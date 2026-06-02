@@ -7,7 +7,10 @@
 """Pythonic workflow evals.
 
 Checks directory structure, file existence, and output completeness
-against the category_manifest.json contract.
+against the category_manifest.json contract. Also includes deterministic
+marker identification checks (top_ops, p_item, detail_estimate).
+
+Supports both standalone and comparative analysis modes via --comparison-scope flag.
 """
 
 import argparse
@@ -30,6 +33,20 @@ _REQUIRED_MODEL_KEYS = {"model", "architecture", "scale", "precision"}
 
 _MIN_REPORT_BYTES = 100
 _GARBLED_THRESHOLD = 0.50
+
+# Marker validation regexes — identical to those in MarkerValidator
+# (TraceLens/Agent/Analysis/utils/validation_utils.py). Defined here directly
+# because validation_utils.py has relative imports that prevent standalone loading.
+_MV_BEGIN_RE = re.compile(r"<!--\s*impact-begin\s+([^>]*?)-->", re.DOTALL)
+_MV_END_RE = re.compile(r"<!--\s*impact-end\s*-->")
+_MV_KIND_ATTR_RE = re.compile(r"\bkind=(\w+)\b")
+_MV_ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
+_TOP_OPS_ROW_RE = re.compile(r"<!--\s*top-ops-row\s+([^>]*?)-->")
+_DETAIL_P_HEADER_RE = re.compile(r"^####\s+.+P(\d+):", re.MULTILINE)
+_DETAIL_P_HEADER_FALLBACK_RE = re.compile(r"^(?:####|###)\s+.+P(\d+):", re.MULTILINE)
+_NOT_QUANTIFIABLE_RE = re.compile(
+    r"not\s+quantifiable\s+from\s+trace\s+data", re.IGNORECASE
+)
 
 
 def _pre_check_gates(output_dir: str) -> str | None:
@@ -135,10 +152,19 @@ def _check_model_info(output_dir: str) -> tuple[str, str]:
     return "PASS", ""
 
 
-def _check_unified_perf_report(output_dir: str) -> tuple[str, str]:
-    path = os.path.join(output_dir, "perf_report_csvs", "unified_perf_summary.csv")
+def _check_unified_perf_report(
+    output_dir: str, comparison_scope: str = "standalone"
+) -> tuple[str, str]:
+    if comparison_scope == "comparative":
+        path = os.path.join(
+            output_dir, "perf_report_trace1_csvs", "unified_perf_summary.csv"
+        )
+        label = "perf_report_trace1_csvs/unified_perf_summary.csv"
+    else:
+        path = os.path.join(output_dir, "perf_report_csvs", "unified_perf_summary.csv")
+        label = "perf_report_csvs/unified_perf_summary.csv"
     if not os.path.isfile(path):
-        return "FAIL", "perf_report_csvs/unified_perf_summary.csv not found"
+        return "FAIL", f"{label} not found"
     return "PASS", ""
 
 
@@ -231,54 +257,65 @@ def _check_plot(output_dir: str) -> tuple[str, str]:
     return "FAIL", "perf_improvement.png not found"
 
 
+# Each entry: (summary, func, root_cause, recommended_fix, mode_aware)
+# mode_aware=True  → called as func(output_dir, comparison_scope)
+# mode_aware=False → called as func(output_dir)
 EVAL_REGISTRY = [
     (
         "Directory structure created",
         _check_directories,
         "pipeline",
         "Re-run analysis pipeline from Step 1",
+        False,
     ),
     (
         "Metadata files exist on disk",
         _check_metadata_files,
         "pipeline",
         "Re-run orchestrator_prepare.py to regenerate metadata",
+        False,
     ),
     (
         "Model info JSON exists and valid",
         _check_model_info,
         "pipeline",
         "Check model-identification subagent; add fallback skeleton in prepare step",
+        False,
     ),
     (
         "Unified perf. report exists",
         _check_unified_perf_report,
         "pipeline",
         "Re-run TraceLens_generate_perf_report_pytorch (Step 1)",
+        True,
     ),
     (
         "Tree data files exist on disk",
         _check_tree_data_files,
         "pipeline",
         "Re-run orchestrator_prepare.py to regenerate tree data",
+        False,
     ),
     (
         "Categorical findings .md files exist",
         _check_findings_exist,
         "pipeline",
         "Retry failed subagent(s) for missing findings files",
+        False,
     ),
     (
         "All findings exist",
         _check_findings_placement,
         "pipeline",
         "Fix tier assignment in orchestrator_prepare.py",
+        False,
     ),
     (
         "Plot generated on disk",
         _check_plot,
         "pipeline",
         "Check priority_data.json; add fallback empty plot_data.json",
+        False,
     ),
 ]
 
@@ -288,10 +325,10 @@ EVAL_REGISTRY = [
 # ---------------------------------------------------------------------------
 
 
-def _make_row(index, summary, result, details, root_cause, fix):
+def _make_row(index, summary, result, details, root_cause, fix, category="Workflow"):
     return {
         "index": index,
-        "category": "Workflow",
+        "category": category,
         "issue_summary": summary,
         "result": result,
         "details": details,
@@ -337,15 +374,49 @@ def _find_table_row(section_text, label_synonyms):
     return None
 
 
+def _find_table_row_all_cells(section_text, label_synonyms):
+    """Find a markdown table row matching any synonym. Returns all cells or None."""
+    for line in section_text.split("\n"):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        if all(set(c) <= {"-", ":", " "} for c in cells):
+            continue
+        label = cells[0]
+        for synonym in label_synonyms:
+            if synonym.lower() in label.lower():
+                return cells  # [label, val1, val2, ...]
+    return None
+
+
 def _extract_percent(value_str):
     """Extract a percentage value from a string like '82.2%'."""
     m = re.search(r"([\d.]+)\s*%", value_str)
     return float(m.group(1)) if m else None
 
 
-def _load_gpu_timeline(output_dir):
+def _extract_numeric(value_str):
+    """Extract first numeric value from a string (handles %, ms, ±, sign prefix)."""
+    # Strip commas used as thousands separators
+    s = value_str.replace(",", "")
+    # Match optional leading sign then digits
+    m = re.search(r"([-+]?\s*[\d.]+)", s)
+    if m:
+        return float(m.group(1).replace(" ", ""))
+    return None
+
+
+def _load_gpu_timeline(output_dir, comparison_scope="standalone", trace_num=1):
     """Load gpu_timeline.csv as {type_name: percent}."""
-    path = os.path.join(output_dir, "perf_report_csvs", "gpu_timeline.csv")
+    if comparison_scope == "standalone":
+        path = os.path.join(output_dir, "perf_report_csvs", "gpu_timeline.csv")
+    else:
+        path = os.path.join(
+            output_dir, f"perf_report_trace{trace_num}_csvs", "gpu_timeline.csv"
+        )
     if not os.path.isfile(path):
         return None
     data = {}
@@ -387,33 +458,22 @@ def _check_p_item_fields(p_text, is_compute):
 
 
 # ---------------------------------------------------------------------------
-# Per-item check functions (evals 9, 10, 11, 14)
+# Per-item check functions (evals 9, 10, 11, 13, 14)
 # ---------------------------------------------------------------------------
 
 _REPORT_HEADERS = {
     "executive_summary": "Executive Summary",
     "compute": "Compute Kernel Optimizations",
+    "kernel_fusion": "Kernel Fusion Opportunities (Experimental)",
     "system": "System-Level Optimizations",
     "detailed": "Detailed Analysis",
     "appendix": "Appendix",
 }
 
 
-def _check_report_template(output_dir):
+def _check_report_template(output_dir, comparison_scope="standalone"):
     """Eval 9 — per-header check for required section headers + table presence."""
     content = _read_report(output_dir)
-    if content is None:
-        return [
-            _make_row(
-                "workflow_eval_9",
-                "Report Template Rendering",
-                "FAIL",
-                "analysis.md not found",
-                "pipeline",
-                "Re-run report generation",
-            )
-        ]
-
     rows = []
     for key, header_text in _REPORT_HEADERS.items():
         found = bool(re.search(rf"^## {re.escape(header_text)}", content, re.MULTILINE))
@@ -443,7 +503,7 @@ def _check_report_template(output_dir):
     return rows
 
 
-_EXEC_SUMMARY_CHECKS = [
+_EXEC_SUMMARY_CHECKS_STANDALONE = [
     ("total_time", ["Total Compute Time", "Total Time"], None, None),
     ("compute_pct", ["Computation", "Compute %", "Compute"], "computation_time", 1.0),
     ("idle_pct", ["Idle Time", "Idle %", "Idle"], "idle_time", 1.0),
@@ -451,22 +511,41 @@ _EXEC_SUMMARY_CHECKS = [
     ("bottleneck", ["Top Bottleneck Category", "Top Bottleneck"], None, None),
 ]
 
+# comparative: (key, labels, csv_type_t1, tol_t1, csv_type_t2, tol_t2)
+# None csv_type means no CSV cross-check for that trace
+_EXEC_SUMMARY_CHECKS_COMPARATIVE = [
+    ("total_time", ["Total Compute Time", "Total Time"], None, None, None, None),
+    (
+        "compute_pct",
+        ["Computation", "Compute %", "Compute"],
+        "computation_time",
+        1.0,
+        "computation_time",
+        1.0,
+    ),
+    ("idle_pct", ["Idle Time", "Idle %", "Idle"], "idle_time", 1.0, "idle_time", 1.0),
+    (
+        "comm_pct",
+        ["Exposed Communication", "Exposed Communication %"],
+        None,
+        None,
+        None,
+        None,
+    ),
+    (
+        "bottleneck",
+        ["Top Bottleneck Category", "Top Bottleneck"],
+        None,
+        None,
+        None,
+        None,
+    ),
+]
 
-def _check_exec_summary(output_dir):
+
+def _check_exec_summary(output_dir, comparison_scope="standalone"):
     """Eval 10 — per-row check for exec summary metrics + CSV cross-validation."""
     content = _read_report(output_dir)
-    if content is None:
-        return [
-            _make_row(
-                "workflow_eval_10",
-                "Executive Summary has metrics table",
-                "FAIL",
-                "analysis.md not found",
-                "pipeline",
-                "Re-run report generation",
-            )
-        ]
-
     exec_section = _extract_section(content, "## Executive Summary")
     if not exec_section:
         return [
@@ -480,10 +559,15 @@ def _check_exec_summary(output_dir):
             )
         ]
 
-    csv_data = _load_gpu_timeline(output_dir)
+    if comparison_scope == "standalone":
+        return _check_exec_summary_standalone(output_dir, exec_section)
+    return _check_exec_summary_comparative(output_dir, exec_section)
 
+
+def _check_exec_summary_standalone(output_dir, exec_section):
+    csv_data = _load_gpu_timeline(output_dir, comparison_scope="standalone")
     rows = []
-    for key, labels, csv_type, tolerance in _EXEC_SUMMARY_CHECKS:
+    for key, labels, csv_type, tolerance in _EXEC_SUMMARY_CHECKS_STANDALONE:
         value_str = _find_table_row(exec_section, labels)
         if value_str is None:
             rows.append(
@@ -531,21 +615,118 @@ def _check_exec_summary(output_dir):
     return rows
 
 
-def _check_issue_template(output_dir):
+def _check_exec_summary_comparative(output_dir, exec_section):
+    """Comparative exec summary: 4-column table (Metric | T1 | T2 | Difference)."""
+    csv_t1 = _load_gpu_timeline(output_dir, comparison_scope="comparative", trace_num=1)
+    csv_t2 = _load_gpu_timeline(output_dir, comparison_scope="comparative", trace_num=2)
+    rows = []
+
+    for (
+        key,
+        labels,
+        csv_type_t1,
+        tol_t1,
+        csv_type_t2,
+        tol_t2,
+    ) in _EXEC_SUMMARY_CHECKS_COMPARATIVE:
+        cells = _find_table_row_all_cells(exec_section, labels)
+        if cells is None:
+            rows.append(
+                _make_row(
+                    f"workflow_eval_10_{key}",
+                    f"Exec Summary row: {labels[0]}",
+                    "FAIL",
+                    f"Row not found (looked for: {', '.join(labels)})",
+                    "template",
+                    "Add missing row to Executive Summary table",
+                )
+            )
+            continue
+
+        # Expect [label, t1_val, t2_val, diff_val]
+        t1_str = cells[1] if len(cells) > 1 else ""
+        t2_str = cells[2] if len(cells) > 2 else ""
+
+        result, detail_parts = "PASS", []
+
+        if csv_type_t1 and not t1_str:
+            result = "FAIL"
+            detail_parts.append("T1 cell missing or empty")
+        if csv_type_t2 and not t2_str:
+            result = "FAIL"
+            detail_parts.append("T2 cell missing or empty")
+
+        # Cross-check T1
+        if csv_type_t1 and csv_t1 and tol_t1:
+            csv_val = csv_t1.get(csv_type_t1)
+            if csv_val is not None:
+                report_val = _extract_percent(t1_str)
+                if report_val is not None:
+                    diff = abs(report_val - csv_val)
+                    if diff > tol_t1:
+                        result = "FAIL"
+                        detail_parts.append(
+                            f"T1 mismatch: report={report_val:.1f}%, csv={csv_val:.2f}%, diff={diff:.2f}%"
+                        )
+                    else:
+                        detail_parts.append(
+                            f"T1 OK ({report_val:.1f}% vs csv {csv_val:.2f}%)"
+                        )
+
+        # Cross-check T2
+        if csv_type_t2 and csv_t2 and tol_t2:
+            csv_val = csv_t2.get(csv_type_t2)
+            if csv_val is not None:
+                report_val = _extract_percent(t2_str)
+                if report_val is not None:
+                    diff = abs(report_val - csv_val)
+                    if diff > tol_t2:
+                        result = "FAIL"
+                        detail_parts.append(
+                            f"T2 mismatch: report={report_val:.1f}%, csv={csv_val:.2f}%, diff={diff:.2f}%"
+                        )
+                    else:
+                        detail_parts.append(
+                            f"T2 OK ({report_val:.1f}% vs csv {csv_val:.2f}%)"
+                        )
+
+        # Check Difference column exists
+        if len(cells) < 4:
+            result = "FAIL"
+            detail_parts.append("Difference column missing (expected 4-column table)")
+        else:
+            # Arithmetic check: |Difference| ≈ |T1 - T2| within 1%
+            diff_str = cells[3]
+            t1_val = _extract_numeric(t1_str)
+            t2_val = _extract_numeric(t2_str)
+            diff_val = _extract_numeric(diff_str)
+            if t1_val is not None and t2_val is not None and diff_val is not None:
+                expected_magnitude = abs(t1_val - t2_val)
+                denom = max(abs(t1_val), abs(t2_val), 1.0)
+                rel_err = abs(abs(diff_val) - expected_magnitude) / denom
+                if rel_err > 0.01:
+                    result = "FAIL"
+                    detail_parts.append(
+                        f"Difference arithmetic error: reported={diff_str}, "
+                        f"expected |diff|≈{expected_magnitude:.2f}, rel_err={rel_err:.3f}"
+                    )
+
+        rows.append(
+            _make_row(
+                f"workflow_eval_10_{key}",
+                f"Exec Summary row: {labels[0]}",
+                result,
+                "; ".join(detail_parts),
+                "template" if result == "FAIL" else "",
+                "Fix value in Executive Summary table" if result == "FAIL" else "",
+            )
+        )
+    return rows
+
+
+def _check_issue_template(output_dir, comparison_scope="standalone"):
     """Eval 11 — per-P-item check for correct bold fields in each priority item."""
     content = _read_report(output_dir)
-    if content is None:
-        return [
-            _make_row(
-                "workflow_eval_11",
-                "Issue Template rendering",
-                "FAIL",
-                "analysis.md not found",
-                "pipeline",
-                "Re-run report generation",
-            )
-        ]
-
     compute_section = _extract_section(content, "## Compute Kernel Optimizations")
     system_section = _extract_section(content, "## System-Level Optimizations")
 
@@ -581,14 +762,19 @@ def _check_issue_template(output_dir):
             )
 
     if not rows:
+        all_sections = (compute_section or "") + (system_section or "")
+        intentionally_empty = (
+            "No compute kernel optimization opportunities identified" in all_sections
+            or "No system-level bottlenecks detected" in all_sections
+        )
         rows.append(
             _make_row(
                 "workflow_eval_11",
                 "Issue Template rendering",
-                "FAIL",
-                "No P-items found in report",
-                "template",
-                "Ensure report contains priority items",
+                "PASS" if intentionally_empty else "FAIL",
+                "" if intentionally_empty else "No P-items found in report",
+                "" if intentionally_empty else "template",
+                "" if intentionally_empty else "Ensure report contains priority items",
             )
         )
     return rows
@@ -597,7 +783,7 @@ def _check_issue_template(output_dir):
 _MODEL_INFO_FIELDS = ["model", "architecture", "scale", "precision"]
 
 
-def _check_model_id(output_dir):
+def _check_model_id(output_dir, comparison_scope=None):
     """Eval 13 — per-field check for model_info.json values in Appendix."""
     model_info_path = os.path.join(output_dir, "metadata", "model_info.json")
     report_path = os.path.join(output_dir, "analysis.md")
@@ -687,11 +873,296 @@ def _check_model_id(output_dir):
     return rows
 
 
+# ---------------------------------------------------------------------------
+# Marker Identification checks (deterministic, structural)
+# ---------------------------------------------------------------------------
+
+
+def _marker_attrs_from_inner(inner):
+    """Parse key=value pairs from a marker's inner content."""
+    return dict(_MV_ATTR_RE.findall(inner))
+
+
+def _make_marker_row(index, summary, result, details, root_cause="", fix=""):
+    return _make_row(
+        index,
+        summary,
+        result,
+        details,
+        root_cause,
+        fix,
+        category="Marker Identification",
+    )
+
+
+def _check_marker_top_ops(output_dir, comparison_scope=None):
+    """Marker eval 1: top_ops wrapper + inline top-ops-row markers."""
+    content = _read_report(output_dir)
+    if content is None:
+        return [
+            _make_marker_row(
+                "marker_eval_1",
+                "Top Operations markers (kind=top_ops)",
+                "FAIL",
+                "analysis.md not found",
+                "pipeline",
+                "Re-run report generation",
+            )
+        ]
+
+    errors = []
+    top_ops_begin = None
+    for m in _MV_BEGIN_RE.finditer(content):
+        inner = m.group(1)
+        km = _MV_KIND_ATTR_RE.search(inner)
+        if km and km.group(1) == "top_ops":
+            top_ops_begin = m
+            break
+
+    if top_ops_begin is None:
+        errors.append("No <!-- impact-begin kind=top_ops --> marker found")
+    else:
+        end_after = _MV_END_RE.search(content, top_ops_begin.end())
+        if end_after is None:
+            errors.append("kind=top_ops marker has no matching <!-- impact-end -->")
+        else:
+            block = content[top_ops_begin.end() : end_after.start()]
+            row_markers = list(_TOP_OPS_ROW_RE.finditer(block))
+            if not row_markers:
+                errors.append(
+                    "No <!-- top-ops-row ... --> markers found inside top_ops block"
+                )
+            else:
+                for i, rm in enumerate(row_markers, start=1):
+                    inner = rm.group(1)
+                    attrs = _marker_attrs_from_inner(inner)
+                    missing_attrs = []
+                    if "low" not in attrs:
+                        missing_attrs.append("low")
+                    if "high" not in attrs:
+                        missing_attrs.append("high")
+                    if missing_attrs:
+                        errors.append(
+                            f"top-ops-row #{i} missing attributes: "
+                            f"{', '.join(missing_attrs)}"
+                        )
+
+    result = "PASS" if not errors else "FAIL"
+    details = "; ".join(errors) if errors else ""
+    return [
+        _make_marker_row(
+            "marker_eval_1",
+            "Top Operations markers (kind=top_ops)",
+            result,
+            details,
+            "template" if result == "FAIL" else "",
+            "Add or fix top_ops markers in analysis.md" if result == "FAIL" else "",
+        )
+    ]
+
+
+def _check_marker_p_items(output_dir, comparison_scope=None):
+    """Marker eval 2: kind=p_item markers for each compute P-item."""
+    content = _read_report(output_dir)
+    if content is None:
+        return [
+            _make_marker_row(
+                "marker_eval_2",
+                "P-item markers (kind=p_item)",
+                "FAIL",
+                "analysis.md not found",
+                "pipeline",
+                "Re-run report generation",
+            )
+        ]
+
+    compute_section = _extract_section(content, "## Compute Kernel Optimizations")
+    if compute_section is None:
+        return [
+            _make_marker_row(
+                "marker_eval_2",
+                "P-item markers (kind=p_item)",
+                "FAIL",
+                "Compute Kernel Optimizations section not found",
+                "template",
+                "Ensure report contains Compute Kernel Optimizations section",
+            )
+        ]
+
+    p_items = _extract_p_items(compute_section)
+    if not p_items:
+        return [
+            _make_marker_row(
+                "marker_eval_2",
+                "P-item markers (kind=p_item)",
+                "FAIL",
+                "No P-items found in Compute Kernel Optimizations",
+                "template",
+                "Ensure report contains P-items",
+            )
+        ]
+
+    rows = []
+    for pnum, p_text in p_items:
+        errors = []
+        p_item_markers = []
+        for m in _MV_BEGIN_RE.finditer(p_text):
+            inner = m.group(1)
+            km = _MV_KIND_ATTR_RE.search(inner)
+            if km and km.group(1) == "p_item":
+                p_item_markers.append(inner)
+
+        if not p_item_markers:
+            errors.append("No <!-- impact-begin kind=p_item ... --> marker found")
+        else:
+            for inner in p_item_markers:
+                attrs = _marker_attrs_from_inner(inner)
+                required = ("category", "low", "mid", "high")
+                missing = [a for a in required if a not in attrs]
+                if missing:
+                    errors.append(
+                        f"kind=p_item marker missing attributes: "
+                        f"{', '.join(missing)}"
+                    )
+
+            end_count = len(_MV_END_RE.findall(p_text))
+            begin_count = len(_MV_BEGIN_RE.findall(p_text))
+            if begin_count > end_count:
+                errors.append("Unpaired impact-begin (missing impact-end)")
+
+        result = "PASS" if not errors else "FAIL"
+        details = "; ".join(errors) if errors else ""
+        rows.append(
+            _make_marker_row(
+                f"marker_eval_2_P{pnum}",
+                f"Compute P{pnum} impact marker (kind=p_item)",
+                result,
+                details,
+                "template" if result == "FAIL" else "",
+                f"Fix kind=p_item marker for P{pnum}" if result == "FAIL" else "",
+            )
+        )
+    return rows
+
+
+def _check_marker_detail_estimates(output_dir, comparison_scope=None):
+    """Marker eval 3: kind=detail_estimate markers in Detailed Analysis."""
+    content = _read_report(output_dir)
+    if content is None:
+        return [
+            _make_marker_row(
+                "marker_eval_3",
+                "Detail estimate markers (kind=detail_estimate)",
+                "FAIL",
+                "analysis.md not found",
+                "pipeline",
+                "Re-run report generation",
+            )
+        ]
+
+    detailed_section = _extract_section(content, "## Detailed Analysis")
+    if detailed_section is None:
+        return [
+            _make_marker_row(
+                "marker_eval_3",
+                "Detail estimate markers (kind=detail_estimate)",
+                "FAIL",
+                "Detailed Analysis section not found",
+                "template",
+                "Ensure report contains Detailed Analysis section",
+            )
+        ]
+
+    m = re.search(
+        r"^### Compute Kernel Insights[^\n]*\n(.*?)(?=^### (?!.*P\d)|^## |\Z)",
+        detailed_section,
+        re.MULTILINE | re.DOTALL,
+    )
+    compute_subsection = m.group(0) if m else detailed_section
+
+    matches = list(_DETAIL_P_HEADER_RE.finditer(compute_subsection))
+    if not matches:
+        matches = list(_DETAIL_P_HEADER_FALLBACK_RE.finditer(compute_subsection))
+
+    if not matches:
+        return [
+            _make_marker_row(
+                "marker_eval_3",
+                "Detail estimate markers (kind=detail_estimate)",
+                "FAIL",
+                "No P-item headers found in Detailed Analysis",
+                "template",
+                "Ensure Detailed Analysis contains P-item sections",
+            )
+        ]
+
+    rows = []
+    for i, match in enumerate(matches):
+        pnum = int(match.group(1))
+        start = match.start()
+        end = (
+            matches[i + 1].start() if i + 1 < len(matches) else len(compute_subsection)
+        )
+        block = compute_subsection[start:end]
+
+        errors = []
+        detail_markers = []
+        for bm in _MV_BEGIN_RE.finditer(block):
+            inner = bm.group(1)
+            km = _MV_KIND_ATTR_RE.search(inner)
+            if km and km.group(1) == "detail_estimate":
+                detail_markers.append(inner)
+
+        has_not_quantifiable = bool(_NOT_QUANTIFIABLE_RE.search(block))
+
+        if not detail_markers and not has_not_quantifiable:
+            errors.append(
+                "No <!-- impact-begin kind=detail_estimate ... --> marker "
+                "and no 'not quantifiable from trace data' sentinel found"
+            )
+        elif detail_markers:
+            for inner in detail_markers:
+                attrs = _marker_attrs_from_inner(inner)
+                required = ("low", "high")
+                missing = [a for a in required if a not in attrs]
+                if missing:
+                    errors.append(
+                        f"kind=detail_estimate marker missing attributes: "
+                        f"{', '.join(missing)}"
+                    )
+
+            total_begin = len(_MV_BEGIN_RE.findall(block))
+            end_count = len(_MV_END_RE.findall(block))
+            if total_begin > end_count:
+                errors.append("Unpaired impact-begin (missing impact-end)")
+
+        result = "PASS" if not errors else "FAIL"
+        details = "; ".join(errors) if errors else ""
+        rows.append(
+            _make_marker_row(
+                f"marker_eval_3_P{pnum}",
+                f"Detailed Analysis P{pnum} estimate marker (kind=detail_estimate)",
+                result,
+                details,
+                "template" if result == "FAIL" else "",
+                (
+                    f"Fix kind=detail_estimate marker for P{pnum} in Detailed Analysis"
+                    if result == "FAIL"
+                    else ""
+                ),
+            )
+        )
+    return rows
+
+
 _MULTI_EVAL_CHECKS = [
     _check_report_template,
     _check_exec_summary,
     _check_issue_template,
     _check_model_id,
+    _check_marker_top_ops,
+    _check_marker_p_items,
+    _check_marker_detail_estimates,
 ]
 
 _GATE_FAIL_NEW_EVALS = [
@@ -699,15 +1170,22 @@ _GATE_FAIL_NEW_EVALS = [
     ("workflow_eval_10", "Executive Summary has metrics table"),
     ("workflow_eval_11", "Issue Template rendering"),
     ("workflow_eval_13", "Model identification in report"),
+    ("marker_eval_1", "Top Operations markers (kind=top_ops)"),
+    ("marker_eval_2", "P-item markers (kind=p_item)"),
+    ("marker_eval_3", "Detail estimate markers (kind=detail_estimate)"),
 ]
 
 
-def run(output_dir: str, results_path: str) -> list[dict]:
+def run(
+    output_dir: str, results_path: str, comparison_scope: str = "standalone"
+) -> list[dict]:
     rows = []
 
     gate_fail = _pre_check_gates(output_dir)
     if gate_fail is not None:
-        for i, (summary, _func, rc, fix) in enumerate(EVAL_REGISTRY, start=1):
+        for i, (summary, _func, rc, fix, _mode_aware) in enumerate(
+            EVAL_REGISTRY, start=1
+        ):
             rows.append(
                 {
                     "index": f"workflow_eval_{i}",
@@ -737,8 +1215,10 @@ def run(output_dir: str, results_path: str) -> list[dict]:
             writer.writerows(rows)
         return rows
 
-    for i, (summary, func, rc, fix) in enumerate(EVAL_REGISTRY, start=1):
-        result, details = func(output_dir)
+    for i, (summary, func, rc, fix, mode_aware) in enumerate(EVAL_REGISTRY, start=1):
+        result, details = (
+            func(output_dir, comparison_scope) if mode_aware else func(output_dir)
+        )
         rows.append(
             {
                 "index": f"workflow_eval_{i}",
@@ -752,7 +1232,8 @@ def run(output_dir: str, results_path: str) -> list[dict]:
         )
 
     for check_fn in _MULTI_EVAL_CHECKS:
-        rows.extend(check_fn(output_dir))
+        rows.extend(check_fn(output_dir, comparison_scope))
+    rows.extend(_check_model_id(output_dir))
 
     with open(results_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
@@ -765,9 +1246,15 @@ def main():
     parser = argparse.ArgumentParser(description="Pythonic workflow evals")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--results", required=True)
+    parser.add_argument(
+        "--comparison-scope",
+        choices=["standalone", "comparative"],
+        default="standalone",
+        help="Analysis comparison scope (default: standalone)",
+    )
     args = parser.parse_args()
 
-    rows = run(args.output_dir, args.results)
+    rows = run(args.output_dir, args.results, args.comparison_scope)
     passed = sum(1 for r in rows if r["result"] == "PASS")
     sys.exit(0 if passed == len(rows) else 1)
 

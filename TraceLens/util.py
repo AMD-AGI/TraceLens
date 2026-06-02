@@ -313,18 +313,26 @@ class JaxProfileProcessor:
                 if outputs.startswith("("):
                     if not outputs.endswith(")"):
                         raise ValueError("Mistmatched parens in outputs in ", outputs)
-                    output_list = outputs[1:-2].split("},")
-                    # this code assumes that the first output is the one we care about
-                    # we should be able to make this an RE
-                    sizes_string = [
-                        [i, d] for i in output_list for d in dtypes if i.startswith(d)
+                    # Extract all tensor tokens from the tuple using regex so that
+                    # scalars (e.g. f32[]) and workspace buffers (e.g. s8[N]{0})
+                    # don't corrupt the split. Handles damax_output=true tuples like
+                    # (f8e5m2[M,N]{1,0}, f32[], s8[W]{0}).
+                    inner = outputs[1:-1]
+                    tokens = re.findall(
+                        r"[a-z0-9]+\[[^\]]*\]\{[^}]*\}|[a-z0-9]+\[[^\]]*\]", inner
+                    )
+                    tensor_tokens = [
+                        t
+                        for t in tokens
+                        if any(t.startswith(d) for d in dtypes) and not t.endswith("[]")
                     ]
-                    if len(sizes_string) != 1:
+                    if len(tensor_tokens) == 0:
                         raise ValueError("Did not find wide output ", op)
-                    sizes_string = sizes_string[0]
-                    sizes_string[0] = (
-                        sizes_string[0] + "}"
-                    )  # restore the } that was removed
+                    # Take the first tensor output; for FP8 GEMMs this is the result.
+                    sizes_string = [
+                        tensor_tokens[0],
+                        next(d for d in dtypes if tensor_tokens[0].startswith(d)),
+                    ]
                 else:
                     sizes_string = outputs
                 operand_list = []
@@ -337,11 +345,15 @@ class JaxProfileProcessor:
                         # pb format, shapes in operand list; exclude scalars e.g. f32[]
                         operand_list.append(opid)
                     elif "[" not in opid:
-                        output = hlo_ops[opid]["output"]
+                        # Strip /*index=N*/ prefix that appears in some FP8 operand refs
+                        hlo_key = re.sub(r"^/\*index=\d+\*/", "", opid).strip()
+                        if hlo_key not in hlo_ops:
+                            continue
+                        output = hlo_ops[hlo_key]["output"]
                         if any(
                             output.startswith(d) for d in dtypes + ["f8"]
                         ) and not output.endswith("[]"):
-                            operand_list.append(hlo_ops[opid]["output"])
+                            operand_list.append(hlo_ops[hlo_key]["output"])
                 if int(beta) == 1 and len(operand_list) < 3:
                     print(
                         "Bias is set, however onLy two operands found!", op
@@ -399,6 +411,15 @@ COMMUNICATION_KEYS = ["rccl", "nccl"]
 # (kernel-name regex fragment, canonical collective name for inference)
 DEFAULT_CUSTOM_COLLECTIVE_PATTERNS: List[Tuple[str, str]] = [
     (r"cross_device_reduce", "allreduce"),
+]
+
+DEFAULT_COMMUNICATION_REGEXES: List[re.Pattern] = [
+    re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS
+]
+
+DEFAULT_CUSTOM_COLLECTIVE_REGEXES: List[re.Pattern] = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern, _ in DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
 ]
 
 
@@ -659,20 +680,16 @@ class TraceEventUtils:
     ) -> List[re.Pattern]:
         """Return compiled patterns for NCCL/RCCL plus optional custom collectives.
 
-        When *custom_collective_patterns* is ``None``, built-in defaults from
-        ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS`` (e.g. vLLM ``cross_device_reduce``)
-        are included. Pass an explicit list (possibly empty) to override that
-        set while keeping NCCL/RCCL markers.
+        When *custom_collective_patterns* is ``None``, returns the built-in defaults from
+        ``DEFAULT_COMMUNICATION_REGEXES + DEFAULT_CUSTOM_COLLECTIVE_REGEXES``.
+        Pass an explicit list (possibly empty) to override the set while keeping NCCL/RCCL markers.
         """
-        regexes = [re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS]
-        custom = (
-            DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
-            if custom_collective_patterns is None
-            else custom_collective_patterns
-        )
-        for pattern, _ in custom:
-            regexes.append(re.compile(pattern, re.IGNORECASE))
-        return regexes
+        if custom_collective_patterns is None:
+            return DEFAULT_COMMUNICATION_REGEXES + DEFAULT_CUSTOM_COLLECTIVE_REGEXES
+        return DEFAULT_COMMUNICATION_REGEXES + [
+            re.compile(pattern, re.IGNORECASE)
+            for pattern, _ in custom_collective_patterns
+        ]
 
     @staticmethod
     def build_collective_filter_and_inference_rules(

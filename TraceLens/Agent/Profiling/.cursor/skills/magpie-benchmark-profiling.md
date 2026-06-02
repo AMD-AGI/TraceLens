@@ -109,25 +109,32 @@ Where `<version_tag>` is one of the `vXX` tags listed in the script's `case` sta
 
 **For SGLang (`framework: sglang`):**
 
-Read `examples/custom_workflows/inference_analysis/build_docker_sglang_v059.sh` and extract each arm of the `case "${GPU_TYPE}" in` block along with its `BASE_IMAGE`. Present the result as a table and ask the user to pick one, for example:
+Read `examples/custom_workflows/inference_analysis/build_docker_sglang.sh`. The script supports two dimensions selected via flags: `--sglang-version` and `--gpu-type`. Discover the currently supported combinations by parsing the script (do **not** hardcode the lists in this skill — they change as new versions land):
 
-> "Which GPU type are you targeting?
+- Parse the `normalize_version()` function to enumerate accepted SGLang version tokens (the canonical version is whatever the function `echo`s, e.g. `0.5.9`, `0.5.11`).
+- Parse the `resolve_base_image()` function's `case "${version}:${gpu}" in` block to enumerate the full `(version, gpu_type) -> base_image` matrix. Each arm pattern like `0.5.9:mi350|0.5.9:mi355)` expands to one row per `version:gpu` pair.
+
+Present the discovered matrix to the user as a table and ask them to pick one row:
+
+> "Which SGLang version + GPU combination should I build a patched image for?
 >
-> | Option | GPU Type | Base Image |
-> |--------|----------|------------|
-> | 1 | `<gpu_type>` | `<base image from script>` |
-> | ... | ... | ... |"
+> | Option | SGLang Version | GPU Type | Base Image |
+> |--------|----------------|----------|------------|
+> | 1 | `<version>` | `<gpu_type>` | `<base image from script>` |
+> | ... | ... | ... | ... |"
 
-Once the user selects, build the patched image on the remote node:
+Once the user selects, build the patched image on the remote node using the explicit flag form:
 
 ```bash
 ssh <node> "cd <TraceLens_repo> && \
-  bash examples/custom_workflows/inference_analysis/build_docker_sglang_v059.sh \
+  bash examples/custom_workflows/inference_analysis/build_docker_sglang.sh \
     <TraceLens_repo> \
-    <gpu_type>"
+    --sglang-version <version> \
+    --gpu-type <gpu_type> \
+    -t tracelens-sglang"
 ```
 
-Where `<gpu_type>` is one of the tags listed in the script's `case` statement. The script starts a container, applies sglang roofline patches, and installs TraceLens inside it.
+The script starts a container from the resolved base image, applies the matching sglang roofline patches from `sglang_roofline_patches/sglang_<ver_with_underscores>/` (auto-derived from `--sglang-version`), and installs TraceLens inside it.
 
 **After building:** Update the `docker_image` field in the benchmark YAML config to use the newly built image:
 

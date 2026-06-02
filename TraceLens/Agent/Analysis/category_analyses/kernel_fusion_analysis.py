@@ -18,7 +18,7 @@ import os
 import re
 import sys
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -33,6 +33,7 @@ from analysis_utils import (
     TARGET_LOW,
     TARGET_MID,
     parse_first_shape,
+    perf_report_csv_dir,
     shape_aware_lookup,
     write_metrics_json,
 )
@@ -272,6 +273,212 @@ def _classify_confidence(candidate: dict, enriched: list) -> str:
     return "low"
 
 
+def _comparative_estimate(
+    candidate: dict,
+    min_savings_ms: float,
+    baseline_ms: float,
+) -> Optional[Dict[str, Any]]:
+    """Compute a single impact estimate for a comparative fusion candidate.
+
+    Savings = measured GPU time gap between trace1 and trace2 kernels.
+    Returns None if the candidate should be skipped.
+    """
+    op_name = candidate.get("base_name", candidate.get("module_name", "Unknown"))
+    instance_count = candidate.get("instance_count", 1)
+
+    t1_kernels = candidate.get("kernels_trace1", [])
+    if not t1_kernels:
+        return None
+
+    total_t1_us = candidate.get("total_kernel_time_us_trace1", 0)
+    total_t2_us = candidate.get("total_kernel_time_us_trace2", 0)
+    gap_us = total_t1_us - total_t2_us
+    if gap_us <= 0:
+        return None
+
+    savings_high = gap_us / 1000
+    if savings_high < min_savings_ms:
+        return None
+
+    savings_low = (TARGET_LOW / TARGET_HIGH) * savings_high
+    savings_mid = (TARGET_MID / TARGET_HIGH) * savings_high
+    time_ms = total_t1_us / 1000
+
+    impact_score_high = savings_high / baseline_ms * 100
+    impact_score_low = savings_low / baseline_ms * 100
+    impact_score_mid = savings_mid / baseline_ms * 100
+
+    if impact_score_high < MIN_IMPACT_SCORE:
+        return None
+
+    has_matrix_ops = any(_is_matrix_op({"type": k.get("type", "")}) for k in t1_kernels)
+    enriched_t1 = [
+        {"name": k.get("name", ""), "type": k.get("type", "")} for k in t1_kernels
+    ]
+
+    estimate: Dict[str, Any] = {
+        "operation": op_name,
+        "category": "kernel_fusion",
+        "type": "kernel_fusion",
+        "impact_score": round(impact_score_mid, 2),
+        "impact_score_low": round(impact_score_low, 2),
+        "impact_score_high": round(impact_score_high, 2),
+        "estimation": "measured",
+        "bound_type": "compute" if has_matrix_ops else "memory",
+        "time_ms": round(time_ms, 3),
+        "instance_count": instance_count,
+        "kernel_count": len(t1_kernels),
+        "modeled_kernel_count": len(t1_kernels),
+        "delta_kernel_count": candidate.get("delta", 0),
+        "confidence": _classify_confidence(candidate, enriched_t1),
+        "affected_gpu_kernels": [
+            k.get("name", k.get("kernel_name", "")) for k in t1_kernels
+        ],
+        "fusion_type": "matrix_compute" if has_matrix_ops else "memory_bound",
+    }
+
+    return estimate
+
+
+def _standalone_estimate(
+    candidate: dict,
+    kernel_lookup: Dict[str, dict],
+    peak_bw_bytes_s: float,
+    vector_maf: float,
+    matrix_maf: float,
+    min_savings_ms: float,
+    baseline_ms: float,
+) -> Optional[Dict[str, Any]]:
+    """Compute a single impact estimate for a standalone fusion candidate.
+
+    Savings are projected via roofline model — elementwise epilogue time saved
+    if kernels were fused, or roofline-capped savings for elementwise-only groups.
+    Returns None if the candidate should be skipped.
+    """
+    op_name = candidate.get("base_name", candidate.get("module_name", "Unknown"))
+    instance_count = candidate.get("instance_count", 1)
+
+    kernels = candidate.get("kernels", [])
+    if len(kernels) < 2:
+        return None
+    if candidate.get("has_fused_kernel", False):
+        return None
+
+    enriched = []
+    for k in kernels:
+        kname = k.get("name", k.get("kernel_name", ""))
+        dur_us = k.get("dur_us", 0)
+        perf = shape_aware_lookup(kernel_lookup, kname, candidate.get("input_dims"))
+        dm = perf.get("Data Moved (MB)")
+        gf = perf.get("GFLOPS")
+        enriched.append(
+            {
+                "name": kname,
+                "type": k.get("type", k.get("kernel_type", "Unknown")),
+                "dur_us": dur_us,
+                "data_moved_mb": float(dm) if dm is not None else None,
+                "data_in_mb": k.get("data_in_mb"),
+                "data_out_mb": k.get("data_out_mb"),
+                "gflops": float(gf) if gf is not None else None,
+                "compute_spec": perf.get("Compute Spec"),
+                "has_perf_data": dm is not None,
+            }
+        )
+
+    modeled = [e for e in enriched if e["has_perf_data"]]
+    unmodeled_count = len(enriched) - len(modeled)
+
+    if not modeled:
+        return None
+    if all(_is_matrix_op(e) for e in enriched):
+        return None
+    if any(e["name"].startswith("triton_") for e in enriched):
+        return None
+
+    non_matrix = [e for e in enriched if not _is_matrix_op(e)]
+    if non_matrix and any(_is_matrix_op(e) for e in enriched):
+        if all(_is_norm_kernel(e) for e in non_matrix):
+            return None
+
+    modeled_frac = len(modeled) / len(enriched)
+    min_frac = 0.5 if len(enriched) < 5 else 0.75
+    if modeled_frac < min_frac:
+        return None
+
+    current_per_instance_us = sum(e["dur_us"] for e in enriched)
+    if current_per_instance_us <= 0:
+        return None
+
+    subgroups = _split_into_subgroups(enriched)
+    has_matrix_ops = any(_is_matrix_op(e) for e in enriched)
+
+    total_savings_us = 0.0
+    for sg_type, sg_kernels in subgroups:
+        if sg_type == "gemm_epilogue":
+            non_gemm_time = sum(e["dur_us"] for e in sg_kernels if not _is_matrix_op(e))
+            total_savings_us += non_gemm_time
+        elif sg_type == "elementwise":
+            sg_savings = _roofline_savings_us(
+                sg_kernels,
+                peak_bw_bytes_s,
+                vector_maf,
+                matrix_maf,
+                TARGET_HIGH,
+            )
+            total_savings_us += sg_savings
+
+    sg_types = [t for t, _ in subgroups]
+    if "gemm_epilogue" in sg_types:
+        bound_type = "compute"
+    else:
+        bound_type = "memory"
+
+    gap_high = total_savings_us / current_per_instance_us
+    gap_low = (TARGET_LOW / TARGET_HIGH) * gap_high
+    gap_mid = (TARGET_MID / TARGET_HIGH) * gap_high
+
+    savings_high_ms = total_savings_us * instance_count / 1000
+
+    if savings_high_ms < min_savings_ms:
+        return None
+
+    time_ms = current_per_instance_us * instance_count / 1000
+    impact_score_high = gap_high * time_ms / baseline_ms * 100
+    impact_score_low = gap_low * time_ms / baseline_ms * 100
+    impact_score_mid = gap_mid * time_ms / baseline_ms * 100
+
+    if impact_score_high < MIN_IMPACT_SCORE:
+        return None
+
+    estimation = "full" if len(modeled) == len(enriched) else "partial"
+
+    estimate: Dict[str, Any] = {
+        "operation": op_name,
+        "category": "kernel_fusion",
+        "type": "kernel_fusion",
+        "impact_score": round(impact_score_mid, 2),
+        "impact_score_low": round(impact_score_low, 2),
+        "impact_score_high": round(impact_score_high, 2),
+        "estimation": estimation,
+        "bound_type": bound_type,
+        "time_ms": round(time_ms, 3),
+        "instance_count": instance_count,
+        "kernel_count": len(kernels),
+        "modeled_kernel_count": len(modeled),
+        "confidence": _classify_confidence(candidate, enriched),
+        "affected_gpu_kernels": [e["name"] for e in enriched],
+        "fusion_type": "matrix_compute" if has_matrix_ops else "memory_bound",
+    }
+
+    if unmodeled_count > 0:
+        estimate["warning"] = (
+            f"{unmodeled_count} of {len(kernels)} kernels lack perf models; "
+            f"savings estimate uses trace time for unmodeled kernels"
+        )
+
+    return estimate
+
+
 def compute_fusion_impact_estimates(
     candidates: List[dict],
     kernel_lookup: Dict[str, dict],
@@ -279,12 +486,18 @@ def compute_fusion_impact_estimates(
     peak_maf_tflops: dict,
     min_savings_ms: float = 0.1,
     baseline_ms: float = 0,
+    is_comparative: bool = False,
 ) -> List[dict]:
-    """
-    Deterministically compute kernel_fusion ``impact_score`` via roofline
-    projection. ``impact_score`` privdes an estimate of impact on gpu runtime.
+    """Compute kernel_fusion savings for all candidates.
 
-    Multi-GEMM candidates are split at GEMM boundaries into sub-groups:
+    Dispatches each candidate to the appropriate estimator:
+      - Comparative: _comparative_estimate (measured GPU time delta)
+      - Standalone:  _standalone_estimate (roofline projection)
+
+    Deterministically compute kernel_fusion ``impact_score`` via roofline
+    projection or gap between traces. ``impact_score`` provides an estimate of impact on gpu runtime.
+
+    For standalone mode, multi-GEMM candidates are split at GEMM boundaries into sub-groups:
       - GEMM + elementwise: recoverable us = sum of elementwise dur_us (epilogue fusion)
       - Elementwise-only: roofline projection using data_in/data_out
       - Single GEMM: no fusion benefit (skipped)
@@ -315,139 +528,21 @@ def compute_fusion_impact_estimates(
     peak_bw_bytes_s = peak_bw_tbs * 1e12
 
     estimates: List[dict] = []
-
     for candidate in candidates:
-        kernels = candidate.get("kernels", [])
-        instance_count = candidate.get("instance_count", 1)
-        if len(kernels) < 2:
-            continue
-        if candidate.get("has_fused_kernel", False):
-            continue
-
-        enriched = []
-        for k in kernels:
-            kname = k.get("name", k.get("kernel_name", ""))
-            dur_us = k.get("dur_us", 0)
-            perf = shape_aware_lookup(kernel_lookup, kname, candidate.get("input_dims"))
-            dm = perf.get("Data Moved (MB)")
-            gf = perf.get("GFLOPS")
-            has_data = dm is not None
-            enriched.append(
-                {
-                    "name": kname,
-                    "type": k.get("type", k.get("kernel_type", "Unknown")),
-                    "dur_us": dur_us,
-                    "data_moved_mb": float(dm) if dm is not None else None,
-                    "data_in_mb": k.get("data_in_mb"),
-                    "data_out_mb": k.get("data_out_mb"),
-                    "gflops": float(gf) if gf is not None else None,
-                    "compute_spec": perf.get("Compute Spec"),
-                    "has_perf_data": has_data,
-                }
-            )
-
-        modeled = [e for e in enriched if e["has_perf_data"]]
-        unmodeled_count = len(enriched) - len(modeled)
-
-        if not modeled:
-            continue
-
-        if all(_is_matrix_op(e) for e in enriched):
-            continue
-
-        if any(e["name"].startswith("triton_") for e in enriched):
-            continue
-
-        non_matrix = [e for e in enriched if not _is_matrix_op(e)]
-        if non_matrix and any(_is_matrix_op(e) for e in enriched):
-            if all(_is_norm_kernel(e) for e in non_matrix):
-                continue
-
-        modeled_frac = len(modeled) / len(enriched)
-        min_frac = 0.5 if len(enriched) < 5 else 0.75
-        if modeled_frac < min_frac:
-            continue
-
-        current_per_instance_us = sum(e["dur_us"] for e in enriched)
-        if current_per_instance_us <= 0:
-            continue
-
-        subgroups = _split_into_subgroups(enriched)
-        has_matrix_ops = any(_is_matrix_op(e) for e in enriched)
-
-        total_savings_us = 0.0
-        for sg_type, sg_kernels in subgroups:
-            if sg_type == "gemm_epilogue":
-                non_gemm_time = sum(
-                    e["dur_us"] for e in sg_kernels if not _is_matrix_op(e)
-                )
-                total_savings_us += non_gemm_time
-            elif sg_type == "elementwise":
-                sg_savings = _roofline_savings_us(
-                    sg_kernels,
-                    peak_bw_bytes_s,
-                    vector_maf,
-                    matrix_maf,
-                    TARGET_HIGH,
-                )
-                total_savings_us += sg_savings
-
-        sg_types = [t for t, _ in subgroups]
-        if "gemm_epilogue" in sg_types:
-            bound_type = "compute"
+        if is_comparative:
+            estimate = _comparative_estimate(candidate, min_savings_ms, baseline_ms)
         else:
-            bound_type = "memory"
-
-        gap_high = total_savings_us / current_per_instance_us
-        gap_low = (TARGET_LOW / TARGET_HIGH) * gap_high
-        gap_mid = (TARGET_MID / TARGET_HIGH) * gap_high
-
-        savings_high_ms = total_savings_us * instance_count / 1000
-        if savings_high_ms < min_savings_ms:
-            continue
-
-        time_ms = current_per_instance_us * instance_count / 1000
-        impact_score_high = gap_high * time_ms / baseline_ms * 100
-        impact_score_low = gap_low * time_ms / baseline_ms * 100
-        impact_score_mid = gap_mid * time_ms / baseline_ms * 100
-
-        if impact_score_high < MIN_IMPACT_SCORE:
-            continue
-
-        estimation = "full" if len(modeled) == len(enriched) else "partial"
-
-        estimate: Dict[str, Any] = {
-            "operation": candidate.get(
-                "base_name", candidate.get("module_name", "Unknown")
-            ),
-            "category": "kernel_fusion",
-            "type": "kernel_fusion",
-            "impact_score": round(impact_score_mid, 2),
-            "impact_score_low": round(impact_score_low, 2),
-            "impact_score_high": round(impact_score_high, 2),
-            "estimation": estimation,
-            "bound_type": bound_type,
-            "time_ms": round(time_ms, 3),
-            "instance_count": instance_count,
-            "kernel_count": len(kernels),
-            "modeled_kernel_count": len(modeled),
-        }
-
-        estimate["confidence"] = _classify_confidence(candidate, enriched)
-        estimate["affected_gpu_kernels"] = [e["name"] for e in enriched]
-
-        if has_matrix_ops:
-            estimate["fusion_type"] = "matrix_compute"
-        else:
-            estimate["fusion_type"] = "memory_bound"
-
-        if unmodeled_count > 0:
-            estimate["warning"] = (
-                f"{unmodeled_count} of {len(kernels)} kernels lack perf models; "
-                f"impact_score uses trace time for unmodeled kernels"
+            estimate = _standalone_estimate(
+                candidate,
+                kernel_lookup,
+                peak_bw_bytes_s,
+                vector_maf,
+                matrix_maf,
+                min_savings_ms,
+                baseline_ms,
             )
-
-        estimates.append(estimate)
+        if estimate is not None:
+            estimates.append(estimate)
 
     return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
 
@@ -456,18 +551,22 @@ def load_fusion_data(output_dir: str):
     """Load fusion candidates and platform arch config from analysis output."""
     fc_path = os.path.join(output_dir, "category_data", "fusion_candidates.json")
     manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
-    csv_path = os.path.join(output_dir, "perf_report_csvs", "unified_perf_summary.csv")
 
     if not os.path.exists(fc_path):
         raise FileNotFoundError(f"Fusion candidates not found: {fc_path}")
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"Perf summary CSV not found: {csv_path}")
 
     with open(fc_path, "r") as f:
         candidates = json.load(f)
 
-    with open(manifest_path, "r") as f:
-        manifest = json.load(f)
+    manifest = {}
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f)
+
+    csv_path = os.path.join(perf_report_csv_dir(output_dir), "unified_perf_summary.csv")
+
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Perf summary CSV not found: {csv_path}")
 
     return candidates, manifest, csv_path
 
@@ -498,32 +597,46 @@ def load_arch_config(output_dir: str, platform: str) -> dict:
         )
 
 
-def _filter_and_dedup(candidates: list, baseline_ms: float = 0) -> list:
+def _filter_and_dedup(
+    candidates: list, baseline_ms: float = 0, is_comparative: bool = False
+) -> list:
     """Filter by kernel count cap, drop tiny candidates, and deduplicate.
 
     Candidates whose total time can't reach MIN_IMPACT_SCORE of baseline are
     dropped early to avoid expensive downstream enrichment.
     """
-    filtered = [
-        c for c in candidates if c.get("kernel_count", 0) <= MAX_FUSION_KERNEL_COUNT
-    ]
+
+    def _kernel_count(c: dict) -> int:
+        if is_comparative:
+            return c.get("kernel_count_trace1", 0)
+        else:
+            return c.get("kernel_count", 0)
+
+    def _name(c: dict) -> str:
+        return c.get("module_name", "")
+
+    def _total_time_us(c: dict) -> float:
+        if is_comparative:
+            return c.get("total_kernel_time_us_trace1", 0)
+        else:
+            return c.get("total_kernel_time_us", 0)
+
+    filtered = [c for c in candidates if _kernel_count(c) <= MAX_FUSION_KERNEL_COUNT]
 
     if baseline_ms > 0:
         min_time_us = baseline_ms * 10 * MIN_IMPACT_SCORE
-        filtered = [
-            c for c in filtered if c.get("total_kernel_time_us", 0) >= min_time_us
-        ]
+        filtered = [c for c in filtered if _total_time_us(c) >= min_time_us]
 
     seen: dict = {}
     for c in filtered:
         sig = (
             c.get("instance_count", 0),
-            c.get("kernel_count", 0),
-            round(c.get("total_kernel_time_us", 0), 1),
+            _kernel_count(c),
+            round(_total_time_us(c), 1),
         )
         if sig in seen:
             existing = seen[sig]
-            if len(c.get("module_name", "")) < len(existing.get("module_name", "")):
+            if len(_name(c)) < len(_name(existing)):
                 seen[sig] = c
         else:
             seen[sig] = c
@@ -536,6 +649,12 @@ def main():
         description="Analyze kernel fusion candidates and estimate savings"
     )
     parser.add_argument("--output-dir", required=True, help="Analysis output directory")
+    parser.add_argument(
+        "--comparison-scope",
+        choices=("standalone", "comparative"),
+        default="standalone",
+        help="Analysis scope: standalone (default) or comparative",
+    )
     args = parser.parse_args()
 
     try:
@@ -551,9 +670,12 @@ def main():
         sys.exit(1)
 
     baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
+    is_comparative = args.comparison_scope == "comparative"
 
     raw_count = len(candidates)
-    candidates = _filter_and_dedup(candidates, baseline_ms=baseline_ms)
+    candidates = _filter_and_dedup(
+        candidates, baseline_ms=baseline_ms, is_comparative=is_comparative
+    )
     print(
         f"  Filtered: {raw_count} -> {len(candidates)} candidates "
         f"(max {MAX_FUSION_KERNEL_COUNT} kernels, deduped)"
@@ -594,10 +716,14 @@ def main():
         peak_bw_tbs,
         peak_maf_tflops,
         baseline_ms=baseline_ms,
+        is_comparative=is_comparative,
     )
 
-    total_time_us = sum(c.get("total_kernel_time_us", 0) for c in candidates)
-    total_impact_score = sum(e["impact_score"] for e in impact_estimates)
+    if is_comparative:
+        total_time_us = sum(c.get("total_kernel_time_us_trace1", 0) for c in candidates)
+    else:
+        total_time_us = sum(c.get("total_kernel_time_us", 0) for c in candidates)
+    total_impact_score = sum(e.get("impact_score", 0) for e in impact_estimates)
     warnings = [e["warning"] for e in impact_estimates if e.get("warning")]
 
     metrics = {

@@ -26,7 +26,7 @@ The prompt provides these key=value parameters:
 
 - **results_root**: path to the repeatability results tree (contains `<trace_id>/run_<n>/` directories)
 - **suite**: `unit` or `e2e`
-- **test_traces_csv**: path to the trace CSV used (e.g. `agent_evals/Analysis/e2e_test_traces.csv`)
+- **test_traces_csv**: path to the trace CSV used (e.g. `agent_evals/Analysis/analysis_tests/combined_traces_standalone.csv`)
 - **report_dir**: where to write output reports
 - **container**: Docker container name (used in reproducer commands)
 
@@ -247,7 +247,7 @@ Generated at: `<ISO 8601 timestamp>`
 
 For the reproducer commands:
 - Use the `container` value from inputs
-- Use the **relative** path of `test_traces_csv` (e.g. `agent_evals/Analysis/combined_traces.csv`) — never embed absolute or user-specific paths
+- Use the **relative** path of `test_traces_csv` (e.g. `agent_evals/Analysis/analysis_tests/combined_traces_standalone.csv`) — never embed absolute or user-specific paths
 - Omit `NUM_REPEATS` and `MAX_PARALLEL` so the script defaults (5 repeats, 5 parallel) are used, matching a standard eval run
 - The `platform` comes from the test traces CSV
 
