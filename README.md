@@ -69,6 +69,7 @@ For community-contributed utilities — including interactive trace dashboards (
 | **JAX** | XPlane protobuf | [docs/jax_analyses.md](docs/jax_analyses.md) |
 | **rocprofv3 JSON** | AMD ROCm rocprofiler-sdk | [docs/generate_perf_report_rocprof.md](docs/generate_perf_report_rocprof.md) |
 | **rocprofv3 pftrace** | Perfetto-style | [docs/generate_perf_report_rocprof_pftrace.md](docs/generate_perf_report_rocprof_pftrace.md) |
+| **Genesis / Taichi** | rocprofv3 + pftrace | [README § Genesis](#genesis--taichi-physics-simulation) |
 
 ### PyTorch
 
@@ -132,6 +133,46 @@ TraceLens_generate_perf_report_pftrace_memory_copy --trace_path sample.pftrace
 ```
 
 `.pftrace` is Perfetto's binary format that needs to be converted to JSON for parsing. `traceconv` (a Perfetto tool) is optional — if not on `PATH`, it is downloaded automatically. You can also pass `--traceconv /path/to/traceconv` explicitly.
+
+### Genesis / Taichi Physics Simulation
+
+Extension for **Genesis/Taichi physics-simulation workloads** — combines rocprof kernel analysis with pftrace HIP activity and memory copy reports, adds physics kernel categorization, and isolates the steady-state simulation window (excluding JIT/build overhead).
+
+**Capture traces** with `rocprofv3` while running a Genesis benchmark:
+
+```bash
+rocprofv3 --hip-trace --kernel-trace --memory-copy-trace \
+    --output-format pftrace -d profile_output/<timestamp>/kernel_trace \
+    -- python3 your_genesis_benchmark.py
+```
+
+The expected capture directory layout:
+
+```
+profile_output/<timestamp>/
+├── kernel_trace/
+│   ├── kernel_kernel_trace.csv    # required — GPU kernel dispatches
+│   ├── kernel_results.json        # native rocprof JSON (fallback)
+│   ├── kernel_results.pftrace     # Perfetto trace for HIP/memory analysis
+│   ├── kernel_agent_info.csv
+│   └── ...
+├── run.log                        # optional — auto-detects benchmark wall_time
+└── combined_manifest.json         # optional — capture metadata (n_envs, steps, etc.)
+```
+
+**Generate the report:**
+
+```bash
+TraceLens_generate_perf_report_genesis \
+    --capture-dir profile_output/<timestamp> \
+    --output-dir analysis_output/<timestamp>
+```
+
+**Output:**
+- `genesis_perf_report.xlsx` — Excel workbook with GPU timeline, kernel summary by physics category (Rigid Body Solver, Collision, Time Integration, etc.), HIP activity, and memory copy sheets
+- `genesis_summary.md` — Markdown overview with steady-state GPU utilization and top kernels
+
+Key options: `--steady-state-gap-ms` (gap threshold to split JIT from simulation, default 1000), `--steady-state-fallback-s` (override timed window, default auto-detected from `run.log`), `--include-api` (include HIP/HSA API events in rocprof JSON), `--keep-work` (retain intermediate files for debugging).
 
 ## Documentation
 
