@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import operator
 from collections import defaultdict
 from typing import Dict, Any, Callable, Optional
 import TraceLens.util
@@ -113,7 +114,7 @@ class BaseTraceToTree(ABC):
             cat = self.event_to_category(event)
             event["cat"] = cat
             is_cpu_or_cuda_event = cat in {"cpu_op", "cuda_runtime", "cuda_driver"}
-            is_python_event = self.event_to_category(event) == "python_function"
+            is_python_event = cat == "python_function"
             return is_cpu_or_cuda_event or (add_python_func and is_python_event)
 
         print(f"Building CPU op tree with add_python_func={add_python_func}")
@@ -609,6 +610,13 @@ class TraceToTree(BaseTraceToTree):
             trace_metadata=trace_metadata,
         )
         self.metadata = TraceEventUtils.get_metadata(self.events)
+        if event_to_category is TraceLens.util.TraceEventUtils.default_categorizer:
+            # Stamp "cat" onto every event once so all hot-path callers can use
+            # event["cat"] via the C-level itemgetter instead of a Python function call.
+            for event in self.events:
+                if "cat" not in event:
+                    event["cat"] = None
+            self.event_to_category = operator.itemgetter("cat")
         self._preprocess_and_index_events()
         self._annotate_gpu_events_with_stream_index()
 

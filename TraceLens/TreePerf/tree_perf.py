@@ -9,6 +9,7 @@ import gzip
 import inspect
 import json
 import logging
+import operator
 import os, re, sys
 import pprint
 
@@ -272,7 +273,10 @@ class TreePerfAnalyzer:
         self.python_path = python_path
         self.enable_origami = enable_origami
         self.inductor_cache_dir = inductor_cache_dir
-        self.event_to_category = event_to_category
+        if event_to_category is TraceEventUtils.default_categorizer:
+            self.event_to_category = operator.itemgetter("cat")
+        else:
+            self.event_to_category = event_to_category
         self.include_unlinked_kernels = include_unlinked_kernels
         self.with_python_stack = any(
             event.get("cat") == "python_func" for event in self.tree.events
