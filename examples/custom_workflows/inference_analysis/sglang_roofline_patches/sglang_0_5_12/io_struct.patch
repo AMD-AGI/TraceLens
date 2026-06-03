@@ -1,0 +1,24 @@
+diff --git a/python/sglang/srt/managers/io_struct.py b/python/sglang/srt/managers/io_struct.py
+index c5910434c..0ac0b9b04 100644
+--- a/python/sglang/srt/managers/io_struct.py
++++ b/python/sglang/srt/managers/io_struct.py
+@@ -1460,6 +1460,10 @@ class ProfileReqInput(BaseReq):
+     profile_prefix: Optional[str] = None
+     # Only profile these stages and ignore others
+     profile_stages: Optional[List[str]] = None
++    # Whether to enable shape discovery
++    shape_discovery: bool = False
++    # Whether roofline annotations are included
++    roofline_annotations: bool = False
+ 
+ 
+ class ProfileReqType(Enum):
+@@ -1481,6 +1485,8 @@ class ProfileReq(BaseReq):
+     merge_profiles: bool = False
+     profile_prefix: Optional[str] = None
+     profile_stages: Optional[List[str]] = None
++    shape_discovery: bool = False
++    roofline_annotations: bool = False
+ 
+ 
+ @dataclass
