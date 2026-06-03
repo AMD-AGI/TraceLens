@@ -61,12 +61,16 @@ def resolve_trace_path(run_dir):
     return None
 
 
+_SDK_PREFIX_RE = re.compile(r"^\[claude-sdk\]\s*")
+
+
 def stream_lines(stream_file):
-    """Yield raw lines from a stream file (ndjson or streamJSON)."""
+    """Yield lines from a stream file (ndjson, streamJSON, or Hyperloom log)."""
     if not stream_file or not os.path.isfile(stream_file):
         return
     with open(stream_file, errors="replace") as f:
-        yield from f
+        for line in f:
+            yield _SDK_PREFIX_RE.sub("", line)
 
 
 def stream_contains(stream_file, pattern):
