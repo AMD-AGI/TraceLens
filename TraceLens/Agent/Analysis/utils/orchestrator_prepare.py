@@ -824,6 +824,14 @@ def main():
         trace1_csv_dir = os.path.join(output_dir, "perf_report_csvs")
         trace2_csv_dir = None
 
+    try:
+        for csv_dir in filter(None, [trace1_csv_dir, trace2_csv_dir]):
+            if not os.path.isdir(csv_dir) or not os.listdir(csv_dir):
+                raise FileNotFoundError(csv_dir)
+    except FileNotFoundError as e:
+        print(f"[DIAG:pipeline:STEP1_FAIL] Perf report CSVs missing at {e}")
+        sys.exit(1)
+
     print("=" * 80)
     print("TRACELENS AGENT - ORCHESTRATOR PREPARATION")
     print("=" * 80)
@@ -879,10 +887,13 @@ def main():
         f"  Communication: {gpu_utilization_metrics['exposed_comm_time_percent']:.4f}%"
     )
     print(f"  MemCpy: {gpu_utilization_metrics['exposed_memcpy_time_percent']:.2f}%")
-    print(f"  Idle: {gpu_utilization_metrics['idle_time_percent']:.2f}%")
+    idle_pct = gpu_utilization_metrics['idle_time_percent']
+    print(f"  Idle: {idle_pct:.2f}%")
 
-    if gpu_utilization_metrics["computation_time_percent"] < 95:
-        print(f"  ⚠️  WARNING: Compute utilization < 95%")
+    if idle_pct > 15:
+        print(f"  [DIAG:trace_quality:HIGH_IDLE] GPU idle time {idle_pct:.1f}% exceeds 15% threshold")
+    if gpu_utilization_metrics["computation_time_percent"] < 85:
+        print(f"  [DIAG:trace_quality:HIGH_IDLE] Compute utilization < 85%")
 
     # ============================================================================
     # STEP 3: Identify Top Operations
@@ -1209,7 +1220,7 @@ def main():
                 json.dump([], f)
 
     except Exception as e:
-        print(f"  ⚠️  Error during tree data pre-computation: {e}")
+        print(f"  [DIAG:pipeline:STEP2_5_FAIL] Error during tree data pre-computation: {e}")
         traceback.print_exc()
 
     # ============================================================================
