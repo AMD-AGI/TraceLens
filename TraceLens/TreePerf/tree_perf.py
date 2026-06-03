@@ -272,13 +272,7 @@ class TreePerfAnalyzer:
         self.python_path = python_path
         self.enable_origami = enable_origami
         self.inductor_cache_dir = inductor_cache_dir
-        if event_to_category in (
-            TraceEventUtils.default_categorizer,
-            TraceToTree.default_categorizer,
-        ):
-            self.event_to_category = lambda e: e["cat"]
-        else:
-            self.event_to_category = event_to_category
+        self.event_to_category = event_to_category
         self.include_unlinked_kernels = include_unlinked_kernels
         self.with_python_stack = any(
             event.get("cat") == "python_func" for event in self.tree.events

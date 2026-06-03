@@ -609,18 +609,12 @@ class TraceToTree(BaseTraceToTree):
             trace_metadata=trace_metadata,
         )
         self.metadata = TraceEventUtils.get_metadata(self.events)
-        _default_cats = (
-            TraceLens.util.TraceEventUtils.default_categorizer,
-            TraceToTree.default_categorizer,
-        )
-        if event_to_category in _default_cats:
-            self.event_to_category = lambda e: e["cat"]
         self._preprocess_and_index_events()
         self._annotate_gpu_events_with_stream_index()
 
     @staticmethod
     def default_categorizer(event: dict) -> str:
-        return event.get(TraceLens.util.TraceEventUtils.TraceKeys.Category)
+        return event["cat"]
 
     def _set_linking_key(self):
         Name = TraceLens.util.TraceEventUtils.TraceKeys.Name
