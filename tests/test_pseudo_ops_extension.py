@@ -28,7 +28,7 @@ from example_megatron_extension import (
     tree_postprocess_extension,
     _link_checkpoint_fwd_bwd,
     perf_model_extension,
-    dict_cat2names_extension,
+    op_category_extension,
     te_layer_norm_fwd,
     te_layer_norm_bwd,
 )
@@ -540,41 +540,31 @@ class TestPseudoOpsExtension:
 class TestFusedAttnFuncBackwardCategorization:
     """Test that FusedAttnFuncBackward is categorized as SDPA_bwd."""
 
-    def test_categorization_via_dict_cat2names(self):
-        """FusedAttnFuncBackward must be in SDPA category."""
-        assert "FusedAttnFuncBackward" in dict_cat2names_extension["SDPA"]
+    def test_categorization_via_op_category_extension(self):
+        """FusedAttnFuncBackward must be registered as a category-only op."""
+        assert op_category_extension["FusedAttnFuncBackward"] == "SDPA_bwd"
 
     def test_categorize_as_sdpa_bwd(self):
         """Core categorizer must return SDPA_bwd for FusedAttnFuncBackward."""
-        from TraceLens.PerfModel.torch_op_mapping import (
-            categorize_torch_op,
-            dict_cat2names,
-        )
+        from TraceLens.PerfModel.torch_op_mapping import categorize_torch_op
 
-        dict_cat2names["SDPA"].extend(dict_cat2names_extension["SDPA"])
-        try:
-            result = categorize_torch_op({"name": "FusedAttnFuncBackward"})
-            assert result == "SDPA_bwd", f"Expected SDPA_bwd, got {result}"
-        finally:
-            for name in dict_cat2names_extension["SDPA"]:
-                if name in dict_cat2names["SDPA"]:
-                    dict_cat2names["SDPA"].remove(name)
+        result = categorize_torch_op({"name": "FusedAttnFuncBackward"})
+        assert result == "SDPA_bwd", f"Expected SDPA_bwd, got {result}"
 
     def test_fused_attn_fwd_still_sdpa_fwd(self):
         """FusedAttnFunc (forward) must still be SDPA_fwd."""
         from TraceLens.PerfModel.torch_op_mapping import (
-            categorize_torch_op,
-            dict_cat2names,
+            OP_CATEGORY_REGISTRY,
+            register_perf_model_categories,
         )
 
-        dict_cat2names["SDPA"].extend(dict_cat2names_extension["SDPA"])
-        try:
-            result = categorize_torch_op({"name": "FusedAttnFunc"})
-            assert result == "SDPA_fwd", f"Expected SDPA_fwd, got {result}"
-        finally:
-            for name in dict_cat2names_extension["SDPA"]:
-                if name in dict_cat2names["SDPA"]:
-                    dict_cat2names["SDPA"].remove(name)
+        registry = dict(OP_CATEGORY_REGISTRY)
+        register_perf_model_categories(
+            {"FusedAttnFunc": perf_model_extension["FusedAttnFunc"]},
+            registry,
+        )
+
+        assert registry["FusedAttnFunc"] == "SDPA_fwd"
 
 
 class TestLayerNormFnPerfModel:
@@ -648,27 +638,28 @@ class TestLayerNormFnPerfModel:
         ), f"is_affine mismatch: fwd={fwd_model.is_affine}, bwd={bwd_model.is_affine}"
 
     def test_categorization_normalization(self):
-        """LayerNormFn/LayerNormFnBackward must be in Normalization category."""
-        assert "LayerNormFn" in dict_cat2names_extension["Normalization"]
-        assert "LayerNormFnBackward" in dict_cat2names_extension["Normalization"]
+        """LayerNormFn classes declare their categories directly."""
+        assert te_layer_norm_fwd.category == "NORM_fwd"
+        assert te_layer_norm_bwd.category == "NORM_bwd"
 
     def test_categorize_as_norm_fwd_bwd(self):
         """Core categorizer must return NORM_fwd and NORM_bwd."""
         from TraceLens.PerfModel.torch_op_mapping import (
-            categorize_torch_op,
-            dict_cat2names,
+            OP_CATEGORY_REGISTRY,
+            register_perf_model_categories,
         )
 
-        dict_cat2names["Normalization"].extend(
-            dict_cat2names_extension["Normalization"]
+        registry = dict(OP_CATEGORY_REGISTRY)
+        register_perf_model_categories(
+            {
+                "LayerNormFn": te_layer_norm_fwd,
+                "LayerNormFnBackward": te_layer_norm_bwd,
+            },
+            registry,
         )
-        try:
-            assert categorize_torch_op({"name": "LayerNormFn"}) == "NORM_fwd"
-            assert categorize_torch_op({"name": "LayerNormFnBackward"}) == "NORM_bwd"
-        finally:
-            for name in dict_cat2names_extension["Normalization"]:
-                if name in dict_cat2names["Normalization"]:
-                    dict_cat2names["Normalization"].remove(name)
+
+        assert registry["LayerNormFn"] == "NORM_fwd"
+        assert registry["LayerNormFnBackward"] == "NORM_bwd"
 
     def test_perf_model_extension_registration(self):
         """LayerNormFn/LayerNormFnBackward must be registered in perf_model_extension."""

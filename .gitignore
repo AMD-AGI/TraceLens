@@ -1,6 +1,7 @@
 # Jax artifacts
 *.SSTABLE
 *.hlo_proto.pb
+.claude/settings.local.json
 
 # Byte-compiled / optimized (Python.gitignore)
 __pycache__/

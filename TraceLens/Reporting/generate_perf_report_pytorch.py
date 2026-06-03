@@ -17,7 +17,12 @@ import numpy as np
 import pandas as pd
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
-from TraceLens.Reporting.reporting_utils import request_install
+from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
+from TraceLens.Reporting.reporting_utils import (
+    add_gpu_arch_cli_args,
+    request_install,
+    resolve_gpu_arch,
+)
 
 
 def get_dfs_short_kernels(
@@ -119,6 +124,12 @@ def apply_extension(perf_analyzer, extension_path):
     extension_path = os.path.abspath(extension_path)
     extension_name = os.path.splitext(os.path.basename(extension_path))[0]
 
+    from TraceLens.PerfModel.torch_op_mapping import (
+        OP_CATEGORY_REGISTRY,
+        register_op_categories,
+        register_perf_model_categories,
+    )
+
     spec = importlib.util.spec_from_file_location(extension_name, extension_path)
     extension = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(extension)
@@ -137,20 +148,27 @@ def apply_extension(perf_analyzer, extension_path):
                 f"Expected perf_model_extension to be a dict, got {type(perf_model_extension)}"
             )
         perf_analyzer.op_to_perf_model_class_map.update(perf_model_extension)
-    if hasattr(extension, "dict_cat2names_extension"):
-        print(f"Updating dict_cat2names with extension from {extension_path}")
-        if not isinstance(extension.dict_cat2names_extension, dict):
+        register_perf_model_categories(
+            perf_model_extension,
+            OP_CATEGORY_REGISTRY,
+        )
+    if hasattr(extension, "op_category_extension"):
+        print(f"Applying op category extension from {extension_path}")
+        op_category_extension = getattr(extension, "op_category_extension")
+        if not isinstance(op_category_extension, dict):
             raise ValueError(
-                f"Expected dict_cat2names_extension to be a dict, got {type(extension.dict_cat2names_extension)}"
+                f"Expected op_category_extension to be a dict, got {type(op_category_extension)}"
             )
-
-        # defaultdict(<class 'list'>,
-        for cat, names in extension.dict_cat2names_extension.items():
-            if cat not in perf_analyzer.dict_cat2names:
-                perf_analyzer.dict_cat2names[cat] = []
-            if not isinstance(names, list):
-                raise ValueError(f"Expected names to be a list, got {type(names)}")
-            perf_analyzer.dict_cat2names[cat].extend(names)
+        register_op_categories(
+            op_category_extension,
+            OP_CATEGORY_REGISTRY,
+        )
+    if hasattr(extension, "dict_cat2names_extension"):
+        warnings.warn(
+            "dict_cat2names_extension is deprecated and ignored. Use "
+            "perf_model_extension for modeled ops or op_category_extension for "
+            "category-only ops."
+        )
 
 
 def trunc_kernel_details(row, kernel_detail_col, trunc_length=64):
@@ -250,20 +268,23 @@ def generate_perf_report_pytorch(
     topk_roofline_ops: Optional[int] = None,
     comparison_json_path: Optional[str] = None,
     extension_file: Optional[str] = None,
-    # for gemm simulator / Origami (Origami requires --enable_origami when using gpu_arch_json_path)
+    # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
+    gpu_arch_platform: Optional[str] = None,
+    gpu_arch: Optional[dict] = None,
+    inductor_cache_dir: Optional[str] = None,
     group_by_num_kernels: bool = False,
     enable_origami: bool = False,
     # activation recompute detection
     detect_recompute: bool = False,
     include_call_stack: bool = False,
 ) -> Dict[str, pd.DataFrame]:
-    if gpu_arch_json_path:
-        with open(gpu_arch_json_path, "r") as f:
-            gpu_arch_json = json.load(f)
-    else:
-        gpu_arch_json = None
+    gpu_arch_json = resolve_gpu_arch(
+        gpu_arch_json_path=gpu_arch_json_path,
+        gpu_arch_platform=gpu_arch_platform,
+        gpu_arch=gpu_arch,
+    )
     add_python_func = True if include_call_stack else False
     perf_analyzer = TreePerfAnalyzer.from_file(
         profile_filepath=profile_json_path,
@@ -274,6 +295,7 @@ def generate_perf_report_pytorch(
         add_python_func=add_python_func,
         detect_recompute=detect_recompute,
         enable_origami=enable_origami,
+        inductor_cache_dir=inductor_cache_dir,
     )
 
     ## Apply annotation for vLLM eager and replay phase
@@ -364,16 +386,19 @@ def generate_perf_report_pytorch(
             )
         # Dictionary to hold the op-specific DataFrames
         perf_metrics_dfs = {}
+        sheet_category_to_op_names = build_sheet_category_to_op_names(
+            perf_analyzer.op_to_perf_model_class_map
+        )
 
-        for op_cat, op_names in perf_analyzer.dict_cat2names.items():
-            # Filter events belonging to the current category
+        for sheet_category, op_names in sheet_category_to_op_names.items():
+            # Filter events belonging to the current legacy sheet category
             op_events = [
                 event
                 for event in perf_analyzer.tree.events
                 if event["name"] in op_names
             ]
 
-            if op_cat in [
+            if sheet_category in [
                 "GEMM",
                 "UnaryElementwise",
                 "BinaryElementwise",
@@ -394,7 +419,7 @@ def generate_perf_report_pytorch(
                     new_col_name="trunc_kernel_details",
                 )
                 if not df_ops.empty:
-                    perf_metrics_dfs[op_cat] = df_ops
+                    perf_metrics_dfs[sheet_category] = df_ops
                 if include_overlap_info:
                     df_ops_overlapping_kernels = (
                         perf_analyzer.summarize_df_perf_metrics(
@@ -415,7 +440,7 @@ def generate_perf_report_pytorch(
                         new_col_name="trunc_overlapping_kernels_details",
                     )
                     if not df_ops_overlapping_kernels.empty:
-                        perf_metrics_dfs[f"{op_cat}_kl_overlap"] = (
+                        perf_metrics_dfs[f"{sheet_category}_kl_overlap"] = (
                             df_ops_overlapping_kernels
                         )
             else:
@@ -483,9 +508,9 @@ def generate_perf_report_pytorch(
                     ]
                     df_ops_bwd = df_ops_bwd[~df_ops_bwd["name"].isin(fwd_op_names)]
                 if not df_ops_fwd.empty:
-                    perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
+                    perf_metrics_dfs[f"{sheet_category}_fwd"] = df_ops_fwd
                 if not df_ops_bwd.empty:
-                    perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
+                    perf_metrics_dfs[f"{sheet_category}_bwd"] = df_ops_bwd
 
                 if include_overlap_info:
                     df_ops_fwd_overlapping_kernels = (
@@ -562,11 +587,11 @@ def generate_perf_report_pytorch(
                             ~df_ops_bwd_overlapping_kernels["name"].isin(fwd_op_names)
                         ]
                     if not df_ops_fwd_overlapping_kernels.empty:
-                        perf_metrics_dfs[f"{op_cat}_fwd_kl_overlap"] = (
+                        perf_metrics_dfs[f"{sheet_category}_fwd_kl_overlap"] = (
                             df_ops_fwd_overlapping_kernels
                         )
                     if not df_ops_bwd_overlapping_kernels.empty:
-                        perf_metrics_dfs[f"{op_cat}_bwd_kl_overlap"] = (
+                        perf_metrics_dfs[f"{sheet_category}_bwd_kl_overlap"] = (
                             df_ops_bwd_overlapping_kernels
                         )
 
@@ -966,12 +991,7 @@ def main():
         default=None,
         help="Path to the python executable for gemm simulator",
     )
-    parser.add_argument(
-        "--gpu_arch_json_path",
-        type=str,
-        default=None,
-        help="Path to the GPU architecture JSON file",
-    )
+    add_gpu_arch_cli_args(parser)
     parser.add_argument(
         "--group_by_num_kernels",
         action="store_true",
@@ -983,6 +1003,13 @@ def main():
         action="store_true",
         default=False,
         help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+    )
+    parser.add_argument(
+        "--inductor_cache_dir",
+        type=str,
+        default=None,
+        help="Path to the TorchInductor cache directory for Triton kernel metadata (V1 fallback). "
+        "Defaults to $TORCHINDUCTOR_CACHE_DIR, ~/.cache/torchinductor, or /tmp/torchinductor_<user>.",
     )
     parser.add_argument(
         "--include_overlap_info",
@@ -1036,9 +1063,11 @@ def main():
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        gpu_arch_platform=args.gpu_arch_platform,
         group_by_num_kernels=args.group_by_num_kernels,
         enable_origami=args.enable_origami,
         detect_recompute=args.detect_recompute,
+        inductor_cache_dir=args.inductor_cache_dir,
         include_call_stack=args.include_call_stack,
     )
 
