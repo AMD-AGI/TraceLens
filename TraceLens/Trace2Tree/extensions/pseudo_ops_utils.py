@@ -324,6 +324,19 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
             if verbose:
                 logger.info("Auto-detected MLA decode operations")
 
+    # MLA Prefill: AITER fp8 implementation
+    if "aiter::mla_prefill_ps_asm_fwd" in tree.name2event_uids:
+        has_prefill_python_func = any(
+            re.search(r":\s*mla_fp8_prefill_attn(\b|$)", name)
+            for name in tree.name2event_uids
+        )
+        if has_prefill_python_func:
+            from .mla_prefill_pseudo_ops import create_pseudo_ops_mla_prefill
+
+            extensions.append(("MLA_Prefill", create_pseudo_ops_mla_prefill))
+            if verbose:
+                logger.info("Auto-detected MLA prefill operations")
+
     # Apply extensions onto tree
     for ext_info in extensions:
         # ext_info tuple of (extension_name, extension_function)
