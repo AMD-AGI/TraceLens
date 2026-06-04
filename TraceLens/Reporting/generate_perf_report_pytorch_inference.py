@@ -603,6 +603,7 @@ def generate_perf_report_pytorch(
             "vllm::unified_attention_with_output",
             "aiter::mha_varlen_fwd",
             "pseudo_mla_decode_fwd",
+            "pseudo_mla_prefill_fwd",
             "vllm::gdn_attention_core",
             "aiter::fmha_v3_varlen_fwd",
             "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
