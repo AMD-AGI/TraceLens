@@ -32,7 +32,7 @@ EXECUTE_CONTEXT_PATTERNS = (
     re.compile(
         r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
     ),
-    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
+    re.compile(r"execute_context_\d+\([\d_]+\)_generation_\d+\([\d_]+\)"),
 )
 
 
