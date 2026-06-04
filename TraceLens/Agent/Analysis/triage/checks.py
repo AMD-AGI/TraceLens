@@ -67,12 +67,16 @@ class CheckSpec:
         implies_failures: Sublabels of other checks that will definitely fail
             if this check fails. Used by the runner to annotate downstream
             findings with ``implied_by``. Safe to leave empty.
+        detailed_only: If True, this check runs only when the runner is
+            invoked with ``--detailed``. Use for expensive or noisy checks
+            that aren't useful in the default fast pass.
     """
     sublabel: str
     name: str
     category: str
     fn: Callable[[str, Optional[str]], Optional[FindingDraft]]
     implies_failures: List[str] = field(default_factory=list)
+    detailed_only: bool = False
 
     def build_tag(self) -> str:
         if self.sublabel:

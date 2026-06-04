@@ -31,8 +31,21 @@ def _auto_detect_stream(run_dir):
     return None
 
 
-def run_triage(run_dir, stream_file=None):
-    """Run all checks and return a list of Findings."""
+def _auto_detect_log(run_dir):
+    """Look for a TraceLens analysis log in ``<parent>/logs/tracelens_analysis/*.log``."""
+    parent = str(Path(run_dir).parent)
+    candidates = sorted(glob.glob(os.path.join(parent, "logs", "tracelens_analysis", "*.log")))
+    if candidates:
+        return candidates[-1]
+    return None
+
+
+def run_triage(run_dir, stream_file=None, detailed=False):
+    """Run all checks and return a list of Findings.
+
+    When ``detailed`` is False (the default), checks marked
+    ``detailed_only=True`` in their CheckSpec are skipped.
+    """
     if not os.path.isdir(run_dir):
         print(f"[DIAG:pipeline:OUTPUT_INCOMPLETE] Run directory does not exist: {run_dir}")
         sys.exit(1)
@@ -49,6 +62,8 @@ def run_triage(run_dir, stream_file=None):
     findings = []
     findings_by_sublabel = {}
     for spec in ALL_CHECKS:
+        if spec.detailed_only and not detailed:
+            continue
         try:
             draft = spec.fn(run_dir, stream_file)
         except Exception as e:
@@ -114,9 +129,11 @@ def main():
     parser = argparse.ArgumentParser(description="TraceLens Analysis Triage Checker")
     parser.add_argument("--run-dir", required=True, help="Path to analysis_output/ directory")
     parser.add_argument("--stream-file", default=None, help="Path to agent stream (.ndjson or .streamJSON)")
+    parser.add_argument("--detailed", action="store_true",
+                        help="Also run checks marked detailed_only (slower / noisier)")
     args = parser.parse_args()
 
-    findings = run_triage(args.run_dir, args.stream_file)
+    findings = run_triage(args.run_dir, args.stream_file, detailed=args.detailed)
     write_detail_csv(findings, args.run_dir)
     write_diag_txt(findings, args.run_dir)
 
