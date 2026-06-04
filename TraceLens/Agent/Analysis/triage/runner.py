@@ -18,7 +18,7 @@ import os
 import sys
 from pathlib import Path
 
-from .checks import ALL_CHECKS
+from .checks import ALL_CHECKS, Finding
 
 
 def _auto_detect_stream(run_dir):
@@ -47,14 +47,39 @@ def run_triage(run_dir, stream_file=None):
             print(f"Auto-detected stream file: {stream_file}")
 
     findings = []
-    for check_fn in ALL_CHECKS:
+    findings_by_sublabel = {}
+    for spec in ALL_CHECKS:
         try:
-            result = check_fn(run_dir, stream_file)
-            if result:
-                findings.append(result)
-                print(result.diag_line())
+            draft = spec.fn(run_dir, stream_file)
         except Exception as e:
-            print(f"Warning: check {check_fn.__name__} raised {e}")
+            print(f"Warning: check {spec.fn.__name__} raised {e}")
+            continue
+        if not draft:
+            continue
+        finding = Finding(
+            tag=spec.build_tag(),
+            sublabel=spec.sublabel,
+            category=spec.category,
+            failure_mode=draft.failure_mode,
+            evidence=draft.evidence,
+            remedy=draft.remedy,
+        )
+        findings.append(finding)
+        if spec.sublabel:
+            findings_by_sublabel[spec.sublabel] = finding
+
+    # Second pass: annotate downstream findings with the sublabels of the
+    # upstream checks that listed them in `implies_failures` and also failed.
+    for spec in ALL_CHECKS:
+        if not spec.implies_failures or spec.sublabel not in findings_by_sublabel:
+            continue
+        for downstream in spec.implies_failures:
+            target = findings_by_sublabel.get(downstream)
+            if target is not None:
+                target.implied_by.append(spec.sublabel)
+
+    for finding in findings:
+        print(finding.diag_line())
 
     return findings
 
@@ -73,7 +98,7 @@ def write_detail_csv(findings, run_dir):
     path = os.path.join(run_dir, "triage_details.csv")
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["DIAG Tag", "Category", "Failure Mode", "Evidence", "Remedy"])
+        writer.writerow(["DIAG Tag", "Category", "Failure Mode", "Evidence", "Remedy", "Implied By"])
         for finding in findings:
             writer.writerow([
                 finding.tag,
@@ -81,6 +106,7 @@ def write_detail_csv(findings, run_dir):
                 finding.failure_mode,
                 finding.evidence,
                 finding.remedy,
+                ",".join(finding.implied_by),
             ])
 
 
