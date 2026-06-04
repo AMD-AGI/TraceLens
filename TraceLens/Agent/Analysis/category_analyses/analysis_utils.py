@@ -129,6 +129,11 @@ _KNOWN_PKG_ANCHORS = (
     "torchrec/",
     "components/",
     "megatron/",
+    "transformers/",
+    "model/",
+    "deepspeed/",
+    "flash_attn/",
+    "ops/",
 )
 
 
@@ -464,10 +469,8 @@ def _extract_launcher_path(call_stack_str: str, op_name: str) -> str:
     """Return the first non-infrastructure .py frame from a call stack, relativized.
 
     Absolute container prefixes are stripped using ``_KNOWN_PKG_ANCHORS``; unknown
-    roots fall back to the last 3 path segments.  ``aten::`` ops always return "".
+    roots fall back to the last 3 path segments.
     """
-    if op_name.startswith("aten::"):
-        return ""
     if not call_stack_str or call_stack_str == "nan":
         return ""
     frames = [f.strip() for f in call_stack_str.split(" => ")]
@@ -499,6 +502,17 @@ def _extract_module_chain(call_stack_str: str) -> List[str]:
         for f in call_stack_str.split(" => ")
         if f.strip().startswith("nn.Module: ")
     ]
+
+
+def _extract_backward_context(call_chain: List[str], library: str) -> str:
+    """Produce a descriptive label for autograd backward ops."""
+    for frame in call_chain:
+        if "autograd::engine::evaluate_function:" in frame:
+            fn = frame.split("autograd::engine::evaluate_function:")[-1].strip()
+            if library:
+                return f"{library} ({fn})"
+            return fn
+    return ""
 
 
 def _extract_call_chain(call_stack_str: str) -> List[str]:
@@ -639,8 +653,23 @@ def build_operation_metrics(
         cs_raw = row.get("call_stack")
         cs_str = "" if cs_raw is None or pd.isna(cs_raw) else str(cs_raw)
         launcher = _extract_launcher_path(cs_str, op_name)
-        op_metric["launcher_path"] = launcher if launcher else "—"
-        op_metric["module_chain"] = _extract_module_chain(cs_str)
+
+        if not launcher:
+            launcher = _extract_backward_context(
+                _extract_call_chain(cs_str) if cs_str else [],
+                op_metric.get("library", ""),
+            )
+
+        module_chain = _extract_module_chain(cs_str)
+
+        if not launcher and module_chain:
+            launcher = " > ".join(module_chain[:3])
+
+        if not launcher and op_metric.get("library"):
+            launcher = f"{op_metric['library']} (vendor)"
+
+        op_metric["launcher_path"] = launcher if launcher else "\u2014"
+        op_metric["module_chain"] = module_chain
         op_metric["_raw_call_stack"] = cs_str
 
         operations.append(op_metric)
