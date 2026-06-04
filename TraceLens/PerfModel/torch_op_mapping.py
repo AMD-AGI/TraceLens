@@ -23,6 +23,9 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     "aten::_scaled_dot_product_cudnn_attention_backward": "SDPA_bwd",
     "aten::_scaled_dot_product_efficient_attention_backward": "SDPA_bwd",
     "aten::_scaled_dot_product_flash_attention_backward": "SDPA_bwd",
+    # xFormers-style efficient attention (ROCm/older PyTorch backend).
+    "aten::_efficient_attention_forward": "SDPA_fwd",
+    "aten::_efficient_attention_backward": "SDPA_bwd",
     # SSM / Mamba category-only backward ops.
     "MambaSplitConv1dScanCombinedFnBackward": "SSM_bwd",
     "DaoAILab::_causal_conv1d_bwd_cpp": "SSM_bwd",
