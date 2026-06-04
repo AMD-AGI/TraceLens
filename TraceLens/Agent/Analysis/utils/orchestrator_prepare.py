@@ -887,11 +887,13 @@ def main():
         f"  Communication: {gpu_utilization_metrics['exposed_comm_time_percent']:.4f}%"
     )
     print(f"  MemCpy: {gpu_utilization_metrics['exposed_memcpy_time_percent']:.2f}%")
-    idle_pct = gpu_utilization_metrics['idle_time_percent']
+    idle_pct = gpu_utilization_metrics["idle_time_percent"]
     print(f"  Idle: {idle_pct:.2f}%")
 
     if idle_pct > 15:
-        print(f"  [DIAG:trace_quality:HIGH_IDLE] GPU idle time {idle_pct:.1f}% exceeds 15% threshold")
+        print(
+            f"  [DIAG:trace_quality:HIGH_IDLE] GPU idle time {idle_pct:.1f}% exceeds 15% threshold"
+        )
     if gpu_utilization_metrics["computation_time_percent"] < 85:
         print(f"  [DIAG:trace_quality:HIGH_IDLE] Compute utilization < 85%")
 
@@ -1220,7 +1222,9 @@ def main():
                 json.dump([], f)
 
     except Exception as e:
-        print(f"  [DIAG:pipeline:STEP2_5_FAIL] Error during tree data pre-computation: {e}")
+        print(
+            f"  [DIAG:pipeline:STEP2_5_FAIL] Error during tree data pre-computation: {e}"
+        )
         traceback.print_exc()
 
     # ============================================================================
@@ -1249,9 +1253,9 @@ def main():
             how="left",
         )
         unified_df.drop(columns=["_trunc_cs"], inplace=True)
-        assert len(unified_df) == pre_merge_len, (
-            f"call_stack join changed row count: {pre_merge_len} -> {len(unified_df)}"
-        )
+        assert (
+            len(unified_df) == pre_merge_len
+        ), f"call_stack join changed row count: {pre_merge_len} -> {len(unified_df)}"
 
     # Apply enhanced categorization
     unified_df["enhanced_category"], unified_df["display_name"] = zip(
