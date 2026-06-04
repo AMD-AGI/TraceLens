@@ -44,6 +44,9 @@ class FusedMoE:
     activation, and down projection) into a single kernel launch.
     """
 
+    category = "MoE_fused"
+    bwd_category = None
+
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
         self.arch = arch
@@ -386,6 +389,9 @@ class UnfusedMoE_Up:
     - Optionally gated (e.g., SwiGLU): both up and gate projections
     """
 
+    category = "MoE_unfused"
+    bwd_category = None
+
     @staticmethod
     def flops_func(num_tokens, hidden_dim, inter_dim, topk, gated):
         """
@@ -474,6 +480,9 @@ class UnfusedMoE_Down:
     This base class only provides static calculation functions.
     Child classes implement get_param_details() to extract parameters from events.
     """
+
+    category = "MoE_unfused"
+    bwd_category = None
 
     @staticmethod
     def flops_func(num_tokens, hidden_dim, inter_dim, topk):
