@@ -6,16 +6,8 @@ See LICENSE for license information.
 
 ---
 name: semantic-comparison-agent
-description: End-to-end semantic gap analysis for two GPU traces. Runs deterministic breakdown per trace (extraction + tree context + classification + pattern finding + label assembly), then a single LLM harmonization pass to assign and unify semantic_block names, followed by comparison pipeline and stakeholder gap analysis report.
-triggers:
-  - semantic comparison
-  - semantic gap analysis
-  - compare two traces semantically
-  - trace comparison
-tools:
-  - terminal
-  - file_read
-  - file_write
+description: End-to-end semantic comparison of two GPU traces. Runs deterministic breakdown per trace (extraction + tree context + classification + pattern finding + label assembly), then a single LLM harmonization pass to assign and unify semantic_block names, followed by a comparison pipeline.
+model: claude-opus-4-7-high
 ---
 
 # Semantic Comparison
@@ -23,8 +15,7 @@ tools:
 Orchestrate end-to-end semantic comparison of two GPU traces. The user
 provides two raw trace files and the orchestrator handles everything:
 deterministic parallel breakdown (no LLM), single-pass LLM harmonization
-that assigns and unifies semantic_block names, comparison pipeline, and
-final stakeholder report.
+that assigns and unifies semantic_block names, and the comparison pipeline.
 
 Use vendor-agnostic terminology (GPU kernels, vendor GEMM library, etc.)
 except when quoting actual kernel names from traces.
@@ -39,8 +30,6 @@ except when quoting actual kernel names from traces.
 2.   Semantic Harmonization (single agent, cross-trace)
 3.   Generate TraceDiff Output (script)
 4.   Generate Comparison CSV (script)
-8.   Write Gap Analysis Report (LLM)
-9.   Validate Report
 ```
 
 ---
@@ -72,8 +61,6 @@ and splits into per-region subdirectories automatically.
 Breakdown is fully deterministic -- no LLM calls. Run both traces as
 **parallel shell commands** (NOT Task subagents) so the orchestrator
 blocks until both finish.
-
-Reference: `TraceLens/AgenticMode/SemanticComparison/.cursor/agents/semantic-breakdown-agent.md`
 
 ### 1.1 Per-trace Pipeline
 
@@ -235,27 +222,6 @@ python TraceLens/Agent/Analysis/semantic_analyses/match_and_compare.py \
 
 ---
 
-## Step 8: Write Gap Analysis Report [LLM]
-
-Read the report template from:
-`TraceLens/AgenticMode/SemanticComparison/.cursor/agents/gap-analysis-report-template.md`
-
-Using `_work/comparison.csv`, `_work/priority.json`, and both
-`_work/<name>/semantic_labels.json` files, produce
-`<output_dir>/semantic_comparison_report.md` following the template.
-
----
-
-## Step 9: Validate Report
-
-- All `priority.json` entries appear in the P1/P2/P3 section
-- All semantic blocks from `comparison.csv` appear in detailed analysis
-- No blocks are missing
-
-Prompt the user to review the report.
-
----
-
 ## Key Principles
 
 1. **Seamless flow** -- user provides two trace paths, orchestrator handles
@@ -264,7 +230,7 @@ Prompt the user to review the report.
 3. **Cross-trace harmonization** -- separate step unifies labels for
    consistent comparison
 4. **Vendor-agnostic language** -- generic terms for all recommendations
-5. **Complete coverage** -- every semantic block appears in the report
+5. **Complete coverage** -- every semantic block is labeled and compared
 6. **No script creation** -- subagents use only existing scripts
 
 ---
@@ -273,8 +239,10 @@ Prompt the user to review the report.
 
 ```
 <output_dir>/
-  comparison_report.xlsx              # Multi-sheet Excel workbook
-  semantic_comparison_report.md       # Stakeholder gap analysis report
+  _work/
+    <name_a>/semantic_labels.json     # Per-trace semantic labels
+    <name_b>/semantic_labels.json
+    comparison.csv                     # Cross-trace comparison
   tracediff_output/                    # TraceDiff-compatible output
     diff_stats.csv
     diff_stats_unique_args_summary.csv
