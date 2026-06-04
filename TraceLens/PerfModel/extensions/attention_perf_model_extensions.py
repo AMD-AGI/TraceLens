@@ -87,24 +87,26 @@ class InferenceAttention:
             "causal": False,
             "flash_impl": True,
             "dtype_Q": None,
+            "dtype_KV": None,
             "_no_perf": True,
         }
 
     @staticmethod
-    def get_param_details(event):
-        try:
-            annotation = str(event.get("annotation"))
-            if annotation == "NA":
-                raise NotImplementedError(
-                    "VLLM attention without annotation is not supported"
-                )
+    def _parse_chunk_stats(event):
+        """Parse chunk stats from ``event["annotation"]``.
 
+        Returns a dict with ``c_sq``/``c_sk``/``c_sqsq``/``c_sqsk``/
+        ``g_sq``/``g_sk``/``g_sqsq``/``g_sqsk``, or ``None`` if the annotation
+        is missing or unparseable.
+        """
+        annotation = str(event.get("annotation"))
+        if annotation == "NA" or annotation == "None":
+            return None
+        try:
             if "sq" not in annotation:
                 requests = annotation.replace("(", "_").replace(")", "_").split("_")
                 if len(requests) < 8:
-                    raise NotImplementedError(
-                        "VLLM attention without annotation is not supported"
-                    )
+                    return None
                 c_sq = int(requests[3])
                 c_sk = int(requests[3])
                 c_sqsq = int(requests[4])
@@ -114,9 +116,7 @@ class InferenceAttention:
                 name = annotation.replace("(", "_").replace(")", "_")
                 requests = re.sub(r"[sqk]+", "_", name).split("_")
                 if len(requests) < 16:
-                    raise NotImplementedError(
-                        "VLLM attention without annotation is not supported"
-                    )
+                    return None
                 c_sq = int(requests[5])
                 c_sk = int(requests[6])
                 c_sqsq = int(requests[7])
@@ -125,12 +125,46 @@ class InferenceAttention:
                 g_sk = int(requests[14])
                 g_sqsq = int(requests[15])
                 g_sqsk = int(requests[16])
+        except (ValueError, IndexError):
+            return None
+        return {
+            "c_sq": c_sq,
+            "c_sk": c_sk,
+            "c_sqsq": c_sqsq,
+            "c_sqsk": c_sqsk,
+            "g_sq": g_sq,
+            "g_sk": g_sk,
+            "g_sqsq": g_sqsq,
+            "g_sqsk": g_sqsk,
+        }
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            chunk = InferenceAttention._parse_chunk_stats(event)
+            if chunk is None:
+                raise NotImplementedError(
+                    "VLLM attention without annotation is not supported"
+                )
+            c_sq, c_sk = chunk["c_sq"], chunk["c_sk"]
+            c_sqsq, c_sqsk = chunk["c_sqsq"], chunk["c_sqsk"]
+            g_sq, g_sk = chunk["g_sq"], chunk["g_sk"]
+            g_sqsq, g_sqsk = chunk["g_sqsq"], chunk["g_sqsk"]
 
             input_dims = event["args"]["Input Dims"]
             q_shape, k_shape = input_dims[0], input_dims[1]
             N_Q, H_Q, d_h_qk = q_shape
             N_KV, H_KV, d_h_v = k_shape[-3:]
-            dtype_Q = event["args"]["Input type"][0]
+            input_types = event["args"]["Input type"]
+            dtype_Q = input_types[0]
+
+            # dtype_KV priority: perf_meta.KCache_dtype -> Input type[1] -> dtype_Q.
+            propagated_kv = (event.get("perf_meta") or {}).get("KCache_dtype")
+            dtype_KV = (
+                propagated_kv
+                if propagated_kv
+                else (input_types[1] if len(input_types) > 1 else dtype_Q)
+            )
             return {
                 "B": 1,
                 "N_Q": N_Q,
@@ -153,6 +187,7 @@ class InferenceAttention:
                 "g_sqsq": g_sqsq,
                 "g_sqsk": g_sqsk,
                 "dtype_Q": dtype_Q,
+                "dtype_KV": dtype_KV,
             }
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return InferenceAttention.no_perf_param_details()
@@ -188,9 +223,24 @@ class InferenceAttention:
 
     @staticmethod
     def bytes_func(
-        B, H_Q, H_KV, d_h_qk, d_h_v, c_sq, c_sk, g_sq, g_sk, bytes_per_element
+        B,
+        H_Q,
+        H_KV,
+        d_h_qk,
+        d_h_v,
+        c_sq,
+        c_sk,
+        g_sq,
+        g_sk,
+        bytes_per_element,
+        bytes_per_element_KV=None,
     ):
         """Calculate bytes moved for attention (context + generation).
+
+        Within each phase, the ``c_sq`` / ``g_sq`` K/V tokens are the current
+        chunk just produced this iteration in Q-dtype; the remaining
+        ``c_sk - c_sq`` / ``g_sk - g_sq`` tokens are read from the KV cache
+        in KV-dtype.
 
         Args:
             B: Batch size.
@@ -198,21 +248,34 @@ class InferenceAttention:
             d_h_qk / d_h_v: Head dimensions for Q-K / V.
             c_sq / c_sk: Aggregate sequence lengths for context Q / KV.
             g_sq / g_sk: Aggregate sequence lengths for generation Q / KV.
-            bytes_per_element: Bytes per tensor element.
+            bytes_per_element: Bytes per Q / output / current-chunk K-V element.
+            bytes_per_element_KV: Bytes per cached K / V element. Defaults to
+                ``bytes_per_element`` (e.g. when KV-cache dtype matches Q).
         """
-        ctx_elems = (
+        if bytes_per_element_KV is None:
+            bytes_per_element_KV = bytes_per_element
+        ctx_elems_q = (
             B * c_sq * H_Q * d_h_qk  # Q read
-            + B * c_sk * H_KV * d_h_qk  # K read
-            + B * c_sk * H_KV * d_h_v  # V read
             + B * c_sq * H_Q * d_h_v  # output write
+            + B * c_sq * H_KV * d_h_qk  # K read (current chunk, Q-dtype)
+            + B * c_sq * H_KV * d_h_v  # V read (current chunk, Q-dtype)
         )
-        gen_elems = (
+        ctx_elems_kv = (
+            B * (c_sk - c_sq) * H_KV * d_h_qk  # K read (cached, KV-dtype)
+            + B * (c_sk - c_sq) * H_KV * d_h_v  # V read (cached, KV-dtype)
+        )
+        gen_elems_q = (
             B * g_sq * H_Q * d_h_qk
-            + B * g_sk * H_KV * d_h_qk
-            + B * g_sk * H_KV * d_h_v
             + B * g_sq * H_Q * d_h_v
+            + B * g_sq * H_KV * d_h_qk  # K read (current token, Q-dtype)
+            + B * g_sq * H_KV * d_h_v  # V read (current token, Q-dtype)
         )
-        return (ctx_elems + gen_elems) * bytes_per_element
+        gen_elems_kv = (
+            B * (g_sk - g_sq) * H_KV * d_h_qk + B * (g_sk - g_sq) * H_KV * d_h_v
+        )
+        return (ctx_elems_q + gen_elems_q) * bytes_per_element + (
+            ctx_elems_kv + gen_elems_kv
+        ) * bytes_per_element_KV
 
     # ------------------------------------------------------------------
     # Instance methods – work for any subclass with valid param_details
@@ -240,6 +303,8 @@ class InferenceAttention:
         bpe = bytes_per_element
         if bpe is None:
             bpe = name2bpe(self.param_details.get("dtype_Q")) or 2
+        dtype_kv = self.param_details.get("dtype_KV")
+        bpe_kv = (name2bpe(dtype_kv) if dtype_kv else None) or bpe
         return self.bytes_func(
             self.B,
             self.H_Q,
@@ -251,6 +316,7 @@ class InferenceAttention:
             self.param_details["g_sq"],
             self.param_details["g_sk"],
             bpe,
+            bpe_kv,
         )
 
     def flops_bwd(self):
@@ -301,6 +367,84 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
         if len(dims) > 2 and len(dims[2]) >= 1:
             params["d_h_v"] = dims[2][-1]
         return params
+
+
+class aiter_paged_attention_v1(InferenceAttention):
+    """
+    Performance model for ``aiter::paged_attention_v1``.
+
+    Signature (positional): ``(out, workspace_buffer, query, key_cache,
+    value_cache, scale, ...)`` -> Q at ``Input Dims[2]``, K at ``[3]``,
+    V at ``[4]``. ``H_KV`` is taken from K's shape based on the
+    ``kv_cache_layout`` ("HND" / "NHD") string in ``Concrete Inputs``.
+
+    The kernel reads the full KV cache in KV-dtype (commonly FP8) while Q is
+    typically BF16, so ``dtype_KV`` is taken from the K-cache input type and
+    ``get_compute_precision`` returns the KV-dtype since that's the dtype the
+    MFMAs run on.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            chunk = InferenceAttention._parse_chunk_stats(event)
+            if chunk is None:
+                return InferenceAttention.no_perf_param_details()
+            # paged_attention_v1 only services the decode portion of an
+            # iteration; any context tokens in the parent's annotation belong
+            # to the prefill kernel (e.g. aiter::fmha_v3_varlen_fwd) running
+            # alongside, not to this op.
+            for k in ("c_sq", "c_sk", "c_sqsq", "c_sqsk"):
+                chunk[k] = 0
+            args = event["args"]
+            dims = args["Input Dims"]
+            types = args.get("Input type") or []
+            concrete = args.get("Concrete Inputs") or event.get("Concrete Inputs") or []
+            q_shape, k_shape, v_shape = dims[2], dims[3], dims[4]
+            N_Q, H_Q, d_h_qk = q_shape
+            d_h_v = v_shape[-1]
+            # paged_attention_v1 K-cache shape is 4D. Two layouts are possible:
+            #   HND: (num_blocks, num_heads, block_size, head_dim) -> H_KV = shape[1]
+            #   NHD: (num_blocks, block_size, num_heads, head_dim) -> H_KV = shape[2]
+            # Prefer the explicit "HND"/"NHD" layout token in Concrete Inputs;
+            # fall back to dimension-equality with d_h_v as a heuristic
+            # (block sizes are typically 8/16/32/64/128, equal to head_dim only
+            # by coincidence — when ambiguous we default to NHD which is the
+            # common aiter layout).
+            layout = next(
+                (c for c in concrete if isinstance(c, str) and c in ("HND", "NHD")),
+                None,
+            )
+            if layout is None:
+                layout = "NHD" if k_shape[-1] == d_h_v else "HND"
+            H_KV = k_shape[1] if layout == "HND" else k_shape[2]
+            dtype_Q = types[2] if len(types) > 2 else None
+            dtype_KV = types[3] if len(types) > 3 else dtype_Q
+            return {
+                "B": 1,
+                "N_Q": N_Q,
+                "H_Q": H_Q,
+                "H_KV": H_KV,
+                "H_K": H_KV,
+                "H_V": H_KV,
+                "N_KV": 0,
+                "d_h_qk": d_h_qk,
+                "d_h_v": d_h_v,
+                "dropout": 0.0,
+                "causal": False,
+                "flash_impl": True,
+                **chunk,
+                "dtype_Q": dtype_Q,
+                "dtype_KV": dtype_KV,
+            }
+        except (IndexError, KeyError, TypeError, ValueError):
+            return InferenceAttention.no_perf_param_details()
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        dtype = self.param_details.get("dtype_KV") or self.param_details.get("dtype_Q")
+        return torch_dtype_map(dtype) if dtype else None
 
 
 class mla_decode_fwd(InferenceAttention):
