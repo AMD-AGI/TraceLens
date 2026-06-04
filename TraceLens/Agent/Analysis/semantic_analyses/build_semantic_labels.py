@@ -19,8 +19,8 @@ The harmonization agent later renames these to descriptive labels
 (e.g. ``QKV Projection``).
 
 Per-kernel output fields:
-    index, name, dur, perf_category, semantic_block, region, nn_module,
-    cpu_op, input_dims, layer.
+    index, name, dur, gpu_op_uid, perf_category, semantic_block, region,
+    nn_module, cpu_op, input_dims, layer.
 
 Usage:
     python build_semantic_labels.py extracted.json classified.json pattern.json \
@@ -153,6 +153,7 @@ def build_labels(extracted, classified, pattern, tree_context=None):
             "index": i,
             "name": k["name"],
             "dur": k["dur"],
+            "gpu_op_uid": tc.get("gpu_op_uid"),
             "perf_category": c.get("perf_category", "Others"),
             "nn_module": _deepest_module(tc.get("nn_module_stack", [])),
             "cpu_op": tc.get("cpu_op_name", ""),

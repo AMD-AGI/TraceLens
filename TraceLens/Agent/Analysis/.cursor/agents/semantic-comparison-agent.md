@@ -198,6 +198,18 @@ Produces in `<output_dir>/tracediff_output/`:
 
 This is a **final deliverable** directory for downstream TraceDiff consumers.
 
+**Perf-report enrichment compatibility:** `diff_stats.csv` carries a
+per-kernel `gpu_op_uid` (the TraceTree UID, identical to the perf report's
+`kernel_details[].gpu_op_uid`) and a per-LCA `busy_time`. This makes it
+consumable by `enrich_perf_report_dict_inplace` in
+`TraceLens/Reporting/tracediff_comparison_extension.py`, which matches
+diff rows to `unified_perf_summary` rows via `gpu_op_uid` and adds the
+speedup / delta / LCA columns. The enrichment is invoked at the
+orchestrator layer (passing the semantic `diff_stats` plus the trace-1
+`df_unified_perf`); `generate_perf_report_pytorch.py` is unchanged and
+retains its own in-memory TraceDiff path for the `--comparison_json_path`
+flow.
+
 ---
 
 ## Step 4: Generate Comparison CSV [S]

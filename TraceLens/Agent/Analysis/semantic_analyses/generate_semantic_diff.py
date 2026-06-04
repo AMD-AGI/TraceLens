@@ -20,7 +20,9 @@ Input:
   - Two semantic_labels.json files (one per trace)
 
 Output (in output directory):
-  - diff_stats.csv
+  - diff_stats.csv (includes per-kernel ``gpu_op_uid`` -- the TraceTree UID --
+    and per-LCA ``busy_time``, so the output is consumable by the perf-report
+    comparison enrichment in tracediff_comparison_extension.py)
   - diff_stats_unique_args_summary.csv
   - cpu_op_map.json
   - cpu_op_map_trace1.json
@@ -109,6 +111,7 @@ def build_diff_stats(labeled_a, labeled_b):
                     "lowest_common_ancestor_id": block_id_map[block],
                     "nn_module_stack": nn_mod,
                     "nn_module_parent": nn_mod,
+                    "gpu_op_uid": k.get("gpu_op_uid"),
                 }
             )
 
@@ -127,10 +130,13 @@ def build_unique_args_summary(diff_stats_df):
     on kernel_time.
     """
     metric_columns = ["kernel_time"]
+    # gpu_op_uid is unique per kernel (would explode groups) and busy_time is
+    # a derived per-LCA aggregate, so neither belongs in the grouping key.
+    excluded_cols = {"lowest_common_ancestor_id", "gpu_op_uid", "busy_time"}
     grouping_cols = [
         c
         for c in diff_stats_df.columns
-        if c not in metric_columns and c != "lowest_common_ancestor_id"
+        if c not in metric_columns and c not in excluded_cols
     ]
 
     agg_dict = {mcol: ["sum", "mean"] for mcol in metric_columns}
@@ -381,6 +387,16 @@ def main():
 
     rows, block_id_map = build_diff_stats(labeled_a, labeled_b)
     diff_stats_df = pd.DataFrame(rows)
+
+    # Per-LCA block total kernel time, broadcast to each row (mirrors
+    # TraceDiff's busy_time, which is identical for every row in an LCA
+    # group). semantic_labels.json has no timestamps, so sum-of-durations
+    # is used as the busy-time proxy (exact for non-overlapping kernels).
+    diff_stats_df["busy_time"] = (
+        diff_stats_df.groupby(["source", "lowest_common_ancestor_id"])["kernel_time"]
+        .transform("sum")
+        .round(3)
+    )
 
     summary_df = build_unique_args_summary(diff_stats_df)
 

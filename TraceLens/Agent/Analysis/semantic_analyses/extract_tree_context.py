@@ -142,6 +142,7 @@ def extract_tree_context(tree, extracted_data, ts_index=None, capture_augmented=
             kernel_contexts.append(
                 {
                     "index": i,
+                    "gpu_op_uid": None,
                     "cpu_op_name": "",
                     "cpu_op_callstack": "",
                     "nn_module_stack": [],
@@ -158,6 +159,7 @@ def extract_tree_context(tree, extracted_data, ts_index=None, capture_augmented=
         kernel_contexts.append(
             {
                 "index": i,
+                "gpu_op_uid": tree_event.get("UID"),
                 "cpu_op_name": cpu_op_name,
                 "cpu_op_callstack": callstack,
                 "nn_module_stack": nn_module,
