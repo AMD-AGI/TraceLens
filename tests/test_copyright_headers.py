@@ -6,6 +6,7 @@
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 # Copyright line must use one of these year forms (longer/more specific first).
