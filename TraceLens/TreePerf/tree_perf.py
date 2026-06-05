@@ -1206,6 +1206,7 @@ class TreePerfAnalyzer:
             },
             inplace=True,
         )
+        df_agg["Categories"] = df_agg["Categories"].map(sorted)
         df_agg.sort_values(
             by="total_direct_kernel_time_sum", ascending=False, inplace=True
         )
@@ -1253,6 +1254,7 @@ class TreePerfAnalyzer:
             },
             inplace=True,
         )
+        df_agg["Categories"] = df_agg["Categories"].map(sorted)
         df_agg.sort_values(
             by="total_direct_kernel_time_sum", ascending=False, inplace=True
         )

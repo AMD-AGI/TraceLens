@@ -18,7 +18,11 @@ import pandas as pd
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
-from TraceLens.Reporting.reporting_utils import request_install
+from TraceLens.Reporting.reporting_utils import (
+    add_gpu_arch_cli_args,
+    request_install,
+    resolve_gpu_arch,
+)
 
 
 def get_dfs_short_kernels(
@@ -264,9 +268,11 @@ def generate_perf_report_pytorch(
     topk_roofline_ops: Optional[int] = None,
     comparison_json_path: Optional[str] = None,
     extension_file: Optional[str] = None,
-    # for gemm simulator / Origami (Origami requires --enable_origami when using gpu_arch_json_path)
+    # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
+    gpu_arch_platform: Optional[str] = None,
+    gpu_arch: Optional[dict] = None,
     inductor_cache_dir: Optional[str] = None,
     group_by_num_kernels: bool = False,
     enable_origami: bool = False,
@@ -274,11 +280,11 @@ def generate_perf_report_pytorch(
     detect_recompute: bool = False,
     include_call_stack: bool = False,
 ) -> Dict[str, pd.DataFrame]:
-    if gpu_arch_json_path:
-        with open(gpu_arch_json_path, "r") as f:
-            gpu_arch_json = json.load(f)
-    else:
-        gpu_arch_json = None
+    gpu_arch_json = resolve_gpu_arch(
+        gpu_arch_json_path=gpu_arch_json_path,
+        gpu_arch_platform=gpu_arch_platform,
+        gpu_arch=gpu_arch,
+    )
     add_python_func = True if include_call_stack else False
     perf_analyzer = TreePerfAnalyzer.from_file(
         profile_filepath=profile_json_path,
@@ -985,12 +991,7 @@ def main():
         default=None,
         help="Path to the python executable for gemm simulator",
     )
-    parser.add_argument(
-        "--gpu_arch_json_path",
-        type=str,
-        default=None,
-        help="Path to the GPU architecture JSON file",
-    )
+    add_gpu_arch_cli_args(parser)
     parser.add_argument(
         "--group_by_num_kernels",
         action="store_true",
@@ -1062,6 +1063,7 @@ def main():
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        gpu_arch_platform=args.gpu_arch_platform,
         group_by_num_kernels=args.group_by_num_kernels,
         enable_origami=args.enable_origami,
         detect_recompute=args.detect_recompute,

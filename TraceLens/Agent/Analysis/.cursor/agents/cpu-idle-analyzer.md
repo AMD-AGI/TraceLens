@@ -12,7 +12,7 @@ model: claude-opus-4-7-high
 
 # CPU/Idle Analysis Subagent
 
-Report GPU idle time percentage, utilization breakdown, and kernel launch statistics. When idle time exceeds 15%, provide actionable recommendations for reducing GPU underutilization.
+Report GPU idle time percentage and utilization breakdown. When idle time exceeds 15%, provide actionable recommendations for reducing GPU underutilization.
 
 ---
 
@@ -57,6 +57,13 @@ Use vendor-agnostic terminology:
 - "device synchronization" not "cudaDeviceSynchronize"
 - Focus on patterns and solutions, not vendor implementation details
 
+## Cross-Analyzer Boundary (Required)
+
+- CPU/Idle owns recommendations rooted in idle bubbles, launch overhead, host-side synchronization, and pipeline stalls.
+- Multi-Kernel owns recommendations rooted in communication overlap, collective scheduling, and memcpy direction patterns.
+- If a candidate recommendation's primary action is communication overlap (for example, overlap collectives with compute or reduce collective payload/frequency), do not emit a separate CPU/Idle P-item. Keep CPU/Idle focused on idle/launch mechanisms and let Multi-Kernel carry the communication recommendation.
+- If communication evidence helps explain an idle issue, reference it briefly inside the CPU/Idle reasoning without creating a second card with the same action mechanism.
+
 ---
 
 ## Analysis Workflow
@@ -85,9 +92,6 @@ Key metrics to analyze:
 - `idle_flagged`: Boolean -- whether idle time exceeds 15%
 - `gpu_utilization.idle_time_percent`: Percentage of total time GPU is idle
 - `gpu_utilization.idle_time_ms`: Absolute idle time in milliseconds
-- `kernel_analysis.total_kernel_count`: Total GPU kernel launches
-- `kernel_analysis.short_kernel_count`: Number of kernels under 10μs
-- `kernel_analysis.avg_kernel_time_us`: Average kernel duration
 
 ### Step 3: Write Findings
 
@@ -110,19 +114,15 @@ Write `<output_dir>/system_findings/cpu_idle_findings.md` using the command pref
 | Communication | Z% |
 | MemCpy | W% |
 
-## Kernel Launch Statistics
-
-| Metric | Value |
-|--------|-------|
-| Total Kernels | N |
-| Short Kernels (<10µs) | N (X%) |
-| Avg Kernel Time | X.X µs |
-
 ## Recommendations
 
-[If idle > 15%, provide actionable recommendations based on the kernel analysis data.
+[If idle > 15%, provide actionable recommendations based on utilization data and
+cross-category system evidence.
 Use the Common Recommendations table below as guidance. If idle <= 15%, state that
 idle time is within acceptable range and no action is needed.]
+
+Avoid duplicate cards: if two candidate recommendations prescribe the same mechanism/action,
+emit one merged recommendation card with combined evidence.
 
 ### [Recommendation Title]
 **Insight**: [1 sentence description]
@@ -157,7 +157,7 @@ If validation fails, fix the findings file and re-run. Max 2 retries.
 
 ## Key Principles
 
-1. **Report factual data** - Idle percentage and kernel statistics from the metrics JSON
+1. **Report factual data** - Idle percentage and utilization breakdown from the metrics JSON
 2. **Provide actionable solutions** - Specific steps, not vague suggestions
 3. **Vendor-agnostic recommendations** - Focus on patterns and solutions
 4. **Consider trade-offs** - Some solutions have costs (memory, complexity)
