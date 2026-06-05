@@ -177,22 +177,29 @@ def resolve_main_trace_path(run_dir):
     """Resolve the main rank-0 trace file for a run."""
     manifest_path = os.path.join(os.path.dirname(os.path.abspath(run_dir)),
                                  "trace_input_manifest.json")
-    if not os.path.isfile(manifest_path):
-        return None
-    try:
-        with open(manifest_path) as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
+    if os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            data = None
 
-    trace_input = _resolve_path(data.get("trace_input"), os.path.isdir)
-    if not trace_input:
-        return None
+        if data is not None:
+            trace_input = _resolve_path(data.get("trace_input"), os.path.isdir)
+            if trace_input:
+                for pattern in ("*TP-0*.json*", "*rank0*.json*"):
+                    matches = sorted(glob.glob(os.path.join(trace_input, pattern)))
+                    if matches:
+                        return matches[0]
 
-    for pattern in ("TP-0*json*", "rank0*json*"):
-        matches = sorted(glob.glob(os.path.join(trace_input, pattern)))
-        if matches:
-            return matches[0]
+    # Fallback: search recursively under run_dir/../../../../../ for trace files.
+    search_root = os.path.abspath(os.path.join(run_dir, "..", "..", "..", "..", ".."))
+    if os.path.isdir(search_root):
+        for pattern in ("*TP-0*.json*", "*rank0*.json*"):
+            matches = sorted(glob.glob(os.path.join(search_root, "**", pattern),
+                                       recursive=True))
+            if matches:
+                return matches[0]
     return None
 
 
