@@ -100,11 +100,13 @@ def _check_amd_gpu_idle(
     if isinstance(proc_data, list) and proc_data:
         gpu_proc = _as_dict(proc_data[0])
         for entry in gpu_proc.get("process_list") or []:
-            info = _as_dict(entry.get("process_info") if isinstance(entry, dict) else None)
+            info = _as_dict(
+                entry.get("process_info") if isinstance(entry, dict) else None
+            )
             pid = info.get("pid")
             if pid is not None and str(pid) != str(os.getpid()):
                 other_pids.append(int(pid))
-                
+
     if util > util_threshold or mem_mib > mem_threshold_mib or other_pids:
         return False, (
             f"amd-smi {dev_tag}: util={util}% mem={mem_mib}MiB "
