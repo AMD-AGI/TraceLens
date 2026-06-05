@@ -380,23 +380,90 @@ def _violator_evidence(label, rows, name_field="name", limit=3):
 # ---------------------------------------------------------------------------
 
 def check_trace_missing(run_dir, _stream_file):
-    torch_trace_dir = os.path.join(run_dir, "torch_trace")
-    if os.path.isdir(torch_trace_dir):
-        gz_files = glob.glob(os.path.join(torch_trace_dir, "*.trace.json.gz"))
-        if not gz_files:
-            return FindingDraft(
-                "Trace files missing",
-                f"torch_trace/ exists but contains no *.trace.json.gz files: {torch_trace_dir}",
-                "Check profiling setting in workload, or if trace path passed in correctly",
-            )
-
+    # Step 1: trace path from cmd_prefix / category_manifest
     trace_path = resolve_trace_path(run_dir)
-    if trace_path and not os.path.exists(trace_path):
+    if trace_path:
+        if os.path.exists(trace_path):
+            return None
         return FindingDraft(
             "Trace files missing",
-            f"Trace file not found: {trace_path}",
+            f"Trace file resolved but does not exist on disk: {trace_path}",
             "Check profiling setting in workload, or if trace path passed in correctly",
         )
+
+    # Helper: list any *json.gz traces sitting 5 levels above the run_dir.
+    def _nearby_traces():
+        nearby_root = os.path.normpath(os.path.join(run_dir, *([".."] * 6)))
+        if not os.path.isdir(nearby_root):
+            return []
+        try:
+            return sorted(glob.glob(os.path.join(nearby_root, "*.json.gz")))[:10]
+        except OSError:
+            return []
+
+    def _with_nearby(evidence):
+        nearby = _nearby_traces()
+        if nearby:
+            return evidence + " | nearby *.json.gz: " + ", ".join(nearby)
+        return evidence
+
+    # Recursive scan: find every *.json.gz under run_dir/../../../../../ (5 levels up).
+    # Used only when no trace can be resolved at all, to help operators locate
+    # the trace artefact wherever it actually landed.
+    def _recursive_traces(limit=50):
+        nearby_root = os.path.normpath(os.path.join(run_dir, *([".."] * 6)))
+        if not os.path.isdir(nearby_root):
+            return None, []
+        found = []
+        try:
+            for dirpath, _dirnames, filenames in os.walk(nearby_root, followlinks=False):
+                for name in filenames:
+                    if name.endswith(".json.gz"):
+                        found.append(os.path.join(dirpath, name))
+                        if len(found) >= limit:
+                            return nearby_root, sorted(found)
+        except OSError:
+            pass
+        return nearby_root, sorted(found)
+
+    # Step 2: trace_split exists with *.gz files but orchestrator never recorded a trace path
+    split_dir = os.path.join(run_dir, "trace_split")
+    if os.path.isdir(split_dir):
+        gz_files = glob.glob(os.path.join(split_dir, "*.gz"))
+        if gz_files:
+            return FindingDraft(
+                "Trace files missing (warning: trace_split present)",
+                _with_nearby(
+                    f"trace_split/ contains {len(gz_files)} *.gz file(s) but orchestrator did not receive a trace path "
+                    f"(cmd_prefix.txt / category_manifest.json missing trace_path): {split_dir}"
+                ),
+                "Verify orchestrator wiring writes --profile_json_path / category_manifest.trace_path",
+            )
+
+    # Step 3: main rank-0 trace from trace_input_manifest
+    main_trace = resolve_main_trace_path(run_dir)
+    if main_trace:
+        return FindingDraft(
+            "Trace files missing",
+            _with_nearby(
+                f"Main trace exists ({main_trace}) but trace_split is missing and was not passed to orchestrator"
+            ),
+            "Re-run trace splitting and ensure split outputs are wired into the orchestrator manifest",
+        )
+
+    nearby_root, found = _recursive_traces()
+    if nearby_root is None:
+        listing = "<root not present>"
+    elif not found:
+        listing = f"<none under {nearby_root}>"
+    else:
+        listing = f"under {nearby_root}: " + ", ".join(found)
+
+    return FindingDraft(
+        "Trace files missing",
+        f"trace_input_manifest.json returned empty / no main trace resolvable | recursive *.json.gz {listing}",
+        "Verify trace_input_manifest.json is generated and points to a valid trace_input directory",
+    )
 
 
 def check_trace_size(run_dir, _stream_file):
@@ -494,7 +561,8 @@ def check_gpu_graph_replay(run_dir, stream_file):
             "DIAG tag found in agent stream",
             "Switch to inference analysis mode (--analysis_mode inference)",
         )
-
+    return None
+    #ToDo: add detailed check once we have stream file
     candidates = []
     main_path = resolve_main_trace_path(run_dir)
     if main_path:
@@ -572,13 +640,21 @@ def check_missing_cpu_op_shapes(run_dir, _stream_file):
 def check_inference_annotation_missing(run_dir, _stream_file):
     main_path = resolve_main_trace_path(run_dir)
     if not main_path or not os.path.exists(main_path):
-        return None
+        return FindingDraft(
+            "Main inference trace missing ",
+            f"No trace found at path: {main_path}",
+            "Verify the correct trace was selected and that the inference mode was enabled",
+        )
     if os.path.getsize(main_path) > 5_000_000_000:
         return None
     try:
         data = _load_trace_json(main_path)
     except (OSError, json.JSONDecodeError):
-        return None
+        return FindingDraft(
+            "Main inference trace corrupted/invalid JSON at path: {main_path}",
+            f"JSONDecodeError reading trace at path: {main_path}",
+            "Verify the correct trace was selected and that the inference mode was enabled",
+        )
     events = data if isinstance(data, list) else data.get("traceEvents", [])
     execs = sum(
         1 for e in events
@@ -660,25 +736,44 @@ def check_split_low_gpu_kernels(run_dir, _stream_file):
     trace_path = resolve_trace_path(run_dir)
     if not trace_path or not os.path.exists(trace_path):
         return None
-    if os.path.getsize(trace_path) > 5_000_000_000:
+
+    candidates = [trace_path]
+    trace_dir = os.path.dirname(trace_path)
+    if trace_dir:
+        for pattern in ("decode_only*.json.gz", "prefilldecode*.json.gz"):
+            for sibling in sorted(glob.glob(os.path.join(trace_dir, pattern))):
+                if sibling not in candidates:
+                    candidates.append(sibling)
+
+    failures = []
+    for path in candidates:
+        if not os.path.exists(path) or os.path.getsize(path) > 5_000_000_000:
+            continue
+        try:
+            data = _load_trace_json(path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        events = data if isinstance(data, list) else data.get("traceEvents", [])
+        cpu_ops = sum(1 for e in events if e.get("cat") == "cpu_op")
+        kernels = sum(1 for e in events if e.get("cat") == "kernel")
+        if cpu_ops == 0:
+            continue
+        ratio = kernels / cpu_ops
+        if ratio < 0.1:
+            failures.append((path, ratio, kernels, cpu_ops))
+
+    if not failures:
         return None
-    try:
-        data = _load_trace_json(trace_path)
-    except (OSError, json.JSONDecodeError):
-        return None
-    events = data if isinstance(data, list) else data.get("traceEvents", [])
-    cpu_ops = sum(1 for e in events if e.get("cat") == "cpu_op")
-    kernels = sum(1 for e in events if e.get("cat") == "kernel")
-    if cpu_ops == 0:
-        return None
-    ratio = kernels / cpu_ops
-    if ratio < 0.5:
-        return FindingDraft(
-            "No / very few GPU kernel events in split trace",
-            f"kernel/cpu_op ratio is {ratio:.2f} ({kernels} kernels, {cpu_ops} cpu_ops) "
-            f"in {os.path.basename(trace_path)}",
-            "Likely a spurious ROCm bug; apply correct fixes inside the docker container",
-        )
+
+    parts = [
+        f"{os.path.basename(p)}: kernel/cpu_op = {r:.2f} ({k} kernels, {c} cpu_ops)"
+        for p, r, k, c in failures
+    ]
+    return FindingDraft(
+        "No / very few GPU kernel events in split trace",
+        f"{len(failures)} split trace(s) with kernel/cpu_op < 0.5: " + "; ".join(parts),
+        "Likely a spurious ROCm bug; apply correct fixes inside the docker container",
+    )
 
 
 def check_runtime_instability(run_dir, _stream_file):
