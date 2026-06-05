@@ -930,10 +930,14 @@ def check_subagent_budget(run_dir, _stream_file):
     findings_dir = os.path.join(run_dir, "category_findings")
     system_dir = os.path.join(run_dir, "system_findings")
 
+    idle_pct = manifest.get("gpu_utilization", {}).get("idle_time_percent")
+
     missing = []
     for cat in manifest.get("categories", []):
         name = cat.get("name", "")
         if not name:
+            continue
+        if name == "cpu_idle" and idle_pct is not None and idle_pct <= 15:
             continue
         tier = cat.get("tier", "compute_kernel")
         target_dir = system_dir if tier == "system" else findings_dir
