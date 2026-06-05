@@ -86,6 +86,8 @@ def test_python_files_have_valid_copyright():
         "venv",
         "env",
         ".venv",
+        "build",
+        "dist",
     }
     skip_files = {".gitignore", "LICENSE", "__init__.py"}
 
@@ -141,6 +143,8 @@ def test_markdown_files_have_valid_copyright():
         "venv",
         "env",
         ".venv",
+        "build",
+        "dist",
     }
     skip_files = {".gitignore", "LICENSE"}
 
@@ -197,6 +201,8 @@ def test_yaml_files_have_valid_copyright():
         "venv",
         "env",
         ".venv",
+        "build",
+        "dist",
     }
 
     missing_copyright = []
@@ -250,6 +256,8 @@ def test_notebooks_have_valid_copyright():
         "venv",
         "env",
         ".venv",
+        "build",
+        "dist",
     }
 
     missing_copyright = []

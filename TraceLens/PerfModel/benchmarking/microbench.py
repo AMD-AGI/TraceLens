@@ -4,6 +4,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+
 """GPU Microbenchmarking Suite.
 
 Measures matrix TFLOPS (PyTorch GEMM), vector TFLOPS (Triton FMA chain), and

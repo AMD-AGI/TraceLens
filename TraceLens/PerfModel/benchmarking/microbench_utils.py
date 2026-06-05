@@ -3,6 +3,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+
 """Shared utilities for the microbenchmark scripts.
 
 - resolve_physical_device: logical torch index -> physical id used by smi tools.

@@ -3,6 +3,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+
 """Triton block-scaled MXFP4/MXFP6 GEMM microbenchmarks.
 
 Issues ``tl.dot_scaled`` on packed-uint8 operands with uint8 e8m0 per-block
