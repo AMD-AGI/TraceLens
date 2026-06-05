@@ -40,6 +40,10 @@ def resolve_physical_device(logical: int) -> Tuple[int, str]:
     return logical, "identity"
 
 
+def _as_dict(obj: Any) -> dict:
+    return obj if isinstance(obj, dict) else {}
+
+
 def _metric_value(block: Any, default: int = 0) -> int:
     """Extract an integer metric from an amd-smi ``{value, unit}`` block."""
     if not isinstance(block, dict):
@@ -48,6 +52,12 @@ def _metric_value(block: Any, default: int = 0) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return default
     return int(value)
+
+
+def _load_json(stdout: str) -> Any:
+    if not stdout.strip():
+        return None
+    return json.loads(stdout)
 
 
 def _check_amd_gpu_idle(
@@ -64,14 +74,19 @@ def _check_amd_gpu_idle(
         timeout=10,
         check=False,
     )
-    metric_data = json.loads(metric.stdout) if metric.stdout.strip() else {}
+    metric_data = _load_json(metric.stdout)
+    if not isinstance(metric_data, dict):
+        return True, f"amd-smi {dev_tag}: unexpected metric JSON; check skipped"
+
     gpu_data = metric_data.get("gpu_data") or []
-    if not gpu_data:
+    if not gpu_data or not isinstance(gpu_data[0], dict):
         return True, f"amd-smi {dev_tag}: no gpu_data; check skipped"
 
     gpu = gpu_data[0]
-    util = _metric_value((gpu.get("usage") or {}).get("gfx_activity"))
-    mem_mib = _metric_value((gpu.get("mem_usage") or {}).get("used_vram"))
+    usage = _as_dict(gpu.get("usage"))
+    mem_usage = _as_dict(gpu.get("mem_usage"))
+    util = _metric_value(usage.get("gfx_activity"))
+    mem_mib = _metric_value(mem_usage.get("used_vram"))
 
     proc = subprocess.run(
         ["amd-smi", "process", "-g", str(phys), "-G", "--json"],
@@ -80,15 +95,16 @@ def _check_amd_gpu_idle(
         timeout=10,
         check=False,
     )
-    proc_data = json.loads(proc.stdout) if proc.stdout.strip() else []
+    proc_data = _load_json(proc.stdout)
     other_pids: list[int] = []
     if isinstance(proc_data, list) and proc_data:
-        for entry in proc_data[0].get("process_list") or []:
-            info = entry.get("process_info") or {}
+        gpu_proc = _as_dict(proc_data[0])
+        for entry in gpu_proc.get("process_list") or []:
+            info = _as_dict(entry.get("process_info") if isinstance(entry, dict) else None)
             pid = info.get("pid")
             if pid is not None and str(pid) != str(os.getpid()):
                 other_pids.append(int(pid))
-    
+                
     if util > util_threshold or mem_mib > mem_threshold_mib or other_pids:
         return False, (
             f"amd-smi {dev_tag}: util={util}% mem={mem_mib}MiB "
