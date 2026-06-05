@@ -91,40 +91,69 @@ class InferenceAttention:
         }
 
     @staticmethod
-    def get_param_details(event):
-        try:
-            annotation = str(event.get("annotation"))
-            if annotation == "NA":
+    def _parse_chunk_stats(annotation):
+        """Parse the sglang/vLLM annotation string into context/generation aggregates.
+
+        Returns a dict with ``c_sq``, ``c_sk``, ``c_sqsq``, ``c_sqsk``,
+        ``g_sq``, ``g_sk``, ``g_sqsq``, ``g_sqsk``. Raises ``NotImplementedError``
+        if the annotation is missing or cannot be parsed.
+        """
+        if annotation == "NA":
+            raise NotImplementedError(
+                "VLLM attention without annotation is not supported"
+            )
+
+        if "sq" not in annotation:
+            requests = annotation.replace("(", "_").replace(")", "_").split("_")
+            if len(requests) < 8:
                 raise NotImplementedError(
                     "VLLM attention without annotation is not supported"
                 )
+            c_sq = int(requests[3])
+            c_sk = int(requests[3])
+            c_sqsq = int(requests[4])
+            c_sqsk = int(requests[4])
+            g_sq, g_sk, g_sqsq, g_sqsk = 0, 0, 0, 0
+        else:
+            name = annotation.replace("(", "_").replace(")", "_")
+            requests = re.sub(r"[sqk]+", "_", name).split("_")
+            if len(requests) < 16:
+                raise NotImplementedError(
+                    "VLLM attention without annotation is not supported"
+                )
+            c_sq = int(requests[5])
+            c_sk = int(requests[6])
+            c_sqsq = int(requests[7])
+            c_sqsk = int(requests[8])
+            g_sq = int(requests[13])
+            g_sk = int(requests[14])
+            g_sqsq = int(requests[15])
+            g_sqsk = int(requests[16])
 
-            if "sq" not in annotation:
-                requests = annotation.replace("(", "_").replace(")", "_").split("_")
-                if len(requests) < 8:
-                    raise NotImplementedError(
-                        "VLLM attention without annotation is not supported"
-                    )
-                c_sq = int(requests[3])
-                c_sk = int(requests[3])
-                c_sqsq = int(requests[4])
-                c_sqsk = int(requests[4])
-                g_sq, g_sk, g_sqsq, g_sqsk = 0, 0, 0, 0
-            else:
-                name = annotation.replace("(", "_").replace(")", "_")
-                requests = re.sub(r"[sqk]+", "_", name).split("_")
-                if len(requests) < 16:
-                    raise NotImplementedError(
-                        "VLLM attention without annotation is not supported"
-                    )
-                c_sq = int(requests[5])
-                c_sk = int(requests[6])
-                c_sqsq = int(requests[7])
-                c_sqsk = int(requests[8])
-                g_sq = int(requests[13])
-                g_sk = int(requests[14])
-                g_sqsq = int(requests[15])
-                g_sqsk = int(requests[16])
+        return {
+            "c_sq": c_sq,
+            "c_sk": c_sk,
+            "c_sqsq": c_sqsq,
+            "c_sqsk": c_sqsk,
+            "g_sq": g_sq,
+            "g_sk": g_sk,
+            "g_sqsq": g_sqsq,
+            "g_sqsk": g_sqsk,
+        }
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+            c_sq = stats["c_sq"]
+            c_sk = stats["c_sk"]
+            c_sqsq = stats["c_sqsq"]
+            c_sqsk = stats["c_sqsk"]
+            g_sq = stats["g_sq"]
+            g_sk = stats["g_sk"]
+            g_sqsq = stats["g_sqsq"]
+            g_sqsk = stats["g_sqsk"]
 
             input_dims = event["args"]["Input Dims"]
             q_shape, k_shape = input_dims[0], input_dims[1]
@@ -289,6 +318,94 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
 
     Unparseable annotation yields :meth:`InferenceAttention.no_perf_param_details`
     (see base class); no packed-tensor fallback.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        params = InferenceAttention.get_param_details(event)
+        if params.get("_no_perf"):
+            return params
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        if len(dims) > 2 and len(dims[2]) >= 1:
+            params["d_h_v"] = dims[2][-1]
+        return params
+
+
+class aiter_paged_attention_ragged(InferenceAttention):
+    """
+    Performance model for ``aiter::paged_attention_ragged`` (inference: sglang),
+    surfaced in traces as ``sglang_profiler::attention_paged_attention_ragged``
+    (per-layer ``_<idx>`` suffix is stripped upstream).
+
+    TODO: account for fp8 KV-cache dtype (``kv_cache_dtype`` ``"fp8"`` /
+    ``"fp8_e4m3"`` stores K/V as 1 B/elem while Q and output remain BF16/FP16);
+    we will make that change later.
+
+    Uses the same chunk statistics as :class:`InferenceAttention` (``annotation``
+    on the event) for packed variable-length decode requests. Reads ``Q`` from
+    ``Input Dims[2]`` and paged ``K``/``V`` caches from ``Input Dims[3]``/``[4]``
+    (shape ``[num_pages, page_size, H_KV, head_dim]``); ``d_h_v`` is taken from
+    the **v** tensor so MLA-style shapes with differing Q/K vs V head dims are
+    modeled correctly.
+
+    Unparseable annotation or unexpected input dims yields
+    :meth:`InferenceAttention.no_perf_param_details` (see base class).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+
+            dims = event["args"]["Input Dims"]
+            q_shape = dims[2]
+            k_shape = dims[3]
+            v_shape = dims[4]
+            N_Q, H_Q, d_h_qk = q_shape
+            H_KV = k_shape[-2]
+            d_h_v = v_shape[-1]
+            N_KV = stats["c_sk"] + stats["g_sk"]
+            dtype_Q = event["args"]["Input type"][2]
+
+            return {
+                "B": 1,
+                "N_Q": N_Q,
+                "H_Q": H_Q,
+                "H_V": H_KV,
+                "H_K": H_KV,
+                "N_KV": N_KV,
+                "H_KV": H_KV,
+                "d_h_qk": d_h_qk,
+                "d_h_v": d_h_v,
+                "dropout": 0.0,
+                "causal": False,
+                "flash_impl": True,
+                **stats,
+                "dtype_Q": dtype_Q,
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return InferenceAttention.no_perf_param_details()
+
+
+class aiter_mha_batch_prefill(InferenceAttention):
+    """
+    Performance model for ``aiter::mha_batch_prefill`` (inference: sglang) — the
+    paged chunked-prefill / extend kernel.
+
+    TODO: account for fp8 (``q_descale`` / ``k_descale`` / ``v_descale`` /
+    ``kv_block_descale`` paths store K/V in lower precision than Q/output); we
+    will make that change later.
+
+    Uses the same chunk statistics as :class:`InferenceAttention` (``annotation``
+    on the event), which naturally cover mixed chunked-prefill + decode batches
+    via the ``c_*`` and ``g_*`` aggregates. Sets ``d_h_v`` from the **v** tensor
+    (``Input Dims[2]``) so MLA shapes with differing Q/K vs V head dims are
+    modeled correctly.
+
+    Unparseable annotation yields :meth:`InferenceAttention.no_perf_param_details`
+    (see base class).
     """
 
     @staticmethod
