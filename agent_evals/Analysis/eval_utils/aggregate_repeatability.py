@@ -364,14 +364,16 @@ def build_run_level_summary(rows):
     run_rows = []
     for (trace_id, run_id), c in sorted(counts.items()):
         is_catastrophic = c["fail"] > c["total"] * 0.5 if c["total"] > 0 else False
-        run_rows.append({
-            "trace_id": trace_id,
-            "run_id": run_id,
-            "pass": c["pass"],
-            "fail": c["fail"],
-            "total": c["total"],
-            "is_catastrophic": is_catastrophic,
-        })
+        run_rows.append(
+            {
+                "trace_id": trace_id,
+                "run_id": run_id,
+                "pass": c["pass"],
+                "fail": c["fail"],
+                "total": c["total"],
+                "is_catastrophic": is_catastrophic,
+            }
+        )
     return run_rows
 
 
@@ -405,7 +407,10 @@ def build_failure_nature_summary(rows, run_level_rows):
         key = (r["trace_id"], r["run_id"])
         if key in catastrophic_runs:
             catastrophic_count += 1
-        elif per_eval_fail_runs[(r["trace_id"], r["issue_summary"])] == per_trace_runs[r["trace_id"]]:
+        elif (
+            per_eval_fail_runs[(r["trace_id"], r["issue_summary"])]
+            == per_trace_runs[r["trace_id"]]
+        ):
             stable_count += 1
         else:
             flaky_count += 1
@@ -492,8 +497,7 @@ def main():
         print(
             "  Catastrophic runs (>50% fail): {}".format(
                 ", ".join(
-                    "{}/run_{}".format(r["trace_id"], r["run_id"])
-                    for r in catastrophic
+                    "{}/run_{}".format(r["trace_id"], r["run_id"]) for r in catastrophic
                 )
             )
         )
