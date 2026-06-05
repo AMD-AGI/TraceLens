@@ -323,8 +323,26 @@ def write_summary_report(
         tags = ", ".join(sorted(diag_tags_per_mode.get(mode, set())))
         lines.append(f"| {i} | {mode} | {count} | {n_models} | {cat} | {tags} | {remedy} |")
 
-    # Action keys for perf_model issues
-    if agg["action_keys_per_issue"]:
+    # Action keys for perf_model issues (only unclassified/synthetic op modes)
+    _OP_ATTENTION_MODES = {
+        "Unclassified op among significant ops",
+        "Synthetic op appears among significant ops",
+    }
+    _LOOKS_LIKE_OP = re.compile(
+        r"^(sglang_profiler::\S+|aiter::\S+|aten::\S+|"
+        r"hipGraphLaunch->\S+|hipLaunchKernel->\S+|hipModuleLaunchKernel->\S+)"
+    )
+    filtered_ops: List[Tuple[str, int, str]] = []
+    for mode, op_counts in agg["action_keys_per_issue"].items():
+        if mode not in _OP_ATTENTION_MODES:
+            continue
+        for op, count in op_counts.items():
+            if not _LOOKS_LIKE_OP.match(op.strip()):
+                continue
+            filtered_ops.append((op, count, mode))
+
+    if filtered_ops:
+        filtered_ops.sort(key=lambda x: x[1], reverse=True)
         lines += [
             "",
             "---",
@@ -336,12 +354,7 @@ def write_summary_report(
             "| Op Name | Occurrences | Associated Failure Mode |",
             "|---|---|---|",
         ]
-        all_ops: List[Tuple[str, int, str]] = []
-        for mode, op_counts in agg["action_keys_per_issue"].items():
-            for op, count in op_counts.items():
-                all_ops.append((op, count, mode))
-        all_ops.sort(key=lambda x: x[1], reverse=True)
-        for op, count, mode in all_ops[:30]:
+        for op, count, mode in filtered_ops[:30]:
             op_display = op[:100]
             lines.append(f"| `{op_display}` | {count} | {mode} |")
 
