@@ -36,7 +36,7 @@ _repo_root = os.path.abspath(os.path.join(_this_dir, "..", "..", "..", ".."))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-from TraceLens.util import DataLoader, TraceEventUtils
+from TraceLens.util import DataLoader
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
 
@@ -61,8 +61,13 @@ def load_and_build_tree(trace_path, capture_trace_path=None):
 
     data = DataLoader.load_data(trace_path)
     events = data.get("traceEvents", [])
-    _, non_meta_events = TraceEventUtils.split_event_list(events)
-    tree = TraceToTree(non_meta_events, prune_nongpu_paths=True)
+    # Pass the full traceEvents list (do NOT strip metadata first) so that the
+    # per-event UID -- assigned as the enumerate() index in TraceToTree -- is
+    # identical to the one produced by TreePerfAnalyzer.from_file (which also
+    # builds from data["traceEvents"] as-is). This keeps the diff_stats
+    # gpu_op_uid aligned with the perf report's kernel_details gpu_op_uid so
+    # the comparison enrichment can map semantic rows onto perf-summary rows.
+    tree = TraceToTree(events, prune_nongpu_paths=True)
     tree.build_tree(add_python_func=True, link_fwd_bwd=False)
     return tree
 

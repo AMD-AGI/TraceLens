@@ -51,7 +51,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
     optionally invoke agent_extension.py (when present), then embed the PNG into the report.
 ```
 
-**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Steps 6, 7, 9). All other steps (including Step 7.5) must be performed directly by the orchestrator using the command prefix.
+**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Step 1.S semantic diff, Steps 6, 7, 9). All other steps (including Step 7.5) must be performed directly by the orchestrator using the command prefix.
 
 ---
 
@@ -93,9 +93,10 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
    - If **Inference (vLLM/SGLang)** is selected, ask **Execution Mode** → `<inference_exec_mode>`:
      1. **Eager mode** (`<inference_exec_mode>` = `eager`) — only the trace file is needed
      2. **Graph replay + capture** (`<inference_exec_mode>` = `graph_capture`) — also requires a capture folder path
-   - If **Graph replay + capture**, ask for **Capture Folder Path** → `<capture_folder_path>`:
-     - Ask: "Please provide the full path to the graph capture traces folder"
-   - **Unsupported combination:** If `<inference_exec_mode>` = `graph_capture` **and** `<comparison_scope>` = `comparative`, stop immediately. Inform the user: "Graph replay + capture mode is not yet supported for comparative analysis. Please provide eager mode traces instead." Do not misinterpret as two standalone analyses. Do **not** proceed to Step 1 or beyond.
+   - If **Graph replay + capture**, ask for the **Capture Folder Path(s)**:
+     - `standalone`: one folder → `<capture_folder_path>`. Ask: "Please provide the full path to the graph capture traces folder"
+     - `comparative`: one folder per trace → `<capture_folder_path>` (primary/trace1) and `<capture_folder_path2>` (comparison/trace2). Ask: "Please provide the graph capture traces folder for the primary trace and for the comparison trace."
+   - **Comparative + graph replay is routed in Step 0.5** (do not abort): collect capture folders for both traces, and Step 0.5 decides tracediff vs semantic.
 
 5. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
@@ -151,9 +152,28 @@ If this fails, check that `<tracelens_dir>` is the **parent** of TraceLens (not 
 
 ---
 
+## Step 0.5: Comparison Method Detection (comparative only)
+
+For `standalone`, skip this step — `<comparison_method>` is unused.
+
+For `comparative`, auto-detect the comparison path (structural **TraceDiff** vs **semantic**). Pass `--capture{1,2}-available` for any trace that had a capture folder collected, so a graph-mode trace with capture is not needlessly routed to semantic:
+
+```bash
+<prefix> python3 TraceLens/Agent/Analysis/utils/comparison_routing.py \
+  <trace_path> <trace2_path> \
+  --platform1 <platform> --platform2 <platform2> \
+  [--capture1-available] [--capture2-available]
+```
+
+Set `<comparison_method>` to the printed `method` field and echo `reasons`. The script routes to `semantic` only when the frameworks differ or a trace is graph-mode with no capture available; otherwise `tracediff`.
+
+If `method` is `semantic` and a graph-mode trace is involved but capture folders were not collected in Step 0, ask for them now: `<capture_folder_path>` (trace1) and `<capture_folder_path2>` (trace2).
+
+---
+
 ## Step 1: Generate Performance Report
 
-Use **`<analysis_mode>`** to determine which CLI tool to run and then **`<comparison_scope>`** to determine arguments.
+Use **`<analysis_mode>`** to determine which CLI tool to run and then **`<comparison_scope>`** (and, for comparative, **`<comparison_method>`** from Step 0.5) to determine arguments.
 
 For all of these scripts below, look at the environment variable TL_EXTENSION to recursively search for a file called <platform>.json. Do not look for <platform2>.json; it is not needed.
 If it is not found also look in TraceLens/Agent/Analysis/utils/arch/<platform>.json.
@@ -173,13 +193,16 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 | `comparative` trace1 | `--output_xlsx_path <output_dir>/perf_report_trace1.xlsx --output_csvs_dir <output_dir>/perf_report_trace1_csvs` |
 | `comparative` trace2 | `--profile_json_path <trace2_path> --output_xlsx_path <output_dir>/perf_report_trace2.xlsx --output_csvs_dir <output_dir>/perf_report_trace2_csvs` |
 
-**`<suffix_2>`** — extension flags:
+**`<suffix_2>`** — extension flags (the comparative trace1 value depends on `<comparison_method>`):
 
 | scope | value |
 |-------|-------|
 | `standalone` | none |
-| `comparative` trace1 | `--comparison_json_path <trace2_path>` |
+| `comparative` trace1, `<comparison_method>` = `tracediff` | `--comparison_json_path <trace2_path>` |
+| `comparative` trace1, `<comparison_method>` = `semantic` | `--precomputed_diff_stats_csv <output_dir>/_semantic/tracediff_output/diff_stats.csv` |
 | `comparative` trace2 | none |
+
+For the **semantic** comparative method, the semantic diff must be generated **before** the trace1 report (so its `diff_stats.csv` exists). Follow the ordering in **Step 1.S** below. Both methods converge on the same artifacts: an enriched `perf_report_trace1_csvs/unified_perf_summary.csv` plus a `perf_report_trace1_csvs/diff_stats.csv`, so Steps 2-11 are identical for either method.
 
 ---
 
@@ -224,6 +247,42 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
   <suffix_1> \
   <suffix_2>
 ```
+
+(For comparative graph mode, the trace2 report uses `--capture_folder <capture_folder_path2>`.)
+
+---
+
+## Step 1.S: Semantic Comparative Ordering (`<comparison_method>` = `semantic` only)
+
+When `<comparison_scope>` = `comparative` and `<comparison_method>` = `semantic`, run Step 1 in this order so the trace1 report can consume the semantic diff:
+
+1. **Trace2 report** — run the analysis-mode CLI above for trace2 using the `comparative` trace2 `<suffix_1>` and empty `<suffix_2>` (identical to the TraceDiff path). For graph mode add `--capture_folder <capture_folder_path2>`.
+
+2. **Semantic diff (subagent)** — launch a Task subagent that reads and follows the FULL instructions in `TraceLens/Agent/Analysis/.cursor/agents/semantic-comparison-agent.md`. Prompt context:
+
+```
+Read and follow the FULL instructions in:
+  TraceLens/Agent/Analysis/.cursor/agents/semantic-comparison-agent.md
+
+**Execution Context:**
+- Trace A (primary/trace1): <trace_path>   (platform <platform>)
+- Trace B (comparison/trace2): <trace2_path>   (platform <platform2>)
+- Labels: name-a trace1, name-b trace2
+- Output directory: <output_dir>/_semantic/
+- Command prefix: read <output_dir>/cache/cmd_prefix.txt — substitute {CMD}
+- Capture folders (graph mode only): trace1 <capture_folder_path>, trace2 <capture_folder_path2>
+
+Run the full semantic comparison through "Generate TraceDiff Output" so that
+<output_dir>/_semantic/tracediff_output/diff_stats.csv is produced. Return "DONE".
+```
+
+   Verify `<output_dir>/_semantic/tracediff_output/diff_stats.csv` exists before continuing. If it is missing, retry the subagent once; if it still fails, stop and report.
+
+3. **Trace1 report** — run the analysis-mode CLI for trace1 with the `comparative` trace1 `<suffix_1>` and `<suffix_2>` = `--precomputed_diff_stats_csv <output_dir>/_semantic/tracediff_output/diff_stats.csv`. For graph mode also add `--capture_folder <capture_folder_path>`. This produces the enriched `unified_perf_summary` and the `diff_stats` sheet in `perf_report_trace1_csvs` (same enrichment as the tracediff path).
+
+4. **Confirm** `<output_dir>/perf_report_trace1_csvs/diff_stats.csv` exists (written by the report script). If absent, copy `<output_dir>/_semantic/tracediff_output/diff_stats.csv` to that path so the comparative fusion step (Steps 2-5) can read it.
+
+After Step 1.S, proceed to Steps 2-5 unchanged.
 
 ---
 
@@ -607,5 +666,6 @@ If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whethe
 
 - **Torch Compile**: `ops_summary.csv` contains op names matching `triton_poi_fused_*`, `triton_red_fused_*`, `triton_per_fused_*`, or `CompiledFunction`. If found, inform the user.
 - **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
-  - **Default mode** (analysis_mode = `default`): Inform the user that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
-  - **Inference mode** (analysis_mode = `inference`): Graph launches are expected and supported if graph capture folder is provided, do not abort. If inference_exec_mode is `eager` (no capture folder was provided), continue.
+  - **Comparative scope** (`<comparison_scope>` = `comparative`): graph replay is **supported via the semantic comparison path** (Step 0.5 routes it; do not abort). Ensure capture folders were collected for both traces and follow Step 1.S.
+  - **Default mode, standalone** (analysis_mode = `default`): Inform the user that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
+  - **Inference mode, standalone** (analysis_mode = `inference`): Graph launches are expected and supported if graph capture folder is provided, do not abort. If inference_exec_mode is `eager` (no capture folder was provided), continue.
