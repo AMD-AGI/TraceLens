@@ -106,7 +106,9 @@ if triton_available():
         RHS_DTYPE: tl.constexpr,
         PACK: tl.constexpr,  # values per byte along K (2 for fp4, 1 for fp8)
     ):
-        SCALE_GROUP_SIZE: tl.constexpr = 32  # must match MX_BLOCK / tl.dot_scaled e8m0 group size
+        SCALE_GROUP_SIZE: tl.constexpr = (
+            32  # must match MX_BLOCK / tl.dot_scaled e8m0 group size
+        )
         pid_m = tl.program_id(0)
         pid_n = tl.program_id(1)
 
