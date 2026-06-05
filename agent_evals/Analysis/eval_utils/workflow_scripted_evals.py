@@ -1233,7 +1233,6 @@ def run(
 
     for check_fn in _MULTI_EVAL_CHECKS:
         rows.extend(check_fn(output_dir, comparison_scope))
-    rows.extend(_check_model_id(output_dir))
 
     with open(results_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)

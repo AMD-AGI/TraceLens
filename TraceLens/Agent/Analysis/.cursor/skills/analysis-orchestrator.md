@@ -109,6 +109,11 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
    - Default: Same directory as trace file, in `analysis_output/` subdirectory
 
+7. **Extension File** (Optional) → `<extension_file>`
+   - Ask: "Do you have a TraceLens extension file to apply? Press Enter to skip."
+   - If provided, resolve to an absolute path and assign to `<extension_file>`.
+   - If skipped, set `<extension_file>` to empty (no `--extension_file` flag is added to any command).
+
 ### Build and Cache Command Prefix
 
 After collecting inputs, build a command template and save it to `<output_dir>/cache/cmd_prefix.txt`. Create the directory with `mkdir -p <output_dir>/cache`.
@@ -143,7 +148,7 @@ Write the resolved template to `<output_dir>/cache/cmd_prefix.txt`. Then validat
 <prefix> python3 -c "import TraceLens; print('PREFIX_OK')"
 ```
 
-If this fails, check that `<tracelens_dir>` is the **parent** of TraceLens (not the repo root itself), verify the container/venv is accessible, rebuild, and retry. Do NOT proceed to Step 1 until validation passes.
+If this fails, inform the user with `[DIAG:pipeline:PREFIX_FAIL]` and check that `<tracelens_dir>` is the **parent** of TraceLens (not the repo root itself), verify the container/venv is accessible, rebuild, and retry. Do NOT proceed to Step 1 until validation passes.
 
 ### Command Execution Pattern
 
@@ -181,6 +186,13 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 | `comparative` trace1 | `--comparison_json_path <trace2_path>` |
 | `comparative` trace2 | none |
 
+**`<suffix_ext>`** — user extension file:
+
+| condition | value |
+|-----------|-------|
+| `<extension_file>` provided | `--extension_file <extension_file>` |
+| not provided | none |
+
 ---
 
 **Default (training and non-vLLM/SGLang eager inference)** (`<analysis_mode>` = `default`):
@@ -193,7 +205,8 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
   --group_by_num_kernels \
   --include_call_stack \
   <suffix_1> \
-  <suffix_2>
+  <suffix_2> \
+  <suffix_ext>
 ```
 
 **Inference eager mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `eager`):
@@ -207,7 +220,8 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
   --group_by_num_kernels \
   --include_call_stack \
   <suffix_1> \
-  <suffix_2>
+  <suffix_2> \
+  <suffix_ext>
 ```
 
 **Inference graph replay + capture mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `graph_capture`):
@@ -222,7 +236,8 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
   --group_by_num_kernels \
   --include_call_stack \
   <suffix_1> \
-  <suffix_2>
+  <suffix_2> \
+  <suffix_ext>
 ```
 
 ---
@@ -236,7 +251,7 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
   TraceLens/Agent/Analysis/utils/orchestrator_prepare.py \
   --trace-path <trace_path> \
   --platform <platform> \
-  --output-dir <output_dir>
+  --output-dir <output_dir> \
   --comparison-scope <comparison_scope>
 ```
 
@@ -250,7 +265,6 @@ This script performs:
 **Outputs:**
 - `category_data/<category>_ops.csv` - Filtered operations per category
 - `metadata/<category>_metadata.json` - Platform specs, GPU utilization, config
-- `category_data/<category>_tree_data.json` - Pre-computed tree analysis
 - `category_data/multi_kernel_data.json` - Memcpy/NCCL/overlap pre-computed data
 - `category_data/category_manifest.json` - Workflow metadata with categories (includes `tier` field: `system` or `compute_kernel`)
 - `system_findings/` - Directory for system-level analysis outputs
@@ -402,8 +416,7 @@ Read and follow the FULL instructions in:
 
 - Category: {category}
 - Input files: category_data/{category}_ops.csv, metadata/{category}_metadata.json,
-  category_data/{category}_tree_data.json (if available),
-  category_data/{category}_metrics.json (P-items come from `category_findings[]`)
+  category_data/{category}_metrics.json (P-items come from `category_findings[]`; `operations[i].module_chain` provides model layer context)
 - Output file: category_findings/{category}_findings.md
 
 Execute every step in the agent file. Return "DONE" when complete.
@@ -601,11 +614,9 @@ embed_plot_in_report(sys.argv[1])
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
 ---
 
-## Unsupported Trace Features
+## Trace Feature Detection
 
-If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses unsupported features before retrying:
-
-- **Torch Compile**: `ops_summary.csv` contains op names matching `triton_poi_fused_*`, `triton_red_fused_*`, `triton_per_fused_*`, or `CompiledFunction`. If found, inform the user.
+If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses the following features before retrying:
 - **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
-  - **Default mode** (analysis_mode = `default`): Inform the user that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
+  - **Default mode** (analysis_mode = `default`): Inform the user with `[DIAG:trace_quality:GPU_GRAPH_REPLAY]` that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
   - **Inference mode** (analysis_mode = `inference`): Graph launches are expected and supported if graph capture folder is provided, do not abort. If inference_exec_mode is `eager` (no capture folder was provided), continue.

@@ -28,7 +28,6 @@ When invoked by the orchestrator, you will receive the following context:
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/gemm_ops.csv` - Filtered GEMM operations
 2. `<output_dir>/metadata/gemm_metadata.json` - Hardware specs, platform info, GPU utilization
-3. `<output_dir>/category_data/gemm_tree_data.json` - Pre-computed parent chains and subtrees
 
 **Output file you must write:**
 - `<output_dir>/category_findings/gemm_findings.md`
