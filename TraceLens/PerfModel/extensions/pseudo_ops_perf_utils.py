@@ -51,12 +51,12 @@ def get_pseudo_op_mappings():
         "aiter::fmha_v3_varlen_fwd": attention_perf_model_extensions.aiter_fmha_v3_varlen_fwd,
         "pseudo_mla_decode_fwd": attention_perf_model_extensions.mla_decode_fwd,
         "pseudo_mla_prefill_fwd": attention_perf_model_extensions.pseudo_mla_prefill_fwd,
-        "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd_586": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
+        "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
         ## Misc ops
         "aiter::batched_gemm_a16wfp4_": perf_model_extensions.batched_gemm_a16wfp4,
         "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
-        "sglang_profiler::fp8_utils_gemm_a8w8_blockscale_7": perf_model_extensions.gemm_a8w8_blockscale,
-        "sglang_profiler::gemm_a8w8_blockscale_gemm_a8w8_blockscale_260": perf_model_extensions.gemm_a8w8_blockscale,
+        "sglang_profiler::fp8_utils_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
+        "sglang_profiler::gemm_a8w8_blockscale_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_aiter_triton_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::gemm_a8w8_blockscale_ck": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::gemm_a8w8_blockscale_cktile": perf_model_extensions.gemm_a8w8_blockscale,
@@ -68,9 +68,8 @@ def get_pseudo_op_mappings():
         "aiter::gemm_a8w8_bpreshuffle_ck": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
-        "sglang_profiler::gemm_kernels_flydsl_hgemm_54": perf_model_extensions.gemm_a16w16_atomic_,
-        "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_464": perf_model_extensions.batched_gemm_a8w8,
-        "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_558": perf_model_extensions.batched_gemm_a8w8,
+        "sglang_profiler::gemm_kernels_flydsl_hgemm": perf_model_extensions.gemm_a16w16_atomic_,
+        "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant": perf_model_extensions.batched_gemm_a8w8,
         ## Quantization ops
         "vllm::triton_per_token_group_quant_fp8": perf_model_extensions.vllm_triton_per_token_group_quant_fp8,
         ## Activation ops
