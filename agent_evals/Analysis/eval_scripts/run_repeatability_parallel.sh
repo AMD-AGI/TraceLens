@@ -39,6 +39,7 @@ REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/agent_evals/Analysis"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_${COMPARISON_SCOPE}}"
+TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
 
 REPORT_DIR="${REPORT_DIR:-$RESULTS_ROOT/../reports_${COMPARISON_SCOPE}}"
 
@@ -103,10 +104,10 @@ run_single_job() {
         (
             cd "$ANALYSIS_DIR" || exit
             if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
-                timeout 1800 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
+                timeout 1800 agent --model claude-4.6-opus-high --print --force --trust --output-format stream-json \
                     "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (trace1) and $platform2 (trace2), analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             else
-                timeout 1800 agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
+                timeout 1800 agent --model claude-4.6-opus-high --print --force --trust --output-format stream-json \
                     "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path with platform $platform, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             fi
         ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
@@ -140,7 +141,7 @@ run_single_job() {
 
     (
         cd "$EVALS_DIR" || exit
-        agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
+        agent --model claude-4.6-opus-high --print --force --trust --output-format stream-json \
             "Run workflow LLM eval skill on $OUTPUT_DIR for test case $id mode=$COMPARISON_SCOPE. Write results to $CASE_RESULTS/workflow_llm_results.csv"
     ) < /dev/null > "$CASE_RESULTS/workflow_llm_eval.ndjson" 2>&1 &
     eval_pids+=($!)
@@ -154,7 +155,7 @@ run_single_job() {
 
     (
         cd "$EVALS_DIR" || exit
-        agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
+        agent --model claude-4.6-opus-high --print --force --trust --output-format stream-json \
             "Run quality LLM eval skill on $OUTPUT_DIR with reference $reference_dir for test case $id mode=$COMPARISON_SCOPE. Write results to $CASE_RESULTS/quality_llm_results.csv"
     ) < /dev/null > "$CASE_RESULTS/quality_llm_eval.ndjson" 2>&1 &
     eval_pids+=($!)
@@ -250,7 +251,7 @@ else
     # standalone CSV: id,sub_category,trace_path,reference_dir,platform
     while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
         [[ -z "$id" ]] && continue
-        _spawn_jobs "$id" "$trace_path" "" "$reference_dir" "$platform"
+        _spawn_jobs "$id" "$trace_path" "" "$reference_dir" "$platform" ""
     done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
 fi
 
@@ -280,7 +281,7 @@ else
 
     (
         cd "$EVALS_DIR" || exit
-        agent --model claude-opus-4-7-high --print --force --trust --output-format stream-json \
+        agent --model claude-4.6-opus-high --print --force --trust --output-format stream-json \
             "Run eval post processing on results_root=$RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$TEST_TRACES_CSV report_dir=$REPORT_DIR container=${CONTAINER:-} $NODE_LABEL $RUNTIME_LABEL"
     ) < /dev/null > "$REPORT_DIR/post_processing.ndjson" 2>&1
 

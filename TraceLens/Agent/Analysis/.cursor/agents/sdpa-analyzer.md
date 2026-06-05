@@ -27,9 +27,8 @@ When invoked by the orchestrator, you will receive the following context:
 - `sdpa`: Either `sdpa_fwd` (forward pass) or `sdpa_bwd` (backward pass)
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/<sdpa>_ops.csv` - Filtered SDPA operations
+1. `<output_dir>/category_data/<sdpa>_ops.csv` - Filtered SDPA operations (includes `call_stack` column for architecture context)
 2. `<output_dir>/metadata/<sdpa>_metadata.json` - Hardware specs, GPU utilization
-3. `<output_dir>/category_data/<sdpa>_tree_data.json` - Pre-computed parent chains
 
 **Output file you must write:**
 - `<output_dir>/category_findings/<sdpa>_findings.md`
