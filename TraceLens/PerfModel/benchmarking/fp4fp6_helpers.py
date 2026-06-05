@@ -24,10 +24,15 @@ except Exception:  # pragma: no cover
     triton = None
     tl = None
 
-MX_BLOCK = 32  # OCP MX block size: 32 elements share one e8m0 scale byte.
+# OCP MX scaling block size: 32 elements share one E8M0 scale byte. Triton does
+# not expose this as a Python constant; tl.dot_scaled assumes group_size=32 for
+# e8m0 scales (https://triton-lang.org/main/python-api/generated/triton.language.dot_scaled.html).
+# OCP Microscaling Formats (MX) v1.0, Section 5.2:
+# https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
+MX_BLOCK = 32
 
 
-def mx_available() -> bool:
+def triton_available() -> bool:
     return triton is not None and tl is not None
 
 
@@ -71,7 +76,7 @@ def prepare_mxfp6_gemm(
     return a_packed, b_packed, a_scales, b_scales, c
 
 
-if mx_available():
+if triton_available():
 
     @triton.jit
     def _mx_dot_scaled_kernel(
@@ -100,7 +105,7 @@ if mx_available():
         RHS_DTYPE: tl.constexpr,
         PACK: tl.constexpr,  # values per byte along K (2 for fp4, 1 for fp8)
     ):
-        SCALE_GROUP_SIZE: tl.constexpr = 32
+        SCALE_GROUP_SIZE: tl.constexpr = 32  # must match MX_BLOCK / tl.dot_scaled e8m0 group size
         pid_m = tl.program_id(0)
         pid_n = tl.program_id(1)
 
@@ -138,7 +143,7 @@ if mx_available():
 
 def _probe_dot_scaled(lhs_dtype: str, rhs_dtype: str, pack: int) -> bool:
     """Compile a tiny kernel to confirm tl.dot_scaled accepts these dtypes."""
-    if not mx_available() or not torch.cuda.is_available():
+    if not triton_available() or not torch.cuda.is_available():
         return False
     try:
         dev = torch.device("cuda:0")
@@ -210,7 +215,7 @@ def _resolve_support() -> None:
         print("[fp4fp6] MXFP6: unsupported; will return 0.")
 
 
-if mx_available() and torch.cuda.is_available():
+if triton_available() and torch.cuda.is_available():
     try:
         _resolve_support()
     except Exception:  # pragma: no cover
@@ -276,7 +281,7 @@ def bench_mxfp4_gemm(
     rep: int,
     do_bench_fn,
 ) -> float:
-    if not mx_available() or not _MXFP4_SUPPORTED:
+    if not triton_available() or not _MXFP4_SUPPORTED:
         return 0.0
     if k % MX_BLOCK != 0 or k % 2 != 0:
         return 0.0
@@ -444,7 +449,7 @@ def bench_mxfp6_gemm(
     rep: int,
     do_bench_fn,
 ) -> float:
-    if not mx_available() or not _MXFP6_DTYPE:
+    if not triton_available() or not _MXFP6_DTYPE:
         return 0.0
     if k % MX_BLOCK != 0:
         return 0.0
