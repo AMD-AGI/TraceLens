@@ -391,12 +391,13 @@ class TreePerfAnalyzer:
         cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
         _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
         list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
-        busy_kernel_time = self.GPUEventAnalyser.compute_busy_time(list_kernels)
-        list_non_data_mov_kernels = [
-            k for k in list_kernels if self.non_data_mov_filter(k)
-        ]
+        kernel_intervals = self.GPUEventAnalyser.kernels_to_intervals(list_kernels)
+        busy_kernel_time = self.GPUEventAnalyser.compute_busy_time(kernel_intervals)
+        non_data_mov_intervals = self.GPUEventAnalyser.kernels_to_intervals(
+            list_kernels, self.non_data_mov_filter
+        )
         busy_non_data_mov_time = self.GPUEventAnalyser.compute_busy_time(
-            list_non_data_mov_kernels
+            non_data_mov_intervals
         )
         event["kernel_details"] = [
             {
