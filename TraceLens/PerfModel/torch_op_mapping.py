@@ -231,6 +231,178 @@ for op_name, perf_model_class in op_to_perf_model_class_map.items():
     dict_cat2names[cat].append(op_name)
 
 
+synthetic_op_marker = " (Synthetic Op)"
+
+# void at::native kernel name substring -> category (categorize_torch_op, first)
+aten_native_kernel_substring_to_category = {
+    "elementwise": "elementwise",
+    "reduce": "reduce",
+    "multi_tensor_apply": "multi_tensor_apply",
+}
+
+# GPU kernel name substring -> category (_category_from_classified_kernel, 1st)
+graph_kernel_name_contains_to_category = {
+    "rmsnorm": "RMSNorm",
+}
+
+# classify_kernel() kernel_type -> category (_category_from_classified_kernel, 2nd)
+graph_kernel_type_to_category = {
+    "KV Cache Store": "InferenceAttention",
+    "MoE GEMM": "MoE_unfused",
+    "GEMM": "GEMM",
+    "Quantization": "GroupQuant",
+    "Attention": "SDPA_fwd",
+    "Linear Attention": "SDPA_fwd",
+    "GDN Gating": "SDPA_fwd",
+    "Rotary Embedding": "RoPE_fwd",
+    "RMSNorm": "RMSNorm",
+    "LayerNorm": "NORM_fwd",
+    "L2Norm": "NORM_fwd",
+    "Normalization": "NORM_fwd",
+    "MoE Routing": "MoE_aux",
+    "MoE Finalize": "MoE_aux",
+    "MoE Quantize": "MoE_aux",
+    "Activation (DeepSeek fused)": "MoE_aux",
+    "Elementwise": "elementwise",
+    "MemCpy": "other",
+}
+
+# classify_kernel() perf_category -> category (_category_from_classified_kernel, 3rd)
+graph_perf_category_to_category = {
+    "GEMM-MoE": "MoE_unfused",
+    "GEMM": "GEMM",
+    "Quantization": "GroupQuant",
+    "SDPA": "SDPA_fwd",
+    "SDPA-GDN": "SDPA_fwd",
+    "Normalization": "NORM_fwd",
+    "Elementwise-MoE": "MoE_aux",
+    "Elementwise": "elementwise",
+    "MemCpy": "other",
+}
+
+# classify_kernel() kernel_type substring -> category (_category_from_classified_kernel, 4th)
+graph_kernel_type_contains_to_category = {
+    "moe gemm": "MoE_unfused",
+    "attention": "SDPA_fwd",
+    "quant": "GroupQuant",
+}
+
+# void at::native kernel name substring -> perf model class (resolve_perf_model_class, 1st)
+aten_native_kernel_substring_to_perf_model_class = {
+    "elementwise": perf_model.aten_unary_elementwise,
+    "reduce": perf_model.aten_reduce,
+}
+
+# GPU kernel name substring -> perf model class (resolve_perf_model_class, 2nd)
+graph_kernel_name_contains_to_perf_model_class = {
+    "rmsnorm": perf_model.RMSNorm,
+}
+
+# classify_kernel() kernel_type -> perf model class (resolve_perf_model_class, 3rd)
+graph_kernel_type_to_perf_model_class = {
+    "MoE GEMM": perf_model.primus_turbo_grouped_gemm,
+    "GEMM": perf_model.aten_mm,
+    "Quantization": perf_model.primus_turbo_quantize_fp8,
+    "Attention": perf_model.flash_attention,
+    "Linear Attention": perf_model.flash_attention,
+    "GDN Gating": perf_model.flash_attention,
+    "Rotary Embedding": perf_model.fused_rope_fwd,
+    "RMSNorm": perf_model.RMSNorm,
+    "LayerNorm": perf_model.LayerNorm,
+    "L2Norm": perf_model.LayerNorm,
+    "Normalization": perf_model.LayerNorm,
+    "Elementwise": perf_model.aten_binary_elementwise,
+}
+
+# classify_kernel() perf_category -> perf model class (resolve_perf_model_class, 4th)
+graph_perf_category_to_perf_model_class = {
+    "GEMM-MoE": perf_model.primus_turbo_grouped_gemm,
+    "GEMM": perf_model.aten_mm,
+    "Quantization": perf_model.primus_turbo_quantize_fp8,
+    "SDPA": perf_model.flash_attention,
+    "SDPA-GDN": perf_model.flash_attention,
+    "Normalization": perf_model.LayerNorm,
+    "Elementwise": perf_model.aten_binary_elementwise,
+}
+
+# classify_kernel() kernel_type substring -> perf model class (resolve_perf_model_class, 5th)
+graph_kernel_type_contains_to_perf_model_class = {
+    "moe gemm": perf_model.primus_turbo_grouped_gemm,
+    "attention": perf_model.flash_attention,
+    "quant": perf_model.primus_turbo_quantize_fp8,
+}
+
+
+def _event_has_input_dims(event):
+    dims = event.get("args", {}).get("Input Dims")
+    return isinstance(dims, list) and len(dims) > 0
+
+
+def _perf_model_class_from_classified_kernel(kernel_name):
+    """Map classify_kernels() output to a perf model class, or None."""
+    from TraceLens.Agent.Analysis.utils.classify_kernels import classify_kernel
+
+    kt, pc, conf = classify_kernel(kernel_name)
+    if not conf:
+        return None
+
+    knl = kernel_name.lower()
+    for needle, model_class in graph_kernel_name_contains_to_perf_model_class.items():
+        if needle in knl:
+            return model_class
+    if kt in graph_kernel_type_to_perf_model_class:
+        return graph_kernel_type_to_perf_model_class[kt]
+    if pc in graph_perf_category_to_perf_model_class:
+        return graph_perf_category_to_perf_model_class[pc]
+
+    ktl = kt.lower()
+    for needle, model_class in graph_kernel_type_contains_to_perf_model_class.items():
+        if needle in ktl:
+            return model_class
+    if ktl.startswith("moe "):
+        return None
+    return None
+
+
+def _perf_model_class_from_kernel_name(kernel_name):
+    if kernel_name.startswith("void at::native"):
+        for substring, model_class in (
+            aten_native_kernel_substring_to_perf_model_class.items()
+        ):
+            if substring in kernel_name:
+                return model_class
+    return _perf_model_class_from_classified_kernel(kernel_name)
+
+
+def resolve_perf_model_class(event, op_map=None):
+    """
+    Resolve a perf model class for a trace event.
+
+    Named ops use op_to_perf_model_class_map. Graph-replay synthetic ops and other
+    rows with kernel_details / parsed kernel names use kernel-based resolution.
+    Kernel-resolved models require Input Dims on the event (e.g. from a parent
+    cpu_op or a merged capture trace) until kernel-only param extraction exists.
+    """
+    op_map = op_to_perf_model_class_map if op_map is None else op_map
+    model_class = op_map.get(event.get("name"))
+    if model_class is not None:
+        return model_class
+
+    kernel_name = _kernel_name_from_graph_or_kernel_details(event)
+    if kernel_name is None:
+        return None
+
+    model_class = _perf_model_class_from_kernel_name(kernel_name)
+    if model_class is None:
+        return None
+
+    if synthetic_op_marker in event.get("name", "") and not _event_has_input_dims(
+        event
+    ):
+        return None
+    return model_class
+
+
 def _category_from_classified_kernel(kernel_name):
     """Map classify_kernels() output to TraceLens op category strings."""
     from TraceLens.Agent.Analysis.utils.classify_kernels import classify_kernel
@@ -245,27 +417,23 @@ def _category_from_classified_kernel(kernel_name):
             stacklevel=2,
         )
         return None
-    ktl, knl = kt.lower(), kernel_name.lower()
-    if kt == "KV Cache Store":
-        return "InferenceAttention"
-    if pc == "GEMM-MoE" or "moe gemm" in ktl:
-        return "MoE_unfused"
-    if pc == "GEMM" or kt == "GEMM":
-        return "GEMM"
-    if pc == "Quantization" or "quant" in ktl:
-        return "GroupQuant"
-    if pc in ("SDPA", "SDPA-GDN") or "attention" in ktl:
-        return "SDPA_fwd"
-    if kt == "Rotary Embedding":
-        return "RoPE_fwd"
-    if pc == "Normalization" or kt in ("RMSNorm", "LayerNorm", "L2Norm"):
-        return "RMSNorm" if "rmsnorm" in knl or kt == "RMSNorm" else "NORM_fwd"
-    if pc == "Elementwise-MoE" or ktl.startswith("moe "):
+
+    knl = kernel_name.lower()
+    for needle, category in graph_kernel_name_contains_to_category.items():
+        if needle in knl:
+            return category
+    if kt in graph_kernel_type_to_category:
+        return graph_kernel_type_to_category[kt]
+    if pc in graph_perf_category_to_category:
+        return graph_perf_category_to_category[pc]
+
+    ktl = kt.lower()
+    for needle, category in graph_kernel_type_contains_to_category.items():
+        if needle in ktl:
+            return category
+    if ktl.startswith("moe "):
         return "MoE_aux"
-    if pc == "Elementwise":
-        return "elementwise"
-    if pc == "MemCpy":
-        return "other"
+
     warnings.warn(
         "WARNING: classify_kernel matched a GPU kernel but there is no TraceLens "
         "op-category mapping in _category_from_classified_kernel; "
@@ -275,6 +443,16 @@ def _category_from_classified_kernel(kernel_name):
         UserWarning,
         stacklevel=2,
     )
+    return None
+
+
+def _kernel_name_from_graph_or_kernel_details(row):
+    """Resolve GPU kernel name from kernel_details or cuda-graph synthetic op name."""
+    if row.get("kernel_details"):
+        return row["kernel_details"][0]["name"]
+    op_name = row.get("name", "")
+    if synthetic_op_marker in op_name and "->" in op_name:
+        return op_name.split("->", 1)[1].rsplit(synthetic_op_marker, 1)[0]
     return None
 
 
@@ -431,25 +609,14 @@ def categorize_torch_op(row):
         return "elementwise"
     elif row["name"] in dict_cat2names.get("Reduce", []):
         return "reduce"
-    kernel_name = None
-    if "kernel_details" in row and len(row["kernel_details"]) > 0:
-        kernel_name = row["kernel_details"][0]["name"]
-    else:
-        op_name = row.get("name", "")
-        # TreePerf may attach GPU-only work to placeholder ops named
-        # "{parent}->{kernel} (Synthetic Op)"; classify by kernel name, not parent.
-        if "(Synthetic Op)" in op_name and "->" in op_name:
-            kernel_name = op_name.split("->", 1)[1].rsplit(" (Synthetic Op)", 1)[0]
+    kernel_name = _kernel_name_from_graph_or_kernel_details(row)
     if kernel_name:
         if kernel_name.startswith("void at::native"):
             if debug:
                 print("Found ATen native kernel:", kernel_name[:64])
-            if "elementwise" in kernel_name:
-                return "elementwise"
-            elif "reduce" in kernel_name:
-                return "reduce"
-            elif "multi_tensor_apply" in kernel_name:
-                return "multi_tensor_apply"
+            for substring, cat in aten_native_kernel_substring_to_category.items():
+                if substring in kernel_name:
+                    return cat
         cat = _category_from_classified_kernel(kernel_name)
         if cat is not None:
             return cat

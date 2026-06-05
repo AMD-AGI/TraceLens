@@ -26,6 +26,7 @@ from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import request_install
 from TraceLens.util import TraceEventUtils
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    find_execution_roots,
     merge_capture_trace_into_graph,
 )
 
@@ -508,6 +509,7 @@ def add_truncated_kernel_details(
 def generate_perf_report_pytorch(
     profile_json_path: str,
     augmented_tree: TraceToTree = None,
+    capture_folder: Optional[str] = None,
     output_xlsx_path: Optional[str] = None,
     output_csvs_dir: Optional[str] = None,
     # include unlinked kernels in gpu timeline
@@ -555,6 +557,7 @@ def generate_perf_report_pytorch(
             add_python_func=add_python_func,
             enable_pseudo_ops=enable_pseudo_ops,
             rebuild_tree=False,
+            capture_folder=capture_folder,
         )
     else:
         perf_analyzer = TreePerfAnalyzer.from_file(
@@ -564,6 +567,7 @@ def generate_perf_report_pytorch(
             include_unlinked_kernels=include_unlinked_kernels,
             add_python_func=add_python_func,
             enable_pseudo_ops=enable_pseudo_ops,
+            capture_folder=capture_folder,
         )
 
         graph_launch_events = [
@@ -1311,17 +1315,23 @@ def main():
     )
 
     args = parser.parse_args()
+    graph_tree = None
+    sglang_capture_folder = None
     if args.capture_folder:
         classify_graph_capture_trace(args.capture_folder)
         metadata_json_path = os.path.join(args.capture_folder, "execution_details.json")
-        graph_tree = merge_capture_trace_into_graph(
-            args.capture_folder, metadata_json_path, args.profile_json_path
-        )
-    else:
-        graph_tree = None
+        if os.path.isfile(metadata_json_path):
+            graph_tree = merge_capture_trace_into_graph(
+                args.capture_folder, metadata_json_path, args.profile_json_path
+            )
+            if len(find_execution_roots(graph_tree)) == 0:
+                sglang_capture_folder = args.capture_folder
+        else:
+            sglang_capture_folder = args.capture_folder
     generate_perf_report_pytorch(
         profile_json_path=args.profile_json_path,
         augmented_tree=graph_tree,
+        capture_folder=sglang_capture_folder,
         output_xlsx_path=args.output_xlsx_path,
         output_csvs_dir=args.output_csvs_dir,
         include_unlinked_kernels=args.include_unlinked_kernels,

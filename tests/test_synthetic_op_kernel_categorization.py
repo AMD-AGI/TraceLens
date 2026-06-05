@@ -10,7 +10,11 @@ import warnings
 
 import pytest
 
-from TraceLens.PerfModel.torch_op_mapping import categorize_torch_op
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.torch_op_mapping import (
+    categorize_torch_op,
+    resolve_perf_model_class,
+)
 
 MOE_GEMM_KERNEL = (
     "_ZN2ck15kernel_moe_gemmINS_25GridwiseMoeGemmBlockScaleINS_13tensor_layout4gemm"
@@ -67,3 +71,42 @@ def test_unmapped_synthetic_kernel_falls_back_to_other():
 def test_cuda_graph_launch_prefix():
     row = _synthetic_row(GEMM_KERNEL, parent="cudaGraphLaunch")
     assert categorize_torch_op(row) == "GEMM"
+
+
+def _synthetic_event(kernel_name, parent="aten::mm", input_dims=None):
+    args = {}
+    if input_dims is not None:
+        m, k, n = input_dims
+        args = {
+            "Input Dims": [[m, k], [k, n]],
+            "Input type": ["c10::BFloat16", "c10::BFloat16"],
+            "Input Strides": [[k, 1], [1, k]],
+        }
+    return {
+        "name": f"{parent}->{kernel_name} (Synthetic Op)",
+        "args": args,
+        "kernel_details": [{"name": kernel_name}],
+        "gpu_events": [],
+    }
+
+
+def test_resolve_perf_model_class_named_op():
+    event = {"name": "aten::mm", "args": {"Input Dims": [[4, 8], [8, 2]]}}
+    assert resolve_perf_model_class(event) is perf_model.aten_mm
+
+
+def test_synthetic_gemm_resolves_aten_mm_with_input_dims():
+    event = _synthetic_event(GEMM_KERNEL, input_dims=(128, 64, 32))
+    assert resolve_perf_model_class(event) is perf_model.aten_mm
+    pm = perf_model.aten_mm(event=event)
+    assert pm.flops() == 2 * 128 * 32 * 64
+
+
+def test_synthetic_gemm_without_input_dims_has_no_perf_model():
+    event = _synthetic_event(GEMM_KERNEL, parent="hipGraphLaunch")
+    assert resolve_perf_model_class(event) is None
+
+
+def test_synthetic_moe_gemm_resolves_grouped_gemm_with_input_dims():
+    event = _synthetic_event(MOE_GEMM_KERNEL, parent="aten::bmm", input_dims=(8, 64, 32))
+    assert resolve_perf_model_class(event) is perf_model.primus_turbo_grouped_gemm

@@ -28,9 +28,14 @@ from ..PerfModel.torch_op_mapping import (
     categorize_torch_op,
     dict_cat2names,
     op_to_perf_model_class_map,
+    resolve_perf_model_class,
+    synthetic_op_marker,
 )
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
+from ..Trace2Tree.trace_sglang_capture_link import (
+    enrich_synthetic_ops_from_sglang_capture,
+)
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
@@ -159,6 +164,7 @@ class TreePerfAnalyzer:
     def from_file(
         profile_filepath,
         capture_trace_filepath=None,
+        capture_folder=None,
         jax: bool = False,
         enable_pseudo_ops: bool = False,
         tree_postprocess_extension=None,
@@ -191,6 +197,7 @@ class TreePerfAnalyzer:
             event_to_category=categorizer,
             enable_pseudo_ops=enable_pseudo_ops,
             tree_postprocess_extension=tree_postprocess_extension,
+            capture_folder=capture_folder,
             *args,
             **kwargs,
         )
@@ -209,8 +216,10 @@ class TreePerfAnalyzer:
         rebuild_tree=True,
         detect_recompute=False,
         enable_origami=False,
+        capture_folder=None,
     ):
         self.jax = jax
+        self.capture_folder = capture_folder
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
         self.detect_recompute = detect_recompute
@@ -368,7 +377,9 @@ class TreePerfAnalyzer:
 
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
-            perf_model_class = self.op_to_perf_model_class_map.get(event["name"])
+            perf_model_class = resolve_perf_model_class(
+                event, op_map=self.op_to_perf_model_class_map
+            )
         perf_model = perf_model_class(
             **_perf_model_init_kwargs(
                 perf_model_class,
@@ -1546,7 +1557,10 @@ class TreePerfAnalyzer:
 
     def _has_perf_model(self, event):
         """Check if an event has a perf model available."""
-        return event.get("name") in self.op_to_perf_model_class_map
+        return (
+            resolve_perf_model_class(event, op_map=self.op_to_perf_model_class_map)
+            is not None
+        )
 
     def _is_leaf_cpu_op(self, event):
         """
@@ -1867,6 +1881,14 @@ class TreePerfAnalyzer:
             synthetic["name"] = f"{parent['name']}->{evt['name']} (Synthetic Op)"
             synthetic["gpu_events"] = [evt["UID"]]
             collected.append(synthetic)
+
+        if self.capture_folder:
+            enrich_synthetic_ops_from_sglang_capture(
+                collected,
+                self.tree,
+                self.capture_folder,
+                synthetic_op_marker=synthetic_op_marker,
+            )
         return collected
 
     def build_df_unified_perf_table(
