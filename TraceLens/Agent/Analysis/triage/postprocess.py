@@ -312,16 +312,16 @@ def write_summary_report(
         "",
         "## Top Failure Modes",
         "",
-        "| # | Failure Mode | Count | Affected Models | Category | Diag Tags | Remedy |",
-        "|---|---|---|---|---|---|---|",
+        "| Diag Tag | Failure Mode | Count | Affected Models | Remedy |",
+        "|---|---|---|---|---|",
     ]
 
-    for i, (mode, count) in enumerate(agg["by_failure_mode"].most_common(20), 1):
+    for mode, count in agg["by_failure_mode"].most_common(20):
         n_models = len(agg["models_per_issue"].get(mode, set()))
-        cat = categories.get(mode, "")
         remedy = remedies.get(mode, "")
-        tags = ", ".join(sorted(diag_tags_per_mode.get(mode, set())))
-        lines.append(f"| {i} | {mode} | {count} | {n_models} | {cat} | {tags} | {remedy} |")
+        tags = sorted(diag_tags_per_mode.get(mode, set()))
+        tag = tags[0] if tags else ""
+        lines.append(f"| {tag} | {mode} | {count} | {n_models} | {remedy} |")
 
     # Action keys for perf_model issues (only unclassified/synthetic op modes)
     _OP_ATTENTION_MODES = {
