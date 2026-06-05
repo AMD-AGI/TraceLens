@@ -113,7 +113,7 @@ ARCH_TLOPS_KEYS: Tuple[str, ...] = (
     "vector_fp64",
 )
 
-# GEMM shapes (M,N,K) 
+# GEMM shapes (M,N,K)
 GEMM_SHAPES: List[Tuple[int, int, int]] = [
     (8192, 8192, 8192),
     (16384, 8192, 1280),
