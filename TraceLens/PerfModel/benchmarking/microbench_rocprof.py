@@ -4,6 +4,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+
 """microbench_rocprof.py — compare microbench TFLOPS vs rocprofv3 MFMA counters.
 
 For each (metric, shape): one plain run, then one rocprofv3 PMC run wrapping
