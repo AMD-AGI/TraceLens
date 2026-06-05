@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 ---
 name: multi-kernel-analyzer
-description: Analyze cross-cutting multi-kernel issues including memcpy D2H/H2D patterns, NCCL blocking compute, and compute/communication overlap. System-level analysis tier.
+description: Analyze cross-cutting multi-kernel issues including memcpy D2H/H2D patterns, communication blocking compute, and compute/communication overlap. System-level analysis tier.
 model: claude-opus-4-7-high
 ---
 
@@ -16,8 +16,8 @@ Analyze cross-cutting multi-kernel issues that affect the GPU pipeline as a whol
 
 **Three analysis areas:**
 1. **Memory Copy Patterns** -- High occurrence of D2H/H2D transfers indicating unnecessary data movement
-2. **NCCL Blocking Compute** -- Communication operations that block GPU compute kernels
-3. **Compute/Communication Overlap** -- Lack of overlap between NCCL and compute, missed pipelining opportunities
+2. **Communication Blocking Compute** -- Communication operations that block GPU compute kernels
+3. **Compute/Communication Overlap** -- Lack of overlap between communication and compute, missed pipelining opportunities
 
 ---
 
@@ -30,7 +30,7 @@ When invoked by the orchestrator, you will receive the following context:
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/multi_kernel_data.json` - Pre-computed memcpy/NCCL/overlap data
+1. `<output_dir>/category_data/multi_kernel_data.json` - Pre-computed memcpy/communication/overlap data
 2. `<output_dir>/metadata/multi_kernel_metadata.json` - Platform specs and GPU utilization
 3. `<output_dir>/category_data/category_manifest.json` - Contains gpu_utilization metrics
 
@@ -56,11 +56,17 @@ When invoked by the orchestrator, you will receive the following context:
 ## Language Guidelines
 
 Use vendor-agnostic terminology:
-- "collective communication" not "NCCL" or "RCCL" (exception: quoting kernel names)
+- "collective communication" not vendor library names (exception: quoting kernel names)
 - "memory copy D2H/H2D" not vendor-specific API names
 - "compute/communication overlap" not vendor-specific implementation details
 - "GPU graph" not "CUDA graph" or "HIP graph"
-- Focus on patterns and solutions, not vendor implementation details
+
+## Cross-Analyzer Boundary (Required)
+
+- Multi-Kernel owns recommendations rooted in communication overlap, collective scheduling, and memcpy direction patterns.
+- CPU/Idle owns recommendations rooted in idle bubbles, launch overhead, host-side synchronization, and pipeline stalls.
+- Do not emit a Multi-Kernel card when the primary mechanism/action is launch-overhead reduction or host-pipeline tuning unless there is distinct communication/memcpy evidence that changes the action.
+- If two candidate Multi-Kernel cards prescribe the same mechanism/action, merge into one card and combine evidence instead of emitting near-duplicates.
 
 ---
 
@@ -92,6 +98,16 @@ Key metrics to analyze:
 - `overlap_assessment`: Boolean `flagged` for compute/communication overlap quality
 - `patterns_detected`: List of detected patterns with description (no recommendations -- you generate those)
 
+### Step 2.1: Recommendation Decision Gates
+
+Before drafting recommendations, map each candidate to a specific gate:
+
+- **Overlap gate:** Recommend overlap tuning only when `overlap_assessment.flagged == true` or exposed communication is clearly on the critical path.
+- **Blocking gate:** Recommend communication-blocking fixes only when `nccl_blocking_assessment.flagged == true` and exposed communication is material in absolute or percentage terms.
+- **Memcpy gate:** Recommend direction-specific transfer fixes only when that direction has clear evidence (time share and/or count pattern) in `memcpy_assessment`.
+- **Synchronization gate:** Recommend sync cleanup only when metrics or detected patterns indicate barrier-like behavior; do not speculate.
+- **Merge gate:** If two candidates prescribe the same mechanism/action, emit one merged card with combined evidence.
+
 ### Step 3: Analyze Memory Copy Patterns
 
 Examine `memcpy_assessment` for D2H and H2D issues. `memcpy_assessment.flagged` is `true` when any direction exceeds thresholds (>5% of total time or >10 transfers).
@@ -111,7 +127,7 @@ Examine `memcpy_assessment` for D2H and H2D issues. `memcpy_assessment.flagged` 
 - Common causes: Explicit `.to(device)` on already-resident tensors, contiguous() calls, format conversions
 - Solution: Eliminate redundant copies; use in-place operations or aliased tensors where possible
 
-### Step 4: Analyze NCCL Blocking and Synchronization
+### Step 4: Analyze Communication Blocking and Synchronization
 
 Examine `nccl_blocking_assessment`. `nccl_blocking_assessment.flagged` is `true` when exposed communication exceeds 5% of total GPU time.
 
@@ -129,6 +145,9 @@ Examine `nccl_blocking_assessment`. `nccl_blocking_assessment.flagged` is `true`
 - Common causes: Framework layers issuing separate collectives that could be fused, duplicate gradient syncs
 - Solution: Deduplicate or fuse collectives; reduce collective frequency per iteration
 
+**Selection rule for this step:**
+- If `nccl_blocking_assessment.flagged` is false and exposed communication is not material, do not emit a standalone "communication blocking" recommendation.
+
 ### Step 5: Analyze Compute/Communication Overlap
 
 Examine `overlap_assessment`. `overlap_assessment.flagged` is `true` when overlap ratio is below 70%.
@@ -145,9 +164,17 @@ For **inference** workloads (vLLM / SGLang):
 2. Pipeline prefill and decode phases so collectives from one phase overlap compute of the next
 3. Reduce collective payload size via quantized or compressed allreduce, tuning communication environment variables
 
+- Do not recommend payload compression/quantization when overlap is already healthy and exposed communication is not a dominant bottleneck.
+
 ### Step 6: Write System Findings
 
 Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command prefix:
+
+Recommendation quality requirements (apply before writing):
+- Each recommendation must cite a concrete evidence points from metrics or detected patterns in `Insight` or `Detailed Analysis`.
+- Each `Action` must name one concrete mechanism (for example, bucket sizing, stream split, collective fusion, async staging) and avoid generic advice.
+- For each recommendation, include a clear expected metric movement in prose (for example, lower exposed communication time, higher overlap ratio, lower D2H/H2D count).
+- Do not emit two recommendations with effectively the same action mechanism; merge them.
 
 ```markdown
 # Multi-Kernel Issue Analysis Findings
@@ -183,7 +210,7 @@ Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command 
 
 ## Communication Blocking Analysis
 
-### NCCL Blocking Compute
+### Communication Blocking Compute
 - **Exposed Communication Time**: X ms (Y% of total)
 - **Total Communication Time**: X ms
 - **Flagged**: true/false
@@ -207,20 +234,6 @@ Write `<output_dir>/system_findings/multi_kernel_findings.md` using the command 
 ### System P<N+1>: [Next Issue]
 **Insight**: [1 sentence]
 **Action**: [1-2 sentences]
-
-## Technical Details
-
-### Top Communication Operations
-| Rank | Operation | Duration (us) | Stream |
-|------|-----------|---------------|--------|
-| 1 | ... | ... | ... |
-
-### Memory Copy Breakdown
-| Direction | Count | Total Time (ms) | Avg Size | Severity |
-|-----------|-------|------------------|----------|----------|
-| D2H | ... | ... | ... | ... |
-| H2D | ... | ... | ... | ... |
-| D2D | ... | ... | ... | ... |
 
 ```
 

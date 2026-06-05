@@ -113,7 +113,7 @@ class BaseTraceToTree(ABC):
             cat = self.event_to_category(event)
             event["cat"] = cat
             is_cpu_or_cuda_event = cat in {"cpu_op", "cuda_runtime", "cuda_driver"}
-            is_python_event = self.event_to_category(event) == "python_function"
+            is_python_event = cat == "python_function"
             return is_cpu_or_cuda_event or (add_python_func and is_python_event)
 
         print(f"Building CPU op tree with add_python_func={add_python_func}")
@@ -629,7 +629,7 @@ class TraceToTree(BaseTraceToTree):
 
     @staticmethod
     def default_categorizer(event: dict) -> str:
-        return event.get(TraceLens.util.TraceEventUtils.TraceKeys.Category)
+        return event["cat"]
 
     def _set_linking_key(self):
         Name = TraceLens.util.TraceEventUtils.TraceKeys.Name
@@ -674,6 +674,7 @@ class TraceToTree(BaseTraceToTree):
 
         for event in self.events:
             cat = event.get("cat")
+            event["cat"] = cat  # ensure key present for lambda e: e["cat"] fast path
 
             if cat in runtime_cats:
                 self.runtime_event_uids.append(event[UID])
