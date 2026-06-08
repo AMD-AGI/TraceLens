@@ -668,6 +668,46 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
     return fusion_candidates
 
 
+def _parse_kernel_details_summary(value):
+    """Parse kernel_details_summary cell from unified_perf_summary.csv."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, list):
+        return value
+    text = str(value).strip()
+    if not text or text in ("None", "nan"):
+        return None
+    try:
+        parsed = ast.literal_eval(text)
+    except (SyntaxError, ValueError):
+        return None
+    return parsed if isinstance(parsed, list) and parsed else None
+
+
+def _is_graph_replay_synthetic_name(name) -> bool:
+    name = str(name or "")
+    return "(Synthetic Op)" in name and (
+        "hipGraphLaunch->" in name or "cudaGraphLaunch->" in name
+    )
+
+
+def _recategorize_op_category(row):
+    """Re-run kernel-based categorization for graph-replay synthetic ops."""
+    from TraceLens.PerfModel.torch_op_mapping import categorize_torch_op
+
+    name = row.get("name", "")
+    if not _is_graph_replay_synthetic_name(name):
+        return row.get("op category")
+
+    cat_row = {"name": name}
+    kernel_details = _parse_kernel_details_summary(row.get("kernel_details_summary"))
+    if kernel_details is None:
+        kernel_details = _parse_kernel_details_summary(row.get("kernel_details"))
+    if kernel_details:
+        cat_row["kernel_details"] = kernel_details
+    return categorize_torch_op(cat_row)
+
+
 def _normalize_category(row):
     """Normalize upstream ``op category`` to a filesystem-safe key."""
     category = row.get("op category", "")
@@ -1233,6 +1273,38 @@ def main():
     print("\n[STEP 5] Filtering and Exporting Category Data...")
 
     unified_df = pd.read_csv(os.path.join(trace1_csv_dir, "unified_perf_summary.csv"))
+
+    synthetic_mask = unified_df["name"].apply(_is_graph_replay_synthetic_name)
+    if synthetic_mask.any():
+        unified_df.loc[synthetic_mask, "op category"] = unified_df.loc[
+            synthetic_mask
+        ].apply(_recategorize_op_category, axis=1)
+        print(
+            f"  ✓ Re-categorized {int(synthetic_mask.sum())} graph-replay synthetic ops"
+        )
+
+    # Join full call_stack from perf callstacks CSV (if available) so each
+    # per-category ops CSV carries the complete call stack per row.
+    cs_path = os.path.join(trace1_csv_dir, "unified_perf_callstacks.csv")
+    if os.path.exists(cs_path):
+        cs_df = pd.read_csv(cs_path)
+        cs_df["_trunc_cs"] = cs_df["call_stack"].apply(
+            lambda s: " => ".join(str(s).split(" => ")[:4])
+        )
+        cs_df = cs_df.drop_duplicates(
+            subset=["name", "op category", "_trunc_cs"], keep="first"
+        )
+        pre_merge_len = len(unified_df)
+        unified_df = unified_df.merge(
+            cs_df[["name", "op category", "_trunc_cs", "call_stack"]],
+            left_on=["name", "op category", "trunc_call_stack"],
+            right_on=["name", "op category", "_trunc_cs"],
+            how="left",
+        )
+        unified_df.drop(columns=["_trunc_cs"], inplace=True)
+        assert (
+            len(unified_df) == pre_merge_len
+        ), f"call_stack join changed row count: {pre_merge_len} -> {len(unified_df)}"
 
     # Apply enhanced categorization
     unified_df["enhanced_category"], unified_df["display_name"] = zip(

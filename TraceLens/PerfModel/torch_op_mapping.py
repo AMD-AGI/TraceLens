@@ -7,8 +7,8 @@
 """Torch op-name mappings and categorization helpers."""
 
 import re
-from typing import Dict, Iterable, List, Mapping, MutableMapping
-from typing import Optional, Pattern, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping
+from typing import Optional, Pattern, Tuple, Union
 
 from . import perf_model
 from .extensions import (
@@ -66,25 +66,180 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
 ]
 
 
+SYNTHETIC_OP_MARKER = " (Synthetic Op)"
+synthetic_op_marker = SYNTHETIC_OP_MARKER
+
 _KERNEL_NAME_PREFIX = "void at::native"
-_KERNEL_NAME_FALLBACK_RULES: Tuple[Tuple[str, str], ...] = (
+_ATEN_NATIVE_CATEGORY_RULES: Tuple[Tuple[str, str], ...] = (
     ("elementwise", "elementwise"),
     ("reduce", "reduce"),
     ("multi_tensor_apply", "multi_tensor_apply"),
 )
+_ATEN_NATIVE_PERF_MODEL_RULES: Tuple[Tuple[str, type], ...] = (
+    ("elementwise", perf_model.aten_unary_elementwise),
+    ("reduce", perf_model.aten_reduce),
+)
+
+# Ordered classify_kernel() output rules: (kind, key, value).
+# kind is one of name_substr, kernel_type, perf_category, kernel_type_substr.
+_ClassifiedRuleValue = Union[str, type]
+_CLASSIFIED_KERNEL_CATEGORY_RULES: Tuple[Tuple[str, str, str], ...] = (
+    ("name_substr", "rmsnorm", "RMSNorm"),
+    ("kernel_type", "KV Cache Store", "InferenceAttention"),
+    ("kernel_type", "MoE GEMM", "MoE_unfused"),
+    ("kernel_type", "GEMM", "GEMM"),
+    ("kernel_type", "Quantization", "GroupQuant"),
+    ("kernel_type", "Attention", "SDPA_fwd"),
+    ("kernel_type", "Linear Attention", "SDPA_fwd"),
+    ("kernel_type", "GDN Gating", "SDPA_fwd"),
+    ("kernel_type", "Rotary Embedding", "RoPE_fwd"),
+    ("kernel_type", "RMSNorm", "RMSNorm"),
+    ("kernel_type", "LayerNorm", "NORM_fwd"),
+    ("kernel_type", "L2Norm", "NORM_fwd"),
+    ("kernel_type", "Normalization", "NORM_fwd"),
+    ("kernel_type", "MoE Routing", "MoE_aux"),
+    ("kernel_type", "MoE Finalize", "MoE_aux"),
+    ("kernel_type", "MoE Quantize", "MoE_aux"),
+    ("kernel_type", "Activation (DeepSeek fused)", "MoE_aux"),
+    ("kernel_type", "Elementwise", "elementwise"),
+    ("kernel_type", "MemCpy", "other"),
+    ("perf_category", "GEMM-MoE", "MoE_unfused"),
+    ("perf_category", "GEMM", "GEMM"),
+    ("perf_category", "Quantization", "GroupQuant"),
+    ("perf_category", "SDPA", "SDPA_fwd"),
+    ("perf_category", "SDPA-GDN", "SDPA_fwd"),
+    ("perf_category", "Normalization", "NORM_fwd"),
+    ("perf_category", "Elementwise-MoE", "MoE_aux"),
+    ("perf_category", "Elementwise", "elementwise"),
+    ("perf_category", "MemCpy", "other"),
+    ("kernel_type_substr", "moe gemm", "MoE_unfused"),
+    ("kernel_type_substr", "attention", "SDPA_fwd"),
+    ("kernel_type_substr", "quant", "GroupQuant"),
+)
+_CLASSIFIED_KERNEL_PERF_MODEL_RULES: Tuple[Tuple[str, str, type], ...] = (
+    ("name_substr", "rmsnorm", perf_model.RMSNorm),
+    ("kernel_type", "MoE GEMM", perf_model.primus_turbo_grouped_gemm),
+    ("kernel_type", "GEMM", perf_model.aten_mm),
+    ("kernel_type", "Quantization", perf_model.primus_turbo_quantize_fp8),
+    ("kernel_type", "Attention", perf_model.flash_attention),
+    ("kernel_type", "Linear Attention", perf_model.flash_attention),
+    ("kernel_type", "GDN Gating", perf_model.flash_attention),
+    ("kernel_type", "Rotary Embedding", perf_model.fused_rope_fwd),
+    ("kernel_type", "RMSNorm", perf_model.RMSNorm),
+    ("kernel_type", "LayerNorm", perf_model.LayerNorm),
+    ("kernel_type", "L2Norm", perf_model.LayerNorm),
+    ("kernel_type", "Normalization", perf_model.LayerNorm),
+    ("kernel_type", "Elementwise", perf_model.aten_binary_elementwise),
+    ("perf_category", "GEMM-MoE", perf_model.primus_turbo_grouped_gemm),
+    ("perf_category", "GEMM", perf_model.aten_mm),
+    ("perf_category", "Quantization", perf_model.primus_turbo_quantize_fp8),
+    ("perf_category", "SDPA", perf_model.flash_attention),
+    ("perf_category", "SDPA-GDN", perf_model.flash_attention),
+    ("perf_category", "Normalization", perf_model.LayerNorm),
+    ("perf_category", "Elementwise", perf_model.aten_binary_elementwise),
+    ("kernel_type_substr", "moe gemm", perf_model.primus_turbo_grouped_gemm),
+    ("kernel_type_substr", "attention", perf_model.flash_attention),
+    ("kernel_type_substr", "quant", perf_model.primus_turbo_quantize_fp8),
+)
+_classified_kernel_category_rule_extensions: List[Tuple[str, str, str]] = []
+_classified_kernel_perf_model_rule_extensions: List[Tuple[str, str, type]] = []
+
+
+def register_classified_kernel_category_rules(
+    rules: Iterable[Tuple[str, str, str]],
+) -> None:
+    """Register extra classify_kernel output -> category rules."""
+    _classified_kernel_category_rule_extensions.extend(rules)
+
+
+def register_classified_kernel_perf_model_rules(
+    rules: Iterable[Tuple[str, str, type]],
+) -> None:
+    """Register extra classify_kernel output -> perf model class rules."""
+    _classified_kernel_perf_model_rule_extensions.extend(rules)
+
+
+def _kernel_name_from_row(row) -> Optional[str]:
+    """Resolve GPU kernel name from kernel_details or graph-replay synthetic op name."""
+    kernel_details = row.get("kernel_details")
+    if kernel_details:
+        return kernel_details[0].get("name") or None
+    op_name = row.get("name", "")
+    if SYNTHETIC_OP_MARKER in op_name and "->" in op_name:
+        return op_name.split("->", 1)[1].rsplit(SYNTHETIC_OP_MARKER, 1)[0]
+    return None
+
+
+def _lookup_classified_kernel(
+    kernel_name: str,
+    rules: Tuple[Tuple[str, str, _ClassifiedRuleValue], ...],
+) -> Optional[_ClassifiedRuleValue]:
+    """Map classify_kernel() output to a category or perf model using ordered rules."""
+    from TraceLens.Agent.Analysis.utils.classify_kernels import classify_kernel
+
+    kt, pc, conf = classify_kernel(kernel_name)
+    if not conf:
+        return None
+
+    knl = kernel_name.lower()
+    ktl = kt.lower()
+    for kind, key, value in rules:
+        if kind == "name_substr" and key in knl:
+            return value
+        if kind == "kernel_type" and kt == key:
+            return value
+        if kind == "perf_category" and pc == key:
+            return value
+        if kind == "kernel_type_substr" and key in ktl:
+            return value
+    return None
+
+
+def _category_from_classified_kernel(kernel_name: str) -> Optional[str]:
+    rules = _CLASSIFIED_KERNEL_CATEGORY_RULES + tuple(
+        _classified_kernel_category_rule_extensions
+    )
+    category = _lookup_classified_kernel(kernel_name, rules)
+    if category is not None:
+        return category
+
+    from TraceLens.Agent.Analysis.utils.classify_kernels import classify_kernel
+
+    kt, _, conf = classify_kernel(kernel_name)
+    if conf and kt.lower().startswith("moe "):
+        return "MoE_aux"
+    return None
+
+
+def _perf_model_class_from_classified_kernel(kernel_name: str) -> Optional[type]:
+    rules = _CLASSIFIED_KERNEL_PERF_MODEL_RULES + tuple(
+        _classified_kernel_perf_model_rule_extensions
+    )
+    model_class = _lookup_classified_kernel(kernel_name, rules)
+    if model_class is not None:
+        return model_class
+
+    from TraceLens.Agent.Analysis.utils.classify_kernels import classify_kernel
+
+    kt, _, conf = classify_kernel(kernel_name)
+    if conf and kt.lower().startswith("moe "):
+        return None
+    return None
 
 
 def _kernel_name_fallback(row) -> Optional[str]:
-    kernel_details = row.get("kernel_details")
-    if not kernel_details:
+    """Category fallback for rows with GPU kernel context but no registry hit."""
+    kernel_name = _kernel_name_from_row(row)
+    if not kernel_name:
         return None
-    kernel_name = kernel_details[0].get("name", "")
-    if not kernel_name.startswith(_KERNEL_NAME_PREFIX):
+
+    if kernel_name.startswith(_KERNEL_NAME_PREFIX):
+        for needle, category in _ATEN_NATIVE_CATEGORY_RULES:
+            if needle in kernel_name:
+                return category
         return None
-    for needle, category in _KERNEL_NAME_FALLBACK_RULES:
-        if needle in kernel_name:
-            return category
-    return None
+
+    return _category_from_classified_kernel(kernel_name)
 
 
 def get_perf_model_category(perf_model_class: type, bwd: bool = False) -> Optional[str]:
@@ -383,17 +538,6 @@ def register_perf_model_matcher(matcher):
     _perf_model_matchers.append(matcher)
 
 
-def resolve_perf_model_class(name):
-    cls = op_to_perf_model_class_map.get(name)
-    if cls is not None:
-        return cls
-    for matcher in _perf_model_matchers:
-        cls = matcher(name)
-        if cls is not None:
-            return cls
-    return None
-
-
 def _match_triton_compiled(name):
     if name.startswith(("triton_poi_", "triton_red_", "triton_per_")):
         from TraceLens.PerfModel.triton_compiled_perf_model import (
@@ -410,6 +554,60 @@ OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,
     category_only_ops=CATEGORY_ONLY_OP_MAPPING,
 )
+
+def _event_has_input_dims(event):
+    from TraceLens.Trace2Tree.trace_sglang_capture_link import is_usable_capture_input_dims
+
+    return is_usable_capture_input_dims(event.get("args", {}).get("Input Dims"))
+
+
+def _perf_model_class_from_kernel_name(kernel_name: str) -> Optional[type]:
+    if kernel_name.startswith(_KERNEL_NAME_PREFIX):
+        for needle, model_class in _ATEN_NATIVE_PERF_MODEL_RULES:
+            if needle in kernel_name:
+                return model_class
+        return None
+    return _perf_model_class_from_classified_kernel(kernel_name)
+
+
+def resolve_perf_model_class(event_or_name, op_map=None):
+    """
+    Resolve a perf model class for a trace event or op name string.
+
+    Named ops use op_to_perf_model_class_map. Graph-replay synthetic ops and other
+    rows with kernel_details / parsed kernel names use kernel-based resolution.
+    Kernel-resolved models require Input Dims on the event (e.g. from a parent
+    cpu_op or a merged capture trace) until kernel-only param extraction exists.
+    """
+    if isinstance(event_or_name, str):
+        event = {"name": event_or_name}
+    else:
+        event = event_or_name
+
+    op_map = op_to_perf_model_class_map if op_map is None else op_map
+    name = event.get("name", "")
+    model_class = op_map.get(name)
+    if model_class is not None:
+        return model_class
+
+    for matcher in _perf_model_matchers:
+        model_class = matcher(name)
+        if model_class is not None:
+            return model_class
+
+    kernel_name = _kernel_name_from_row(event)
+    if kernel_name is None:
+        return None
+
+    model_class = _perf_model_class_from_kernel_name(kernel_name)
+    if model_class is None:
+        return None
+
+    if SYNTHETIC_OP_MARKER in event.get("name", "") and not _event_has_input_dims(
+        event
+    ):
+        return None
+    return model_class
 
 
 def categorize_torch_op(row):
@@ -433,7 +631,4 @@ def categorize_torch_op(row):
         Note: Backward variants and auxiliary ops (TokenPermuteMaskMap, etc.)
         are categorization-only (timing without GFLOPS or TB/s).
     """
-    return _categorize_torch_op_from_registry(
-        row,
-        OP_CATEGORY_REGISTRY,
-    )
+    return _categorize_torch_op_from_registry(row, OP_CATEGORY_REGISTRY)
