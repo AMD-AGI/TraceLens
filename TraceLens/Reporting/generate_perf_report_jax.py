@@ -5,7 +5,6 @@
 ###############################################################################
 
 import argparse, os, sys
-import json
 from typing import Optional, Dict
 import pandas as pd
 import logging
@@ -19,7 +18,11 @@ logging.basicConfig(
 
 from TraceLens.PerfModel import jax_op_mapping
 from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyzer
-from TraceLens.Reporting.reporting_utils import request_install
+from TraceLens.Reporting.reporting_utils import (
+    add_gpu_arch_cli_args,
+    request_install,
+    resolve_gpu_arch,
+)
 from TraceLens.util import TraceEventUtils
 
 
@@ -142,13 +145,15 @@ def generate_perf_report_jax(
     output_csvs_dir: Optional[str] = None,
     kernel_metadata_keyword_filters=None,
     gpu_arch_json_path: Optional[str] = None,
+    gpu_arch_platform: Optional[str] = None,
+    gpu_arch: Optional[dict] = None,
     enable_origami: bool = False,
 ) -> Dict[str, pd.DataFrame]:
-    if gpu_arch_json_path:
-        with open(gpu_arch_json_path, "r") as f:
-            gpu_arch_json = json.load(f)
-    else:
-        gpu_arch_json = None
+    gpu_arch_json = resolve_gpu_arch(
+        gpu_arch_json_path=gpu_arch_json_path,
+        gpu_arch_platform=gpu_arch_platform,
+        gpu_arch=gpu_arch,
+    )
     # Analyze trace profile
     dict_name2df = perf_analysis(
         profile_path,
@@ -221,12 +226,7 @@ def main():
         default=None,
         help="Kernel metadata keyword filters, performance analysis is computed only for the events containing the kerword in the metadata e.g. in framework name scope, e.g. --kernel_metadata_keyword_filters remat checkpoint",
     )
-    parser.add_argument(
-        "--gpu_arch_json_path",
-        type=str,
-        default=None,
-        help="Path to the GPU architecture JSON file",
-    )
+    add_gpu_arch_cli_args(parser)
     parser.add_argument(
         "--enable-origami",
         action="store_true",
@@ -242,6 +242,7 @@ def main():
         output_csvs_dir=args.output_csvs_dir,
         kernel_metadata_keyword_filters=args.kernel_metadata_keyword_filters,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        gpu_arch_platform=args.gpu_arch_platform,
         enable_origami=args.enable_origami,
     )
 

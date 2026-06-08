@@ -5,7 +5,7 @@
 ###############################################################################
 
 from collections import defaultdict
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Optional
 import TraceLens.util
 
 from ..util import TraceEventUtils, JaxProfileProcessor
@@ -25,12 +25,14 @@ class BaseTraceToTree(ABC):
         compute_end_times=True,
         linking_key: str = None,
         event_to_category: Callable[[dict], str] = None,
+        trace_metadata: Optional[Dict[str, Any]] = None,
     ):
 
         self.events = [
             {**data, TraceLens.util.TraceEventUtils.TraceKeys.UID: i}
             for i, data in enumerate(events_data)
         ]
+        self.trace_metadata = dict(trace_metadata or {})
         self.events_by_uid = {
             event[TraceLens.util.TraceEventUtils.TraceKeys.UID]: event
             for event in self.events
@@ -111,7 +113,7 @@ class BaseTraceToTree(ABC):
             cat = self.event_to_category(event)
             event["cat"] = cat
             is_cpu_or_cuda_event = cat in {"cpu_op", "cuda_runtime", "cuda_driver"}
-            is_python_event = self.event_to_category(event) == "python_function"
+            is_python_event = cat == "python_function"
             return is_cpu_or_cuda_event or (add_python_func and is_python_event)
 
         print(f"Building CPU op tree with add_python_func={add_python_func}")
@@ -139,24 +141,42 @@ class BaseTraceToTree(ABC):
             stack = dict_pidtid2stack[stack_key]
             nn_module_stack = dict_pidtid2nn_module_stack[stack_key]
 
-            # Pop the stack top while it either (a) has already ended before this
-            # event starts, or (b) would end before this event ends and therefore
-            # cannot fully contain it. Case (b) handles "event bleed" where a
-            # runtime event (e.g. hipLaunchKernel) is timestamped slightly inside
-            # a sibling CPU op but extends past it; without popping past that
-            # sibling, the event would otherwise be dropped from the tree.
+            # Pop stack entries that have already ended before this event starts.
             while stack and (
                 event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
                 >= stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
-                or event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
-                > stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
             ):
                 popped_event = stack.pop()
                 if self.event_to_category(popped_event) == "cpu_op":
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
-                # Pop from nn_module_stack if this was an nn.Module event
                 if self._is_nn_module_event(popped_event):
                     nn_module_stack.pop()
+
+            # Handle "event bleed": the event starts inside the stack top
+            # but ends after it.  If the overlap (stack[-1].t_end - event.ts)
+            # is < 1 us, this is a tiny timing overlap (e.g. hipLaunchKernel
+            # starting a few hundred ns before a sibling cpu_op finishes).
+            # Pop the sibling and attach the event under the same parent.
+            # Larger bleeds (>= 1 us) are discarded — these are typically
+            # python_function instrumentation artifacts (e.g. PyCapsule
+            # built-ins whose duration includes GPU sync time).
+            if stack and (
+                event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
+                > stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
+            ):
+                overlap_us = (
+                    stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
+                    - event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
+                )
+                overlap_tolerance_us = 1.0
+                if overlap_us < overlap_tolerance_us and len(stack) >= 2:
+                    popped_event = stack.pop()
+                    if self.event_to_category(popped_event) == "cpu_op":
+                        dict_pidtid2num_cpu_ops[stack_key] -= 1
+                    if self._is_nn_module_event(popped_event):
+                        nn_module_stack.pop()
+                else:
+                    continue
 
             # Set nn_module_stack for the current event (copy to avoid reference issues)
             if nn_module_stack:
@@ -300,6 +320,7 @@ class JaxTraceToTree(BaseTraceToTree):
         event_to_category: Callable[
             [dict], str
         ] = TraceEventUtils.prepare_event_categorizer,
+        trace_metadata: Optional[Dict[str, Any]] = None,
     ):
 
         super().__init__(
@@ -308,6 +329,7 @@ class JaxTraceToTree(BaseTraceToTree):
             compute_end_times=compute_end_times,
             linking_key=linking_key,
             event_to_category=event_to_category,
+            trace_metadata=trace_metadata,
         )
         self._preprocess_and_index_events()
         self._annotate_gpu_events_with_stream_index()
@@ -592,6 +614,7 @@ class TraceToTree(BaseTraceToTree):
         event_to_category: Callable[
             [dict], str
         ] = TraceLens.util.TraceEventUtils.default_categorizer,
+        trace_metadata: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(
             events_data,
@@ -599,6 +622,7 @@ class TraceToTree(BaseTraceToTree):
             compute_end_times=compute_end_times,
             linking_key=linking_key,
             event_to_category=event_to_category,
+            trace_metadata=trace_metadata,
         )
         self.metadata = TraceEventUtils.get_metadata(self.events)
         self._preprocess_and_index_events()
@@ -606,7 +630,7 @@ class TraceToTree(BaseTraceToTree):
 
     @staticmethod
     def default_categorizer(event: dict) -> str:
-        return event.get(TraceLens.util.TraceEventUtils.TraceKeys.Category)
+        return event["cat"]
 
     def _set_linking_key(self):
         Name = TraceLens.util.TraceEventUtils.TraceKeys.Name
@@ -651,6 +675,7 @@ class TraceToTree(BaseTraceToTree):
 
         for event in self.events:
             cat = event.get("cat")
+            event["cat"] = cat  # ensure key present for lambda e: e["cat"] fast path
 
             if cat in runtime_cats:
                 self.runtime_event_uids.append(event[UID])

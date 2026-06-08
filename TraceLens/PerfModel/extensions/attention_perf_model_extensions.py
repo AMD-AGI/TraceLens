@@ -30,6 +30,9 @@ class InferenceAttention:
     ``params.get("_no_perf")`` is true.
     """
 
+    category = "InferenceAttention"
+    bwd_category = None
+
     REQUIRED_PARAM_KEYS = (
         "B",
         "N_Q",
@@ -302,6 +305,19 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
 
 class mla_decode_fwd(InferenceAttention):
     pass
+
+
+class pseudo_mla_prefill_fwd(InferenceAttention):
+    @staticmethod
+    def get_param_details(event):
+        params = InferenceAttention.get_param_details(event)
+        if params.get("_no_perf"):
+            return params
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        if len(dims) > 2 and len(dims[2]) >= 1:
+            params["d_h_v"] = dims[2][-1]
+        return params
 
 
 class mla_tilelang_sparse_fwd(InferenceAttention):

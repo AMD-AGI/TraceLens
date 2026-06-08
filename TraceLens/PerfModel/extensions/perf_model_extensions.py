@@ -375,6 +375,9 @@ class GroupQuant(BinaryElementwise):
     Performance model for group quantization.
     """
 
+    category = "GroupQuant"
+    bwd_category = None
+
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
         self.arch = arch
@@ -449,25 +452,6 @@ class per_group_quant(GroupQuant):
         # Use first input dtype as the compute precision
         dtype = self.dtype_in1_in2_out[1] if self.dtype_in1_in2_out else None
         return torch_dtype_map(dtype) if dtype else None
-
-
-class concat_and_cache_mla(BinaryElementwise):
-    """Performance model for _C_cache_ops::concat_and_cache_mla."""
-
-    def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.param_details = self.get_param_details(event)
-
-    @staticmethod
-    def get_param_details(event):
-        pass
-
-    def flops(self):
-        pass
-
-    def bytes(self):
-        pass
 
 
 class vllm_triton_per_token_group_quant_fp8(GroupQuant):
