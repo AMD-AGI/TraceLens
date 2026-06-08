@@ -20,6 +20,7 @@ from TraceLens.Trace2Tree.trace_sglang_capture_link import (
     enrich_synthetic_ops_from_sglang_capture,
     find_decode_batch_size_for_graph_launch,
     index_decode_annotations,
+    is_usable_capture_input_dims,
     load_sglang_capture_batch_sizes,
 )
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
@@ -200,3 +201,47 @@ def test_collect_unified_perf_events_enriches_graph_synthetics(capture_folder):
         [2048, 3072],
         [16, 24],
     ]
+
+
+def test_is_usable_capture_input_dims():
+    assert is_usable_capture_input_dims([[16, 3072], [2048, 3072]])
+    assert not is_usable_capture_input_dims([[4], [4], [4], [], [], [], [], [], []])
+    assert not is_usable_capture_input_dims([[], []])
+    assert not is_usable_capture_input_dims([])
+
+
+def test_enrich_overwrites_placeholder_and_isolates_sibling_args(capture_folder):
+    """Each synthetic gets its own args; placeholder dims must not block enrichment."""
+    tree = TraceToTree(_build_replay_trace())
+    tree.build_tree(add_python_func=False)
+
+    decode_ts, decode_bs = index_decode_annotations(tree.events)
+    kernel_index = build_graph_replay_kernel_index(tree, decode_ts, decode_bs)
+    kernel_uid = next(iter(kernel_index.keys()))
+
+    placeholder = [[4], [4], [4], [], [], [], [], [], []]
+    shared_args = {"Input Dims": placeholder, "cid": 1}
+    synthetics = [
+        {
+            "name": f"hipGraphLaunch->{GEMM_KERNEL} (Synthetic Op)",
+            "args": shared_args,
+            "gpu_events": [kernel_uid],
+        },
+        {
+            "name": f"hipGraphLaunch->other_kernel (Synthetic Op)",
+            "args": shared_args,
+            "gpu_events": [999999],
+        },
+    ]
+
+    enriched = enrich_synthetic_ops_from_sglang_capture(
+        synthetics, tree, capture_folder
+    )
+    assert enriched == 1
+    assert synthetics[0]["args"]["Input Dims"] == [
+        [16, 3072],
+        [2048, 3072],
+        [16, 24],
+    ]
+    assert synthetics[1]["args"]["Input Dims"] is placeholder
+    assert synthetics[0]["args"] is not synthetics[1]["args"]

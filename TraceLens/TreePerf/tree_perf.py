@@ -375,10 +375,9 @@ class TreePerfAnalyzer:
         Includes all kernels in the event's subtree (this op and all descendants).
         Overlaps between kernels are accounted for via GPUEventAnalyser busy_time.
         """
-        _, list_kernel_uids = self.loop_and_aggregate_kernels([event])
-        if not list_kernel_uids:
+        list_kernels = self._kernels_for_perf_metrics(event)
+        if not list_kernels:
             return 0
-        list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernel_uids]
         return self.GPUEventAnalyser(list_kernels).compute_metrics()["busy_time"]
 
     @staticmethod
@@ -386,30 +385,74 @@ class TreePerfAnalyzer:
         DATA_MOVEMENT_PATTERNS = ["at::native::direct_copy_kernel_cuda", "transpose_"]
         return not any(pattern in event["name"] for pattern in DATA_MOVEMENT_PATTERNS)
 
+    def _is_off_tree_synthetic_event(self, event):
+        """True for graph-replay synthetics created in collect_unified_perf_events."""
+        uid = event.get("UID")
+        if uid is None or uid in self.tree.events_by_uid:
+            return False
+        return synthetic_op_marker in event.get("name", "")
+
+    @staticmethod
+    def _finalize_synthetic_event(synthetic, kernel):
+        """Attach per-kernel metadata for off-tree synthetic ops."""
+        synthetic["dur"] = kernel.get("dur", synthetic.get("dur"))
+        synthetic["children"] = []
+        synthetic["gpu_events"] = [kernel["UID"]]
+
+    def _kernels_for_perf_metrics(self, event, bwd=False, filter_func=None):
+        """Resolve GPU kernel events for perf metrics, including off-tree synthetics."""
+        if filter_func is None:
+            filter_func = lambda x: True
+
+        if not bwd and self._is_off_tree_synthetic_event(event):
+            kernels = []
+            for uid in event.get("gpu_events", []):
+                kernel = self.tree.events_by_uid.get(uid)
+                if not kernel:
+                    continue
+                if self.event_to_category(kernel) not in {
+                    "kernel",
+                    "gpu_memcpy",
+                    "gpu_memset",
+                }:
+                    continue
+                if filter_func(kernel):
+                    kernels.append(kernel)
+            return kernels
+
+        if bwd:
+            cpu_op_uids = self.tree.get_subtree_bwd_events(event["UID"])
+        else:
+            cpu_op_uids = [event["UID"]]
+        cpu_op_list = []
+        for uid in cpu_op_uids:
+            if uid in self.tree.events_by_uid:
+                cpu_op_list.append(self.tree.get_UID2event(uid))
+            elif uid == event.get("UID"):
+                cpu_op_list.append(event)
+        _, list_kernel_uids = self.loop_and_aggregate_kernels(
+            cpu_op_list, filter_func=filter_func
+        )
+        return [
+            self.tree.events_by_uid[uid]
+            for uid in list_kernel_uids
+            if uid in self.tree.events_by_uid
+        ]
+
     def compute_perf_metrics(
         self, event, bwd=False, non_data_mov=False, perf_model_class=None
     ):
 
         # Handle kernel aggregation
-        if bwd:
-            # Always use subtree aggregation for backward metrics
-            cpu_op_uids = self.tree.get_subtree_bwd_events(event["UID"])
-        else:
-            cpu_op_uids = [event["UID"]]
-        cpu_op_list = [self.tree.get_UID2event(uid) for uid in cpu_op_uids]
-        _, list_kernelUIDS = self.loop_and_aggregate_kernels(cpu_op_list)
-        list_kernels = [self.tree.events_by_uid[uid] for uid in list_kernelUIDS]
+        list_kernels = self._kernels_for_perf_metrics(event, bwd=bwd)
         busy_kernel_time = 0
         if len(list_kernels) > 0:
             busy_kernel_time = self.GPUEventAnalyser(list_kernels).compute_metrics()[
                 "busy_time"
             ]
-        _, list_non_data_mov_kernelUIDs = self.loop_and_aggregate_kernels(
-            cpu_op_list, filter_func=self.non_data_mov_filter
+        list_non_data_mov_kernels = self._kernels_for_perf_metrics(
+            event, bwd=bwd, filter_func=self.non_data_mov_filter
         )
-        list_non_data_mov_kernels = [
-            self.tree.events_by_uid[uid] for uid in list_non_data_mov_kernelUIDs
-        ]
         busy_non_data_mov_time = 0
         if len(list_non_data_mov_kernels) > 0:
             busy_non_data_mov_time = self.GPUEventAnalyser(
@@ -1926,19 +1969,21 @@ class TreePerfAnalyzer:
             parent_evt = self.tree.get_UID2event(parent_uid)
             for kernel in kernels:
                 synthetic = dict(parent_evt)
+                synthetic["args"] = copy.deepcopy(parent_evt.get("args") or {})
                 synthetic["UID"] = next_uid
                 next_uid += 1
                 synthetic["name"] = (
                     f"{parent_evt['name']}->{kernel['name']} (Synthetic Op)"
                 )
-                synthetic["gpu_events"] = [kernel["UID"]]
+                self._finalize_synthetic_event(synthetic, kernel)
                 collected.append(synthetic)
         for evt, parent in kernels_with_cpu_op:
             synthetic = dict(parent)
+            synthetic["args"] = copy.deepcopy(parent.get("args") or {})
             synthetic["UID"] = next_uid
             next_uid += 1
             synthetic["name"] = f"{parent['name']}->{evt['name']} (Synthetic Op)"
-            synthetic["gpu_events"] = [evt["UID"]]
+            self._finalize_synthetic_event(synthetic, evt)
             collected.append(synthetic)
 
         if self.capture_folder:

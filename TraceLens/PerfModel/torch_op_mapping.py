@@ -550,8 +550,9 @@ OP_CATEGORY_REGISTRY = build_op_category_registry(
 )
 
 def _event_has_input_dims(event):
-    dims = event.get("args", {}).get("Input Dims")
-    return isinstance(dims, list) and len(dims) > 0
+    from TraceLens.Trace2Tree.trace_sglang_capture_link import is_usable_capture_input_dims
+
+    return is_usable_capture_input_dims(event.get("args", {}).get("Input Dims"))
 
 
 def _perf_model_class_from_kernel_name(kernel_name: str) -> Optional[type]:

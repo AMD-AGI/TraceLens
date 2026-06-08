@@ -14,6 +14,7 @@ Capture traces are stored as ``bs_<N>_rank0.json.gz`` files. Replay kernel index
 
 from __future__ import annotations
 
+import copy
 import gzip
 import json
 import logging
@@ -33,6 +34,13 @@ CAPTURE_FILE_RE = re.compile(r"^bs_(\d+)_rank0\.json\.gz$")
 DEFAULT_CAPTURE_OFFSET = 2
 MAX_OFFSET_SEARCH = 6
 DECODE_ANNOTATION_WINDOW_US = 100_000
+
+
+def is_usable_capture_input_dims(dims) -> bool:
+    """True when *dims* contains at least one rank-2+ tensor shape."""
+    if not isinstance(dims, list) or not dims:
+        return False
+    return any(isinstance(dim, (list, tuple)) and len(dim) >= 2 for dim in dims)
 
 
 def load_sglang_capture_batch_sizes(capture_folder: str) -> List[int]:
@@ -303,7 +311,7 @@ def enrich_synthetic_ops_from_sglang_capture(
     for event in collected:
         if synthetic_op_marker not in event.get("name", ""):
             continue
-        if event.get("args", {}).get("Input Dims"):
+        if is_usable_capture_input_dims(event.get("args", {}).get("Input Dims")):
             continue
 
         parent_name = event.get("name", "").split("->", 1)[0]
@@ -329,10 +337,14 @@ def enrich_synthetic_ops_from_sglang_capture(
         capture_args = linker.capture_args_for_replay_index(
             padded_bs, replay_idx, replay_kernels
         )
-        if not capture_args:
+        if not capture_args or not is_usable_capture_input_dims(
+            capture_args.get("Input Dims")
+        ):
             continue
 
-        event.setdefault("args", {}).update(capture_args)
+        event_args = copy.deepcopy(event.get("args") or {})
+        event_args.update(capture_args)
+        event["args"] = event_args
         enriched += 1
 
     if enriched:
