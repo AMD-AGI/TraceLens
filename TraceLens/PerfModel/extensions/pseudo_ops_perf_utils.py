@@ -70,10 +70,15 @@ def get_pseudo_op_mappings():
         "aiter::gemm_a8w8_bpreshuffle_ck": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
+        "aiter::_gemm_a16w16_asm": perf_model_extensions.gemm_a16w16_atomic_,
         "sglang_profiler::gemm_kernels_flydsl_hgemm": perf_model_extensions.gemm_a16w16_atomic_,
+        "aiter::gemm_afp4wfp4_": perf_model_extensions.gemm_afp4wfp4,
         "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant": perf_model_extensions.batched_gemm_a8w8,
         ## Quantization ops
         "vllm::triton_per_token_group_quant_fp8": perf_model_extensions.vllm_triton_per_token_group_quant_fp8,
+        "sglang_profiler::fused_mxfp4_quant_fused_flatten_mxfp4_quant": perf_model_extensions.fused_flatten_mxfp4_quant,
+        ## RoPE ops
+        "aiter::rope_cached_positions_2c_fwd_impl": perf_model_extensions.aiter_rope_cached_positions_2c_fwd_impl,
         ## Activation ops
         "aiter::silu_and_mul": perf_model_extensions.aiter_silu_and_mul,
         "_C::silu_and_mul": perf_model_extensions.aiter_silu_and_mul,
@@ -92,6 +97,7 @@ def get_pseudo_op_mappings():
         "vllm::rocm_aiter_rmsnorm_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_fp8_group_quant,
         "vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant,
         "vllm::rocm_aiter_triton_add_rmsnorm_pad": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
+        "sglang_profiler::fused_mxfp4_quant_fused_rms_mxfp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
         ## Collective ops
         "aiter::fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm,
         "_C_custom_ar::all_reduce": custom_collectives_perf_model_extensions.custom_ar_all_reduce,
@@ -106,3 +112,24 @@ def get_pseudo_op_mappings():
     }
 
     return pseudo_op_mappings
+
+
+def get_pseudo_op_category_only_mappings():
+    """
+    Return a dictionary mapping pseudo-op names to category labels only.
+
+    These ops do not have a full performance model class but should still be
+    classified (and not bucketed under "other") for category-level analysis.
+
+    Returns:
+        dict: Mapping of op names to category strings.
+    """
+
+    return {
+        # MoE sorting / permutation auxiliary kernels.
+        # Reference: aiter/aiter/ops/triton/moe_op_mxfp4.py (mxfp4_moe_sort_hip,
+        # fused_dynamic_mxfp4_quant_moe_sort_hip). Memory-bound shuffle/sort ops
+        # with negligible FLOPs; we only classify them.
+        "aiter::mxfp4_moe_sort_hip": "MoE_aux",
+        "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": "MoE_aux",
+    }
