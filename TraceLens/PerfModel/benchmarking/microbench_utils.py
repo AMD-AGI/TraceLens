@@ -7,12 +7,11 @@
 """Shared utilities for the microbenchmark scripts.
 
 - resolve_physical_device: logical torch index -> physical id used by smi tools.
-- check_gpu_idle: pre-flight idle check via amd-smi or nvidia-smi.
+- check_gpu_idle: pre-flight idle check via amdsmi or nvidia-smi.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -20,7 +19,7 @@ from typing import Any, Tuple
 
 
 def resolve_physical_device(logical: int) -> Tuple[int, str]:
-    """Map a logical torch device index to the physical id used by amd-smi /
+    """Map a logical torch device index to the physical id used by amdsmi /
     nvidia-smi via HIP/ROCR/CUDA_VISIBLE_DEVICES. Returns (phys, source)."""
     for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
         val = os.environ.get(var, "").strip()
@@ -40,24 +39,11 @@ def resolve_physical_device(logical: int) -> Tuple[int, str]:
     return logical, "identity"
 
 
-def _as_dict(obj: Any) -> dict:
-    return obj if isinstance(obj, dict) else {}
-
-
-def _metric_value(block: Any, default: int = 0) -> int:
-    """Extract an integer metric from an amd-smi ``{value, unit}`` block."""
-    if not isinstance(block, dict):
-        return default
-    value = block.get("value", default)
+def _int_metric(value: Any, default: int = 0) -> int:
+    """Coerce an amdsmi metric to int; treat ``N/A`` and non-numeric as *default*."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return default
     return int(value)
-
-
-def _load_json(stdout: str) -> Any:
-    if not stdout.strip():
-        return None
-    return json.loads(stdout)
 
 
 def _check_amd_gpu_idle(
@@ -67,63 +53,57 @@ def _check_amd_gpu_idle(
     util_threshold: int,
     mem_threshold_mib: int,
 ) -> Tuple[bool, str]:
-    metric = subprocess.run(
-        ["amd-smi", "metric", "-g", str(phys), "-u", "-m", "--json"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    metric_data = _load_json(metric.stdout)
-    if not isinstance(metric_data, dict):
-        return True, f"amd-smi {dev_tag}: unexpected metric JSON; check skipped"
+    import amdsmi
 
-    gpu_data = metric_data.get("gpu_data") or []
-    if not gpu_data or not isinstance(gpu_data[0], dict):
-        return True, f"amd-smi {dev_tag}: no gpu_data; check skipped"
-
-    gpu = gpu_data[0]
-    usage = _as_dict(gpu.get("usage"))
-    mem_usage = _as_dict(gpu.get("mem_usage"))
-    util = _metric_value(usage.get("gfx_activity"))
-    mem_mib = _metric_value(mem_usage.get("used_vram"))
-
-    proc = subprocess.run(
-        ["amd-smi", "process", "-g", str(phys), "-G", "--json"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    proc_data = _load_json(proc.stdout)
-    other_pids: list[int] = []
-    if isinstance(proc_data, list) and proc_data:
-        gpu_proc = _as_dict(proc_data[0])
-        for entry in gpu_proc.get("process_list") or []:
-            info = _as_dict(
-                entry.get("process_info") if isinstance(entry, dict) else None
+    amdsmi.amdsmi_init()
+    try:
+        devices = amdsmi.amdsmi_get_processor_handles()
+        if phys < 0 or phys >= len(devices):
+            return (
+                True,
+                f"amdsmi {dev_tag}: physical id {phys} out of range "
+                f"(found {len(devices)} GPU(s)); check skipped",
             )
-            pid = info.get("pid")
-            if pid is not None and str(pid) != str(os.getpid()):
+
+        device = devices[phys]
+        activity = amdsmi.amdsmi_get_gpu_activity(device)
+        util = _int_metric(activity.get("gfx_activity"))
+
+        vram = amdsmi.amdsmi_get_gpu_vram_usage(device)
+        mem_mib = _int_metric(vram.get("vram_used"))
+
+        other_pids: list[int] = []
+        for proc in amdsmi.amdsmi_get_gpu_process_list(device):
+            if not isinstance(proc, dict):
+                continue
+            pid = proc.get("pid")
+            if pid is not None and int(pid) != os.getpid():
                 other_pids.append(int(pid))
 
-    if util > util_threshold or mem_mib > mem_threshold_mib or other_pids:
-        return False, (
-            f"amd-smi {dev_tag}: util={util}% mem={mem_mib}MiB "
-            f"other_pids={other_pids}"
-        )
-    return True, f"amd-smi {dev_tag}: idle (util={util}% mem={mem_mib}MiB)"
+        if util > util_threshold or mem_mib > mem_threshold_mib or other_pids:
+            return False, (
+                f"amdsmi {dev_tag}: util={util}% mem={mem_mib}MiB "
+                f"other_pids={other_pids}"
+            )
+        return True, f"amdsmi {dev_tag}: idle (util={util}% mem={mem_mib}MiB)"
+    finally:
+        amdsmi.amdsmi_shut_down()
 
 
 def check_gpu_idle(
     device: int, *, util_threshold: int = 5, mem_threshold_mib: int = 256
 ) -> Tuple[bool, str]:
-    """Pre-flight idle check via amd-smi or nvidia-smi. Returns (is_idle, msg).
-    Skipped (returns True) if neither tool is on PATH."""
+    """Pre-flight idle check via amdsmi or nvidia-smi. Returns (is_idle, msg).
+    Skipped (returns True) if neither library/tool is available."""
     phys, src = resolve_physical_device(device)
     dev_tag = f"logical {device} -> physical {phys} (via {src})"
 
-    if shutil.which("amd-smi"):
+    try:
+        import amdsmi  # noqa: F401
+    except ImportError:
+        amdsmi = None
+
+    if amdsmi is not None:
         try:
             return _check_amd_gpu_idle(
                 phys,
@@ -132,7 +112,7 @@ def check_gpu_idle(
                 mem_threshold_mib=mem_threshold_mib,
             )
         except Exception as e:
-            return True, f"amd-smi check skipped ({e})"
+            return True, f"amdsmi check skipped ({e})"
 
     if shutil.which("nvidia-smi"):
         try:
@@ -177,4 +157,4 @@ def check_gpu_idle(
         except Exception as e:
             return True, f"nvidia-smi check skipped ({e})"
 
-    return True, "no amd-smi/nvidia-smi on PATH; skipping idle check"
+    return True, "no amdsmi/nvidia-smi available; skipping idle check"
