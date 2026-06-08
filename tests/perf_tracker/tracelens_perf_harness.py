@@ -136,7 +136,7 @@ def get_tracelens_version():
 
 
 def get_commit_sha():
-    """Get the current git commit SHA."""
+    """Get the current git commit SHA, warning if it cannot be determined."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -144,9 +144,16 @@ def get_commit_sha():
             text=True,
             cwd=PROJECT_ROOT,
         )
-        return result.stdout.strip() if result.returncode == 0 else "unknown"
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
     except Exception:
-        return "unknown"
+        pass
+
+    print(
+        "Warning: could not determine commit SHA."
+        "commit SHA will be set to 'unknown'."
+    )
+    return "unknown"
 
 
 def build_metadata():
