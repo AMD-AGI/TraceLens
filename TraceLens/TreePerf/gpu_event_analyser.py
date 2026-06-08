@@ -80,6 +80,8 @@ class GPUEventAnalyser:
         The default implementation is for PyTorch json trace format.
         Inherit the class and reimplement this method for your profile format.
         """
+        if hasattr(self, "_gpu_event_lists_cache"):
+            return self._gpu_event_lists_cache
 
         # note all events are not gpu events
         # the events list contains gpu events as well as host side events
@@ -196,12 +198,13 @@ class GPUEventAnalyser:
 
                     active_uids.add(uid)
 
-        return {
+        self._gpu_event_lists_cache = {
             GPUEventAnalyser.all_gpu_key: gpu_events,
             GPUEventAnalyser.computation_key: comp_events,
             GPUEventAnalyser.communication_key: comm_events,
             GPUEventAnalyser.memcpy_key: memcpy_events,
         }
+        return self._gpu_event_lists_cache
 
     @staticmethod
     def verify_dict_gpu_event_lists(dict_gpu_event_lists):
