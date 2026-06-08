@@ -175,7 +175,7 @@ For a one-off local check on a single trace without pushing metrics:
 
 ```bash
 python tests/perf_tracker/tracelens_perf_harness.py \
-    --trace-file ~/traces/my_trace.json.gz \
+    --trace-file traces/my_trace.json.gz \
     --trace-id my_trace \
     --output-dir /tmp/perf_check
 cat /tmp/perf_check/timing.json
