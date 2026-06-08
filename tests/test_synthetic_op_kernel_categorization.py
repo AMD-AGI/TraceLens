@@ -61,11 +61,30 @@ def test_graph_parent_name_alone_would_be_other():
     assert categorize_torch_op(row) == "other"
 
 
-def test_unmapped_synthetic_kernel_falls_back_to_other():
+def test_fwd_grouped_kernel_stage1_categorizes_as_sdpa():
     row = _synthetic_row("_fwd_grouped_kernel_stage1")
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        assert categorize_torch_op(row) == "other"
+    assert categorize_torch_op(row) == "SDPA_fwd"
+
+
+def test_grouped_topk_categorizes_as_moe_aux():
+    row = _synthetic_row(
+        "void aiter::grouped_topk_kernel<float, float __vector(4), 1, true, true, false>"
+    )
+    assert categorize_torch_op(row) == "MoE_aux"
+
+
+def test_store_kvcache_categorizes_as_inference_attention():
+    row = _synthetic_row(
+        "void (anonymous namespace)::store_kvcache<256l, 1, false, long>"
+    )
+    assert categorize_torch_op(row) == "InferenceAttention"
+
+
+def test_triton_poi_fused_categorizes_as_elementwise():
+    row = _synthetic_row(
+        "triton_poi_fused_add_bitwise_and_bitwise_not_bitwise_or_ge_lt_mul_sub_0"
+    )
+    assert categorize_torch_op(row) == "elementwise"
 
 
 def test_cuda_graph_launch_prefix():

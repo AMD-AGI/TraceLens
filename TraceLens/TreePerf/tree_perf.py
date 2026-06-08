@@ -2018,10 +2018,6 @@ class TreePerfAnalyzer:
                         linked_perf_model_class, bwd=True
                     )
 
-            op_category = self.op_categorizer(event)
-            if not has_own_perf_model and linked_bwd_category is not None:
-                op_category = linked_bwd_category
-
             if event.get("overlap_pct") is None and event.get("gpu_events"):
                 kernels = [
                     self.tree.get_UID2event(uid)
@@ -2032,6 +2028,35 @@ class TreePerfAnalyzer:
                 ]
                 if kernels:
                     self._compute_overlap_info(event, kernels)
+
+            kernel_details = None
+            if include_kernel_details:
+                gpu_event_uids = event.get("gpu_events", [])
+                kernel_details = []
+                for gpu_uid in gpu_event_uids:
+                    gpu_event = self.tree.get_UID2event(gpu_uid)
+                    if gpu_event and self.event_to_category(gpu_event) in {
+                        "kernel",
+                        "gpu_memcpy",
+                        "gpu_memset",
+                    }:
+                        kernel_details.append(
+                            {
+                                "name": gpu_event.get("name"),
+                                "dur": gpu_event.get("dur"),
+                                "stream": gpu_event.get("args", {}).get("stream"),
+                                "gpu_op_uid": gpu_event.get("UID"),
+                            }
+                        )
+                kernel_details = kernel_details if kernel_details else None
+
+            categorizer_row = event
+            if kernel_details and not event.get("kernel_details"):
+                categorizer_row = {**event, "kernel_details": kernel_details}
+
+            op_category = self.op_categorizer(categorizer_row)
+            if not has_own_perf_model and linked_bwd_category is not None:
+                op_category = linked_bwd_category
 
             row = {
                 "name": event.get("name"),
@@ -2064,26 +2089,8 @@ class TreePerfAnalyzer:
                 row["Input Strides"] = list_to_tuple(args.get("Input Strides"))
                 row["Concrete Inputs"] = list_to_tuple(args.get("Concrete Inputs"))
 
-            # Add kernel details from gpu_events
             if include_kernel_details:
-                gpu_event_uids = event.get("gpu_events", [])
-                kernel_details = []
-                for gpu_uid in gpu_event_uids:
-                    gpu_event = self.tree.get_UID2event(gpu_uid)
-                    if gpu_event and self.event_to_category(gpu_event) in {
-                        "kernel",
-                        "gpu_memcpy",
-                        "gpu_memset",
-                    }:
-                        kernel_details.append(
-                            {
-                                "name": gpu_event.get("name"),
-                                "dur": gpu_event.get("dur"),
-                                "stream": gpu_event.get("args", {}).get("stream"),
-                                "gpu_op_uid": gpu_event.get("UID"),
-                            }
-                        )
-                row["kernel_details"] = kernel_details if kernel_details else None
+                row["kernel_details"] = kernel_details
 
             # Add perf metrics if available
             perf_cols = [

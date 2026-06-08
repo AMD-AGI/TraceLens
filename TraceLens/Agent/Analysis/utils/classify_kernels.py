@@ -60,8 +60,10 @@ KERNEL_TYPE_RULES = [
     (r"(?i)fmha[Ss]m\d+|fmhaSm100f", "Attention (NVIDIA fmha)", 20),
     (r"(?i)paged_attention|PagedAttention", "Attention (paged)", 20),
     (r"(?i)flash_attn|flash_fwd", "Attention (flash)", 20),
+    (r"(?i)_fwd_grouped_kernel_stage1|_fwd_kernel_stage2", "Attention (flash)", 20),
     (r"(?i)reduce_segments", "Attention Reduce", 20),
-    (r"(?i)reshape_and_cache_flash|reshape_and_cache", "KV Cache Store", 20),
+    (r"(?i)reshape_and_cache_flash|reshape_and_cache|store_kvcache", "KV Cache Store", 20),
+    (r"(?i)grouped_topk_kernel", "MoE TopK", 20),
     # ---- Linear attention kernels (priority 20) ----
     (r"(?i)chunk_gated_delta_rule_fwd", "Linear Attention (chunk delta)", 20),
     (r"(?i)chunk_fwd_kernel_o", "Linear Attention (chunk fwd)", 20),
@@ -137,9 +139,11 @@ KERNEL_TYPE_RULES = [
     (r"(?i)fmha[Ss]m\d+|fmhaSm100f", "Attention", 20),
     (r"(?i)paged_attention|PagedAttention", "Attention", 20),
     (r"(?i)flash_attn|flash_fwd", "Attention", 20),
+    (r"(?i)_fwd_grouped_kernel_stage1|_fwd_kernel_stage2", "Attention", 20),
     (r"(?i)reduce_segments", "Attention", 20),
     # ---- Anchor: KV Cache Store (priority 20) ----
-    (r"(?i)reshape_and_cache_flash|reshape_and_cache", "KV Cache Store", 20),
+    (r"(?i)reshape_and_cache_flash|reshape_and_cache|store_kvcache", "KV Cache Store", 20),
+    (r"(?i)grouped_topk_kernel", "MoE Routing", 20),
     # ---- Linear attention (priority 20) ----
     # Distinct anchor: identifies linear-attention blocks during alignment.
     (r"(?i)chunk_gated_delta_rule_fwd", "Linear Attention", 20),
@@ -161,7 +165,7 @@ KERNEL_TYPE_RULES = [
     # ---- Activation / misc elementwise (priority 5-20) ----
     (r"(?i)act_and_mul_kernel.*silu_kernel", "Elementwise", 20),
     (r"(?i)embedding", "Elementwise", 20),
-    (r"(?i)gather_kernel|vectorized_gather", "Elementwise", 20),
+    (r"(?i)gather_kernel|vectorized_gather|indexSelectSmallIndex", "Elementwise", 20),
     (r"(?i)per_token_group_quant|dynamic_per_group_scaled_quant", "Quantization", 18),
     (r"(?i)silu_and_mul|silu_mul|SiluAndMul", "Elementwise", 18),
     (r"(?i)fused_mul_sigmoid", "Elementwise", 18),
@@ -197,9 +201,9 @@ KERNEL_TYPE_RULES = [
     # ---- Quantization catch-all (priority 4) ----
     (r"(?i)quant", "Quantization", 4),
     # ---- Triton / generic catch-alls (lowest priority) ----
-    (r"(?i)triton_poi_fused", "Elementwise", 3),
-    (r"(?i)triton_red_fused", "Elementwise", 3),
-    (r"(?i)triton_per_fused", "Elementwise", 3),
+    (r"(?i)triton_poi_fused", "Elementwise", 8),
+    (r"(?i)triton_red_fused", "Elementwise", 8),
+    (r"(?i)triton_per_fused", "Elementwise", 8),
     (r"(?i)\bnorm\b", "Normalization", 1),
     (r"(?i)rocprim|hipcub", "Elementwise", 1),
     (r"(?i)cub::DeviceScan|DeviceRadixSort|DeviceReduce", "Elementwise", 1),
