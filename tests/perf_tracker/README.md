@@ -11,7 +11,7 @@ It runs the full TraceLens pipeline, extracting runtime metrics, and optionally 
 
 ## Installation
 
-The harness requires `pyyaml`. For OTLP emission it also needs the OpenTelemetry
+The harness requires `pyyaml`. For emission to a Grafana endpoint it also needs the OpenTelemetry
 SDK packages:
 
 ```bash
@@ -36,7 +36,7 @@ By default the trace ID is derived from the filename stem. Override it with
 ```bash
 python tests/perf_tracker/tracelens_perf_harness.py \
     --trace-file /path/to/trace.json.gz \
-    --trace-id my_model_run \
+    --trace-id trace1 \
     --output-dir ./perf_results
 ```
 
@@ -168,7 +168,7 @@ python tests/perf_tracker/tracelens_perf_harness.py \
 cat ./perf_results_$(date +%Y%m%d)/timing.json | python -m json.tool
 
 # 3. Drill into a slow trace with snakeviz (pip install snakeviz)
-snakeviz ./perf_results_$(date +%Y%m%d)/my_model_a_profile.prof
+snakeviz ./perf_results_$(date +%Y%m%d)/trace1_profile.prof
 ```
 
 For a one-off local check on a single trace without pushing metrics:
