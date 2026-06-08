@@ -168,7 +168,8 @@ class BaseTraceToTree(ABC):
                     stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
                     - event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
                 )
-                if overlap_us < 1.0 and len(stack) >= 2:
+                overlap_tolerance_us = 1.0
+                if overlap_us < overlap_tolerance_us and len(stack) >= 2:
                     popped_event = stack.pop()
                     if self.event_to_category(popped_event) == "cpu_op":
                         dict_pidtid2num_cpu_ops[stack_key] -= 1
