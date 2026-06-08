@@ -68,6 +68,8 @@ def get_pseudo_op_mappings():
         "aiter::gfx950_a8w8_blockscale_asm": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::gemm_a8w8_ck": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::gemm_a8w8_bpreshuffle_ck": perf_model_extensions.gemm_a8w8_blockscale,
+        "aiter::gemm_a8w8_bpreshuffle": perf_model_extensions.gemm_a8w8_blockscale,
+        "vllm::_rocm_aiter_preshuffled_per_token_w8a8_gemm": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
         "aiter::_gemm_a16w16_asm": perf_model_extensions.gemm_a16w16_atomic_,
@@ -85,8 +87,6 @@ def get_pseudo_op_mappings():
         "sgl_kernel::silu_and_mul": perf_model_extensions.sgl_kernel_silu_and_mul,
         "aiter::gelu_and_mul": perf_model_extensions.aiter_gelu_and_mul,
         "aiter::gelu_tanh_and_mul": perf_model_extensions.aiter_gelu_tanh_and_mul,
-        ## MoE ops
-        ##"aiter::moe_sorting_fwd": perf_model_extensions.aiter_moe_sorting_fwd,
         ## RMSNorm ops
         "aiter::rms_norm": rmsnorm_perf_model_extensions.aiter_rms_norm,
         "aiter::rmsnorm": rmsnorm_perf_model_extensions.aiter_rmsnorm,
@@ -109,6 +109,7 @@ def get_pseudo_op_mappings():
         "_C_custom_ar::qr_all_reduce": custom_collectives_perf_model_extensions.custom_ar_qr_all_reduce,
         ## GDN attention ops
         "vllm::gdn_attention_core": attention_perf_model_extensions.gdn_attention_core,
+        "aiter::linear_attention_with_output_base": attention_perf_model_extensions.gdn_attention_core,
     }
 
     return pseudo_op_mappings
