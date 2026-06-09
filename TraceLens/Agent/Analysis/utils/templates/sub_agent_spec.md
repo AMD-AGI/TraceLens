@@ -185,9 +185,9 @@ inside `## Detailed Analysis` blocks.
 - **Operation**: `operations[i].name`. Bare op name only.
 - **Args (T1)**: `operations[i].args`. Pre-rendered shape/dtype string, already joined with `<br>` — paste verbatim. `—` when absent.
 - **Trace 1 Time (ms)**: `operations[i].time_ms`
-- **Trace 2 Time (ms)**: `operations[i].t2_time_ms`. `—` when absent.
+- **Trace 2 Time (ms)**: `operations[i].efficiency.t2_time_ms`. `—` when absent.
 - **Count (T1/T2)**: T1 = `operations[i].count`; T2 = `operations[i].count_trace2`. Format `T1 / T2` (use `—` for missing T2).
-- **Difference (ms)**: `operations[i].difference_ms`. `—` when absent.
+- **Difference (ms)**: `operations[i].efficiency.difference_ms`. `—` when absent.
 - **FLOPS/Byte (T1)**: `operations[i].efficiency.flops_per_byte`
 - **Bound (T1)**: `operations[i].efficiency.bound_type` with a `-bound` suffix
 
