@@ -19,6 +19,25 @@ from typing import List
 import pandas as pd
 
 
+def _category_roofline_time_fraction(category_data_dir: str, category: str) -> float:
+    """Fraction of category GPU time with a computed roofline efficiency."""
+    fpath = os.path.join(category_data_dir, f"{category}_metrics.json")
+    if not os.path.isfile(fpath):
+        return 0.0
+    with open(fpath) as handle:
+        metrics = json.load(handle)
+    total_ms = float(metrics.get("total_time_ms") or 0)
+    if total_ms <= 0:
+        return 0.0
+    covered_ms = 0.0
+    for op in metrics.get("operations") or []:
+        eff = op.get("efficiency") or {}
+        if eff.get("efficiency_percent") is None:
+            continue
+        covered_ms += float(op.get("time_ms") or 0)
+    return covered_ms / total_ms
+
+
 def load_manifest(output_dir: str) -> dict:
     """Load and return the category manifest JSON from output_dir."""
     manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
@@ -290,6 +309,12 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                     "impact_score": rec["impact_score"],
                     "impact_score_low": rec["impact_score_low"],
                     "impact_score_high": rec["impact_score_high"],
+                    "roofline_time_fraction": round(
+                        _category_roofline_time_fraction(
+                            category_data_dir, rec["category"]
+                        ),
+                        4,
+                    ),
                     "source": "findings_rollup",
                 }
             )
@@ -325,6 +350,12 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                     "display_name": entry["display_name"],
                     "impact_score": None,
                     "gpu_kernel_time_ms": entry["gpu_kernel_time_ms"],
+                    "roofline_time_fraction": round(
+                        _category_roofline_time_fraction(
+                            category_data_dir, entry["category"]
+                        ),
+                        4,
+                    ),
                     "source": "manifest_fallback",
                 }
             )

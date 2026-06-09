@@ -707,5 +707,136 @@ class gdn_attention_core(InferenceAttention):
         dtype = self.param_details.get("dtype_Q", None)
         return torch_dtype_map(dtype) if dtype else None
 
+
+def _parse_graph_attention_head_config(event):
+    """Parse ``[seq, num_heads, head_dim]`` from Concrete Inputs when present."""
+    import ast
+
+    for raw in event.get("args", {}).get("Concrete Inputs") or []:
+        if not isinstance(raw, str) or not raw.startswith("["):
+            continue
+        try:
+            vals = ast.literal_eval(raw)
+        except (SyntaxError, ValueError):
+            continue
+        if isinstance(vals, (list, tuple)) and len(vals) >= 3:
+            heads = int(vals[1])
+            head_dim = int(vals[2])
+            if heads > 0 and head_dim > 0:
+                return heads, head_dim
+    return None, None
+
+
+class graph_decode_attention_kernel:
+    """
+    Graph-replay decode/grouped attention (``_fwd_grouped_kernel_stage1``,
+    ``_fwd_kernel_stage2``).
+
+    Capture traces often record only ``(num_tokens, hidden)`` plus a head-config
+    vector in Concrete Inputs (e.g. ``[-1, 12, 128]``).
+    """
+
+    category = "SDPA_fwd"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        from TraceLens.PerfModel.perf_model import SDPA
+
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self._sdpa = SDPA.__new__(SDPA)
+        self._sdpa.param_details = self.param_details
+        (
+            self._sdpa.B,
+            self._sdpa.N_Q,
+            self._sdpa.H_Q,
+            self._sdpa.N_KV,
+            self._sdpa.H_KV,
+            self._sdpa.d_h_qk,
+            self._sdpa.d_h_v,
+        ) = (
+            self.param_details[key]
+            for key in [
+                "B",
+                "N_Q",
+                "H_Q",
+                "N_KV",
+                "H_KV",
+                "d_h_qk",
+                "d_h_v",
+            ]
+        )
+        self._sdpa.d_h = self._sdpa.d_h_qk
+
+    @staticmethod
+    def get_param_details(event):
+        from TraceLens.PerfModel.perf_model import SDPA
+
+        args = event.get("args", {})
+        dims = args.get("Input Dims") or []
+        if not dims or not isinstance(dims[0], (list, tuple)) or len(dims[0]) < 2:
+            raise ValueError(
+                f"graph_decode_attention_kernel needs rank-2 Input Dims[0], got {dims}"
+            )
+
+        num_tokens, hidden = int(dims[0][0]), int(dims[0][1])
+        num_heads, head_dim = _parse_graph_attention_head_config(event)
+        if num_heads is None:
+            head_dim = 128 if hidden % 128 == 0 else max(hidden // 12, 1)
+            num_heads = max(hidden // head_dim, 1)
+
+        dtype = args.get("Input type", ["c10::Half"])[0]
+        if dtype in ("ScalarList", "Scalar", ""):
+            dtype = "c10::Half"
+
+        return {
+            "B": num_tokens,
+            "N_Q": 1,
+            "H_Q": num_heads,
+            "N_KV": 512,
+            "H_KV": num_heads,
+            "d_h_qk": head_dim,
+            "d_h_v": head_dim,
+            "causal": False,
+            "dtype_A_B": (dtype, dtype),
+        }
+
+    def flops(self):
+        from TraceLens.PerfModel.perf_model import SDPA
+
+        return SDPA.flops_func(
+            self.param_details["B"],
+            self.param_details["N_Q"],
+            self.param_details["H_Q"],
+            self.param_details["N_KV"],
+            self.param_details["H_KV"],
+            self.param_details["d_h_qk"],
+            self.param_details["d_h_v"],
+            self.param_details["causal"],
+        )
+
+    def bytes(self, bytes_per_element=2):
+        from TraceLens.PerfModel.perf_model import SDPA
+
+        dtype = self.param_details.get("dtype_A_B", ("c10::Half",))[0]
+        bpe = name2bpe(dtype) or bytes_per_element
+        return SDPA.bytes_func(
+            self.param_details["B"],
+            self.param_details["N_Q"],
+            self.param_details["H_Q"],
+            self.param_details["N_KV"],
+            self.param_details["H_KV"],
+            self.param_details["d_h_qk"],
+            self.param_details["d_h_v"],
+            self.param_details["causal"],
+            bpe,
+        )
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_A_B", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
     def get_maf_type(self):
         return "matrix"

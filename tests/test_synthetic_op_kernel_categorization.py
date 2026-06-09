@@ -146,9 +146,159 @@ def test_synthetic_moe_gemm_resolves_ck_kernel_with_stage2_dims():
     from TraceLens.PerfModel.extensions import moe_perf_model_extensions
 
     assert (
-        resolve_perf_model_class(event)
-        is moe_perf_model_extensions.ck_kernel_moe_gemm
+        resolve_perf_model_class(event) is moe_perf_model_extensions.ck_kernel_moe_gemm
     )
     pm = moe_perf_model_extensions.ck_kernel_moe_gemm(event=event)
     assert pm.flops() > 0
     assert pm.bytes() > 0
+
+
+def test_synthetic_rmsnorm_serial_resolves_with_scalarlist_dtype():
+    event = {
+        "name": "hipGraphLaunch->rmsnorm_sumsq_kernel_serial (Synthetic Op)",
+        "args": {
+            "Input Dims": [[4, 256], [256], ()],
+            "Input type": ["ScalarList", "Scalar", "", "", "Scalar", ""],
+            "Concrete Inputs": ["[8]", "6", "", "", "False", ""],
+        },
+        "kernel_details": [{"name": "rmsnorm_sumsq_kernel_serial"}],
+    }
+    from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions
+
+    assert (
+        resolve_perf_model_class(event)
+        is rmsnorm_perf_model_extensions.aiter_rmsnorm_sumsq_serial
+    )
+    pm = rmsnorm_perf_model_extensions.aiter_rmsnorm_sumsq_serial(event=event)
+    assert pm.bpe_in == 2
+    assert pm.flops() > 0
+    assert pm.bytes() > 0
+
+
+def test_synthetic_add_rmsnorm_quant_resolves_with_scalarlist_dtype():
+    event = {
+        "name": "hipGraphLaunch->void aiter::add_rmsnorm_quant_kernel<half, half, ...> (Synthetic Op)",
+        "args": {
+            "Input Dims": [[4, 3072], [4, 3072], [3072], (), ()],
+            "Input type": ["ScalarList", "Scalar", "", "", ""],
+            "Concrete Inputs": ["[0]", "6", "", "", ""],
+        },
+        "kernel_details": [{"name": "void aiter::add_rmsnorm_quant_kernel"}],
+    }
+    from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions
+
+    assert (
+        resolve_perf_model_class(event)
+        is rmsnorm_perf_model_extensions.aiter_add_rmsnorm_quant_graph
+    )
+    pm = rmsnorm_perf_model_extensions.aiter_add_rmsnorm_quant_graph(event=event)
+    assert pm.bpe_in == 2
+    assert pm.flops() > 0
+    assert pm.bytes() > 0
+
+
+def test_synthetic_moe_sorting_resolves_perf_model():
+    event = {
+        "name": "hipGraphLaunch->void ck_tile::MoeSortingKernel<...> (Synthetic Op)",
+        "args": {
+            "Input Dims": [
+                [4, 8],
+                [4, 8],
+                [8216],
+                [8216],
+                [257],
+                [2],
+                [4, 3072],
+                (),
+                (),
+                (),
+                (),
+                (),
+            ],
+            "Input type": [
+                "int",
+                "float",
+                "int",
+                "float",
+                "int",
+                "int",
+                "c10::Half",
+                "Scalar",
+                "Scalar",
+                "",
+                "",
+                "Scalar",
+            ],
+        },
+        "kernel_details": [{"name": "void ck_tile::MoeSortingKernel"}],
+    }
+    from TraceLens.PerfModel.extensions import moe_aux_perf_model_extensions
+
+    assert (
+        resolve_perf_model_class(event)
+        is moe_aux_perf_model_extensions.aiter_moe_sorting_kernel
+    )
+    pm = moe_aux_perf_model_extensions.aiter_moe_sorting_kernel(event=event)
+    assert pm.flops() > 0
+    assert pm.bytes() > 0
+
+
+def test_synthetic_grouped_topk_resolves_perf_model():
+    event = {
+        "name": "hipGraphLaunch->void aiter::grouped_topk_kernel<...> (Synthetic Op)",
+        "args": {
+            "Input Dims": [
+                [4, 256],
+                [256],
+                [4, 8],
+                [4, 8],
+                (),
+                (),
+                (),
+                (),
+            ],
+            "Input type": [
+                "float",
+                "float",
+                "float",
+                "int",
+                "Scalar",
+                "Scalar",
+                "Scalar",
+                "Scalar",
+            ],
+        },
+        "kernel_details": [{"name": "void aiter::grouped_topk_kernel"}],
+    }
+    from TraceLens.PerfModel.extensions import moe_aux_perf_model_extensions
+
+    assert (
+        resolve_perf_model_class(event)
+        is moe_aux_perf_model_extensions.aiter_grouped_topk_kernel
+    )
+    pm = moe_aux_perf_model_extensions.aiter_grouped_topk_kernel(event=event)
+    assert pm.flops() > 0
+    assert pm.bytes() > 0
+
+
+def test_synthetic_graph_sdpa_resolves_perf_model():
+    event = {
+        "name": "hipGraphLaunch->_fwd_grouped_kernel_stage1 (Synthetic Op)",
+        "args": {
+            "Input Dims": [[4, 1536], ()],
+            "Input type": ["c10::Half", "ScalarList"],
+            "Concrete Inputs": ["", "[-1, 12, 128]"],
+        },
+        "kernel_details": [{"name": "_fwd_grouped_kernel_stage1"}],
+    }
+    from TraceLens.PerfModel.extensions import attention_perf_model_extensions
+
+    assert (
+        resolve_perf_model_class(event)
+        is attention_perf_model_extensions.graph_decode_attention_kernel
+    )
+    pm = attention_perf_model_extensions.graph_decode_attention_kernel(event=event)
+    assert pm.flops() > 0
+    assert pm.bytes() > 0
+    assert pm.param_details["H_Q"] == 12
+    assert pm.param_details["d_h_qk"] == 128

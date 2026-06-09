@@ -469,6 +469,8 @@ def test_generate_priority_data(output_dir_with_manifest_and_metrics):
     assert gemm_rec["impact_score_high"] == 173.0
     assert gemm_rec["operation_count"] == 2
     assert "savings_ms" not in gemm_rec
+    for entry in data["priorities"]:
+        assert "roofline_time_fraction" in entry
 
 
 def test_generate_priority_data_skips_error_metrics(tmp_path):
