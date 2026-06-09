@@ -212,7 +212,10 @@ def _category_from_classified_kernel(kernel_name: str) -> Optional[str]:
 
 
 def _perf_model_class_from_classified_kernel(kernel_name: str) -> Optional[type]:
-    rules = tuple(_classified_kernel_perf_model_rule_extensions) + _CLASSIFIED_KERNEL_PERF_MODEL_RULES
+    rules = (
+        tuple(_classified_kernel_perf_model_rule_extensions)
+        + _CLASSIFIED_KERNEL_PERF_MODEL_RULES
+    )
     model_class = _lookup_classified_kernel(kernel_name, rules)
     if model_class is not None:
         return model_class
@@ -637,6 +640,8 @@ def categorize_torch_op(row):
 
 def _register_graph_replay_kernel_perf_models() -> None:
     """Register perf models for SGLang graph-replay GPU kernels (lazy import)."""
+    from TraceLens.PerfModel.extensions import attention_perf_model_extensions
+    from TraceLens.PerfModel.extensions import moe_aux_perf_model_extensions
     from TraceLens.PerfModel.extensions import moe_perf_model_extensions
     from TraceLens.PerfModel.extensions import perf_model_extensions
     from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions
@@ -667,6 +672,26 @@ def _register_graph_replay_kernel_perf_models() -> None:
                 "name_substr",
                 "add_rmsnorm_quant_kernel",
                 rmsnorm_perf_model_extensions.aiter_add_rmsnorm_quant_graph,
+            ),
+            (
+                "name_substr",
+                "moesortingkernel",
+                moe_aux_perf_model_extensions.aiter_moe_sorting_kernel,
+            ),
+            (
+                "name_substr",
+                "grouped_topk_kernel",
+                moe_aux_perf_model_extensions.aiter_grouped_topk_kernel,
+            ),
+            (
+                "name_substr",
+                "_fwd_grouped_kernel_stage1",
+                attention_perf_model_extensions.graph_decode_attention_kernel,
+            ),
+            (
+                "name_substr",
+                "_fwd_kernel_stage2",
+                attention_perf_model_extensions.graph_decode_attention_kernel,
             ),
         ]
     )

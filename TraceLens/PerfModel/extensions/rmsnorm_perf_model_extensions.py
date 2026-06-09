@@ -562,6 +562,8 @@ def _rmsnorm_graph_param_details(event, op_shape_index=0):
     op_shape = tuple(dims[op_shape_index])
     types = event["args"].get("Input type") or []
     dtype_in = types[op_shape_index] if len(types) > op_shape_index else "c10::Half"
+    if dtype_in in ("ScalarList", "Scalar", ""):
+        dtype_in = "c10::Half"
     strides = event["args"].get("Input Strides") or []
     stride_input = (
         tuple(strides[op_shape_index]) if len(strides) > op_shape_index else ()
@@ -638,11 +640,11 @@ class aiter_add_rmsnorm_quant_graph(RMSNorm):
         op_shape = tuple(dims[0])
         types = event["args"].get("Input type") or []
         dtype_in = types[0] if types else "c10::Half"
+        if dtype_in in ("ScalarList", "Scalar", ""):
+            dtype_in = "c10::Half"
         weight_idx = 2 if len(dims) > 2 and isinstance(dims[2], (list, tuple)) else 1
         num_channels = (
-            dims[weight_idx][0]
-            if len(dims[weight_idx]) == 1
-            else op_shape[-1]
+            dims[weight_idx][0] if len(dims[weight_idx]) == 1 else op_shape[-1]
         )
         return {
             "op_shape": op_shape,
@@ -663,5 +665,7 @@ class aiter_add_rmsnorm_quant_graph(RMSNorm):
         N = self.num_channels
         num_groups = (N + self.group_size - 1) // self.group_size
         bytes_read = 2 * self.num_elems * self.bpe_in + N * self.bpe_in
-        bytes_write = self.num_elems * 1 + M * num_groups * 4 + self.num_elems * self.bpe_in
+        bytes_write = (
+            self.num_elems * 1 + M * num_groups * 4 + self.num_elems * self.bpe_in
+        )
         return bytes_read + bytes_write
