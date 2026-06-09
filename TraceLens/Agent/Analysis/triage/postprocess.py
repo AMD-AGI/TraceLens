@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import re
 import shutil
@@ -34,6 +35,26 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+
+# ---------------------------------------------------------------------------
+# Module-level constants
+# ---------------------------------------------------------------------------
+
+_MODEL_RE = re.compile(
+    r"/([^/]+)/\d{8}T\d{6}Z/kernel-agent/runs/"
+)
+
+_EG_RE = re.compile(r"\(e\.g\.\s+(.+?)\)$")
+
+_OP_ATTENTION_MODES = {
+    "Unclassified op among significant ops",
+    "Synthetic op appears among significant ops",
+}
+
+_LOOKS_LIKE_OP = re.compile(
+    r"^(sglang_profiler::\S+|aiter::\S+|aten::\S+|"
+    r"hipGraphLaunch->\S+|hipLaunchKernel->\S+|hipModuleLaunchKernel->\S+)"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -60,13 +81,6 @@ class TriageFinding:
 # ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
-
-_MODEL_RE = re.compile(
-    r"/([^/]+)/\d{8}T\d{6}Z/kernel-agent/runs/"
-)
-
-_EG_RE = re.compile(r"\(e\.g\.\s+(.+?)\)$")
-
 
 def extract_model_name(run_dir: str) -> str:
     m = _MODEL_RE.search(run_dir)
@@ -323,15 +337,6 @@ def write_summary_report(
         tag = tags[0] if tags else ""
         lines.append(f"| {tag} | {mode} | {count} | {n_models} | {remedy} |")
 
-    # Action keys for perf_model issues (only unclassified/synthetic op modes)
-    _OP_ATTENTION_MODES = {
-        "Unclassified op among significant ops",
-        "Synthetic op appears among significant ops",
-    }
-    _LOOKS_LIKE_OP = re.compile(
-        r"^(sglang_profiler::\S+|aiter::\S+|aten::\S+|"
-        r"hipGraphLaunch->\S+|hipLaunchKernel->\S+|hipModuleLaunchKernel->\S+)"
-    )
     filtered_ops: List[Tuple[str, int, str]] = []
     for mode, op_counts in agg["action_keys_per_issue"].items():
         if mode not in _OP_ATTENTION_MODES:
@@ -531,7 +536,6 @@ def _collectible_paths(run_dir: str, max_bytes: int) -> List[Tuple[str, str]]:
         )
         if os.path.isfile(manifest_path):
             try:
-                import json
                 with open(manifest_path) as mf:
                     mdata = json.load(mf)
                 cap_path = mdata.get("capture_folder_path")

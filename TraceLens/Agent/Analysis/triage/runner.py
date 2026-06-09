@@ -18,7 +18,9 @@ import os
 import sys
 from pathlib import Path
 
-from .checks import ALL_CHECKS, Finding
+from .checks import ALL_CHECKS, Finding, check_kernel_candidates_missing
+
+_GEAK_SPECS = [s for s in ALL_CHECKS if s.category == "geak_interface"]
 
 
 def _auto_detect_stream(run_dir):
@@ -125,26 +127,65 @@ def write_detail_csv(findings, run_dir):
             ])
 
 
+def run_geak_triage(session_dir):
+    """Run GEAK interface checks against a Hyperloom session directory."""
+    if not os.path.isdir(session_dir):
+        print(f"Session directory does not exist: {session_dir}")
+        return []
+
+    findings = []
+    for spec in _GEAK_SPECS:
+        draft = spec.fn(session_dir)
+        if not draft:
+            continue
+        findings.append(Finding(
+            tag=spec.build_tag(),
+            sublabel=spec.sublabel,
+            category=spec.category,
+            failure_mode=draft.failure_mode,
+            evidence=draft.evidence,
+            remedy=draft.remedy,
+        ))
+
+    for finding in findings:
+        print(finding.diag_line())
+
+    return findings
+
+
 def main():
     parser = argparse.ArgumentParser(description="TraceLens Analysis Triage Checker")
-    parser.add_argument("--run-dir", required=True, help="Path to analysis_output/ directory")
+    parser.add_argument("--run-dir", default=None, help="Path to analysis_output/ directory")
+    parser.add_argument("--session-dir", default=None,
+                        help="Path to a Hyperloom session directory (runs GEAK interface checks)")
     parser.add_argument("--stream-file", default=None, help="Path to agent stream (.ndjson or .streamJSON)")
     parser.add_argument("--detailed", action="store_true",
                         help="Also run checks marked detailed_only (slower / noisier)")
     args = parser.parse_args()
 
-    findings = run_triage(args.run_dir, args.stream_file, detailed=args.detailed)
-    write_detail_csv(findings, args.run_dir)
-    write_diag_txt(findings, args.run_dir)
+    if not args.run_dir and not args.session_dir:
+        parser.error("one of --run-dir or --session-dir is required")
+
+    all_findings = []
+
+    if args.run_dir:
+        findings = run_triage(args.run_dir, args.stream_file, detailed=args.detailed)
+        write_detail_csv(findings, args.run_dir)
+        write_diag_txt(findings, args.run_dir)
+        all_findings.extend(findings)
+
+    if args.session_dir:
+        all_findings.extend(run_geak_triage(args.session_dir))
 
     print("\n" + "=" * 60)
     print("TRIAGE RESULTS")
     print("=" * 60)
-    if findings:
-        for f in findings:
+    if all_findings:
+        for f in all_findings:
             print(f.diag_line())
-        print(f"\n{len(findings)} failure(s) detected.")
-        print(f"Details: {os.path.join(args.run_dir, 'triage_details.csv')}")
+        print(f"\n{len(all_findings)} failure(s) detected.")
+        if args.run_dir:
+            print(f"Details: {os.path.join(args.run_dir, 'triage_details.csv')}")
         sys.exit(1)
     else:
         print("No failures detected. Analysis run appears healthy.")

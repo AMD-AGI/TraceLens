@@ -91,6 +91,8 @@ class CheckSpec:
 
 _PATH_REMAPS_ENV = "TRACELENS_PATH_REMAPS"
 _PATH_REMAPS_CACHE = None
+_SDK_PREFIX_RE = re.compile(r"^\[claude-sdk\]\s*")
+_TBS_TFLOPS_EXEMPT_SUBSTRINGS = ("collective", "custom")
 
 
 def _path_remaps():
@@ -219,9 +221,6 @@ def resolve_capture_folder(run_dir):
         return None
 
     return _resolve_path(os.path.join(trace_input, "capture_traces"), os.path.isdir)
-
-
-_SDK_PREFIX_RE = re.compile(r"^\[claude-sdk\]\s*")
 
 
 def stream_lines(stream_file):
@@ -1027,6 +1026,55 @@ def check_missing_dep(_run_dir, stream_file):
 
 
 # ---------------------------------------------------------------------------
+# GEAK interface checks
+# ---------------------------------------------------------------------------
+
+def check_kernel_candidates_missing(run_dir_or_session_dir, _stream_file=None):
+    """Check if kernel_candidates.json exists for a session that reached the KERNEL phase.
+
+    Accepts either a Hyperloom session directory (containing
+    ``session_breakdown.json``) or a TraceLens run_dir nested inside one
+    (``<session>/kernel-agent/runs/<id>/<tl-hash>/tracelens/``).
+    Returns None when the file exists, session_breakdown.json is absent,
+    or the session never reached KERNEL.
+    """
+    path = os.path.abspath(run_dir_or_session_dir)
+
+    if os.path.isfile(os.path.join(path, "session_breakdown.json")):
+        session_dir = path
+    else:
+        session_dir = os.path.normpath(os.path.join(path, *([".."] * 5)))
+
+    sbd_path = os.path.join(session_dir, "session_breakdown.json")
+    if not os.path.isfile(sbd_path):
+        return None
+
+    try:
+        with open(sbd_path) as f:
+            sbd = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    phases = [p.get("phase", "") for p in sbd.get("phase_segments", [])]
+    if "KERNEL" not in phases:
+        return None
+
+    matches = glob.glob(os.path.join(
+        session_dir, "kernel-agent", "runs", "*", "*", "kernel_candidates.json",
+    ))
+    if matches:
+        return None
+
+    return FindingDraft(
+        "kernel_candidates.json missing",
+        f"Session reached KERNEL phase but no kernel_candidates.json found "
+        f"under {session_dir}/kernel-agent/runs/",
+        "TraceLens analysis did not produce kernel_candidates.json; "
+        "check tl-* run logs under kernel-agent/runs/",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Perf model / report-correctness checks
 # ---------------------------------------------------------------------------
 
@@ -1085,9 +1133,6 @@ def check_unclassified_op_significant(run_dir, _stream_file):
         _violator_evidence("significant ops have empty / 'other' op category", matches),
         "Add perf model — TraceLens side fix",
     )
-
-
-_TBS_TFLOPS_EXEMPT_SUBSTRINGS = ("collective", "custom")
 
 
 def check_tbs_tflops_missing(run_dir, _stream_file):
@@ -1222,4 +1267,8 @@ ALL_CHECKS = [
     CheckSpec("5e", "NFS_STALE",                    "infra",         check_nfs_stale),
     CheckSpec("5f", "MISSING_DEP",                  "infra",         check_missing_dep),
     CheckSpec("5g", "CONTEXT_LENGTH_EXCEEDED",      "infra",         check_resource_exhausted),
+
+    # -- 6x: geak_interface ---------------------------------------------------
+    CheckSpec("6a", "KERNEL_CANDIDATES_MISSING",    "geak_interface",
+              check_kernel_candidates_missing),
 ]
