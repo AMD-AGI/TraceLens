@@ -62,11 +62,7 @@ KERNEL_TYPE_RULES = [
     (r"(?i)flash_attn|flash_fwd", "Attention (flash)", 20),
     (r"(?i)_fwd_grouped_kernel_stage1|_fwd_kernel_stage2", "Attention (flash)", 20),
     (r"(?i)reduce_segments", "Attention Reduce", 20),
-    (
-        r"(?i)reshape_and_cache_flash|reshape_and_cache|store_kvcache",
-        "KV Cache Store",
-        20,
-    ),
+    (r"(?i)reshape_and_cache_flash|reshape_and_cache|store_kvcache", "KV Cache Store", 20),
     (r"(?i)grouped_topk_kernel", "MoE TopK", 20),
     # ---- Linear attention kernels (priority 20) ----
     (r"(?i)chunk_gated_delta_rule_fwd", "Linear Attention (chunk delta)", 20),
@@ -146,11 +142,7 @@ KERNEL_TYPE_RULES = [
     (r"(?i)_fwd_grouped_kernel_stage1|_fwd_kernel_stage2", "Attention", 20),
     (r"(?i)reduce_segments", "Attention", 20),
     # ---- Anchor: KV Cache Store (priority 20) ----
-    (
-        r"(?i)reshape_and_cache_flash|reshape_and_cache|store_kvcache",
-        "KV Cache Store",
-        20,
-    ),
+    (r"(?i)reshape_and_cache_flash|reshape_and_cache|store_kvcache", "KV Cache Store", 20),
     (r"(?i)grouped_topk_kernel", "MoE Routing", 20),
     # ---- Linear attention (priority 20) ----
     # Distinct anchor: identifies linear-attention blocks during alignment.
