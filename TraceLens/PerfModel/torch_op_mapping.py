@@ -555,8 +555,11 @@ OP_CATEGORY_REGISTRY = build_op_category_registry(
     category_only_ops=CATEGORY_ONLY_OP_MAPPING,
 )
 
+
 def _event_has_input_dims(event):
-    from TraceLens.Trace2Tree.trace_sglang_capture_link import is_usable_capture_input_dims
+    from TraceLens.Trace2Tree.trace_sglang_capture_link import (
+        is_usable_capture_input_dims,
+    )
 
     return is_usable_capture_input_dims(event.get("args", {}).get("Input Dims"))
 

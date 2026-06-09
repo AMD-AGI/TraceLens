@@ -26,9 +26,7 @@ from TraceLens.Trace2Tree.trace_sglang_capture_link import (
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
-GEMM_KERNEL = (
-    "_ZN2ck59kernel_gemm_xdl_cshuffle_v3_multi_d_blockscale_b_preshuffleINS_58GridwiseGemm"
-)
+GEMM_KERNEL = "_ZN2ck59kernel_gemm_xdl_cshuffle_v3_multi_d_blockscale_b_preshuffleINS_58GridwiseGemm"
 PREAMBLE_KERNELS = ["preamble_0", "preamble_1"]
 
 
