@@ -554,3 +554,114 @@ class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
         bytes_write_out = M * self.n_out * self.bpe_in
         bytes_write_res = M * N * self.bpe_in
         return bytes_read + bytes_write_out + bytes_write_res
+
+
+def _rmsnorm_graph_param_details(event, op_shape_index=0):
+    """Build RMSNorm param_details from a minimal graph-replay Input Dims layout."""
+    dims = event["args"]["Input Dims"]
+    op_shape = tuple(dims[op_shape_index])
+    types = event["args"].get("Input type") or []
+    dtype_in = types[op_shape_index] if len(types) > op_shape_index else "c10::Half"
+    strides = event["args"].get("Input Strides") or []
+    stride_input = (
+        tuple(strides[op_shape_index]) if len(strides) > op_shape_index else ()
+    )
+    weight_idx = 1 if len(dims) > 1 and isinstance(dims[1], (list, tuple)) else None
+    num_channels = (
+        dims[weight_idx][0]
+        if weight_idx is not None and len(dims[weight_idx]) == 1
+        else op_shape[-1]
+    )
+    return {
+        "op_shape": op_shape,
+        "dtype_in_out": (dtype_in, None),
+        "stride_input": stride_input,
+        "stride_output": None,
+        "num_channels": num_channels,
+        "has_bias": False,
+        "is_affine": weight_idx is not None,
+        "is_training": False,
+    }
+
+
+class aiter_rmsnorm_sumsq_serial(RMSNorm):
+    """Graph-replay ``rmsnorm_sumsq_kernel_serial`` (reduction pass)."""
+
+    @staticmethod
+    def get_param_details(event):
+        return _rmsnorm_graph_param_details(event)
+
+    def flops(self):
+        return self.num_elems * 2
+
+    def bytes(self):
+        return self.num_elems * self.bpe_in
+
+
+class aiter_rmsnorm_apply_serial(RMSNorm):
+    """Graph-replay ``rmsnorm_apply_kernel_serial`` (normalize + scale pass)."""
+
+    @staticmethod
+    def get_param_details(event):
+        return _rmsnorm_graph_param_details(event)
+
+    def flops(self):
+        return self.num_elems * (3 if self.is_affine else 2)
+
+    def bytes(self):
+        read_bytes = self.num_elems * self.bpe_in
+        write_bytes = self.num_elems * self.bpe_in
+        weight_bytes = self.num_channels * self.bpe_in if self.is_affine else 0
+        return read_bytes + write_bytes + weight_bytes
+
+
+class aiter_add_rmsnorm_quant_graph(RMSNorm):
+    """
+    Graph-replay ``add_rmsnorm_quant_kernel`` (fused add + RMSNorm + FP8 group quant).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        args = event.get("args", {})
+        group_size = args.get("_inferred_group_size")
+        if group_size is None:
+            concrete = args.get("Concrete Inputs") or []
+            if len(concrete) > 4 and concrete[4]:
+                group_size = int(concrete[4])
+            else:
+                group_size = 128
+        super().__init__(event, arch, python_path)
+        self.group_size = int(group_size)
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        op_shape = tuple(dims[0])
+        types = event["args"].get("Input type") or []
+        dtype_in = types[0] if types else "c10::Half"
+        weight_idx = 2 if len(dims) > 2 and isinstance(dims[2], (list, tuple)) else 1
+        num_channels = (
+            dims[weight_idx][0]
+            if len(dims[weight_idx]) == 1
+            else op_shape[-1]
+        )
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": (),
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+        }
+
+    def flops(self):
+        return self.num_elems + super().flops()
+
+    def bytes(self):
+        M = self.num_elems // self.num_channels
+        N = self.num_channels
+        num_groups = (N + self.group_size - 1) // self.group_size
+        bytes_read = 2 * self.num_elems * self.bpe_in + N * self.bpe_in
+        bytes_write = self.num_elems * 1 + M * num_groups * 4 + self.num_elems * self.bpe_in
+        return bytes_read + bytes_write

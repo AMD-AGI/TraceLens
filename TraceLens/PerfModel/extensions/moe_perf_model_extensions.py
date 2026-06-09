@@ -1244,6 +1244,86 @@ class moe_aiter_ck_stage2(UnfusedMoE_Down):
         return "matrix"
 
 
+def _is_ck_moe_stage2_layout(dims) -> bool:
+    """True when *dims* matches aiter::ck_moe_stage2 / graph kernel_moe_gemm stage2."""
+    if not isinstance(dims, list) or len(dims) < 3:
+        return False
+    a, b, c = dims[0], dims[1], dims[2]
+    if not (
+        isinstance(a, (list, tuple))
+        and len(a) == 3
+        and isinstance(b, (list, tuple))
+        and len(b) == 3
+        and isinstance(c, (list, tuple))
+        and len(c) == 3
+    ):
+        return False
+    tokens, topk, inter = a
+    if not all(isinstance(x, int) and x > 0 for x in (tokens, topk, inter)):
+        return False
+    if tokens > 256 or topk > 64:
+        return False
+    return b[0] == c[0] and b[0] >= 8
+
+
+def _is_ck_moe_stage1_layout(dims) -> bool:
+    """True when *dims* matches aiter::ck_moe_stage1 / graph kernel_moe_gemm stage1."""
+    if not isinstance(dims, list) or len(dims) < 3:
+        return False
+    a, b, c = dims[0], dims[1], dims[2]
+    if not (
+        isinstance(a, (list, tuple))
+        and len(a) == 2
+        and isinstance(b, (list, tuple))
+        and len(b) == 3
+        and isinstance(c, (list, tuple))
+        and len(c) == 3
+    ):
+        return False
+    return a[0] <= 8192 and a[1] > 8 and b[0] == c[0]
+
+
+class ck_kernel_moe_gemm:
+    """
+    Performance model for CK ``kernel_moe_gemm`` graph-replay synthetics.
+
+    Delegates to ``moe_aiter_ck_stage1`` or ``moe_aiter_ck_stage2`` based on
+    the traced ``Input Dims`` layout (same tensors as ``aiter::ck_moe_stage*``).
+    """
+
+    category = "MoE_unfused"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        dims = event.get("args", {}).get("Input Dims", [])
+        if _is_ck_moe_stage2_layout(dims):
+            self._delegate = moe_aiter_ck_stage2(event, arch, python_path)
+        else:
+            self._delegate = moe_aiter_ck_stage1(event, arch, python_path)
+        self.param_details = self._delegate.param_details
+
+    def flops(self):
+        return self._delegate.flops()
+
+    def bytes(self):
+        return self._delegate.bytes()
+
+    def flops_bwd(self):
+        return self._delegate.flops_bwd()
+
+    def bytes_bwd(self):
+        return self._delegate.bytes_bwd()
+
+    def get_compute_precision(self):
+        return self._delegate.get_compute_precision()
+
+    def get_maf_type(self):
+        return self._delegate.get_maf_type()
+
+
 # ==============================================================================
 # MoE flydsl Performance Models (aiter::fused_moe_ flydsl two-stage)
 # ==============================================================================

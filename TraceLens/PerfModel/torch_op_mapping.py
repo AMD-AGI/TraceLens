@@ -212,9 +212,7 @@ def _category_from_classified_kernel(kernel_name: str) -> Optional[str]:
 
 
 def _perf_model_class_from_classified_kernel(kernel_name: str) -> Optional[type]:
-    rules = _CLASSIFIED_KERNEL_PERF_MODEL_RULES + tuple(
-        _classified_kernel_perf_model_rule_extensions
-    )
+    rules = tuple(_classified_kernel_perf_model_rule_extensions) + _CLASSIFIED_KERNEL_PERF_MODEL_RULES
     model_class = _lookup_classified_kernel(kernel_name, rules)
     if model_class is not None:
         return model_class
@@ -635,3 +633,43 @@ def categorize_torch_op(row):
         are categorization-only (timing without GFLOPS or TB/s).
     """
     return _categorize_torch_op_from_registry(row, OP_CATEGORY_REGISTRY)
+
+
+def _register_graph_replay_kernel_perf_models() -> None:
+    """Register perf models for SGLang graph-replay GPU kernels (lazy import)."""
+    from TraceLens.PerfModel.extensions import moe_perf_model_extensions
+    from TraceLens.PerfModel.extensions import perf_model_extensions
+    from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions
+
+    register_classified_kernel_perf_model_rules(
+        [
+            (
+                "name_substr",
+                "kernel_moe_gemm",
+                moe_perf_model_extensions.ck_kernel_moe_gemm,
+            ),
+            (
+                "name_substr",
+                "dynamic_per_group_scaled_quant",
+                perf_model_extensions.dynamic_per_group_scaled_quant_kernel,
+            ),
+            (
+                "name_substr",
+                "rmsnorm_sumsq_kernel_serial",
+                rmsnorm_perf_model_extensions.aiter_rmsnorm_sumsq_serial,
+            ),
+            (
+                "name_substr",
+                "rmsnorm_apply_kernel_serial",
+                rmsnorm_perf_model_extensions.aiter_rmsnorm_apply_serial,
+            ),
+            (
+                "name_substr",
+                "add_rmsnorm_quant_kernel",
+                rmsnorm_perf_model_extensions.aiter_add_rmsnorm_quant_graph,
+            ),
+        ]
+    )
+
+
+_register_graph_replay_kernel_perf_models()

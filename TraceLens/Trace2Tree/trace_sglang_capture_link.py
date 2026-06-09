@@ -34,6 +34,189 @@ CAPTURE_FILE_RE = re.compile(r"^bs_(\d+)_rank0\.json\.gz$")
 DEFAULT_CAPTURE_OFFSET = 2
 MAX_OFFSET_SEARCH = 6
 DECODE_ANNOTATION_WINDOW_US = 100_000
+NEARBY_DIMS_WINDOW = 12
+
+
+def _first_2d_shape(dims) -> Optional[List[int]]:
+    """Return the first rank-2 integer shape in *dims*."""
+    if not isinstance(dims, list):
+        return None
+    for item in dims:
+        if (
+            isinstance(item, (list, tuple))
+            and len(item) == 2
+            and all(isinstance(x, int) and x > 0 for x in item)
+        ):
+            return [int(item[0]), int(item[1])]
+    return None
+
+
+def _is_ck_moe_stage2_layout(dims) -> bool:
+    if not isinstance(dims, list) or len(dims) < 3:
+        return False
+    a, b, c = dims[0], dims[1], dims[2]
+    if not (
+        isinstance(a, (list, tuple))
+        and len(a) == 3
+        and isinstance(b, (list, tuple))
+        and len(b) == 3
+        and isinstance(c, (list, tuple))
+        and len(c) == 3
+    ):
+        return False
+    tokens, topk, inter = a
+    if not all(isinstance(x, int) and x > 0 for x in (tokens, topk, inter)):
+        return False
+    if tokens > 256 or topk > 64:
+        return False
+    return b[0] == c[0] and b[0] >= 8
+
+
+def _is_ck_moe_stage1_layout(dims) -> bool:
+    if not isinstance(dims, list) or len(dims) < 3:
+        return False
+    a, b, c = dims[0], dims[1], dims[2]
+    if not (
+        isinstance(a, (list, tuple))
+        and len(a) == 2
+        and isinstance(b, (list, tuple))
+        and len(b) == 3
+        and isinstance(c, (list, tuple))
+        and len(c) == 3
+    ):
+        return False
+    return a[0] <= 8192 and a[1] > 8 and b[0] == c[0]
+
+
+def _find_nearby_2d_shape(table: List[dict], center_index: int, window: int) -> Optional[List[int]]:
+    for delta in range(1, window + 1):
+        for idx in (center_index - delta, center_index + delta):
+            if 0 <= idx < len(table):
+                shape = _first_2d_shape(table[idx]["args"].get("Input Dims"))
+                if shape:
+                    return shape
+    return None
+
+
+def _find_nearby_full_moe_dims(
+    table: List[dict], center_index: int, window: int
+) -> Tuple[Optional[List], Optional[dict]]:
+    start = max(0, center_index - window)
+    end = min(len(table), center_index + window + 1)
+    for idx in range(start, end):
+        args = table[idx]["args"]
+        dims = args.get("Input Dims")
+        if _is_ck_moe_stage2_layout(dims):
+            return dims, args
+    return None, None
+
+
+def _infer_group_size_from_nearby_quant(
+    table: List[dict], center_index: int, window: int = 8
+) -> Optional[int]:
+    start = max(0, center_index - window)
+    end = min(len(table), center_index + window + 1)
+    for idx in range(start, end):
+        kernel = table[idx].get("kernel", "").lower()
+        if "quant" not in kernel:
+            continue
+        dims = table[idx]["args"].get("Input Dims")
+        if not isinstance(dims, list) or len(dims) < 3:
+            continue
+        out_shape = dims[0]
+        scale_shape = dims[2]
+        if not (
+            isinstance(out_shape, (list, tuple))
+            and isinstance(scale_shape, (list, tuple))
+            and len(out_shape) >= 2
+            and len(scale_shape) >= 2
+        ):
+            continue
+        if out_shape[0] == scale_shape[0] and scale_shape[1] > 0:
+            group_size = out_shape[1] // scale_shape[1]
+            if group_size > 0:
+                return group_size
+    return None
+
+
+def _augment_capture_args(
+    kernel_name: str,
+    capture_args: dict,
+    table: List[dict],
+    capture_index: int,
+) -> dict:
+    """
+    Fill in missing or truncated capture args for graph-replay kernel launches.
+
+    CK MoE GEMM and AITER RMSNorm serial kernels often trace pointer args only;
+    nearby launches in the same capture graph carry usable tensor shapes.
+    """
+    kn = kernel_name.lower()
+    dims = capture_args.get("Input Dims") or []
+    augmented = copy.deepcopy(capture_args)
+
+    if "kernel_moe_gemm" in kn and not _is_ck_moe_stage2_layout(
+        dims
+    ) and not _is_ck_moe_stage1_layout(dims):
+        first = dims[0] if dims else None
+        if isinstance(first, (list, tuple)) and len(first) == 3 and first[0] >= 64:
+            w1 = list(first)
+            full_dims, full_args = _find_nearby_full_moe_dims(
+                table, capture_index, NEARBY_DIMS_WINDOW
+            )
+            token_shape = _find_nearby_2d_shape(
+                table, capture_index, NEARBY_DIMS_WINDOW
+            )
+            if full_dims and token_shape:
+                w2 = list(full_dims[2])
+                topk = int(full_dims[0][1])
+                out_shape = [token_shape[0], topk, int(w2[2])]
+                augmented["Input Dims"] = [
+                    token_shape,
+                    w1,
+                    w2,
+                    [],
+                    [],
+                    [],
+                    out_shape,
+                ]
+                if full_args and full_args.get("Input type"):
+                    augmented["Input type"] = full_args["Input type"]
+                return augmented
+
+    if is_usable_capture_input_dims(dims):
+        return augmented
+
+    if "rmsnorm_sumsq_kernel_serial" in kn or "rmsnorm_apply_kernel_serial" in kn:
+        shape = _find_nearby_2d_shape(table, capture_index, NEARBY_DIMS_WINDOW)
+        if shape:
+            hidden = shape[1]
+            augmented["Input Dims"] = [shape, [hidden], []]
+            if not augmented.get("Input type"):
+                augmented["Input type"] = ["c10::Half", "c10::Half", "Scalar"]
+            return augmented
+
+    if "add_rmsnorm_quant_kernel" in kn:
+        shape = _find_nearby_2d_shape(table, capture_index, NEARBY_DIMS_WINDOW)
+        if shape:
+            hidden = shape[1]
+            augmented["Input Dims"] = [shape, shape, [hidden], [], []]
+            if not augmented.get("Input type"):
+                augmented["Input type"] = [
+                    "c10::Half",
+                    "c10::Half",
+                    "c10::Half",
+                    "Scalar",
+                    "Scalar",
+                ]
+            group_size = _infer_group_size_from_nearby_quant(
+                table, capture_index, NEARBY_DIMS_WINDOW
+            )
+            if group_size:
+                augmented["_inferred_group_size"] = group_size
+            return augmented
+
+    return augmented
 
 
 def is_usable_capture_input_dims(dims) -> bool:
@@ -256,7 +439,14 @@ class SGLangCaptureLinker:
         capture_index = replay_index + offset
         if capture_index < 0 or capture_index >= len(table):
             return None
-        return table[capture_index]["args"] or None
+        row = table[capture_index]
+        capture_args = row["args"] or None
+        if not capture_args:
+            return None
+        kernel_name = replay_kernels[replay_index] if replay_index < len(replay_kernels) else row.get("kernel", "")
+        return _augment_capture_args(
+            kernel_name, capture_args, table, capture_index
+        )
 
 
 def enrich_synthetic_ops_from_sglang_capture(
@@ -314,8 +504,13 @@ def enrich_synthetic_ops_from_sglang_capture(
     for event in collected:
         if synthetic_op_marker not in event.get("name", ""):
             continue
-        if is_usable_capture_input_dims(event.get("args", {}).get("Input Dims")):
-            continue
+        existing_dims = event.get("args", {}).get("Input Dims")
+        if is_usable_capture_input_dims(existing_dims):
+            kn = event.get("name", "").split("->", 1)[-1].lower()
+            if "kernel_moe_gemm" not in kn or _is_ck_moe_stage1_layout(
+                existing_dims
+            ) or _is_ck_moe_stage2_layout(existing_dims):
+                continue
 
         parent_name = event.get("name", "").split("->", 1)[0]
         if parent_name not in GRAPH_LAUNCH_NAMES:
