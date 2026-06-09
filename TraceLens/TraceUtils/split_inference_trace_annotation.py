@@ -359,11 +359,82 @@ def parse_range(range_str: str, max_len: int) -> Tuple[int, int]:
     return start, min(end, max_len)
 
 
+# ---------------------------------------------------------------------------
+# SGLang step-annotation grammar.
+#
+# SGLang annotates each forward step (see
+# ``sglang/srt/model_executor/model_runner.py:_build_step_span_name``) as a
+# ``user_annotation`` event named:
+#     step[EXTEND bs=<bs> toks=<ext_toks>]     # prefill / extend step
+#     step[DECODE bs=<bs>]                      # decode-only step
+#     step[<MODE> bs=<bs>]                      # any other ForwardMode (IDLE,
+#                                                 MIXED, TARGET_VERIFY, ...)
+# These differ from the vLLM ``execute_..._context_..._generation_...`` grammar
+# parsed below, so they need their own matcher / parser. EXTEND/PREFILL maps to
+# the prefill phase (context requests), DECODE maps to steady-state decode
+# (generation requests), MIXED carries both.
+# ---------------------------------------------------------------------------
+SGLANG_STEP_PATTERN = [
+    re.compile(r"step\[\s*[A-Za-z_]+\s+bs=\d+"),
+]
+
+_SGLANG_STEP_RE = re.compile(
+    r"step\[\s*(?P<mode>[A-Za-z_]+)\s+bs=(?P<bs>\d+)(?:\s+toks=(?P<toks>\d+))?",
+    re.IGNORECASE,
+)
+
+
+def _parse_sglang_step_name(name: str) -> Optional[dict]:
+    """Parse an SGLang ``step[...]`` annotation into iter-detail fields.
+
+    Returns ``None`` when *name* is not an SGLang step annotation so callers
+    can fall back to the vLLM grammar.
+    """
+    m = _SGLANG_STEP_RE.search(name)
+    if m is None:
+        return None
+    mode = m.group("mode").upper()
+    bs = int(m.group("bs"))
+    toks = int(m.group("toks")) if m.group("toks") is not None else None
+
+    if mode == "DECODE":
+        # Decode-only step: each of the ``bs`` requests emits one query token.
+        ctx_req, ctx_sum, gen_req, gen_sum = 0, 0, bs, bs
+    elif mode in ("EXTEND", "PREFILL", "DRAFT_EXTEND", "SPLIT_PREFILL"):
+        # Prefill / extend step: ``bs`` context requests, ``toks`` query tokens.
+        ctx_req, ctx_sum, gen_req, gen_sum = bs, (toks if toks is not None else bs), 0, 0
+    elif mode == "MIXED":
+        # Mixed step carries both prefill and decode work in the same batch.
+        ctx_req, ctx_sum, gen_req, gen_sum = bs, (toks if toks is not None else bs), bs, bs
+    elif mode == "IDLE":
+        ctx_req, ctx_sum, gen_req, gen_sum = 0, 0, 0, 0
+    else:
+        # Unknown forward mode: token-bearing -> treat as prefill, else decode.
+        if toks is not None:
+            ctx_req, ctx_sum, gen_req, gen_sum = bs, toks, 0, 0
+        else:
+            ctx_req, ctx_sum, gen_req, gen_sum = 0, 0, bs, bs
+
+    return {
+        "batch_size": ctx_sum + gen_sum,
+        "num_requests": ctx_req + gen_req,
+        "context_requests": ctx_req,
+        "context_sum": ctx_sum,
+        "generation_requests": gen_req,
+        "generation_sum": gen_sum,
+    }
+
+
 def get_iter_details_from_name(name: str, prefix: str = "annotation_iteration") -> dict:
 
-    name = name.replace("(", "_").replace(")", "_")
     if not "annotation_iteration" in prefix:
         return {"batch_size": 0}
+    # SGLang ``step[...]`` annotations use a different grammar than the vLLM
+    # ``execute_...`` names; try them first and fall back to the vLLM parser.
+    sglang_details = _parse_sglang_step_name(name)
+    if sglang_details is not None:
+        return sglang_details
+    name = name.replace("(", "_").replace(")", "_")
     iter_details = re.sub(r"[sqk]+", "_", name).split("_")
     if len(iter_details) < 10:
         ctx_req, ctx_sum, gen_req, gen_sum = (
@@ -1201,10 +1272,26 @@ def main():
     gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
     print(f"Loaded {len(events)} events")
 
-    # Find iterations and dummy runs
+    # Find iterations and dummy runs.
+    #
+    # Prefer the vLLM / roofline ``execute_..._context_..._generation_...``
+    # annotations (richer: they carry per-phase token sums). When the trace
+    # has none (e.g. an SGLang run where the roofline annotation patch is not
+    # active, or a stock SGLang build), fall back to SGLang's native
+    # ``step[DECODE bs=..]`` / ``step[EXTEND bs=.. toks=..]`` step markers so
+    # the steady-state split still works (issue #723). Preferring execute_*
+    # first also avoids double-counting when both are present (the execute_*
+    # annotation is nested inside the step[...] span).
     iteration_roots = find_events_by_pattern(
         events, ANNOTATION_PATTERN, "execution steps (iteration)", cat="user_annotation"
     )
+    if not iteration_roots:
+        iteration_roots = find_events_by_pattern(
+            events,
+            SGLANG_STEP_PATTERN,
+            "SGLang step annotations (iteration)",
+            cat="user_annotation",
+        )
     dummy_roots = find_events_by_pattern(events, RUNTIME_EVENT_PATTERN, "_dummy_run")
 
     # Create output directory
