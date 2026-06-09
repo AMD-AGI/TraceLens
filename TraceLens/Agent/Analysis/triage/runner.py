@@ -47,7 +47,7 @@ def run_triage(run_dir, stream_file=None, detailed=False):
     ``detailed_only=True`` in their CheckSpec are skipped.
     """
     if not os.path.isdir(run_dir):
-        print(f"[DIAG:pipeline:OUTPUT_INCOMPLETE] Run directory does not exist: {run_dir}")
+        print(f"[DIAG:tracelens_agent_workflow:OUTPUT_INCOMPLETE] Run directory does not exist: {run_dir}")
         sys.exit(1)
 
     if stream_file and not os.path.isfile(stream_file):

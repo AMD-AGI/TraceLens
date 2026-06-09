@@ -59,12 +59,11 @@ class CheckSpec:
     """Metadata + function pointer for a single triage check.
 
     Attributes:
-        sublabel: Short ordinal label such as "1a", "1b". May be "" until a
-            label has been assigned, in which case the DIAG tag falls back to
-            ``DIAG:{category}:{name}``.
+        sublabel: Ordinal label such as "1a", "2f", "4b". Every check must
+            have a sublabel; the DIAG tag is ``DIAG:{category}:{sublabel}_{name}``.
         name: NAME slot of the DIAG tag, e.g. "TRACE_MISSING".
         category: Short category prefix, e.g. "profiling", "trace_quality",
-            "pipeline", "report", "token", "infra".
+            "perf_model", "tracelens_agent_workflow", "infra".
         fn: The check function. Signature ``(run_dir, stream_file) -> FindingDraft | None``.
         implies_failures: Sublabels of other checks that will definitely fail
             if this check fails. Used by the runner to annotate downstream
@@ -809,7 +808,7 @@ def check_runtime_instability(run_dir, _stream_file):
 
 
 # ---------------------------------------------------------------------------
-# Pipeline checks
+# TraceLens agent workflow checks
 # ---------------------------------------------------------------------------
 
 def check_step1_fail(run_dir, stream_file):
@@ -828,7 +827,7 @@ def check_step1_fail(run_dir, stream_file):
             f"perf_report_csvs/ exists but is missing required files: {', '.join(missing)}",
             "Check if the perf report generation command is correct",
         )
-    if stream_contains(stream_file, r"DIAG:pipeline:STEP1_FAIL"):
+    if stream_contains(stream_file, r"DIAG:pipeline:STEP1_FAIL|DIAG:tracelens_agent_workflow:PERF_REPORT_FAILURE"):
         return FindingDraft(
             "TraceLens perf reports are missing",
             "DIAG tag found in agent stream",
@@ -844,7 +843,7 @@ def check_step2_5_fail(run_dir, stream_file):
             "category_manifest.json missing despite perf_report_csvs/ existing",
             "Check that perf_report_csvs/ was generated in Step 1; verify trace path and platform",
         )
-    if stream_contains(stream_file, r"DIAG:pipeline:STEP2_5_FAIL"):
+    if stream_contains(stream_file, r"DIAG:pipeline:STEP2_5_FAIL|DIAG:tracelens_agent_workflow:ORCHESTRATOR_PREP_FAIL"):
         return FindingDraft(
             "Orchestrator preparation fails (Steps 2-5)",
             "DIAG tag found in agent stream",
@@ -864,7 +863,7 @@ def check_output_incomplete(run_dir, _stream_file):
 
 
 def check_prefix_fail(_run_dir, stream_file):
-    if stream_contains(stream_file, r"DIAG:pipeline:PREFIX_FAIL"):
+    if stream_contains(stream_file, r"DIAG:pipeline:PREFIX_FAIL|DIAG:tracelens_agent_workflow:CMD_PREFIX_INVALID"):
         return FindingDraft(
             "Command prefix validation fails",
             "DIAG tag found in agent stream",
@@ -873,7 +872,7 @@ def check_prefix_fail(_run_dir, stream_file):
 
 
 # ---------------------------------------------------------------------------
-# Report checks
+# TraceLens agent workflow checks (continued — report)
 # ---------------------------------------------------------------------------
 
 def check_report_too_small(run_dir, _stream_file):
@@ -893,7 +892,7 @@ def check_report_too_small(run_dir, _stream_file):
 
 
 # ---------------------------------------------------------------------------
-# Token budget checks
+# TraceLens agent workflow checks (continued — subagent) / infra
 # ---------------------------------------------------------------------------
 
 def check_resource_exhausted(_run_dir, stream_file):
@@ -1157,61 +1156,70 @@ def check_zero_pct_ops(run_dir, _stream_file):
 
 
 # ---------------------------------------------------------------------------
-# Check registry (order follows the CSV)
+# Check registry
 #
-# Sublabels are filled in as the finalized list is reviewed. Empty sublabel
-# means "not yet labeled"; the runner falls back to the legacy
-# DIAG:<category>:<NAME> tag in that case.
+# Every check has an ordinal sublabel (e.g. "1a", "2f", "4b") so the DIAG
+# tag is always DIAG:{category}:{sublabel}_{NAME}.
+#
+# Section numbering:
+#   1x = profiling          (data capture / workload side)
+#   2x = trace_quality      (trace / runtime quality)
+#   3x = perf_model         (report correctness / model coverage)
+#   4x = tracelens_agent_workflow  (orchestrator + agent execution)
+#   5x = infra              (host / environment)
 # ---------------------------------------------------------------------------
 
 ALL_CHECKS = [
-    CheckSpec("1a",  "TRACE_MISSING",                 "profiling",     check_trace_missing,
+    # -- 1x: profiling ------------------------------------------------------
+    CheckSpec("1a", "TRACE_MISSING",                "profiling",     check_trace_missing,
               implies_failures=["1b", "1c"]),
-    CheckSpec("1b",  "TRACE_SIZE",                    "profiling",     check_trace_size),
-    CheckSpec("1c",  "NO_GPU_KERNELS",                "profiling",     check_no_gpu_kernels),
-    CheckSpec("1d",  "CAPTURE_MISSING",               "profiling",     check_capture_missing),
+    CheckSpec("1b", "TRACE_SIZE",                   "profiling",     check_trace_size),
+    CheckSpec("1c", "NO_GPU_KERNELS",               "profiling",     check_no_gpu_kernels),
+    CheckSpec("1d", "CAPTURE_MISSING",              "profiling",     check_capture_missing),
 
-    CheckSpec("2a",  "MISSING_CPU_OP_SHAPES",         "trace_quality", check_missing_cpu_op_shapes,
+    # -- 2x: trace_quality --------------------------------------------------
+    CheckSpec("2a", "MISSING_CPU_OP_SHAPES",        "trace_quality", check_missing_cpu_op_shapes,
               detailed_only=True),
-    CheckSpec("2b",  "INFERENCE_ANNOTATION_MISSING",  "trace_quality", check_inference_annotation_missing,
+    CheckSpec("2b", "INFERENCE_ANNOTATION_MISSING", "trace_quality", check_inference_annotation_missing,
               detailed_only=True),
-    CheckSpec("2c",  "SPLIT_TRACE_MISSING",           "trace_quality", check_split_trace_missing,
-              detailed_only=True, implies_failures=["2e2"]),
-    CheckSpec("2d",  "SPLIT_INCORRECT",               "trace_quality", check_split_incorrect,
+    CheckSpec("2c", "SPLIT_TRACE_MISSING",          "trace_quality", check_split_trace_missing,
+              detailed_only=True, implies_failures=["2f"]),
+    CheckSpec("2d", "SPLIT_INCORRECT",              "trace_quality", check_split_incorrect,
               detailed_only=True),
-    CheckSpec("2e",  "SGLANG_SHAPE_MISSING",          "trace_quality", check_sglang_shape_missing,
+    CheckSpec("2e", "SGLANG_SHAPE_MISSING",         "trace_quality", check_sglang_shape_missing,
               detailed_only=True),
-    CheckSpec("2e2", "SPLIT_LOW_GPU_KERNELS",         "trace_quality", check_split_low_gpu_kernels,
+    CheckSpec("2f", "SPLIT_LOW_GPU_KERNELS",        "trace_quality", check_split_low_gpu_kernels,
               detailed_only=True),
-    CheckSpec("2f",  "HIGH_IDLE",                     "trace_quality", check_high_idle),
-    CheckSpec("2g",  "GPU_GRAPH_REPLAY",              "trace_quality", check_gpu_graph_replay),
-    CheckSpec("2h",  "CORRUPT_JSON",                  "trace_quality", check_corrupt_json),
-    CheckSpec("2i",  "RUNTIME_INSTABILITY",           "trace_quality", check_runtime_instability),
+    CheckSpec("2g", "HIGH_IDLE",                    "trace_quality", check_high_idle),
+    CheckSpec("2h", "GPU_GRAPH_REPLAY",             "trace_quality", check_gpu_graph_replay),
+    CheckSpec("2i", "CORRUPT_JSON",                 "trace_quality", check_corrupt_json),
+    CheckSpec("2j", "RUNTIME_INSTABILITY",          "trace_quality", check_runtime_instability),
 
-    CheckSpec("3a0", "PERF_REPORT_GENERATED",         "perf_model",    check_step1_fail,
+    # -- 3x: perf_model -----------------------------------------------------
+    CheckSpec("3a", "PERF_REPORT_COMMAND_INCORRECT", "perf_model",   check_perf_report_command_incorrect),
+    CheckSpec("3b", "HIPGRAPH_LAUNCH_IN_REPORT",    "perf_model",    check_hipgraph_launch_in_report),
+    CheckSpec("3c", "CAPTURE_GRAPH_MERGE_FAIL",     "perf_model",    check_capture_graph_merge_fail),
+    CheckSpec("3d", "SYNTHETIC_OP_SIGNIFICANT",     "perf_model",    check_synthetic_op_significant),
+    CheckSpec("3e", "UNCLASSIFIED_OP_SIGNIFICANT",  "perf_model",    check_unclassified_op_significant),
+    CheckSpec("3f", "TBS_TFLOPS_MISSING",           "perf_model",    check_tbs_tflops_missing),
+    CheckSpec("3g", "ROOFLINE_PCT_MISSING",         "perf_model",    check_roofline_pct_missing),
+    CheckSpec("3h", "ZERO_PCT_OPS",                 "perf_model",    check_zero_pct_ops),
+
+    # -- 4x: tracelens_agent_workflow ----------------------------------------
+    CheckSpec("4a", "PERF_REPORT_FAILURE",          "tracelens_agent_workflow", check_step1_fail,
               implies_failures=["3b", "3d", "3e", "3f", "3g", "3h"]),
-    CheckSpec("3a",  "PERF_REPORT_COMMAND_INCORRECT", "perf_model",    check_perf_report_command_incorrect),
-    CheckSpec("3b",  "HIPGRAPH_LAUNCH_IN_REPORT",     "perf_model",    check_hipgraph_launch_in_report),
-    CheckSpec("3c",  "CAPTURE_GRAPH_MERGE_FAIL",      "perf_model",    check_capture_graph_merge_fail),
-    CheckSpec("3d",  "SYNTHETIC_OP_SIGNIFICANT",      "perf_model",    check_synthetic_op_significant),
-    CheckSpec("3e",  "UNCLASSIFIED_OP_SIGNIFICANT",   "perf_model",    check_unclassified_op_significant),
-    CheckSpec("3f",  "TBS_TFLOPS_MISSING",            "perf_model",    check_tbs_tflops_missing),
-    CheckSpec("3g",  "ROOFLINE_PCT_MISSING",          "perf_model",    check_roofline_pct_missing),
-    CheckSpec("3h",  "ZERO_PCT_OPS",                  "perf_model",    check_zero_pct_ops),
+    CheckSpec("4b", "ORCHESTRATOR_PREP_FAIL",       "tracelens_agent_workflow", check_step2_5_fail),
+    CheckSpec("4c", "OUTPUT_DIRS_MISSING",          "tracelens_agent_workflow", check_output_incomplete),
+    CheckSpec("4d", "CMD_PREFIX_INVALID",           "tracelens_agent_workflow", check_prefix_fail),
+    CheckSpec("4e", "ANALYSIS_MD_MISSING_OR_EMPTY", "tracelens_agent_workflow", check_report_too_small),
+    CheckSpec("4f", "SUBAGENT_FINDINGS_MISSING",    "tracelens_agent_workflow", check_subagent_budget),
 
-    CheckSpec("",    "STEP2_5_FAIL",                  "pipeline",      check_step2_5_fail),
-    CheckSpec("",    "OUTPUT_INCOMPLETE",             "pipeline",      check_output_incomplete),
-    CheckSpec("",    "PREFIX_FAIL",                   "pipeline",      check_prefix_fail),
-
-    CheckSpec("",    "REPORT_TOO_SMALL",              "report",        check_report_too_small),
-
-    CheckSpec("",    "RESOURCE_EXHAUSTED",            "token",         check_resource_exhausted),
-    CheckSpec("",    "SUBAGENT_BUDGET",               "token",         check_subagent_budget),
-
-    CheckSpec("",    "SSH_FAIL",                      "infra",         check_ssh_fail),
-    CheckSpec("",    "DOCKER_MISSING",                "infra",         check_docker_missing),
-    CheckSpec("",    "TL_NOT_INSTALLED",              "infra",         check_tl_not_installed),
-    CheckSpec("",    "DISK_FULL",                     "infra",         check_disk_full),
-    CheckSpec("",    "NFS_STALE",                     "infra",         check_nfs_stale),
-    CheckSpec("",    "MISSING_DEP",                   "infra",         check_missing_dep),
+    # -- 5x: infra -----------------------------------------------------------
+    CheckSpec("5a", "SSH_FAIL",                     "infra",         check_ssh_fail),
+    CheckSpec("5b", "DOCKER_MISSING",               "infra",         check_docker_missing),
+    CheckSpec("5c", "TL_NOT_INSTALLED",             "infra",         check_tl_not_installed),
+    CheckSpec("5d", "DISK_FULL",                    "infra",         check_disk_full),
+    CheckSpec("5e", "NFS_STALE",                    "infra",         check_nfs_stale),
+    CheckSpec("5f", "MISSING_DEP",                  "infra",         check_missing_dep),
+    CheckSpec("5g", "CONTEXT_LENGTH_EXCEEDED",      "infra",         check_resource_exhausted),
 ]
