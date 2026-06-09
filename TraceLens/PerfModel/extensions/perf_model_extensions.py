@@ -457,6 +457,74 @@ class GroupQuant(BinaryElementwise):
         self.bpe_out = name2bpe(self.dtype_in1_in2_out[2])
 
 
+class dynamic_per_group_scaled_quant_kernel(GroupQuant):
+    """
+    Performance model for AITER ``dynamic_per_group_scaled_quant_kernel`` HIP launches.
+
+    Graph-replay capture layout (typical):
+        [out_fp8, block_scales?, per_token_scales, ...]
+    When the bf16 input tensor is not traced, assume it matches *out* shape.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        dims = args.get("Input Dims") or []
+        types = args.get("Input type") or []
+        if len(dims) < 3:
+            raise ValueError(
+                f"dynamic_per_group_scaled_quant_kernel needs >=3 Input Dims, got {dims}"
+            )
+
+        shape_out = tuple(dims[0])
+        dtype_out = types[0] if types else "c10::Float8_e4m3fn"
+
+        mid = dims[1]
+        scales = dims[2]
+        mid_type = types[1] if len(types) > 1 else ""
+        if isinstance(mid, (list, tuple)) and len(mid) == len(shape_out):
+            shape_in1 = tuple(mid)
+            dtype_in1 = mid_type or "c10::Half"
+        else:
+            shape_in1 = shape_out
+            dtype_in1 = "c10::Half"
+
+        shape_in2 = tuple(scales) if isinstance(scales, (list, tuple)) else ()
+        dtype_in2 = types[2] if len(types) > 2 else "float"
+
+        strides = args.get("Input Strides") or [[], [], []]
+        return {
+            "shape_in1": shape_in1,
+            "shape_in2": shape_in2,
+            "shape_out": shape_out,
+            "dtype_in1_in2_out": (dtype_in1, dtype_in2, dtype_out),
+            "stride_input1": tuple(strides[1]) if len(strides) > 1 else (),
+            "stride_input2": tuple(strides[2]) if len(strides) > 2 else (),
+            "stride_output": tuple(strides[0]) if strides else (),
+        }
+
+    def bytes(self):
+        pd = self.param_details
+        bytes_out = prod(pd["shape_out"]) * name2bpe(pd["dtype_in1_in2_out"][2])
+        bytes_in = prod(pd["shape_in1"]) * name2bpe(pd["dtype_in1_in2_out"][0])
+        bytes_scales = prod(pd["shape_in2"]) * name2bpe(pd["dtype_in1_in2_out"][1])
+        mid = self.event["args"]["Input Dims"][1]
+        mid_type = (self.event["args"].get("Input type") or [""])[1]
+        bytes_block = 0
+        if isinstance(mid, (list, tuple)) and len(mid) == 2 and mid != list(
+            pd["shape_in1"]
+        ):
+            bytes_block = prod(mid) * name2bpe(mid_type or "c10::Half")
+        return bytes_in + bytes_out + bytes_scales + bytes_block
+
+    def flops(self):
+        return prod(self.param_details["shape_out"]) * 3
+
+    def get_compute_precision(self):
+        dtype = self.param_details["dtype_in1_in2_out"][0]
+        return torch_dtype_map(dtype) if dtype else None
+
+
 class per_group_quant(GroupQuant):
     """
     Performance model for aiter::dynamic_per_token_scaled_quant.

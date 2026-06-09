@@ -15,6 +15,7 @@ from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.torch_op_mapping import resolve_perf_model_class
 from TraceLens.Trace2Tree.trace_sglang_capture_link import (
     DEFAULT_CAPTURE_OFFSET,
+    _augment_capture_args,
     build_graph_replay_kernel_index,
     detect_launch_offset,
     enrich_synthetic_ops_from_sglang_capture,
@@ -243,3 +244,69 @@ def test_enrich_overwrites_placeholder_and_isolates_sibling_args(capture_folder)
     ]
     assert synthetics[1]["args"]["Input Dims"] is placeholder
     assert synthetics[0]["args"] is not synthetics[1]["args"]
+
+
+MOE_KERNEL = "_ZN2ck15kernel_moe_gemmINS_25GridwiseMoeGemmBlockScale"
+QUANT_KERNEL = "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDhDB8_Li32EEEvPT0_PfPKT_PKfiliibPKii"
+
+
+def test_augment_truncated_moe_gemm_from_nearby_launch():
+    table = [
+        {"kernel": "quant", "args": {"Input Dims": [[4, 3072], [], []]}},
+        {
+            "kernel": MOE_KERNEL,
+            "args": {"Input Dims": [[256, 768, 3072], [], [], []]},
+        },
+        {
+            "kernel": MOE_KERNEL,
+            "args": {
+                "Input Dims": [
+                    [4, 8, 384],
+                    [256, 768, 3072],
+                    [256, 3072, 384],
+                ],
+                "Input type": ["c10::Float8_e4m3fn"] * 3,
+            },
+        },
+    ]
+    augmented = _augment_capture_args(
+        MOE_KERNEL, table[1]["args"], table, capture_index=1
+    )
+    assert is_usable_capture_input_dims(augmented["Input Dims"])
+    assert augmented["Input Dims"][0] == [4, 3072]
+    assert augmented["Input Dims"][1] == [256, 768, 3072]
+
+
+def test_augment_rmsnorm_serial_from_nearby_2d_shape():
+    table = [
+        {"kernel": QUANT_KERNEL, "args": {"Input Dims": [[4, 3072], [], [4, 24]]}},
+        {"kernel": "rmsnorm_sumsq_kernel_serial", "args": {"Input Dims": [[], [], []]}},
+    ]
+    augmented = _augment_capture_args(
+        "rmsnorm_sumsq_kernel_serial", table[1]["args"], table, capture_index=1
+    )
+    assert augmented["Input Dims"][0] == [4, 3072]
+
+
+def test_augment_quant_kernel_resolves_perf_model():
+    from TraceLens.PerfModel.extensions import perf_model_extensions
+
+    event = {
+        "name": f"hipGraphLaunch->{QUANT_KERNEL} (Synthetic Op)",
+        "args": {
+            "Input Dims": [[4, 3072], [96, 128], [4, 24]],
+            "Input type": [
+                "c10::Float8_e4m3fn",
+                "c10::Half",
+                "float",
+            ],
+        },
+        "kernel_details": [{"name": QUANT_KERNEL}],
+    }
+    assert (
+        resolve_perf_model_class(event)
+        is perf_model_extensions.dynamic_per_group_scaled_quant_kernel
+    )
+    pm = perf_model_extensions.dynamic_per_group_scaled_quant_kernel(event=event)
+    assert pm.flops() > 0
+    assert pm.bytes() > 0

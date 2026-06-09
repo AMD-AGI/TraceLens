@@ -126,8 +126,29 @@ def test_synthetic_gemm_without_input_dims_has_no_perf_model():
     assert resolve_perf_model_class(event) is None
 
 
-def test_synthetic_moe_gemm_resolves_grouped_gemm_with_input_dims():
-    event = _synthetic_event(
-        MOE_GEMM_KERNEL, parent="aten::bmm", input_dims=(8, 64, 32)
+def test_synthetic_moe_gemm_resolves_ck_kernel_with_stage2_dims():
+    event = {
+        "name": f"hipGraphLaunch->{MOE_GEMM_KERNEL} (Synthetic Op)",
+        "args": {
+            "Input Dims": [
+                [4, 8, 384],
+                [256, 768, 3072],
+                [256, 3072, 384],
+            ],
+            "Input type": [
+                "c10::Float8_e4m3fn",
+                "c10::Float8_e4m3fn",
+                "c10::Float8_e4m3fn",
+            ],
+        },
+        "kernel_details": [{"name": MOE_GEMM_KERNEL}],
+    }
+    from TraceLens.PerfModel.extensions import moe_perf_model_extensions
+
+    assert (
+        resolve_perf_model_class(event)
+        is moe_perf_model_extensions.ck_kernel_moe_gemm
     )
-    assert resolve_perf_model_class(event) is perf_model.primus_turbo_grouped_gemm
+    pm = moe_perf_model_extensions.ck_kernel_moe_gemm(event=event)
+    assert pm.flops() > 0
+    assert pm.bytes() > 0
