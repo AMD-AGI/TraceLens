@@ -58,12 +58,15 @@ def capture_filepath(capture_folder: str, batch_size: int) -> str:
 
 
 def _is_runtime_launch(event: dict) -> bool:
-    return event.get("cat") in ("cuda_runtime", "cuda_driver") and "Launch" in event.get(
-        "name", ""
-    )
+    return event.get("cat") in (
+        "cuda_runtime",
+        "cuda_driver",
+    ) and "Launch" in event.get("name", "")
 
 
-def _cpu_op_args_before_launch(events: List[dict], launch_event: dict) -> Optional[dict]:
+def _cpu_op_args_before_launch(
+    events: List[dict], launch_event: dict
+) -> Optional[dict]:
     """Return cpu_op args with Input Dims for a capture launch event."""
     corr = launch_event.get("args", {}).get("correlation")
     if corr is not None:
@@ -108,9 +111,7 @@ def _load_capture_launch_table(capture_path: str) -> List[dict]:
             {
                 "kernel": launch.get("args", {}).get("kernel", ""),
                 "args": {
-                    key: cpu_args[key]
-                    for key in CAPTURE_ARGS_KEYS
-                    if key in cpu_args
+                    key: cpu_args[key] for key in CAPTURE_ARGS_KEYS if key in cpu_args
                 },
             }
         )
@@ -118,7 +119,9 @@ def _load_capture_launch_table(capture_path: str) -> List[dict]:
 
 
 def detect_launch_offset(
-    capture_kernels: List[str], replay_kernels: List[str], max_offset: int = MAX_OFFSET_SEARCH
+    capture_kernels: List[str],
+    replay_kernels: List[str],
+    max_offset: int = MAX_OFFSET_SEARCH,
 ) -> int:
     """Pick offset in [0, max_offset) maximizing kernel-name matches."""
     if not capture_kernels or not replay_kernels:

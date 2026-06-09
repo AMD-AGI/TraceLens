@@ -114,7 +114,9 @@ class TestSyntheticOpPerfMetrics:
         tree = TraceToTree(deepcopy(_make_graph_launch_trace()))
         tree.build_tree(add_python_func=False)
         analyzer = TreePerfAnalyzer(tree, add_python_func=False)
-        synthetic = _build_synthetic(analyzer, GEMM_KERNEL, kernel_dur=20, parent_dur=700)
+        synthetic = _build_synthetic(
+            analyzer, GEMM_KERNEL, kernel_dur=20, parent_dur=700
+        )
         assert synthetic["dur"] == 20
         assert synthetic["children"] == []
         assert synthetic["gpu_events"] == [2]
@@ -154,12 +156,8 @@ class TestSyntheticOpPerfMetrics:
         tree.build_tree(add_python_func=False)
         analyzer = TreePerfAnalyzer(tree, add_python_func=False, arch=TEST_ARCH)
         synthetics = [
-            _build_synthetic(
-                analyzer, GEMM_KERNEL, kernel_dur=20, next_uid=9001
-            ),
-            _build_synthetic(
-                analyzer, OTHER_KERNEL, kernel_dur=50, next_uid=9002
-            ),
+            _build_synthetic(analyzer, GEMM_KERNEL, kernel_dur=20, next_uid=9001),
+            _build_synthetic(analyzer, OTHER_KERNEL, kernel_dur=50, next_uid=9002),
         ]
         synthetics[0]["args"] = {
             "Input Dims": [[4, 3072], [3072, 256]],
