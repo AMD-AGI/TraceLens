@@ -176,6 +176,16 @@ def _categorize_torch_op_from_registry(
     if fallback is not None:
         return fallback
 
+    # Ops without an explicit registry/pattern entry but with a pattern-matched
+    # perf model (e.g. the Triton fused-MoE expert GEMM, whose registered op
+    # name carries an unstable numeric suffix) inherit the category declared by
+    # that perf model, so categorization and roofline stay in sync.
+    perf_model_class = resolve_perf_model_class(name)
+    if perf_model_class is not None:
+        category = getattr(perf_model_class, "category", None)
+        if category is not None:
+            return category
+
     return "other"
 
 
@@ -398,7 +408,25 @@ def _match_triton_compiled(name):
     return None
 
 
+def _match_fused_moe_triton(name):
+    """Match the Triton fused-MoE expert GEMM (sglang / vLLM).
+
+    The MoE expert FFN GEMMs are launched via the Triton ``fused_moe_kernel``
+    (op name ``..._invoke_fused_moe_kernel``). The registered op name carries an
+    unstable numeric suffix and the W4A16 (gptq/awq) path reuses the same
+    kernel, so match on the stable substring rather than an exact op name.
+    """
+    if "invoke_fused_moe_kernel" in name:
+        from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
+            moe_triton_fused_gemm,
+        )
+
+        return moe_triton_fused_gemm
+    return None
+
+
 register_perf_model_matcher(_match_triton_compiled)
+register_perf_model_matcher(_match_fused_moe_triton)
 
 OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,

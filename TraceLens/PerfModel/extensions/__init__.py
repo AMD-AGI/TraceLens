@@ -11,6 +11,7 @@ Extension for pseudo-op operations.
 from .moe_perf_model_extensions import (
     FusedMoE,
     moe_aiter_fused_1stage,
+    moe_triton_fused_gemm,
     UnfusedMoE_Up,
     UnfusedMoE_Down,
     moe_triton_unfused_up,
@@ -59,6 +60,7 @@ __all__ = [
     "InferenceAttention",
     # Concrete classes
     "moe_aiter_fused_1stage",
+    "moe_triton_fused_gemm",
     "moe_triton_unfused_up",
     "moe_triton_unfused_down",
     "moe_gptq_awq_up",

@@ -8,7 +8,8 @@
 Performance models for pseudo-op extensions.
 """
 
-from TraceLens.PerfModel.utils import torch_dtype_map
+from TraceLens.PerfModel.perf_model import GroupedGemm
+from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
 
 DTYPE_TO_BYTES = {
     "Float8_e4m3fn": 1,
@@ -1585,3 +1586,117 @@ class moe_gptq_awq_down(UnfusedMoE_Down):
 
     def get_maf_type(self):
         return "matrix"
+
+
+# ==============================================================================
+# Triton fused-MoE expert GEMM (sglang / vLLM ``invoke_fused_moe_kernel``)
+# ==============================================================================
+
+
+class moe_triton_fused_gemm(GroupedGemm):
+    """Roofline for one Triton fused-MoE expert GEMM (``fused_moe_kernel``).
+
+    SGLang / vLLM run the MoE expert FFN with the Triton ``fused_moe_kernel``,
+    launched once per projection: the gate/up GEMM (``w1``) and the down GEMM
+    (``w2``). Each launch is a *grouped* GEMM — every routed token-expert row
+    multiplies the per-expert weight block — so it is modelled exactly like
+    :class:`GroupedGemm` (``X[M, K] @ W[G, *, *] -> Y[M, N]``):
+
+        FLOPs : 2 * M * K * N
+        Bytes : (M*K + G*K*N) * bpe_in + M*N * bpe_out
+
+    where ``M`` is the number of token-expert output rows (``num_tokens *
+    top_k``), ``K`` the (logical, unpacked) contraction dim, ``N`` the output
+    feature dim, and ``G`` the number of experts.
+
+    Both projections route here; the differing ``w1``/``w2`` shapes are read
+    generically from the kernel arguments rather than positionally, because the
+    registered op name carries an unstable numeric suffix and the W4A16
+    (gptq/awq) path reuses the same kernel.
+
+    Expected ``invoke_fused_moe_kernel`` Input Dims (non-quantized example)::
+
+        gate/up: [[T, K], [E, N, K], (), [T*top_k, N], ..., [T, top_k], ...]
+        down   : [[T*top_k, K], [E, N, K], (), [T, top_k, N], ..., [T, top_k], ...]
+
+    Index 0 is the activation ``A`` (its last dim is the *logical* ``K`` — the
+    expert-weight ``K`` may be storage-packed for W4A16/FP8); the first 3-D
+    tensor is the expert weight ``B = [E, N, K_stored]``; the output (whose last
+    dim equals ``N``) gives ``M`` from the product of its leading dims.
+    """
+
+    category = "MoE_fused"
+    bwd_category = None
+
+    @staticmethod
+    def _is_int_shape(shp):
+        return (
+            isinstance(shp, (list, tuple))
+            and len(shp) >= 1
+            and all(isinstance(v, int) and v > 0 for v in shp)
+        )
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {}) or {}
+        input_dims = args.get("Input Dims", []) or []
+
+        # Expert weight B = [E, N, K_stored]: the first 3-D operand.
+        weight_idx, weight = None, None
+        for i, shp in enumerate(input_dims):
+            if moe_triton_fused_gemm._is_int_shape(shp) and len(shp) == 3:
+                weight_idx, weight = i, tuple(shp)
+                break
+        if weight is None:
+            raise ValueError(
+                "fused_moe kernel: no 3-D expert-weight tensor in "
+                f"Input Dims: {input_dims}"
+            )
+        E, N = weight[0], weight[1]
+
+        # Activation A = first 2-D operand; its trailing dim is the logical
+        # (unpacked) contraction dim K. Fall back to the stored weight K.
+        K = weight[2]
+        for shp in input_dims:
+            if moe_triton_fused_gemm._is_int_shape(shp) and len(shp) == 2:
+                K = shp[-1]
+                break
+
+        # M = routed token-expert output rows = product of the output tensor's
+        # leading dims. The output is the non-weight operand whose last dim is N
+        # (pick the largest such row count to skip the pre-expansion activation
+        # when K == N).
+        M = None
+        for i, shp in enumerate(input_dims):
+            if i == weight_idx or not moe_triton_fused_gemm._is_int_shape(shp):
+                continue
+            if len(shp) >= 2 and shp[-1] == N:
+                rows = 1
+                for d in shp[:-1]:
+                    rows *= d
+                if M is None or rows > M:
+                    M = rows
+        if M is None:
+            raise ValueError(
+                "fused_moe kernel: could not locate output rows "
+                f"(N={N}) in Input Dims: {input_dims}"
+            )
+
+        dtype_list = args.get("Input type", []) or []
+        dtype_in = dtype_list[0] if dtype_list else None
+        bpe_in = name2bpe(dtype_in) if dtype_in is not None else None
+        # Output dtype is typically the activation dtype (BF16); weights share
+        # bpe_in in GroupedGemm.bytes (exact for the BF16 path, an approximation
+        # for quantized weights, which are compute-bound here regardless).
+        bpe_out = bpe_in
+        return {"M": M, "K": K, "N": N, "G": E, "bpe_in": bpe_in, "bpe_out": bpe_out}
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for fused MoE is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for fused MoE is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.event.get("args", {}).get("Input type", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
