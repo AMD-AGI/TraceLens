@@ -88,7 +88,9 @@ def _is_ck_moe_stage1_layout(dims) -> bool:
     return a[0] <= 8192 and a[1] > 8 and b[0] == c[0]
 
 
-def _find_nearby_2d_shape(table: List[dict], center_index: int, window: int) -> Optional[List[int]]:
+def _find_nearby_2d_shape(
+    table: List[dict], center_index: int, window: int
+) -> Optional[List[int]]:
     for delta in range(1, window + 1):
         for idx in (center_index - delta, center_index + delta):
             if 0 <= idx < len(table):
@@ -155,9 +157,11 @@ def _augment_capture_args(
     dims = capture_args.get("Input Dims") or []
     augmented = copy.deepcopy(capture_args)
 
-    if "kernel_moe_gemm" in kn and not _is_ck_moe_stage2_layout(
-        dims
-    ) and not _is_ck_moe_stage1_layout(dims):
+    if (
+        "kernel_moe_gemm" in kn
+        and not _is_ck_moe_stage2_layout(dims)
+        and not _is_ck_moe_stage1_layout(dims)
+    ):
         first = dims[0] if dims else None
         if isinstance(first, (list, tuple)) and len(first) == 3 and first[0] >= 64:
             w1 = list(first)
@@ -443,10 +447,12 @@ class SGLangCaptureLinker:
         capture_args = row["args"] or None
         if not capture_args:
             return None
-        kernel_name = replay_kernels[replay_index] if replay_index < len(replay_kernels) else row.get("kernel", "")
-        return _augment_capture_args(
-            kernel_name, capture_args, table, capture_index
+        kernel_name = (
+            replay_kernels[replay_index]
+            if replay_index < len(replay_kernels)
+            else row.get("kernel", "")
         )
+        return _augment_capture_args(kernel_name, capture_args, table, capture_index)
 
 
 def enrich_synthetic_ops_from_sglang_capture(
@@ -507,9 +513,11 @@ def enrich_synthetic_ops_from_sglang_capture(
         existing_dims = event.get("args", {}).get("Input Dims")
         if is_usable_capture_input_dims(existing_dims):
             kn = event.get("name", "").split("->", 1)[-1].lower()
-            if "kernel_moe_gemm" not in kn or _is_ck_moe_stage1_layout(
-                existing_dims
-            ) or _is_ck_moe_stage2_layout(existing_dims):
+            if (
+                "kernel_moe_gemm" not in kn
+                or _is_ck_moe_stage1_layout(existing_dims)
+                or _is_ck_moe_stage2_layout(existing_dims)
+            ):
                 continue
 
         parent_name = event.get("name", "").split("->", 1)[0]

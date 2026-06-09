@@ -511,8 +511,10 @@ class dynamic_per_group_scaled_quant_kernel(GroupQuant):
         mid = self.event["args"]["Input Dims"][1]
         mid_type = (self.event["args"].get("Input type") or [""])[1]
         bytes_block = 0
-        if isinstance(mid, (list, tuple)) and len(mid) == 2 and mid != list(
-            pd["shape_in1"]
+        if (
+            isinstance(mid, (list, tuple))
+            and len(mid) == 2
+            and mid != list(pd["shape_in1"])
         ):
             bytes_block = prod(mid) * name2bpe(mid_type or "c10::Half")
         return bytes_in + bytes_out + bytes_scales + bytes_block
