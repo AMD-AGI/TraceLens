@@ -79,8 +79,10 @@ def get_pseudo_op_mappings():
         ## Quantization ops
         "vllm::triton_per_token_group_quant_fp8": perf_model_extensions.vllm_triton_per_token_group_quant_fp8,
         "sglang_profiler::fused_mxfp4_quant_fused_flatten_mxfp4_quant": perf_model_extensions.fused_flatten_mxfp4_quant,
+        "aiter::dynamic_per_tensor_quant": perf_model_extensions.aiter_dynamic_per_tensor_quant,
         ## RoPE ops
         "aiter::rope_cached_positions_2c_fwd_impl": perf_model_extensions.aiter_rope_cached_positions_2c_fwd_impl,
+        "sgl_kernel::rotary_embedding": perf_model_extensions.sgl_kernel_rotary_embedding,
         ## Activation ops
         "aiter::silu_and_mul": perf_model_extensions.aiter_silu_and_mul,
         "_C::silu_and_mul": perf_model_extensions.aiter_silu_and_mul,
@@ -110,6 +112,8 @@ def get_pseudo_op_mappings():
         ## GDN attention ops
         "vllm::gdn_attention_core": attention_perf_model_extensions.gdn_attention_core,
         "aiter::linear_attention_with_output_base": attention_perf_model_extensions.gdn_attention_core,
+        ## KV cache ops
+        "sglang::store_cache": perf_model_extensions.sglang_store_cache,
     }
 
     return pseudo_op_mappings
