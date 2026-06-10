@@ -459,7 +459,6 @@ class per_group_quant(GroupQuant):
         return torch_dtype_map(dtype) if dtype else None
 
 
-
 class vllm_triton_per_token_group_quant_fp8(GroupQuant):
     """
     Performance model for vllm::triton_per_token_group_quant_fp8.
