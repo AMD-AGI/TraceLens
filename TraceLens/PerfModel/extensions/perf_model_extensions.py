@@ -10,7 +10,12 @@ Performance models for pseudo-op extensions.
 
 from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
 import re
-from TraceLens.PerfModel.perf_model import GEMM, BinaryElementwise, UnaryElementwise
+from TraceLens.PerfModel.perf_model import (
+    GEMM,
+    BinaryElementwise,
+    UnaryElementwise,
+    FusedRoPE,
+)
 from math import prod
 
 
@@ -651,3 +656,203 @@ class aiter_gelu_tanh_and_mul(aiter_silu_and_mul):
 
     def flops(self):
         return 10 * prod(self.param_details["op_shape"])
+
+
+class gemm_afp4wfp4(GEMM):
+    """
+    Performance model for AITER's gemm_afp4wfp4_ kernel.
+
+    Computes: Y[M, N] = (X * x_scales) @ (W * w_scales)^T  with MXFP4 inputs.
+        X is FP4 E2M1 packed as uint8 with shape (M, K // 2) (two FP4 values per byte).
+        W is FP4 E2M1 packed as uint8 with shape (N, K // 2).
+        x_scales / w_scales are E8M0 per-group scales with one scale per 32 K-elements
+        (shapes (M, K // 32) and (N, K // 32) respectively).
+        Y is BF16/FP16 with shape (M, N).
+
+    Reference implementation:
+        aiter/aiter/ops/triton/gemm/basic/gemm_afp4wfp4.py
+
+    Kernel mechanics:
+        Tiles M, N, K with optional split-K. Both X and W are read as FP4 (uint8
+        packed), dequantized with their per-group E8M0 scales inside the MFMA
+        pipeline, accumulated in FP32, and cast to BF16/FP16 on store. Split-K
+        partials are reduced by a separate kernel.
+
+    Roofline calculation -- FLOPs:
+        FLOPs = 2 * M * N * K   (inherited from GEMM base class)
+
+        Per-block scale multiplications are O(M * N * K / 32) and negligible
+        relative to the matmul.
+
+    Roofline calculation -- Bytes:
+        bytes_X      = M * K * 0.5             # FP4 packed
+        bytes_W      = N * K * 0.5             # FP4 packed
+        bytes_output = M * N * bpe(output)     # BF16/FP16 -> 2 bytes
+
+        Scale tensors are negligible and omitted.
+
+    Compute precision:
+        MXFP4 -> mapped via torch_dtype_map("mxfp4"). We override get_compute_precision
+        defensively because traces may report the FP4 storage dtype as "unsigned char"
+        which would otherwise map to fp8.
+
+    Expected Input Dims from trace:
+        [[M, K // 2], [N, K // 2], [M, K // 32], [N, K // 32], (), [M, N], (), ()]
+
+    Expected Input type from trace:
+        [dtype_x, dtype_w, dtype_x_scale, dtype_w_scale, ..., dtype_y, ...]
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return {
+            "B": 1,
+            "M": event["args"]["Input Dims"][0][0],
+            "N": event["args"]["Input Dims"][1][0],
+            "K": event["args"]["Input Dims"][0][1] * 2,
+            "bias": False,
+            "dtype_A_B": (
+                event["args"]["Input type"][0],
+                event["args"]["Input type"][1],
+                "c10::bfloat16",
+            ),
+        }
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_mat1 = 0.5  # FP4 packed
+        self.bpe_mat2 = 0.5  # FP4 packed
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[2])  # unused (bias=False)
+
+        return super().bytes(
+            bpe_mat1=self.bpe_mat1,
+            bpe_mat2=self.bpe_mat2,
+            bpe_bias=self.bpe_bias,
+            bpe_output=self.bpe_output,
+        )
+
+    def get_compute_precision(self):
+        return torch_dtype_map("mxfp4")
+
+
+class fused_flatten_mxfp4_quant(UnaryElementwise):
+    """
+    Performance model for aiter.ops.triton.quant.fused_mxfp4_quant.fused_flatten_mxfp4_quant
+    (surfaced in traces as sglang_profiler::fused_mxfp4_quant_fused_flatten_mxfp4_quant).
+
+    Flattens the last two dims of a (M, N1, N2) BF16/FP16 tensor and MXFP4-quantizes
+    each row to packed FP4 + E8M0 per-32-elem block scales.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/quant/fused_mxfp4_quant.py:149
+
+    Signature:
+        fused_flatten_mxfp4_quant(x: Tensor)  # x shape (M, N1, N2), bf16/fp16
+        -> out: (M, (N1*N2)//2) uint8, out_block_scales: (M, ceil(N1*N2/32)) uint8
+
+    Roofline calculation -- FLOPs:
+        ~2 FLOPs per input element (max-abs reduction per 32-elem group + scale).
+
+    Roofline calculation -- Bytes:
+        read x:              nelems * bpe_in              # BF16/FP16 -> 2 bytes
+        write packed FP4:    nelems * 0.5
+        write E8M0 scales:   nelems // 32 * 1
+
+    Expected Input Dims from trace:
+        [[M, N1, N2]]
+
+    Category: bucketed as GroupQuant (it computes per-32-elem block E8M0 scales
+    and quantizes to MXFP4, same family as per_group_quant /
+    vllm_triton_per_token_group_quant_fp8). The UnaryElementwise base is kept
+    only for the single-input FLOPs/bytes roofline machinery.
+    """
+
+    category = "GroupQuant"
+    sheet_category = "GroupQuant"
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_in),
+            "stride_input": stride_input,
+            "stride_output": None,
+        }
+
+    def flops(self):
+        return 2 * self.nelems
+
+    def bytes(self):
+        if self.bpe_in is None:
+            return None
+        bytes_read = self.nelems * self.bpe_in
+        bytes_write_fp4 = self.nelems * 0.5
+        bytes_write_scales = (self.nelems // 32) * 1
+        return bytes_read + bytes_write_fp4 + bytes_write_scales
+
+
+class aiter_rope_cached_positions_2c_fwd_impl(FusedRoPE):
+    """
+    Performance model for aiter::rope_cached_positions_2c_fwd_impl.
+
+    Two-channel (Q + K) forward RoPE with cached cos / sin and per-token positions.
+    Rotates the rotate-dim slice of each channel using NEOX or GPT-J rotate style;
+    the no-position part is copied through.
+
+    Reference implementation:
+        aiter/aiter/ops/rope.py:207
+
+    Signature:
+        rope_cached_positions_2c_fwd_impl(
+            output_x,   # (B, S, H_q,  d)
+            output_y,   # (B, S, H_kv, d)
+            input_x,    # (B, S, H_q,  d)
+            input_y,    # (B, S, H_kv, d)
+            cos,        # (max_pos, 1, 1, d_cs)
+            sin,        # (max_pos, 1, 1, d_cs)
+            positions,  # (B, S), int64
+            rotate_style, reuse_freqs_front_part, nope_first,
+        ) -> None
+
+    Roofline calculation -- FLOPs:
+        Each rotated element pair takes 4 muls + 2 adds = 6 ops over 2 elements,
+        i.e. ~3 FLOPs per element. Applied to both x and y channels.
+
+        FLOPs = 3 * (numel(input_x) + numel(input_y))
+
+    Roofline calculation -- Bytes:
+        read + write both x and y channels:
+            2 * (numel(input_x) + numel(input_y)) * bpe_in
+
+        cos/sin/positions are typically cache-resident and small; omitted from
+        the dominant HBM traffic.
+
+    Expected Input Dims from trace:
+        [[B, S, H_q, d], [B, S, H_kv, d], [B, S, H_q, d], [B, S, H_kv, d],
+         [max_pos, 1, 1, d_cs], [max_pos, 1, 1, d_cs], [B, S]]
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        # input_x at Input Dims[2], input_y at Input Dims[3]
+        x_shape = tuple(input_dims[2])
+        y_shape = tuple(input_dims[3])
+        return {
+            "x_shape": x_shape,
+            "y_shape": y_shape,
+            "num_elements": prod(x_shape) + prod(y_shape),
+        }
+
+    def flops(self):
+        return 3 * self.param_details["num_elements"]
+
+    def bytes(self):
+        if self.bpe is None:
+            return None
+        n = self.param_details["num_elements"]
+        return 2 * n * self.bpe
