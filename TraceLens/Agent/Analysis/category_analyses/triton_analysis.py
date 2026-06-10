@@ -23,7 +23,7 @@ from analysis_utils import (
 
 
 def classify_triton_operation(op_name: str, row) -> dict:
-    """Classify Triton kernel type from name prefix."""
+    """Classify Triton kernel by inductor prefix."""
     op_lower = op_name.lower()
     if op_lower.startswith("triton_poi_"):
         kernel_type = "pointwise"
@@ -71,7 +71,6 @@ def main():
             "operation_classifier": classify_triton_operation,
         },
         extract_fn=extract_category_specific,
-        compute_impact=False,
         comparison_scope=args.comparison_scope,
     )
 
