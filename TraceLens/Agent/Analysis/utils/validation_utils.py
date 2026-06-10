@@ -533,7 +533,9 @@ def _check_priority_consistency(output_dir, manifest):
             continue
         cat = p.get("category")
         expected = sum(
-            f.get("impact_score", 0) for f in findings if f.get("category") == cat
+            (f.get("impact_score") or 0)
+            for f in findings
+            if f.get("category") == cat
         )
         actual = p.get("impact_score", 0) or 0
         if abs(actual - expected) > _ROLLUP_IMPACT_TOL:
@@ -727,9 +729,11 @@ def _validate_report_priority_consistency(content, output_dir):
             pd = json.load(f)
     except (OSError, json.JSONDecodeError):
         return []
-    findings = [
-        f for f in (pd.get("findings", []) or []) if f.get("impact_score") is not None
-    ]
+    # Include roofline-unresolved findings (``impact_score`` None): the
+    # orchestrator renders one card per findings[] entry, and such a card carries
+    # null low/mid/high markers (R3 below validates "null" against None). Filtering
+    # them out here would make R1/R2 spuriously report a count/order mismatch.
+    findings = list(pd.get("findings", []) or [])
     priorities = pd.get("priorities", []) or []
     errors = []
 

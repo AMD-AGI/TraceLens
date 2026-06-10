@@ -249,9 +249,16 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
         )
         for f in findings:
             cat = f["category"]
-            quantified[cat]["impact_score"] += f.get("impact_score", 0)
-            quantified[cat]["impact_score_low"] += f.get("impact_score_low", 0)
-            quantified[cat]["impact_score_high"] += f.get("impact_score_high", 0)
+            # Roofline-unresolved findings carry ``impact_score`` None (not
+            # quantifiable); skip them in the rollup so they neither distort
+            # category impact sums nor crash the arithmetic. They remain in
+            # ``findings[]`` below, and the category still surfaces via the
+            # manifest_fallback (unmodeled) path on GPU-time.
+            if f.get("impact_score") is None:
+                continue
+            quantified[cat]["impact_score"] += f.get("impact_score") or 0
+            quantified[cat]["impact_score_low"] += f.get("impact_score_low") or 0
+            quantified[cat]["impact_score_high"] += f.get("impact_score_high") or 0
             quantified[cat]["operation_count"] += f.get("operation_count", 0)
 
         plot_recs = sorted(
@@ -323,7 +330,15 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             )
             next_rank += 1
 
-        findings.sort(key=lambda f: f["impact_score"], reverse=True)
+        # Quantified findings first (descending impact); roofline-unresolved
+        # findings (``impact_score`` None) sort last.
+        findings.sort(
+            key=lambda f: (
+                f.get("impact_score") is not None,
+                f.get("impact_score") or 0.0,
+            ),
+            reverse=True,
+        )
         for global_rank, f in enumerate(findings, start=1):
             f["global_rank"] = global_rank
 

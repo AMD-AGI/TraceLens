@@ -28,6 +28,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     validate_efficiency,
     calculate_efficiency_with_validation,
     compute_impact_estimates,
+    build_category_findings,
     write_metrics_json,
     load_category_data,
     calculate_time_metrics,
@@ -323,6 +324,113 @@ def test_compute_impact_estimates_min_impact_score():
         operations, "gemm", min_impact_score=1.0, baseline_ms=100.0
     )
     assert len(estimates_strict) == 0
+
+
+# ----- Unit tests: roofline-unresolved dominant op surfacing (fused-MoE gap) -----
+
+
+def _moe_like_operations():
+    """One dominant fused-MoE op with a NULL roofline + a small resolved op."""
+    return [
+        {
+            "name": "invoke_fused_moe_kernel",
+            "time_ms": 302.876,
+            "library": "Triton",
+            "launcher_path": (
+                "sglang/srt/layers/moe/moe_runner/triton_utils/"
+                "fused_moe.py(391): _fused_moe_kernel_sequence"
+            ),
+            "efficiency": {
+                "efficiency_percent": None,
+                "is_anomaly": False,
+                "bound_type": None,
+            },
+        },
+        {
+            "name": "tiny_resolved_op",
+            "time_ms": 1.0,
+            "library": "Triton",
+            "efficiency": {
+                "efficiency_percent": 50.0,
+                "is_anomaly": False,
+                "bound_type": "compute",
+            },
+        },
+    ]
+
+
+def test_unresolved_dominant_dropped_without_opt_in():
+    """Default behaviour unchanged: a null-roofline op yields no estimate."""
+    estimates = compute_impact_estimates(
+        _moe_like_operations(), "moe_fused", baseline_ms=1328.77
+    )
+    # Only the small resolved op survives; the dominant null-roofline op is dropped.
+    assert [e["operation"] for e in estimates] == ["tiny_resolved_op"]
+
+
+def test_unresolved_dominant_surfaced_when_opted_in():
+    """With opt-in, the dominant null-roofline op surfaces as non-quantifiable."""
+    estimates = compute_impact_estimates(
+        _moe_like_operations(),
+        "moe_fused",
+        baseline_ms=1328.77,
+        surface_unresolved_dominant=True,
+    )
+    by_op = {e["operation"]: e for e in estimates}
+    assert "invoke_fused_moe_kernel" in by_op
+    dom = by_op["invoke_fused_moe_kernel"]
+    assert dom["roofline_unresolved"] is True
+    assert dom["impact_score"] is None
+    assert dom["impact_score_low"] is None
+    assert dom["impact_score_high"] is None
+    assert dom["efficiency_pct"] is None
+    assert dom["library"] == "Triton"
+    # ~22.79% of the 1328.77 ms E2E window.
+    assert dom["percent_of_e2e"] == pytest.approx(22.79, abs=0.05)
+    # Quantified estimate still sorts ahead of the unresolved one.
+    assert estimates[0]["operation"] == "tiny_resolved_op"
+    assert estimates[-1]["operation"] == "invoke_fused_moe_kernel"
+
+
+def test_unresolved_dominant_below_threshold_not_surfaced():
+    """A null-roofline op below the %E2E floor is NOT surfaced (noise guard)."""
+    ops = [
+        {
+            "name": "small_null_op",
+            "time_ms": 5.0,  # ~0.4% of E2E, below the 5% floor
+            "library": "Triton",
+            "efficiency": {"efficiency_percent": None, "is_anomaly": False},
+        },
+    ]
+    estimates = compute_impact_estimates(
+        ops, "moe_fused", baseline_ms=1328.77, surface_unresolved_dominant=True
+    )
+    assert estimates == []
+
+
+def test_build_category_findings_keeps_unresolved_dominant():
+    """The dominant null-roofline estimate survives the MIN_PITEM_IMPACT_SCORE cut."""
+    estimates = compute_impact_estimates(
+        _moe_like_operations(),
+        "moe_fused",
+        baseline_ms=1328.77,
+        surface_unresolved_dominant=True,
+    )
+    findings = build_category_findings(estimates)
+    # The tiny resolved op is below MIN_PITEM_IMPACT_SCORE and is dropped; the
+    # unresolved dominant finding is force-kept so the kernel never vanishes.
+    unresolved = [f for f in findings if f.get("roofline_unresolved")]
+    assert len(unresolved) == 1
+    f = unresolved[0]
+    assert f["impact_score"] is None
+    assert f["impact_score_low"] is None
+    assert f["impact_score_high"] is None
+    assert f["library"] == "Triton"
+    assert f["eff_bucket"] == "unknown"
+    assert f["rank"] >= 1
+    member = f["members"][0]
+    assert member["operation"] == "invoke_fused_moe_kernel"
+    assert member["roofline_unresolved"] is True
 
 
 def test_comparative_impact_from_operations_trace2_faster():

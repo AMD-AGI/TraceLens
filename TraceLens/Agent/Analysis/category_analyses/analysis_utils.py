@@ -38,6 +38,21 @@ MIN_PITEM_IMPACT_SCORE = (
 )
 _EFF_BUCKET_BOUNDARIES = (30, 60)
 
+# Roofline-unresolved dominant-op surfacing (closes the Triton fused-MoE gap).
+# A high-GPU-time op whose roofline could not be resolved (efficiency_percent is
+# None -- e.g. the fused-MoE expert kernel whose invoke_fused_moe_kernel trace
+# event carries no Input Dims, so M/K/N cannot be recovered) is normally dropped
+# by compute_impact_estimates (``eff_pct is None`` -> continue) and never reaches
+# category_findings, so no P-item / reasoning-candidate block is emitted and the
+# dominant kernel is invisible to downstream consumers. When a category opts in
+# (``surface_unresolved_dominant=True``), the single dominant such op at or above
+# this share of E2E GPU time is surfaced as a non-quantifiable finding
+# (``impact_score`` is None, ``roofline_unresolved`` is True) so it still produces
+# one compute-tier P-item, rendered with efficiency and impact as ``--`` /
+# "Not quantifiable from trace data". Scoped to opt-in categories (MoE) to avoid
+# surfacing every un-roofline'd op as noise.
+DOMINANT_NULL_ROOFLINE_MIN_PCT = 5.0
+
 _OP_NAME_LIBRARY_RULES = [
     ("aiter::", "AITER"),
     ("rocm_aiter", "AITER"),
@@ -689,6 +704,9 @@ def compute_impact_estimates(
     category: str,
     min_impact_score: float = 0.01,
     baseline_ms: float = 0,
+    *,
+    surface_unresolved_dominant: bool = False,
+    dominant_min_pct: float = DOMINANT_NULL_ROOFLINE_MIN_PCT,
 ) -> List[dict]:
     """
     Deterministically compute kernel_tuning impact estimates from operation metrics.
@@ -720,9 +738,18 @@ def compute_impact_estimates(
         min_impact_score: Per-op noise floor on ``impact_score_high`` (% E2E).
         baseline_ms: Total end-to-end GPU time for impact_score calculation.
             Must be > 0; otherwise an empty list is returned.
+        surface_unresolved_dominant: When True, also emit one non-quantifiable
+            estimate for the single dominant op whose roofline is unresolved
+            (``efficiency_percent`` is None) and whose share of E2E GPU time is
+            >= ``dominant_min_pct``. The estimate carries ``impact_score`` None
+            and ``roofline_unresolved`` True so a compute-tier P-item is still
+            produced for the dominant kernel (see ``DOMINANT_NULL_ROOFLINE_MIN_PCT``).
+        dominant_min_pct: % of E2E GPU time threshold for the above surfacing.
 
     Returns:
-        List of impact estimate dicts sorted by ``impact_score`` descending.
+        List of impact estimate dicts sorted by ``impact_score`` descending;
+        any roofline-unresolved dominant estimate (``impact_score`` None) sorts
+        last.
     """
     if baseline_ms is None or baseline_ms <= 0:
         print(
@@ -768,7 +795,93 @@ def compute_impact_estimates(
             "time_ms": round(time_ms, 3),
         }
         estimates.append(estimate)
-    return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
+
+    if surface_unresolved_dominant:
+        dominant = _unresolved_dominant_estimate(
+            operations,
+            category,
+            baseline_ms=baseline_ms,
+            dominant_min_pct=dominant_min_pct,
+            existing=estimates,
+        )
+        if dominant is not None:
+            estimates.append(dominant)
+
+    # ``impact_score`` is None for a roofline-unresolved dominant estimate; keep
+    # quantified estimates first (descending by impact), unresolved ones last.
+    return sorted(
+        estimates,
+        key=lambda x: (
+            x.get("impact_score") is not None,
+            x.get("impact_score") or 0.0,
+        ),
+        reverse=True,
+    )
+
+
+def _unresolved_dominant_estimate(
+    operations: List[dict],
+    category: str,
+    *,
+    baseline_ms: float,
+    dominant_min_pct: float,
+    existing: List[dict],
+) -> Optional[dict]:
+    """Build a non-quantifiable estimate for the dominant unresolved-roofline op.
+
+    Picks the single op with the largest ``time_ms`` among those whose roofline
+    is unresolved (``efficiency.efficiency_percent`` is None, not anomalous, not
+    fusion-flagged) and whose share of E2E GPU time is >= ``dominant_min_pct``.
+    Returns None when ``baseline_ms`` is non-positive, no such op clears the
+    threshold, or the op is already represented in ``existing``. The estimate has
+    ``impact_score`` (and low/high) None and ``roofline_unresolved`` True; a roofline
+    gap (hence an impact score) cannot be computed without an efficiency value,
+    but the kernel is too large to silently drop.
+    """
+    if baseline_ms is None or baseline_ms <= 0:
+        return None
+
+    best = None
+    best_time = 0.0
+    for op in operations:
+        if op.get("fusion_flagged"):
+            continue
+        eff = op.get("efficiency", {}) or {}
+        if eff.get("efficiency_percent") is not None or eff.get("is_anomaly"):
+            continue
+        time_ms = op.get("time_ms", 0) or 0
+        if time_ms <= 0:
+            continue
+        if time_ms > best_time:
+            best_time = time_ms
+            best = op
+
+    if best is None:
+        return None
+
+    pct_e2e = best_time / baseline_ms * 100.0
+    if pct_e2e < dominant_min_pct:
+        return None
+
+    name = best.get("name", "Unknown")
+    if any(e.get("operation") == name for e in existing):
+        return None
+
+    eff = best.get("efficiency", {}) or {}
+    return {
+        "operation": name,
+        "category": category,
+        "type": "kernel_tuning",
+        "impact_score": None,
+        "impact_score_low": None,
+        "impact_score_high": None,
+        "efficiency_pct": None,
+        "bound_type": eff.get("bound_type"),
+        "library": best.get("library"),
+        "time_ms": round(best_time, 3),
+        "percent_of_e2e": round(pct_e2e, 2),
+        "roofline_unresolved": True,
+    }
 
 
 def build_category_findings(
@@ -786,6 +899,13 @@ def build_category_findings(
     surviving group becomes one P-item the sub-agent renders. The orchestrator
     later concatenates these arrays across categories to derive the global
     ``priority_data.json::findings[]`` ranking.
+
+    Roofline-unresolved dominant estimates (``roofline_unresolved`` True,
+    ``impact_score`` None; see :func:`compute_impact_estimates`) bypass the
+    ``MIN_PITEM_IMPACT_SCORE`` cut so the dominant kernel is never silently
+    dropped. A group whose members are all unresolved keeps ``impact_score``
+    None (rendered as a non-quantifiable P-item) and sorts after quantified
+    findings.
     """
     use_eff_bucket = comparison_scope == "standalone"
     groups: dict = defaultdict(
@@ -794,6 +914,7 @@ def build_category_findings(
             "impact_score": 0.0,
             "impact_score_low": 0.0,
             "impact_score_high": 0.0,
+            "roofline_unresolved": False,
         }
     )
     for e in estimates:
@@ -803,32 +924,46 @@ def build_category_findings(
         key = (bound, lib, bucket)
         g = groups[key]
         g["members"].append(e)
-        g["impact_score"] += e.get("impact_score", 0)
-        g["impact_score_low"] += e.get("impact_score_low", 0)
-        g["impact_score_high"] += e.get("impact_score_high", 0)
+        if e.get("roofline_unresolved"):
+            g["roofline_unresolved"] = True
+        else:
+            g["impact_score"] += e.get("impact_score") or 0
+            g["impact_score_low"] += e.get("impact_score_low") or 0
+            g["impact_score_high"] += e.get("impact_score_high") or 0
 
     findings = []
     for (bound, lib, bucket), g in groups.items():
-        if g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
+        # A group with only roofline-unresolved members has impact_score 0 here;
+        # keep it (the dominant kernel must surface) but report impact as None.
+        unresolved_only = g["roofline_unresolved"] and g["impact_score"] <= 0
+        if not g["roofline_unresolved"] and g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
             continue
-        findings.append(
-            {
-                "bound_type": bound,
-                "library": lib,
-                "eff_bucket": bucket,
-                "impact_score": round(g["impact_score"], 2),
-                "impact_score_low": round(g["impact_score_low"], 2),
-                "impact_score_high": round(g["impact_score_high"], 2),
-                "member_count": len(g["members"]),
-                "members": sorted(
-                    g["members"],
-                    key=lambda m: m.get("impact_score", 0),
-                    reverse=True,
-                ),
-            }
-        )
+        finding = {
+            "bound_type": bound,
+            "library": lib,
+            "eff_bucket": bucket,
+            "impact_score": None if unresolved_only else round(g["impact_score"], 2),
+            "impact_score_low": None if unresolved_only else round(g["impact_score_low"], 2),
+            "impact_score_high": None if unresolved_only else round(g["impact_score_high"], 2),
+            "member_count": len(g["members"]),
+            "members": sorted(
+                g["members"],
+                key=lambda m: (m.get("impact_score") or 0, m.get("time_ms") or 0),
+                reverse=True,
+            ),
+        }
+        if g["roofline_unresolved"]:
+            finding["roofline_unresolved"] = True
+        findings.append(finding)
 
-    findings.sort(key=lambda f: f["impact_score"], reverse=True)
+    # Quantified findings first (descending impact); unresolved (None) last.
+    findings.sort(
+        key=lambda f: (
+            f["impact_score"] is not None,
+            f["impact_score"] or 0.0,
+        ),
+        reverse=True,
+    )
     for rank, f in enumerate(findings, start=1):
         f["rank"] = rank
     return findings
@@ -942,6 +1077,7 @@ def run_category_analysis(
     no_data_check_fn=None,
     compute_impact=True,
     comparison_scope: str = "standalone",
+    surface_unresolved_dominant: bool = False,
 ):
     """Generic runner for category analysis scripts.
 
@@ -958,6 +1094,10 @@ def run_category_analysis(
         compute_impact: Whether to compute kernel-tuning impact estimates
         comparison_scope: ``standalone`` (roofline efficiency) or ``comparative``
             (TraceDiff-style ``100 * t2 / t1`` in ``operations[].efficiency``).
+        surface_unresolved_dominant: Forwarded to :func:`compute_impact_estimates`
+            so a dominant op with an unresolved roofline still yields one
+            compute-tier P-item (used by MoE categories where the fused-MoE
+            kernel carries no resolvable input dims).
     """
     if no_data_check_fn:
         no_data_metrics = no_data_check_fn(output_dir, category, comparison_scope)
@@ -999,6 +1139,7 @@ def run_category_analysis(
             operations,
             category,
             baseline_ms=baseline_ms,
+            surface_unresolved_dominant=surface_unresolved_dominant,
         )
     else:
         impact_estimates = []

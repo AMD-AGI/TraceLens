@@ -71,6 +71,12 @@ def main():
         extract_fn=extract_category_specific,
         no_data_check_fn=_check_moe_data,
         comparison_scope=args.comparison_scope,
+        # Fused-MoE expert kernels (e.g. invoke_fused_moe_kernel) often carry no
+        # resolvable Input Dims, so their roofline efficiency is null and they
+        # would be dropped from category_findings. Surface the dominant one as a
+        # non-quantifiable P-item so the largest MoE kernel still reaches the
+        # report (and downstream candidate extraction) instead of vanishing.
+        surface_unresolved_dominant=True,
     )
 
 

@@ -238,8 +238,18 @@ The set of P-items is decided by `category_findings[]` alone — `MIN_PITEM_IMPA
 | `bound_type` | `compute` \| `memory`. Selects the matching Action Prose Guidance row. |
 | `library` | One per finding. Drives the `(<Library>)` title suffix. |
 | `eff_bucket` | Roofline-efficiency band: `"0-30"`, `"30-60"`, `"60-100"`, or `"unknown"` (standalone); `"all"` (comparative). Members within a finding share the same band. |
-| `impact_score` / `_low` / `_high` | Group-summed % of E2E. Render verbatim into `kind=p_item` and `kind=detail_estimate` markers. |
+| `impact_score` / `_low` / `_high` | Group-summed % of E2E. Render verbatim into `kind=p_item` and `kind=detail_estimate` markers. **`null` when `roofline_unresolved` is `true`** — render as a non-quantifiable card (see § Roofline-unresolved findings). |
+| `roofline_unresolved` | `true` for a dominant op whose roofline could not be resolved (null efficiency). Render a non-quantifiable card; see § Roofline-unresolved findings. Absent/`false` otherwise. |
 | `member_count`, `members[]` | Underlying per-op estimate rows (operation, time_ms, efficiency_pct, …) — rows of the `**Data:**` table. |
+
+### Roofline-unresolved findings
+
+A `category_findings[i]` with `roofline_unresolved: true` is a **dominant** op (high share of E2E GPU time) whose roofline efficiency could not be computed (e.g. a fused-MoE expert kernel whose trace event carries no resolvable input dims). Its `impact_score`, `impact_score_low`, and `impact_score_high` are `null` — a roofline gap (hence a quantified impact) cannot be derived without an efficiency value, but the kernel is too large to drop. Still emit **one P-item and one matching `## Detailed Analysis` reasoning candidate** (it is NOT a "no actionable findings" case), rendered as follows:
+
+- **`## Recommendations` P-item:** `**Impact**: Not quantifiable from trace data`, wrapped in `kind=p_item` markers with `low=null mid=null high=null`. Include the `(<Library>)` title suffix as usual.
+- **`## Detailed Analysis` Data table:** render every cell whose value is null (Efficiency, FLOPS/Byte, Bound, Args) as `—`, but **always populate the `Kernel Path` column** from `operations[i].launcher_path` (verbatim) — downstream tooling resolves the kernel source from it.
+- **`**Impact estimate:**`** `Impact estimate is not quantifiable from trace data.` (omit the `kind=detail_estimate` two-bullet block — there are no numbers to render).
+- **Prose:** in **Identification** state the op is the dominant kernel in the category but that its roofline could not be resolved from trace data (cite `operations[].efficiency.efficiency_percent` is null); in **Reasoning for Slowdown** / **Resolution** fall back to the action for an un-roofline'd dominant kernel (profile/tune the kernel) without speculating on the achieved bound.
 
 ### Empty category_findings
 
