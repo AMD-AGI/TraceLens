@@ -340,6 +340,8 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- Paste reasoning blocks from sub-agent findings, augment headings with P-numbers, icons, and HTML anchors. Everything else should be copied verbatim-->
 <!-- Detailed Analysis labels per rule 9 — do not use these labels in optimization cards above -->
 <!-- Impact estimate bullets are rendered by each sub-agent from metadata/*.json → impact_estimates (same source as card Impact). -->
+<!-- MARKER CONTRACT: Every #### P<N>: heading in Detailed Analysis MUST be
+     preceded by  <!-- reasoning-candidate tier=<TIER> rank=<R> --> where TIER = compute | fusion | system (matching the ### subsection), R= 1, 2, 3, … incrementing per tier (rank=1 for first item, rank=2 for second, etc.). -->
 
 ### Compute Kernel Insights
 
@@ -350,6 +352,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- === STANDALONE Compute Kernel Data table === Use this schema for standalone mode ONLY. Use these 8 exact columns-->
 
 <a id="detailed-analysis-compute-p1"></a>
+<!-- reasoning-candidate tier=compute rank=1 -->
 #### 🔴 P1: <Brief Title> (<Library>)
 **Identification:**
 **Data:**
@@ -368,6 +371,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
      Difference (ms) = operations[i].difference_ms (negative ⇒ Trace 1 slower), or —. -->
 
 <a id="detailed-analysis-compute-p1"></a>
+<!-- reasoning-candidate tier=compute rank=1 -->
 #### 🔴 P1: <Brief Title>
 **Identification:** [1-2 sentences - How this opportunity was surfaced relative to the target trace. Must end with (source: <artifact> → <keys>).]
 **Data:** [1 sentence summary of table]
@@ -391,6 +395,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- If kernel_fusion category is not in the manifest or findings are empty, show "No fusion impact estimates available." -->
 
 <a id="detailed-analysis-fusion-P1"></a>
+<!-- reasoning-candidate tier=fusion rank=1 -->
 #### 🔴/🟡/🟢 P1: <Candidate Name> (<time_ms> ms, <instance_count> instances)
 
 **Identification:**
@@ -404,6 +409,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Impact estimate:**
 
 <a id="detailed-analysis-fusion-P2"></a>
+<!-- reasoning-candidate tier=fusion rank=2 -->
 #### 🔴/🟡/🟢 P2: <Candidate Name> (<time_ms> ms, <instance_count> instances)
 
 *Repeat the same Identification + Data + Impact estimate format for each candidate, with anchors `detailed-analysis-fusion-PN`.*
@@ -416,6 +422,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
      In comparative mode, system-level analysis covers Trace 1 () only. -->
 
 <a id="detailed-analysis-system-p1"></a>
+<!-- reasoning-candidate tier=system rank=1 -->
 #### 🔴 P1: <Brief Title>
 **Identification:**
 **Data:**
