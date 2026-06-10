@@ -260,10 +260,11 @@ def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
         tuples — one per capture root — pre-computed from
         :func:`get_subtree_events`.
     """
-    if key in _capture_tree_cache:
-        _capture_tree_cache.move_to_end(key)
+    cache_key = (key, os.path.abspath(filepath))
+    if cache_key in _capture_tree_cache:
+        _capture_tree_cache.move_to_end(cache_key)
         print("Cache hit for capture tree (key={})".format(key))
-        return _capture_tree_cache[key]
+        return _capture_tree_cache[cache_key]
 
     print("Loading capture trace: {} (key={})".format(filepath, key))
     capture_perf_analyzer = TreePerfAnalyzer.from_file(filepath, add_python_func=True)
@@ -281,10 +282,10 @@ def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
         filtered_uids = {e[UID] for e in capture_filtered_events}
         capture_root_data.append((capture_events, filtered_uids))
 
-    _capture_tree_cache[key] = (capture_tree, capture_roots, capture_root_data)
+    _capture_tree_cache[cache_key] = (capture_tree, capture_roots, capture_root_data)
     if len(_capture_tree_cache) > _CAPTURE_TREE_CACHE_MAX_SIZE:
-        evicted_key, _ = _capture_tree_cache.popitem(last=False)
-        print("Evicted capture tree cache entry (key={})".format(evicted_key))
+        evicted_cache_key, _ = _capture_tree_cache.popitem(last=False)
+        print("Evicted capture tree cache entry (key={})".format(evicted_cache_key[0]))
 
     return capture_tree, capture_roots, capture_root_data
 
