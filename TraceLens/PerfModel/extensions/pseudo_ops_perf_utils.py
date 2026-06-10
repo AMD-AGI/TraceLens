@@ -79,7 +79,7 @@ def get_pseudo_op_mappings():
         ## Quantization ops
         "vllm::triton_per_token_group_quant_fp8": perf_model_extensions.vllm_triton_per_token_group_quant_fp8,
         "sglang_profiler::fused_mxfp4_quant_fused_flatten_mxfp4_quant": perf_model_extensions.fused_flatten_mxfp4_quant,
-        "aiter::dynamic_per_tensor_quant": perf_model_extensions.aiter_dynamic_per_tensor_quant,
+        "aiter::dynamic_per_tensor_quant": perf_model_extensions.per_group_quant,
         ## RoPE ops
         "aiter::rope_cached_positions_2c_fwd_impl": perf_model_extensions.aiter_rope_cached_positions_2c_fwd_impl,
         "sgl_kernel::rotary_embedding": perf_model_extensions.sgl_kernel_rotary_embedding,

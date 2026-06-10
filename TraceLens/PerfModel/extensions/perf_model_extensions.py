@@ -459,24 +459,6 @@ class per_group_quant(GroupQuant):
         return torch_dtype_map(dtype) if dtype else None
 
 
-class aiter_dynamic_per_tensor_quant(per_group_quant):
-    """
-    Performance model for aiter::dynamic_per_tensor_quant.
-    Dynamic FP8 quantization with a single tensor-wide scale.
-
-    Reference implementation:
-        aiter/aiter/ops/quant.py:706 (dynamic_per_tensor_quant)
-
-    Expected Input Dims format: [out_shape, input_shape, scale_shape]
-        e.g. [(32, 8192), (32, 8192), (1,)]
-    Expected Input type format: [dtype_out (FP8), dtype_input (BF16), dtype_scale (FP32)]
-
-    Same out=Dims[0] / input=Dims[1] / scale=Dims[2] layout as per_group_quant;
-    flops/bytes inherited (single-element scale is negligible).
-    """
-
-    pass
-
 
 class vllm_triton_per_token_group_quant_fp8(GroupQuant):
     """
@@ -887,7 +869,6 @@ class sgl_kernel_rotary_embedding(FusedRoPE):
 
     Expected Input Dims format:
         [positions, query, key, (), cos_sin_cache, ()]
-        e.g. [(64,), (64, 5120), (64, 5120), (), (8448, 128), ()]
     Concrete Inputs[3] = head_size; cos_sin_cache last dim = rot_dim.
 
     Only the rot_dim slice of each head is rotated:
