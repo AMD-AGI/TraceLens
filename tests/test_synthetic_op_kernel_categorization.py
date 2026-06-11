@@ -302,3 +302,42 @@ def test_synthetic_graph_sdpa_resolves_perf_model():
     assert pm.bytes() > 0
     assert pm.param_details["H_Q"] == 12
     assert pm.param_details["d_h_qk"] == 128
+    assert pm.param_details["N_Q"] == 1
+    assert pm.param_details["N_KV"] == 512
+
+
+def test_synthetic_graph_sdpa_uses_execute_user_annotation_for_nq_nkv():
+    ann = (
+        "execute_32_context_0(sq0sk0sqsq0sqsk0)_generation_32(sq32sk55086sqsq32sqsk55086)"
+    )
+    event = {
+        "name": "hipGraphLaunch->_fwd_grouped_kernel_stage1 (Synthetic Op)",
+        "annotation": ann,
+        "args": {
+            "Input Dims": [[4, 1536], ()],
+            "Input type": ["c10::Half", "ScalarList"],
+            "Concrete Inputs": ["", "[-1, 12, 128]"],
+        },
+        "kernel_details": [{"name": "_fwd_grouped_kernel_stage1"}],
+    }
+    from TraceLens.PerfModel.extensions import attention_perf_model_extensions
+
+    pm = attention_perf_model_extensions.graph_decode_attention_kernel(event=event)
+    assert pm.param_details["N_Q"] == 32
+    assert pm.param_details["N_KV"] == 55086
+
+
+def test_parse_vllm_execute_annotation_sq_sk():
+    from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+        parse_vllm_execute_annotation_sq_sk,
+    )
+
+    ann = (
+        "execute_32_context_0(sq0sk0sqsq0sqsk0)_generation_32(sq32sk55086sqsq32sqsk55086)"
+    )
+    p = parse_vllm_execute_annotation_sq_sk(ann)
+    assert p is not None
+    assert p["g_sq"] == 32
+    assert p["g_sk"] == 55086
+    assert parse_vllm_execute_annotation_sq_sk(None) is None
+    assert parse_vllm_execute_annotation_sq_sk("NA") is None
