@@ -9,6 +9,9 @@
 from math import prod
 
 from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
+from TraceLens.PerfModel.extensions.perf_model_fallback_warning import (
+    warn_perf_model_fallback,
+)
 
 
 def _dtype_from_types(types, index, default="float"):
@@ -64,6 +67,12 @@ class aiter_moe_sorting_kernel:
         if dims and isinstance(dims[0], (list, tuple)) and len(dims[0]) >= 2:
             num_tokens = int(dims[0][0])
             topk = int(dims[0][1])
+        else:
+            warn_perf_model_fallback(
+                "aiter_moe_sorting_kernel",
+                "Input Dims[0] missing or has fewer than 2 entries; using "
+                "num_tokens=1, topk=1 for FLOPs (graph replay layout incomplete).",
+            )
         return {
             "num_tokens": num_tokens,
             "topk": topk,
@@ -109,11 +118,25 @@ class aiter_grouped_topk_kernel:
         num_tokens = 1
         num_experts = 1
         topk = 1
+        reasons: list[str] = []
         if dims and isinstance(dims[0], (list, tuple)) and len(dims[0]) >= 2:
             num_tokens = int(dims[0][0])
             num_experts = int(dims[0][1])
+        else:
+            reasons.append(
+                "Input Dims[0] missing or rank<2: using num_tokens=1, num_experts=1."
+            )
         if len(dims) > 2 and isinstance(dims[2], (list, tuple)) and len(dims[2]) >= 2:
             topk = int(dims[2][1])
+        else:
+            reasons.append(
+                "Input Dims[2] missing or rank<2: using topk=1 for FLOPs estimate."
+            )
+        if reasons:
+            warn_perf_model_fallback(
+                "aiter_grouped_topk_kernel",
+                "\n  ".join(reasons),
+            )
         return {
             "num_tokens": num_tokens,
             "num_experts": num_experts,

@@ -16,6 +16,9 @@ from TraceLens.PerfModel.perf_model import (
     UnaryElementwise,
     FusedRoPE,
 )
+from TraceLens.PerfModel.extensions.perf_model_fallback_warning import (
+    warn_perf_model_fallback,
+)
 from math import prod
 
 
@@ -476,8 +479,15 @@ class dynamic_per_group_scaled_quant_kernel(GroupQuant):
                 f"dynamic_per_group_scaled_quant_kernel needs >=3 Input Dims, got {dims}"
             )
 
+        reasons: list[str] = []
         shape_out = tuple(dims[0])
-        dtype_out = types[0] if types else "c10::Float8_e4m3fn"
+        if types:
+            dtype_out = types[0]
+        else:
+            dtype_out = "c10::Float8_e4m3fn"
+            reasons.append(
+                "Missing Input type; dtype_out defaults to c10::Float8_e4m3fn."
+            )
 
         mid = dims[1]
         scales = dims[2]
@@ -485,14 +495,33 @@ class dynamic_per_group_scaled_quant_kernel(GroupQuant):
         if isinstance(mid, (list, tuple)) and len(mid) == len(shape_out):
             shape_in1 = tuple(mid)
             dtype_in1 = mid_type or "c10::Half"
+            if not mid_type:
+                reasons.append(
+                    "Missing Input type[1]; activation dtype defaults to c10::Half."
+                )
         else:
             shape_in1 = shape_out
             dtype_in1 = "c10::Half"
+            reasons.append(
+                "Input Dims[1] missing or shape does not match output; assuming "
+                "activation shape == output shape and dtype c10::Half."
+            )
 
         shape_in2 = tuple(scales) if isinstance(scales, (list, tuple)) else ()
-        dtype_in2 = types[2] if len(types) > 2 else "float"
+        if len(types) > 2:
+            dtype_in2 = types[2]
+        else:
+            dtype_in2 = "float"
+            reasons.append(
+                "Missing Input type[2]; scale tensor dtype defaults to float."
+            )
 
         strides = args.get("Input Strides") or [[], [], []]
+        if reasons:
+            warn_perf_model_fallback(
+                "dynamic_per_group_scaled_quant_kernel",
+                "\n  ".join(reasons),
+            )
         return {
             "shape_in1": shape_in1,
             "shape_in2": shape_in2,

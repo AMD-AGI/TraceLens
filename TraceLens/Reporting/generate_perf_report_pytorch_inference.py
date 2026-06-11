@@ -605,6 +605,8 @@ def generate_perf_report_pytorch(
     ## Apply annotation for vLLM eager and replay phase
     perf_analyzer.tree.apply_annotation(
         name_filters=[
+            "hipGraphLaunch",
+            "cudaGraphLaunch",
             "vllm::unified_attention_with_output",
             "aiter::mha_varlen_fwd",
             "pseudo_mla_decode_fwd",

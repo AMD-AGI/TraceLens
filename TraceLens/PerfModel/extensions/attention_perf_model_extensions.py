@@ -8,7 +8,14 @@
 Performance models for pseudo-op extensions.
 """
 
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
 from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
+from TraceLens.PerfModel.extensions.perf_model_fallback_warning import (
+    warn_perf_model_fallback,
+)
 import re
 
 
@@ -708,6 +715,98 @@ class gdn_attention_core(InferenceAttention):
         return torch_dtype_map(dtype) if dtype else None
 
 
+def parse_vllm_execute_annotation_sq_sk(annotation: Any) -> Optional[Dict[str, int]]:
+    """
+    Parse ``sq`` / ``sk`` chunk statistics from a vLLM-style ``execute_*`` user
+    annotation name (same layout as :class:`InferenceAttention`).
+
+    Returns dict with ``c_sq``, ``c_sk``, ``c_sqsq``, ``c_sqsk``, ``g_sq``,
+    ``g_sk``, ``g_sqsq``, ``g_sqsk`` or ``None`` if the string does not match.
+    """
+    if annotation is None:
+        return None
+    ann = str(annotation).strip()
+    if not ann or ann == "NA":
+        return None
+    try:
+        if "sq" not in ann:
+            requests = ann.replace("(", "_").replace(")", "_").split("_")
+            if len(requests) < 8:
+                return None
+            c_sq = int(requests[3])
+            c_sk = int(requests[3])
+            c_sqsq = int(requests[4])
+            c_sqsk = int(requests[4])
+            return {
+                "c_sq": c_sq,
+                "c_sk": c_sk,
+                "c_sqsq": c_sqsq,
+                "c_sqsk": c_sqsk,
+                "g_sq": 0,
+                "g_sk": 0,
+                "g_sqsq": 0,
+                "g_sqsk": 0,
+            }
+        name = ann.replace("(", "_").replace(")", "_")
+        requests = re.sub(r"[sqk]+", "_", name).split("_")
+        if len(requests) < 17:
+            return None
+        return {
+            "c_sq": int(requests[5]),
+            "c_sk": int(requests[6]),
+            "c_sqsq": int(requests[7]),
+            "c_sqsk": int(requests[8]),
+            "g_sq": int(requests[13]),
+            "g_sk": int(requests[14]),
+            "g_sqsq": int(requests[15]),
+            "g_sqsk": int(requests[16]),
+        }
+    except (ValueError, IndexError, TypeError):
+        return None
+
+
+def _graph_decode_nq_nkv_from_annotation(
+    parsed: Optional[Dict[str, int]],
+) -> tuple[int, int]:
+    """Pick SDPA ``N_Q`` / ``N_KV`` from parsed execute annotation (generation first)."""
+    model = "graph_decode_attention_kernel"
+    if not parsed:
+        warn_perf_model_fallback(
+            model,
+            "No parseable vLLM-style execute_* annotation on this event "
+            "(stamp user_annotation on hipGraphLaunch/cudaGraphLaunch or inherit "
+            "annotation on synthetics). Using N_Q=1, N_KV=512 for SDPA roofline.",
+        )
+        return 1, 512
+    g_sq = parsed.get("g_sq", 0)
+    g_sk = parsed.get("g_sk", 0)
+    c_sq = parsed.get("c_sq", 0)
+    c_sk = parsed.get("c_sk", 0)
+    if g_sk > 0:
+        n_kv = g_sk
+    elif c_sk > 0:
+        n_kv = c_sk
+    else:
+        warn_perf_model_fallback(
+            model,
+            "Annotation parsed but no non-zero KV sequence length (g_sk/c_sk); "
+            "using N_KV=512 for SDPA roofline.",
+        )
+        n_kv = 512
+    if g_sq > 0:
+        n_q = g_sq
+    elif c_sq > 0:
+        n_q = c_sq
+    else:
+        warn_perf_model_fallback(
+            model,
+            "Annotation parsed but no non-zero Q sequence length (g_sq/c_sq); "
+            "using N_Q=1 for SDPA roofline.",
+        )
+        n_q = 1
+    return max(1, n_q), max(1, n_kv)
+
+
 def _parse_graph_attention_head_config(event):
     """Parse ``[seq, num_heads, head_dim]`` from Concrete Inputs when present."""
     import ast
@@ -734,6 +833,12 @@ class graph_decode_attention_kernel:
 
     Capture traces often record only ``(num_tokens, hidden)`` plus a head-config
     vector in Concrete Inputs (e.g. ``[-1, 12, 128]``).
+
+    When ``event["annotation"]`` is set to a vLLM-style ``execute_*`` user
+    annotation (stamped on ``hipGraphLaunch`` / ``cudaGraphLaunch`` and copied
+    onto synthetics), ``N_Q`` and ``N_KV`` for the SDPA roofline are taken from
+    the parsed generation ``sq`` / ``sk`` chunk stats (falling back to context
+    ``c_sk`` / ``c_sq``, then to defaults ``1`` / ``512``).
     """
 
     category = "SDPA_fwd"
@@ -784,18 +889,38 @@ class graph_decode_attention_kernel:
         num_tokens, hidden = int(dims[0][0]), int(dims[0][1])
         num_heads, head_dim = _parse_graph_attention_head_config(event)
         if num_heads is None:
+            warn_perf_model_fallback(
+                "graph_decode_attention_kernel",
+                "Could not read [-1, num_heads, head_dim] from Concrete Inputs; "
+                f"inferring head_dim and num_heads from hidden={hidden} "
+                f"(heuristic: head_dim 128 if hidden divisible by 128 else hidden//12).",
+            )
             head_dim = 128 if hidden % 128 == 0 else max(hidden // 12, 1)
             num_heads = max(hidden // head_dim, 1)
 
-        dtype = args.get("Input type", ["c10::Half"])[0]
+        types_list = args.get("Input type") or ["c10::Half"]
+        dtype = types_list[0] if types_list else "c10::Half"
+        if not args.get("Input type"):
+            warn_perf_model_fallback(
+                "graph_decode_attention_kernel",
+                "Missing args['Input type']; assuming activation dtype c10::Half.",
+            )
         if dtype in ("ScalarList", "Scalar", ""):
+            warn_perf_model_fallback(
+                "graph_decode_attention_kernel",
+                f"Input type was {dtype!r}; assuming c10::Half for roofline bytes.",
+            )
             dtype = "c10::Half"
+
+        ann = event.get("annotation")
+        parsed = parse_vllm_execute_annotation_sq_sk(ann)
+        n_q, n_kv = _graph_decode_nq_nkv_from_annotation(parsed)
 
         return {
             "B": num_tokens,
-            "N_Q": 1,
+            "N_Q": n_q,
             "H_Q": num_heads,
-            "N_KV": 512,
+            "N_KV": n_kv,
             "H_KV": num_heads,
             "d_h_qk": head_dim,
             "d_h_v": head_dim,

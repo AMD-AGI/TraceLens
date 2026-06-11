@@ -399,6 +399,16 @@ class TreePerfAnalyzer:
         synthetic["children"] = []
         synthetic["gpu_events"] = [kernel["UID"]]
 
+    def _inherit_user_annotation_from_ancestors(self, start_evt):
+        """Return stamped user_annotation text from *start_evt* or an ancestor."""
+        evt = start_evt
+        while evt is not None:
+            ann = evt.get("annotation")
+            if ann is not None and str(ann) != "NA":
+                return str(ann)
+            evt = self.tree.get_parent_event(evt)
+        return None
+
     def _kernels_for_perf_metrics(self, event, bwd=False, filter_func=None):
         """Resolve GPU kernel events for perf metrics, including off-tree synthetics."""
         if filter_func is None:
@@ -2003,6 +2013,11 @@ class TreePerfAnalyzer:
                     f"{parent_evt['name']}->{kernel['name']} (Synthetic Op)"
                 )
                 self._finalize_synthetic_event(synthetic, kernel)
+                inherited_ann = self._inherit_user_annotation_from_ancestors(
+                    parent_evt
+                )
+                if inherited_ann:
+                    synthetic["annotation"] = inherited_ann
                 collected.append(synthetic)
         for evt, parent in kernels_with_cpu_op:
             synthetic = dict(parent)
@@ -2011,6 +2026,9 @@ class TreePerfAnalyzer:
             next_uid += 1
             synthetic["name"] = f"{parent['name']}->{evt['name']} (Synthetic Op)"
             self._finalize_synthetic_event(synthetic, evt)
+            inherited_ann = self._inherit_user_annotation_from_ancestors(parent)
+            if inherited_ann:
+                synthetic["annotation"] = inherited_ann
             collected.append(synthetic)
 
         if self.capture_folder:

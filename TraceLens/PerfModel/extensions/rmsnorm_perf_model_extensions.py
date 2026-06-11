@@ -9,6 +9,9 @@ Performance models for RMSNorm pseudo-op extensions.
 """
 
 from TraceLens.PerfModel.perf_model import RMSNorm as CoreRMSNorm
+from TraceLens.PerfModel.extensions.perf_model_fallback_warning import (
+    warn_perf_model_fallback,
+)
 
 
 class RMSNorm(CoreRMSNorm):
@@ -562,7 +565,16 @@ def _rmsnorm_graph_param_details(event, op_shape_index=0):
     op_shape = tuple(dims[op_shape_index])
     types = event["args"].get("Input type") or []
     dtype_in = types[op_shape_index] if len(types) > op_shape_index else "c10::Half"
+    if len(types) <= op_shape_index:
+        warn_perf_model_fallback(
+            "aiter_rmsnorm_graph (rmsnorm_sumsq/apply_serial)",
+            f"Input type entry missing at index {op_shape_index}; assuming c10::Half.",
+        )
     if dtype_in in ("ScalarList", "Scalar", ""):
+        warn_perf_model_fallback(
+            "aiter_rmsnorm_graph (rmsnorm_sumsq/apply_serial)",
+            f"Input type was {dtype_in!r}; assuming c10::Half for roofline.",
+        )
         dtype_in = "c10::Half"
     strides = event["args"].get("Input Strides") or []
     stride_input = (
@@ -630,6 +642,11 @@ class aiter_add_rmsnorm_quant_graph(RMSNorm):
             if len(concrete) > 4 and concrete[4]:
                 group_size = int(concrete[4])
             else:
+                warn_perf_model_fallback(
+                    "aiter_add_rmsnorm_quant_graph",
+                    "group_size not in _inferred_group_size or Concrete Inputs[4]; "
+                    "using default group_size=128 for quant byte accounting.",
+                )
                 group_size = 128
         super().__init__(event, arch, python_path)
         self.group_size = int(group_size)
