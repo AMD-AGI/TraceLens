@@ -348,10 +348,19 @@ class TraceDiff:
                 return []
             return node.get("children", [])
 
+        _GRAPH_LAUNCH_NAMES = {"hipGraphLaunch", "cudaGraphLaunch"}
+
         def subtree_contains_cuda_runtime(uid, uid2node):
-            """Return True if this node is a cuda_runtime node."""
+            """Return True if this node is a cuda_runtime node.
+
+            Graph launch events (hipGraphLaunch, cudaGraphLaunch) are exempt:
+            they are platform-specific names for the same operation and should
+            be matched by position rather than forced through Wagner-Fischer.
+            """
             node = uid2node.get(uid)
             if not node or not isinstance(node, dict):
+                return False
+            if node.get("name") in _GRAPH_LAUNCH_NAMES:
                 return False
             cat = node.get("cat") or node.get("category")
             if cat == "cuda_runtime" or cat == "cuda_driver":
