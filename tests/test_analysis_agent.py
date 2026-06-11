@@ -33,6 +33,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     load_category_data,
     calculate_time_metrics,
     build_operation_metrics,
+    resolve_fused_moe_args_from_unique,
 )
 from TraceLens.Agent.Analysis.category_analyses.gemm_analysis import (
     detect_quantized_gemm,
@@ -431,6 +432,88 @@ def test_build_category_findings_keeps_unresolved_dominant():
     member = f["members"][0]
     assert member["operation"] == "invoke_fused_moe_kernel"
     assert member["roofline_unresolved"] is True
+
+
+# ----- Unit tests: fused-MoE trace-anchored shape recovery from ops_unique_args -----
+
+
+_FUSED_MOE_UNIQUE_ARGS_CSV = (
+    "name,op category,Input Dims,Input type\n"
+    'sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427,MoE_fused,'
+    '"((15360, 2048), (128, 1536, 2048), (), (122880, 1536), (), (), (), '
+    '(15360, 8), (15360, 8), (131007,), (2047,), (1,), ())",'
+    "\"('c10::BFloat16', 'c10::BFloat16', '', 'c10::BFloat16', '', '', '', "
+    "'float', 'int', 'int', 'int', 'int', '')\"\n"
+    'sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427,MoE_fused,'
+    '"((122880, 768), (128, 2048, 768), (), (15360, 8, 2048), (), (), (), '
+    '(15360, 8), (15360, 8), (131007,), (2047,), (1,), ())",'
+    "\"('c10::BFloat16', 'c10::BFloat16', '', 'c10::BFloat16', '', '', '', "
+    "'float', 'int', 'int', 'int', 'int', '')\"\n"
+)
+
+
+def _write_fused_moe_unique_args(tmp_path):
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    (csv_dir / "ops_unique_args.csv").write_text(
+        _FUSED_MOE_UNIQUE_ARGS_CSV, encoding="utf-8"
+    )
+    return str(tmp_path)
+
+
+def test_resolve_fused_moe_args_recovers_operand_shapes(tmp_path):
+    """The empty-Input-Dims fused-MoE kernel gets its operand shapes from ops_unique_args.csv."""
+    output_dir = _write_fused_moe_unique_args(tmp_path)
+    rendered = resolve_fused_moe_args_from_unique(
+        output_dir,
+        "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427",
+    )
+    assert rendered is not None
+    entries = rendered.split("<br>")
+    # gate/up GEMM operands: A(num_tokens,H), w1(E,2I,H), C(T,2I)
+    assert "(15360,2048) bf16" in entries
+    assert "(128,1536,2048) bf16" in entries
+    assert "(122880,1536) bf16" in entries
+    # down GEMM operands: A(T,I), w2(E,H,I), C(num_tokens,topk,H)
+    assert "(122880,768) bf16" in entries
+    assert "(128,2048,768) bf16" in entries
+    assert "(15360,8,2048) bf16" in entries
+
+
+def test_resolve_fused_moe_args_scoped_and_safe(tmp_path):
+    """Non-MoE op names and an absent sidecar return None (no fabricated shapes)."""
+    output_dir = _write_fused_moe_unique_args(tmp_path)
+    assert resolve_fused_moe_args_from_unique(output_dir, "aten::mm") is None
+    assert (
+        resolve_fused_moe_args_from_unique(str(tmp_path / "nope"), "invoke_fused_moe_kernel")
+        is None
+    )
+
+
+def test_build_operation_metrics_backfills_fused_moe_args(tmp_path):
+    """build_operation_metrics back-fills the fused-MoE op's Args from the sidecar when its row has none."""
+    output_dir = _write_fused_moe_unique_args(tmp_path)
+    df = pd.DataFrame(
+        {
+            "name": ["sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427"],
+            "count": [96],
+            "Kernel Time (µs)_sum": [302_428.0],
+            "Input Dims": [""],
+            "Input type": [""],
+        }
+    )
+    metadata = {
+        "peak_hbm_bw_tbs": 5.3,
+        "peak_bf16_maf_tflops": 708.0,
+        "output_dir": output_dir,
+    }
+    operations = build_operation_metrics(
+        df, metadata, {"extra_fields": ["Input Dims", "Input type"]}
+    )
+    op = operations[0]
+    assert op.get("args"), "fused-MoE op must carry a recovered Args string"
+    assert "(15360,2048) bf16" in op["args"]
+    assert op.get("args_resolved_from") == "ops_unique_args.csv"
 
 
 def test_comparative_impact_from_operations_trace2_faster():

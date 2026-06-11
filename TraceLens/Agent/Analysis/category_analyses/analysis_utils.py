@@ -614,6 +614,17 @@ def build_operation_metrics(
             row.get("Input Dims") if "Input Dims" in row else None,
             row.get("Input type") if "Input type" in row else None,
         )
+        # The fused-MoE expert kernel carries no Input Dims on its top-level event;
+        # recover its operand shapes from the per-shape ops_unique_args sidecar so
+        # the dominant MoE kernel is still shape-anchored (closes the empty-shape gap
+        # that blocks downstream kernel-opt dispatch). Scoped to that op so other
+        # kernels are untouched.
+        if not args_str:
+            args_str = resolve_fused_moe_args_from_unique(
+                metadata.get("output_dir", ""), op_name
+            )
+            if args_str:
+                op_metric["args_resolved_from"] = "ops_unique_args.csv"
         if args_str:
             op_metric["args"] = args_str
 
@@ -1013,6 +1024,54 @@ def format_args(input_dims_str, input_type_str) -> Optional[str]:
         # Trailing comma keeps tuple syntax for 1-element shapes ((128,) not (128))
         body = ",".join(map(str, shape)) + ("," if len(shape) == 1 else "")
         parts.append(f"({body}) {kind}".rstrip())
+    return "<br>".join(parts) or None
+
+
+# Fused-MoE expert-kernel op symbol embedded in the wrapped profiler frames whose
+# per-shape operands ARE captured in ops_unique_args.csv (see below).
+_FUSED_MOE_OP_MARKER = "invoke_fused_moe_kernel"
+
+
+def resolve_fused_moe_args_from_unique(output_dir: str, op_name: str) -> Optional[str]:
+    """Recover the fused-MoE expert kernel's ``Args`` from ``ops_unique_args.csv``.
+
+    The Triton fused-MoE expert kernel reaches the trace as a pybind built-in
+    whose top-level event carries no ``Input Dims`` -- so its row in
+    ``{category}_ops.csv`` (and hence ``build_operation_metrics``'s ``args``) is
+    empty and the kernel cannot be roofline'd or shape-anchored. The wrapped
+    invocation IS captured per-shape in ``perf_report_csvs/ops_unique_args.csv``
+    (the gate/up and down grouped-GEMM operands), keyed by the embedded
+    ``invoke_fused_moe_kernel`` symbol. This formats those operands with the same
+    :func:`format_args` renderer the resolved path uses, deduped across the
+    per-shape rows in first-seen order. Returns ``None`` when the op is not the
+    fused-MoE kernel, the sidecar is absent, or no operands are recoverable (so
+    the caller leaves ``args`` empty rather than fabricating shapes).
+    """
+    if _FUSED_MOE_OP_MARKER not in str(op_name or "").lower():
+        return None
+    if not output_dir:
+        return None
+    csv_path = os.path.join(output_dir, "perf_report_csvs", "ops_unique_args.csv")
+    if not os.path.isfile(csv_path):
+        return None
+    parts: List[str] = []
+    seen: set = set()
+    try:
+        import csv as _csv
+
+        with open(csv_path, newline="", encoding="utf-8") as fh:
+            for row in _csv.DictReader(fh):
+                if _FUSED_MOE_OP_MARKER not in str(row.get("name") or "").lower():
+                    continue
+                rendered = format_args(row.get("Input Dims"), row.get("Input type"))
+                if not rendered:
+                    continue
+                for entry in rendered.split("<br>"):
+                    if entry and entry not in seen:
+                        seen.add(entry)
+                        parts.append(entry)
+    except (OSError, _csv.Error):
+        return None
     return "<br>".join(parts) or None
 
 
