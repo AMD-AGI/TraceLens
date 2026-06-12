@@ -93,7 +93,7 @@ blank line between them. The validator checks for these as substring matches.
 
 | Label | Purpose |
 |-------|---------|
-| `**Identification:**` | Why these operations were flagged. Body text must be plain language — JSON keys, dotted paths, and internal variable names belong **only** in the closing `(source: \`artifact\` → \`keys\`)` parenthetical (artifact + keys backticked, e.g. `(source: \`gemm_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). When any flagged op has a non-null `library` (e.g. `Tensile`, `CK`, `AITER`, `Triton`, `rocBLAS`), state the backend in prose (e.g. "These operations use the **Tensile** backend.") and include `operations[].library` in the `(source:)` parenthetical. |
+| `**Identification:**` | Why these operations were flagged. Body text must be plain language — JSON keys, dotted paths, and internal variable names belong **only** in the closing `(source: \`artifact\` → \`keys\`)` parenthetical (artifact + keys backticked, e.g. `(source: \`<cat>_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). When any flagged op has a non-null `library` (e.g. `Tensile`, `CK`, `AITER`, `Triton`, `rocBLAS`), state the backend in prose and include `operations[].library` in the `(source:)` parenthetical. When `operations[i].module_chain` is non-empty, name the model layer the ops belong to. When `operations[i].call_chain` is present, use it for deeper context. |
 | `**Data:**` | **Compute** (`tier=compute`): exactly one trace-grounded kernel breakdown table (see § Operations Table Schema). **All columns in the schema are mandatory — never drop a column.** Use `—` for any individual cell whose value is missing or null. **System** (`tier=system`): **must not** include kernel breakdown tables. include metric table (see § Metric Table Schema). |
 | `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: **Standalone:** low % of roofline, low arithmetic intensity, unfused patterns, etc. **Comparative:** how Trace 1 is slower than Trace 2 for these operations — express speed differences as "X% faster" or "X% slower", plus absolute time gaps. Never use raw efficiency ratios or `efficiency_percent` values in prose. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
@@ -207,7 +207,7 @@ Standard schema for the `**Data:**` table inside system-tier `## Detailed Analys
 **Column rules:**
 - **Metric**: Copy metric label directly from earlier findings sections — do not rename or reformat.
 - **Value**: `X.X ms` or `X.X%` or `X.X ms (X.X%)`
-- **Flagged**: `false` when the metric's threshold is exceeded; `true` otherwise.
+- **Flagged**: `true` when the metric's threshold is exceeded (issue present); `false` otherwise.
 
 ---
 
@@ -307,7 +307,7 @@ mandatory `kind=p_item` for category/system findings unless exempt) per
 <prefix> python3 -c "
 import sys
 from TraceLens.Agent.Analysis.utils.validation_utils import validate_findings_file
-passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
 if not passed:
     print('FAIL:')
     for e in errors:

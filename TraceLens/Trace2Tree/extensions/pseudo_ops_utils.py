@@ -11,6 +11,25 @@ from typing import Any, Optional, List, Callable
 logger = logging.getLogger(__name__)
 
 
+_SGLANG_SUFFIX_RE = re.compile(r"^(sglang_profiler::.+?)_\d+$")
+
+
+def normalize_sglang_profiler_op_names(tree):
+    """Strip volatile trailing _<digits> from sglang_profiler cpu_op names."""
+    for old in [n for n in tree.name2event_uids if n.startswith("sglang_profiler::")]:
+        m = _SGLANG_SUFFIX_RE.match(old)
+        if not m:
+            continue
+        uids = tree.name2event_uids[old]
+        if not uids or tree.events_by_uid[uids[0]].get("cat") != "cpu_op":
+            continue
+        new = m.group(1)
+        for uid in uids:
+            tree.events_by_uid[uid]["name"] = new
+        tree.name2event_uids.setdefault(new, []).extend(uids)
+        del tree.name2event_uids[old]
+
+
 def set_bookkeeping_attr(tree, event: dict):
     """Add bookkeeping attributes for a new pseudo event in the tree."""
 
@@ -250,6 +269,8 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
     Apply all available pseudo-op extensions to trace tree.
     Extensions are automatically detected and applied.
     """
+
+    normalize_sglang_profiler_op_names(tree)
 
     # Auto-detect and add all known pseudo-op extensions
     extensions = []

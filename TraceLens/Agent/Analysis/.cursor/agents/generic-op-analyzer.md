@@ -29,9 +29,8 @@ When invoked by the orchestrator, you will receive the following context:
 - `<cat>`: Category name (e.g., `other`, `inferenceattention`, `rmsnorm`, `multi_tensor_apply`). Substitute it everywhere below before executing.
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered uncategorized operations
+1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered uncategorized operations (includes `call_stack` column for architecture context)
 2. `<output_dir>/metadata/<cat>_metadata.json` - Hardware specs
-3. `<output_dir>/category_data/<cat>_tree_data.json` - Pre-computed parent chains and subtrees
 
 **Output file you must write:**
 - `<output_dir>/category_findings/<cat>_findings.md`
@@ -76,12 +75,11 @@ Use vendor-agnostic terminology:
 
 ```bash
 cat <output_dir>/category_data/<cat>_metrics.json
-cat <output_dir>/category_data/<cat>_tree_data.json
 ```
 
 `metrics['category_specific']` carries sub-category counts (`communication_count`, `graph_count`, `miscellaneous_count`). **Communication kernels are skipped by the analysis script**: if `category_specific.communication_ops_skipped.count > 0`, include a "Communication Kernels (Skipped)" section in the findings directing users to TraceLens's NCCL Analyzer and do NOT analyze those operations here.
 
-`<cat>_tree_data.json` resolves the parent chain for each member op (which model layer / module the op belongs to). Use it in the **Identification** prose to name what the operation actually does (e.g. embedding lookup, scatter/gather, topk, custom kernel) and where it sits.
+`operations[i].module_chain` (list of nn.Module names, leaf-to-root) identifies which model layer / module the op belongs to. Use it in the **Identification** prose to name what the operation actually does and where it sits. When `operations[i].call_chain` is present, use it for deeper context.
 
 ### Step 3: Render P-items from `category_findings`
 
@@ -93,7 +91,7 @@ Read `category_data/<cat>_metrics.json::category_findings`. Per [`utils/template
 
 For each surviving entry:
 
-1. **Resolve what each member actually does.** Walk `members[]` and for every entry combine the `operation` name, kernel details, and parent-chain context from `<cat>_tree_data.json` to identify the real workload (e.g. embedding lookup, scatter/gather, custom layer). Call out miscategorization explicitly when the trace label is misleading.
+1. **Resolve what each member actually does.** Walk `members[]` and for every entry combine the `operation` name, kernel details, and `module_chain` context from `operations[]` to identify the real workload (e.g. embedding lookup, scatter/gather, custom layer). Call out miscategorization explicitly when the trace label is misleading.
 2. **Render the P-item.** Ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (`operation`, `efficiency_pct`, `library`) plus the resolved purpose from step 1, using the Action Prose Guidance and Common Patterns below. The P-item heading must include the `(<Library>)` suffix per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Recommendations: use `category_findings[i].library` as the value (e.g. `(vLLM)` for an aggregated InferenceAttention finding whose members are all vLLM ops). Omit the parenthetical only when the value is `Unknown`.
 3. **Annotate the Data table.** Extend the **Data:** operations table with a `Sub-Category` column from `operations[i].classification` when populated. Even when the finding has a single `members[]` row (e.g. aggregated InferenceAttention with one operation), render the canonical 9-column horizontal Operations Table from [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Operations Table Schema. Do not substitute a vertical `Metric | Value` table — that schema is system-tier only.
 
