@@ -534,6 +534,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
    b. **Compute Kernel Optimizations** — append `## Compute Kernel Optimizations` with `### Top Operations` table and P-item cards. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
       - Data sources: `priority_data.json` — P1 = `findings[0]`, P2 = `findings[1]`, ... ; each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting).
       - `category_findings/*.md` — for each findings file, copy its `## Recommendations` P-items into the report card slots. **Copy table cells verbatim** from the source `category_findings/<cat>_findings.md`.
+      - Non-quantifiable findings (`findings[i].members[0].type == "unmodeled_significant"`) sort last in `findings[]` — render them as the lowest-priority cards (do NOT skip them) per `sub_agent_spec.md § Non-quantifiable findings`.
 
    c. **Kernel Fusion** — append `## Kernel Fusion Opportunities (Experimental)`. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
       - Data source: `system_findings/kernel_fusion_findings.md`.

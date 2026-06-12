@@ -14,7 +14,7 @@ model: claude-opus-4-7-high
 
 Analyze GPU operations that do not fit standard categories (GEMM, SDPA, Elementwise, Reduce, Norm, Convolution, MoE, Triton). Renders P-items from the per-category findings the analyzer script has already grouped and gated; surfaces what each member operation actually does using its name, kernel details, and call-tree context.
 
-**Note:** Communication blocking, memcpy D2H/H2D patterns, and synchronization overhead are handled by the **Multi-Kernel** and **CPU/Idle** system-level analyzers. This analyzer must NOT duplicate those findings.
+**Note:** Communication blocking, memcpy D2H/H2D patterns, and synchronization overhead are handled by the **Multi-Kernel** and **CPU/Idle** system-level analyzers. This analyzer must NOT duplicate those findings. **Exception:** `customcollective` categories are in scope.
 
 ---
 
@@ -77,13 +77,15 @@ Use vendor-agnostic terminology:
 cat <output_dir>/category_data/<cat>_metrics.json
 ```
 
-`metrics['category_specific']` carries sub-category counts (`communication_count`, `graph_count`, `miscellaneous_count`). **Communication kernels are skipped by the analysis script**: if `category_specific.communication_ops_skipped.count > 0`, include a "Communication Kernels (Skipped)" section in the findings directing users to TraceLens's NCCL Analyzer and do NOT analyze those operations here.
+`metrics['category_specific']` carries sub-category counts (`communication_count`, `graph_count`, `miscellaneous_count`). If `category == "other"` and `category_specific.communication_ops_skipped.count > 0`, include a "Communication Kernels (Skipped)" section directing users to TraceLens's NCCL Analyzer.
 
 `operations[i].module_chain` (list of nn.Module names, leaf-to-root) identifies which model layer / module the op belongs to. Use it in the **Identification** prose to name what the operation actually does and where it sits. When `operations[i].call_chain` is present, use it for deeper context.
 
 ### Step 3: Render P-items from `category_findings`
 
 Read `category_data/<cat>_metrics.json::category_findings`. Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
+
+Entries whose `members[].type == "unmodeled_significant"` (op with no perf model) render as the lowest-priority non-quantifiable cards — follow [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Non-quantifiable findings.
 
 **efficiency_percent semantics:**
 - **Standalone:** Treat `efficiency_percent` as **% of roofline**.
