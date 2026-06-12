@@ -547,7 +547,9 @@ def _check_priority_consistency(output_dir, manifest):
             continue
         cat = p.get("category")
         expected = sum(
-            f.get("impact_score", 0) for f in findings if f.get("category") == cat
+            f.get("impact_score", 0)
+            for f in findings
+            if f.get("category") == cat and f.get("impact_score") is not None
         )
         actual = p.get("impact_score", 0) or 0
         if abs(actual - expected) > _ROLLUP_IMPACT_TOL:
@@ -726,14 +728,16 @@ def _validate_report_args_column(content, output_dir):
 def _validate_report_priority_consistency(content, output_dir):
     """Cross-check analysis.md against priority_data.json.
 
-    R1: Compute Kernel Optimizations P-item heading count == len(quantified findings).
+    R1: Compute Kernel Optimizations P-item heading count == len(findings).
     R2: Each kind=p_item marker's category attr (in doc order) == findings[N-1].category.
     R3: Each marker's low/mid/high attrs match findings[N-1] impact_score_low / impact_score / impact_score_high.
     R4: Top Operations marker rows == len(priorities).
 
     Silently skips when priority_data.json is absent (Step 8 already warns).
     Numeric attrs are compared as 2-decimal strings to match the writer's
-    rounding in generate_priority_data.
+    rounding in generate_priority_data. Non-quantifiable findings
+    (impact_score=None, e.g. unmodeled significant ops) are included: they
+    render as bottom P-items with low=null mid=null high=null markers.
     """
     pd_path = os.path.join(output_dir, "priority_data.json")
     if not os.path.exists(pd_path):
@@ -743,9 +747,7 @@ def _validate_report_priority_consistency(content, output_dir):
             pd = json.load(f)
     except (OSError, json.JSONDecodeError):
         return []
-    findings = [
-        f for f in (pd.get("findings", []) or []) if f.get("impact_score") is not None
-    ]
+    findings = pd.get("findings", []) or []
     priorities = pd.get("priorities", []) or []
     errors = []
 
@@ -759,7 +761,7 @@ def _validate_report_priority_consistency(content, output_dir):
     if n_p != len(findings):
         errors.append(
             f"R1: Compute Kernel Optimizations has {n_p} P-item headings but "
-            f"priority_data.json has {len(findings)} quantified findings"
+            f"priority_data.json has {len(findings)} findings"
         )
 
     p_markers = []
@@ -774,7 +776,7 @@ def _validate_report_priority_consistency(content, output_dir):
         if idx >= len(findings):
             errors.append(
                 f"R2: extra kind=p_item marker #{idx + 1} in Compute Kernel "
-                f"Optimizations beyond {len(findings)} quantified findings"
+                f"Optimizations beyond {len(findings)} findings"
             )
             break
         f = findings[idx]
