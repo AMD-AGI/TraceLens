@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -487,6 +487,8 @@ class transformer_engine_attention(SDPA):
         # ref TransformerEngine/transformer_engine/pytorch/cpp_extensions/fused_attn.py
         # https://github.com/NVIDIA/TransformerEngine/blob/51cd441501e8e6dee18c00056f008e1b53b89ebd/transformer_engine/pytorch/attention/dot_product_attention/backends.py#L881
         input_dims = event["args"]["Input Dims"]
+        input_types = event["args"]["Input type"]
+
         q_idx, k_idx, v_idx = 9, 10, 11  # this is the idx in the args list
         q_shape, k_shape, v_shape = (
             input_dims[q_idx],
@@ -508,6 +510,7 @@ class transformer_engine_attention(SDPA):
             tuple(k_strides),
             tuple(v_strides),
         )
+        dtype_A_B = (input_types[q_idx], input_types[k_idx])
 
         is_causal = True
         dropout_p = 0.0
@@ -526,6 +529,7 @@ class transformer_engine_attention(SDPA):
             "dropout": dropout_p,
             "causal": is_causal,
             "flash_impl": flash_impl,
+            "dtype_A_B": dtype_A_B,
         }
 
 
@@ -537,6 +541,8 @@ class te_layer_norm_fwd(Normalization):
       args[1] = ln_weight      (gamma)
       args[2] = ln_bias        (beta, may be empty)
     """
+
+    category = "NORM_fwd"
 
     @staticmethod
     def get_param_details(event):
@@ -574,6 +580,8 @@ class te_layer_norm_bwd(Normalization):
     we default has_bias=False to stay consistent with the forward model
     which infers it from the (often empty) ln_bias dim.
     """
+
+    category = "NORM_bwd"
 
     @staticmethod
     def get_param_details(event):
@@ -666,16 +674,7 @@ perf_model_extension = {
     "LayerNormFnBackward": te_layer_norm_bwd,
 }
 
-dict_cat2names_extension = {
-    "GEMM": [
-        "_Linear_yfwd_mm",
-        "_LinearBackward_xgrad_mm",
-        "_LinearBackward_wgrad_mm",
-        "_LayerNormLinear_yfwd_mm",
-        "_LayerNormLinearBackward_xgrad_mm",
-        "_LayerNormLinearBackward_wgrad_mm",
-    ],
-    "SDPA": ["FusedAttnFunc", "FusedAttnFuncBackward"],
-    "GroupedGEMM": ["GroupedGemm"],
-    "Normalization": ["LayerNormFn", "LayerNormFnBackward"],
+op_category_extension = {
+    "FusedAttnFuncBackward": "SDPA_bwd",
+    "GroupedGemmBackward": "GroupedGEMM_bwd",
 }

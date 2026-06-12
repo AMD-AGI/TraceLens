@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -8,7 +8,15 @@
 Performance models for RMSNorm pseudo-op extensions.
 """
 
-from TraceLens.PerfModel.perf_model import RMSNorm
+from TraceLens.PerfModel.perf_model import RMSNorm as CoreRMSNorm
+
+
+class RMSNorm(CoreRMSNorm):
+    """Extension-side RMSNorm family reported separately from generic normalization."""
+
+    category = "RMSNorm"
+    bwd_category = None
+    sheet_category = "RMSNorm"
 
 
 class aiter_rms_norm(RMSNorm):
@@ -48,6 +56,51 @@ class aiter_rms_norm(RMSNorm):
             "num_channels": num_channels,
             "has_bias": False,
             "is_affine": True,  # weight is always provided
+            "is_training": False,
+        }
+
+
+class aiter_rmsnorm(RMSNorm):
+    """
+    Performance model for aiter::rmsnorm.
+
+    Same roofline as aiter_rms_norm and RMSNorm, but a different bound op and profiler layout:
+    explicit out tensor first (see aiter_rms_norm for aiter::rms_norm).
+
+    RMSNorm with separate output tensor.
+
+    Signature: rmsnorm(out, input, weight, epsilon)
+        out      — shape [M, N], dtype BFloat16
+        input    — shape [M, N], dtype BFloat16
+        weight   — shape [N],    dtype BFloat16 (affine scale)
+        epsilon  — float scalar
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape, weight_shape, eps_scalar]
+        e.g. [(4, 7168), (4, 7168), (7168,), ()]
+
+    Expected Input type from trace:
+        [dtype_out, dtype_input, dtype_weight, 'Scalar']
+
+    flops/bytes are inherited from RMSNorm (affine=True, training=False).
+
+    get_param_details uses input at index [1] and weight length at [2][0].
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][1])  # input: [M, N]
+        dtype_in = event["args"]["Input type"][1]
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        num_channels = event["args"]["Input Dims"][2][0]  # weight.shape[0] = N
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
             "is_training": False,
         }
 
@@ -102,6 +155,121 @@ class aiter_rmsnorm2d_fwd_with_dynamicquant_ck(RMSNorm):
         bytes_write_quant = self.num_elems * 1  # FP8 = 1 byte/elem
         bytes_write_scales = M * 1 * 4  # FP32 per-token scales [M, 1]
         return bytes_read_x + bytes_read_weight + bytes_write_quant + bytes_write_scales
+
+
+class fused_rms_mxfp4_quant(RMSNorm):
+    """
+    Performance model for aiter.ops.triton.quant.fused_mxfp4_quant.fused_rms_mxfp4_quant
+    (surfaced in traces as sglang_profiler::fused_mxfp4_quant_fused_rms_mxfp4_quant).
+
+    Fused (optional residual-add) + RMSNorm on x1, optional separate RMSNorm on x2,
+    then MXFP4 quantization on the normalized x1 only.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/quant/fused_mxfp4_quant.py:22
+
+    Signature:
+        fused_rms_mxfp4_quant(
+            x1: Tensor,                       # (M, N1), bf16/fp16
+            x1_weight: Tensor,                # (N1,),   bf16/fp16
+            x1_epsilon: float,
+            x2: Optional[Tensor] = None,      # (M, N2), bf16/fp16
+            x2_weight: Optional[Tensor] = None,
+            x2_epsilon: float = 0.0,
+            res1: Optional[Tensor] = None,    # (M, N1), bf16/fp16
+            shuffle: bool = False,
+            scale_shuffle_padding: bool = False,
+            output_unquantized_inp1: bool = False,
+        )
+        ->  (out1_fp4, out1_bs),              # (M, N1 // 2) uint8, (M, ceil(N1/32)) uint8
+            out1_unquant,                     # (M, N1) bf16/fp16 (optional)
+            out2,                             # (M, N2) bf16/fp16 (optional, normalized)
+            out_res1                          # (M, N1) bf16/fp16 (optional, x1 + res1)
+
+    The trace only carries shape and dtype info. We detect optional x2 / res1
+    presence from the Input Dims list length and rank.
+
+    Roofline -- FLOPs:
+        RMSNorm on x1 (inherited)
+        + optional residual-add (M * N1)
+        + optional RMSNorm on x2 (M * N2 * RMSNorm-cost-per-elem; counted same way)
+        + MXFP4 quant of x1 output (~2 * M * N1: max-abs per 32-elem block + scale)
+
+    Roofline -- Bytes:
+        read  x1, x1_weight, [res1, x2, x2_weight]
+        write out1_fp4 (0.5 B/elem), out1_bs (1/32 B/elem),
+              [out_res1, out2] when present
+
+    Compute precision: BF16/FP16 (from x1 dtype). The 4-bit output is materialised
+    via quant; bandwidth uses 0.5 B/elem for the FP4 packed tensor.
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
+        input_dims = event["args"]["Input Dims"]
+        input_types = event["args"]["Input type"]
+
+        self.has_res1 = False
+        self.has_x2 = False
+        self.n2 = 0
+        # The trace layout follows the positional signature; presence is detected
+        # by inspecting tensor ranks (rank-2 -> tensor present; () -> scalar/None).
+        # x1 at [0], x1_weight at [1], x1_epsilon scalar at [2], x2 at [3], ...
+        if len(input_dims) > 3 and len(input_dims[3]) == 2:
+            self.has_x2 = True
+            self.n2 = input_dims[3][1]
+        if len(input_dims) > 6 and len(input_dims[6]) == 2:
+            self.has_res1 = True
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][0])  # x1: (M, N1)
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        num_channels = event["args"]["Input Dims"][1][0]  # x1_weight.shape[0] = N1
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+        }
+
+    def flops(self):
+        M = self.num_elems // self.num_channels
+        N1 = self.num_channels
+        flops = super().flops()
+        if self.has_res1:
+            flops += M * N1
+        if self.has_x2:
+            # Approximate x2 RMSNorm cost: same per-elem flop intensity as x1.
+            x2_elems = M * self.n2
+            flops += int(super().flops() * x2_elems / max(self.num_elems, 1))
+        # MXFP4 quant: max-abs per 32-elem block + per-elem scale
+        flops += 2 * self.num_elems
+        return flops
+
+    def bytes(self):
+        M = self.num_elems // self.num_channels
+        N1 = self.num_channels
+        bytes_read_x1 = self.num_elems * self.bpe_in
+        bytes_read_w1 = N1 * self.bpe_in
+        bytes_write_fp4 = self.num_elems * 0.5
+        bytes_write_scales = (self.num_elems // 32) * 1
+
+        total = bytes_read_x1 + bytes_read_w1 + bytes_write_fp4 + bytes_write_scales
+        if self.has_res1:
+            total += self.num_elems * self.bpe_in  # read residual
+            total += self.num_elems * self.bpe_in  # write updated residual
+        if self.has_x2:
+            x2_elems = M * self.n2
+            total += x2_elems * self.bpe_in  # read x2
+            total += self.n2 * self.bpe_in  # read x2_weight
+            total += x2_elems * self.bpe_in  # write out2
+        return total
 
 
 class vllm_rocm_aiter_rmsnorm_fp8_group_quant(RMSNorm):
@@ -213,6 +381,33 @@ class aiter_rmsnorm2d_fwd_with_add_ck(RMSNorm):
         return bytes_read + bytes_write
 
 
+class aiter_add_rmsnorm(aiter_rmsnorm2d_fwd_with_add_ck):
+    """
+    Performance model for aiter::add_rmsnorm.
+
+    Fused residual-add + RMSNorm (HIP add_rmsnorm).
+
+    Signature: add_rmsnorm(out, input, residual_in, residual_out, weight, epsilon)
+        out           — shape [M, N], dtype BFloat16 (RMSNorm output)
+        input         — shape [M, N], dtype BFloat16
+        residual_in   — shape [M, N], dtype BFloat16
+        residual_out  — shape [M, N], dtype BFloat16 (input + residual_in)
+        weight        — shape [N],    dtype BFloat16 (affine scale)
+        epsilon       — float scalar
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape, residual_in_shape, residual_out_shape, weight_shape, eps_scalar]
+        e.g. [(4, 7168), (4, 7168), (4, 7168), (4, 7168), (7168,), ()]
+
+    FLOPs: residual-add (num_elems) + RMSNorm (inherited from RMSNorm.flops()).
+    Bytes: HBM traffic per GPU (read input+residual_in+weight, write out+residual_out).
+
+    get_param_details, flops, and bytes are inherited from aiter_rmsnorm2d_fwd_with_add_ck.
+    """
+
+    pass
+
+
 class vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant(RMSNorm):
     """
     Performance model for vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant.
@@ -280,3 +475,82 @@ class vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant(RMSNorm):
             + bytes_write_res
             + bytes_write_scales
         )
+
+
+class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
+    """
+    Performance model for vllm::rocm_aiter_triton_add_rmsnorm_pad.
+
+    Fused residual-add + RMSNorm + zero-pad on hidden dim. The compiler fusion
+    pass replaces separate add + RMSNorm + pad nodes with this single Triton kernel.
+    Padding aligns hidden_dim to a multiple of x_pad_to_multiple for downstream
+    AITER MoE GEMMs.
+
+    Signature: rocm_aiter_triton_add_rmsnorm_pad(x, weight, variance_epsilon,
+               residual, x_pad_to_multiple) -> (out, residual_out)
+        x                  — shape [M, N],     dtype BFloat16
+        weight             — shape [N],        dtype BFloat16  (affine RMSNorm scale)
+        variance_epsilon   — float scalar      (e.g. 1e-5)
+        residual           — shape [M, N],     dtype BFloat16
+        x_pad_to_multiple  — int scalar        (e.g. 256)
+        out                — shape [M, N_out], dtype BFloat16  (N_out = ceil(N / pad) * pad)
+        residual_out       — shape [M, N],     dtype BFloat16  (x + residual, pre-norm)
+
+    Expected Input Dims from trace:
+        [x_shape, weight_shape, eps_scalar, residual_shape, pad_scalar]
+        e.g. [(64, 2880), (2880,), (), (64, 2880), ()]
+
+    Expected Input type from trace:
+        ['c10::BFloat16', 'c10::BFloat16', 'Scalar', 'c10::BFloat16', 'Scalar']
+
+    Concrete Inputs[2] = variance_epsilon (e.g. '1e-05')
+    Concrete Inputs[4] = x_pad_to_multiple (e.g. '256')
+
+    Roofline -- FLOPs:
+        residual_add + rmsnorm (inherited from RMSNorm.flops() + num_elems for add).
+
+    Roofline -- bytes moved:
+        Read x + residual + weight; write padded output + updated residual.
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.x_pad_to_multiple = int(event["args"]["Concrete Inputs"][4])
+        super().__init__(event, arch, python_path)
+
+        N = self.num_channels
+        if self.x_pad_to_multiple > 0:
+            self.n_out = (
+                (N + self.x_pad_to_multiple - 1)
+                // self.x_pad_to_multiple
+                * self.x_pad_to_multiple
+            )
+        else:
+            self.n_out = N
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        num_channels = event["args"]["Input Dims"][1][0]
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+        }
+
+    def flops(self):
+        return self.num_elems + super().flops()
+
+    def bytes(self):
+        M = self.num_elems // self.num_channels
+        N = self.num_channels
+        bytes_read = 2 * self.num_elems * self.bpe_in + N * self.bpe_in
+        bytes_write_out = M * self.n_out * self.bpe_in
+        bytes_write_res = M * N * self.bpe_in
+        return bytes_read + bytes_write_out + bytes_write_res

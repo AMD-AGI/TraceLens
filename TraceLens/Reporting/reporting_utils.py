@@ -1,10 +1,12 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
+import argparse
 import ast
+import json
 import logging
 import re
 from typing import Dict, List, Optional, Union
@@ -15,6 +17,64 @@ import sys
 import subprocess
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_gpu_arch(
+    *,
+    gpu_arch_json_path: Optional[str] = None,
+    gpu_arch_platform: Optional[str] = None,
+    gpu_arch: Optional[dict] = None,
+) -> Optional[dict]:
+    """Resolve a GPU architecture dict for roofline / Origami.
+
+    Exactly one of ``gpu_arch_json_path``, ``gpu_arch_platform``, or ``gpu_arch``
+    may be set. ``gpu_arch_platform`` is loaded via
+    ``TraceLens.Agent.Analysis.utils.arch_utils.load_arch``.
+    """
+    sources = [
+        gpu_arch_json_path is not None,
+        gpu_arch_platform is not None,
+        gpu_arch is not None,
+    ]
+    if sum(sources) > 1:
+        raise ValueError(
+            "At most one of gpu_arch_json_path, gpu_arch_platform, and gpu_arch "
+            "may be set."
+        )
+    if gpu_arch is not None:
+        return gpu_arch
+    if gpu_arch_json_path is not None:
+        with open(gpu_arch_json_path, "r") as f:
+            return json.load(f)
+    if gpu_arch_platform is not None:
+        from TraceLens.Agent.Analysis.utils.arch_utils import load_arch
+
+        return load_arch(gpu_arch_platform)
+    return None
+
+
+def add_gpu_arch_cli_args(parser: argparse.ArgumentParser) -> None:
+    """Add mutually exclusive GPU arch CLI options to *parser*."""
+    from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
+
+    platforms = ", ".join(list_platforms())
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--gpu_arch_json_path",
+        type=str,
+        default=None,
+        help="Path to the GPU architecture JSON file",
+    )
+    group.add_argument(
+        "--gpu_arch_platform",
+        type=str,
+        default=None,
+        metavar="PLATFORM",
+        help=(
+            "Bundled or TL_EXTENSION platform name loaded via load_arch "
+            f"(available: {platforms})"
+        ),
+    )
 
 
 def export_data_df(

@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -20,7 +20,7 @@ except ImportError:
     # fallback for Python 3.10
     except ImportError:
         from strenum import StrEnum
-from typing import List, Dict, Callable, Iterable, Tuple
+from typing import List, Dict, Callable, Iterable, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -313,31 +313,47 @@ class JaxProfileProcessor:
                 if outputs.startswith("("):
                     if not outputs.endswith(")"):
                         raise ValueError("Mistmatched parens in outputs in ", outputs)
-                    output_list = outputs[1:-2].split("},")
-                    # this code assumes that the first output is the one we care about
-                    # we should be able to make this an RE
-                    sizes_string = [
-                        [i, d] for i in output_list for d in dtypes if i.startswith(d)
+                    # Extract all tensor tokens from the tuple using regex so that
+                    # scalars (e.g. f32[]) and workspace buffers (e.g. s8[N]{0})
+                    # don't corrupt the split. Handles damax_output=true tuples like
+                    # (f8e5m2[M,N]{1,0}, f32[], s8[W]{0}).
+                    inner = outputs[1:-1]
+                    tokens = re.findall(
+                        r"[a-z0-9]+\[[^\]]*\]\{[^}]*\}|[a-z0-9]+\[[^\]]*\]", inner
+                    )
+                    tensor_tokens = [
+                        t
+                        for t in tokens
+                        if any(t.startswith(d) for d in dtypes) and not t.endswith("[]")
                     ]
-                    if len(sizes_string) != 1:
+                    if len(tensor_tokens) == 0:
                         raise ValueError("Did not find wide output ", op)
-                    sizes_string = sizes_string[0]
-                    sizes_string[0] = (
-                        sizes_string[0] + "}"
-                    )  # restore the } that was removed
+                    # Take the first tensor output; for FP8 GEMMs this is the result.
+                    sizes_string = [
+                        tensor_tokens[0],
+                        next(d for d in dtypes if tensor_tokens[0].startswith(d)),
+                    ]
                 else:
                     sizes_string = outputs
                 operand_list = []
                 for opid in op["operands"]:
-                    if "[" in opid and "]" in opid:
-                        # pb format, shapes in operand list
+                    if (
+                        "[" in opid
+                        and "]" in opid
+                        and not opid.split("[")[1].startswith("]")
+                    ):
+                        # pb format, shapes in operand list; exclude scalars e.g. f32[]
                         operand_list.append(opid)
-                    else:
-                        output = hlo_ops[opid]["output"]
+                    elif "[" not in opid:
+                        # Strip /*index=N*/ prefix that appears in some FP8 operand refs
+                        hlo_key = re.sub(r"^/\*index=\d+\*/", "", opid).strip()
+                        if hlo_key not in hlo_ops:
+                            continue
+                        output = hlo_ops[hlo_key]["output"]
                         if any(
                             output.startswith(d) for d in dtypes + ["f8"]
                         ) and not output.endswith("[]"):
-                            operand_list.append(hlo_ops[opid]["output"])
+                            operand_list.append(hlo_ops[hlo_key]["output"])
                 if int(beta) == 1 and len(operand_list) < 3:
                     print(
                         "Bias is set, however onLy two operands found!", op
@@ -392,6 +408,20 @@ class JaxProfileProcessor:
 # inside the nested JaxOpKeys class (outer class name is not bound yet during nested exec).
 COMMUNICATION_KEYS = ["rccl", "nccl"]
 
+# (kernel-name regex fragment, canonical collective name for inference)
+DEFAULT_CUSTOM_COLLECTIVE_PATTERNS: List[Tuple[str, str]] = [
+    (r"cross_device_reduce", "allreduce"),
+]
+
+DEFAULT_COMMUNICATION_REGEXES: List[re.Pattern] = [
+    re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS
+]
+
+DEFAULT_CUSTOM_COLLECTIVE_REGEXES: List[re.Pattern] = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern, _ in DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
+]
+
 
 class TraceEventUtils:
     class JaxOpKeys:
@@ -410,8 +440,14 @@ class TraceEventUtils:
             "fmha_fwd",  # _ZN5aiter*fmha_fwd*
         ]
         FAV3Keys = ["kernel_func"]  # find a more precise way to do this
-        ConvKeys = ["FillBuffer", "conv_", "conv.", "conv-"]
-        TEKeys = ["transformer_engine"]
+        # "FillBuffer" was historically here but matches XLA buffer-init
+        # fusions that sit inside TE custom calls (issue #423); the
+        # metadata-aware fallback in JaxAnalyses.breakdown_compute_events
+        # now re-routes those by hlo_op instead.
+        ConvKeys = ["conv_", "conv.", "conv-"]
+        # "te_fused_attn" catches te_fused_attn_{forward,backward}_ffi
+        # XLA custom-call host events (issue #422 reproducer).
+        TEKeys = ["transformer_engine", "te_fused_attn"]
         CommunicationKeys = COMMUNICATION_KEYS  # use the generic version until we can't
         ClassCategories = {
             "GEMM": GemmKeys,
@@ -542,7 +578,7 @@ class TraceEventUtils:
 
     @staticmethod
     def default_categorizer(event: dict) -> str:
-        return event.get(TraceEventUtils.TraceKeys.Category)
+        return event["cat"]
 
     # TODO separate util class for Jax
     # returns a curried function to categorizes events based on the
@@ -555,8 +591,9 @@ class TraceEventUtils:
     # TODO separate util class for Jax
     @staticmethod
     def get_event_category(metadata: dict, event: dict):
-        if event.get(
-            TraceEventUtils.TraceKeys.Phase == TraceEventUtils.TracePhases.Metadata
+        if (
+            event.get(TraceEventUtils.TraceKeys.Phase)
+            == TraceEventUtils.TracePhases.Metadata
         ):
             return "metadata"
         elif (
@@ -638,13 +675,83 @@ class TraceEventUtils:
             )
 
     @staticmethod
-    def get_communication_regexes() -> List[re.Pattern]:
-        return [re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS]
+    def get_communication_regexes(
+        custom_collective_patterns: Optional[List[Tuple[str, str]]] = None,
+    ) -> List[re.Pattern]:
+        """Return compiled patterns for NCCL/RCCL plus optional custom collectives.
+
+        When *custom_collective_patterns* is ``None``, returns the built-in defaults from
+        ``DEFAULT_COMMUNICATION_REGEXES + DEFAULT_CUSTOM_COLLECTIVE_REGEXES``.
+        Pass an explicit list (possibly empty) to override the set while keeping NCCL/RCCL markers.
+        """
+        if custom_collective_patterns is None:
+            return DEFAULT_COMMUNICATION_REGEXES + DEFAULT_CUSTOM_COLLECTIVE_REGEXES
+        return DEFAULT_COMMUNICATION_REGEXES + [
+            re.compile(pattern, re.IGNORECASE)
+            for pattern, _ in custom_collective_patterns
+        ]
+
+    @staticmethod
+    def build_collective_filter_and_inference_rules(
+        custom_collective_patterns: Optional[List[Tuple[str, str]]] = None,
+    ) -> Tuple[List[re.Pattern], List[Tuple[re.Pattern, str]]]:
+        """Compile NCCL/RCCL/custom kernel match patterns and collective inference rules.
+
+        Same *custom_collective_patterns* semantics as
+        :meth:`get_communication_regexes`: ``None`` uses
+        ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS``; otherwise the given list
+        replaces that default set (use ``[]`` for no custom kernels).
+        """
+        effective = (
+            custom_collective_patterns
+            if custom_collective_patterns is not None
+            else DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
+        )
+        filter_patterns = TraceEventUtils.get_communication_regexes(
+            custom_collective_patterns=effective
+        )
+        inference_rules = [
+            (re.compile(pattern, re.IGNORECASE), collective)
+            for pattern, collective in effective
+        ]
+        return filter_patterns, inference_rules
 
     @staticmethod
     def is_communication_string(text: str) -> bool:
-        """Return True if *text* case-insensitively indicates a collective operation."""
-        return any(x.match(text) for x in TraceEventUtils.get_communication_regexes())
+        """Return True if *text* matches NCCL/RCCL or default custom collective patterns.
+
+        Uses substring search (``Pattern.search``), not start-anchored ``match``,
+        so demangled names like ``void rcclGenericKernel<...>(...)`` match.
+        Custom kernels use the same defaults as :meth:`get_communication_regexes`.
+        """
+        if not text:
+            return False
+        return any(x.search(text) for x in TraceEventUtils.get_communication_regexes())
+
+    # ROCm 7.1 / older Primus images label memory copies and fills as cat=kernel
+    # with rocclr-internal names (MEMORY_COPY_*, __amd_rocclr_copyBuffer*,
+    # __amd_rocclr_fillBuffer*). ROCm 7.2 corrected this to cat=gpu_memcpy /
+    # cat=gpu_memset matching the CUDA convention. These patterns rebucket
+    # legacy traces so cross-version reports compare like-for-like.
+    _ROCM_LEGACY_MEMCPY_NAMES = re.compile(
+        r"^("
+        r"MEMORY_COPY_(HOST_TO_DEVICE|DEVICE_TO_HOST|DEVICE_TO_DEVICE)"
+        r"|__amd_rocclr_copyBuffer(Rect)?(Aligned)?"
+        r")(\.kd)?$"
+    )
+    _ROCM_LEGACY_MEMSET_NAMES = re.compile(
+        r"^__amd_rocclr_fillBuffer(Aligned)?(\.kd)?$"
+    )
+
+    @staticmethod
+    def is_rocm_legacy_memcpy(text: str) -> bool:
+        """Return True if *text* is a rocclr legacy copy kernel name (ROCm 7.1)."""
+        return bool(text and TraceEventUtils._ROCM_LEGACY_MEMCPY_NAMES.match(text))
+
+    @staticmethod
+    def is_rocm_legacy_memset(text: str) -> bool:
+        """Return True if *text* is a rocclr legacy fill kernel name (ROCm 7.1)."""
+        return bool(text and TraceEventUtils._ROCM_LEGACY_MEMSET_NAMES.match(text))
 
 
 class RocprofParser:

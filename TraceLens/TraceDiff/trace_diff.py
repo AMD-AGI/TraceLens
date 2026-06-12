@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -509,7 +509,7 @@ class TraceDiff:
             node2 = variant_uid2node.get(uid2) if uid2 is not None else None
 
             # Boundary logic: when both exist, check POD and name mismatch
-            if uid1 and uid2:
+            if uid1 is not None and uid2 is not None:
                 if uid1 in self.pod1 or uid2 in self.pod2:
                     pass  # Skip boundary logic, still need merge structure
                 else:
@@ -522,20 +522,20 @@ class TraceDiff:
                         self.pod2.add(uid2)
 
             # POD logic: when only one exists, add to POD
-            if uid1 and not uid2:
+            if uid1 is not None and uid2 is None:
                 self.pod1.add(uid1)
-            if uid2 and not uid1:
+            if uid2 is not None and uid1 is None:
                 self.pod2.add(uid2)
 
             merged_id = merged_id_counter[0]
             merged_id_counter[0] += 1
             uid_pair_to_merged_id[key] = merged_id
 
-            if uid1 and uid2:
+            if uid1 is not None and uid2 is not None:
                 self.merged_uid_map[(1, uid1)] = uid2
                 self.merged_uid_map[(2, uid2)] = uid1
                 nn_module_stack = node1.get("nn_module_stack", "")
-            elif uid1:
+            elif uid1 is not None:
                 self.merged_uid_map[(1, uid1)] = -1
                 nn_module_stack = node1.get("nn_module_stack", "")
             else:
@@ -574,8 +574,11 @@ class TraceDiff:
                         self.db2.append(child_node)
                     child_merged_ids.append(traverse_and_merge(None, c2))
 
+            # UID 0 is valid; do not use truthiness (0 and 0 is falsy).
             merged_type = (
-                "combined" if (uid1 and uid2) else ("trace1" if uid1 else "trace2")
+                "combined"
+                if (uid1 is not None and uid2 is not None)
+                else ("trace1" if uid1 is not None else "trace2")
             )
             event = make_event(
                 merged_id, uid1, uid2, merged_type, child_merged_ids, nn_module_stack
@@ -1006,7 +1009,32 @@ class TraceDiff:
                         if self.is_kernel(event2):
                             gpu_event_uids2.append(event2["UID"])
 
-                        def add_rows(gpu_event_uids, tree_obj, uid2node, source):
+                        def _compute_lca_busy_time(gpu_event_uids, uid2node):
+                            gpu_events = [
+                                uid2node.get(uid)
+                                for uid in gpu_event_uids
+                                if uid2node.get(uid) is not None
+                            ]
+                            if not gpu_events:
+                                return 0.0
+                            return GPUEventAnalyser(gpu_events).compute_metrics()[
+                                "busy_time"
+                            ]
+
+                        busy_time1 = _compute_lca_busy_time(
+                            gpu_event_uids1, baseline_uid2node
+                        )
+                        busy_time2 = _compute_lca_busy_time(
+                            gpu_event_uids2, variant_uid2node
+                        )
+
+                        def add_rows(
+                            gpu_event_uids,
+                            tree_obj,
+                            uid2node,
+                            source,
+                            lca_busy_time,
+                        ):
                             tree_num = 1 if source == "trace1" else 2
                             for gpu_uid in gpu_event_uids:
                                 gpu_event = uid2node.get(gpu_uid)
@@ -1041,8 +1069,10 @@ class TraceDiff:
                                             parent_node
                                         ),
                                         "kernel_time": gpu_event.get("dur", 0),
+                                        "busy_time": lca_busy_time,
                                         "lowest_common_ancestor_name": lca_name,
                                         "lowest_common_ancestor_id": node["merged_id"],
+                                        "gpu_op_uid": gpu_uid,
                                         "nn_module_stack": ";".join(
                                             str(x)
                                             for x in parent_node.get(
@@ -1056,11 +1086,19 @@ class TraceDiff:
                                 )
 
                         add_rows(
-                            gpu_event_uids1, self.baseline, baseline_uid2node, "trace1"
+                            gpu_event_uids1,
+                            self.baseline,
+                            baseline_uid2node,
+                            "trace1",
+                            busy_time1,
                         )
 
                         add_rows(
-                            gpu_event_uids2, self.variant, variant_uid2node, "trace2"
+                            gpu_event_uids2,
+                            self.variant,
+                            variant_uid2node,
+                            "trace2",
+                            busy_time2,
                         )
 
                         visited_stats_nodes.add(merged_id)
@@ -1087,6 +1125,18 @@ class TraceDiff:
 
                     # Get all GPU kernels from trace1's branch
                     gpu_event_uids = event1.get("gpu_events", [])
+                    gpu_events_for_busy = [
+                        baseline_uid2node.get(uid)
+                        for uid in gpu_event_uids
+                        if baseline_uid2node.get(uid) is not None
+                    ]
+                    lca_busy = (
+                        GPUEventAnalyser(gpu_events_for_busy).compute_metrics()[
+                            "busy_time"
+                        ]
+                        if gpu_events_for_busy
+                        else 0.0
+                    )
                     for gpu_uid in gpu_event_uids:
                         gpu_event = baseline_uid2node.get(gpu_uid)
 
@@ -1117,8 +1167,10 @@ class TraceDiff:
                                 "Input type": get_input_type(parent_node),
                                 "Concrete Inputs": get_concrete_inputs(parent_node),
                                 "kernel_time": gpu_event.get("dur", 0),
+                                "busy_time": lca_busy,
                                 "lowest_common_ancestor_name": lca_name,
                                 "lowest_common_ancestor_id": lca_id,
+                                "gpu_op_uid": gpu_uid,
                                 "nn_module_stack": ";".join(
                                     str(x)
                                     for x in parent_node.get("nn_module_stack", [])
@@ -1146,6 +1198,18 @@ class TraceDiff:
 
                     # Get all GPU kernels from trace2's branch
                     gpu_event_uids = event2.get("gpu_events", [])
+                    gpu_events_for_busy = [
+                        variant_uid2node.get(uid)
+                        for uid in gpu_event_uids
+                        if variant_uid2node.get(uid) is not None
+                    ]
+                    lca_busy = (
+                        GPUEventAnalyser(gpu_events_for_busy).compute_metrics()[
+                            "busy_time"
+                        ]
+                        if gpu_events_for_busy
+                        else 0.0
+                    )
                     for gpu_uid in gpu_event_uids:
                         gpu_event = variant_uid2node.get(gpu_uid)
 
@@ -1176,8 +1240,10 @@ class TraceDiff:
                                 "Input type": get_input_type(parent_node),
                                 "Concrete Inputs": get_concrete_inputs(parent_node),
                                 "kernel_time": gpu_event.get("dur", 0),
+                                "busy_time": lca_busy,
                                 "lowest_common_ancestor_name": lca_name,
                                 "lowest_common_ancestor_id": lca_id,
+                                "gpu_op_uid": gpu_uid,
                                 "nn_module_stack": ";".join(
                                     str(x)
                                     for x in parent_node.get("nn_module_stack", [])
@@ -1212,6 +1278,7 @@ class TraceDiff:
             self.diff_stats_df = df
             return df
 
+        df["busy_time"] = df["busy_time"].round(3)
         df_trace1 = df[df["source"] == "trace1"].drop(columns=["source"])
         df_trace2 = df[df["source"] == "trace2"].drop(columns=["source"])
         if df_trace1.reset_index(drop=True).equals(df_trace2.reset_index(drop=True)):
@@ -1248,7 +1315,9 @@ class TraceDiff:
         df_filtered = self.diff_stats_df
         if op_name:
             df_filtered = df_filtered[df_filtered["name"] == op_name]
-        df_filtered = df_filtered.drop(columns=["lowest_common_ancestor_id"])
+        df_filtered = df_filtered.drop(
+            columns=["lowest_common_ancestor_id", "gpu_op_uid"]
+        )
 
         # 3. Identify “argument” columns (everything that isn’t a metric)
         metric_columns = ["kernel_time"]

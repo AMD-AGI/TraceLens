@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -43,17 +43,17 @@ def test_ck_grouped_gemm_variable_k_mapped():
     assert op_to_perf_model_class_map[op] is primus_turbo_grouped_gemm_variable_k
 
 
-def test_ck_grouped_gemm_categorizes_as_gemm():
+def test_ck_grouped_gemm_categorizes_as_grouped_gemm():
     row = {"name": "primus_turbo_cpp_extension::ck_grouped_gemm", "kernel_details": []}
-    assert categorize_torch_op(row) == "GEMM"
+    assert categorize_torch_op(row) == "GroupedGEMM_fwd"
 
 
-def test_ck_grouped_gemm_variable_k_categorizes_as_gemm():
+def test_ck_grouped_gemm_variable_k_categorizes_as_grouped_gemm():
     row = {
         "name": "primus_turbo_cpp_extension::ck_grouped_gemm_variable_k",
         "kernel_details": [],
     }
-    assert categorize_torch_op(row) == "GEMM"
+    assert categorize_torch_op(row) == "GroupedGEMM_fwd"
 
 
 def test_ck_grouped_gemm_flops():

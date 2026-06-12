@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -26,8 +26,9 @@ logger = logging.getLogger(__name__)
 from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
 from ..PerfModel.torch_op_mapping import (
     categorize_torch_op,
-    dict_cat2names,
+    get_perf_model_category,
     op_to_perf_model_class_map,
+    resolve_perf_model_class,
 )
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
@@ -130,10 +131,12 @@ def get_max_achievable_tflops(perf_model, arch):
     return maf_specs.get(compute_spec)
 
 
-def _perf_model_init_kwargs(perf_model_class, event, arch, python_path, enable_origami):
+def _perf_model_init_kwargs(
+    perf_model_class, event, arch, python_path, enable_origami, inductor_cache_dir=None
+):
     """
-    Build keyword args for perf model construction. Only passes enable_origami when
-    the model's __init__ declares that parameter or accepts **kwargs.
+    Build keyword args for perf model construction. Only passes enable_origami
+    and inductor_cache_dir when the model's __init__ declares them or accepts **kwargs.
     """
     kwargs = {
         "event": event,
@@ -144,13 +147,13 @@ def _perf_model_init_kwargs(perf_model_class, event, arch, python_path, enable_o
         sig = inspect.signature(perf_model_class.__init__)
     except (TypeError, ValueError):
         return kwargs
-    if "enable_origami" in sig.parameters:
+    has_var_keyword = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    if "enable_origami" in sig.parameters or has_var_keyword:
         kwargs["enable_origami"] = enable_origami
-        return kwargs
-    for param in sig.parameters.values():
-        if param.kind == inspect.Parameter.VAR_KEYWORD:
-            kwargs["enable_origami"] = enable_origami
-            break
+    if "inductor_cache_dir" in sig.parameters or has_var_keyword:
+        kwargs["inductor_cache_dir"] = inductor_cache_dir
     return kwargs
 
 
@@ -168,6 +171,48 @@ class TreePerfAnalyzer:
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
         data = DataLoader.load_data(profile_filepath)
+        # PyTorch Chrome traces carry run metadata as top-level JSON fields.
+        # Field presence varies by profiler version, profiler options, and backend, e.g.
+        # {
+        #   "schemaVersion": 1,          # usually present
+        #   "deviceProperties": [{       # usually present for GPU traces
+        #     "id": 0,
+        #     "name": "AMD Instinct MI210",
+        #     "totalGlobalMem": 68702699520,
+        #     "computeMajor": 9,
+        #     "computeMinor": 0,
+        #     "maxThreadsPerBlock": 1024,
+        #     "maxThreadsPerMultiprocessor": 2048,
+        #     "regsPerBlock": 131072,
+        #     "warpSize": 64,
+        #     "sharedMemPerBlock": 65536,
+        #     "maxSharedMemoryPerMultiProcessor": 65536,
+        #     "numSms": 104
+        #   }],
+        #   "distributedInfo": {         # optional; distributed profiler traces
+        #     "backend": "nccl",
+        #     "rank": 0,
+        #     "world_size": 1,
+        #     "pg_count": 7,
+        #     "pg_config": [{
+        #       "pg_name": "0",
+        #       "pg_desc": "default_pg",
+        #       "backend_config": "cuda:nccl",
+        #       "pg_size": 1,
+        #       "ranks": [0]
+        #     }]
+        #   },
+        #   "record_shapes": 1,              # optional; profiler option/version dependent
+        #   "with_stack": 1,                 # optional; profiler option/version dependent
+        #   "roctracer_version": 4.1,        # optional; ROCm traces only
+        #   "hip_runtime_version": 70253211, # optional; ROCm traces only
+        #   "hip_driver_version": 70253211,  # optional; ROCm traces only
+        #   "traceEvents": [...]             # required event payload
+        # }
+        # Keep these trace-level fields separate from Chrome "M" metadata events.
+        trace_metadata = {
+            key: value for key, value in data.items() if key != "traceEvents"
+        }
         data = data["traceEvents"]
 
         categorizer = (
@@ -176,7 +221,11 @@ class TreePerfAnalyzer:
             else TraceEventUtils.prepare_event_categorizer(data)
         )
         data = data if not jax else TraceEventUtils.non_metadata_events(data)
-        tree = TraceToTree(data, event_to_category=categorizer)
+        tree = TraceToTree(
+            data,
+            event_to_category=categorizer,
+            trace_metadata=trace_metadata,
+        )
 
         # Optionally merge capture trace into graph tree
         if capture_trace_filepath is not None:
@@ -209,10 +258,12 @@ class TreePerfAnalyzer:
         rebuild_tree=True,
         detect_recompute=False,
         enable_origami=False,
+        inductor_cache_dir=None,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
         self.tree = tree
+        self.trace_metadata = self.tree.trace_metadata
         self.detect_recompute = detect_recompute
         if detect_recompute:
             add_python_func = True
@@ -220,6 +271,7 @@ class TreePerfAnalyzer:
         self.arch = arch
         self.python_path = python_path
         self.enable_origami = enable_origami
+        self.inductor_cache_dir = inductor_cache_dir
         self.event_to_category = event_to_category
         self.include_unlinked_kernels = include_unlinked_kernels
         self.with_python_stack = any(
@@ -244,7 +296,6 @@ class TreePerfAnalyzer:
 
         self.op_to_perf_model_class_map = op_to_perf_model_class_map
         self.op_categorizer = categorize_torch_op
-        self.dict_cat2names = dict_cat2names
 
     def check_gpu_only(self):
         for event in self.tree.events:
@@ -361,13 +412,14 @@ class TreePerfAnalyzer:
                 "name": kernel["name"],
                 "dur": kernel["dur"],
                 "stream": kernel.get("args", {}).get("stream", None),
+                "gpu_op_uid": kernel.get("UID"),
             }
             for kernel in sorted(list_kernels, key=lambda k: k.get("ts", 0))
         ]
 
         # Select the appropriate dictionary for FLOPS and memory functions
         if perf_model_class is None:
-            perf_model_class = self.op_to_perf_model_class_map.get(event["name"])
+            perf_model_class = resolve_perf_model_class(event["name"])
         perf_model = perf_model_class(
             **_perf_model_init_kwargs(
                 perf_model_class,
@@ -375,6 +427,7 @@ class TreePerfAnalyzer:
                 self.arch,
                 self.python_path,
                 self.enable_origami,
+                self.inductor_cache_dir,
             )
         )
 
@@ -1162,6 +1215,7 @@ class TreePerfAnalyzer:
             },
             inplace=True,
         )
+        df_agg["Categories"] = df_agg["Categories"].map(sorted)
         df_agg.sort_values(
             by="total_direct_kernel_time_sum", ascending=False, inplace=True
         )
@@ -1209,6 +1263,7 @@ class TreePerfAnalyzer:
             },
             inplace=True,
         )
+        df_agg["Categories"] = df_agg["Categories"].map(sorted)
         df_agg.sort_values(
             by="total_direct_kernel_time_sum", ascending=False, inplace=True
         )
@@ -1293,7 +1348,7 @@ class TreePerfAnalyzer:
             )
         except StopIteration:
             return []  # The series was empty or contained no valid lists.
-        # --- CHANGE: Collect durations BY INDEX, not by name ---
+        # Collect per-position durations across all instances.
         all_durations = [[] for _ in template]
 
         for kernel_list in series_of_kernel_lists:
@@ -1317,7 +1372,6 @@ class TreePerfAnalyzer:
                         )
                         continue
 
-        # --- CHANGE: Create a deep copy to avoid modifying original data ---
         summary_list = copy.deepcopy(template)
 
         # Now, compute statistics and populate the summary list
@@ -1325,8 +1379,8 @@ class TreePerfAnalyzer:
             durations_for_this_index = all_durations[i]
             dur_arr = np.array(durations_for_this_index)
 
-            # --- CHANGE: Use consistent naming and clear up original 'dur' key ---
             del kernel_summary["dur"]
+            kernel_summary.pop("gpu_op_uid", None)
 
             kernel_summary["count"] = len(dur_arr)
             kernel_summary["total_duration_us"] = np.sum(
@@ -1340,7 +1394,6 @@ class TreePerfAnalyzer:
             for metric in agg_metrics:
                 if metric in METRIC_MAP:
                     metric_name, agg_func = METRIC_MAP[metric]
-                    # --- CHANGE: Use the consistent metric name directly ---
                     kernel_summary[metric_name] = agg_func(dur_arr)
 
         summary_list.sort(
@@ -1547,7 +1600,12 @@ class TreePerfAnalyzer:
 
     def _has_perf_model(self, event):
         """Check if an event has a perf model available."""
-        return event.get("name") in self.op_to_perf_model_class_map
+        cls = resolve_perf_model_class(event.get("name", ""))
+        if cls is None:
+            return False
+        if hasattr(cls, "can_model"):
+            return cls.can_model(event)
+        return True
 
     def _is_leaf_cpu_op(self, event):
         """
@@ -1663,6 +1721,10 @@ class TreePerfAnalyzer:
         """
         fwd_event, is_sole_bwd = self._get_linked_fwd_event(event)
         if not fwd_event or not is_sole_bwd:
+            return False
+
+        fwd_perf_model_class = self.op_to_perf_model_class_map.get(fwd_event["name"])
+        if get_perf_model_category(fwd_perf_model_class, bwd=True) is None:
             return False
 
         # Check if backward metrics are actually defined for this forward op
@@ -1823,7 +1885,9 @@ class TreePerfAnalyzer:
                 continue
             if evt["UID"] in collected_gpu_uids:
                 continue
-            if not include_nccl and "nccl" in evt.get("name", "").lower():
+            if not include_nccl and TraceEventUtils.is_communication_string(
+                evt.get("name", "")
+            ):
                 continue
 
             has_cpu_op = False
@@ -1924,6 +1988,21 @@ class TreePerfAnalyzer:
             args = event.get("args", {})
             has_own_perf_model = self._has_perf_model(event)
             is_sole_bwd = self._is_sole_bwd_with_fwd_perf_model(event)
+            linked_fwd_event = None
+            linked_bwd_category = None
+            if is_sole_bwd:
+                linked_fwd_event, _ = self._get_linked_fwd_event(event)
+                if linked_fwd_event is not None:
+                    linked_perf_model_class = self.op_to_perf_model_class_map.get(
+                        linked_fwd_event["name"]
+                    )
+                    linked_bwd_category = get_perf_model_category(
+                        linked_perf_model_class, bwd=True
+                    )
+
+            op_category = self.op_categorizer(event)
+            if not has_own_perf_model and linked_bwd_category is not None:
+                op_category = linked_bwd_category
 
             if event.get("overlap_pct") is None and event.get("gpu_events"):
                 kernels = [
@@ -1938,7 +2017,7 @@ class TreePerfAnalyzer:
 
             row = {
                 "name": event.get("name"),
-                "op category": self.op_categorizer(event),
+                "op category": op_category,
                 "UID": event.get("UID"),
                 "pid": event.get("pid"),
                 "tid": event.get("tid"),
@@ -1983,6 +2062,7 @@ class TreePerfAnalyzer:
                                 "name": gpu_event.get("name"),
                                 "dur": gpu_event.get("dur"),
                                 "stream": gpu_event.get("args", {}).get("stream"),
+                                "gpu_op_uid": gpu_event.get("UID"),
                             }
                         )
                 row["kernel_details"] = kernel_details if kernel_details else None
@@ -2026,11 +2106,21 @@ class TreePerfAnalyzer:
                 except Exception as e:
                     perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
+                    gpu_event_uids = event.get("gpu_events", [])
+                    if gpu_event_uids:
+                        gpu_events_list = [
+                            self.tree.get_UID2event(uid)
+                            for uid in gpu_event_uids
+                            if self.tree.get_UID2event(uid)
+                        ]
+                        if gpu_events_list:
+                            row["Kernel Time (µs)"] = self.GPUEventAnalyser(
+                                gpu_events_list
+                            ).compute_metrics()["busy_time"]
             elif include_perf_metrics and is_sole_bwd:
                 # 1:1 backward op - use forward's backward metrics
-                fwd_event, _ = self._get_linked_fwd_event(event)
                 try:
-                    metrics = self.compute_perf_metrics(fwd_event, bwd=True)
+                    metrics = self.compute_perf_metrics(linked_fwd_event, bwd=True)
                     for col in perf_cols:
                         if col in metrics:
                             row[col] = metrics[col]
@@ -2047,6 +2137,17 @@ class TreePerfAnalyzer:
                 except Exception as e:
                     perf_metrics_failed.append((event, e))
                     row["perf_params"] = None
+                    gpu_event_uids = event.get("gpu_events", [])
+                    if gpu_event_uids:
+                        gpu_events_list = [
+                            self.tree.get_UID2event(uid)
+                            for uid in gpu_event_uids
+                            if self.tree.get_UID2event(uid)
+                        ]
+                        if gpu_events_list:
+                            row["Kernel Time (µs)"] = self.GPUEventAnalyser(
+                                gpu_events_list
+                            ).compute_metrics()["busy_time"]
             else:
                 # No perf model - compute kernel time using GPUEventAnalyser busy_time
                 row["perf_params"] = None
@@ -2111,7 +2212,9 @@ class TreePerfAnalyzer:
         agg_metrics=["mean", "std"],
         include_pct=True,
         group_by_num_kernels=False,
+        include_call_stack=False,
         include_overlapping_kernels=False,
+        tree=None,
     ):
         """
         Summarize unified perf table by unique (name, Input Dims, Input type, etc.).
@@ -2126,6 +2229,8 @@ class TreePerfAnalyzer:
             include_pct (bool): Include percentage and cumulative percentage columns.
             include_overlapping_kernels (bool): If True, group by overlapping_kernel_names
                 and aggregate overlapping_kernels_details.
+            tree: Required when include_call_stack=True; used to look up call stacks
+                post-aggregation via ex_UID.
 
         Returns:
             pd.DataFrame: Summarized DataFrame grouped by unique args.
@@ -2291,6 +2396,24 @@ class TreePerfAnalyzer:
                 rename_map[col] = "overlapping_kernels_details_summary"
 
         df_summary = df_summary.rename(columns=rename_map)
+
+        if include_call_stack and tree is not None and "ex_UID" in df_summary.columns:
+
+            def _get_call_stack(ex_uid):
+                try:
+                    event = tree.get_UID2event(int(ex_uid))
+                    cs = tree.traverse_parents_and_get_callstack(
+                        event, filter=["nn.Module", "::", "/"]
+                    )
+                    return re.sub(r"_\d+", "", cs)
+                except Exception:
+                    return "Not found"
+
+            df_summary["call_stack"] = df_summary["ex_UID"].apply(_get_call_stack)
+        elif include_call_stack and tree is None:
+            warnings.warn(
+                "include_call_stack=True but tree=None; skipping call stack column."
+            )
 
         # Sort: overlap mode matches grouped ordering; otherwise by kernel time / duration
         if include_overlapping_kernels:
@@ -2830,6 +2953,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         self.arch = arch
         self.python_path = python_path
         self.enable_origami = enable_origami
+        self.inductor_cache_dir = None
         self.event_to_category = event_to_category
         self.pb_file_name = pb_file_name
         self.arch = arch
@@ -3199,6 +3323,11 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             "u32": 4,
             "f16": 2,
             "u64": 8,
+            "f8e4m3fn": 1,
+            "f8e4m3fnuz": 1,
+            "f8e5m2": 1,
+            "f8e5m2fnuz": 1,
+            "pred": 1,
         }
 
         def parse_dtype_shape_layout(operand):
@@ -3339,6 +3468,7 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 self.arch,
                 self.python_path,
                 self.enable_origami,
+                self.inductor_cache_dir,
             )
         )
 

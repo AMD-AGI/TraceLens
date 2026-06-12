@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -10,7 +10,12 @@ Performance models for pseudo-op extensions.
 
 from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
 import re
-from TraceLens.PerfModel.perf_model import GEMM, BinaryElementwise, UnaryElementwise
+from TraceLens.PerfModel.perf_model import (
+    GEMM,
+    BinaryElementwise,
+    UnaryElementwise,
+    FusedRoPE,
+)
 from math import prod
 
 
@@ -375,6 +380,9 @@ class GroupQuant(BinaryElementwise):
     Performance model for group quantization.
     """
 
+    category = "GroupQuant"
+    bwd_category = None
+
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
         self.arch = arch
@@ -449,25 +457,6 @@ class per_group_quant(GroupQuant):
         # Use first input dtype as the compute precision
         dtype = self.dtype_in1_in2_out[1] if self.dtype_in1_in2_out else None
         return torch_dtype_map(dtype) if dtype else None
-
-
-class concat_and_cache_mla(BinaryElementwise):
-    """Performance model for _C_cache_ops::concat_and_cache_mla."""
-
-    def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.param_details = self.get_param_details(event)
-
-    @staticmethod
-    def get_param_details(event):
-        pass
-
-    def flops(self):
-        pass
-
-    def bytes(self):
-        pass
 
 
 class vllm_triton_per_token_group_quant_fp8(GroupQuant):
@@ -598,6 +587,33 @@ class aiter_silu_and_mul(UnaryElementwise):
         return 2 * self.nelems * self.bpe_in + self.nelems * self.bpe_out
 
 
+class sgl_kernel_silu_and_mul(aiter_silu_and_mul):
+    """
+    Performance model for sgl_kernel::silu_and_mul.
+
+    Gated SiLU (same math as aiter::silu_and_mul):
+        out[..., :inter_dim] = silu(input[..., :inter_dim]) * input[..., inter_dim:]
+
+    SGLang registers this op from sgl_kernel (e.g. sgl_kernel/elementwise.py silu_and_mul,
+    used by srt/layers/activation.py SiluAndMul).
+
+    Signature: silu_and_mul(out, input) -> None
+        out   — shape [M, inter_dim],     dtype BFloat16
+        input — shape [M, 2 * inter_dim], dtype BFloat16
+
+    Expected Input Dims from trace:
+        [out_shape, input_shape]
+        e.g. [(65536, 2304), (65536, 4608)]
+
+    Expected Input type from trace:
+        [dtype_out, dtype_input]
+
+    FLOPs and bytes are inherited from aiter_silu_and_mul.
+    """
+
+    pass
+
+
 class aiter_gelu_and_mul(aiter_silu_and_mul):
     """
     Performance model for aiter::gelu_and_mul.
@@ -640,3 +656,303 @@ class aiter_gelu_tanh_and_mul(aiter_silu_and_mul):
 
     def flops(self):
         return 10 * prod(self.param_details["op_shape"])
+
+
+class gemm_afp4wfp4(GEMM):
+    """
+    Performance model for AITER's gemm_afp4wfp4_ kernel.
+
+    Computes: Y[M, N] = (X * x_scales) @ (W * w_scales)^T  with MXFP4 inputs.
+        X is FP4 E2M1 packed as uint8 with shape (M, K // 2) (two FP4 values per byte).
+        W is FP4 E2M1 packed as uint8 with shape (N, K // 2).
+        x_scales / w_scales are E8M0 per-group scales with one scale per 32 K-elements
+        (shapes (M, K // 32) and (N, K // 32) respectively).
+        Y is BF16/FP16 with shape (M, N).
+
+    Reference implementation:
+        aiter/aiter/ops/triton/gemm/basic/gemm_afp4wfp4.py
+
+    Kernel mechanics:
+        Tiles M, N, K with optional split-K. Both X and W are read as FP4 (uint8
+        packed), dequantized with their per-group E8M0 scales inside the MFMA
+        pipeline, accumulated in FP32, and cast to BF16/FP16 on store. Split-K
+        partials are reduced by a separate kernel.
+
+    Roofline calculation -- FLOPs:
+        FLOPs = 2 * M * N * K   (inherited from GEMM base class)
+
+        Per-block scale multiplications are O(M * N * K / 32) and negligible
+        relative to the matmul.
+
+    Roofline calculation -- Bytes:
+        bytes_X      = M * K * 0.5             # FP4 packed
+        bytes_W      = N * K * 0.5             # FP4 packed
+        bytes_output = M * N * bpe(output)     # BF16/FP16 -> 2 bytes
+
+        Scale tensors are negligible and omitted.
+
+    Compute precision:
+        MXFP4 -> mapped via torch_dtype_map("mxfp4"). We override get_compute_precision
+        defensively because traces may report the FP4 storage dtype as "unsigned char"
+        which would otherwise map to fp8.
+
+    Expected Input Dims from trace:
+        [[M, K // 2], [N, K // 2], [M, K // 32], [N, K // 32], (), [M, N], (), ()]
+
+    Expected Input type from trace:
+        [dtype_x, dtype_w, dtype_x_scale, dtype_w_scale, ..., dtype_y, ...]
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        return {
+            "B": 1,
+            "M": event["args"]["Input Dims"][0][0],
+            "N": event["args"]["Input Dims"][1][0],
+            "K": event["args"]["Input Dims"][0][1] * 2,
+            "bias": False,
+            "dtype_A_B": (
+                event["args"]["Input type"][0],
+                event["args"]["Input type"][1],
+                "c10::bfloat16",
+            ),
+        }
+
+    def bytes(self):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_mat1 = 0.5  # FP4 packed
+        self.bpe_mat2 = 0.5  # FP4 packed
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[2])  # unused (bias=False)
+
+        return super().bytes(
+            bpe_mat1=self.bpe_mat1,
+            bpe_mat2=self.bpe_mat2,
+            bpe_bias=self.bpe_bias,
+            bpe_output=self.bpe_output,
+        )
+
+    def get_compute_precision(self):
+        return torch_dtype_map("mxfp4")
+
+
+class fused_flatten_mxfp4_quant(UnaryElementwise):
+    """
+    Performance model for aiter.ops.triton.quant.fused_mxfp4_quant.fused_flatten_mxfp4_quant
+    (surfaced in traces as sglang_profiler::fused_mxfp4_quant_fused_flatten_mxfp4_quant).
+
+    Flattens the last two dims of a (M, N1, N2) BF16/FP16 tensor and MXFP4-quantizes
+    each row to packed FP4 + E8M0 per-32-elem block scales.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/quant/fused_mxfp4_quant.py:149
+
+    Signature:
+        fused_flatten_mxfp4_quant(x: Tensor)  # x shape (M, N1, N2), bf16/fp16
+        -> out: (M, (N1*N2)//2) uint8, out_block_scales: (M, ceil(N1*N2/32)) uint8
+
+    Roofline calculation -- FLOPs:
+        ~2 FLOPs per input element (max-abs reduction per 32-elem group + scale).
+
+    Roofline calculation -- Bytes:
+        read x:              nelems * bpe_in              # BF16/FP16 -> 2 bytes
+        write packed FP4:    nelems * 0.5
+        write E8M0 scales:   nelems // 32 * 1
+
+    Expected Input Dims from trace:
+        [[M, N1, N2]]
+
+    Category: bucketed as GroupQuant (it computes per-32-elem block E8M0 scales
+    and quantizes to MXFP4, same family as per_group_quant /
+    vllm_triton_per_token_group_quant_fp8). The UnaryElementwise base is kept
+    only for the single-input FLOPs/bytes roofline machinery.
+    """
+
+    category = "GroupQuant"
+    sheet_category = "GroupQuant"
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][0])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_in),
+            "stride_input": stride_input,
+            "stride_output": None,
+        }
+
+    def flops(self):
+        return 2 * self.nelems
+
+    def bytes(self):
+        if self.bpe_in is None:
+            return None
+        bytes_read = self.nelems * self.bpe_in
+        bytes_write_fp4 = self.nelems * 0.5
+        bytes_write_scales = (self.nelems // 32) * 1
+        return bytes_read + bytes_write_fp4 + bytes_write_scales
+
+
+class aiter_rope_cached_positions_2c_fwd_impl(FusedRoPE):
+    """
+    Performance model for aiter::rope_cached_positions_2c_fwd_impl.
+
+    Two-channel (Q + K) forward RoPE with cached cos / sin and per-token positions.
+    Rotates the rotate-dim slice of each channel using NEOX or GPT-J rotate style;
+    the no-position part is copied through.
+
+    Reference implementation:
+        aiter/aiter/ops/rope.py:207
+
+    Signature:
+        rope_cached_positions_2c_fwd_impl(
+            output_x,   # (B, S, H_q,  d)
+            output_y,   # (B, S, H_kv, d)
+            input_x,    # (B, S, H_q,  d)
+            input_y,    # (B, S, H_kv, d)
+            cos,        # (max_pos, 1, 1, d_cs)
+            sin,        # (max_pos, 1, 1, d_cs)
+            positions,  # (B, S), int64
+            rotate_style, reuse_freqs_front_part, nope_first,
+        ) -> None
+
+    Roofline calculation -- FLOPs:
+        Each rotated element pair takes 4 muls + 2 adds = 6 ops over 2 elements,
+        i.e. ~3 FLOPs per element. Applied to both x and y channels.
+
+        FLOPs = 3 * (numel(input_x) + numel(input_y))
+
+    Roofline calculation -- Bytes:
+        read + write both x and y channels:
+            2 * (numel(input_x) + numel(input_y)) * bpe_in
+
+        cos/sin/positions are typically cache-resident and small; omitted from
+        the dominant HBM traffic.
+
+    Expected Input Dims from trace:
+        [[B, S, H_q, d], [B, S, H_kv, d], [B, S, H_q, d], [B, S, H_kv, d],
+         [max_pos, 1, 1, d_cs], [max_pos, 1, 1, d_cs], [B, S]]
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        # input_x at Input Dims[2], input_y at Input Dims[3]
+        x_shape = tuple(input_dims[2])
+        y_shape = tuple(input_dims[3])
+        return {
+            "x_shape": x_shape,
+            "y_shape": y_shape,
+            "num_elements": prod(x_shape) + prod(y_shape),
+        }
+
+    def flops(self):
+        return 3 * self.param_details["num_elements"]
+
+    def bytes(self):
+        if self.bpe is None:
+            return None
+        n = self.param_details["num_elements"]
+        return 2 * n * self.bpe
+
+
+class sgl_kernel_rotary_embedding(FusedRoPE):
+    """
+    Performance model for sgl_kernel::rotary_embedding.
+    In-place RoPE on query and key (vLLM-style rotate-half).
+
+    Reference implementation:
+        sglang/sgl-kernel/python/sgl_kernel/elementwise.py:406 (rotary_embedding)
+
+    Expected Input Dims format:
+        [positions, query, key, (), cos_sin_cache, ()]
+    Concrete Inputs[3] = head_size; cos_sin_cache last dim = rot_dim.
+
+    Only the rot_dim slice of each head is rotated:
+        flops = 3 * rotated_elems ; bytes = 2 * rotated_elems * bpe (read+write q, k).
+    """
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        super().__init__(event, arch, python_path, **kwargs)
+        # Input type[0] is positions (int64); bpe must come from query (Input type[1]).
+        qdtype = event["args"]["Input type"][1]
+        bpe = name2bpe(qdtype)
+        self.bpe = bpe if bpe is not None else 2
+        self._qdtype = qdtype
+
+    def get_compute_precision(self):
+        return torch_dtype_map(self._qdtype) if self._qdtype else None
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete = event["args"].get("Concrete Inputs", [])
+        q_shape = tuple(input_dims[1])
+        k_shape = tuple(input_dims[2])
+        head_size = q_shape[-1]
+        if len(concrete) > 3 and str(concrete[3]).strip():
+            head_size = int(concrete[3])
+        rot_dim = head_size
+        if len(input_dims) > 4 and len(input_dims[4]) > 1:
+            rot_dim = input_dims[4][1]
+        num_tokens = q_shape[0]
+        num_q_heads = q_shape[1] // head_size
+        num_k_heads = k_shape[1] // head_size
+        return {
+            "num_elements": num_tokens * (num_q_heads + num_k_heads) * rot_dim,
+        }
+
+
+class sglang_store_cache:
+    """
+    Performance model for sglang::store_cache.
+    Scatter-copy of K/V rows into the paged KV cache (pure memory move, no math).
+
+    Reference implementation:
+        sglang/python/sglang/srt/mem_cache/memory_pool.py (store_cache)
+
+    Expected Input Dims format: [k, v, k_cache, v_cache, indices, (), ()]
+        e.g. [(64, 5120), (64, 5120), (168724, 5120), (168724, 5120), (64,), (), ()]
+    Expected Input type format: [dtype_k, dtype_v, dtype_k_cache, dtype_v_cache, ...]
+
+    Reads k + v and writes T touched rows of k_cache + v_cache:
+        flops = 0 ; bytes = 4 * T * D * bpe (2 reads + 2 writes).
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.nelems = self.param_details["nelems"]
+        dtype = self.param_details["dtype"]
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+    @staticmethod
+    def get_param_details(event):
+        k_shape = tuple(event["args"]["Input Dims"][0])
+        dtype = event["args"]["Input type"][0]
+        return {
+            "op_shape": k_shape,
+            "nelems": prod(k_shape),
+            "dtype": dtype,
+        }
+
+    def flops(self):
+        return 0
+
+    def bytes(self):
+        return 4 * self.nelems * self.bpe
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype")
+        return torch_dtype_map(dtype) if dtype else None

@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -28,8 +28,11 @@ import TraceLens
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
 
-EXECUTE_CONTEXT_PATTERN = re.compile(
-    r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
+EXECUTE_CONTEXT_PATTERNS = (
+    re.compile(
+        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
+    ),
+    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
 )
 
 
@@ -67,7 +70,7 @@ def verify_subtree_events(capture_events, graph_events):
         # print("=========matching ========")
         for j, i in zip(capture_events, graph_events):
             if "kernel" not in j.get("args", {}).keys():
-                if "hipMemcpy" in j["name"]:
+                if "Memcpy" in j["name"] or "Memset" in j["name"]:
                     continue
                 warnings.warn(
                     "Kernel name missing in capture event args, "
@@ -250,6 +253,12 @@ def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
     Uses LRU eviction with at most ``_CAPTURE_TREE_CACHE_MAX_SIZE`` entries.
     Callers must deep-copy any events they intend to mutate so the cached tree
     stays clean for subsequent look-ups.
+
+    Returns:
+        (capture_tree, capture_roots, capture_root_data) where
+        *capture_root_data* is a list of ``(capture_events, filtered_uids)``
+        tuples — one per capture root — pre-computed from
+        :func:`get_subtree_events`.
     """
     if key in _capture_tree_cache:
         _capture_tree_cache.move_to_end(key)
@@ -334,7 +343,7 @@ def find_execution_roots(graph_tree):
     roots = [
         event
         for event in graph_tree.events
-        if EXECUTE_CONTEXT_PATTERN.match(event.get("name", ""))
+        if any(p.match(event.get("name", "")) for p in EXECUTE_CONTEXT_PATTERNS)
         and event.get("cat") == "user_annotation"
     ]
     roots.sort(key=lambda x: x.get("ts", 0))
@@ -444,8 +453,11 @@ def find_closest_batch_size(
 
 
 def find_execution_details(execution_root):
-    name = execution_root["name"].split("_")[1]
-    return name
+    name = execution_root["name"]
+    if name.startswith("execute_context_"):
+        paren_values = re.findall(r"\((\d+)\)", name)
+        return str(sum(int(v) for v in paren_values))
+    return name.split("_")[1]
 
 
 def merge_capture_trace_into_graph(

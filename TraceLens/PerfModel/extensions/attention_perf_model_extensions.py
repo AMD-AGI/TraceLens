@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -22,7 +22,16 @@ class InferenceAttention:
     Subclasses only need to implement ``get_param_details`` to extract
     parameters from their framework-specific event format. The returned
     dict must contain at least the keys listed in ``REQUIRED_PARAM_KEYS``.
+
+    **No perf estimate:** If parsing fails, :meth:`get_param_details` returns
+    :meth:`no_perf_param_details` (includes ``_no_perf: True``). In that case
+    :meth:`flops`, :meth:`bytes`, and :meth:`get_compute_precision` return
+    ``None``. Subclasses that extend the parent dict should return early when
+    ``params.get("_no_perf")`` is true.
     """
+
+    category = "InferenceAttention"
+    bwd_category = None
 
     REQUIRED_PARAM_KEYS = (
         "B",
@@ -56,8 +65,39 @@ class InferenceAttention:
         self.d_h_v = self.param_details["d_h_v"]
 
     @staticmethod
-    def get_param_details(event):
-        annotation = str(event.get("annotation"))
+    def no_perf_param_details():
+        """Placeholder params when annotation/inputs cannot be parsed; disables FLOPs/bytes."""
+        return {
+            "B": 1,
+            "N_Q": 0,
+            "H_Q": 0,
+            "N_KV": 0,
+            "H_KV": 0,
+            "d_h_qk": 0,
+            "d_h_v": 0,
+            "c_sq": 0,
+            "c_sk": 0,
+            "c_sqsq": 0,
+            "c_sqsk": 0,
+            "g_sq": 0,
+            "g_sk": 0,
+            "g_sqsq": 0,
+            "g_sqsk": 0,
+            "dropout": 0.0,
+            "causal": False,
+            "flash_impl": True,
+            "dtype_Q": None,
+            "_no_perf": True,
+        }
+
+    @staticmethod
+    def _parse_chunk_stats(annotation):
+        """Parse the sglang/vLLM annotation string into context/generation aggregates.
+
+        Returns a dict with ``c_sq``, ``c_sk``, ``c_sqsq``, ``c_sqsk``,
+        ``g_sq``, ``g_sk``, ``g_sqsq``, ``g_sqsk``. Raises ``NotImplementedError``
+        if the annotation is missing or cannot be parsed.
+        """
         if annotation == "NA":
             raise NotImplementedError(
                 "VLLM attention without annotation is not supported"
@@ -90,24 +130,7 @@ class InferenceAttention:
             g_sqsq = int(requests[15])
             g_sqsk = int(requests[16])
 
-        input_dims = event["args"]["Input Dims"]
-        q_shape, k_shape = input_dims[0], input_dims[1]
-        N_Q, H_Q, d_h_qk = q_shape
-        N_KV, H_KV, d_h_v = k_shape[-3:]
-        dtype_Q = event["args"]["Input type"][0]
         return {
-            "B": 1,
-            "N_Q": N_Q,
-            "H_Q": H_Q,
-            "H_V": H_KV,
-            "H_K": H_KV,
-            "N_KV": N_KV,
-            "H_KV": H_KV,
-            "d_h_qk": d_h_qk,
-            "d_h_v": d_h_v,
-            "dropout": 0.0,
-            "causal": False,
-            "flash_impl": True,
             "c_sq": c_sq,
             "c_sk": c_sk,
             "c_sqsq": c_sqsq,
@@ -116,8 +139,52 @@ class InferenceAttention:
             "g_sk": g_sk,
             "g_sqsq": g_sqsq,
             "g_sqsk": g_sqsk,
-            "dtype_Q": dtype_Q,
         }
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+            c_sq = stats["c_sq"]
+            c_sk = stats["c_sk"]
+            c_sqsq = stats["c_sqsq"]
+            c_sqsk = stats["c_sqsk"]
+            g_sq = stats["g_sq"]
+            g_sk = stats["g_sk"]
+            g_sqsq = stats["g_sqsq"]
+            g_sqsk = stats["g_sqsk"]
+
+            input_dims = event["args"]["Input Dims"]
+            q_shape, k_shape = input_dims[0], input_dims[1]
+            N_Q, H_Q, d_h_qk = q_shape
+            N_KV, H_KV, d_h_v = k_shape[-3:]
+            dtype_Q = event["args"]["Input type"][0]
+            return {
+                "B": 1,
+                "N_Q": N_Q,
+                "H_Q": H_Q,
+                "H_V": H_KV,
+                "H_K": H_KV,
+                "N_KV": N_KV,
+                "H_KV": H_KV,
+                "d_h_qk": d_h_qk,
+                "d_h_v": d_h_v,
+                "dropout": 0.0,
+                "causal": False,
+                "flash_impl": True,
+                "c_sq": c_sq,
+                "c_sk": c_sk,
+                "c_sqsq": c_sqsq,
+                "c_sqsk": c_sqsk,
+                "g_sq": g_sq,
+                "g_sk": g_sk,
+                "g_sqsq": g_sqsq,
+                "g_sqsk": g_sqsk,
+                "dtype_Q": dtype_Q,
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return InferenceAttention.no_perf_param_details()
 
     # ------------------------------------------------------------------
     # Static helpers – reusable across subclasses
@@ -181,6 +248,8 @@ class InferenceAttention:
     # ------------------------------------------------------------------
 
     def flops(self):
+        if self.param_details.get("_no_perf"):
+            return None
         if self.param_details["c_sq"] == 0 and self.param_details["g_sq"] == 0:
             raise NotImplementedError(
                 "Attention perf model for decode phase requires custom annotations"
@@ -194,7 +263,12 @@ class InferenceAttention:
             self.param_details["g_sqsk"],
         )
 
-    def bytes(self, bytes_per_element=2):
+    def bytes(self, bytes_per_element=None):
+        if self.param_details.get("_no_perf"):
+            return None
+        bpe = bytes_per_element
+        if bpe is None:
+            bpe = name2bpe(self.param_details.get("dtype_Q")) or 2
         return self.bytes_func(
             self.B,
             self.H_Q,
@@ -205,7 +279,7 @@ class InferenceAttention:
             self.param_details["c_sk"],
             self.param_details["g_sq"],
             self.param_details["g_sk"],
-            bytes_per_element,
+            bpe,
         )
 
     def flops_bwd(self):
@@ -215,6 +289,8 @@ class InferenceAttention:
         raise NotImplementedError("Backward pass for attention is not defined.")
 
     def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
         dtype = self.param_details.get("dtype_Q", None)
         return torch_dtype_map(dtype) if dtype else None
 
@@ -232,8 +308,133 @@ class mha_varlen_fwd(InferenceAttention):
     pass
 
 
+class aiter_fmha_v3_varlen_fwd(InferenceAttention):
+    """
+    Performance model for ``aiter::fmha_v3_varlen_fwd`` (inference: sglang / vLLM).
+
+    Uses the same chunk statistics as :class:`InferenceAttention` (``annotation``
+    on the event). Sets ``d_h_v`` from the **v** tensor (``Input Dims[2]``) so MLA
+    shapes with differing Q/K vs V head dims are modeled correctly.
+
+    Unparseable annotation yields :meth:`InferenceAttention.no_perf_param_details`
+    (see base class); no packed-tensor fallback.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        params = InferenceAttention.get_param_details(event)
+        if params.get("_no_perf"):
+            return params
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        if len(dims) > 2 and len(dims[2]) >= 1:
+            params["d_h_v"] = dims[2][-1]
+        return params
+
+
+class aiter_paged_attention_ragged(InferenceAttention):
+    """
+    Performance model for ``aiter::paged_attention_ragged`` (inference: sglang),
+    surfaced in traces as ``sglang_profiler::attention_paged_attention_ragged``
+    (per-layer ``_<idx>`` suffix is stripped upstream).
+
+    TODO: account for fp8 KV-cache dtype (``kv_cache_dtype`` ``"fp8"`` /
+    ``"fp8_e4m3"`` stores K/V as 1 B/elem while Q and output remain BF16/FP16);
+    we will make that change later.
+
+    Uses the same chunk statistics as :class:`InferenceAttention` (``annotation``
+    on the event) for packed variable-length decode requests. Reads ``Q`` from
+    ``Input Dims[2]`` and paged ``K``/``V`` caches from ``Input Dims[3]``/``[4]``
+    (shape ``[num_pages, page_size, H_KV, head_dim]``); ``d_h_v`` is taken from
+    the **v** tensor so MLA-style shapes with differing Q/K vs V head dims are
+    modeled correctly.
+
+    Unparseable annotation or unexpected input dims yields
+    :meth:`InferenceAttention.no_perf_param_details` (see base class).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+
+            dims = event["args"]["Input Dims"]
+            q_shape = dims[2]
+            k_shape = dims[3]
+            v_shape = dims[4]
+            N_Q, H_Q, d_h_qk = q_shape
+            H_KV = k_shape[-2]
+            d_h_v = v_shape[-1]
+            N_KV = stats["c_sk"] + stats["g_sk"]
+            dtype_Q = event["args"]["Input type"][2]
+
+            return {
+                "B": 1,
+                "N_Q": N_Q,
+                "H_Q": H_Q,
+                "H_V": H_KV,
+                "H_K": H_KV,
+                "N_KV": N_KV,
+                "H_KV": H_KV,
+                "d_h_qk": d_h_qk,
+                "d_h_v": d_h_v,
+                "dropout": 0.0,
+                "causal": False,
+                "flash_impl": True,
+                **stats,
+                "dtype_Q": dtype_Q,
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return InferenceAttention.no_perf_param_details()
+
+
+class aiter_mha_batch_prefill(InferenceAttention):
+    """
+    Performance model for ``aiter::mha_batch_prefill`` (inference: sglang) — the
+    paged chunked-prefill / extend kernel.
+
+    TODO: account for fp8 (``q_descale`` / ``k_descale`` / ``v_descale`` /
+    ``kv_block_descale`` paths store K/V in lower precision than Q/output); we
+    will make that change later.
+
+    Uses the same chunk statistics as :class:`InferenceAttention` (``annotation``
+    on the event), which naturally cover mixed chunked-prefill + decode batches
+    via the ``c_*`` and ``g_*`` aggregates. Sets ``d_h_v`` from the **v** tensor
+    (``Input Dims[2]``) so MLA shapes with differing Q/K vs V head dims are
+    modeled correctly.
+
+    Unparseable annotation yields :meth:`InferenceAttention.no_perf_param_details`
+    (see base class).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        params = InferenceAttention.get_param_details(event)
+        if params.get("_no_perf"):
+            return params
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        if len(dims) > 2 and len(dims[2]) >= 1:
+            params["d_h_v"] = dims[2][-1]
+        return params
+
+
 class mla_decode_fwd(InferenceAttention):
     pass
+
+
+class pseudo_mla_prefill_fwd(InferenceAttention):
+    @staticmethod
+    def get_param_details(event):
+        params = InferenceAttention.get_param_details(event)
+        if params.get("_no_perf"):
+            return params
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        if len(dims) > 2 and len(dims[2]) >= 1:
+            params["d_h_v"] = dims[2][-1]
+        return params
 
 
 class mla_tilelang_sparse_fwd(InferenceAttention):
@@ -241,6 +442,8 @@ class mla_tilelang_sparse_fwd(InferenceAttention):
     @staticmethod
     def get_param_details(event):
         params = InferenceAttention.get_param_details(event)
+        if params.get("_no_perf"):
+            return params
         concrete = event.get("Concrete Inputs", [])
         if len(concrete) < 5:
             params["d_h_v"] = 512

@@ -1,7 +1,119 @@
- ./tests/traces/*.csv
-**/__pycache__/
-**.ipynb_checkpoints/
-**/build/
-**.egg-info/
+# Jax artifacts
 *.SSTABLE
 *.hlo_proto.pb
+.claude/settings.local.json
+
+# Byte-compiled / optimized (Python.gitignore)
+__pycache__/
+*.py[codz]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Test / type / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+*.cover
+*.py.cover
+.tox/
+.nox/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Secrets and local env (Node.gitignore + Python.gitignore)
+.env
+.env.*
+!.env.example
+.envrc
+
+# Node (Node.gitignore)
+node_modules/
+jspm_packages/
+web_modules/
+.npm
+.eslintcache
+*.tsbuildinfo
+.pnpm-store/
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# IDE — JetBrains (Global/JetBrains.gitignore essentials)
+.idea/
+*.iml
+*.iws
+out/
+cmake-build-*/
+
+# IDE — VS Code (Global/VisualStudioCode.gitignore)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+!*.code-workspace
+*.vsix
+
+# Build / bundler caches (common in JS tooling; dist/ and out/ also above)
+.cache/
+.parcel-cache/
+.vite/
+.next/
+.nuxt/
+.output/
+
+# Large binaries / artifacts (archives, ML weights, dumps)
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.parquet
+*.orc
+*.arrow
+*.feather
+*.exe
+*.dll
+*.dylib
