@@ -856,3 +856,103 @@ class aiter_rope_cached_positions_2c_fwd_impl(FusedRoPE):
             return None
         n = self.param_details["num_elements"]
         return 2 * n * self.bpe
+
+
+class sgl_kernel_rotary_embedding(FusedRoPE):
+    """
+    Performance model for sgl_kernel::rotary_embedding.
+    In-place RoPE on query and key (vLLM-style rotate-half).
+
+    Reference implementation:
+        sglang/sgl-kernel/python/sgl_kernel/elementwise.py:406 (rotary_embedding)
+
+    Expected Input Dims format:
+        [positions, query, key, (), cos_sin_cache, ()]
+    Concrete Inputs[3] = head_size; cos_sin_cache last dim = rot_dim.
+
+    Only the rot_dim slice of each head is rotated:
+        flops = 3 * rotated_elems ; bytes = 2 * rotated_elems * bpe (read+write q, k).
+    """
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        super().__init__(event, arch, python_path, **kwargs)
+        # Input type[0] is positions (int64); bpe must come from query (Input type[1]).
+        qdtype = event["args"]["Input type"][1]
+        bpe = name2bpe(qdtype)
+        self.bpe = bpe if bpe is not None else 2
+        self._qdtype = qdtype
+
+    def get_compute_precision(self):
+        return torch_dtype_map(self._qdtype) if self._qdtype else None
+
+    @staticmethod
+    def get_param_details(event):
+        input_dims = event["args"]["Input Dims"]
+        concrete = event["args"].get("Concrete Inputs", [])
+        q_shape = tuple(input_dims[1])
+        k_shape = tuple(input_dims[2])
+        head_size = q_shape[-1]
+        if len(concrete) > 3 and str(concrete[3]).strip():
+            head_size = int(concrete[3])
+        rot_dim = head_size
+        if len(input_dims) > 4 and len(input_dims[4]) > 1:
+            rot_dim = input_dims[4][1]
+        num_tokens = q_shape[0]
+        num_q_heads = q_shape[1] // head_size
+        num_k_heads = k_shape[1] // head_size
+        return {
+            "num_elements": num_tokens * (num_q_heads + num_k_heads) * rot_dim,
+        }
+
+
+class sglang_store_cache:
+    """
+    Performance model for sglang::store_cache.
+    Scatter-copy of K/V rows into the paged KV cache (pure memory move, no math).
+
+    Reference implementation:
+        sglang/python/sglang/srt/mem_cache/memory_pool.py (store_cache)
+
+    Expected Input Dims format: [k, v, k_cache, v_cache, indices, (), ()]
+        e.g. [(64, 5120), (64, 5120), (168724, 5120), (168724, 5120), (64,), (), ()]
+    Expected Input type format: [dtype_k, dtype_v, dtype_k_cache, dtype_v_cache, ...]
+
+    Reads k + v and writes T touched rows of k_cache + v_cache:
+        flops = 0 ; bytes = 4 * T * D * bpe (2 reads + 2 writes).
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.nelems = self.param_details["nelems"]
+        dtype = self.param_details["dtype"]
+        bpe = name2bpe(dtype) if dtype else None
+        self.bpe = bpe if bpe is not None else 2
+
+    @staticmethod
+    def get_param_details(event):
+        k_shape = tuple(event["args"]["Input Dims"][0])
+        dtype = event["args"]["Input type"][0]
+        return {
+            "op_shape": k_shape,
+            "nelems": prod(k_shape),
+            "dtype": dtype,
+        }
+
+    def flops(self):
+        return 0
+
+    def bytes(self):
+        return 4 * self.nelems * self.bpe
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype")
+        return torch_dtype_map(dtype) if dtype else None
