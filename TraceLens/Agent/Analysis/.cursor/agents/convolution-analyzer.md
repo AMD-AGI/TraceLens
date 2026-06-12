@@ -24,11 +24,11 @@ When invoked by the orchestrator, you will receive the following context:
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
 - `cat`: `conv_fwd` or `conv_bwd`
+- `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered Convolution operations
+1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered Convolution operations (includes `call_stack` column for architecture context)
 2. `<output_dir>/metadata/<cat>_metadata.json` - Hardware specs
-3. `<output_dir>/category_data/<cat>_tree_data.json` - Pre-computed parent chains
 
 **Output file you must write:**
 - `<output_dir>/category_findings/<cat>_findings.md`
@@ -91,6 +91,10 @@ Each `category_findings[i].members[j].operation` carries a torch op name (e.g. `
 These are guidelines; if a member doesn't fit neatly, classify it semantically.
 
 ### Step 4: Render P-items from `category_findings`
+
+**efficiency_percent semantics:**
+- **Standalone:** Treat `efficiency_percent` as **% of roofline**.
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**.
 
 Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order; ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (their `operation`, `efficiency_pct`, `time_ms`, `library`) using the Action Prose Guidance, Expected Efficiency, and Common Patterns below. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
 
@@ -169,14 +173,14 @@ Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate find
 <prefix> python3 -c "
 import sys
 from TraceLens.Agent.Analysis.utils.validation_utils import validate_findings_file
-passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
 if not passed:
     print('FAIL:')
     for e in errors:
         print('  - ' + e)
     sys.exit(1)
 print('PASS: Findings file is valid')
-" '<output_dir>/category_findings/<cat>_findings.md' 'compute'
+" '<output_dir>/category_findings/<cat>_findings.md' 'compute' '<comparison_scope>'
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.

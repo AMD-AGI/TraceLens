@@ -6,13 +6,13 @@ See LICENSE for license information.
 
 ---
 name: triton-analyzer
-description: Report informational summary for Triton custom kernels. Use when orchestrator needs Triton category analysis.
+description: Analyze Triton (torch.compile fused) kernels for roofline efficiency. Use when orchestrator needs Triton category analysis.
 model: claude-opus-4-7-high
 ---
 
 # Triton Analysis Subagent
 
-Produce an **informational-only** summary for Triton custom kernels. TraceLens does not currently support detailed Triton kernel analysis, so this subagent reports time and operation data without drawing efficiency conclusions or optimization recommendations.
+Analyze Triton (torch.compile / inductor) fused GPU kernels for roofline efficiency. Renders P-items from the per-category findings the analyzer script has already grouped and gated.
 
 ---
 
@@ -23,11 +23,11 @@ When invoked by the orchestrator, you will receive the following context:
 **Required context provided by orchestrator:**
 - `output_dir`: Base analysis output directory
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/triton_ops.csv` - Filtered Triton operations
+1. `<output_dir>/category_data/triton_ops.csv` - Filtered Triton operations (includes `call_stack` column for architecture context)
 2. `<output_dir>/metadata/triton_metadata.json` - Hardware specs
-3. `<output_dir>/category_data/triton_tree_data.json` - Pre-computed parent chains
 
 **Output file you must write:**
 - `<output_dir>/category_findings/triton_findings.md`
@@ -51,19 +51,8 @@ When invoked by the orchestrator, you will receive the following context:
 
 Use vendor-agnostic terminology:
 - "GPU kernels" not "CUDA kernels"
-- "custom kernel framework" for Triton (Triton itself is vendor-neutral)
+- "Triton fused kernels" or "torch.compile fused kernels" for the category
 - Focus on operation semantics, not vendor implementation details
-
----
-
-## Performance Model Limitation
-
-> **Note:** TraceLens does not have dedicated performance models for Triton kernels.
-> Triton kernels are user-written custom GPU kernels with arbitrary compute and memory
-> access patterns. Without a kernel-specific performance model, FLOPS counts, byte
-> estimates, and roofline percentages cannot be reliably computed. This is why
-> efficiency-based bottleneck flagging, impact estimates, and optimization
-> recommendations are not produced for this category.
 
 ---
 
@@ -71,76 +60,98 @@ Use vendor-agnostic terminology:
 
 ### Step 1: Run Analysis Script
 
-Execute the analysis script using the command prefix:
-
 ```bash
 <prefix> python3 \
   TraceLens/Agent/Analysis/category_analyses/triton_analysis.py \
   --output-dir <output_dir>
+  --comparison_scope <comparison_scope>
 ```
 
-### Step 2: Read Metrics
-
-After the script completes, read the JSON metrics file:
+### Step 2: Read metrics
 
 ```bash
 cat <output_dir>/category_data/triton_metrics.json
 ```
 
-### Step 3: Write Informational Findings
+`category_specific.pointwise_count`, `reduction_count`, and `persistent_count` indicate the inductor kernel-type mix; reference them in **Identification** when one type dominates a finding.
 
-**CRITICAL:** Do NOT identify bottlenecks, make efficiency-based conclusions, or provide optimization recommendations. This section is informational only.
+### Step 3: Classify members by name
 
-Write `<output_dir>/category_findings/triton_findings.md` using the command prefix, following the template below:
+Each `category_findings[i].members[j].operation` carries a torch.compile kernel name (e.g. `triton_poi_fused_add_gelu_1`, `triton_red_fused_sum_36`). Classify each member by its inductor prefix when describing the finding:
 
-```markdown
-# Triton Kernel Analysis Findings
+- **Pointwise**: `triton_poi_` (elementwise fusions — add, mul, gelu, sigmoid, etc.).
+- **Reduction**: `triton_red_` (reduction fusions — sum, mean, norm backward, etc.).
+- **Persistent**: `triton_per_` (persistent-reduction fusions — layer_norm, etc.).
+- **Other**: anything not matching the above.
 
-**Status:** SUCCESS
+The fused ATen ops are encoded in the kernel name after the prefix (e.g. `triton_red_fused_add_native_layer_norm_backward_20` fuses `add` + `native_layer_norm_backward`). Use them to describe the dominant computation in prose.
 
-**Platform:** <platform> | **Trace:** <trace_path> | **Analysis Date:** <date>
+### Step 4: Render P-items from `category_findings`
 
-> **Note:** Triton kernel analysis is not currently supported by TraceLens. This section provides an informational time breakdown only. No bottleneck conclusions or optimization recommendations are made.
+**efficiency_percent semantics:**
+- **Standalone:** Treat `efficiency_percent` as **% of roofline**.
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**.
 
-## 1. Overview
+Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order; ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (their `operation`, `efficiency_pct`, `time_ms`, `library`) using the Action Prose Guidance and Common Patterns below. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
 
-| Metric | Value |
-|--------|-------|
-| Total Time | X.X ms |
-| % of Compute Time | X.X% |
-| Operation Count | N |
+**Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
-## 2. Operations Breakdown
+**Trace observability:** ground every claim in **Reasoning for Slowdown** / **Resolution** in the spec § Trace observability (compute tier) **CAN Infer** rows; for any property in the universal **CANNOT Infer** rows or the category-specific rows in [§ Trace observability (category-specific)](#trace-observability-category-specific) below, use the listed fallback prose instead of speculating.
 
-| Operation | Time (ms) | % of Category | Invocations |
-|-----------|-----------|---------------|-------------|
-| <op_name> | X.X       | X.X%          | N           |
-```
+---
 
-This analyzer does not emit `kind=p_item` or `kind=detail_estimate` markers because Triton has no quantifiable impact estimates.
+## Action Prose Guidance
 
-**Key rules for the findings file:**
-- Do NOT add any "Key Findings", "Bottleneck", or "Recommendations" sections
-- Do NOT assess efficiency or compare to peak performance
-- Only report factual time and count data from the metrics JSON
+Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].bound_type`:
+
+| `bound_type` | Action template |
+|---|---|
+| `memory` | Optimize memory access patterns of the dominant member kernels. For chains of memory-bound fused ops in the same parent module, defer to the kernel fusion analysis. |
+| `compute` | Rare for fused Triton kernels; if it occurs, profile the kernel for tile-size and wave-occupancy tuning. |
+
+---
+
+## Common Patterns
+
+### Low-efficiency fused kernels (<30% roofline)
+- **Symptoms:** Fused kernels with norm or reduction ops at <30% of peak HBM BW.
+- **Reasoning:** Fused norm+backward or small-reduction kernels can have suboptimal memory access patterns.
+- **Kernel:** Profile the fused kernel; consider dedicated kernel libraries for the dominant op.
+
+### Many small fused kernels
+- **Symptoms:** High aggregate count of small Triton kernels with low individual time.
+- **Reasoning:** torch.compile may generate many narrow fusions instead of one broad fusion.
+- **Kernel:** Review compilation strategy for broader fusion scope.
 
 ---
 
 ## Trace observability (category-specific)
 
-The universal CANNOT Infer rows in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) always apply. In addition, Triton custom-kernel analysis cannot observe:
+The universal CANNOT Infer rows in [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) always apply. In addition, Triton fused-kernel analysis cannot observe:
 
 | NOT observable | Why | Fallback prose |
 |----------------|-----|----------------|
-| FLOPs per kernel | TraceLens has no analytical performance model for user-written Triton kernels | "FLOPs not computable for Triton custom kernels — report time and counts only." |
-| Bytes moved per kernel | TraceLens has no analytical performance model for user-written Triton kernels | "Bytes not computable for Triton custom kernels — report time and counts only." |
-| Roofline % / efficiency % / impact_score | All three derive from FLOPs and Bytes, which are not available for Triton | "No efficiency or impact estimate available — Triton is informational only." |
+| Per-sub-op breakdown within a fused kernel | Trace only captures the fused kernel as a single event | "Individual sub-op timings within the fused kernel are not separable from the trace." |
+| Torch.compile fusion strategy | The inductor fusion decisions are not recorded in the trace | "Fusion strategy not visible — review torch.compile settings if kernels appear under-fused." |
 
 ---
 
-## Key Principles
+## Validate findings
 
-1. **Informational only** -- no performance model exists for user-written Triton kernels (see [Performance Model Limitation](#performance-model-limitation)); report time and operation data without drawing efficiency conclusions
-2. **No impact estimates** -- the metrics JSON contains an empty `impact_estimates` list by design
-3. **No recommendations** -- do not suggest algorithmic or kernel-level optimizations
-4. **High variance** - If `high_variance: true` in metrics, mark `[HIGH VARIANCE]` and exclude from bottleneck prioritization
+Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate findings, run:
+
+```bash
+<prefix> python3 -c "
+import sys
+from TraceLens.Agent.Analysis.utils.validation_utils import validate_findings_file
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
+if not passed:
+    print('FAIL:')
+    for e in errors:
+        print('  - ' + e)
+    sys.exit(1)
+print('PASS: Findings file is valid')
+" '<output_dir>/category_findings/triton_findings.md' 'compute' '<comparison_scope>'
+```
+
+If validation fails, fix the findings file and re-run. Max 2 retries.

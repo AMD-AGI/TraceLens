@@ -23,7 +23,7 @@ Orchestrate modular PyTorch trace analysis using a **two-tier architecture**:
 - **System-Level Analysis** (Step 6): CPU/idle time + Kernel Fusion + Multi-kernel issues (memcpy, communication blocking, overlap)
 - **Compute Kernel Analysis** (Step 7): Per-category kernel efficiency (GEMM, SDPA, elementwise, etc.)
 
-**Role**: Load trace once, pre-compute tree data, filter by category, invoke system-level and compute kernel subagents in parallel, aggregate results into independently composable report sections.
+**Role**: Load trace once (primary trace), pre-compute tree data, filter by category, invoke system-level and compute kernel subagents in parallel, and aggregate results into independently composable report sections. For **standalone** mode this will be a single trace, roofline analysis. For **comparative** mode this will be a baseline vs target trace comparative analysis.
 
 ---
 
@@ -38,8 +38,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 ## Workflow Steps
 
 ```
-0. Query User Inputs (Platform, Trace Path, Analysis Mode, Environment Setup)
-1. Generate Performance Report (branches on analysis mode: training vs inference)
+0. Query User Inputs (Platform, Trace Path(s), Analysis Mode, Environment Setup)
+1. Generate Performance Report (branches on analysis mode: training vs inference then, comparison scope)
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
 6. System-Level Analysis (PARALLEL, CPU/Idle + Kernel Fusion + Multi-Kernel) → system_findings/
 7. Invoke Compute Kernel Subagents (PARALLEL, read category_findings[] from _metrics.json) → category_findings/
@@ -61,19 +61,31 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 ### Required Information:
 
-1. **Trace File Path** → `<trace_path>`
-   - Ask: "Please provide the full path to your PyTorch trace file (.json or .json.gz)"
+1. **Comparison scope** → `<comparison_scope>`
+   - Set from the user’s intent **before** deep-diving on paths:
+     - **`comparative`** if the skill was triggered by **“comparative analysis”**, **“compare two traces”**, or the user supplies **two** trace paths / explicitly asks to compare trace A vs B.
+     - **`standalone`** otherwise (including triggers **“standalone analysis”**, **“analyze trace standalone”**, single trace only).
 
-2. **Platform** → `<platform>`
-   - Ask: "Which platform are you analyzing?"
+2. **Trace File Path(s)**
+   - **`standalone`:** **Trace File Path** → `<trace_path>`
+     - Ask: "Please provide the full path to your PyTorch trace file (.json or .json.gz)"
+   - **`comparative`:** ask for both:
+     - **Primary trace (trace1)** → `<trace_path>`
+     - **Comparison trace (trace2)** → `<trace2_path>`
+     - Ask: "Please provide the full path to your primary trace file and your comparison trace file (.json or .json.gz)"
+
+3. **Platform** → `<platform>`
+   **`standalone`**: Ask: "Which platform are you analyzing?"
+   **`comparative`**: Ask: "Which platform is baseline trace (trace1)?"
    - Options:
      1. **MI300X**
      2. **MI325X**
      3. **MI350X**
      4. **MI355X**
      5. **MI455X**
+   **`comparative`:** Ask: "Which platform is target trace (trace2)?" Assign `<platform2>` (`<platform2>` does not need to be one of the platform options)
 
-3. **Analysis Mode** → `<analysis_mode>`
+4. **Analysis Mode** → `<analysis_mode>`
    - If the user's prompt explicitly specifies an analysis mode or mentions inference/vLLM/SGLang, use that. Otherwise, default to `default` without asking.
    - Options:
      1. **Default (training and non-vLLM/SGLang eager inference)** (`<analysis_mode>` = `default`) — uses `TraceLens_generate_perf_report_pytorch`
@@ -83,8 +95,9 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      2. **Graph replay + capture** (`<inference_exec_mode>` = `graph_capture`) — also requires a capture folder path
    - If **Graph replay + capture**, ask for **Capture Folder Path** → `<capture_folder_path>`:
      - Ask: "Please provide the full path to the graph capture traces folder"
+   - **Unsupported combination:** If `<inference_exec_mode>` = `graph_capture` **and** `<comparison_scope>` = `comparative`, stop immediately. Inform the user: "Graph replay + capture mode is not yet supported for comparative analysis. Please provide eager mode traces instead." Do not misinterpret as two standalone analyses. Do **not** proceed to Step 1 or beyond.
 
-4. **Environment Setup**
+5. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
      - If **local**: No further environment questions — prefix is blank (commands run directly).
      - If **cluster**:
@@ -92,9 +105,14 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
        - Ask "Are you working in a containerized environment (e.g. Docker)?" → if yes, ask for container name → `<container>`
        - Ask "Are you using a virtual environment?" → if yes, ask for venv path → `<venv_path>`
 
-5. **Output Directory** (Optional)
+6. **Output Directory** (Optional)
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
    - Default: Same directory as trace file, in `analysis_output/` subdirectory
+
+7. **Extension File** (Optional) → `<extension_file>`
+   - Ask: "Do you have a TraceLens extension file to apply? Press Enter to skip."
+   - If provided, resolve to an absolute path and assign to `<extension_file>`.
+   - If skipped, set `<extension_file>` to empty (no `--extension_file` flag is added to any command).
 
 ### Build and Cache Command Prefix
 
@@ -130,7 +148,7 @@ Write the resolved template to `<output_dir>/cache/cmd_prefix.txt`. Then validat
 <prefix> python3 -c "import TraceLens; print('PREFIX_OK')"
 ```
 
-If this fails, check that `<tracelens_dir>` is the **parent** of TraceLens (not the repo root itself), verify the container/venv is accessible, rebuild, and retry. Do NOT proceed to Step 1 until validation passes.
+If this fails, inform the user with `[DIAG:pipeline:PREFIX_FAIL]` and check that `<tracelens_dir>` is the **parent** of TraceLens (not the repo root itself), verify the container/venv is accessible, rebuild, and retry. Do NOT proceed to Step 1 until validation passes.
 
 ### Command Execution Pattern
 
@@ -140,57 +158,87 @@ If this fails, check that `<tracelens_dir>` is the **parent** of TraceLens (not 
 
 ## Step 1: Generate Performance Report
 
-Use the analysis mode selected in Step 0 to determine which CLI tool to run.
+Use **`<analysis_mode>`** to determine which CLI tool to run and then **`<comparison_scope>`** to determine arguments.
 
-For all of these scripts below, look at the environment variable TL_EXTENSION to recursively search for a file called <platform>.json
+For all of these scripts below, look at the environment variable TL_EXTENSION to recursively search for a file called <platform>.json. Do not look for <platform2>.json; it is not needed.
 If it is not found also look in TraceLens/Agent/Analysis/utils/arch/<platform>.json.
 Use <platform_file> to represent the location of this file
 
-**Default (training and non-vLLM/SGLang eager inference)** (analysis_mode = `default`):
+**CLI call count:**
+- **`standalone`**: one TraceLens CLI call (for `<trace_path>`)
+- **`comparative`**: one TraceLens CLI call per trace (for `<trace_path>` and `<trace2_path>`)
+
+All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<comparison_scope>`:
+
+**`<suffix_1>`** — output paths:
+
+| scope | value |
+|-------|-------|
+| `standalone` | `--output_xlsx_path <output_dir>/perf_report.xlsx --output_csvs_dir <output_dir>/perf_report_csvs` |
+| `comparative` trace1 | `--output_xlsx_path <output_dir>/perf_report_trace1.xlsx --output_csvs_dir <output_dir>/perf_report_trace1_csvs` |
+| `comparative` trace2 | `--profile_json_path <trace2_path> --output_xlsx_path <output_dir>/perf_report_trace2.xlsx --output_csvs_dir <output_dir>/perf_report_trace2_csvs` |
+
+**`<suffix_2>`** — extension flags:
+
+| scope | value |
+|-------|-------|
+| `standalone` | none |
+| `comparative` trace1 | `--comparison_json_path <trace2_path>` |
+| `comparative` trace2 | none |
+
+**`<suffix_ext>`** — user extension file:
+
+| condition | value |
+|-----------|-------|
+| `<extension_file>` provided | `--extension_file <extension_file>` |
+| not provided | none |
+
+---
+
+**Default (training and non-vLLM/SGLang eager inference)** (`<analysis_mode>` = `default`):
 
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch \
   --profile_json_path <trace_path> \
-  --output_xlsx_path <output_dir>/perf_report.xlsx \
-  --output_csvs_dir <output_dir>/perf_report_csvs \
   --gpu_arch_json_path <platform_file> \
   --enable_pseudo_ops \
   --group_by_num_kernels \
-  --include_call_stack
+  --include_call_stack \
+  <suffix_1> \
+  <suffix_2> \
+  <suffix_ext>
 ```
 
-**Inference eager mode** (analysis_mode = `inference`, inference_exec_mode = `eager`):
+**Inference eager mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `eager`):
 
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch_inference \
   --profile_json_path <trace_path> \
-  --output_xlsx_path <output_dir>/perf_report.xlsx \
-  --output_csvs_dir <output_dir>/perf_report_csvs \
   --gpu_arch_json_path <platform_file> \
   --group_by_parent_module \
   --enable_pseudo_ops \
   --group_by_num_kernels \
-  --include_call_stack
+  --include_call_stack \
+  <suffix_1> \
+  <suffix_2> \
+  <suffix_ext>
 ```
 
-**Inference graph replay + capture mode** (analysis_mode = `inference`, inference_exec_mode = `graph_capture`):
+**Inference graph replay + capture mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `graph_capture`):
 
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch_inference \
   --profile_json_path <trace_path> \
   --capture_folder <capture_folder_path> \
-  --output_xlsx_path <output_dir>/perf_report.xlsx \
-  --output_csvs_dir <output_dir>/perf_report_csvs \
   --gpu_arch_json_path <platform_file> \
   --group_by_parent_module \
   --enable_pseudo_ops \
   --group_by_num_kernels \
-  --include_call_stack
+  --include_call_stack \
+  <suffix_1> \
+  <suffix_2> \
+  <suffix_ext>
 ```
-
-This generates:
-- `perf_report.xlsx` - Excel report with all sheets
-- `perf_report_csvs/` directory with CSV files
 
 ---
 
@@ -203,7 +251,8 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
   TraceLens/Agent/Analysis/utils/orchestrator_prepare.py \
   --trace-path <trace_path> \
   --platform <platform> \
-  --output-dir <output_dir>
+  --output-dir <output_dir> \
+  --comparison-scope <comparison_scope>
 ```
 
 This script performs:
@@ -216,7 +265,6 @@ This script performs:
 **Outputs:**
 - `category_data/<category>_ops.csv` - Filtered operations per category
 - `metadata/<category>_metadata.json` - Platform specs, GPU utilization, config
-- `category_data/<category>_tree_data.json` - Pre-computed tree analysis
 - `category_data/multi_kernel_data.json` - Memcpy/NCCL/overlap pre-computed data
 - `category_data/category_manifest.json` - Workflow metadata with categories (includes `tier` field: `system` or `compute_kernel`)
 - `system_findings/` - Directory for system-level analysis outputs
@@ -270,6 +318,7 @@ Read and follow the FULL instructions in:
   TraceLens/Agent/Analysis/.cursor/agents/<agent-file>.md
 
 **Execution Context:**
+- Comparison scope: `<comparison_scope>`
 - Output directory: <output_dir>
 - Command prefix: read `<output_dir>/cache/cmd_prefix.txt` — contains a template
   with `{CMD}` placeholder; substitute `{CMD}` with the actual command
@@ -328,12 +377,18 @@ Include this block in every compute kernel subagent prompt:
 
 <Shared Compute Kernel Preamble>:
 ```
+comparison_scope: {comparison_scope}
+
 **CRITICAL - READ FIRST:**
 - Use GPU kernel time (not CPU duration) for all bottleneck analysis
-- Flag any efficiency > 100% as "[ANOMALY] - verify measurement"
+- `efficiency_percent` semantics differ by mode:
+  - **Standalone:** % of roofline. Flag > 100% as "[ANOMALY] - verify measurement".
+  - **Comparative:** `100 × (Trace 2 kernel time) / (Trace 1 kernel time)`.
+    - **< 100%** → Trace 1 is slower than Trace 2. **This is an optimization opportunity — flag it.**
+    - **> 100%** → Trace 2 is slower than Trace 1. **NOT an anomaly; no Trace-1 optimization needed.**
 
 **CRITICAL CONSTRAINTS:**
-1. Any efficiency > 100% → `[ANOMALY] - verify measurement`
+1. **Standalone:** Any efficiency > 100% → `[ANOMALY] - verify measurement`. **Comparative:** efficiency > 100% means Trace 2 is slower — NOT an anomaly; efficiency < 100% means Trace 1 is slower — flag as optimization opportunity.
 2. Status must be SUCCESS or ERROR; times in ms; efficiencies as percentages
 3. Operations with `fusion_flagged: true` in the metrics JSON are already covered by
    a high-confidence kernel fusion candidate — do NOT flag them as bottlenecks or write
@@ -361,8 +416,7 @@ Read and follow the FULL instructions in:
 
 - Category: {category}
 - Input files: category_data/{category}_ops.csv, metadata/{category}_metadata.json,
-  category_data/{category}_tree_data.json (if available),
-  category_data/{category}_metrics.json (P-items come from `category_findings[]`)
+  category_data/{category}_metrics.json (P-items come from `category_findings[]`; `operations[i].module_chain` provides model layer context)
 - Output file: category_findings/{category}_findings.md
 
 Execute every step in the agent file. Return "DONE" when complete.
@@ -413,7 +467,7 @@ validate_subagent_outputs(sys.argv[1])
 
 This runs four checks:
 1. **Time Sanity** -- category GPU kernel time sum vs computation time (WARN if >15% discrepancy)
-2. **Efficiency Anomalies** -- findings with efficiency >100% (measurement issues)
+2. **Efficiency Anomalies** -- findings with efficiency >100% (measurement issues) when `<comparison_scope>` = `standalone`
 3. **Coverage** -- all expected system and compute findings present
 4. **Priority Consistency** -- `priority_data.json` invariants: `findings[]` sorted desc by `impact_score`, contiguous `global_rank` / `priorities[].rank`, and per-category `priorities[].impact_score` ≈ `sum(findings[].impact_score)`
 
@@ -465,6 +519,8 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
 ---
 
 ## Step 11: Generate Final Report (<output_dir>/analysis.md)
+
+**CRITICAL: Do NOT delegate Step 10 to a Task subagent.** The orchestrator must write the report directly.
 
 1. **Read** the report template: `TraceLens/Agent/Analysis/utils/templates/analysis_template.md`
 2. **Write** the filled-in report to `<output_dir>/analysis.md` using `<prefix> tee <output_dir>/analysis.md << 'REPORT_EOF'` with a **single-quoted heredoc delimiter**. Do not use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.3 reads.
@@ -533,7 +589,7 @@ If the file is absent, skip this step silently. The analysis is complete; the si
 ```bash
 EXT='<agent_extension_file>'
 if [ -f "$EXT" ]; then
-  <prefix> python3 "$EXT" --output-dir '<output_dir>' --title '<Model> on <Platform> — Kernel Tuning Potential'
+  <prefix> python3 "$EXT" --output-dir '<output_dir>' --title '<Model> on <Platform> — Kernel Tuning Potential' --comparison-scope <comparison_scope>
 fi
 ```
 
@@ -558,11 +614,9 @@ embed_plot_in_report(sys.argv[1])
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
 ---
 
-## Unsupported Trace Features
+## Trace Feature Detection
 
-If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses unsupported features before retrying:
-
-- **Torch Compile**: `ops_summary.csv` contains op names matching `triton_poi_fused_*`, `triton_red_fused_*`, `triton_per_fused_*`, or `CompiledFunction`. If found, inform the user.
+If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses the following features before retrying:
 - **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
-  - **Default mode** (analysis_mode = `default`): Inform the user that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
+  - **Default mode** (analysis_mode = `default`): Inform the user with `[DIAG:trace_quality:GPU_GRAPH_REPLAY]` that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
   - **Inference mode** (analysis_mode = `inference`): Graph launches are expected and supported if graph capture folder is provided, do not abort. If inference_exec_mode is `eager` (no capture folder was provided), continue.

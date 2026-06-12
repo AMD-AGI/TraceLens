@@ -24,11 +24,11 @@ When invoked by the orchestrator, you will receive the following context:
 - `output_dir`: Base analysis output directory
 - `cat`: MoE bucket being analyzed — one of `moe_fused` or `moe_unfused`. Substitute `<cat>` everywhere below before executing.
 - `prefix`: Command prefix from `<output_dir>/cache/cmd_prefix.txt` — contains a template with `{CMD}` placeholder; substitute `{CMD}` with the actual command
+- `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator, if MoE exists):**
-1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered MoE operations
+1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered MoE operations (includes `call_stack` column for architecture context)
 2. `<output_dir>/metadata/<cat>_metadata.json` - Hardware specs
-3. `<output_dir>/category_data/<cat>_tree_data.json` - Pre-computed parent chains
 
 **Output file you must write:**
 - `<output_dir>/category_findings/<cat>_findings.md`
@@ -65,6 +65,7 @@ Use vendor-agnostic terminology:
 <prefix> python3 \
   TraceLens/Agent/Analysis/category_analyses/moe_analysis.py \
   --output-dir <output_dir> \
+  --comparison_scope <comparison_scope>
   --category <cat>
 ```
 
@@ -79,6 +80,10 @@ If `status` is `NO_DATA`, write the no-MoE finding noted in Error Handling and s
 The byte estimation for MoE is an **average-case approximation** under uniform routing; the FLOPS calculation is exact. When emitting any memory-bound finding (where the byte estimate drives the metric), state in **Identification** that TB/s, FLOPS/Byte, and efficiency carry this approximation. Do not speculate about per-expert load imbalance or routing decisions — they are not observable from kernel-level trace data.
 
 ### Step 3: Render P-items from `category_findings`
+
+**efficiency_percent semantics:**
+- **Standalone:** Treat `efficiency_percent` as **% of roofline**.
+- **Comparative:** Treat `efficiency_percent` as **100 × (trace2 kernel time) / (trace1 kernel time)**.
 
 Read `category_data/<cat>_metrics.json::category_findings`. Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order; ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (their `operation`, `efficiency_pct`, `library`, precision from `Compute Spec`) using the Action Prose Guidance and Common Patterns below. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
 
@@ -150,14 +155,14 @@ Per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Validate find
 <prefix> python3 -c "
 import sys
 from TraceLens.Agent.Analysis.utils.validation_utils import validate_findings_file
-passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
 if not passed:
     print('FAIL:')
     for e in errors:
         print('  - ' + e)
     sys.exit(1)
 print('PASS: Findings file is valid')
-" '<output_dir>/category_findings/<cat>_findings.md' 'compute'
+" '<output_dir>/category_findings/<cat>_findings.md' 'compute' '<comparison_scope>'
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.

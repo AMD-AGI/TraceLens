@@ -11,7 +11,8 @@ files. The orchestrator extracts these sections when composing the final
 `analysis.md` report.
 
 > **Usage:** Link here from every `*-analyzer.md` instead of duplicating the
-> schema. Replace `<category>` with the actual category name
+> schema. Replace `<category>` with the actual category name.
+> This spec receives `comparison_scope`: `standalone` (default) or `comparative`.
 ---
 
 ## Orchestrator-consumed sections
@@ -25,6 +26,17 @@ Applies to both tiers (compute → `category_findings/`, system → `system_find
 
 ---
 
+## No actionable findings
+
+**Compute tier:** There is no actionable bottleneck when the analyzer left
+`category_data/<category>_metrics.json::category_findings` as an **empty array**
+`[]`. In that case emit **empty** `## Recommendations` and **empty**
+`## Detailed Analysis` exactly as in § Empty category_findings.
+
+**System tier:** Follow the structured output your analyzer JSON supports.
+
+---
+
 ## Recommendations
 
 Each P-item maps 1:1 to a `## Detailed Analysis` reasoning candidate at the same rank.
@@ -34,13 +46,13 @@ Each P-item maps 1:1 to a `## Detailed Analysis` reasoning candidate at the same
 **Insight**: [1 sentence — what's wrong]
 **Action**: [1-2 sentences — what to do]
 <!-- impact-begin kind=p_item low=<impact_score_low> mid=<impact_score> high=<impact_score_high> -->
-**Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]   <!-- compute tier only -->
+**Impact**: [impact_score: X.X, OR "Not quantifiable from trace data"]
 <!-- impact-end -->
 ```
 
 - **Compute tier**: include all three fields. Pull `**Impact**` from `category_data/<category>_metrics.json::category_findings[i]`, ordered by `rank` (one card per entry).
-- **System tier**: omit `**Impact**` and the `(<Library>)` title suffix. System-tier P-items still wrap `**Impact**` in `kind=p_item` markers when they choose to emit one (typically as `Not quantifiable from trace data`); see § Impact markers (REQUIRED) below.
-- **Field labels are exact** — always `**Insight**`, `**Action**`, `**Impact**`.
+- **System tier**: omit the `(<Library>)` title suffix. Always emit `**Impact**: Not quantifiable from trace data` wrapped in `kind=p_item` markers with `low=null mid=null high=null`.
+- **Field labels are exact** — `**Insight**`, `**Action**`, `**Impact**`.
 - **`(<Library>)` suffix**: the single `category_findings[i].library` for this card (one library per finding by construction). Omit the parenthetical when the value is `Unknown`.
 - **Marker required** — see § Impact markers (REQUIRED). The `low`/`mid`/`high` attributes carry the raw `impact_score_low/impact_score/impact_score_high` values from `category_findings[i]`. For non-quantifiable cards (system tier) use `low=null mid=null high=null`.
 
@@ -81,9 +93,9 @@ blank line between them. The validator checks for these as substring matches.
 
 | Label | Purpose |
 |-------|---------|
-| `**Identification:**` | Why these operations were flagged. Body text must be plain language — JSON keys, dotted paths, and internal variable names belong **only** in the closing `(source: \`artifact\` → \`keys\`)` parenthetical (artifact + keys backticked, e.g. `(source: \`gemm_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). When any flagged op has a non-null `library` (e.g. `Tensile`, `CK`, `AITER`, `Triton`, `rocBLAS`), state the backend in prose (e.g. "These operations use the **Tensile** backend.") and include `operations[].library` in the `(source:)` parenthetical. |
-| `**Data:**` | **Compute** (`tier=compute`): exactly one trace-grounded kernel breakdown table (see § Operations Table Schema). **All columns in the schema are mandatory — never drop a column.** Use `—` for any individual cell whose value is missing or null. **System** (`tier=system`): **must not** include kernel breakdown tables. Default columns: `Metric \| Value \| Flagged`. |
-| `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: low % of roofline, low arithmetic intensity, unfused patterns, etc. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
+| `**Identification:**` | Why these operations were flagged. Body text must be plain language — JSON keys, dotted paths, and internal variable names belong **only** in the closing `(source: \`artifact\` → \`keys\`)` parenthetical (artifact + keys backticked, e.g. `(source: \`<cat>_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). When any flagged op has a non-null `library` (e.g. `Tensile`, `CK`, `AITER`, `Triton`, `rocBLAS`), state the backend in prose and include `operations[].library` in the `(source:)` parenthetical. When `operations[i].module_chain` is non-empty, name the model layer the ops belong to. When `operations[i].call_chain` is present, use it for deeper context. |
+| `**Data:**` | **Compute** (`tier=compute`): exactly one trace-grounded kernel breakdown table (see § Operations Table Schema). **All columns in the schema are mandatory — never drop a column.** Use `—` for any individual cell whose value is missing or null. **System** (`tier=system`): **must not** include kernel breakdown tables. include metric table (see § Metric Table Schema). |
+| `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: **Standalone:** low % of roofline, low arithmetic intensity, unfused patterns, etc. **Comparative:** how Trace 1 is slower than Trace 2 for these operations — express speed differences as "X% faster" or "X% slower", plus absolute time gaps. Never use raw efficiency ratios or `efficiency_percent` values in prose. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
 | `**Impact estimate:**` | Compute tier: rendered from `category_findings[i]` (matched by `rank`), two-bullet low/high `impact_score` format (see § Impact estimate rendering). System tier: `Impact estimate is not quantifiable from trace data.` |
 
@@ -140,6 +152,8 @@ The universal rows above always apply on top of those.
 Standard column schema for operations breakdown tables and the `**Data:**` table
 inside `## Detailed Analysis` blocks.
 
+### Standalone (`comparison_scope` = `standalone`)
+
 ```markdown
 | Operation |  Args  |            Kernel Path                  | Time (ms) | %E2E | Count |FLOPS/Byte| Efficiency | Bound |
 |-----------|--------|-----------------------------------------|-----------|------|-------|----------|------------|-------|
@@ -160,6 +174,41 @@ inside `## Detailed Analysis` blocks.
   - `memory-bound`: `X.XX% of Y TB/s` (Y = `resolved_peak_hbm_bw`)
 - **Bound**: `operations[i].efficiency.bound_type` + `-bound` suffix (e.g., `memory-bound`). Must reflect compute/memory bound type — never use `classification.gemm_type` or similar.
 
+### Comparative (`comparison_scope` = `comparative`)
+
+```markdown
+| Operation | Args (T1) | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
+|-----------|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
+```
+
+**Column mappings** (all sourced from `metrics['operations']`; do **not** re-join the CSV):
+- **Operation**: `operations[i].name`. Bare op name only.
+- **Args (T1)**: `operations[i].args`. Pre-rendered shape/dtype string, already joined with `<br>` — paste verbatim. `—` when absent.
+- **Trace 1 Time (ms)**: `operations[i].time_ms`
+- **Trace 2 Time (ms)**: `operations[i].t2_time_ms`. `—` when absent.
+- **Count (T1/T2)**: T1 = `operations[i].count`; T2 = `operations[i].count_trace2`. Format `T1 / T2` (use `—` for missing T2).
+- **Difference (ms)**: `operations[i].difference_ms`. `—` when absent.
+- **FLOPS/Byte (T1)**: `operations[i].efficiency.flops_per_byte`
+- **Bound (T1)**: `operations[i].efficiency.bound_type` with a `-bound` suffix
+
+Agents may add extra columns when needed (e.g. `Sub-Category` in the generic-op analyzer).
+
+---
+
+## Metric Table Schema (system tier)
+
+Standard schema for the `**Data:**` table inside system-tier `## Detailed Analysis` blocks. In comparative mode, report Trace 1 metrics only — do not add Trace 2 columns or comparisons.
+
+```markdown
+| Metric | Value | Flagged |
+|--------|-------|---------|
+```
+
+**Column rules:**
+- **Metric**: Copy metric label directly from earlier findings sections — do not rename or reformat.
+- **Value**: `X.X ms` or `X.X%` or `X.X ms (X.X%)`
+- **Flagged**: `true` when the metric's threshold is exceeded (issue present); `false` otherwise.
+
 ---
 
 ## Peak Reference (compute tier)
@@ -175,9 +224,9 @@ Do not look up peaks independently from the metadata dict.
 
 ---
 
-## Impact Estimates
+## Impact estimate rendering
 
-Compute-tier sub-agents READ their P-items from `category_data/<category>_metrics.json::category_findings[]`, one card per entry ordered by `rank`. The analyzer script has already grouped per-op estimates by `(bound_type, library)`, summed impact, and dropped sub-threshold groups; the sub-agent renders one card per surviving entry.
+Compute-tier sub-agents READ their P-items from `category_data/<category>_metrics.json::category_findings[]`, one card per entry ordered by `rank`. The analyzer script has already grouped per-op estimates by `(bound_type, library, eff_bucket)` in standalone mode (or `(bound_type, library)` in comparative mode), summed impact, and dropped sub-threshold groups; the sub-agent renders one card per surviving entry.
 
 The set of P-items is decided by `category_findings[]` alone — `MIN_PITEM_IMPACT_SCORE` already gated upstream. **Per-category efficiency tables, expected-band thresholds, and Common Patterns in analyzer files are interpretation context for the prose** (cite in **Reasoning for Slowdown** when a member matches the band/symptom); they MUST NOT be used to add or drop P-items.
 
@@ -188,6 +237,7 @@ The set of P-items is decided by `category_findings[]` alone — `MIN_PITEM_IMPA
 | `rank` | Card order within your category (1 = highest impact). Also the `rank=` value in `<!-- reasoning-candidate -->`. |
 | `bound_type` | `compute` \| `memory`. Selects the matching Action Prose Guidance row. |
 | `library` | One per finding. Drives the `(<Library>)` title suffix. |
+| `eff_bucket` | Roofline-efficiency band: `"0-30"`, `"30-60"`, `"60-100"`, or `"unknown"` (standalone); `"all"` (comparative). Members within a finding share the same band. |
 | `impact_score` / `_low` / `_high` | Group-summed % of E2E. Render verbatim into `kind=p_item` and `kind=detail_estimate` markers. |
 | `member_count`, `members[]` | Underlying per-op estimate rows (operation, time_ms, efficiency_pct, …) — rows of the `**Data:**` table. |
 
@@ -209,6 +259,7 @@ Two bullets — low and high. Wrap in `kind=detail_estimate` markers (see
 <!-- impact-end -->
 ```
 
+**Non-quantifiable:** `Impact estimate is not quantifiable from trace data.`
 
 ## Impact markers (REQUIRED)
 
@@ -256,18 +307,19 @@ mandatory `kind=p_item` for category/system findings unless exempt) per
 <prefix> python3 -c "
 import sys
 from TraceLens.Agent.Analysis.utils.validation_utils import validate_findings_file
-passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
 if not passed:
     print('FAIL:')
     for e in errors:
         print('  - ' + e)
     sys.exit(1)
 print('PASS: Findings file is valid')
-" '<output_dir>/<subdir>/<category>_findings.md' '<tier>'
+" '<output_dir>/<subdir>/<category>_findings.md' '<tier>' '<comparison_scope>'
 ```
 
-Where `<tier>` is `compute` or `system` and `<subdir>` is `category_findings`
-or `system_findings` respectively.
+Where `<tier>` is `compute` or `system`, `<subdir>` is `category_findings`
+or `system_findings` respectively, and `<comparison_scope>` is `standalone` or
+`comparative`.
 
 **If validation fails (exit code 1):**
 
