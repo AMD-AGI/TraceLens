@@ -123,22 +123,6 @@ _SKIP_PY_PATTERNS = (
     "kernel_shape_profiler",
 )
 
-_KNOWN_PKG_ANCHORS = (
-    "sglang/",
-    "vllm/",
-    "aiter/",
-    "fbgemm_gpu/",
-    "sgl_kernel/",
-    "torchrec/",
-    "components/",
-    "megatron/",
-    "transformers/",
-    "model/",
-    "deepspeed/",
-    "flash_attn/",
-    "ops/",
-)
-
 
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
     """
@@ -469,10 +453,7 @@ def _match_fusion_op(kd_str: str, fusion_map: Dict[str, str]) -> Optional[str]:
 
 
 def _extract_launcher_path(call_stack_str: str, op_name: str) -> str:
-    """Return the first non-infrastructure .py frame from a call stack, relativized.
-
-    Absolute container prefixes are stripped using ``_KNOWN_PKG_ANCHORS``; unknown
-    roots fall back to the last 3 path segments.
+    """Return the first non-infrastructure .py frame from a call stack.
     """
     if not call_stack_str or call_stack_str == "nan":
         return ""
@@ -484,14 +465,6 @@ def _extract_launcher_path(call_stack_str: str, op_name: str) -> str:
             continue
         if any(p in frame for p in _SKIP_PY_PATTERNS):
             continue
-        for anchor in _KNOWN_PKG_ANCHORS:
-            idx = frame.rfind(anchor)
-            if idx > 0:
-                return frame[idx:]
-        if frame.startswith("/") or frame.startswith("./"):
-            parts = frame.lstrip("./").split("/")
-            if len(parts) > 3:
-                return "/".join(parts[-4:])
         return frame
     return ""
 
