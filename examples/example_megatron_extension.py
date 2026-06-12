@@ -76,6 +76,31 @@ def _link_checkpoint_fwd_bwd(trace_tree):
                     fwd_op["bwd_events"] = [bwd_op["UID"]]
 
 
+def _annotate_layernorm_backward_shapes(trace_tree):
+    """Annotate _LayerNormLinearBackward events with the LayerNorm input shape.
+
+    The backward event's Input Dims only contains the output gradient shape
+    (with the projected dimension from the Linear), not the LayerNorm input
+    shape (hidden dimension).  This function copies the input shape and weight
+    shape from the corresponding forward event so that the perf model can
+    compute accurate FLOPS/bytes for the LayerNorm backward kernels.
+    """
+    if "_LayerNormLinear" not in trace_tree.name2event_uids:
+        return
+
+    for fwd_uid in trace_tree.name2event_uids["_LayerNormLinear"]:
+        fwd_event = trace_tree.get_UID2event(fwd_uid)
+        input_dims = fwd_event["args"]["Input Dims"]
+        ln_input_shape = input_dims[0]  # e.g. (8192, 4, 4096)
+        ln_weight_shape = input_dims[1]  # e.g. (4096,)
+
+        bwd_ops = get_bwd_ops_for_fwd_op(trace_tree, fwd_event)
+        for bwd_op in bwd_ops:
+            if bwd_op.get("name") == "_LayerNormLinearBackward":
+                bwd_op["args"]["_ln_input_shape"] = ln_input_shape
+                bwd_op["args"]["_ln_weight_shape"] = ln_weight_shape
+
+
 def tree_postprocess_extension(trace_tree):
     """
     Context: In Transformer Engine v1, the blas GEMM calls are made by tex_ts::te_gemm_ts CPU ops.
@@ -121,6 +146,8 @@ def tree_postprocess_extension(trace_tree):
         ]
         for fwd_op_event in fwd_op_events:
             create_host_mm_ops_from_layernormlinear_op(trace_tree, fwd_op_event)
+
+    _annotate_layernorm_backward_shapes(trace_tree)
 
 
 def get_bwd_ops_for_fwd_op(trace_tree, fwd_op_event: dict) -> list[dict]:
@@ -627,6 +654,109 @@ class te_layer_norm_bwd(Normalization):
 import ast
 
 
+class te_layernorm_linear_fwd(Normalization):
+    """Perf model for the LayerNorm portion of TE's fused _LayerNormLinear.
+
+    After the GEMM pseudo op is extracted, the parent _LayerNormLinear still
+    carries the LayerNorm kernels.  The arg layout matches LayerNormFn:
+      args[0] = input activation  (e.g. (8192, 4, 4096))
+      args[1] = ln_weight         (e.g. (4096,))
+      args[2] = ln_bias           (may be empty)
+    """
+
+    category = "NORM_fwd"
+
+    @staticmethod
+    def get_param_details(event):
+        args_input_dims = event["args"]["Input Dims"]
+        op_shape = tuple(args_input_dims[0])
+        weight_shape = args_input_dims[1]
+        num_channels = weight_shape[0] if weight_shape else op_shape[-1]
+        has_bias = bool(args_input_dims[2])
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": has_bias,
+            "is_affine": bool(weight_shape),
+            "is_training": True,
+        }
+
+    def flops_bwd(self):
+        raise NotImplementedError("Use te_layernorm_linear_bwd for backward pass.")
+
+    def bytes_bwd(self, bytes_per_element):
+        raise NotImplementedError("Use te_layernorm_linear_bwd for backward pass.")
+
+
+class te_layernorm_linear_bwd(Normalization):
+    """Perf model for the LayerNorm backward portion of _LayerNormLinearBackward.
+
+    The backward event's Input Dims records the output gradient shape whose
+    last dimension is the *projected* dim (e.g. 28672), not the hidden dim
+    that the LayerNorm backward kernels actually operate on (e.g. 4096).
+
+    tree_postprocess_extension injects ``_ln_input_shape`` and
+    ``_ln_weight_shape`` from the corresponding forward event so this model
+    can use the correct LayerNorm dimensions.  If the annotations are missing
+    (e.g. forward/backward linkage failed), the model falls back to the
+    gradient shape, which will overestimate FLOPS/bytes.
+    """
+
+    category = "NORM_bwd"
+
+    @staticmethod
+    def get_param_details(event):
+        args = event["args"]
+        if "_ln_input_shape" in args:
+            op_shape = tuple(args["_ln_input_shape"])
+            ln_weight_shape = args.get("_ln_weight_shape")
+            num_channels = ln_weight_shape[0] if ln_weight_shape else op_shape[-1]
+        else:
+            args_input_dims = args["Input Dims"]
+            op_shape = tuple(args_input_dims[0])
+            num_channels = op_shape[-1]
+
+        dtype_in = args["Input type"][0]
+        stride_input = tuple(args["Input Strides"][0])
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": True,
+        }
+
+    def flops(self):
+        return self.flops_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            [True, self.is_affine, self.has_bias],
+        )
+
+    def bytes(self):
+        return self.bytes_func_bwd(
+            self.has_bias,
+            self.is_affine,
+            self.is_training,
+            self.num_elems,
+            self.num_channels,
+            self.bpe_in,
+            self.bpe_out,
+            [True, self.is_affine, self.has_bias],
+        )
+
+
 class custom_grouped_gemm(GroupedGemm):
 
     @staticmethod
@@ -672,6 +802,8 @@ perf_model_extension = {
     "GroupedGemm": custom_grouped_gemm,
     "LayerNormFn": te_layer_norm_fwd,
     "LayerNormFnBackward": te_layer_norm_bwd,
+    "_LayerNormLinear": te_layernorm_linear_fwd,
+    "_LayerNormLinearBackward": te_layernorm_linear_bwd,
 }
 
 op_category_extension = {
