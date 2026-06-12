@@ -27,9 +27,8 @@ When invoked by the orchestrator, you will receive the following context:
 - `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator, if MoE exists):**
-1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered MoE operations
+1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered MoE operations (includes `call_stack` column for architecture context)
 2. `<output_dir>/metadata/<cat>_metadata.json` - Hardware specs
-3. `<output_dir>/category_data/<cat>_tree_data.json` - Pre-computed parent chains
 
 **Output file you must write:**
 - `<output_dir>/category_findings/<cat>_findings.md`

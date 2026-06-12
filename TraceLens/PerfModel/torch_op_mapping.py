@@ -11,7 +11,10 @@ from typing import Dict, Iterable, List, Mapping, MutableMapping
 from typing import Optional, Pattern, Tuple
 
 from . import perf_model
-from .extensions import get_pseudo_op_mappings
+from .extensions import (
+    get_pseudo_op_mappings,
+    get_pseudo_op_category_only_mappings,
+)
 
 CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     # CONV ops not present in op_to_perf_model_class_map.
@@ -272,6 +275,9 @@ op_to_perf_model_class_map = {
 
 # Add pseudo-op extension mappings
 op_to_perf_model_class_map.update(get_pseudo_op_mappings())
+
+# Add pseudo-op category-only mappings (no perf model, just a category label).
+CATEGORY_ONLY_OP_MAPPING.update(get_pseudo_op_category_only_mappings())
 
 unary_elemwise_ops = [
     "aten::copy",

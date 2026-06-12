@@ -578,7 +578,7 @@ class TraceEventUtils:
 
     @staticmethod
     def default_categorizer(event: dict) -> str:
-        return event.get(TraceEventUtils.TraceKeys.Category)
+        return event["cat"]
 
     # TODO separate util class for Jax
     # returns a curried function to categorizes events based on the

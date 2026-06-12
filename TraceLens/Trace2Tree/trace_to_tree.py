@@ -113,7 +113,7 @@ class BaseTraceToTree(ABC):
             cat = self.event_to_category(event)
             event["cat"] = cat
             is_cpu_or_cuda_event = cat in {"cpu_op", "cuda_runtime", "cuda_driver"}
-            is_python_event = self.event_to_category(event) == "python_function"
+            is_python_event = cat == "python_function"
             return is_cpu_or_cuda_event or (add_python_func and is_python_event)
 
         print(f"Building CPU op tree with add_python_func={add_python_func}")
@@ -141,26 +141,42 @@ class BaseTraceToTree(ABC):
             stack = dict_pidtid2stack[stack_key]
             nn_module_stack = dict_pidtid2nn_module_stack[stack_key]
 
-            while (
-                stack
-                and event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
+            # Pop stack entries that have already ended before this event starts.
+            while stack and (
+                event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
                 >= stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
             ):
                 popped_event = stack.pop()
                 if self.event_to_category(popped_event) == "cpu_op":
                     dict_pidtid2num_cpu_ops[stack_key] -= 1
-                # Pop from nn_module_stack if this was an nn.Module event
                 if self._is_nn_module_event(popped_event):
                     nn_module_stack.pop()
 
-            if (
-                stack
-                and event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
+            # Handle "event bleed": the event starts inside the stack top
+            # but ends after it.  If the overlap (stack[-1].t_end - event.ts)
+            # is < 1 us, this is a tiny timing overlap (e.g. hipLaunchKernel
+            # starting a few hundred ns before a sibling cpu_op finishes).
+            # Pop the sibling and attach the event under the same parent.
+            # Larger bleeds (>= 1 us) are discarded — these are typically
+            # python_function instrumentation artifacts (e.g. PyCapsule
+            # built-ins whose duration includes GPU sync time).
+            if stack and (
+                event[TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
                 > stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
             ):
-                # TODO add following to logging when logging level is debug
-                # print(f"Invalid event ordering: {event[TraceLens.util.TraceEventUtils.TraceKeys.Name]} ends after the stack top event.")
-                continue
+                overlap_us = (
+                    stack[-1][TraceLens.util.TraceEventUtils.TraceKeys.TimeEnd]
+                    - event[TraceLens.util.TraceEventUtils.TraceKeys.TimeStamp]
+                )
+                overlap_tolerance_us = 1.0
+                if overlap_us < overlap_tolerance_us and len(stack) >= 2:
+                    popped_event = stack.pop()
+                    if self.event_to_category(popped_event) == "cpu_op":
+                        dict_pidtid2num_cpu_ops[stack_key] -= 1
+                    if self._is_nn_module_event(popped_event):
+                        nn_module_stack.pop()
+                else:
+                    continue
 
             # Set nn_module_stack for the current event (copy to avoid reference issues)
             if nn_module_stack:
@@ -614,7 +630,7 @@ class TraceToTree(BaseTraceToTree):
 
     @staticmethod
     def default_categorizer(event: dict) -> str:
-        return event.get(TraceLens.util.TraceEventUtils.TraceKeys.Category)
+        return event["cat"]
 
     def _set_linking_key(self):
         Name = TraceLens.util.TraceEventUtils.TraceKeys.Name
@@ -659,6 +675,7 @@ class TraceToTree(BaseTraceToTree):
 
         for event in self.events:
             cat = event.get("cat")
+            event["cat"] = cat  # ensure key present for lambda e: e["cat"] fast path
 
             if cat in runtime_cats:
                 self.runtime_event_uids.append(event[UID])
