@@ -552,6 +552,41 @@ class TraceDiff:
                 nn_module_stack = node2.get("nn_module_stack", "")
 
             children1, children2 = get_children_with_missing(uid1, uid2)
+
+            # Flatten transparent wrapper layers on whichever side has exactly
+            # one gpu-path child, until counts match or a cpu_op (real op) or
+            # dead end is reached.  This handles call-stack depth asymmetries
+            # between backends (e.g. AMD adds an extra utils.py: run wrapper
+            # that CUDA doesn't have) without confusing them with kernel-fusion
+            # differences, where the single child would be a cpu_op and we stop.
+            while len(children1) != len(children2):
+                if len(children1) == 1:
+                    node = baseline_uid2node.get(children1[0])
+                    if not node or tree1.event_to_category(node) == "cpu_op":
+                        break
+                    deeper = [
+                        c
+                        for c in node.get("children", [])
+                        if self.is_gpu_path(baseline_uid2node.get(c))
+                    ]
+                    if not deeper:
+                        break
+                    children1 = deeper
+                elif len(children2) == 1:
+                    node = variant_uid2node.get(children2[0])
+                    if not node or tree2.event_to_category(node) == "cpu_op":
+                        break
+                    deeper = [
+                        c
+                        for c in node.get("children", [])
+                        if self.is_gpu_path(variant_uid2node.get(c))
+                    ]
+                    if not deeper:
+                        break
+                    children2 = deeper
+                else:
+                    break
+
             any_cuda_runtime = any(
                 subtree_contains_cuda_runtime(c, baseline_uid2node) for c in children1
             ) or any(
