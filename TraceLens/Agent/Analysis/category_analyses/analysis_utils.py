@@ -36,9 +36,7 @@ TARGET_MID = 87.5
 MIN_PITEM_IMPACT_SCORE = (
     0.5  # Group-sum (% E2E) below which a finding is dropped from priority_data.json.
 )
-UNMODELED_E2E_THRESHOLD = (
-    4.0  # Summed %E2E (per op-name, across shapes) above which an unmodeled op becomes a non-quantifiable low-priority finding.
-)
+UNMODELED_E2E_THRESHOLD = 4.0  # Summed %E2E (per op-name, across shapes) above which an unmodeled op becomes a non-quantifiable low-priority finding.
 _EFF_BUCKET_BOUNDARIES = (30, 60)
 
 _OP_NAME_LIBRARY_RULES = [
@@ -453,8 +451,7 @@ def _match_fusion_op(kd_str: str, fusion_map: Dict[str, str]) -> Optional[str]:
 
 
 def _extract_launcher_path(call_stack_str: str, op_name: str) -> str:
-    """Return the first non-infrastructure .py frame from a call stack.
-    """
+    """Return the first non-infrastructure .py frame from a call stack."""
     if not call_stack_str or call_stack_str == "nan":
         return ""
     frames = [f.strip() for f in call_stack_str.split(" => ")]

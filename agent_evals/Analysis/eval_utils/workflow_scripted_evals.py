@@ -1206,7 +1206,8 @@ def _check_marker_reasoning_candidates(output_dir, comparison_scope=None):
             continue
         n_headings = len(_DETAIL_P_HEADER_RE.findall(subsection))
         n_markers = sum(
-            1 for m in _REASONING_CANDIDATE_RE.finditer(subsection)
+            1
+            for m in _REASONING_CANDIDATE_RE.finditer(subsection)
             if m.group(1).lower() == tier
         )
         if n_headings == 0:

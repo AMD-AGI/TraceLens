@@ -36,9 +36,7 @@ _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _KERNEL_FUSION_FINDINGS = "kernel_fusion_findings.md"
 # Optional icon / prefix before P<N> (e.g. kernel fusion `### 🟢 P1:`).
 _P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
-_CANDIDATE_RE = re.compile(
-    r"<!-- reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->"
-)
+_CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->")
 _DA_HEADING_RE = re.compile(r"^####\s+.*?P(\d+)\s*:", re.MULTILINE)
 _NOT_QUANTIFIABLE_SENTINEL = re.compile(
     r"not quantifiable from trace data", re.IGNORECASE
@@ -213,9 +211,7 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
         )
 
     if candidates:
-        wrong_tier = [
-            (t, r) for t, r in candidates if t.lower() != tier
-        ]
+        wrong_tier = [(t, r) for t, r in candidates if t.lower() != tier]
         if wrong_tier:
             bad = ", ".join(f"tier={t} rank={r}" for t, r in wrong_tier)
             errors.append(
@@ -844,7 +840,7 @@ def _extract_detailed_analysis_subsection(content, subsection_header):
     sub_start = da_text.find(subsection_header)
     if sub_start < 0:
         return None
-    sub_text = da_text[sub_start + len(subsection_header):]
+    sub_text = da_text[sub_start + len(subsection_header) :]
     next_h3 = re.search(r"^### ", sub_text, re.MULTILINE)
     next_h2 = re.search(r"^## ", sub_text, re.MULTILINE)
     ends = [pos.start() for pos in [next_h3, next_h2] if pos is not None]
@@ -872,8 +868,7 @@ def _validate_report_reasoning_candidates(content):
             continue
         n_headings = len(_DA_HEADING_RE.findall(subsection))
         n_markers = sum(
-            1 for m in _CANDIDATE_RE.finditer(subsection)
-            if m.group(1).lower() == tier
+            1 for m in _CANDIDATE_RE.finditer(subsection) if m.group(1).lower() == tier
         )
         if n_headings > 0 and n_markers != n_headings:
             label = header.lstrip("# ")
