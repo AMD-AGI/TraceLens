@@ -159,7 +159,17 @@ class InferenceAttention:
             q_shape, k_shape = input_dims[0], input_dims[1]
             N_Q, H_Q, d_h_qk = q_shape
             N_KV, H_KV, d_h_v = k_shape[-3:]
-            dtype_Q = event["args"]["Input type"][0]
+            input_types = event["args"]["Input type"]
+            dtype_Q = input_types[0]
+
+            propagated_kv = (event.get("attention_perf_meta") or {}).get(
+                "k_cache_dtype"
+            )
+            dtype_KV = (
+                propagated_kv
+                if propagated_kv
+                else (input_types[1] if len(input_types) > 1 else dtype_Q)
+            )
             return {
                 "B": 1,
                 "N_Q": N_Q,
@@ -182,6 +192,7 @@ class InferenceAttention:
                 "g_sqsq": g_sqsq,
                 "g_sqsk": g_sqsk,
                 "dtype_Q": dtype_Q,
+                "dtype_KV": dtype_KV,
             }
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return InferenceAttention.no_perf_param_details()
@@ -217,7 +228,17 @@ class InferenceAttention:
 
     @staticmethod
     def bytes_func(
-        B, H_Q, H_KV, d_h_qk, d_h_v, c_sq, c_sk, g_sq, g_sk, bytes_per_element
+        B,
+        H_Q,
+        H_KV,
+        d_h_qk,
+        d_h_v,
+        c_sq,
+        c_sk,
+        g_sq,
+        g_sk,
+        bytes_per_element,
+        bytes_per_element_KV=None,
     ):
         """Calculate bytes moved for attention (context + generation).
 
@@ -227,21 +248,36 @@ class InferenceAttention:
             d_h_qk / d_h_v: Head dimensions for Q-K / V.
             c_sq / c_sk: Aggregate sequence lengths for context Q / KV.
             g_sq / g_sk: Aggregate sequence lengths for generation Q / KV.
-            bytes_per_element: Bytes per tensor element.
+            bytes_per_element: Bytes per Q / output / current-chunk K-V element.
+            bytes_per_element_KV: Bytes per cached K / V element. Defaults to
+                ``bytes_per_element`` (e.g. when KV-cache dtype matches Q).
         """
-        ctx_elems = (
+        if bytes_per_element_KV is None:
+            bytes_per_element_KV = bytes_per_element
+        ctx_elems_q = (
             B * c_sq * H_Q * d_h_qk  # Q read
-            + B * c_sk * H_KV * d_h_qk  # K read
-            + B * c_sk * H_KV * d_h_v  # V read
             + B * c_sq * H_Q * d_h_v  # output write
+            + B * c_sq * H_KV * d_h_qk  # K read (current chunk, Q-dtype)
+            + B * c_sq * H_KV * d_h_v  # V read (current chunk, Q-dtype)
         )
-        gen_elems = (
+        ctx_elems_kv = (
+            B * (c_sk - c_sq) * H_KV * d_h_qk  # K read (cached, KV-dtype)
+            + B * (c_sk - c_sq) * H_KV * d_h_v  # V read (cached, KV-dtype)
+        )
+        gen_elems_q = (
             B * g_sq * H_Q * d_h_qk
-            + B * g_sk * H_KV * d_h_qk
-            + B * g_sk * H_KV * d_h_v
             + B * g_sq * H_Q * d_h_v
+            + B * g_sq * H_KV * d_h_qk  # K read (current token, Q-dtype)
+            + B * g_sq * H_KV * d_h_v  # V read (current token, Q-dtype)
         )
-        return (ctx_elems + gen_elems) * bytes_per_element
+        gen_elems_kv = (
+            B * (g_sk - g_sq) * H_KV * d_h_qk  # K read (cached, KV-dtype)
+            + B * (g_sk - g_sq) * H_KV * d_h_v  # V read (cached, KV-dtype)
+        )
+
+        return (ctx_elems_q + gen_elems_q) * bytes_per_element + (
+            ctx_elems_kv + gen_elems_kv
+        ) * bytes_per_element_KV
 
     # ------------------------------------------------------------------
     # Instance methods – work for any subclass with valid param_details
@@ -269,6 +305,8 @@ class InferenceAttention:
         bpe = bytes_per_element
         if bpe is None:
             bpe = name2bpe(self.param_details.get("dtype_Q")) or 2
+        dtype_kv = self.param_details.get("dtype_KV")
+        bpe_kv = (name2bpe(dtype_kv) if dtype_kv else None) or bpe
         return self.bytes_func(
             self.B,
             self.H_Q,
@@ -280,6 +318,7 @@ class InferenceAttention:
             self.param_details["g_sq"],
             self.param_details["g_sk"],
             bpe,
+            bpe_kv,
         )
 
     def flops_bwd(self):
