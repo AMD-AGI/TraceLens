@@ -32,6 +32,8 @@ Usage:
 
 import argparse
 import cProfile
+import importlib
+import importlib.metadata
 import json
 import os
 import platform
@@ -128,20 +130,13 @@ def load_manifest(manifest_path):
 def get_tracelens_version():
     """Attempt to read TraceLens version from setup.py or package metadata."""
     try:
-        from importlib.metadata import version
-
-        return version("TraceLens")
+        return importlib.metadata.version("TraceLens")
     except Exception:
         return "unknown"
 
 
 def get_commit_sha():
-    """Extract the short commit SHA from the installed TraceLens wheel version.
-
-    Runs 'pip install -e .' first so setup.py re-stamps the version with the
-    current commit, then reads the local segment of the PEP 440 version string
-    (format: '0.1.0.dev<date>+g<shortsha>').
-    """
+    """Extract the short commit SHA from the installed TraceLens wheel version"""
     try:
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "-e", "."],
@@ -154,12 +149,8 @@ def get_commit_sha():
         return "unknown"
 
     try:
-        # Reload metadata after reinstall
-        import importlib.metadata as _meta
-        import importlib
-
         importlib.invalidate_caches()
-        ver = _meta.version("TraceLens")
+        ver = importlib.metadata.version("TraceLens")
         # Version format: 0.1.0.dev20260612+gabcd123
         if "+" in ver:
             local = ver.split("+", 1)[1]  # e.g. "gabcd123"
