@@ -25,6 +25,7 @@ from analysis_utils import (
     calculate_time_metrics,
     build_operation_metrics,
     build_category_findings,
+    build_unmodeled_significant_findings,
     compute_impact_estimates,
     write_metrics_json,
 )
@@ -158,6 +159,17 @@ def main():
     category_findings = build_category_findings(
         impact_estimates, comparison_scope=args.comparison_scope
     )
+
+    # Surface no-perf-model significant ops as non-quantifiable findings.
+    # Standalone only: comparative efficiency is a ratio, not a roofline gap.
+    if args.comparison_scope == "standalone":
+        category_findings.extend(
+            build_unmodeled_significant_findings(
+                operations,
+                category,
+                start_rank=len(category_findings) + 1,
+            )
+        )
 
     metrics = {
         "category": category,

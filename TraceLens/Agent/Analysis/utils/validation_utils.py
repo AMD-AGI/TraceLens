@@ -36,7 +36,8 @@ _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _KERNEL_FUSION_FINDINGS = "kernel_fusion_findings.md"
 # Optional icon / prefix before P<N> (e.g. kernel fusion `### 🟢 P1:`).
 _P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
-_CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=\w+\s+rank=(\d+)\s*-->")
+_CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->")
+_DA_HEADING_RE = re.compile(r"^####\s+.*?P(\d+)\s*:", re.MULTILINE)
 _NOT_QUANTIFIABLE_SENTINEL = re.compile(
     r"not quantifiable from trace data", re.IGNORECASE
 )
@@ -141,7 +142,7 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
 
     Args:
         filepath: Path to the *_findings.md file
-        tier: "compute" or "system"
+        tier: "compute", "system", or "fusion"
         comparison_scope: "standalone" or "comparative". When omitted, inferred
             from the category metrics JSON.
 
@@ -208,6 +209,15 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
             f"P-item count ({len(p_items)}) does not match "
             f"reasoning-candidate count ({len(candidates)})"
         )
+
+    if candidates:
+        wrong_tier = [(t, r) for t, r in candidates if t.lower() != tier]
+        if wrong_tier:
+            bad = ", ".join(f"tier={t} rank={r}" for t, r in wrong_tier)
+            errors.append(
+                f"reasoning-candidate tier mismatch: expected tier={tier}, "
+                f"found {bad}"
+            )
 
     # Compute tier only: shape + Args verbatim + Kernel Path verbatim, all
     # scoped to <!-- reasoning-candidate tier=compute --> blocks.
@@ -533,7 +543,9 @@ def _check_priority_consistency(output_dir, manifest):
             continue
         cat = p.get("category")
         expected = sum(
-            f.get("impact_score", 0) for f in findings if f.get("category") == cat
+            f.get("impact_score", 0)
+            for f in findings
+            if f.get("category") == cat and f.get("impact_score") is not None
         )
         actual = p.get("impact_score", 0) or 0
         if abs(actual - expected) > _ROLLUP_IMPACT_TOL:
@@ -630,6 +642,8 @@ def validate_report(output_dir, comparison_scope=None):
 
     missing.extend(_validate_report_priority_consistency(content, output_dir))
 
+    missing.extend(_validate_report_reasoning_candidates(content))
+
     # Report-level marker structure
     missing.extend(MarkerValidator.check_report(report_path))
 
@@ -710,14 +724,16 @@ def _validate_report_args_column(content, output_dir):
 def _validate_report_priority_consistency(content, output_dir):
     """Cross-check analysis.md against priority_data.json.
 
-    R1: Compute Kernel Optimizations P-item heading count == len(quantified findings).
+    R1: Compute Kernel Optimizations P-item heading count == len(findings).
     R2: Each kind=p_item marker's category attr (in doc order) == findings[N-1].category.
     R3: Each marker's low/mid/high attrs match findings[N-1] impact_score_low / impact_score / impact_score_high.
     R4: Top Operations marker rows == len(priorities).
 
     Silently skips when priority_data.json is absent (Step 8 already warns).
     Numeric attrs are compared as 2-decimal strings to match the writer's
-    rounding in generate_priority_data.
+    rounding in generate_priority_data. Non-quantifiable findings
+    (impact_score=None, e.g. unmodeled significant ops) are included: they
+    render as bottom P-items with low=null mid=null high=null markers.
     """
     pd_path = os.path.join(output_dir, "priority_data.json")
     if not os.path.exists(pd_path):
@@ -727,9 +743,7 @@ def _validate_report_priority_consistency(content, output_dir):
             pd = json.load(f)
     except (OSError, json.JSONDecodeError):
         return []
-    findings = [
-        f for f in (pd.get("findings", []) or []) if f.get("impact_score") is not None
-    ]
+    findings = pd.get("findings", []) or []
     priorities = pd.get("priorities", []) or []
     errors = []
 
@@ -743,7 +757,7 @@ def _validate_report_priority_consistency(content, output_dir):
     if n_p != len(findings):
         errors.append(
             f"R1: Compute Kernel Optimizations has {n_p} P-item headings but "
-            f"priority_data.json has {len(findings)} quantified findings"
+            f"priority_data.json has {len(findings)} findings"
         )
 
     p_markers = []
@@ -758,7 +772,7 @@ def _validate_report_priority_consistency(content, output_dir):
         if idx >= len(findings):
             errors.append(
                 f"R2: extra kind=p_item marker #{idx + 1} in Compute Kernel "
-                f"Optimizations beyond {len(findings)} quantified findings"
+                f"Optimizations beyond {len(findings)} findings"
             )
             break
         f = findings[idx]
@@ -810,6 +824,58 @@ def _validate_report_priority_consistency(content, output_dir):
                 f"priority_data.json::priorities has {len(priorities)} entries"
             )
 
+    return errors
+
+
+def _extract_detailed_analysis_subsection(content, subsection_header):
+    """Extract a ### subsection from ## Detailed Analysis.
+
+    Returns the text from the subsection header to the next ### or ## header,
+    or None if not found.
+    """
+    da_start = content.find("## Detailed Analysis")
+    if da_start < 0:
+        return None
+    da_text = content[da_start:]
+    sub_start = da_text.find(subsection_header)
+    if sub_start < 0:
+        return None
+    sub_text = da_text[sub_start + len(subsection_header) :]
+    next_h3 = re.search(r"^### ", sub_text, re.MULTILINE)
+    next_h2 = re.search(r"^## ", sub_text, re.MULTILINE)
+    ends = [pos.start() for pos in [next_h3, next_h2] if pos is not None]
+    end = min(ends) if ends else len(sub_text)
+    return sub_text[:end]
+
+
+def _validate_report_reasoning_candidates(content):
+    """Check reasoning-candidate markers in Detailed Analysis match P-item headings.
+
+    For each tier (compute / system), the number of
+    ``<!-- reasoning-candidate tier=<tier> -->`` markers must equal the number
+    of ``#### P<N>:`` headings in the corresponding subsection. Missing markers
+    break Hyperloom's ``parse_analysis_md()`` which uses them as block delimiters.
+    """
+    errors = []
+    checks = [
+        ("compute", "### Compute Kernel Insights"),
+        ("fusion", "### Kernel Fusion Insights"),
+        ("system", "### System-Level Insights"),
+    ]
+    for tier, header in checks:
+        subsection = _extract_detailed_analysis_subsection(content, header)
+        if subsection is None:
+            continue
+        n_headings = len(_DA_HEADING_RE.findall(subsection))
+        n_markers = sum(
+            1 for m in _CANDIDATE_RE.finditer(subsection) if m.group(1).lower() == tier
+        )
+        if n_headings > 0 and n_markers != n_headings:
+            label = header.lstrip("# ")
+            errors.append(
+                f"R5: {label} has {n_headings} #### P<N>: headings but "
+                f"{n_markers} reasoning-candidate tier={tier} markers"
+            )
     return errors
 
 

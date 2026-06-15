@@ -520,20 +520,37 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
 
 ## Step 11: Generate Final Report (<output_dir>/analysis.md)
 
-**CRITICAL: Do NOT delegate Step 10 to a Task subagent.** The orchestrator must write the report directly.
+**CRITICAL: Do NOT delegate Step 11 to a Task subagent.** The orchestrator must write the report directly.
 
 1. **Read** the report template: `TraceLens/Agent/Analysis/utils/templates/analysis_template.md`
-2. **Write** the filled-in report to `<output_dir>/analysis.md` using `<prefix> tee <output_dir>/analysis.md << 'REPORT_EOF'` with a **single-quoted heredoc delimiter**. Do not use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.3 reads.
-3. **Fill in** each section by substituting placeholders with data using `<prefix>`. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
-   - `category_data/category_manifest.json` (metrics, GPU utilization)
-   - `category_findings/*.md` (compute kernel P-items)
-   - `system_findings/*.md` (system-level P-items)
-   - `category_data/*_metrics.json` (per-op tables, impact estimates)
-   - `priority_data.json` — compute kernel P-items: P1 = `findings[0]`, P2 = `findings[1]`, ... (`findings[]` is globally sorted by `impact_score`); each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting) — see the template for cell mapping. Render exactly one P-item per entry in `findings[]` — never merge entries.
-   - `metadata/model_info.json` — for `### Model Architecture` in Appendix: substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
-   - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/Agent/Analysis/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
-   - **IMPORTANT: Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting. **Copy table cells verbatim** from the source `category_findings/<cat>_findings.md` — do NOT reformat, shorten, or strip prefixes from any cell. Preserve the `<!-- reasoning-candidate tier=… rank=… -->` HTML comment that precedes each `####` heading in the source findings file. Follow the template for formatting.
-   - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
+2. **Write the report in sections** to `<output_dir>/analysis.md` using **only** `<prefix> tee` / `<prefix> tee -a` with single-quoted heredoc delimiters (see write order below). You MUST NOT use the IDE Write tool, Edit tool, StrReplace tool, `cat >`, `echo >`, `>>` redirect, or any other write method for `analysis.md` unless tee fails.
+3. **Fill in** each section by substituting placeholders with actual data. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
+
+**Write order (one heredoc per step):**
+
+   a. **Initialize** — truncate and write the title line + `## Executive Summary` (metrics table, `{{PERF_PLOT}}` placeholder). Use `<prefix> tee <output_dir>/analysis.md << 'SECTION_EOF'` (truncating `tee`, not append) for this first write only.
+      - Data sources: `category_data/category_manifest.json` (`gpu_utilization` keys), `priority_data.json` (top bottleneck).
+
+   b. **Compute Kernel Optimizations** — append `## Compute Kernel Optimizations` with `### Top Operations` table and P-item cards. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
+      - Data sources: `priority_data.json` — P1 = `findings[0]`, P2 = `findings[1]`, ... ; each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting).
+      - `category_findings/*.md` — for each findings file, copy its `## Recommendations` P-items into the report card slots. **Copy table cells verbatim** from the source `category_findings/<cat>_findings.md`.
+      - Non-quantifiable findings (`findings[i].members[0].type == "unmodeled_significant"`) sort last in `findings[]` — render them as the lowest-priority cards (do NOT skip them) per `sub_agent_spec.md § Non-quantifiable findings`.
+
+   c. **Kernel Fusion** — append `## Kernel Fusion Opportunities (Experimental)`. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
+      - Data source: `system_findings/kernel_fusion_findings.md`.
+
+   d. **System-Level** — append `## System-Level Optimizations`. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
+      - Data sources: remaining `system_findings/*.md` (cpu_idle, multi_kernel).
+
+   e. **Detailed Analysis** — append `## Detailed Analysis` with `### Compute Kernel Insights`, `### Kernel Fusion Insights`, `### System-Level Insights` subsections. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
+      - Data sources: copy the `## Detailed Analysis` blocks verbatim from each `*_findings.md` file. Follow the template for formatting.
+      - `category_data/*_metrics.json` (per-op tables, impact estimates).
+
+   f. **Appendix** — append `## Appendix` with `### Model Architecture` and `### Hardware Reference`. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
+      - `metadata/model_info.json` — substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
+      - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/Agent/Analysis/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
+
+**Failure exclusion:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a `## Warnings` section (between Executive Summary and Compute Kernel Optimizations) only if failures exist.
 
 The report at `<output_dir>/analysis.md` must use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`
@@ -554,14 +571,14 @@ After writing `analysis.md`, validate that the report contains all required `##`
 <prefix> python3 -c \"
 import sys
 from TraceLens.Agent.Analysis.utils.validation_utils import validate_report
-passed, missing = validate_report(sys.argv[1])
+passed, missing = validate_report(sys.argv[1], comparison_scope=sys.argv[2])
 if not passed:
     print('FAIL:')
     for m in missing:
         print('  - ' + m)
     sys.exit(1)
 print('PASS: All required sections present')
-\" '<output_dir>'
+\" '<output_dir>' '<comparison_scope>'
 ```
 
 **If validation fails (exit code 1):**

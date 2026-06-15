@@ -248,6 +248,9 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             }
         )
         for f in findings:
+            # impact_score=None (no perf model): excluded from rollup/plot, ranked last.
+            if f.get("impact_score") is None:
+                continue
             cat = f["category"]
             quantified[cat]["impact_score"] += f.get("impact_score", 0)
             quantified[cat]["impact_score_low"] += f.get("impact_score_low", 0)
@@ -323,7 +326,15 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             )
             next_rank += 1
 
-        findings.sort(key=lambda f: f["impact_score"], reverse=True)
+        # Quantified findings sort by impact_score descending; non-quantifiable
+        # (impact_score=None) findings always rank last.
+        findings.sort(
+            key=lambda f: (
+                f.get("impact_score") is not None,
+                f.get("impact_score") or 0,
+            ),
+            reverse=True,
+        )
         for global_rank, f in enumerate(findings, start=1):
             f["global_rank"] = global_rank
 
