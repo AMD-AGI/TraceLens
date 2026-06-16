@@ -357,7 +357,28 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
             extensions.append(("MLA_Prefill", create_pseudo_ops_mla_prefill))
             if verbose:
                 logger.info("Auto-detected MLA prefill operations")
+    if "_rocm_C::paged_attention" in tree.name2event_uids:
+        from .paged_attn_perf_meta import mark_rocm_paged_attn_kvcache_dtype
 
+        extensions.append(
+            ("RocmPagedAttn_KVCacheDtype", mark_rocm_paged_attn_kvcache_dtype)
+        )
+        if verbose:
+            logger.info(
+                "Auto-detected _rocm_C::paged_attention — will propagate "
+                "perf_meta.KCache_dtype/VCache_dtype to cpu_op parents"
+            )
+    if "aiter::paged_attention_v1" in tree.name2event_uids:
+        from .paged_attn_perf_meta import mark_aiter_paged_attn_kvcache_dtype
+
+        extensions.append(
+            ("AiterPagedAttn_KVCacheDtype", mark_aiter_paged_attn_kvcache_dtype)
+        )
+        if verbose:
+            logger.info(
+                "Auto-detected aiter::paged_attention_v1 — will propagate "
+                "perf_meta.k_cache_dtype/v_cache_dtype to cpu_op parents"
+            )
     # Apply extensions onto tree
     for ext_info in extensions:
         # ext_info tuple of (extension_name, extension_function)
