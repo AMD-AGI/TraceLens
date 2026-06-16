@@ -45,8 +45,11 @@ def _find_entry_point(call_stack_value, op_name):
                 result = search(frame)
                 if result:
                     return result
-            elif ".py" in frame and local_name in frame.lower():
-                return frame
+            elif ".py" in frame:
+                # Match local_name only against the function name part (after '): ')
+                func_name = frame.split("): ")[-1].lower() if "): " in frame else frame.lower()
+                if local_name in func_name:
+                    return frame
         return ""
 
     return search(stack)
