@@ -29,16 +29,16 @@ from TraceLens.Reporting.reporting_utils import (
 
 _WRAPPER_FILE_PATTERNS = (
     "torch/_ops.py",
-    "torch/nn/modules/",
+    "torch/nn/modules/module.py",
     "torch/utils/_contextlib.py",
     "torch/utils/_device.py",
     "torch/_tensor.py",
-    "torch/nn/functional.py",
     "torch/functional.py",
     "torch/overrides.py",
     "torch/_inductor/",
     "torch/_functorch/",
     "torch/distributed/c10d_logger.py",
+    "triton/backends/",
 )
 
 _WRAPPER_NAME_PREFIXES = (
