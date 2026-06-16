@@ -80,6 +80,12 @@ def _is_wrapper_frame(frame):
 def _find_entry_point(call_stack_value, op_name):
     """Find the dispatch entry point for a CPU op from its call stack.
 
+    Returns a dict with keys:
+    - ``entry_point``: the matched frame string, or ``""``
+    - ``num_wrappers``: number of frames between entry point and the CPU op
+    - ``traversal``: ``"inward"`` or ``"outward"`` (which strategy matched)
+    - ``wrappers``: list of frames between the CPU op and the entry point
+
     Strategy:
     1. **Inward matching** – search the call stack for a .py frame whose
        function name contains the op name (part after '::').
@@ -87,34 +93,14 @@ def _find_entry_point(call_stack_value, op_name):
        call stack from innermost frame outward, skip wrapper/dispatch
        functions, and return the first non-wrapper .py frame.
     """
+    empty = {"entry_point": "", "num_wrappers": -1, "traversal": "", "wrappers": ""}
     try:
         stack = ast.literal_eval(str(call_stack_value))
         if not isinstance(stack, list):
-            return ""
+            return empty
     except Exception:
-        return ""
-    # Use the local name part after '::' if present
-    local_name = op_name.split("::")[-1].lower() if "::" in op_name else op_name.lower()
+        return empty
 
-    # --- Inward matching: find a .py frame whose function name contains the op name ---
-    def search_inward(frames):
-        for frame in frames:
-            if isinstance(frame, list):
-                result = search_inward(frame)
-                if result:
-                    return result
-            elif ".py" in frame:
-                func_name = frame.split("): ")[-1].lower() if "): " in frame else frame.lower()
-                if local_name in func_name:
-                    return frame
-        return ""
-
-    result = search_inward(stack)
-    if result:
-        return result
-
-    # --- Outward matching (fallback): flatten the stack, walk from innermost
-    #     frame outward, skip wrappers, return first non-wrapper .py frame ---
     def flatten(frames):
         flat = []
         for frame in frames:
@@ -125,15 +111,53 @@ def _find_entry_point(call_stack_value, op_name):
         return flat
 
     flat_stack = flatten(stack)
-    # Walk from innermost (end) toward root (start)
-    for frame in reversed(flat_stack):
+
+    # Use the local name part after '::' if present
+    local_name = op_name.split("::")[-1].lower() if "::" in op_name else op_name.lower()
+
+    # Find the CPU op position in the flat stack (search from end for the exact op_name)
+    op_idx = -1
+    for i in range(len(flat_stack) - 1, -1, -1):
+        if flat_stack[i] == op_name:
+            op_idx = i
+            break
+    if op_idx == -1:
+        return empty
+
+    # --- Inward matching: from CPU op toward leaf (children), find a .py frame
+    #     whose function name contains the op name ---
+    for i in range(op_idx + 1, len(flat_stack)):
+        frame = flat_stack[i]
+        if ".py" in frame:
+            func_name = frame.split("): ")[-1].lower() if "): " in frame else frame.lower()
+            if local_name in func_name:
+                between = flat_stack[op_idx + 1 : i]
+                wrappers_list = [op_name] + between + [frame]
+                return {
+                    "entry_point": frame,
+                    "num_wrappers": len(between),
+                    "traversal": "inward",
+                    "wrappers": str(wrappers_list),
+                }
+
+    # --- Outward matching (fallback): from CPU op toward root (parents),
+    #     skip wrappers, return first non-wrapper .py frame ---
+    for i in range(op_idx - 1, -1, -1):
+        frame = flat_stack[i]
         if ".py" not in frame:
             continue
         if _is_wrapper_frame(frame):
             continue
-        return frame
+        between = flat_stack[i + 1 : op_idx]
+        wrappers_list = [frame] + between + [op_name]
+        return {
+            "entry_point": frame,
+            "num_wrappers": len(between),
+            "traversal": "outward",
+            "wrappers": str(wrappers_list),
+        }
 
-    return ""
+    return empty
 
 
 
@@ -775,14 +799,31 @@ def generate_perf_report_pytorch(
                 )
                 if "call_stack_full" in df_unified_perf_summary.columns:
                     cs_col = df_unified_perf_summary.columns.get_loc("call_stack_full")
+                    ep_results = df_unified_perf_summary.apply(
+                        lambda row: _find_entry_point(row["call_stack_full"], row["name"]),
+                        axis=1,
+                    )
                     df_unified_perf_summary.insert(
                         cs_col,
                         "entry_point",
-                        df_unified_perf_summary.apply(
-                            lambda row: _find_entry_point(row["call_stack_full"], row["name"]),
-                            axis=1,
-                        ),
+                        ep_results.apply(lambda x: x["entry_point"]),
                     )
+                    if os.environ.get("TRACELENS_DEBUG"):
+                        df_unified_perf_summary.insert(
+                            cs_col + 1,
+                            "num_wrappers",
+                            ep_results.apply(lambda x: x["num_wrappers"]),
+                        )
+                        df_unified_perf_summary.insert(
+                            cs_col + 2,
+                            "traversal",
+                            ep_results.apply(lambda x: x["traversal"]),
+                        )
+                        df_unified_perf_summary.insert(
+                            cs_col + 3,
+                            "wrappers",
+                            ep_results.apply(lambda x: x["wrappers"]),
+                        )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
 
             if _tracediff_diff_stats is not None and not _tracediff_diff_stats.empty:
