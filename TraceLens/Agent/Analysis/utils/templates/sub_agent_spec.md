@@ -238,8 +238,10 @@ The set of P-items is decided by `category_findings[]` alone — `MIN_PITEM_IMPA
 | `bound_type` | `compute` \| `memory`. Selects the matching Action Prose Guidance row. |
 | `library` | One per finding. Drives the `(<Library>)` title suffix. |
 | `eff_bucket` | Roofline-efficiency band: `"0-30"`, `"30-60"`, `"60-100"`, or `"unknown"` (standalone); `"all"` (comparative). Members within a finding share the same band. |
-| `impact_score` / `_low` / `_high` | Group-summed % of E2E, or `null` for non-quantifiable findings (see below). Render verbatim into `kind=p_item` and `kind=detail_estimate` markers. |
-| `member_count`, `members[]` | Underlying per-op estimate rows (operation, time_ms, efficiency_pct, `type`, …) — rows of the `**Data:**` table. `members[].type == "unmodeled_significant"` marks a non-quantifiable finding (op with no perf model, see below); `"kernel_tuning"` is a normal quantified finding. |
+| `impact_score` / `_low` / `_high` | Group-summed % of E2E. Render verbatim into `kind=p_item` and `kind=detail_estimate` markers. |
+| `estimate_method` | `"quantified"` (impact from a perf model — standalone roofline gap or comparative t2/t1 ratio) or `"heuristic"` (op has no perf model; impact estimated from E2E share — see below). |
+| `percent_of_total` | Heuristic findings only: the op's combined E2E GPU-time share (summed across shapes). Drives the warning line in § Heuristic findings. Absent on quantified findings. |
+| `member_count`, `members[]` | Underlying per-op estimate rows (operation, time_ms, efficiency_pct, `type`, …) — rows of the `**Data:**` table. `members[].type == "unmodeled_significant"` marks a heuristic finding; `"kernel_tuning"` is a quantified (perf-modeled) finding. |
 
 ### Empty category_findings
 
@@ -247,15 +249,20 @@ If `category_findings[]` is empty, emit `## Recommendations` with no P-items
 and `## Detailed Analysis` with no candidates. Do not manufacture sub-threshold
 cards to fill the section — that is the honest "no actionable issues" answer.
 
-### Non-quantifiable findings (`members[].type == "unmodeled_significant"`)
+### Heuristic findings (`estimate_method == "heuristic"`)
 
-These describe an op with no perf model whose combined (summed across shapes)
-E2E GPU-time share crosses the unmodeled threshold. `impact_score` / `_low` /
-`_high` are `null` (no roofline to estimate headroom), and the analyzer ranks
-them after all quantified findings. Render like a normal P-item card except:
-- `**Impact**`: `Not quantifiable from trace data`, with `low=null mid=null high=null` on the `kind=p_item` marker.
-- Add one note line giving the op's E2E share (`members[0].percent_of_total`%).
-- In `## Detailed Analysis`: use the sentinel `Impact estimate is not quantifiable from trace data.` (no `kind=detail_estimate` marker); the `**Data:**` row renders `—` for `Efficiency` and `Bound`.
+An op with no perf model: `impact_score` / `_low` / `_high` are estimated from a
+recoverable fraction of its E2E share (`percent_of_total`, summed across shapes)
+and ranked alongside quantified findings.
+
+Render like a normal P-item card (numeric `low`/`mid`/`high` on `kind=p_item`,
+normal `kind=detail_estimate` bullets) with two additions:
+- Immediately **after** the `kind=p_item` impact marker block (i.e. *outside* the `impact-begin`/`impact-end` markers), add a warning line, substituting the finding's `percent_of_total`:
+
+```markdown
+> **Warning — estimated:** No performance model for this op; impact is derived from its E2E GPU-time share (<percent_of_total>%), not a gap projection.
+```
+- In the `## Detailed Analysis` `**Data:**` row, render `—` for `Efficiency` and `Bound`.
 
 ### Rendering in `## Detailed Analysis` (compute tier)
 
@@ -268,8 +275,6 @@ Two bullets — low and high. Wrap in `kind=detail_estimate` markers (see
 - High end impact_score: <impact_score_high>
 <!-- impact-end -->
 ```
-
-**Non-quantifiable:** `Impact estimate is not quantifiable from trace data.`
 
 ## Impact markers (REQUIRED)
 
@@ -292,8 +297,8 @@ The block between them is exactly the `impact_score`-based markdown you would ot
 
 | `kind` | Where | Required attributes | Optional attributes |
 |--------|-------|--------------------|---------------------|
-| `p_item` | Around every P-item `**Impact**` line in `## Recommendations`. | `low`, `mid`, `high` (all three; use `null` for non-quantifiable). | `category` is reserved for the orchestrator template; sub-agents do **not** emit it. |
-| `detail_estimate` | Around the two-bullet `Low end ... / High end ...` block under `**Impact estimate:**` in each `## Detailed Analysis` candidate. Skip for non-quantifiable estimates. | `low`, `high` (impact_score values, % of E2E). | none |
+| `p_item` | Around every P-item `**Impact**` line in `## Recommendations`. | `low`, `mid`, `high` (all three; use `null` only for system-tier non-quantifiable). | `category` is reserved for the orchestrator template; sub-agents do **not** emit it. |
+| `detail_estimate` | Around the two-bullet `Low end ... / High end ...` block under `**Impact estimate:**` in each `## Detailed Analysis` candidate. Skip only for system-tier non-quantifiable estimates. | `low`, `high` (impact_score values, % of E2E). | none |
 
 ### Value-source rule
 

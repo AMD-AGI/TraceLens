@@ -158,7 +158,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- One card per entry in priority_data.findings[] in array order. Title uses the entry's category and library; Action text is category-appropriate. Do NOT recommend "fuse the SDPA kernel" (already fused — defer upstream/downstream fusion to Kernel Fusion section). -->
 <!-- Skip categories that have empty category_findings[] in category_data/<cat>_metrics.json (no P-items for that category). -->
-<!-- Non-quantifiable findings (priority_data.findings[i].members[0].type == "unmodeled_significant") sort last; render per sub_agent_spec.md § Non-quantifiable findings. -->
+<!-- Heuristic findings (priority_data.findings[i].estimate_method == "heuristic") carry a numeric estimated impact and sort by impact_score like any other compute finding; render per sub_agent_spec.md § Heuristic findings. -->
 
 ### 🔴 P1: <Brief Title> (<Library>)
 
