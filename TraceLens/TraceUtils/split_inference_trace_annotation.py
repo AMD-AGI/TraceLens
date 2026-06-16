@@ -221,6 +221,45 @@ def find_events_by_pattern(
     return matches
 
 
+# Iteration marker patterns. The primary pattern is preferred; the backup
+# patterns are only consulted when the primary matches nothing (see
+# find_iteration_roots). The execute_new_<n>_cached_<n> shape is intentionally
+# excluded because get_iter_details_from_name cannot parse it.
+ANNOTATION_PATTERN = [
+    re.compile(
+        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
+    ),
+]
+ANNOTATION_PATTERN_BACKUP = [
+    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
+    re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"),
+    # SGLang profiler per-step annotations, e.g.
+    #   "step[EXTEND bs=1 toks=862]"  (prefill / extend batch)
+    #   "step[DECODE bs=25]"          (decode batch)
+    re.compile(r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]"),
+]
+
+
+def find_iteration_roots(events: List[dict]) -> Optional[List[dict]]:
+    """Return iteration-root events.
+
+    Tries the primary annotation pattern first and only falls back to the
+    backup patterns when the primary matches nothing.
+    """
+    roots = find_events_by_pattern(
+        events, ANNOTATION_PATTERN, "execution steps (iteration)", cat="user_annotation"
+    )
+    if roots is None:
+        print("No primary annotations found; falling back to backup patterns...")
+        roots = find_events_by_pattern(
+            events,
+            ANNOTATION_PATTERN_BACKUP,
+            "execution steps (iteration, backup)",
+            cat="user_annotation",
+        )
+    return roots
+
+
 def preprocess_trace(events: List[dict]):
     gpu_corr_map = {}
     flow_corr_map = {}
@@ -361,38 +400,52 @@ def parse_range(range_str: str, max_len: int) -> Tuple[int, int]:
 
 def get_iter_details_from_name(name: str, prefix: str = "annotation_iteration") -> dict:
 
-    name = name.replace("(", "_").replace(")", "_")
-    if not "annotation_iteration" in prefix:
+    # SGLang profiler step annotations, e.g. "step[EXTEND bs=1 toks=862]" (prefill)
+    # or "step[DECODE bs=25]" (decode). Map to the context/generation request and
+    # token counts that the steady-state logic downstream expects.
+    sglang_step = re.match(r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]", name)
+    if sglang_step:
+        kind, bs = sglang_step.group(1), int(sglang_step.group(2))
+        toks = int(sglang_step.group(3) or 0)
+        if kind == "DECODE":
+            ctx_req, ctx_sum, gen_req, gen_sum, batch_size = 0, 0, bs, bs, bs
+        else:  # EXTEND / MIXED treated as prefill; toks = total prompt tokens.
+            ctx_req, ctx_sum, gen_req, gen_sum, batch_size = (
+                bs,
+                toks,
+                0,
+                0,
+                (toks or bs),
+            )
+        return {
+            "batch_size": batch_size,
+            "num_requests": ctx_req + gen_req,
+            "context_requests": ctx_req,
+            "context_sum": ctx_sum,
+            "generation_requests": gen_req,
+            "generation_sum": gen_sum,
+        }
+
+    if "annotation_iteration" not in prefix:
         return {"batch_size": 0}
-    iter_details = re.sub(r"[sqk]+", "_", name).split("_")
-    if len(iter_details) < 10:
-        ctx_req, ctx_sum, gen_req, gen_sum = (
-            iter_details[2],
-            iter_details[3],
-            iter_details[6],
-            iter_details[7],
-        )
-    elif len(iter_details) < 12:
-        ctx_req, ctx_sum, gen_req, gen_sum = (
-            iter_details[2],
-            iter_details[3],
-            iter_details[7],
-            iter_details[8],
-        )
+
+    # vLLM execute_..._context_..._generation_... annotations: strip parens and the
+    # sq/sk shape letters to a flat token list, then pick counts by index.
+    parts = re.sub(r"[sqk]+", "_", name.replace("(", "_").replace(")", "_")).split("_")
+    if len(parts) < 10:
+        idx = (2, 3, 6, 7)
+    elif len(parts) < 12:
+        idx = (2, 3, 7, 8)
     else:
-        ctx_req, ctx_sum, gen_req, gen_sum = (
-            iter_details[3],
-            iter_details[5],
-            iter_details[11],
-            iter_details[13],
-        )
+        idx = (3, 5, 11, 13)
+    ctx_req, ctx_sum, gen_req, gen_sum = (int(parts[i]) for i in idx)
     return {
-        "batch_size": int(ctx_sum) + int(gen_sum),
-        "num_requests": int(ctx_req) + int(gen_req),
-        "context_requests": int(ctx_req),
-        "context_sum": int(ctx_sum),
-        "generation_requests": int(gen_req),
-        "generation_sum": int(gen_sum),
+        "batch_size": ctx_sum + gen_sum,
+        "num_requests": ctx_req + gen_req,
+        "context_requests": ctx_req,
+        "context_sum": ctx_sum,
+        "generation_requests": gen_req,
+        "generation_sum": gen_sum,
     }
 
 
@@ -1178,15 +1231,6 @@ def main():
     )
     args = parser.parse_args()
     execution_details = []
-    # Iteration marker patterns
-    ANNOTATION_PATTERN = [
-        re.compile(
-            r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
-        ),
-        re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
-        re.compile(r"execute_new_\d+_cached_\d+"),
-        re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"),
-    ]
     RUNTIME_EVENT_PATTERN = [
         re.compile(r"vllm/v1/worker/gpu_model_runner\.py\(\d+\): _dummy_run"),
         ## re.compile(r"/sgl-workspace/sglang/python/sglang/srt/managers/scheduler\.py\(\d+\): run_batch"),
@@ -1202,9 +1246,7 @@ def main():
     print(f"Loaded {len(events)} events")
 
     # Find iterations and dummy runs
-    iteration_roots = find_events_by_pattern(
-        events, ANNOTATION_PATTERN, "execution steps (iteration)", cat="user_annotation"
-    )
+    iteration_roots = find_iteration_roots(events)
     dummy_roots = find_events_by_pattern(events, RUNTIME_EVENT_PATTERN, "_dummy_run")
 
     # Create output directory
