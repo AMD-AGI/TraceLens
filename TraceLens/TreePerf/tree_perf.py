@@ -2013,9 +2013,7 @@ class TreePerfAnalyzer:
                     f"{parent_evt['name']}->{kernel['name']} (Synthetic Op)"
                 )
                 self._finalize_synthetic_event(synthetic, kernel)
-                inherited_ann = self._inherit_user_annotation_from_ancestors(
-                    parent_evt
-                )
+                inherited_ann = self._inherit_user_annotation_from_ancestors(parent_evt)
                 if inherited_ann:
                     synthetic["annotation"] = inherited_ann
                 collected.append(synthetic)
