@@ -1872,7 +1872,18 @@ class TreePerfAnalyzer:
             for child_uid in event.get("children", []):
                 traverse(child_uid, call_stack)
 
-        # Start from cpu_root_nodes
+        # When python_function events are in the tree, start from
+        # parentless python_function roots that have GPU work
+        if self.add_python_func:
+            for evt in self.tree.events:
+                if (
+                    self.event_to_category(evt) == "python_function"
+                    and evt.get("parent") is None
+                    and evt.get("gpu_events")
+                ):
+                    traverse(evt["UID"])
+
+        # Start from cpu_root_nodes (any not already visited via python roots)
         for root_uid in self.tree.cpu_root_nodes:
             traverse(root_uid)
 
