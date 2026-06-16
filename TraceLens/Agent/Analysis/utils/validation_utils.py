@@ -542,10 +542,14 @@ def _check_priority_consistency(output_dir, manifest):
         if p.get("source") != "findings_rollup":
             continue
         cat = p.get("category")
+        # Mirror generate_priority_data: the findings_rollup excludes
+        # heuristic findings, so the consistency sum must too.
         expected = sum(
             f.get("impact_score", 0)
             for f in findings
-            if f.get("category") == cat and f.get("impact_score") is not None
+            if f.get("category") == cat
+            and f.get("impact_score") is not None
+            and f.get("estimate_method") != "heuristic"
         )
         actual = p.get("impact_score", 0) or 0
         if abs(actual - expected) > _ROLLUP_IMPACT_TOL:
@@ -731,9 +735,9 @@ def _validate_report_priority_consistency(content, output_dir):
 
     Silently skips when priority_data.json is absent (Step 8 already warns).
     Numeric attrs are compared as 2-decimal strings to match the writer's
-    rounding in generate_priority_data. Non-quantifiable findings
-    (impact_score=None, e.g. unmodeled significant ops) are included: they
-    render as bottom P-items with low=null mid=null high=null markers.
+    rounding in generate_priority_data. Every compute-tier finding now carries
+    a numeric impact_score (quantified or heuristic estimate), so p_item
+    markers in this section must use numeric low/mid/high (never null).
     """
     pd_path = os.path.join(output_dir, "priority_data.json")
     if not os.path.exists(pd_path):

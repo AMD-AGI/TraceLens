@@ -85,7 +85,7 @@ cat <output_dir>/category_data/<cat>_metrics.json
 
 Read `category_data/<cat>_metrics.json::category_findings`. Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
 
-Entries whose `members[].type == "unmodeled_significant"` (op with no perf model) render as the lowest-priority non-quantifiable cards — follow [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Non-quantifiable findings.
+Entries whose `estimate_method == "heuristic"` (op with no perf model) carry a numeric **estimated** impact derived from E2E share and rank by `impact_score` like any other compute finding — follow [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Heuristic findings.
 
 **efficiency_percent semantics:**
 - **Standalone:** Treat `efficiency_percent` as **% of roofline**.
