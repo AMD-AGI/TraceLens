@@ -27,9 +27,66 @@ from TraceLens.Reporting.reporting_utils import (
 )
 
 
+_WRAPPER_FILE_PATTERNS = (
+    "torch/_ops.py",
+    "torch/nn/modules/",
+    "torch/utils/_contextlib.py",
+    "torch/utils/_device.py",
+    "torch/_tensor.py",
+    "torch/nn/functional.py",
+    "torch/functional.py",
+    "torch/overrides.py",
+    "torch/_inductor/",
+    "torch/_functorch/",
+    "torch/distributed/c10d_logger.py",
+)
+
+_WRAPPER_NAME_PREFIXES = (
+    "<built-in",
+    "pybind11_builtins",
+    "nn.Module:",
+)
+
+_WRAPPER_FUNC_NAMES = frozenset({
+    "__torch_function__",
+    "_call_impl",
+    "_wrapped_call_impl",
+    "decorate_context",
+    "handle_torch_function",
+    "wrapper",
+    "custom_wrapper",
+    "wrapper_custom",
+    "outer_wrapper",
+})
+
+
+def _is_wrapper_frame(frame):
+    """Return True if *frame* is a wrapper/dispatch function that should be
+    skipped when searching outward for the dispatch entry point."""
+    for prefix in _WRAPPER_NAME_PREFIXES:
+        if frame.startswith(prefix):
+            return True
+    for pat in _WRAPPER_FILE_PATTERNS:
+        if pat in frame:
+            return True
+    # Extract function name from "path.py(line): func_name" format
+    if "): " in frame:
+        func_name = frame.split("): ")[-1]
+        if func_name in _WRAPPER_FUNC_NAMES:
+            return True
+    return False
+
+
 def _find_entry_point(call_stack_value, op_name):
-    """Find the first .py frame in the call stack whose function name contains
-    the op name (part after '::') as a substring. Returns blank if not found."""
+    """Find the dispatch entry point for a CPU op from its call stack.
+
+    Strategy:
+    1. **Inward matching** – search the call stack for a .py frame whose
+       function name contains the op name (part after '::').
+    2. **Outward matching** (fallback) – if inward matching fails, walk the
+       call stack from innermost frame outward, skip wrapper/dispatch
+       functions, and return the first non-wrapper .py frame.
+    """
     try:
         stack = ast.literal_eval(str(call_stack_value))
         if not isinstance(stack, list):
@@ -39,20 +96,44 @@ def _find_entry_point(call_stack_value, op_name):
     # Use the local name part after '::' if present
     local_name = op_name.split("::")[-1].lower() if "::" in op_name else op_name.lower()
 
-    def search(frames):
+    # --- Inward matching: find a .py frame whose function name contains the op name ---
+    def search_inward(frames):
         for frame in frames:
             if isinstance(frame, list):
-                result = search(frame)
+                result = search_inward(frame)
                 if result:
                     return result
             elif ".py" in frame:
-                # Match local_name only against the function name part (after '): ')
                 func_name = frame.split("): ")[-1].lower() if "): " in frame else frame.lower()
                 if local_name in func_name:
                     return frame
         return ""
 
-    return search(stack)
+    result = search_inward(stack)
+    if result:
+        return result
+
+    # --- Outward matching (fallback): flatten the stack, walk from innermost
+    #     frame outward, skip wrappers, return first non-wrapper .py frame ---
+    def flatten(frames):
+        flat = []
+        for frame in frames:
+            if isinstance(frame, list):
+                flat.extend(flatten(frame))
+            else:
+                flat.append(frame)
+        return flat
+
+    flat_stack = flatten(stack)
+    # Walk from innermost (end) toward root (start)
+    for frame in reversed(flat_stack):
+        if ".py" not in frame:
+            continue
+        if _is_wrapper_frame(frame):
+            continue
+        return frame
+
+    return ""
 
 
 
