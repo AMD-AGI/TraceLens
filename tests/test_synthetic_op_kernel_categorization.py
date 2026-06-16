@@ -307,9 +307,7 @@ def test_synthetic_graph_sdpa_resolves_perf_model():
 
 
 def test_synthetic_graph_sdpa_uses_execute_user_annotation_for_nq_nkv():
-    ann = (
-        "execute_32_context_0(sq0sk0sqsq0sqsk0)_generation_32(sq32sk55086sqsq32sqsk55086)"
-    )
+    ann = "execute_32_context_0(sq0sk0sqsq0sqsk0)_generation_32(sq32sk55086sqsq32sqsk55086)"
     event = {
         "name": "hipGraphLaunch->_fwd_grouped_kernel_stage1 (Synthetic Op)",
         "annotation": ann,
@@ -332,9 +330,7 @@ def test_parse_vllm_execute_annotation_sq_sk():
         parse_vllm_execute_annotation_sq_sk,
     )
 
-    ann = (
-        "execute_32_context_0(sq0sk0sqsq0sqsk0)_generation_32(sq32sk55086sqsq32sqsk55086)"
-    )
+    ann = "execute_32_context_0(sq0sk0sqsq0sqsk0)_generation_32(sq32sk55086sqsq32sqsk55086)"
     p = parse_vllm_execute_annotation_sq_sk(ann)
     assert p is not None
     assert p["g_sq"] == 32
