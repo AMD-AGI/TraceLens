@@ -145,7 +145,9 @@ def get_commit_sha():
             capture_output=True,
         )
     except Exception as e:
-        print(f"Warning: 'pip install -e .' failed: {e}. commit SHA will be set to 'unknown'.")
+        print(
+            f"Warning: 'pip install -e .' failed: {e}. commit SHA will be set to 'unknown'."
+        )
         return "unknown"
 
     try:
