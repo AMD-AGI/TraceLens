@@ -936,7 +936,7 @@ class TraceToTree(BaseTraceToTree):
         follow_fwd_link: bool = False,
     ):
         """
-        Traverses the parent nodes and returns a string representation of the call stack.
+        Traverses the parent nodes and returns a list representation of the call stack.
 
         Args:
             node (Dict[str, Any]): The event node from which to start traversing upwards.
@@ -945,36 +945,34 @@ class TraceToTree(BaseTraceToTree):
                 follow the fwd_event link to continue traversing the forward call stack.
 
         Returns:
-            str: The call stack as a string with " => " separators.
+            list: The call stack as a list of frame strings, starting from the node itself.
         """
         depth = 0
-        print_str = node["name"] + " => "
-        while True:
+        frames = [node["name"]]
+        # Move to parent immediately so we don't re-add the starting node
+        node = self.get_parent_event(node)
+        while node is not None:
             name = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name, "Unknown")
             max_len = 256
             if len(name) > max_len:
                 name = name[:max_len] + ".."
             if filter is None:
-                print_str += f"{name} => "
+                frames.append(name)
             else:
                 if any(filter_str in name for filter_str in filter):
-                    print_str += f"{name} => "
-            # Move to the parent node
+                    frames.append(name)
             parent_node = self.get_parent_event(node)
-            if parent_node is None:
-                # Check if we should follow the fwd_event link for backward events
-                if follow_fwd_link and "fwd_event" in node:
-                    fwd_uid = node["fwd_event"]
-                    fwd_node = self.get_UID2event(fwd_uid)
-                    print_str += "[FWD] => "
-                    # Continue traversing the forward event's parent chain
-                    fwd_callstack = self.traverse_parents_and_get_callstack(
-                        fwd_node, filter, follow_fwd_link=False
-                    )
-                    return print_str + fwd_callstack
-                return print_str.strip(" => ").strip(" ")
+            if parent_node is None and follow_fwd_link and "fwd_event" in node:
+                fwd_uid = node["fwd_event"]
+                fwd_node = self.get_UID2event(fwd_uid)
+                frames.append("[FWD]")
+                fwd_callstack = self.traverse_parents_and_get_callstack(
+                    fwd_node, filter, follow_fwd_link=False
+                )
+                return frames + fwd_callstack
             node = parent_node
             depth += 1
+        return frames
 
     def traverse_parents_and_print(
         self,

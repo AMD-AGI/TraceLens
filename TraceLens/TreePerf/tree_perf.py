@@ -1120,7 +1120,7 @@ class TreePerfAnalyzer:
                     )
                     metrics_event["call_stack"] = call_stack
                     metrics_event["parent_module"] = re.sub(
-                        r"_\d+", "", (call_stack.split("=>") + ["NA", "NA"])[1]
+                        r"_\d+", "", (call_stack + ["NA", "NA"])[1]
                     ).strip("")
             thread_metadata = self.tree.metadata.get(event["pid"], {}).get(
                 event["tid"], {}
@@ -2399,17 +2399,28 @@ class TreePerfAnalyzer:
 
         if include_call_stack and tree is not None and "ex_UID" in df_summary.columns:
 
-            def _get_call_stack(ex_uid):
+            def _get_call_stack(row):
+                """Get call stack from root down to CPU op and then to kernels."""
                 try:
-                    event = tree.get_UID2event(int(ex_uid))
-                    cs = tree.traverse_parents_and_get_callstack(
+                    event = tree.get_UID2event(int(row["ex_UID"]))
+                    frames = tree.traverse_parents_and_get_callstack(
                         event, filter=["nn.Module", "::", "/"]
                     )
-                    return re.sub(r"_\d+", "", cs)
+                    # Reverse so it goes root -> CPU op
+                    frames = [re.sub(r"_\d+", "", f) for f in reversed(frames)]
+                    # Append kernel names from kernel_details_summary
+                    kd = row.get("kernel_details_summary")
+                    if isinstance(kd, list) and kd:
+                        kernels = [k["name"] for k in kd if k.get("name")]
+                        if len(kernels) == 1:
+                            frames.append(kernels[0])
+                        elif len(kernels) > 1:
+                            frames.append(kernels)
+                    return str(frames)
                 except Exception:
                     return "Not found"
 
-            df_summary["call_stack"] = df_summary["ex_UID"].apply(_get_call_stack)
+            df_summary["call_stack_full"] = df_summary.apply(_get_call_stack, axis=1)
         elif include_call_stack and tree is None:
             warnings.warn(
                 "include_call_stack=True but tree=None; skipping call stack column."

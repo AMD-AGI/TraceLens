@@ -5,9 +5,11 @@
 ###############################################################################
 
 import argparse
+import ast
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import warnings
@@ -23,6 +25,32 @@ from TraceLens.Reporting.reporting_utils import (
     request_install,
     resolve_gpu_arch,
 )
+
+
+def _find_entry_point(call_stack_value, op_name):
+    """Find the first .py frame in the call stack whose function name contains
+    the op name (part after '::') as a substring. Returns blank if not found."""
+    try:
+        stack = ast.literal_eval(str(call_stack_value))
+        if not isinstance(stack, list):
+            return ""
+    except Exception:
+        return ""
+    # Use the local name part after '::' if present
+    local_name = op_name.split("::")[-1].lower() if "::" in op_name else op_name.lower()
+
+    def search(frames):
+        for frame in frames:
+            if isinstance(frame, list):
+                result = search(frame)
+                if result:
+                    return result
+            elif ".py" in frame and local_name in frame.lower():
+                return frame
+        return ""
+
+    return search(stack)
+
 
 
 def get_dfs_short_kernels(
@@ -661,24 +689,15 @@ def generate_perf_report_pytorch(
                     source_col="kernel_details_summary",
                     new_col_name="trunc_kernel_details",
                 )
-                if "call_stack" in df_unified_perf_summary.columns:
-                    df_callstacks = df_unified_perf_summary[
-                        ["name", "op category", "call_stack"]
-                    ].copy()
-                    df_callstacks.insert(0, "row_id", range(len(df_callstacks)))
-                    dict_name2df["unified_perf_callstacks"] = df_callstacks
-
-                    n_frames = 4  # op name + 3 parent frames
-                    cs_col = df_unified_perf_summary.columns.get_loc("call_stack")
+                if "call_stack_full" in df_unified_perf_summary.columns:
+                    cs_col = df_unified_perf_summary.columns.get_loc("call_stack_full")
                     df_unified_perf_summary.insert(
                         cs_col,
-                        "trunc_call_stack",
-                        df_unified_perf_summary["call_stack"].apply(
-                            lambda s: " => ".join(str(s).split(" => ")[:n_frames])
+                        "entry_point",
+                        df_unified_perf_summary.apply(
+                            lambda row: _find_entry_point(row["call_stack_full"], row["name"]),
+                            axis=1,
                         ),
-                    )
-                    df_unified_perf_summary = df_unified_perf_summary.drop(
-                        columns=["call_stack"]
                     )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
 
@@ -1038,7 +1057,7 @@ def main():
         "--include_call_stack",
         action="store_true",
         default=False,
-        help="Add trunc_call_stack to unified_perf_summary and write unified_perf_callstacks with full call stacks.",
+        help="Add call_stack_trimmed and call_stack_full columns to unified_perf_summary.",
     )
 
     args = parser.parse_args()
