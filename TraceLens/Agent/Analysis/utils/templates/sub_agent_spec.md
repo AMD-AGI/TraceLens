@@ -155,16 +155,17 @@ inside `## Detailed Analysis` blocks.
 ### Standalone (`comparison_scope` = `standalone`)
 
 ```markdown
-| Operation |  Args  |            Kernel Path                  | Time (ms) | %E2E | Count |FLOPS/Byte| Efficiency | Bound |
-|-----------|--------|-----------------------------------------|-----------|------|-------|----------|------------|-------|
+| Operation |  Args  |            Kernel Path                  | Kernel Name | Time (ms) | %E2E | Count |FLOPS/Byte| Efficiency | Bound |
+|-----------|--------|-----------------------------------------|-------------|-----------|------|-------|----------|------------|-------|
 ```
 
-**All nine columns above are mandatory.** Never drop a column because some or all of its values are missing — render `—` in any cell whose value is null/absent and keep the column. The header row of every `**Data:**` table must contain exactly these nine column names in this order. (Agents may append extra columns at the end when needed, e.g. `Sub-Category` in the generic-op analyzer, but must not remove or reorder the nine standard columns.)
+**All ten columns above are mandatory.** Never drop a column because some or all of its values are missing — render `—` in any cell whose value is null/absent and keep the column. The header row of every `**Data:**` table must contain exactly these ten column names in this order. (Agents may append extra columns at the end when needed, e.g. `Sub-Category` in the generic-op analyzer, but must not remove or reorder the ten standard columns.)
 
 **Column mappings** (source: `metrics['operations']`):
 - **Operation**: `operations[i].name`. Bare op name only — shape/dtype go in Args. Allowed suffix: `(decode)`/`(prefill)` to disambiguate the same op at multiple shapes.
 - **Args**: `operations[i].args`. Pre-rendered shape/dtype string, already joined with `<br>` — paste verbatim, do not reformat or re-join. `—` when absent.
 - **Kernel Path**: `operations[i].launcher_path`. Relative Python path that launched the kernel (e.g. `sglang/srt/layers/quantization/fp8_utils.py(549): aiter_w8a8_block_fp8_linear`). **Copy the value exactly as-is — do NOT truncate, shorten, or extract just the function name.** `—` when absent.
+- **Kernel Name**: `operations[i].kernel_name_trunc`. Truncated GPU kernel name(s) launched by this operation. For multi-kernel ops, formatted as `Kernel 1: <name><br>Kernel 2: <name>`. **Copy the value exactly as-is.** `—` when absent. (The full untruncated name is available in `operations[i].kernel_name` if needed for identification.)
 - **Time (ms)**: `operations[i].time_ms` — kernel time in milliseconds.
 - **%E2E**: `operations[i].percent_of_total` — kernel time as % of E2E GPU time. `—` when null. (`percent_of_category` is still in the JSON for screening thresholds but no longer rendered.)
 - **Count**: `operations[i].count` — total invocations, not unique signatures. `—` when absent.

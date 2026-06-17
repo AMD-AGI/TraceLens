@@ -475,6 +475,51 @@ def _extract_call_chain(call_stack_full: str) -> List[str]:
     ]
 
 
+_KERNEL_NAME_TRUNC_LEN = 75
+
+
+def _extract_kernel_names(call_stack_full: str) -> tuple:
+    """Extract GPU kernel name(s) from call_stack_full.
+
+    Single kernel (flat list): last element is the kernel.
+    Multi-kernel (sublists): last element of each sublist is a kernel.
+
+    Returns ``(kernel_name, kernel_name_trunc)`` where the truncated form
+    clips each individual kernel name to ``_KERNEL_NAME_TRUNC_LEN`` chars.
+    """
+    if not call_stack_full or call_stack_full == "nan":
+        return "", ""
+    try:
+        stack = ast.literal_eval(str(call_stack_full))
+    except Exception:
+        return "", ""
+    if not isinstance(stack, list) or not stack:
+        return "", ""
+
+    sublists = [f for f in stack if isinstance(f, list)]
+
+    if not sublists:
+        # Flat list — last element is the kernel
+        k = stack[-1] if isinstance(stack[-1], str) else ""
+        kernels = [k] if k else []
+    else:
+        # Multi-kernel — last element of each sublist is a kernel
+        kernels = [sub[-1] for sub in sublists if sub and isinstance(sub[-1], str)]
+
+    if not kernels:
+        return "", ""
+
+    def _trunc(name: str) -> str:
+        return name[:_KERNEL_NAME_TRUNC_LEN] + "..." if len(name) > _KERNEL_NAME_TRUNC_LEN else name
+
+    if len(kernels) == 1:
+        return kernels[0], _trunc(kernels[0])
+
+    full = "<br>".join(f"Kernel {i+1}: {k}" for i, k in enumerate(kernels))
+    trunc = "<br>".join(f"Kernel {i+1}: {_trunc(k)}" for i, k in enumerate(kernels))
+    return full, trunc
+
+
 def build_operation_metrics(
     ops_df: pd.DataFrame,
     metadata: dict,
@@ -612,6 +657,7 @@ def build_operation_metrics(
                 launcher = "Not found"
 
         op_metric["launcher_path"] = launcher
+        op_metric["kernel_name"], op_metric["kernel_name_trunc"] = _extract_kernel_names(cs_str)
         op_metric["module_chain"] = module_chain
         op_metric["_raw_call_stack"] = cs_str
 
