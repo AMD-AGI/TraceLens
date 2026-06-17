@@ -1234,29 +1234,6 @@ def main():
 
     unified_df = pd.read_csv(os.path.join(trace1_csv_dir, "unified_perf_summary.csv"))
 
-    # Join full call_stack from perf callstacks CSV (if available) so each
-    # per-category ops CSV carries the complete call stack per row.
-    cs_path = os.path.join(trace1_csv_dir, "unified_perf_callstacks.csv")
-    if os.path.exists(cs_path):
-        cs_df = pd.read_csv(cs_path)
-        cs_df["_trunc_cs"] = cs_df["call_stack"].apply(
-            lambda s: " => ".join(str(s).split(" => ")[:4])
-        )
-        cs_df = cs_df.drop_duplicates(
-            subset=["name", "op category", "_trunc_cs"], keep="first"
-        )
-        pre_merge_len = len(unified_df)
-        unified_df = unified_df.merge(
-            cs_df[["name", "op category", "_trunc_cs", "call_stack"]],
-            left_on=["name", "op category", "trunc_call_stack"],
-            right_on=["name", "op category", "_trunc_cs"],
-            how="left",
-        )
-        unified_df.drop(columns=["_trunc_cs"], inplace=True)
-        assert (
-            len(unified_df) == pre_merge_len
-        ), f"call_stack join changed row count: {pre_merge_len} -> {len(unified_df)}"
-
     # Apply enhanced categorization
     unified_df["enhanced_category"], unified_df["display_name"] = zip(
         *unified_df.apply(_normalize_category, axis=1)
