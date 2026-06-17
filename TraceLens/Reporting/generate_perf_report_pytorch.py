@@ -94,7 +94,7 @@ def _find_entry_point(call_stack_value, op_name):
        call stack from innermost frame outward, skip wrapper/dispatch
        functions, and return the first non-wrapper .py frame.
     """
-    empty = {"entry_point": "Not Identifiable", "num_wrappers": -1, "traversal": "", "wrappers": ""}
+    empty = {"entry_point": "Not found", "num_wrappers": -1, "traversal": "", "wrappers": ""}
     try:
         stack = ast.literal_eval(str(call_stack_value))
         if not isinstance(stack, list):
