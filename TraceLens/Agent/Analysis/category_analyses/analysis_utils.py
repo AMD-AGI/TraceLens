@@ -86,6 +86,8 @@ _CALL_CHAIN_SKIP = frozenset(
     }
 )
 
+_KERNEL_NAME_TRUNC_LEN = 75
+
 
 def _eff_bucket(pct):
     """Classify roofline efficiency into a coarse band for P-item grouping."""
@@ -473,9 +475,6 @@ def _extract_call_chain(call_stack_full: str) -> List[str]:
         if not any(s in f for s in _CALL_CHAIN_SKIP)
         and (f.startswith("nn.Module:") or ".py" in f or "::" in f)
     ]
-
-
-_KERNEL_NAME_TRUNC_LEN = 75
 
 
 def _extract_kernel_names(call_stack_full: str) -> tuple:
