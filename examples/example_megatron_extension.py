@@ -100,6 +100,13 @@ def _annotate_layernorm_backward_shapes(trace_tree):
             if bwd_op.get("name") == "_LayerNormLinearBackward":
                 bwd_op["args"]["_ln_input_shape"] = ln_input_shape
                 bwd_op["args"]["_ln_weight_shape"] = ln_weight_shape
+            else:
+                # bwd_op may be the autograd wrapper; check children
+                for child_uid in bwd_op.get("children", []):
+                    child = trace_tree.get_UID2event(child_uid)
+                    if child.get("name") == "_LayerNormLinearBackward":
+                        child["args"]["_ln_input_shape"] = ln_input_shape
+                        child["args"]["_ln_weight_shape"] = ln_weight_shape
 
 
 def tree_postprocess_extension(trace_tree):
