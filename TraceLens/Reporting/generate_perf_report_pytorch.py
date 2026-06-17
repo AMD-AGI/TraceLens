@@ -115,7 +115,7 @@ def _find_entry_point(call_stack_value, op_name):
     # Use the local name part after '::' if present
     local_name = op_name.split("::")[-1].lower() if "::" in op_name else op_name.lower()
 
-    # Find the CPU op position in the flat stack (search from end for the exact op_name)
+    # Find the CPU op position in the flat stack (search from end for exact match)
     op_idx = -1
     for i in range(len(flat_stack) - 1, -1, -1):
         if flat_stack[i] == op_name:

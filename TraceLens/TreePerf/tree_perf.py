@@ -1811,7 +1811,7 @@ class TreePerfAnalyzer:
                 name = event.get("name", "")
                 if call_stack is None:
                     call_stack = []
-                if any(f in name for f in ["nn.Module", "::", "/"]):
+                if any(f in name for f in ["nn.Module", "::", "/"]) or self.event_to_category(event) == "cpu_op":
                     call_stack = call_stack + [re.sub(r"_\d+", "", name)]
 
             # Skip non-cpu_op events
@@ -2095,7 +2095,7 @@ class TreePerfAnalyzer:
                             cur = self.tree.get_parent_event(gpu_event)
                             while cur is not None and cur.get("UID") != event_uid:
                                 cname = cur.get("name", "")
-                                if any(f in cname for f in ["nn.Module", "::", "/"]):
+                                if any(f in cname for f in ["nn.Module", "::", "/"]) or self.event_to_category(cur) == "cpu_op":
                                     suffix.append(re.sub(r"_\d+", "", cname))
                                 cur = self.tree.get_parent_event(cur)
                             suffix.reverse()
