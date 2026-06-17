@@ -5,6 +5,7 @@
 ###############################################################################
 
 import argparse
+import ast
 import collections
 import json
 import math
@@ -599,74 +600,14 @@ class te_layer_norm_fwd(Normalization):
 
 
 class te_layer_norm_bwd(Normalization):
-    """TransformerEngine's LayerNormFnBackward.
+    """LayerNorm backward for both LayerNormFnBackward and _LayerNormLinearBackward.
 
-    The backward event only records the gradient tensor shape (args[0]).
-    TE's LayerNormFn always has a weight (affine=True), but bias is
-    optional.  Since the backward trace args don't carry bias metadata,
-    we default has_bias=False to stay consistent with the forward model
-    which infers it from the (often empty) ln_bias dim.
-    """
+    For LayerNormFnBackward: Input Dims[0] is already [M, H_in], used directly.
 
-    category = "NORM_bwd"
-
-    @staticmethod
-    def get_param_details(event):
-        args_input_dims = event["args"]["Input Dims"]
-        op_shape = tuple(args_input_dims[0])
-        num_channels = op_shape[-1]
-        dtype_in = event["args"]["Input type"][0]
-        stride_input = tuple(event["args"]["Input Strides"][0])
-        return {
-            "op_shape": op_shape,
-            "dtype_in_out": (dtype_in, None),
-            "stride_input": stride_input,
-            "stride_output": None,
-            "num_channels": num_channels,
-            "has_bias": False,
-            "is_affine": True,
-            "is_training": True,
-        }
-
-    def flops(self):
-        return self.flops_func_bwd(
-            self.has_bias,
-            self.is_affine,
-            self.is_training,
-            self.num_elems,
-            self.num_channels,
-            [True, self.is_affine, self.has_bias],
-        )
-
-    def bytes(self):
-        return self.bytes_func_bwd(
-            self.has_bias,
-            self.is_affine,
-            self.is_training,
-            self.num_elems,
-            self.num_channels,
-            self.bpe_in,
-            self.bpe_out,
-            [True, self.is_affine, self.has_bias],
-        )
-
-
-import ast
-
-
-
-class te_layernorm_linear_bwd(Normalization):
-    """Perf model for the LayerNorm backward portion of _LayerNormLinearBackward.
-
-    The backward event's Input Dims records the output gradient shape whose
-    last dimension is the *projected* dim (e.g. 28672), not the hidden dim
-    that the LayerNorm backward kernels actually operate on (e.g. 4096).
-
-    tree_postprocess_extension injects ``_ln_input_shape`` and
-    ``_ln_weight_shape`` from the corresponding forward event so this model
-    can use the correct LayerNorm dimensions.  If the annotations are missing
-    (e.g. forward/backward linkage failed), the model falls back to the
-    gradient shape, which will overestimate FLOPS/bytes.
+    For _LayerNormLinearBackward: Input Dims[0] is the gradient entering the fused
+    op ([M, H_out]), not the shape the LayerNorm backward kernel operates on ([M, H_in]).
+    _annotate_layernorm_backward_shapes() injects '_ln_input_shape' and
+    '_ln_weight_shape' from the forward event.
     """
 
     category = "NORM_bwd"
@@ -676,13 +617,15 @@ class te_layernorm_linear_bwd(Normalization):
         args = event["args"]
         if "_ln_input_shape" in args:
             op_shape = tuple(args["_ln_input_shape"])
-            ln_weight_shape = args.get("_ln_weight_shape")
-            num_channels = ln_weight_shape[0] if ln_weight_shape else op_shape[-1]
+            num_channels = args["_ln_weight_shape"][0]
+        elif event.get("name") == "_LayerNormLinearBackward":
+            raise ValueError(
+                "_LayerNormLinearBackward event is missing '_ln_input_shape' annotation. "
+                "Ensure _annotate_layernorm_backward_shapes() ran before the perf model."
+            )
         else:
-            args_input_dims = args["Input Dims"]
-            op_shape = tuple(args_input_dims[0])
+            op_shape = tuple(args["Input Dims"][0])
             num_channels = op_shape[-1]
-
         dtype_in = args["Input type"][0]
         stride_input = tuple(args["Input Strides"][0])
         return {
@@ -765,7 +708,7 @@ perf_model_extension = {
     "LayerNormFn": te_layer_norm_fwd,
     "LayerNormFnBackward": te_layer_norm_bwd,
     "_LayerNormLinear": te_layer_norm_fwd,
-    "_LayerNormLinearBackward": te_layernorm_linear_bwd,
+    "_LayerNormLinearBackward": te_layer_norm_bwd,
 }
 
 op_category_extension = {
