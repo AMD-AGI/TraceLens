@@ -2,7 +2,7 @@
 # Syntax:     https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 # Last matching rule wins. Prefer GitHub Teams over individuals.
 # Default — every file requires project-team approval
-*                            @AMD-AGI/tracelens-code-owners
+*                            @AMD-AGI/perf-opt
 # Stricter paths — leads must approve
 
 # TraceLens package changes require Adeem or Gabe review
