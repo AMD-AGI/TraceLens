@@ -50,6 +50,7 @@ _COMPUTE_DATA_REQUIRED_COLS_STANDALONE = (
     "Operation",
     "Args",
     "Kernel Path",
+    "Kernel Name",
     "Time (ms)",
     "%E2E",
     "Count",
