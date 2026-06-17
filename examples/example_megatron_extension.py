@@ -654,44 +654,6 @@ class te_layer_norm_bwd(Normalization):
 import ast
 
 
-class te_layernorm_linear_fwd(Normalization):
-    """Perf model for the LayerNorm portion of TE's fused _LayerNormLinear.
-
-    After the GEMM pseudo op is extracted, the parent _LayerNormLinear still
-    carries the LayerNorm kernels.  The arg layout matches LayerNormFn:
-      args[0] = input activation  (e.g. (8192, 4, 4096))
-      args[1] = ln_weight         (e.g. (4096,))
-      args[2] = ln_bias           (may be empty)
-    """
-
-    category = "NORM_fwd"
-
-    @staticmethod
-    def get_param_details(event):
-        args_input_dims = event["args"]["Input Dims"]
-        op_shape = tuple(args_input_dims[0])
-        weight_shape = args_input_dims[1]
-        num_channels = weight_shape[0] if weight_shape else op_shape[-1]
-        has_bias = bool(args_input_dims[2])
-        dtype_in = event["args"]["Input type"][0]
-        stride_input = tuple(event["args"]["Input Strides"][0])
-        return {
-            "op_shape": op_shape,
-            "dtype_in_out": (dtype_in, None),
-            "stride_input": stride_input,
-            "stride_output": None,
-            "num_channels": num_channels,
-            "has_bias": has_bias,
-            "is_affine": bool(weight_shape),
-            "is_training": True,
-        }
-
-    def flops_bwd(self):
-        raise NotImplementedError("Use te_layernorm_linear_bwd for backward pass.")
-
-    def bytes_bwd(self, bytes_per_element):
-        raise NotImplementedError("Use te_layernorm_linear_bwd for backward pass.")
-
 
 class te_layernorm_linear_bwd(Normalization):
     """Perf model for the LayerNorm backward portion of _LayerNormLinearBackward.
@@ -802,7 +764,7 @@ perf_model_extension = {
     "GroupedGemm": custom_grouped_gemm,
     "LayerNormFn": te_layer_norm_fwd,
     "LayerNormFnBackward": te_layer_norm_bwd,
-    "_LayerNormLinear": te_layernorm_linear_fwd,
+    "_LayerNormLinear": te_layer_norm_fwd,
     "_LayerNormLinearBackward": te_layernorm_linear_bwd,
 }
 
