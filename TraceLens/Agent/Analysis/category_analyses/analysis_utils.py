@@ -443,32 +443,24 @@ def _match_fusion_op(kd_str: str, fusion_map: Dict[str, str]) -> Optional[str]:
     return None
 
 
-def _flatten_call_stack(call_stack_full: str) -> List[str]:
-    """Parse call_stack_full (Python list repr) into a flat list of frames."""
+def _parse_call_stack(call_stack_full: str) -> List[str]:
+    """Parse call_stack_full"""
     if not call_stack_full or call_stack_full == "nan":
         return []
     try:
         stack = ast.literal_eval(str(call_stack_full))
-    except Exception:
+    except Exception:   
         return []
-
-    def _flatten(frames):
-        flat = []
-        for f in frames:
-            if isinstance(f, list):
-                flat.extend(_flatten(f))
-            else:
-                flat.append(f)
-        return flat
-
-    return _flatten(stack) if isinstance(stack, list) else []
+    if not isinstance(stack, list):
+        return []
+    return [f for f in stack if isinstance(f, str)]
 
 
 def _extract_module_chain(call_stack_full: str) -> List[str]:
     """Extract nn.Module names from call_stack_full."""
     return [
         f.removeprefix("nn.Module: ")
-        for f in _flatten_call_stack(call_stack_full)
+        for f in _parse_call_stack(call_stack_full)
         if f.startswith("nn.Module: ")
     ]
 
@@ -477,7 +469,7 @@ def _extract_call_chain(call_stack_full: str) -> List[str]:
     """Return meaningful frames from call_stack_full, filtering torch dispatch internals."""
     return [
         f
-        for f in _flatten_call_stack(call_stack_full)
+        for f in _parse_call_stack(call_stack_full)
         if not any(s in f for s in _CALL_CHAIN_SKIP)
         and (f.startswith("nn.Module:") or ".py" in f or "::" in f)
     ]
