@@ -600,8 +600,19 @@ def build_operation_metrics(
         cs_raw = row.get("call_stack_full")
         cs_str = "" if cs_raw is None or pd.isna(cs_raw) else str(cs_raw)
 
-        op_metric["launcher_path"] = row.get("entry_point", "Not found")
-        op_metric["module_chain"] = _extract_module_chain(cs_str)
+        launcher = row.get("entry_point", "")
+        module_chain = _extract_module_chain(cs_str)
+
+        if not launcher or launcher == "Not found":
+            if module_chain:
+                launcher = " > ".join(module_chain[:3])
+            elif op_metric.get("library"):
+                launcher = f"{op_metric['library']} (vendor)"
+            else:
+                launcher = "Not found"
+
+        op_metric["launcher_path"] = launcher
+        op_metric["module_chain"] = module_chain
         op_metric["_raw_call_stack"] = cs_str
 
         operations.append(op_metric)
