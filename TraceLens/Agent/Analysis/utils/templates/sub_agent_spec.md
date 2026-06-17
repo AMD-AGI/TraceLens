@@ -238,14 +238,24 @@ The set of P-items is decided by `category_findings[]` alone — `MIN_PITEM_IMPA
 | `bound_type` | `compute` \| `memory`. Selects the matching Action Prose Guidance row. |
 | `library` | One per finding. Drives the `(<Library>)` title suffix. |
 | `eff_bucket` | Roofline-efficiency band: `"0-30"`, `"30-60"`, `"60-100"`, or `"unknown"` (standalone); `"all"` (comparative). Members within a finding share the same band. |
-| `impact_score` / `_low` / `_high` | Group-summed % of E2E. Render verbatim into `kind=p_item` and `kind=detail_estimate` markers. |
-| `member_count`, `members[]` | Underlying per-op estimate rows (operation, time_ms, efficiency_pct, …) — rows of the `**Data:**` table. |
+| `impact_score` / `_low` / `_high` | Group-summed % of E2E, or `null` for non-quantifiable findings (see below). Render verbatim into `kind=p_item` and `kind=detail_estimate` markers. |
+| `member_count`, `members[]` | Underlying per-op estimate rows (operation, time_ms, efficiency_pct, `type`, …) — rows of the `**Data:**` table. `members[].type == "unmodeled_significant"` marks a non-quantifiable finding (op with no perf model, see below); `"kernel_tuning"` is a normal quantified finding. |
 
 ### Empty category_findings
 
 If `category_findings[]` is empty, emit `## Recommendations` with no P-items
 and `## Detailed Analysis` with no candidates. Do not manufacture sub-threshold
 cards to fill the section — that is the honest "no actionable issues" answer.
+
+### Non-quantifiable findings (`members[].type == "unmodeled_significant"`)
+
+These describe an op with no perf model whose combined (summed across shapes)
+E2E GPU-time share crosses the unmodeled threshold. `impact_score` / `_low` /
+`_high` are `null` (no roofline to estimate headroom), and the analyzer ranks
+them after all quantified findings. Render like a normal P-item card except:
+- `**Impact**`: `Not quantifiable from trace data`, with `low=null mid=null high=null` on the `kind=p_item` marker.
+- Add one note line giving the op's E2E share (`members[0].percent_of_total`%).
+- In `## Detailed Analysis`: use the sentinel `Impact estimate is not quantifiable from trace data.` (no `kind=detail_estimate` marker); the `**Data:**` row renders `—` for `Efficiency` and `Bound`.
 
 ### Rendering in `## Detailed Analysis` (compute tier)
 
