@@ -115,18 +115,6 @@ def perf_report_csv_dir(output_dir: str) -> str:
     return os.path.join(output_dir, "perf_report_csvs")
 
 
-_SKIP_PY_PATTERNS = (
-    "torch/",
-    "_functorch/",
-    "_dynamo/",
-    "torch/cuda/",
-    "torch/utils/",
-    "vllm/compilation/",
-    "/tmp/torchinductor",
-    "kernel_shape_profiler",
-)
-
-
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
     """
     Load CSV operations data and metadata JSON for a category.
@@ -455,52 +443,33 @@ def _match_fusion_op(kd_str: str, fusion_map: Dict[str, str]) -> Optional[str]:
     return None
 
 
-def _extract_launcher_path(call_stack_str: str, op_name: str) -> str:
-    """Return the first non-infrastructure .py frame from a call stack."""
-    if not call_stack_str or call_stack_str == "nan":
-        return ""
-    frames = [f.strip() for f in call_stack_str.split(" => ")]
-    for i, frame in enumerate(frames):
-        if i == 0:
-            continue
-        if ".py" not in frame:
-            continue
-        if any(p in frame for p in _SKIP_PY_PATTERNS):
-            continue
-        return frame
-    return ""
-
-
-def _extract_module_chain(call_stack_str: str) -> List[str]:
-    """Extract nn.Module names from a call stack string (leaf-to-root order)."""
-    if not call_stack_str or call_stack_str == "nan":
+def _parse_call_stack(call_stack_full: str) -> List[str]:
+    """Parse call_stack_full"""
+    if not call_stack_full or call_stack_full == "nan":
         return []
+    try:
+        stack = ast.literal_eval(str(call_stack_full))
+    except Exception:   
+        return []
+    if not isinstance(stack, list):
+        return []
+    return [f for f in stack if isinstance(f, str)]
+
+
+def _extract_module_chain(call_stack_full: str) -> List[str]:
+    """Extract nn.Module names from call_stack_full."""
     return [
-        f.strip().removeprefix("nn.Module: ")
-        for f in call_stack_str.split(" => ")
-        if f.strip().startswith("nn.Module: ")
+        f.removeprefix("nn.Module: ")
+        for f in _parse_call_stack(call_stack_full)
+        if f.startswith("nn.Module: ")
     ]
 
 
-def _extract_backward_context(call_chain: List[str], library: str) -> str:
-    """Produce a descriptive label for autograd backward ops."""
-    for frame in call_chain:
-        if "autograd::engine::evaluate_function:" in frame:
-            fn = frame.split("autograd::engine::evaluate_function:")[-1].strip()
-            if library:
-                return f"{library} ({fn})"
-            return fn
-    return ""
-
-
-def _extract_call_chain(call_stack_str: str) -> List[str]:
-    """Return meaningful frames from a call stack, filtering torch dispatch internals."""
-    if not call_stack_str or call_stack_str == "nan":
-        return []
-    frames = [f.strip() for f in call_stack_str.split(" => ")]
+def _extract_call_chain(call_stack_full: str) -> List[str]:
+    """Return meaningful frames from call_stack_full, filtering torch dispatch internals."""
     return [
         f
-        for f in frames
+        for f in _parse_call_stack(call_stack_full)
         if not any(s in f for s in _CALL_CHAIN_SKIP)
         and (f.startswith("nn.Module:") or ".py" in f or "::" in f)
     ]
@@ -628,25 +597,21 @@ def build_operation_metrics(
                 op_metric["fusion_flagged"] = True
                 op_metric["fusion_candidate_name"] = matched
 
-        cs_raw = row.get("call_stack")
+        cs_raw = row.get("call_stack_full")
         cs_str = "" if cs_raw is None or pd.isna(cs_raw) else str(cs_raw)
-        launcher = _extract_launcher_path(cs_str, op_name)
 
-        if not launcher:
-            launcher = _extract_backward_context(
-                _extract_call_chain(cs_str) if cs_str else [],
-                op_metric.get("library", ""),
-            )
-
+        launcher = row.get("entry_point", "")
         module_chain = _extract_module_chain(cs_str)
 
-        if not launcher and module_chain:
-            launcher = " > ".join(module_chain[:3])
+        if not launcher or launcher == "Not found":
+            if module_chain:
+                launcher = " > ".join(module_chain[:3])
+            elif op_metric.get("library"):
+                launcher = f"{op_metric['library']} (vendor)"
+            else:
+                launcher = "Not found"
 
-        if not launcher and op_metric.get("library"):
-            launcher = f"{op_metric['library']} (vendor)"
-
-        op_metric["launcher_path"] = launcher if launcher else "\u2014"
+        op_metric["launcher_path"] = launcher
         op_metric["module_chain"] = module_chain
         op_metric["_raw_call_stack"] = cs_str
 
