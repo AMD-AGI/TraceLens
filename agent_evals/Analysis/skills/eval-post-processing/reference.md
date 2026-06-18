@@ -4,21 +4,11 @@ Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
----
-name: Eval Post Processing
-description: Aggregate eval results, classify failures, and generate PR + fix-ticket reports from completed repeatability results.
-triggers:
-  - eval post processing
-  - run eval post processing
-tools:
-  - terminal
-  - file_read
-  - file_write
----
+# Eval post processing — reference
 
-# Eval Post Processing
+Full specification for the **eval-post-processing** skill ([SKILL.md](SKILL.md)). Follow for key=value inputs, aggregation, classification, report templates, reproducer tarballs, and `eval_reports/latest/` copy.
 
-Standalone skill invoked after the repeatability harness finishes, or manually on existing results. Aggregates per-run CSVs, classifies failures, and writes two markdown reports.
+---
 
 ## Inputs
 

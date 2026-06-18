@@ -15,6 +15,8 @@ The framework uses a hybrid approach:
 
 All eval results use a 7-column CSV schema: `index, category, issue_summary, result, details, root_cause, recommended_fix`. See [EVAL_RUBRICS.md](EVAL_RUBRICS.md) for the full rubric reference.
 
+LLM and post-processing **agent skills** ship under `agent_evals/Analysis/skills/<skill-name>/` (`SKILL.md` + `reference.md`). Cursor’s default skill discovery uses `.cursor/skills/` at the workspace root — symlink or copy those folders if you need automatic attachment.
+
 ## Prerequisites / Setup
 
 ### 1. Clone TraceLens
@@ -144,7 +146,7 @@ agent --model claude-opus-4-7-high --print --force --trust \
 
 ## Post-Processing Skill
 
-After the repeatability harness finishes, a Cursor agent is automatically invoked to aggregate results and generate reports. This is defined in `.cursor/skills/eval-post-processing.md`.
+After the repeatability harness finishes, a Cursor agent is automatically invoked to aggregate results and generate reports. The skill lives under `agent_evals/Analysis/skills/eval-post-processing/` (`SKILL.md` + `reference.md`).
 
 The skill performs four steps:
 
@@ -220,7 +222,7 @@ For each test case in the traces CSV, the scripts run two phases:
 
 ### Eval Skills
 
-Three Cursor agent skills in `.cursor/skills/` define the eval and pipeline logic:
+Three Cursor agent skills under `agent_evals/Analysis/skills/` define the eval and pipeline logic:
 
 **eval-post-processing** -- Aggregates repeatability results, classifies failures using `report_section_rules.yaml`, and generates PR + fix-ticket reports with reproducer packages. Invoked automatically by `run_repeatability_parallel.sh` or manually on existing results.
 
@@ -237,7 +239,7 @@ The remaining two skills define the per-case eval logic:
 | 12 | LLM | Hardware Reference in Appendix — platform, HBM BW, MAF values. Multi-dimensional weighted scoring: correctness (50%) + completeness (50%), pass threshold ≥ 7.0 |
 | 13 | Scripted | Model identification in Appendix — all 4 `model_info.json` fields present. Per-field sub-indices (`_model`, `_architecture`, `_scale`, `_precision`) |
 
-Scripted evals (1–11, 13–14) run via `eval_utils/workflow_scripted_evals.py`. LLM eval (12) runs via `.cursor/skills/workflow-llm-eval.md`.
+Scripted evals (1–11, 13–14) run via `eval_utils/workflow_scripted_evals.py`. LLM eval (12) runs via `skills/workflow-llm-eval/` (`SKILL.md` + `reference.md`).
 
 All scripted evals include **pre-check gates** that immediately FAIL all evals with a clear message if the output directory is missing, `analysis.md` is absent/garbled, or other fundamental prerequisites are unmet.
 
@@ -249,7 +251,7 @@ All scripted evals include **pre-check gates** that immediately FAIL all evals w
 | 2 | LLM | Compute Issue Title Alignment — semantic comparison of P-item titles against reference. Multi-dimensional scoring: correctness (40%) + completeness (30%) + precision (30%), pass threshold ≥ 7.0 |
 | 3 | LLM | Compute Issue Content Alignment — performance numbers, shapes, efficiency, gains against reference. Same 3-dimension scoring as eval 2 |
 
-LLM evals (2–3) run via `.cursor/skills/quality-llm-eval.md`. System-level P-items are skipped (no Impact field to compare).
+LLM evals (2–3) run via `skills/quality-llm-eval/` (`SKILL.md` + `reference.md`). System-level P-items are skipped (no Impact field to compare).
 
 ## Results
 
