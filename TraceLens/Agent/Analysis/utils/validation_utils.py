@@ -285,12 +285,12 @@ def _load_valid_args(*metrics_paths):
 
 
 def _load_compute_data_metrics(metrics_path):
-    """Return (args_set, launcher_paths_set) from one metrics JSON; empty on read failure."""
+    """Return (args_set, launcher_paths_set, kernel_names_set) from one metrics JSON; empty on read failure."""
     try:
         with open(metrics_path) as f:
             d = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return set(), set()
+        return set(), set(), set()
     ops = d.get("operations", [])
     args = {op["args"] for op in ops if isinstance(op.get("args"), str)}
     paths = {
@@ -298,7 +298,12 @@ def _load_compute_data_metrics(metrics_path):
         for op in ops
         if isinstance(op.get("launcher_path"), str) and op["launcher_path"]
     }
-    return args, paths
+    kernel_names = {
+        op["kernel_name_trunc"]
+        for op in ops
+        if isinstance(op.get("kernel_name_trunc"), str) and op["kernel_name_trunc"]
+    }
+    return args, paths, kernel_names
 
 
 def _iter_compute_candidate_blocks(content):
@@ -353,8 +358,9 @@ def _find_data_table(lines, start, end):
 def _validate_compute_data_tables(content, findings_path, comparison_scope=None):
     """For each <!-- reasoning-candidate tier=compute --> block: shape check
     (Args column required for standalone; comparative schema for comparative),
-    Args cells verbatim vs operations[].args, and Kernel Path cells verbatim
-    vs operations[].launcher_path when present.
+    Args cells verbatim vs operations[].args, Kernel Path cells verbatim
+    vs operations[].launcher_path, and Kernel Name cells verbatim vs
+    operations[].kernel_name_trunc when present.
     Skips silently when the metrics JSON is absent.
     """
     metrics_path = _metrics_json_for_findings(findings_path)
@@ -365,7 +371,7 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
         if is_comparative
         else _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
     )
-    valid_args, valid_paths = _load_compute_data_metrics(metrics_path)
+    valid_args, valid_paths, valid_kernel_names = _load_compute_data_metrics(metrics_path)
     lines = content.splitlines()
     errors = []
     for start, end in _iter_compute_candidate_blocks(content):
@@ -387,6 +393,7 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
             continue
         args_idx = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE.index("Args")
         kp_idx = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE.index("Kernel Path")
+        kn_idx = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE.index("Kernel Name")
         for row_line, cells in row_iter:
             if is_comparative:
                 continue
@@ -403,6 +410,13 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
                         f"Kernel Path cell on line {row_line} does not match "
                         f"operations[].launcher_path in {cat_metrics_basename} "
                         f"(paste verbatim): {cells[kp_idx]}"
+                    )
+            if valid_kernel_names and kn_idx < len(cells) and cells[kn_idx] and cells[kn_idx] != "—":
+                if cells[kn_idx] not in valid_kernel_names:
+                    errors.append(
+                        f"Kernel Name cell on line {row_line} does not match "
+                        f"operations[].kernel_name_trunc in {cat_metrics_basename} "
+                        f"(paste verbatim): {cells[kn_idx]}"
                     )
     return errors
 
