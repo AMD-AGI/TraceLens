@@ -27,7 +27,7 @@ from TraceLens.Reporting.reporting_utils import (
 )
 
 
-_WRAPPER_FILE_PATTERNS = (
+_WRAPPER_FILE_PATTERNS = frozenset({
     "torch/_ops.py",
     "torch/nn/modules/module.py",
     "torch/utils/_contextlib.py",
@@ -39,13 +39,13 @@ _WRAPPER_FILE_PATTERNS = (
     "torch/_functorch/",
     "torch/distributed/c10d_logger.py",
     "triton/backends/",
-)
+})
 
-_WRAPPER_NAME_PREFIXES = (
+_WRAPPER_NAME_PREFIXES = frozenset({
     "<built-in",
     "pybind11_builtins",
     "nn.Module:",
-)
+})
 
 _WRAPPER_FUNC_NAMES = frozenset({
     "__torch_function__",
