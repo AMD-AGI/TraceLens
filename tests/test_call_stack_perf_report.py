@@ -75,14 +75,16 @@ def test_single_kernel_rows_have_flat_call_stack(unified_perf_summary):
             continue
         parsed = ast.literal_eval(cs_val)
         assert isinstance(parsed, list), f"Expected list, got {type(parsed)}"
-        assert not any(isinstance(x, list) for x in parsed), (
-            f"Single-kernel row has nested list: {parsed}"
-        )
+        assert not any(
+            isinstance(x, list) for x in parsed
+        ), f"Single-kernel row has nested list: {parsed}"
         assert len(parsed) > 0
         found = True
         break
 
-    assert found, "No single-kernel rows with a call stack found in unified_perf_summary"
+    assert (
+        found
+    ), "No single-kernel rows with a call stack found in unified_perf_summary"
 
 
 # ---------------------------------------------------------------------------
@@ -124,10 +126,11 @@ def test_entry_point_column_present(unified_perf_summary):
     assert "entry_point" in unified_perf_summary.columns
 
 
-
 def test_find_entry_point_inward_matching():
     # A stack where a .py frame with the op name appears after the op
-    stack = str(["user_code.py(10): my_func", "aten::addmm", "torch/functional.py(5): addmm"])
+    stack = str(
+        ["user_code.py(10): my_func", "aten::addmm", "torch/functional.py(5): addmm"]
+    )
     result = _find_entry_point(stack, "aten::addmm")
     assert result["traversal"] == "inward"
     assert "addmm" in result["entry_point"]
@@ -147,5 +150,3 @@ def test_find_entry_point_not_found():
     stack = str(["torch/nn/modules/module.py(5): _call_impl", "aten::addmm"])
     result = _find_entry_point(stack, "aten::addmm")
     assert result["entry_point"] == "Not found"
-
-

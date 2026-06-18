@@ -26,39 +26,44 @@ from TraceLens.Reporting.reporting_utils import (
     resolve_gpu_arch,
 )
 
+_WRAPPER_FILE_PATTERNS = frozenset(
+    {
+        "torch/_ops.py",
+        "torch/nn/modules/module.py",
+        "torch/utils/_contextlib.py",
+        "torch/utils/_device.py",
+        "torch/_tensor.py",
+        "torch/functional.py",
+        "torch/overrides.py",
+        "torch/_inductor/",
+        "torch/_functorch/",
+        "torch/distributed/c10d_logger.py",
+        "triton/backends/",
+    }
+)
 
-_WRAPPER_FILE_PATTERNS = frozenset({
-    "torch/_ops.py",
-    "torch/nn/modules/module.py",
-    "torch/utils/_contextlib.py",
-    "torch/utils/_device.py",
-    "torch/_tensor.py",
-    "torch/functional.py",
-    "torch/overrides.py",
-    "torch/_inductor/",
-    "torch/_functorch/",
-    "torch/distributed/c10d_logger.py",
-    "triton/backends/",
-})
+_WRAPPER_NAME_PREFIXES = frozenset(
+    {
+        "<built-in",
+        "pybind11_builtins",
+        "nn.Module:",
+    }
+)
 
-_WRAPPER_NAME_PREFIXES = frozenset({
-    "<built-in",
-    "pybind11_builtins",
-    "nn.Module:",
-})
-
-_WRAPPER_FUNC_NAMES = frozenset({
-    "__torch_function__",
-    "_call_impl",
-    "_wrapped_call_impl",
-    "decorate_context",
-    "dispatch_wrapper",
-    "handle_torch_function",
-    "wrapper",
-    "custom_wrapper",
-    "wrapper_custom",
-    "outer_wrapper",
-})
+_WRAPPER_FUNC_NAMES = frozenset(
+    {
+        "__torch_function__",
+        "_call_impl",
+        "_wrapped_call_impl",
+        "decorate_context",
+        "dispatch_wrapper",
+        "handle_torch_function",
+        "wrapper",
+        "custom_wrapper",
+        "wrapper_custom",
+        "outer_wrapper",
+    }
+)
 
 
 def _is_wrapper_frame(frame):
@@ -94,7 +99,12 @@ def _find_entry_point(call_stack_value, op_name):
        call stack from innermost frame outward, skip wrapper/dispatch
        functions, and return the first non-wrapper .py frame.
     """
-    empty = {"entry_point": "Not found", "num_wrappers": -1, "traversal": "", "wrappers": ""}
+    empty = {
+        "entry_point": "Not found",
+        "num_wrappers": -1,
+        "traversal": "",
+        "wrappers": "",
+    }
     try:
         stack = ast.literal_eval(str(call_stack_value))
         if not isinstance(stack, list):
@@ -140,7 +150,9 @@ def _find_entry_point(call_stack_value, op_name):
     for i in range(op_idx + 1, len(flat_stack)):
         frame = flat_stack[i]
         if ".py" in frame:
-            func_name = frame.split("): ")[-1].lower() if "): " in frame else frame.lower()
+            func_name = (
+                frame.split("): ")[-1].lower() if "): " in frame else frame.lower()
+            )
             if local_name in func_name:
                 between = flat_stack[op_idx + 1 : i]
                 wrappers_list = [op_name] + between + [frame]
@@ -169,7 +181,6 @@ def _find_entry_point(call_stack_value, op_name):
         }
 
     return empty
-
 
 
 def get_dfs_short_kernels(
@@ -811,7 +822,9 @@ def generate_perf_report_pytorch(
                 if "call_stack_full" in df_unified_perf_summary.columns:
                     cs_col = df_unified_perf_summary.columns.get_loc("call_stack_full")
                     ep_results = df_unified_perf_summary.apply(
-                        lambda row: _find_entry_point(row["call_stack_full"], row["name"]),
+                        lambda row: _find_entry_point(
+                            row["call_stack_full"], row["name"]
+                        ),
                         axis=1,
                     )
                     df_unified_perf_summary.insert(
