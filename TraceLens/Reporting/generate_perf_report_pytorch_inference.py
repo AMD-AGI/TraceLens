@@ -953,14 +953,31 @@ def generate_perf_report_pytorch(
                 )
                 if "call_stack_full" in df_unified_perf_summary.columns:
                     cs_col = df_unified_perf_summary.columns.get_loc("call_stack_full")
+                    ep_results = df_unified_perf_summary.apply(
+                        lambda row: _find_entry_point(row["call_stack_full"], row["name"]),
+                        axis=1,
+                    )
                     df_unified_perf_summary.insert(
                         cs_col,
                         "entry_point",
-                        df_unified_perf_summary.apply(
-                            lambda row: _find_entry_point(row["call_stack_full"], row["name"]),
-                            axis=1,
-                        ),
+                        ep_results.apply(lambda x: x["entry_point"]),
                     )
+                    if os.environ.get("TRACELENS_DEBUG"):
+                        df_unified_perf_summary.insert(
+                            cs_col + 1,
+                            "num_wrappers",
+                            ep_results.apply(lambda x: x["num_wrappers"]),
+                        )
+                        df_unified_perf_summary.insert(
+                            cs_col + 2,
+                            "traversal",
+                            ep_results.apply(lambda x: x["traversal"]),
+                        )
+                        df_unified_perf_summary.insert(
+                            cs_col + 3,
+                            "wrappers",
+                            ep_results.apply(lambda x: x["wrappers"]),
+                        )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
 
             if _tracediff_diff_stats is not None and not _tracediff_diff_stats.empty:
