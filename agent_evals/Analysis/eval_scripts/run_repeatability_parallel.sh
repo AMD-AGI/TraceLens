@@ -67,12 +67,10 @@ expand_archive() {
     local name="$1"
     local archive="$EVALS_DIR/analysis_tests/${name}.tar.gz"
     local target="$EVALS_DIR/analysis_tests/$name"
-    if [[ -f "$archive" ]]; then
-        if [[ ! -d "$target" ]] || [[ "$archive" -nt "$target" ]]; then
-            echo "Expanding ${name}.tar.gz..."
-            tar xzf "$archive" -C "$REPO_ROOT"
-            echo "Done."
-        fi
+    if [[ -f "$archive" ]] && [[ ! -d "$target" ]]; then
+        echo "Expanding ${name}.tar.gz..."
+        tar xzf "$archive" -C "$REPO_ROOT"
+        echo "Done."
     fi
 }
 
