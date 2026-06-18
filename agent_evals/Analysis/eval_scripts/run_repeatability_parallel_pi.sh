@@ -36,7 +36,7 @@ SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 
 # Paths (run from repo root on the node)
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-ANALYSIS_DIR="TraceLens/Agent/Analysis"
+ANALYSIS_DIR="$REPO_ROOT/TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/agent_evals/Analysis"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_${COMPARISON_SCOPE}}"
 TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
@@ -104,10 +104,10 @@ run_single_job() {
         (
             cd "$ANALYSIS_DIR" || exit
             if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
-                timeout 1800 pi --mode json \
+                pi --mode json \
                     "use venv_tracelens for all commands and tool calls. Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (trace1) and $platform2 (trace2), analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             else
-                timeout 1800 pi --mode json \
+                pi --mode json \
                     "use venv_tracelens for all commands and tool calls. Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path with platform $platform, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             fi
         ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
