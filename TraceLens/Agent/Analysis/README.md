@@ -71,6 +71,8 @@ The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json
 
 > **Note**: The instructions below use the Cursor IDE and CLI (`agent`), but the orchestrator skills are portable. They also work with Claude Code CLI (`claude`) and other agentic runners that support skill file discovery.
 
+> **Skill paths in the package:** The orchestrator and its subagent prompts live under `TraceLens/Agent/Analysis/skills/analysis-orchestrator/` (`SKILL.md`, `reference.md`, and `agents/*.md`). Cursor’s default project skill discovery uses `.cursor/skills/`; symlink or copy `skills/analysis-orchestrator` there if your workflow relies on automatic skill pickup.
+
 ### To run via Cursor chat:
 
 1. **In a Cursor chat with Claude Opus 4.7 High, invoke one of:**
@@ -117,21 +119,21 @@ This installs the `agent` command. If you only plan to run analysis interactivel
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
+    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Cluster + container — inference (vLLM/SGLang eager mode):**
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
+    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Cluster + container — inference (vLLM/SGLang graph replay + capture):**
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
+    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
 ```
 
 All parameters are passed inline so no interactive prompts are needed. This is useful for batch runs and CI pipelines (see `agent_evals/Analysis/eval_scripts/generate_ref.sh` for an example).
@@ -282,7 +284,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 
 ### Sub-agent model
 
-The orchestrator and all 13 sub-agents currently run on **`claude-opus-4-7-high`**, declared in each agent file's front matter under `.cursor/agents/`. The full set: `cpu-idle-analyzer`, `multi-kernel-analyzer`, `kernel-fusion-analyzer`, `model-identification-agent`, `gemm-analyzer`, `sdpa-analyzer`, `elementwise-analyzer`, `reduce-analyzer`, `triton-analyzer`, `moe-analyzer`, `norm-analyzer`, `convolution-analyzer`, `generic-op-analyzer`.
+The orchestrator and all 13 sub-agents currently run on **`claude-opus-4-7-high`**, declared in each agent file's front matter under `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/`. The full set: `cpu-idle-analyzer`, `multi-kernel-analyzer`, `kernel-fusion-analyzer`, `model-identification-agent`, `gemm-analyzer`, `sdpa-analyzer`, `elementwise-analyzer`, `reduce-analyzer`, `triton-analyzer`, `moe-analyzer`, `norm-analyzer`, `convolution-analyzer`, `generic-op-analyzer`.
 
 ### Supported Standalone Analysis Modes
 
