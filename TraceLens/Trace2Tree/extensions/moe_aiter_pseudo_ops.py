@@ -9,6 +9,10 @@ from .pseudo_ops_utils import inject_pseudo_op
 
 logger = logging.getLogger(__name__)
 
+# When checking for cpu_op descendants, do not descend into GPU leaf categories:
+# they are huge in python_func-augmented traces and do not contain cpu_ops.
+_SKIP_CPUOP_DESCENT_CATS = frozenset({"kernel", "gpu_memcpy", "gpu_memset"})
+
 
 def create_pseudo_ops_moe_fused_aiter(trace_tree):
     """
@@ -47,14 +51,17 @@ def is_aiter_fused_moe_kernel(kernel_event: dict) -> bool:
 def _has_cpu_op_descendant(trace_tree, event: dict) -> bool:
     """Recursively check if any descendant of event is a cpu_op.
     Skips subtrees marked non_gpu_path since they cannot contain cpu_ops with GPU work.
+    Skips descending into GPU kernel/mem subtrees (no cpu_op descendants there).
     """
     for child_uid in event.get("children", []):
         child = trace_tree.get_UID2event(child_uid)
         if child.get("cat") == "cpu_op":
             return True
-        if not child.get("non_gpu_path", False) and _has_cpu_op_descendant(
-            trace_tree, child
-        ):
+        if child.get("non_gpu_path", False):
+            continue
+        if child.get("cat") in _SKIP_CPUOP_DESCENT_CATS:
+            continue
+        if _has_cpu_op_descendant(trace_tree, child):
             return True
     return False
 

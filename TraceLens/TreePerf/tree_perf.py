@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,6 @@ from ..PerfModel.torch_op_mapping import (
     resolve_perf_model_class,
     synthetic_op_marker,
 )
-from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_sglang_capture_link import (
     enrich_synthetic_ops_from_sglang_capture,
@@ -163,6 +163,39 @@ def _perf_model_init_kwargs(
 
 class TreePerfAnalyzer:
     @staticmethod
+    def _scan_events_python_stack_and_gpu_only(events, show_progress: bool):
+        """One pass over *events* for ``with_python_stack`` and ``gpu_only`` flags.
+
+        ``with_python_stack`` is True iff some event has ``cat == "python_func"``.
+        ``gpu_only`` is True iff no event has ``cat`` in ``{"python_func", "cpu_op"}``.
+        When *show_progress* is True, wrap the iteration in ``tqdm`` on stderr so
+        ``--show-progress`` is visible during ``TreePerfAnalyzer`` construction.
+        """
+        if show_progress:
+            tqdm.write(
+                "perf: TreePerfAnalyzer init: scanning events (python_stack, gpu_only) …",
+                file=sys.stderr,
+            )
+            iterator = tqdm(
+                events,
+                desc="perf: TreePerf init (events)",
+                unit="evt",
+                file=sys.stderr,
+                mininterval=0.5,
+            )
+        else:
+            iterator = events
+        with_python_stack = False
+        has_host_cpu_or_python = False
+        for event in iterator:
+            cat = event.get("cat")
+            if cat == "python_func":
+                with_python_stack = True
+            if cat in {"python_func", "cpu_op"}:
+                has_host_cpu_or_python = True
+        return with_python_stack, not has_host_cpu_or_python
+
+    @staticmethod
     def from_file(
         profile_filepath,
         capture_trace_filepath=None,
@@ -266,6 +299,7 @@ class TreePerfAnalyzer:
         enable_origami=False,
         capture_folder=None,
         inductor_cache_dir=None,
+        show_progress: bool = False,
     ):
         self.jax = jax
         self.capture_folder = capture_folder
@@ -282,17 +316,21 @@ class TreePerfAnalyzer:
         self.enable_origami = enable_origami
         self.event_to_category = event_to_category
         self.include_unlinked_kernels = include_unlinked_kernels
-        self.with_python_stack = any(
-            event.get("cat") == "python_func" for event in self.tree.events
+        self.show_progress = show_progress
+        self.with_python_stack, self.gpu_only = (
+            TreePerfAnalyzer._scan_events_python_stack_and_gpu_only(
+                self.tree.events, show_progress
+            )
         )
-        self.gpu_only = self.check_gpu_only()
         if rebuild_tree:
             self.tree.build_tree(add_python_func=add_python_func)
 
         # Apply pseudo-op extensions
         if enable_pseudo_ops:
             try:
-                apply_pseudo_op_extensions(self.tree)
+                apply_pseudo_op_extensions(
+                    self.tree, show_progress=self.show_progress
+                )
             except Exception as e:
                 logger.warning(f"Failed to apply pseudo-op extensions: {e}")
         # Backward compatibility for custom tree postprocessing
@@ -306,10 +344,10 @@ class TreePerfAnalyzer:
         self.op_categorizer = categorize_torch_op
 
     def check_gpu_only(self):
-        for event in self.tree.events:
-            if event.get("cat") in {"python_func", "cpu_op"}:
-                return False
-        return True
+        _, gpu_only = TreePerfAnalyzer._scan_events_python_stack_and_gpu_only(
+            self.tree.events, False
+        )
+        return gpu_only
 
     def _detect_recompute_events(self):
         """Mark events under torch.utils.checkpoint recompute_fn as is_recompute=True."""

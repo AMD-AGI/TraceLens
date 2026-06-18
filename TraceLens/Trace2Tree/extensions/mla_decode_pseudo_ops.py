@@ -43,27 +43,43 @@ def _find_mla_decode_python_funcs(trace_tree):
 
     matched = []
     for name, uids in trace_tree.name2event_uids.items():
-        if MLA_DECODE_FWD_PATTERN.search(name):
-            for uid in uids:
-                evt = trace_tree.get_UID2event(uid)
-                if evt.get("cat") == "python_function":
-                    matched.append(evt)
+        if "mla.py" not in name or "mla_decode_fwd" not in name:
+            continue
+        if not MLA_DECODE_FWD_PATTERN.search(name):
+            continue
+        for uid in uids:
+            evt = trace_tree.get_UID2event(uid)
+            if evt.get("cat") == "python_function":
+                matched.append(evt)
     return matched
 
 
 def _find_stage1_child(trace_tree, parent_evt):
     """
-    Search descendants of parent_evt for 'aiter::mla_decode_stage1_asm_fwd'.
-    Returns the first matching event, or None.
+    Find a ``aiter::mla_decode_stage1_asm_fwd`` event under *parent_evt*.
+
+    Uses ``name2event_uids`` + parent-pointer walks (O(#stage1 × depth)) instead
+    of DFS over the whole python_function subtree, which is far larger on big
+    traces with ``add_python_func=True``.
     """
 
-    for child_evt in trace_tree.get_children_events(parent_evt):
-        if child_evt.get("name") == STAGE1_KERNEL_NAME:
-            return child_evt
-        found = _find_stage1_child(trace_tree, child_evt)
-        if found is not None:
-            return found
-    return None
+    py_uid = parent_evt["UID"]
+    candidates = trace_tree.name2event_uids.get(STAGE1_KERNEL_NAME, [])
+    if not candidates:
+        return None
+    under = []
+    for uid in candidates:
+        evt = trace_tree.get_UID2event(uid)
+        cur: dict | None = evt
+        while cur is not None:
+            if cur.get("UID") == py_uid:
+                under.append(evt)
+                break
+            cur = trace_tree.get_parent_event(cur)
+    if not under:
+        return None
+    under.sort(key=lambda e: e.get("ts", 0))
+    return under[0]
 
 
 def _create_pseudo_op_mla_decode(trace_tree, py_func_evt):

@@ -43,27 +43,40 @@ def _find_mla_prefill_python_funcs(trace_tree):
 
     matched = []
     for name, uids in trace_tree.name2event_uids.items():
-        if MLA_PREFILL_FWD_PATTERN.search(name):
-            for uid in uids:
-                evt = trace_tree.get_UID2event(uid)
-                if evt.get("cat") == "python_function":
-                    matched.append(evt)
+        if "mla_fp8_prefill_attn" not in name:
+            continue
+        if not MLA_PREFILL_FWD_PATTERN.search(name):
+            continue
+        for uid in uids:
+            evt = trace_tree.get_UID2event(uid)
+            if evt.get("cat") == "python_function":
+                matched.append(evt)
     return matched
 
 
 def _find_prefill_cpu_op_child(trace_tree, parent_evt):
     """
-    Search descendants of parent_evt for 'aiter::mla_prefill_ps_asm_fwd'.
-    Returns the first matching event, or None.
+    Find ``aiter::mla_prefill_ps_asm_fwd`` under *parent_evt* via the name index
+    and parent-pointer walks (avoids DFS over the full python_function subtree).
     """
 
-    for child_evt in trace_tree.get_children_events(parent_evt):
-        if child_evt.get("name") == PREFILL_CPU_OP_NAME:
-            return child_evt
-        found = _find_prefill_cpu_op_child(trace_tree, child_evt)
-        if found is not None:
-            return found
-    return None
+    py_uid = parent_evt["UID"]
+    candidates = trace_tree.name2event_uids.get(PREFILL_CPU_OP_NAME, [])
+    if not candidates:
+        return None
+    under = []
+    for uid in candidates:
+        evt = trace_tree.get_UID2event(uid)
+        cur = evt
+        while cur is not None:
+            if cur.get("UID") == py_uid:
+                under.append(evt)
+                break
+            cur = trace_tree.get_parent_event(cur)
+    if not under:
+        return None
+    under.sort(key=lambda e: e.get("ts", 0))
+    return under[0]
 
 
 def _create_pseudo_op_mla_prefill(trace_tree, py_func_evt):

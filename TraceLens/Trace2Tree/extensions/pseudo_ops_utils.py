@@ -6,12 +6,43 @@
 
 import re
 import logging
+import sys
 from typing import Any, Optional, List, Callable
+
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
 
 _SGLANG_SUFFIX_RE = re.compile(r"^(sglang_profiler::.+?)_\d+$")
+_MLA_DECODE_FWD_NAME_RE = re.compile(r"aiter/mla.py\(\d+\): mla_decode_fwd")
+_MLA_FP8_PREFILL_NAME_RE = re.compile(r":\s*mla_fp8_prefill_attn(\b|$)")
+
+
+def _any_kernel_event_name_contains(tree, needle: str, *, lower: bool = True) -> bool:
+    """True if some *kernel* event's name contains *needle* (via ``name2event_uids``).
+
+    Avoids scanning all ``tree.events``; only unique names that match the
+    substring are checked, then UIDs are filtered by ``cat == \"kernel\"``.
+    """
+    if lower:
+        needle_l = needle.lower()
+
+        def hit(n: str) -> bool:
+            return needle_l in n.lower()
+
+    else:
+
+        def hit(n: str) -> bool:
+            return needle in n
+
+    for name in tree.name2event_uids:
+        if not hit(name):
+            continue
+        for uid in tree.name2event_uids[name]:
+            if tree.get_UID2event(uid).get("cat") == "kernel":
+                return True
+    return False
 
 
 def normalize_sglang_profiler_op_names(tree):
@@ -264,12 +295,22 @@ def inject_pseudo_op_above_event(
     return pseudo_evt
 
 
-def apply_pseudo_op_extensions(tree, verbose: bool = False):
+def apply_pseudo_op_extensions(
+    tree, verbose: bool = False, show_progress: bool = False
+):
     """
     Apply all available pseudo-op extensions to trace tree.
     Extensions are automatically detected and applied.
+
+    When ``show_progress`` is True, emit ``tqdm`` milestone lines and a bar over
+    the apply phase (stderr), mirroring perf-report progress.
     """
 
+    if show_progress:
+        tqdm.write(
+            "perf: pseudo_ops: normalize_sglang_profiler_op_names …",
+            file=sys.stderr,
+        )
     normalize_sglang_profiler_op_names(tree)
 
     # Auto-detect and add all known pseudo-op extensions
@@ -289,11 +330,7 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
         # TO DO: Update kernel detection approach (Look for gpt_oss_triton_kernels_moe.py)
         else:
             # Check if any kernel events contain matmul_ogs: Triton MoE kernel
-            has_matmul_ogs = any(
-                "matmul_ogs" in event.get("name", "").lower()
-                for event in tree.events
-                if event.get("cat") == "kernel"
-            )
+            has_matmul_ogs = _any_kernel_event_name_contains(tree, "matmul_ogs")
 
             if has_matmul_ogs:
                 from .moe_unfused_triton_pseudo_ops import (
@@ -310,10 +347,8 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
 
     # MoE: GPTQ/AWQ quantized unfused implementation (vllm::outplace_fused_experts)
     if "vllm::outplace_fused_experts" in tree.name2event_uids:
-        has_gptq_awq = any(
-            "fused_moe_kernel_gptq_awq" in event.get("name", "")
-            for event in tree.events
-            if event.get("cat") == "kernel"
+        has_gptq_awq = _any_kernel_event_name_contains(
+            tree, "fused_moe_kernel_gptq_awq", lower=False
         )
         if has_gptq_awq:
             from .moe_gptq_awq_pseudo_ops import create_pseudo_ops_moe_gptq_awq
@@ -334,9 +369,12 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
 
     # MLA Decode: AITER implementation
     if "aiter::mla_decode_stage1_asm_fwd" in tree.name2event_uids:
+        # Prefilter keys before regex: scanning every unique name is costly on
+        # large traces (millions of events, hundreds of thousands of names).
         has_mla_python_func = any(
-            re.search(r"aiter/mla.py\(\d+\): mla_decode_fwd", name)
+            _MLA_DECODE_FWD_NAME_RE.search(name)
             for name in tree.name2event_uids
+            if "mla.py" in name and "mla_decode_fwd" in name
         )
         if has_mla_python_func:
             from .mla_decode_pseudo_ops import create_pseudo_ops_mla_decode
@@ -348,8 +386,9 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
     # MLA Prefill: AITER fp8 implementation
     if "aiter::mla_prefill_ps_asm_fwd" in tree.name2event_uids:
         has_prefill_python_func = any(
-            re.search(r":\s*mla_fp8_prefill_attn(\b|$)", name)
+            _MLA_FP8_PREFILL_NAME_RE.search(name)
             for name in tree.name2event_uids
+            if "mla_fp8_prefill_attn" in name
         )
         if has_prefill_python_func:
             from .mla_prefill_pseudo_ops import create_pseudo_ops_mla_prefill
@@ -380,7 +419,21 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
                 "perf_meta.k_cache_dtype/v_cache_dtype to cpu_op parents"
             )
     # Apply extensions onto tree
-    for ext_info in extensions:
+    if show_progress:
+        tqdm.write(
+            f"perf: pseudo_ops: detected {len(extensions)} extension(s) to run …",
+            file=sys.stderr,
+        )
+    _ext_iter = extensions
+    if show_progress:
+        _ext_iter = tqdm(
+            extensions,
+            desc="perf: pseudo-op extensions",
+            unit="ext",
+            file=sys.stderr,
+            mininterval=0.3,
+        )
+    for ext_info in _ext_iter:
         # ext_info tuple of (extension_name, extension_function)
         ext_name, ext_func = ext_info
 
