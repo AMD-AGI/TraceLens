@@ -5,9 +5,11 @@
 ###############################################################################
 
 import argparse
+import faulthandler
 import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
 import warnings
@@ -37,6 +39,23 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
 )
 
 import TraceLens
+
+
+def _install_interrupt_stack_dumps() -> None:
+    """SIGINT: dump all thread stacks then exit 130; SIGUSR1: dump only (see orchestrator)."""
+
+    def _sigint_dump_and_exit(signum: int, frame: object) -> None:
+        del signum, frame
+        try:
+            sys.stderr.write("\n--- SIGINT: thread stacks (Ctrl-C style) ---\n")
+            faulthandler.dump_traceback(all_threads=True, file=sys.stderr)
+            sys.stderr.flush()
+        finally:
+            sys.exit(130)
+
+    signal.signal(signal.SIGINT, _sigint_dump_and_exit)
+    if hasattr(signal, "SIGUSR1"):
+        faulthandler.register(signal.SIGUSR1, chain=False)
 
 
 def perf_report_sanity_check(
@@ -560,6 +579,7 @@ def generate_perf_report_pytorch(
     group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
     include_call_stack: bool = False,
+    show_progress: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     gpu_arch_json = resolve_gpu_arch(
         gpu_arch_json_path=gpu_arch_json_path,
@@ -570,6 +590,8 @@ def generate_perf_report_pytorch(
         True if (group_by_parent_module or include_call_stack is True) else False
     )
     if augmented_tree is not None:
+        if show_progress:
+            tqdm.write("perf: TreePerfAnalyzer construction …", file=sys.stderr)
         perf_analyzer = TreePerfAnalyzer(
             tree=augmented_tree,
             arch=gpu_arch_json,
@@ -579,8 +601,11 @@ def generate_perf_report_pytorch(
             enable_pseudo_ops=enable_pseudo_ops,
             rebuild_tree=False,
             capture_folder=capture_folder,
+            show_progress=show_progress,
         )
     else:
+        if show_progress:
+            tqdm.write("perf: TreePerfAnalyzer from file …", file=sys.stderr)
         perf_analyzer = TreePerfAnalyzer.from_file(
             profile_filepath=profile_json_path,
             arch=gpu_arch_json,
@@ -589,20 +614,29 @@ def generate_perf_report_pytorch(
             add_python_func=add_python_func,
             enable_pseudo_ops=enable_pseudo_ops,
             capture_folder=capture_folder,
+            show_progress=show_progress,
         )
 
-        graph_launch_events = [
-            event
-            for event in perf_analyzer.tree.events
-            if "graphlaunch" in event.get("name", "").lower()
-        ]
-        if len(graph_launch_events) > 0:
+    # When we will scan all events again for perf sheets, defer graph-launch counting
+    # into that loop. GPU-only traces skip those sheets, so count graph launches here.
+    _defer_graph_launch_warn = augmented_tree is None and not perf_analyzer.gpu_only
+    if augmented_tree is None and perf_analyzer.gpu_only:
+        _graph_launch_n = sum(
+            1
+            for e in perf_analyzer.tree.events
+            if "graphlaunch" in e.get("name", "").lower()
+        )
+        if _graph_launch_n > 0:
             warnings.warn(
-                f"There are hipgraph launches (Count: {len(graph_launch_events)}) in this trace, but a graph capture folder not provided, the analysis might be limited",
+                f"There are hipgraph launches (Count: {_graph_launch_n}) in this trace, "
+                "but a graph capture folder not provided, the analysis might be limited",
                 UserWarning,
             )
 
     ## Apply annotation for vLLM eager and replay phase
+    if show_progress:
+        tqdm.write("perf: applying annotation …", file=sys.stderr)
+
     perf_analyzer.tree.apply_annotation(
         name_filters=[
             "hipGraphLaunch",
@@ -621,6 +655,8 @@ def generate_perf_report_pytorch(
     )
 
     if extension_file:
+        if show_progress:
+            tqdm.write("perf: loading user extension …", file=sys.stderr)
         apply_extension(perf_analyzer, extension_file)
 
     # Detect GPU-only trace early and inform user
@@ -629,6 +665,9 @@ def generate_perf_report_pytorch(
             "Detected GPU-only trace. Skipping CPU-dependent analysis and generating only GPU timeline and kernel summary."
         )
     agg_metrics = ["mean", "median", "std", "min", "max"]
+
+    if show_progress:
+        tqdm.write("perf: building GPU timeline …", file=sys.stderr)
 
     # Generate base DataFrames
     df_gpu_timeline = perf_analyzer.get_df_gpu_timeline(
@@ -650,6 +689,8 @@ def generate_perf_report_pytorch(
 
     # Only process CPU-dependent analysis for non-GPU-only traces
     if not perf_analyzer.gpu_only:
+        if show_progress:
+            tqdm.write("perf: building kernel launcher table …", file=sys.stderr)
         df_kernel_launchers = perf_analyzer.get_df_kernel_launchers(
             include_kernel_details=True,
             include_call_stack=group_by_parent_module,
@@ -707,13 +748,55 @@ def generate_perf_report_pytorch(
         sheet_category_to_op_names = build_sheet_category_to_op_names(
             perf_analyzer.op_to_perf_model_class_map
         )
-        for sheet_category, op_names in sheet_category_to_op_names.items():
-            # Filter events belonging to the current legacy sheet category
-            op_events = [
-                event
-                for event in perf_analyzer.tree.events
-                if event["name"] in op_names
-            ]
+        # One full-tree scan: bucket by op name, then assemble per category by
+        # global index so order matches a single traversal (avoids O(categories
+        # * len(events)) scans from filtering tree.events per sheet category).
+        tracked_op_names: set[str] = set()
+        for names in sheet_category_to_op_names.values():
+            tracked_op_names.update(names)
+        events_by_op_name: dict[str, list[tuple[int, dict]]] = collections.defaultdict(
+            list
+        )
+        _graph_launch_count = 0
+        _events_src = perf_analyzer.tree.events
+        _n_events = len(_events_src)
+        for i, event in enumerate(
+            tqdm(
+                _events_src,
+                desc="perf: index events",
+                total=_n_events,
+                unit="evt",
+                disable=not show_progress,
+                mininterval=0.5,
+                file=sys.stderr,
+            )
+        ):
+            if _defer_graph_launch_warn and "graphlaunch" in event.get("name", "").lower():
+                _graph_launch_count += 1
+            n = event.get("name")
+            if n in tracked_op_names:
+                events_by_op_name[n].append((i, event))
+        if _defer_graph_launch_warn and _graph_launch_count > 0:
+            warnings.warn(
+                f"There are hipgraph launches (Count: {_graph_launch_count}) in this trace, "
+                "but a graph capture folder not provided, the analysis might be limited",
+                UserWarning,
+            )
+        if show_progress:
+            tqdm.write("perf: building per-category perf metric sheets …", file=sys.stderr)
+        for sheet_category, op_names in tqdm(
+            sheet_category_to_op_names.items(),
+            desc="perf: metric sheets",
+            unit="cat",
+            disable=not show_progress,
+            mininterval=0.2,
+            file=sys.stderr,
+        ):
+            indexed: list[tuple[int, dict]] = []
+            for n in op_names:
+                indexed.extend(events_by_op_name.get(n, []))
+            indexed.sort(key=lambda ie: ie[0])
+            op_events = [e for _, e in indexed]
             if len(op_events) == 0:
                 continue
             # Skip categories with no events
@@ -922,6 +1005,8 @@ def generate_perf_report_pytorch(
             )
 
         # Add unified perf metrics table (ops with perf models + leaf ops with GPU kernels)
+        if show_progress:
+            tqdm.write("perf: building unified perf table …", file=sys.stderr)
         df_unified_perf = perf_analyzer.build_df_unified_perf_table(
             include_nccl=collective_analysis
         )
@@ -1189,6 +1274,7 @@ def generate_perf_report_pytorch(
 
 
 def main():
+    _install_interrupt_stack_dumps()
 
     parser = argparse.ArgumentParser(
         description="Process a JSON trace profile and generate performance report tables."
@@ -1347,6 +1433,12 @@ def main():
         "Adds ops_unique_args_kl_overlap, unified_perf_summary_kl_overlap, and "
         "per-category *_kl_overlap / *_fwd_kl_overlap / *_bwd_kl_overlap sheets when data exists.",
     )
+    parser.add_argument(
+        "--show-progress",
+        action="store_true",
+        default=False,
+        help="Show tqdm progress for long phases and milestone lines on stderr.",
+    )
 
     args = parser.parse_args()
     if args.capture_folder and args.comparison_json_path:
@@ -1367,6 +1459,8 @@ def main():
                 sglang_capture_folder = args.capture_folder
         else:
             sglang_capture_folder = args.capture_folder
+        print("Graph capture has finished.")
+    print("Starting performance report generation...")
     generate_perf_report_pytorch(
         profile_json_path=args.profile_json_path,
         augmented_tree=graph_tree,
@@ -1394,6 +1488,7 @@ def main():
         group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
         include_call_stack=args.include_call_stack,
+        show_progress=args.show_progress,
     )
 
 

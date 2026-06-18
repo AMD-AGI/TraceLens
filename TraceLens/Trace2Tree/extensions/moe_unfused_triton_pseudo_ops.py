@@ -101,6 +101,8 @@ def _extract_topk_from_moe(trace_tree, moe_op_event: dict):
         # Recursively search children (for Python function wrappers)
         # Use native get_children_events() method
         for child_event in trace_tree.get_children_events(event):
+            if child_event.get("cat") in ("kernel", "gpu_memcpy", "gpu_memset"):
+                continue
             result = search_for_topk(child_event, depth + 1, max_depth)
             if result is not None:
                 return result
