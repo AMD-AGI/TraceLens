@@ -36,7 +36,7 @@ SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 
 # Paths (run from repo root on the node)
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-ANALYSIS_DIR="TraceLens/Agent/Analysis"
+ANALYSIS_DIR="$REPO_ROOT/TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/agent_evals/Analysis"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_${COMPARISON_SCOPE}}"
 TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
