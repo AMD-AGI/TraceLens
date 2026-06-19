@@ -1411,6 +1411,135 @@ class moe_flydsl_stage2(UnfusedMoE_Down):
 
 
 # ==============================================================================
+# SGLang Triton fused-MoE grouped GEMM (single invoke_fused_moe_kernel launch)
+# ==============================================================================
+
+
+class moe_triton_invoke_grouped_gemm:
+    """
+    SGLang's Triton fused-MoE path calls invoke_fused_moe_kernel TWICE per MoE
+    block. Both launches share this profiler name so this single grouped-GEMM
+    model handles both directions by deriving (M_work, N, K) generically from
+    the args.
+
+    Signature: invoke_fused_moe_kernel(A, B, C, A_scale, B_scale, topk_weights,
+        topk_ids, sorted_token_ids, expert_ids, num_tokens_post_padded, ...)
+
+    Expected Input Dims from trace:
+        [0] A            = (tokens, K) or (tokens*topk, K)   activations
+        [1] B            = (E, N, K)                          per-expert weights (fp8)
+        [3] C            = (tokens*topk, N)                   output buffer
+        :
+        e.g. gate/up: [(64,2048), (128,1536,2048), (), (512,1536), (), (128,), ...]
+             down:    [(512,768),  (128,2048,768),  (), (64,8,2048), (), (128,), ...]
+
+    Roofline -- FLOPs (single grouped GEMM):
+        M_work = tokens * topk          # expanded token-expert rows
+        flops  = 2 * M_work * N * K     # N already encodes the SwiGLU 2x on gate/up
+
+    Roofline -- bytes moved:
+        E_active       = E * (1 - ((E - topk)/E)^tokens)   # uniform-routing estimate
+        bytes_read_A   = M_work * K * input_bpe            # gathered activations
+        bytes_read_B   = E_active * N * K * weight_bpe
+        bytes_write_C  = M_work * N * output_bpe
+        Total          = bytes_read_A + bytes_read_B + bytes_write_C
+    """
+
+    category = "MoE_unfused"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        input_dims = args["Input Dims"]
+        input_types = args.get("Input type", [])
+
+        if len(input_dims) < 9:
+            raise ValueError(
+                f"Expected >=9 Input Dims for invoke_fused_moe_kernel, got {len(input_dims)}"
+            )
+
+        b_shape = input_dims[1]  # [E, N, K]
+        if len(b_shape) != 3:
+            raise ValueError(
+                f"Expected 3D weight tensor at Input Dims[1], got {b_shape}"
+            )
+        num_experts, N, K = b_shape
+
+        topk_ids_shape = input_dims[8]  # [tokens, topk]
+        if len(topk_ids_shape) != 2:
+            raise ValueError(
+                f"Expected 2D topk_ids at Input Dims[8], got {topk_ids_shape}"
+            )
+        num_tokens, topk = topk_ids_shape
+        m_work = num_tokens * topk
+
+        input_dtype = input_types[0] if len(input_types) > 0 else None
+        weight_dtype = input_types[1] if len(input_types) > 1 else None
+        output_dtype = (
+            input_types[3] if len(input_types) > 3 and input_types[3] else input_dtype
+        )
+
+        return {
+            "m_work": m_work,
+            "num_tokens": num_tokens,
+            "topk": topk,
+            "N": N,
+            "K": K,
+            "num_experts": num_experts,
+            "input_dtype": input_dtype,
+            "weight_dtype": weight_dtype,
+            "output_dtype": output_dtype,
+        }
+
+    def flops(self):
+        p = self.param_details
+        return 2 * p["m_work"] * p["N"] * p["K"]
+
+    def bytes(self):
+        p = self.param_details
+        input_bpe = DTYPE_TO_BYTES.get(p["input_dtype"], 2)
+        weight_bpe = DTYPE_TO_BYTES.get(p["weight_dtype"], 1)
+        output_bpe = DTYPE_TO_BYTES.get(p["output_dtype"], 2)
+
+        if None in {input_bpe, weight_bpe, output_bpe}:
+            return None
+
+        E = p["num_experts"]
+        topk = p["topk"]
+        num_tokens = p["num_tokens"]
+        # Uniform routing estimate of unique active experts across the token batch.
+        e_active = E * (1 - ((E - topk) / E) ** num_tokens) if E > 0 else 0
+
+        a_read = p["m_work"] * p["K"] * input_bpe
+        b_read = e_active * p["N"] * p["K"] * weight_bpe
+        c_write = p["m_work"] * p["N"] * output_bpe
+
+        return a_read + b_read + c_write
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for fused MoE is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for fused MoE is not defined.")
+
+    def get_compute_precision(self):
+        # Weights are fp8 and activations are dynamically quantized to fp8 before
+        # the MFMA, so the dominant matrix-engine dtype is fp8.
+        dtype = self.param_details.get("weight_dtype")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "matrix"
+
+
+# ==============================================================================
 # MoE GPTQ/AWQ Performance Models (vllm::outplace_fused_experts)
 # ==============================================================================
 

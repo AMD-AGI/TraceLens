@@ -36,6 +36,7 @@ TARGET_MID = 87.5
 MIN_PITEM_IMPACT_SCORE = (
     0.5  # Group-sum (% E2E) below which a finding is dropped from priority_data.json.
 )
+UNMODELED_E2E_THRESHOLD = 4.0  # Summed %E2E (per op-name, across shapes) above which an unmodeled op becomes a non-quantifiable low-priority finding.
 _EFF_BUCKET_BOUNDARIES = (30, 60)
 
 _OP_NAME_LIBRARY_RULES = [
@@ -118,22 +119,6 @@ _SKIP_PY_PATTERNS = (
     "vllm/compilation/",
     "/tmp/torchinductor",
     "kernel_shape_profiler",
-)
-
-_KNOWN_PKG_ANCHORS = (
-    "sglang/",
-    "vllm/",
-    "aiter/",
-    "fbgemm_gpu/",
-    "sgl_kernel/",
-    "torchrec/",
-    "components/",
-    "megatron/",
-    "transformers/",
-    "model/",
-    "deepspeed/",
-    "flash_attn/",
-    "ops/",
 )
 
 
@@ -466,11 +451,7 @@ def _match_fusion_op(kd_str: str, fusion_map: Dict[str, str]) -> Optional[str]:
 
 
 def _extract_launcher_path(call_stack_str: str, op_name: str) -> str:
-    """Return the first non-infrastructure .py frame from a call stack, relativized.
-
-    Absolute container prefixes are stripped using ``_KNOWN_PKG_ANCHORS``; unknown
-    roots fall back to the last 3 path segments.
-    """
+    """Return the first non-infrastructure .py frame from a call stack."""
     if not call_stack_str or call_stack_str == "nan":
         return ""
     frames = [f.strip() for f in call_stack_str.split(" => ")]
@@ -481,14 +462,6 @@ def _extract_launcher_path(call_stack_str: str, op_name: str) -> str:
             continue
         if any(p in frame for p in _SKIP_PY_PATTERNS):
             continue
-        for anchor in _KNOWN_PKG_ANCHORS:
-            idx = frame.rfind(anchor)
-            if idx > 0:
-                return frame[idx:]
-        if frame.startswith("/") or frame.startswith("./"):
-            parts = frame.lstrip("./").split("/")
-            if len(parts) > 3:
-                return "/".join(parts[-4:])
         return frame
     return ""
 
@@ -831,6 +804,80 @@ def build_category_findings(
     findings.sort(key=lambda f: f["impact_score"], reverse=True)
     for rank, f in enumerate(findings, start=1):
         f["rank"] = rank
+    return findings
+
+
+def build_unmodeled_significant_findings(
+    operations: List[dict],
+    category: str,
+    start_rank: int = 1,
+) -> List[dict]:
+    """Emit non-quantifiable findings for significant ops that have no perf model.
+
+    Contributions are summed by op-name across shapes before thresholding (so a
+    collective fragmented across token shapes is judged on its combined %E2E).
+    Findings carry ``impact_score = None`` and rank from ``start_rank`` after the
+    category's quantified findings.
+    """
+    aggregated = {}
+    for op in operations:
+        eff = op.get("efficiency") or {}
+        if eff.get("efficiency_percent") is not None:
+            continue
+        pct = op.get("percent_of_total")
+        if pct is None:
+            continue
+        if (op.get("time_ms") or 0) <= 0:
+            continue
+        if op.get("fusion_flagged"):
+            continue
+        name = op.get("name", "Unknown")
+        agg = aggregated.setdefault(
+            name,
+            {"percent_of_total": 0.0, "time_ms": 0.0, "n_shapes": 0, "library": None},
+        )
+        agg["percent_of_total"] += pct
+        agg["time_ms"] += op.get("time_ms", 0) or 0
+        agg["n_shapes"] += 1
+        if agg["library"] is None:
+            agg["library"] = op.get("library")
+
+    qualifying = [
+        (name, agg)
+        for name, agg in aggregated.items()
+        if agg["percent_of_total"] > UNMODELED_E2E_THRESHOLD
+    ]
+    qualifying.sort(key=lambda item: item[1]["percent_of_total"], reverse=True)
+
+    findings = []
+    for offset, (name, agg) in enumerate(qualifying):
+        member = {
+            "operation": name,
+            "category": category,
+            "type": "unmodeled_significant",
+            "impact_score": None,
+            "impact_score_low": None,
+            "impact_score_high": None,
+            "efficiency_pct": None,
+            "bound_type": None,
+            "library": agg["library"],
+            "time_ms": round(agg["time_ms"], 3),
+            "percent_of_total": round(agg["percent_of_total"], 2),
+            "n_shapes": agg["n_shapes"],
+        }
+        findings.append(
+            {
+                "bound_type": "unmodeled",
+                "library": agg["library"] or "Unknown",
+                "eff_bucket": "unknown",
+                "impact_score": None,
+                "impact_score_low": None,
+                "impact_score_high": None,
+                "member_count": 1,
+                "members": [member],
+                "rank": start_rank + offset,
+            }
+        )
     return findings
 
 
