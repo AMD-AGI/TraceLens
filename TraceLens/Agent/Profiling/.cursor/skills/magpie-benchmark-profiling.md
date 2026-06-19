@@ -284,7 +284,7 @@ If the YAML already has an `EXTRA_VLLM_ARGS` field with existing flags, **append
 **This patch is always required when using delay + max iterations.** The `run_benchmark_serving` function in `benchmark_lib.sh` **unconditionally overrides** `num_prompts` when `PROFILE=1` — this happens *after* parsing the `--num-prompts` argument, so it stomps whatever value the calling script (e.g. `vllm_mi300x.sh`) passes. Do NOT skip this patch even if the calling script already sets a larger `--num-prompts`. Without this fix, the benchmark finishes before the delay window is reached, and no steady-state trace is captured.
 
 ```bash
-ssh <node> "sed -i 's/num_prompts=\"\$((max_concurrency \* 1))\"/num_prompts=\"\$((max_concurrency * 10))\"/' \
+ssh <node> "sed -i 's/num_prompts=\"\$max_concurrency\"/num_prompts=\"\$((max_concurrency * 10))\"/' \
   <magpie_repo>/InferenceX/benchmarks/benchmark_lib.sh"
 ```
 
@@ -316,7 +316,7 @@ SGLang will skip `start_step` engine iterations (warmup), then profile for `num_
 This is the same patch as for vLLM — `benchmark_lib.sh` is shared between both frameworks:
 
 ```bash
-ssh <node> "sed -i 's/num_prompts=\"\$((max_concurrency \* 1))\"/num_prompts=\"\$((max_concurrency * 10))\"/' \
+ssh <node> "sed -i 's/num_prompts=\"\$max_concurrency\"/num_prompts=\"\$((max_concurrency * 10))\"/' \
   <magpie_repo>/InferenceX/benchmarks/benchmark_lib.sh"
 ```
 
@@ -553,7 +553,7 @@ In the Python config dataclass, `TorchProfilerConfig.enabled` defaults to `True`
 
 ### 8. `benchmark_lib.sh` unconditionally overrides `num_prompts` when profiling
 
-When `PROFILE=1`, the `run_benchmark_serving` function in `benchmark_lib.sh` **unconditionally** sets `num_prompts="$((max_concurrency * 1))"` *after* parsing all `--num-prompts` arguments. This means even if the calling benchmark script (e.g. `vllm_mi300x.sh`) explicitly passes `--num-prompts $(( $CONC * 10 ))`, that value gets overwritten. When using `delay_iterations` + `max_iterations` for steady-state profiling, you **must** patch `benchmark_lib.sh` to increase this multiplier, otherwise the benchmark ends before the profiling window starts and no trace is captured.
+When `PROFILE=1`, the `run_benchmark_serving` function in `benchmark_lib.sh` **unconditionally** sets `num_prompts="$max_concurrency"` *after* parsing all `--num-prompts` arguments. This means even if the calling benchmark script (e.g. `vllm_mi300x.sh`) explicitly passes `--num-prompts $(( $CONC * 10 ))`, that value gets overwritten. When using `delay_iterations` + `max_iterations` for steady-state profiling, you **must** patch `benchmark_lib.sh` to increase this multiplier, otherwise the benchmark ends before the profiling window starts and no trace is captured.
 
 ### 9. The `hf_cache_path` field avoids re-downloading models
 
