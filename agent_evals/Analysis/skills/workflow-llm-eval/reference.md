@@ -4,24 +4,11 @@ Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
+# Workflow LLM eval — reference
+
+Detailed rubric and output format for **workflow-llm-eval** ([SKILL.md](SKILL.md)) — eval 12 (Appendix hardware reference) only.
+
 ---
-name: Workflow LLM Eval
-description: Run LLM-based workflow eval (eval 12 only) on an analysis output and produce a results CSV.
-triggers:
-  - workflow LLM eval
-  - run workflow LLM eval
-tools:
-  - file_read
-  - file_write
----
-
-# Workflow LLM Eval
-
-Evaluate the analysis report's Appendix for correct hardware reference values.
-
-**Note:** Evals 9, 10, 11, 13, and 14 have been converted to deterministic Python
-checks in `workflow_scripted_evals.py`. This skill now only handles eval 12 (Hardware
-Reference in Appendix), which requires semantic reasoning about hardware values.
 
 ## Inputs
 

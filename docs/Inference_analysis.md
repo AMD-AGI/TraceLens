@@ -59,7 +59,7 @@ There are two ways to collect inference traces for TraceLens analysis:
 
 #### Option A: Use the Profiling Agent (recommended)
 
-Follow [`TraceLens/Agent/Profiling/README.md`](../TraceLens/Agent/Profiling/README.md). The skill handles trace collection and splitting end-to-end; you can skip the rest of Step 2 and Step 3.
+Follow [`TraceLens/Agent/Profiling/README.md`](../TraceLens/Agent/Profiling/README.md); the agentic skill files live under `TraceLens/Agent/Profiling/skills/magpie-benchmark-profiling/`. The skill handles trace collection and splitting end-to-end; you can skip the rest of Step 2 and Step 3.
 
 #### Option B: Manual Profiling
 

@@ -364,7 +364,7 @@ def _run_experiment(args: argparse.Namespace) -> None:
     )
     prompt = (
         "Follow the analysis orchestrator installed with the TraceLens pip package "
-        "(look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) "
+        "(look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) "
         "and run the full workflow "
         f"{trace_and_platform}\n\n"
     )

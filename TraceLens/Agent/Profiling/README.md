@@ -8,7 +8,7 @@ See LICENSE for license information.
 
 > **⚠️ Experimental**: This feature is under active development and may change.
 
-The TraceLens Agentic Profiling module drives LLM inference benchmarking and PyTorch profiler trace collection using the [Magpie](https://github.com/AMD-AGI/Magpie) framework. A skill coordinates environment setup, Docker image patching, profiler-window tuning, benchmark execution, trace verification, and trace splitting — producing traces that are ready for the [TraceLens Analysis Orchestrator](../Analysis/README.md). Supports vLLM and SGLang, in eager or graph-replay + capture mode.
+The TraceLens Agentic Profiling module drives LLM inference benchmarking and PyTorch profiler trace collection using the [Magpie](https://github.com/AMD-AGI/Magpie) framework. The **magpie-benchmark-profiling** skill (`TraceLens/Agent/Profiling/skills/magpie-benchmark-profiling/`) coordinates environment setup, Docker image patching, profiler-window tuning, benchmark execution, trace verification, and trace splitting — producing traces that are ready for the [TraceLens Analysis Orchestrator](../Analysis/README.md). Supports vLLM and SGLang, in eager or graph-replay + capture mode.
 
 ---
 
@@ -45,6 +45,8 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 
 > **Note**: The instructions below use the Cursor IDE and CLI (`agent`), but the skill is portable. It also works with Claude Code CLI (`claude`) and other agentic runners that support skill file discovery.
 
+> **Skill paths in the package:** The profiling skill lives under `TraceLens/Agent/Profiling/skills/magpie-benchmark-profiling/` (`SKILL.md` + `reference.md`). Cursor’s default project skill discovery uses `.cursor/skills/`; symlink or copy `skills/magpie-benchmark-profiling` there if your workflow relies on automatic skill pickup.
+
 ### To run via Cursor chat:
 
 1. **In a Cursor chat with Claude Opus 4.7 High, invoke:**
@@ -74,7 +76,7 @@ Then pass all parameters inline so no prompts are needed:
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the Magpie Benchmark + Profiling skill installed with TraceLens and run the benchmark + trace collection workflow on <path_to_config.yaml>, node <node>, conda env <env>, Docker image patched <yes|no, vllm_version=vXX or sglang gpu_type=<gpu_type> if no>, profiling mode <targeted|full>, output to <workspace_dir>"
+    "Follow the Magpie Benchmark + Profiling skill installed with the TraceLens pip package (look under TraceLens/Agent/Profiling/skills/magpie-benchmark-profiling/ in the package installation directory) and run the benchmark + trace collection workflow on <path_to_config.yaml>, node <node>, conda env <env>, Docker image patched <yes|no, vllm_version=vXX or sglang gpu_type=<gpu_type> if no>, profiling mode <targeted|full>, output to <workspace_dir>"
 ```
 
 If you only plan to run profiling interactively through the Cursor IDE chat, you can skip installing the CLI.
@@ -131,7 +133,7 @@ The **Magpie Benchmark + Profiling** skill coordinates the entire trace-collecti
 | Framework | Build Script (patched image) | Targeted-Window Mechanism |
 |-----------|------------------------------|---------------------------|
 | **vLLM** (`framework: vllm`) | `examples/custom_workflows/inference_analysis/build_docker_vllm.sh <version_tag>` | `EXTRA_VLLM_ARGS` profiler-config flags + `benchmark_lib.sh` `num_prompts` patch |
-| **SGLang** (`framework: sglang`) | `examples/custom_workflows/inference_analysis/build_docker_sglang_v059.sh <gpu_type>` | `benchmark_serving.py` `start_step`/`num_steps` patch + `benchmark_lib.sh` `num_prompts` patch |
+| **SGLang** (`framework: sglang`) | `examples/custom_workflows/inference_analysis/build_docker_sglang.sh` (`--sglang-version`, `--gpu-type`) | `benchmark_serving.py` `start_step`/`num_steps` patch + `benchmark_lib.sh` `num_prompts` patch |
 
 The skill parses the `case` blocks of these scripts at runtime to discover currently supported tags.
 

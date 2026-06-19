@@ -4,14 +4,15 @@ Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
----
-name: magpie-benchmark-profiling
-description: Run Magpie LLM inference benchmarks (vLLM/SGLang) and collect PyTorch profiler traces on remote GPU nodes. Use when the user asks to benchmark, profile, or collect traces for LLM inference workloads using the Magpie framework.
----
+# Magpie benchmark + profiling — reference
 
-# Magpie Benchmark + Profiling
+This file is the detailed specification for the TraceLens **magpie-benchmark-profiling** skill ([SKILL.md](SKILL.md)). Use it for every operational step: environment gathering, Docker patch builds, YAML and Magpie script edits, benchmark execution, trace verification, splitting, and pitfalls.
 
-Run LLM inference benchmarks via the Magpie framework and collect PyTorch profiler traces for downstream analysis.
+## Workflow overview
+
+Steps **0–6**: collect SSH/conda details, read the Magpie YAML, optionally build a TraceLens-patched inference Docker image, enable and tune the PyTorch profiler (targeted steady-state vs full run), run `python -m Magpie benchmark` on the remote node, verify trace quality, then split rank-0 traces with `split_inference_trace_annotation` and print the suggested `generate_perf_report_pytorch_inference.py` command for downstream analysis.
+
+---
 
 ## Prerequisites
 
