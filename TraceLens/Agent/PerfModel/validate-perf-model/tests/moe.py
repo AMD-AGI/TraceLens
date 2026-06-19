@@ -611,6 +611,139 @@ def test_ck_moe_stage2(
 
 
 # ---------------------------------------------------------------------------
+# 6. SGLang Triton fused-MoE grouped GEMM (single invoke_fused_moe_kernel)
+# ---------------------------------------------------------------------------
+
+def test_sglang_fused_moe_triton_invoke(
+    M, N, K, E, topk,
+    in_dtype="bf16",
+    w_dtype="fp8",
+    out_dtype="bf16",
+    num_warmup=3,
+    **_,
+):
+    """A single SGLang Triton ``invoke_fused_moe_kernel`` (gate/up grouped GEMM).
+
+    Drives exactly one ``fused_moe_kernel`` dispatch per iteration so the
+    rocprofv3 counters line up with the per-event prediction of
+    ``moe_triton_invoke_grouped_gemm`` (one grouped GEMM, FP8 weights).
+
+    Shapes follow the gate/up pass: A = (M, K), B = (E, N, K) where N = 2*inter,
+    K = hidden; the kernel writes C = (M*topk, N).
+
+    Notes
+    -----
+    SGLang's low-level helpers (``moe_align_block_size``,
+    ``try_get_optimal_moe_config``, ``invoke_fused_moe_kernel``) live under
+    ``sglang.srt.layers.moe.fused_moe_triton.fused_moe``; their exact import
+    path / signature can shift across SGLang releases. If an import or argument
+    mismatch occurs, pin the harness to the target SGLang version.
+    """
+    import torch
+
+    from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_kernels import (
+        invoke_fused_moe_kernel,
+    )
+    from sglang.srt.layers.moe.moe_runner.triton_utils.moe_align_block_size import (
+        moe_align_block_size,
+    )
+    from sglang.srt.layers.moe.moe_runner.triton_utils import (
+        fused_moe_triton_kernels as _fmk,
+    )
+    from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_config import (
+        try_get_optimal_moe_config,
+    )
+
+    torch.set_default_device("cuda")
+    out_t = _resolve_dtype(out_dtype)
+    fp8_t = _resolve_dtype("fp8")
+    if w_dtype != "fp8":
+        raise ValueError(f"sglang fused_moe invoke harness requires fp8 weights, got {w_dtype}")
+
+    # The fp8_w8a8 path (block_shape=None) quantizes the BF16 activations to fp8
+    # *inside* invoke_fused_moe_kernel via scaled_fp8_quant; A must therefore be
+    # passed as BF16 with A_scale=None (dynamic). The kernel reads
+    # K = B.shape[-1] - padding_size, so the weight K dim is padded.
+    pad = int(getattr(_fmk, "padding_size", 0) or 0)
+
+    print(
+        f"test: sglang_fused_moe_triton_invoke M={M} K={K} N={N} E={E} topk={topk} "
+        f"in={in_dtype} w={w_dtype} out={out_dtype} pad={pad}",
+        flush=True,
+    )
+
+    # Routing.
+    hidden = torch.randn(M, K, dtype=out_t)
+    gating = torch.randn(M, E, dtype=torch.float32)
+    topk_weights, topk_ids = torch.topk(torch.softmax(gating, dim=-1), topk, dim=-1)
+    topk_weights = topk_weights.to(torch.float32).contiguous()
+    topk_ids = topk_ids.to(torch.int32).contiguous()
+
+    # FP8 expert weights with per-tensor (per-expert scalar) scales; K dim padded.
+    w1 = (torch.randn(E, N, K + pad, dtype=out_t) / 10).to(fp8_t)
+    w1_scale = torch.ones(E, dtype=torch.float32)
+    out = torch.empty(M * topk, N, dtype=out_t)
+
+    config = {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
+    try:
+        get_config = try_get_optimal_moe_config(
+            (E, N, K), (E, K, N), topk, "fp8_w8a8", M,
+        )
+        if isinstance(get_config, dict) and get_config:
+            config = get_config
+    except Exception as exc:  # noqa: BLE001 - fall back to the static config
+        print(f"test: using fallback config ({exc})", flush=True)
+
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+        topk_ids, config["BLOCK_SIZE_M"], E,
+    )
+
+    def _run():
+        invoke_fused_moe_kernel(
+            hidden, w1, None, out,
+            None, w1_scale, None,
+            topk_weights, topk_ids,
+            sorted_token_ids, expert_ids, num_tokens_post_padded,
+            False, topk,
+            config,
+            tl_dtype_for(out_t),
+            use_fp8_w8a8=True,
+            use_int8_w8a8=False,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+            per_channel_quant=False,
+            block_shape=None,
+        )
+
+    for _ in range(num_warmup):
+        _run()
+    torch.cuda.synchronize()
+    print("test: measured iteration...", flush=True)
+    _run()
+    torch.cuda.synchronize()
+    print(f"test: done, shape={out.shape}", flush=True)
+
+
+def tl_dtype_for(torch_dtype):
+    """Map a torch dtype to the Triton compute_type expected by fused_moe_kernel."""
+    import triton.language as tl
+    import torch
+
+    return {
+        torch.bfloat16: tl.bfloat16,
+        torch.float16: tl.float16,
+        torch.float32: tl.float32,
+    }.get(torch_dtype, tl.bfloat16)
+
+
+# ---------------------------------------------------------------------------
 # OP_METADATA
 # ---------------------------------------------------------------------------
 
@@ -669,5 +802,16 @@ OP_METADATA: dict = {
             "in_dtype": "fp8",
         },
         "required_args": ["M", "N", "K"],
+    },
+    "sglang_fused_moe_triton_invoke": {
+        "fn":           test_sglang_fused_moe_triton_invoke,
+        "category":     "MoE",
+        "description":  "SGLang Triton fused-MoE grouped GEMM (invoke_fused_moe_kernel)",
+        "dtypes":       ["fp8"],
+        "defaults":     {
+            "M": 15360, "N": 1536, "K": 2048, "E": 128, "topk": 8,
+            "in_dtype": "bf16", "w_dtype": "fp8", "out_dtype": "bf16",
+        },
+        "required_args": ["M", "N", "K", "E", "topk"],
     },
 }
