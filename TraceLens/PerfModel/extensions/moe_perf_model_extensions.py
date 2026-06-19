@@ -1407,6 +1407,7 @@ class moe_flydsl_stage2(UnfusedMoE_Down):
     def get_maf_type(self):
         return "matrix"
 
+
 # ==============================================================================
 # SGLang Triton fused-MoE grouped GEMM (single invoke_fused_moe_kernel launch)
 # ==============================================================================
@@ -1534,7 +1535,8 @@ class moe_triton_invoke_grouped_gemm:
 
     def get_maf_type(self):
         return "matrix"
-        
+
+
 # ==============================================================================
 # MoE GPTQ/AWQ Performance Models (vllm::outplace_fused_experts)
 # ==============================================================================
