@@ -22,6 +22,7 @@ Matching uses ``gpu_op_uid`` values from ``df_unified_perf``.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -237,12 +238,22 @@ def _build_lca_metadata(
         return out
 
     lca_trace2_time = trace2.groupby("lowest_common_ancestor_id")["busy_time"].first()
+    # Number of trace2 kernel invocations per LCA group. lca_count_trace2 reports
+    # the count of the *dominant* mapped LCA (the one contributing the most trace2
+    # kernel time) so it is comparable to trace1's op-invocation count -- rather
+    # than the number of matched LCA groups, which is meaningless as an op count
+    # for ops that span multiple LCAs (e.g. a custom all-reduce whose op owns both
+    # a MemCpy and an AllReduce LCA).
+    lca_trace2_count = trace2.groupby("lowest_common_ancestor_id").size()
 
     for lca_id, grp in trace1.groupby("lowest_common_ancestor_id"):
         t1_total = float(grp["busy_time"].iloc[0])
 
         t2_total = float(lca_trace2_time.get(lca_id, 0.0))
         has_trace2_match = bool(_trace2_gpu_op_uid_set_for_lca(trace2, lca_id))
+        t2_count_this_lca = (
+            int(lca_trace2_count.get(lca_id, 0)) if has_trace2_match else 0
+        )
 
         names = grp["lowest_common_ancestor_name"].dropna()
         lca_display_name = str(names.iloc[0]) if not names.empty else None
@@ -261,7 +272,8 @@ def _build_lca_metadata(
                     "lca_names": [lca_display_name],
                     "lca_total_kernel_time_trace1_us": t1_total,
                     "lca_total_kernel_time_trace2_us": t2_total,
-                    "lca_count_trace2": 1 if has_trace2_match else 0,
+                    "lca_count_trace2": t2_count_this_lca,
+                    "_dominant_t2_time": t2_total,
                 }
             else:
                 existing = out[key]
@@ -270,8 +282,13 @@ def _build_lca_metadata(
                     existing["lca_names"].append(lca_display_name)
                     existing["lca_total_kernel_time_trace1_us"] += t1_total
                     existing["lca_total_kernel_time_trace2_us"] += t2_total
-                    if has_trace2_match:
-                        existing["lca_count_trace2"] += 1
+                    if t2_total > existing["_dominant_t2_time"]:
+                        existing["_dominant_t2_time"] = t2_total
+                        existing["lca_count_trace2"] = t2_count_this_lca
+
+    # Drop the private dominant-time helper so the output schema is unchanged.
+    for meta in out.values():
+        meta.pop("_dominant_t2_time", None)
 
     return out
 
@@ -349,6 +366,112 @@ def _enrich_sheet_with_trace2(
     _ins("lca_total_kernel_time_trace2_us", lca_t2)
 
     return df
+
+
+def aligned_trace2_summary_by_category(
+    diff_stats_df: pd.DataFrame,
+    df_unified_perf: pd.DataFrame,
+    unified_perf_summary: pd.DataFrame,
+    category_col: str = "op category",
+) -> List[Dict[str, Any]]:
+    """Roll trace2 kernel time up to **trace1** categories via the LCA alignment.
+
+    The per-trace ``ops_summary_by_category`` of trace2 is computed from
+    trace2's *own* categorization, which does not survive a cross-framework
+    comparison (e.g. a vLLM custom all-reduce attributed to a compute-kernel
+    category vs. an SGLang NCCL collective counted as exposed communication).
+    Joining the two per-trace breakdowns by category *name* therefore produces
+    spurious near-zero trace2 times for categories that exist on only one side.
+
+    This helper instead attributes each diff_stats LCA group's trace2 time to a
+    single trace1 category -- the category that owns the largest share of that
+    LCA's trace1 kernel time -- so the resulting per-category totals are aligned
+    with the same semantic blocks the Detailed Analysis cards already use.
+
+    Returns a list of dicts matching the ``trace2_ops_summary_by_category``
+    schema (``op category``, ``Count``, ``total_direct_kernel_time_ms``,
+    ``Percentage (%)``, ``Cumulative Percentage (%)``), sorted by time desc.
+    Returns ``[]`` when alignment data is unavailable (caller should fall back).
+    """
+    if (
+        diff_stats_df is None
+        or diff_stats_df.empty
+        or df_unified_perf is None
+        or df_unified_perf.empty
+        or unified_perf_summary is None
+        or unified_perf_summary.empty
+        or category_col not in unified_perf_summary.columns
+    ):
+        return []
+
+    uid_to_row_idx = _build_uid_to_row_idx(df_unified_perf, unified_perf_summary)
+    if not uid_to_row_idx:
+        return []
+
+    row_idx_to_cat: Dict[Any, str] = {
+        idx: str(unified_perf_summary.at[idx, category_col])
+        for idx in unified_perf_summary.index
+    }
+
+    df = diff_stats_df.dropna(subset=["lowest_common_ancestor_id"])
+    if df.empty:
+        return []
+    trace1 = df[df["source"] == "trace1"]
+    trace2 = df[df["source"] == "trace2"]
+    if trace1.empty:
+        return []
+
+    lca_trace2_time = trace2.groupby("lowest_common_ancestor_id")["busy_time"].first()
+    lca_trace2_count = trace2.groupby("lowest_common_ancestor_id").size()
+
+    cat_time_us: Dict[str, float] = defaultdict(float)
+    cat_count: Dict[str, int] = defaultdict(int)
+
+    for lca_id, grp in trace1.groupby("lowest_common_ancestor_id"):
+        # Pick the dominant trace1 category for this LCA, weighting each mapped
+        # summary row by its diff_stats kernel_time.
+        cat_weight: Dict[str, float] = defaultdict(float)
+        for _, row in grp.iterrows():
+            key = _resolve_diff_row_to_key(row, uid_to_row_idx)
+            if key is None:
+                continue
+            cat = row_idx_to_cat.get(key)
+            if cat is None:
+                continue
+            try:
+                kt = float(row.get("kernel_time", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                kt = 0.0
+            cat_weight[cat] += kt
+        if not cat_weight:
+            continue
+        dominant_cat = max(cat_weight.items(), key=lambda kv: kv[1])[0]
+
+        t2_us = float(lca_trace2_time.get(lca_id, 0.0) or 0.0)
+        cat_time_us[dominant_cat] += t2_us
+        cat_count[dominant_cat] += int(lca_trace2_count.get(lca_id, 0))
+
+    if not cat_time_us:
+        return []
+
+    total_ms = sum(cat_time_us.values()) / 1000.0
+    rows = sorted(cat_time_us.items(), key=lambda kv: kv[1], reverse=True)
+    summary: List[Dict[str, Any]] = []
+    cumulative = 0.0
+    for cat, time_us in rows:
+        time_ms = time_us / 1000.0
+        pct = (time_ms / total_ms * 100.0) if total_ms > 0 else 0.0
+        cumulative += pct
+        summary.append(
+            {
+                "op category": cat,
+                "Count": cat_count.get(cat, 0),
+                "total_direct_kernel_time_ms": round(time_ms, 10),
+                "Percentage (%)": round(pct, 10),
+                "Cumulative Percentage (%)": round(cumulative, 10),
+            }
+        )
+    return summary
 
 
 def enrich_perf_report_dict_inplace(

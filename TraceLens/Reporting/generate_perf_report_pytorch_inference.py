@@ -989,6 +989,20 @@ def generate_perf_report_pytorch(
                 )
                 dict_name2df["diff_stats"] = _tracediff_diff_stats
 
+                from TraceLens.Reporting.tracediff_comparison_extension import (
+                    aligned_trace2_summary_by_category,
+                )
+
+                _aligned_t2 = aligned_trace2_summary_by_category(
+                    _tracediff_diff_stats,
+                    df_unified_perf,
+                    df_unified_perf_summary,
+                )
+                if _aligned_t2:
+                    dict_name2df["trace2_aligned_by_category"] = pd.DataFrame(
+                        _aligned_t2
+                    )
+
             if include_overlap_info:
                 df_unified_perf_summary_overlapping_kernels = (
                     perf_analyzer.summarize_df_unified_perf_table(

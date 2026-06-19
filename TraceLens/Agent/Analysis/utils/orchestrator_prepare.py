@@ -18,7 +18,7 @@ import re
 import sys
 import traceback
 from collections import defaultdict
-from typing import Any
+from typing import Any, Optional
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -737,6 +737,26 @@ def _build_trace2_ops_summary_by_enhanced_category(trace2_csv_dir: str) -> list:
     return json.loads(grouped.to_json(orient="records"))
 
 
+def _load_trace2_aligned_by_category(trace1_csv_dir: str) -> Optional[list]:
+    """Load the semantic-aligned trace2 per-category summary, if present.
+
+    The perf-report script writes ``trace2_aligned_by_category.csv`` into the
+    trace1 CSV dir when a precomputed/in-memory diff is enriched. Unlike the
+    per-framework ``_build_trace2_ops_summary_by_enhanced_category`` (which
+    categorizes trace2 by its own op names), this rolls trace2 kernel time up
+    to *trace1* categories via the LCA alignment, so the comparative Top-Ops
+    table compares like-for-like across frameworks. Returns ``None`` when the
+    artifact is absent (caller falls back to the per-framework breakdown).
+    """
+    aligned_path = os.path.join(trace1_csv_dir, "trace2_aligned_by_category.csv")
+    if not os.path.isfile(aligned_path):
+        return None
+    df = pd.read_csv(aligned_path)
+    if df.empty or "op category" not in df.columns:
+        return None
+    return json.loads(df.to_json(orient="records"))
+
+
 def _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline: pd.DataFrame) -> dict:
     """Build the same gpu_utilization dict used in category_manifest from gpu_timeline.csv rows."""
     gpu_data = {}
@@ -868,9 +888,28 @@ def main():
             os.path.join(output_dir, "metadata", "trace2_gpu_utilization.json"), "w"
         ) as f:
             json.dump(trace2_gpu_utilization, f, indent=2)
-        trace2_ops_summary_by_category = _build_trace2_ops_summary_by_enhanced_category(
-            trace2_csv_dir
+        # Per-framework breakdown (trace2 categorized by its own op names). Kept
+        # for reference; it mis-compares when frameworks differ (the source of
+        # the 0 ms Top-Ops artifact).
+        trace2_ops_summary_by_category_raw = (
+            _build_trace2_ops_summary_by_enhanced_category(trace2_csv_dir)
         )
+        # Preferred: trace2 time rolled up to trace1 categories via the semantic
+        # LCA alignment. Falls back to the per-framework breakdown when the
+        # aligned artifact is unavailable (e.g. no diff was enriched).
+        trace2_aligned = _load_trace2_aligned_by_category(trace1_csv_dir)
+        if trace2_aligned is not None:
+            trace2_ops_summary_by_category = trace2_aligned
+            print(
+                "  trace2_ops_summary_by_category: using semantic-aligned "
+                "per-category totals (LCA-mapped to trace1 categories)"
+            )
+        else:
+            trace2_ops_summary_by_category = trace2_ops_summary_by_category_raw
+            print(
+                "  trace2_ops_summary_by_category: aligned artifact missing; "
+                "falling back to per-framework breakdown"
+            )
 
     print(f"\nGPU Utilization Metrics:")
     print(f"  Total Time: {gpu_utilization_metrics['total_time_ms']:.2f} ms")
@@ -1524,6 +1563,9 @@ def main():
     if comparison_scope == "comparative" and trace2_gpu_utilization is not None:
         manifest["trace2_gpu_utilization"] = trace2_gpu_utilization
         manifest["trace2_ops_summary_by_category"] = trace2_ops_summary_by_category
+        manifest["trace2_ops_summary_by_category_raw"] = (
+            trace2_ops_summary_by_category_raw
+        )
 
     manifest_file = f"{output_dir}/category_data/category_manifest.json"
     with open(manifest_file, "w") as f:
