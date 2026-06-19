@@ -374,6 +374,8 @@ class moe_aiter_fused_blockscale(FusedMoE):
 
     def get_compute_precision(self):
         dtype = self.param_details.get("input_dtype")
+        if not dtype:
+            return None
         return "fp8" if dtype == "fp8" or dtype == "bf16" else torch_dtype_map(dtype)
 
     def get_maf_type(self):
