@@ -371,7 +371,9 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
         if is_comparative
         else _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
     )
-    valid_args, valid_paths, valid_kernel_names = _load_compute_data_metrics(metrics_path)
+    valid_args, valid_paths, valid_kernel_names = _load_compute_data_metrics(
+        metrics_path
+    )
     lines = content.splitlines()
     errors = []
     for start, end in _iter_compute_candidate_blocks(content):
@@ -411,7 +413,12 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
                         f"operations[].launcher_path in {cat_metrics_basename} "
                         f"(paste verbatim): {cells[kp_idx]}"
                     )
-            if valid_kernel_names and kn_idx < len(cells) and cells[kn_idx] and cells[kn_idx] != "—":
+            if (
+                valid_kernel_names
+                and kn_idx < len(cells)
+                and cells[kn_idx]
+                and cells[kn_idx] != "—"
+            ):
                 if cells[kn_idx] not in valid_kernel_names:
                     errors.append(
                         f"Kernel Name cell on line {row_line} does not match "

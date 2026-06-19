@@ -296,9 +296,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
 
         quantified_cats = set(quantified.keys())
         heuristic_cats = {
-            f["category"]
-            for f in findings
-            if f.get("estimate_method") == "heuristic"
+            f["category"] for f in findings if f.get("estimate_method") == "heuristic"
         }
         unmodeled = []
         for cat_entry in manifest.get("categories", []):

@@ -451,7 +451,7 @@ def _parse_call_stack(call_stack_full: str) -> List[str]:
         return []
     try:
         stack = ast.literal_eval(str(call_stack_full))
-    except Exception:   
+    except Exception:
         return []
     if not isinstance(stack, list):
         return []
@@ -509,7 +509,11 @@ def _extract_kernel_names(call_stack_full: str) -> tuple:
         return "", ""
 
     def _trunc(name: str) -> str:
-        return name[:_KERNEL_NAME_TRUNC_LEN] + "..." if len(name) > _KERNEL_NAME_TRUNC_LEN else name
+        return (
+            name[:_KERNEL_NAME_TRUNC_LEN] + "..."
+            if len(name) > _KERNEL_NAME_TRUNC_LEN
+            else name
+        )
 
     if len(kernels) == 1:
         return kernels[0], _trunc(kernels[0])
@@ -656,7 +660,9 @@ def build_operation_metrics(
                 launcher = "Not found"
 
         op_metric["launcher_path"] = launcher
-        op_metric["kernel_name"], op_metric["kernel_name_trunc"] = _extract_kernel_names(cs_str)
+        op_metric["kernel_name"], op_metric["kernel_name_trunc"] = (
+            _extract_kernel_names(cs_str)
+        )
         op_metric["module_chain"] = module_chain
         op_metric["_raw_call_stack"] = cs_str
 

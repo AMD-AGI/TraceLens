@@ -1811,7 +1811,10 @@ class TreePerfAnalyzer:
                 name = event.get("name", "")
                 if call_stack is None:
                     call_stack = []
-                if any(f in name for f in ["nn.Module", "::", "/"]) or self.event_to_category(event) == "cpu_op":
+                if (
+                    any(f in name for f in ["nn.Module", "::", "/"])
+                    or self.event_to_category(event) == "cpu_op"
+                ):
                     call_stack = call_stack + [re.sub(r"_\d+", "", name)]
 
             # Skip non-cpu_op events
@@ -2095,7 +2098,10 @@ class TreePerfAnalyzer:
                             cur = self.tree.get_parent_event(gpu_event)
                             while cur is not None and cur.get("UID") != event_uid:
                                 cname = cur.get("name", "")
-                                if any(f in cname for f in ["nn.Module", "::", "/"]) or self.event_to_category(cur) == "cpu_op":
+                                if (
+                                    any(f in cname for f in ["nn.Module", "::", "/"])
+                                    or self.event_to_category(cur) == "cpu_op"
+                                ):
                                     suffix.append(re.sub(r"_\d+", "", cname))
                                 cur = self.tree.get_parent_event(cur)
                             suffix.reverse()
@@ -2448,7 +2454,9 @@ class TreePerfAnalyzer:
 
                     per_kernel = []
                     for k in kd:
-                        chain = list(k.get("call_stack", [])) + [k.get("name", "Unknown")]
+                        chain = list(k.get("call_stack", [])) + [
+                            k.get("name", "Unknown")
+                        ]
                         per_kernel.append(chain)
 
                     if len(per_kernel) == 1:
@@ -2483,12 +2491,14 @@ class TreePerfAnalyzer:
 
             # Drop call_stack and gpu_op_uid from kernel_details_summary
             if "kernel_details_summary" in df_summary.columns:
+
                 def _drop_internal_fields(kd):
                     if isinstance(kd, list):
                         for k in kd:
                             k.pop("call_stack", None)
                             k.pop("gpu_op_uid", None)
                     return kd
+
                 df_summary["kernel_details_summary"] = df_summary[
                     "kernel_details_summary"
                 ].apply(_drop_internal_fields)

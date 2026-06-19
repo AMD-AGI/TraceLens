@@ -954,7 +954,9 @@ def generate_perf_report_pytorch(
                 if "call_stack_full" in df_unified_perf_summary.columns:
                     cs_col = df_unified_perf_summary.columns.get_loc("call_stack_full")
                     ep_results = df_unified_perf_summary.apply(
-                        lambda row: _find_entry_point(row["call_stack_full"], row["name"]),
+                        lambda row: _find_entry_point(
+                            row["call_stack_full"], row["name"]
+                        ),
                         axis=1,
                     )
                     df_unified_perf_summary.insert(
