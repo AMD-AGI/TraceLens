@@ -85,7 +85,7 @@ cat <output_dir>/category_data/<cat>_metrics.json
 
 Read `category_data/<cat>_metrics.json::category_findings`. Per [`utils/templates/sub_agent_spec.md`](../utils/templates/sub_agent_spec.md), emit one P-item per entry in ascending `rank` order. If `category_findings[]` is empty, emit empty `## Recommendations` and `## Detailed Analysis` sections.
 
-Entries whose `members[].type == "unmodeled_significant"` (op with no perf model) render as the lowest-priority non-quantifiable cards — follow [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Non-quantifiable findings.
+Entries whose `estimate_method == "heuristic"` (op with no perf model) carry a numeric **estimated** impact derived from E2E share and rank by `impact_score` like any other compute finding — follow [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Heuristic findings.
 
 **efficiency_percent semantics:**
 - **Standalone:** Treat `efficiency_percent` as **% of roofline**.
@@ -95,7 +95,7 @@ For each surviving entry:
 
 1. **Resolve what each member actually does.** Walk `members[]` and for every entry combine the `operation` name, kernel details, and `module_chain` context from `operations[]` to identify the real workload (e.g. embedding lookup, scatter/gather, custom layer). Call out miscategorization explicitly when the trace label is misleading.
 2. **Render the P-item.** Ground **Insight** / **Action** / **Reasoning for Slowdown** in the `members[]` rows (`operation`, `efficiency_pct`, `library`) plus the resolved purpose from step 1, using the Action Prose Guidance and Common Patterns below. The P-item heading must include the `(<Library>)` suffix per [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Recommendations: use `category_findings[i].library` as the value (e.g. `(vLLM)` for an aggregated InferenceAttention finding whose members are all vLLM ops). Omit the parenthetical only when the value is `Unknown`.
-3. **Annotate the Data table.** Extend the **Data:** operations table with a `Sub-Category` column from `operations[i].classification` when populated. Even when the finding has a single `members[]` row (e.g. aggregated InferenceAttention with one operation), render the canonical 9-column horizontal Operations Table from [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Operations Table Schema. Do not substitute a vertical `Metric | Value` table — that schema is system-tier only.
+3. **Annotate the Data table.** Extend the **Data:** operations table with a `Sub-Category` column from `operations[i].classification` when populated. Even when the finding has a single `members[]` row (e.g. aggregated InferenceAttention with one operation), render the canonical 10-column horizontal Operations Table from [`sub_agent_spec.md`](../utils/templates/sub_agent_spec.md) § Operations Table Schema. Do not substitute a vertical `Metric | Value` table — that schema is system-tier only.
 
 **Markers required:** wrap every `**Impact**` line in `<!-- impact-begin kind=p_item ... --> ... <!-- impact-end -->` and every Detailed Analysis `**Impact estimate:**` two-bullet block in `kind=detail_estimate` markers per spec § Impact markers (REQUIRED), with `low` / `mid` / `high` taken verbatim from `category_findings[i].impact_score{,_low,_high}`.
 
