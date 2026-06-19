@@ -37,7 +37,7 @@ jobs:
       - name: Run function-based tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py
+          pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py tests/test_call_stack_perf_report.py
 
       - name: Run rocprof report tests
         run: |

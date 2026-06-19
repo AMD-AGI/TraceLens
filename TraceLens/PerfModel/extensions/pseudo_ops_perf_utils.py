@@ -36,6 +36,7 @@ def get_pseudo_op_mappings():
         "aiter::ck_moe_stage2": moe_perf_model_extensions.moe_aiter_ck_stage2,
         # MoE - AITER FP8 block-scale fused (direct CPU op, no pseudo-op needed)
         "aiter::fmoe_fp8_blockscale_g1u1": moe_perf_model_extensions.moe_aiter_fused_blockscale,
+        "aiter::fmoe_g1u1": moe_perf_model_extensions.moe_aiter_fused_blockscale,
         # MoE pseudo ops - Unfused Triton (2-stage: up and down)
         "pseudo_op::moe_triton_unfused_up": moe_perf_model_extensions.moe_triton_unfused_up,
         "pseudo_op::moe_triton_unfused_down": moe_perf_model_extensions.moe_triton_unfused_down,
@@ -45,6 +46,7 @@ def get_pseudo_op_mappings():
         # MoE flydsl two-stage (under aiter::fused_moe_)
         "pseudo_op::moe_flydsl_stage1": moe_perf_model_extensions.moe_flydsl_stage1,
         "pseudo_op::moe_flydsl_stage2": moe_perf_model_extensions.moe_flydsl_stage2,
+        "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel": moe_perf_model_extensions.moe_triton_invoke_grouped_gemm,
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
