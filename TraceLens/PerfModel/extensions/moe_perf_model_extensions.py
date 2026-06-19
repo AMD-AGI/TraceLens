@@ -1414,9 +1414,6 @@ class moe_flydsl_stage2(UnfusedMoE_Down):
 
 class moe_triton_invoke_grouped_gemm:
     """
-    Performance model for sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel.
-
-
     SGLang's Triton fused-MoE path calls invoke_fused_moe_kernel TWICE per MoE
     block. Both launches share this profiler name so this single grouped-GEMM
     model handles both directions by deriving (M_work, N, K) generically from
@@ -1443,9 +1440,6 @@ class moe_triton_invoke_grouped_gemm:
         bytes_read_B   = E_active * N * K * weight_bpe
         bytes_write_C  = M_work * N * output_bpe
         Total          = bytes_read_A + bytes_read_B + bytes_write_C
-
-    Notes:
-        - Activations arrive BF16 and are dynamically quantized to FP8 before the MFMA, so the dominant MFMA dtype is fp8.
     """
 
     category = "MoE_unfused"
