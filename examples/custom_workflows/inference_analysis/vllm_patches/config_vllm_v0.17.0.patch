@@ -59,7 +59,7 @@ index e4ddefc81..3942904f9 100644
 +        enable_profiler = (local_rank == 0) and self.vllm_config.profiler_config.capture_torch_profiler_dir
 +        
 +        if enable_profiler:
-+            trace_dir = self.vllm_config.profiler_config.torch_profiler_dir + "/capture_traces"
++            trace_dir = self.vllm_config.profiler_config.capture_torch_profiler_dir
 +            profiler = torch.profiler.profile(
 +                activities=[
 +                    torch.profiler.ProfilerActivity.CPU,
