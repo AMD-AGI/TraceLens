@@ -6,6 +6,9 @@ See LICENSE for license information.
 
 # TraceLens
 
+[![Lint](https://github.com/AMD-AGI/TraceLens/actions/workflows/lint.yml/badge.svg)](https://github.com/AMD-AGI/TraceLens/actions/workflows/lint.yml)
+[![Regression Tests](https://github.com/AMD-AGI/TraceLens/actions/workflows/regression-tests.yml/badge.svg)](https://github.com/AMD-AGI/TraceLens/actions/workflows/regression-tests.yml)
+
 TraceLens is a Python library focused on **automating analysis from trace files** and enabling rich performance insights. Designed with **simplicity and extensibility** in mind, this library provides tools to simplify the process of profiling and debugging complex distributed training and inference systems.
 
 ## Key Features
