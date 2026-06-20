@@ -226,9 +226,10 @@ class GPUEventAnalyser:
 
     @staticmethod
     def compute_metrics_dict(dict: dict, micro_idle_thresh_us=None):
-        dict_intervals = {}
-        for key, events in dict.items():
-            dict_intervals[key] = [(event["ts"], event["t_end"]) for event in events]
+        dict_intervals = {
+            key: GPUEventAnalyser.kernels_to_intervals(events)
+            for key, events in dict.items()
+        }
 
         # Merge intervals within each category.
         comp_union = GPUEventAnalyser.merge_intervals(dict_intervals["computation"])
@@ -320,6 +321,21 @@ class GPUEventAnalyser:
                 "total_comm_time": total_comm_time,
                 "total_memcpy_time": total_memcpy_time,
             }
+
+    @staticmethod
+    def kernels_to_intervals(kernels, filter_func=None):
+        """Extract (ts, t_end) tuples from a kernel list, with an optional filter."""
+        return [
+            (k["ts"], k["t_end"])
+            for k in kernels
+            if filter_func is None or filter_func(k)
+        ]
+
+    @staticmethod
+    def compute_busy_time(intervals):
+        """Return the merged busy time (µs) for a list of (ts, t_end) tuples."""
+        merged = GPUEventAnalyser.merge_intervals(intervals)
+        return sum(end - start for start, end in merged)
 
     def compute_metrics(self, micro_idle_thresh_us=None):
         """
