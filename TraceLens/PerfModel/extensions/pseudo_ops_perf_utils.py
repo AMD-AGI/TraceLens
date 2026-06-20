@@ -111,6 +111,9 @@ def get_pseudo_op_mappings():
         "sgl_kernel::qr_all_reduce": custom_collectives_perf_model_extensions.sgl_kernel_qr_all_reduce,
         "sglang::reg_all_gather_into_tensor": custom_collectives_perf_model_extensions.sgl_kernel_reg_all_gather_into_tensor,
         "_C_custom_ar::qr_all_reduce": custom_collectives_perf_model_extensions.custom_ar_qr_all_reduce,
+        ## aten efficient attention (xformers / PyTorch SDPA efficient backend)
+        "aten::_efficient_attention_forward": attention_perf_model_extensions.aten__efficient_attention_forward,
+        "aten::_efficient_attention_backward": attention_perf_model_extensions.aten__efficient_attention_backward,
         ## GDN attention ops
         "vllm::gdn_attention_core": attention_perf_model_extensions.gdn_attention_core,
         "aiter::linear_attention_with_output_base": attention_perf_model_extensions.gdn_attention_core,

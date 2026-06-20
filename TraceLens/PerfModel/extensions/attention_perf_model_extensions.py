@@ -626,3 +626,289 @@ class gdn_attention_core(InferenceAttention):
 
     def get_maf_type(self):
         return "matrix"
+
+
+class aten__efficient_attention_forward:
+    """
+    Performance model for aten::_efficient_attention_forward.
+
+    Reference implementation:
+        torch/_C/_VariableFunctions.pyi / aten/src/ATen/native/transformers/attention.cpp
+
+    xformers / PyTorch memory-efficient attention forward pass (CUDA/HIP cutlass kernel).
+    Called via torch.nn.functional.scaled_dot_product_attention when the
+    efficient-attention backend is selected.
+
+    Signature: _efficient_attention_forward(
+        query, key, value, bias,
+        cu_seqlens_q, cu_seqlens_k,
+        max_seqlen_q, max_seqlen_k,
+        dropout_p, custom_mask_type, causal,
+        scale, seqstart_q, seqstart_k
+    ) -> (output, logsumexp, ...)
+
+    Expected Input Dims from trace:
+        [0] query  — [B, N_Q, H_Q, d_h_qk],   dtype bf16/fp16
+        [1] key    — [B, N_KV, H_KV, d_h_qk], dtype bf16/fp16
+        [2] value  — [B, N_KV, H_KV, d_h_v],  dtype bf16/fp16
+        [3] bias   — [B, H_Q, N_Q, N_KV] or [] when absent
+        [4..13]    — scalars / optional tensors (empty dims)
+
+    Expected Input type from trace:
+        ['c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16', ...]
+
+    Concrete Inputs[8]  = dropout_p        (float, e.g. '0.')
+    Concrete Inputs[9]  = custom_mask_type (int: 0=none, 1=causal, 2=anti-causal)
+    Concrete Inputs[10] = causal           (bool string 'True'/'False', legacy alias)
+
+    Roofline -- FLOPs:
+        Inherits SDPA.flops_func:
+            flops_QK = B * H_Q * 2 * N_Q * N_KV * d_h_qk
+            flops_PV = B * H_Q * 2 * N_Q * d_h_v * N_KV
+            total    = flops_QK + flops_PV  (halved if causal and N_Q == N_KV)
+
+    Roofline -- bytes moved:
+        bytes_read_Q  = B * N_Q  * H_Q  * d_h_qk * bpe
+        bytes_read_K  = B * N_KV * H_KV * d_h_qk * bpe
+        bytes_read_V  = B * N_KV * H_KV * d_h_v  * bpe
+        bytes_write_O = B * N_Q  * H_Q  * d_h_v  * bpe
+        Total         = sum of all above
+        Note: attention bias read omitted (negligible vs Q/K/V for large N).
+
+    Notes:
+        Layout is BNHD (batch, seq, heads, head_dim) — bhnd_idx = (0, 1, 2, 3).
+        flash_impl=True: xformers uses flash-style tiled recompute in backward.
+        output_bpe == input_bpe (no dtype change in fwd).
+
+    Vendor roofline reference:
+        xformers/benchmarks/benchmark_mem_eff_attn.py
+    """
+
+    category = "SDPA_fwd"
+
+    def __init__(self, event, **kwargs):
+        self.param_details = self.get_param_details(event)
+        self.B = self.param_details["B"]
+        self.N_Q = self.param_details["N_Q"]
+        self.H_Q = self.param_details["H_Q"]
+        self.N_KV = self.param_details["N_KV"]
+        self.H_KV = self.param_details["H_KV"]
+        self.d_h_qk = self.param_details["d_h_qk"]
+        self.d_h_v = self.param_details["d_h_v"]
+
+    @staticmethod
+    def get_param_details(event):
+        from TraceLens.PerfModel.perf_model import extract_sdpa_cfg
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        # Inputs: query=0, key=1, value=2, bias=3 (layout BNHD)
+        q_shape = input_dims[0]
+        k_shape = input_dims[1]
+        v_shape = input_dims[2]
+        bhnd_idx = (0, 1, 2, 3)
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+            sdpa_cfg[key]
+            for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+        )
+
+        # custom_mask_type: 0=none, 1=causal, 2=anti-causal (Concrete Inputs[9])
+        custom_mask_type = 0
+        if len(concrete_inputs) > 9 and concrete_inputs[9] not in ("", "None"):
+            try:
+                custom_mask_type = int(concrete_inputs[9])
+            except (ValueError, TypeError):
+                pass
+
+        # Legacy causal bool (Concrete Inputs[10])
+        causal_flag = False
+        if len(concrete_inputs) > 10 and concrete_inputs[10] not in ("", "None"):
+            causal_flag = concrete_inputs[10].strip().lower() == "true"
+
+        is_causal = (custom_mask_type == 1) or causal_flag
+
+        dropout_p = 0.0
+        if len(concrete_inputs) > 8 and concrete_inputs[8] not in ("", "None"):
+            try:
+                dropout_p = float(concrete_inputs[8])
+            except (ValueError, TypeError):
+                pass
+
+        dtype_A_B = tuple(event["args"]["Input type"][:2])
+
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "dropout": dropout_p,
+            "causal": is_causal,
+            "flash_impl": True,
+            "dtype_A_B": dtype_A_B,
+        }
+
+    def flops(self):
+        from TraceLens.PerfModel.perf_model import SDPA
+        return SDPA.flops_func(
+            self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV,
+            self.d_h_qk, self.d_h_v, self.param_details["causal"],
+        )
+
+    def bytes(self, bytes_per_element=2):
+        from TraceLens.PerfModel.perf_model import SDPA
+        return SDPA.bytes_func(
+            self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV,
+            self.d_h_qk, self.d_h_v, self.param_details["causal"],
+            bytes_per_element,
+        )
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_A_B", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "matrix"
+
+
+class aten__efficient_attention_backward:
+    """
+    Performance model for aten::_efficient_attention_backward.
+
+    Reference implementation:
+        torch/_C/_VariableFunctions.pyi / aten/src/ATen/native/transformers/attention.cpp
+
+    xformers / PyTorch memory-efficient attention backward pass.
+
+    Signature: _efficient_attention_backward(
+        grad_out, query, key, value, bias, out,
+        cu_seqlens_q, cu_seqlens_k,
+        max_seqlen_q, max_seqlen_k,
+        logsumexp, dropout_p, scale,
+        num_splits_key, causal, ...
+    ) -> (grad_query, grad_key, grad_value, grad_bias)
+
+    Expected Input Dims from trace:
+        [0] grad_out — [B, N_Q, H_Q, d_h_v],   dtype bf16/fp16
+        [1] query    — [B, N_Q, H_Q, d_h_qk],  dtype bf16/fp16
+        [2] key      — [B, N_KV, H_KV, d_h_qk], dtype bf16/fp16
+        [3] value    — [B, N_KV, H_KV, d_h_v],  dtype bf16/fp16
+        [4] bias     — [B, H_Q, N_Q, N_KV] or []
+        [5] out      — [B, N_Q, H_Q, d_h_v]
+        [10] logsumexp — [B, H_Q, N_Q]
+
+    Expected Input type from trace:
+        ['c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16', 'c10::BFloat16', ...]
+
+    Concrete Inputs[8]  = max_seqlen_q (int)
+    Concrete Inputs[9]  = max_seqlen_k (int)
+    Concrete Inputs[11] = dropout_p    (float, e.g. '0.')
+    Concrete Inputs[15] = causal       (bool string 'True'/'False')
+
+    Roofline -- FLOPs:
+        Inherits SDPA.flops_bwd_func (flash_impl=True adds QK recompute):
+            recompute_QK + V_grad + P_grad + Q_grad + K_grad matmuls
+            (see SDPA.flops_bwd_func for full breakdown with GQA reduce terms)
+
+    Roofline -- bytes moved:
+        bytes_read_Q       = B * N_Q  * H_Q  * d_h_qk * bpe
+        bytes_read_K       = B * N_KV * H_KV * d_h_qk * bpe
+        bytes_read_V       = B * N_KV * H_KV * d_h_v  * bpe
+        bytes_read_O_grad  = B * N_Q  * H_Q  * d_h_v  * bpe
+        bytes_write_Q_grad = B * N_Q  * H_Q  * d_h_qk * bpe
+        bytes_write_K_grad = B * N_KV * H_KV * d_h_qk * bpe
+        bytes_write_V_grad = B * N_KV * H_KV * d_h_v  * bpe
+        Total              = sum of all above
+
+    Notes:
+        Layout is BNHD — bhnd_idx = (0, 1, 2, 3); query/key/value at indices 1/2/3.
+        flash_impl=True: xformers bwd recomputes the attention scores (no P stored).
+        output_bpe == input_bpe.
+
+    Vendor roofline reference:
+        xformers/benchmarks/benchmark_mem_eff_attn.py
+    """
+
+    category = "SDPA_bwd"
+
+    def __init__(self, event, **kwargs):
+        self.param_details = self.get_param_details(event)
+        self.B = self.param_details["B"]
+        self.N_Q = self.param_details["N_Q"]
+        self.H_Q = self.param_details["H_Q"]
+        self.N_KV = self.param_details["N_KV"]
+        self.H_KV = self.param_details["H_KV"]
+        self.d_h_qk = self.param_details["d_h_qk"]
+        self.d_h_v = self.param_details["d_h_v"]
+
+    @staticmethod
+    def get_param_details(event):
+        from TraceLens.PerfModel.perf_model import extract_sdpa_cfg
+        input_dims = event["args"]["Input Dims"]
+        concrete_inputs = event["args"]["Concrete Inputs"]
+        # Inputs: grad_out=0, query=1, key=2, value=3, bias=4, out=5 (layout BNHD)
+        q_shape = input_dims[1]
+        k_shape = input_dims[2]
+        v_shape = input_dims[3]
+        bhnd_idx = (0, 1, 2, 3)
+        sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
+            sdpa_cfg[key]
+            for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
+        )
+
+        # causal (Concrete Inputs[15])
+        is_causal = False
+        if len(concrete_inputs) > 15 and concrete_inputs[15] not in ("", "None"):
+            is_causal = concrete_inputs[15].strip().lower() == "true"
+
+        dropout_p = 0.0
+        if len(concrete_inputs) > 11 and concrete_inputs[11] not in ("", "None"):
+            try:
+                dropout_p = float(concrete_inputs[11])
+            except (ValueError, TypeError):
+                pass
+
+        # dtype from query (index 1) and key (index 2)
+        dtype_A_B = tuple(event["args"]["Input type"][1:3])
+
+        return {
+            "B": B,
+            "N_Q": N_Q,
+            "H_Q": H_Q,
+            "N_KV": N_KV,
+            "H_KV": H_KV,
+            "d_h_qk": d_h_qk,
+            "d_h_v": d_h_v,
+            "dropout": dropout_p,
+            "causal": is_causal,
+            "flash_impl": True,
+            "dtype_A_B": dtype_A_B,
+        }
+
+    def flops(self):
+        from TraceLens.PerfModel.perf_model import SDPA
+        return SDPA.flops_bwd_func(
+            self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV,
+            self.d_h_qk, self.d_h_v,
+            self.param_details["causal"],
+            self.param_details["flash_impl"],
+        )
+
+    def bytes(self, bytes_per_element=2):
+        from TraceLens.PerfModel.perf_model import SDPA
+        return SDPA.bytes_bwd_func(
+            self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV,
+            self.d_h_qk, self.d_h_v,
+            self.param_details["causal"],
+            bytes_per_element,
+        )
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_A_B", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "matrix"
