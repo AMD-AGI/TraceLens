@@ -1,16 +1,16 @@
 diff --git a/python/sglang/srt/model_executor/cuda_graph_runner.py b/python/sglang/srt/model_executor/cuda_graph_runner.py
-index 05b64778a..f5717e2ad 100644
+index c037b20dd..ffc70f35b 100644
 --- a/python/sglang/srt/model_executor/cuda_graph_runner.py
 +++ b/python/sglang/srt/model_executor/cuda_graph_runner.py
-@@ -84,6 +84,7 @@ from sglang.srt.utils import (
+@@ -82,6 +82,7 @@ from sglang.srt.utils import (
+     require_mlp_sync,
+     require_mlp_tp_gather,
  )
++from sglang.srt.utils.kernel_shape_profiler import disable, enable, is_enabled
  from sglang.srt.utils.patch_torch import monkey_patch_torch_compile
  from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
-+from sglang.srt.utils.kernel_shape_profiler import enable, disable, is_enabled
  
- try:
-     from kt_kernel import KTMoEWrapper
-@@ -591,6 +592,9 @@ class CudaGraphRunner:
+@@ -610,6 +611,9 @@ class CudaGraphRunner:
          self.speculative_algorithm = model_runner.server_args.speculative_algorithm
          self.enable_profile_cuda_graph = (
              model_runner.server_args.enable_profile_cuda_graph
@@ -20,12 +20,14 @@ index 05b64778a..f5717e2ad 100644
          )
          self.tp_size = model_runner.server_args.tp_size
          self.dp_size = model_runner.server_args.dp_size
-@@ -812,9 +816,31 @@ class CudaGraphRunner:
+@@ -834,9 +838,33 @@ class CudaGraphRunner:
          )
  
      def _init_profile_context_and_memory_record(self):
 +        rank = get_tensor_model_parallel_rank()
-+        trace_dir = os.path.join(os.environ.get("SGLANG_TORCH_PROFILER_DIR", "traces"),"capture_traces")
++        trace_dir = os.path.join(
++            os.environ.get("SGLANG_TORCH_PROFILER_DIR", "traces"), "capture_traces"
++        )
 +        os.makedirs(trace_dir, exist_ok=True)
 +
 +        # Track which BS is currently being captured for trace file naming
@@ -52,7 +54,7 @@ index 05b64778a..f5717e2ad 100644
          )
          torch.cuda.memory._record_memory_history()
          return profile_context
-@@ -834,11 +860,14 @@ class CudaGraphRunner:
+@@ -856,11 +884,14 @@ class CudaGraphRunner:
              + "\n\nMemory Usage is saved to cuda_graph_runner_memory_usage.pickle\n"
          )
          logger.info(log_message)
@@ -67,7 +69,7 @@ index 05b64778a..f5717e2ad 100644
  
          def _capture_one_stream(stream_idx: Optional[int] = None):
              avail_mem = get_available_gpu_memory(
-@@ -907,7 +936,7 @@ class CudaGraphRunner:
+@@ -929,7 +960,7 @@ class CudaGraphRunner:
          _set_capture_lora_variant(None)
  
          if self.enable_profile_cuda_graph:
@@ -76,8 +78,7 @@ index 05b64778a..f5717e2ad 100644
  
      def _capture_graph(self, graph, pool, stream, run_once_fn):
          if self.model_runner.server_args.debug_cuda_graph:
-@@ -1185,15 +1214,28 @@ class CudaGraphRunner:
-             self.device_module.synchronize()
+@@ -1186,15 +1217,30 @@ class CudaGraphRunner:
              self.model_runner.tp_group.barrier()
              run_once()
              attn_backend.on_after_cuda_graph_warmup()
@@ -85,14 +86,13 @@ index 05b64778a..f5717e2ad 100644
 +                # Activate kernel shape profiler AFTER warmup runs so that all
 +                # lazily-imported modules (e.g. tilelang_kernel) are in sys.modules
 +                # and auto-discovery can find them.
-+                if self.enable_shape_discovery_for_cuda_graph_profile and not is_enabled():
++                if (
++                    self.enable_shape_discovery_for_cuda_graph_profile
++                    and not is_enabled()
++                ):
 +                    enable()
 +                self._profiler.step()
- 
--        if get_global_graph_memory_pool() is None:
--            set_global_graph_memory_pool(self.device_module.graph_pool_handle())
--        # Set graph pool id globally to be able to use symmetric memory
--        set_graph_pool_id(get_global_graph_memory_pool())
++
 +        with torch.profiler.record_function(
 +            f"capture_{num_tokens}_{self.capture_forward_mode.name}"
 +        ):
@@ -100,14 +100,18 @@ index 05b64778a..f5717e2ad 100644
 +                set_global_graph_memory_pool(self.device_module.graph_pool_handle())
 +            # Set graph pool id globally to be able to use symmetric memory
 +            set_graph_pool_id(get_global_graph_memory_pool())
- 
--        out = self._capture_graph(
--            graph, get_global_graph_memory_pool(), stream, run_once
--        )
 +            out = self._capture_graph(
 +                graph, get_global_graph_memory_pool(), stream, run_once
 +            )
-+
+ 
+-        if get_global_graph_memory_pool() is None:
+-            set_global_graph_memory_pool(self.device_module.graph_pool_handle())
+-        # Set graph pool id globally to be able to use symmetric memory
+-        set_graph_pool_id(get_global_graph_memory_pool())
+-
+-        out = self._capture_graph(
+-            graph, get_global_graph_memory_pool(), stream, run_once
+-        )
 +        if self.enable_profile_cuda_graph:
 +            self._profiler.step()
  

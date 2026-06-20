@@ -40,6 +40,7 @@ Base images:
   0.5.12 MI355X : lmsysorg/sglang:v0.5.12-rocm720-mi35x
 
 Examples:
+  $0 /path/to/TraceLens --sglang-version 0.5.12 --gpu-type mi300 -t tracelens-sglang:0.5.12-mi300
   $0 /path/to/TraceLens --sglang-version 0.5.11 --gpu-type mi300 -t tracelens-sglang:0.5.11-mi300
   $0 /path/to/TraceLens mi350 -t tracelens-sglang:0.5.9-mi350
 EOF
