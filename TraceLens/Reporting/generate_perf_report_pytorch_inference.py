@@ -307,6 +307,33 @@ def classify_graph_capture_trace(input_folder: str):
     return
 
 
+def diag_sweep_unified_perf_summary(df_summary, pct_threshold=4.0):
+    """
+    Sweep the unified perf summary and print DIAG triage warnings for synthetic
+    and uncategorized ops whose total runtime share (across all shapes/args)
+    exceeds *pct_threshold* percent.
+    """
+    if df_summary.empty or "Percentage (%)" not in df_summary.columns:
+        return
+
+    synth = df_summary[
+        df_summary["name"]
+        .astype(str)
+        .str.contains(r"\(Synthetic Op\)", regex=True, na=False)
+    ]
+    for name, pct in synth.groupby("name")["Percentage (%)"].sum().items():
+        if pct > pct_threshold:
+            print(f"DIAG: Synthetic op {name} found with total {pct:.2f}% of runtime")
+
+    if "op category" in df_summary.columns:
+        uncat = df_summary[df_summary["op category"].astype(str) == "other"]
+        for name, pct in uncat.groupby("name")["Percentage (%)"].sum().items():
+            if pct > pct_threshold:
+                print(
+                    f"DIAG: uncategorized op {name} found with total {pct:.2f}% of runtime"
+                )
+
+
 def get_dfs_short_kernels(
     perf_analyzer, short_kernel_threshold_us=10, histogram_bins=100, topk=None
 ):
@@ -981,6 +1008,7 @@ def generate_perf_report_pytorch(
                             ep_results.apply(lambda x: x["wrappers"]),
                         )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
+                diag_sweep_unified_perf_summary(df_unified_perf_summary)
 
             if _tracediff_diff_stats is not None and not _tracediff_diff_stats.empty:
                 from TraceLens.Reporting.tracediff_comparison_extension import (

@@ -495,7 +495,7 @@ def merge_capture_trace_into_graph(
     capture_map, capture_batch_sizes = load_capture_folder(
         capture_folder, metadata_json_path
     )
-    for execution_root, graph_roots in execution_graph_root_map:
+    for step, (execution_root, graph_roots) in enumerate(execution_graph_root_map):
         print("Processing execution root: {}".format(execution_root["name"]))
         if len(graph_roots) == 0:
             print(
@@ -553,6 +553,17 @@ def merge_capture_trace_into_graph(
             )
 
             if verify_success == 0:
+                print(
+                    "DIAG: graph capture merge failed at step {}, capture trace has "
+                    "{} events and {} capture roots and graph trace has {} events "
+                    "and {} graph roots".format(
+                        step,
+                        len(capture_tree.events),
+                        len(capture_roots),
+                        len(graph_tree.events),
+                        len(graph_roots),
+                    )
+                )
                 print(
                     "Warning: subtree events verification failed for capture root {} and graph root {}".format(
                         c_root["name"], g_root["name"]
