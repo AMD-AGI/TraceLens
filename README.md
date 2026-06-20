@@ -20,6 +20,8 @@ TraceLens is a Python library focused on **automating analysis from trace files*
 
 **Event Replay** — Isolate any operation for focused debugging. TraceLens generates minimal, self-contained replay scripts directly from trace metadata, making it simple to share IP-safe test cases with kernel developers.
 
+**Trace Corpus Indexing** — Build a searchable catalog over many TraceLens reports so you can find traces by op, category, kernel name, or timeline metric without reopening every raw trace. The first backend is local SQLite, with a storage interface for future shared backends.
+
 **Extensible SDK** — Get started instantly with ready-to-use scripts, then build your own custom workflows using a flexible and hackable Python API.
 
 ## Quick Start
@@ -90,6 +92,16 @@ TraceLens_compare_perf_reports_pytorch \
 
 Detailed docs: [compare_perf_reports_pytorch.md](docs/compare_perf_reports_pytorch.md).
 
+### Trace corpus indexing
+
+```bash
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite scan --root /path/to/traces
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite build --trace-path /path/to/trace.json.gz
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite search Cijk
+```
+
+Detailed docs: [TraceIndex.md](docs/TraceIndex.md).
+
 ### Multi-rank collective report
 
 ```bash
@@ -145,6 +157,7 @@ Deeper dives on the core modules:
 | TraceDiff | [docs/TraceDiff.md](docs/TraceDiff.md) |
 | Event Replay | [docs/EventReplay.md](docs/EventReplay.md) |
 | TraceFusion | [docs/TraceFusion.md](docs/TraceFusion.md) |
+| TraceIndex | [docs/TraceIndex.md](docs/TraceIndex.md) |
 | GPU Event Analyser | [docs/gpu_event_analyser.md](docs/gpu_event_analyser.md) |
 | JAX Analyses | [docs/jax_analyses.md](docs/jax_analyses.md) |
 | pftrace Reports | [docs/generate_perf_report_rocprof_pftrace.md](docs/generate_perf_report_rocprof_pftrace.md) |
