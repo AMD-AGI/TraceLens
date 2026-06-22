@@ -6,12 +6,22 @@
 
 import re
 import logging
+from collections import defaultdict
+
 from .pseudo_ops_utils import inject_pseudo_op_wrap_children
 
 logger = logging.getLogger(__name__)
 
 MLA_DECODE_FWD_PATTERN = re.compile(r"aiter/mla.py\(\d+\): mla_decode_fwd")
 STAGE1_KERNEL_NAME = "aiter::mla_decode_stage1_asm_fwd"
+
+
+def _is_mla_decode_fwd_python(name: str) -> bool:
+    return (
+        "mla.py" in name
+        and "mla_decode_fwd" in name
+        and bool(MLA_DECODE_FWD_PATTERN.search(name))
+    )
 
 
 def create_pseudo_ops_mla_decode(trace_tree):
@@ -34,8 +44,21 @@ def create_pseudo_ops_mla_decode(trace_tree):
 
     logger.info(f"Processing {len(mla_python_funcs)} MLA decode operations")
 
+    stage1_index = _build_mla_decode_stage1_index(trace_tree)
+
+    # One O(R) snapshot; per-wrap root updates go through a set so we do not
+    # rebuild ``cpu_root_nodes`` (length R) on every MLA op (O(M×R) total).
+    cpu_roots_acc = set(trace_tree.cpu_root_nodes)
+
     for py_func_evt in mla_python_funcs:
-        _create_pseudo_op_mla_decode(trace_tree, py_func_evt)
+        _create_pseudo_op_mla_decode(
+            trace_tree, py_func_evt, stage1_index, cpu_roots_acc
+        )
+
+    trace_tree.cpu_root_nodes[:] = sorted(
+        cpu_roots_acc,
+        key=lambda u: (trace_tree.get_UID2event(u).get("ts", 0), u),
+    )
 
 
 def _find_mla_decode_python_funcs(trace_tree):
@@ -54,38 +77,54 @@ def _find_mla_decode_python_funcs(trace_tree):
     return matched
 
 
-def _find_stage1_child(trace_tree, parent_evt):
-    """
-    Find a ``aiter::mla_decode_stage1_asm_fwd`` event under *parent_evt*.
+def _build_mla_decode_stage1_index(trace_tree):
+    """Map each mla_decode_fwd python_function UID → stage1 events under it.
 
-    Uses ``name2event_uids`` + parent-pointer walks (O(#stage1 × depth)) instead
-    of DFS over the whole python_function subtree, which is far larger on big
-    traces with ``add_python_func=True``.
+    One O(#stage1 × depth) pass. Avoids O(#decode × #stage1 × depth) when both
+    name buckets are large (``add_python_func=True`` traces).
+
+    Mirrors legacy ``_find_stage1_child`` parent walks: walk upward from the
+    stage1 event itself, then its ancestors, and attach the stage1 to every
+    matching ``mla_decode_fwd`` python_function seen on that chain (so nested
+    wrappers behave the same as repeated full scans).
+    """
+
+    index = defaultdict(list)
+    candidates = trace_tree.name2event_uids.get(STAGE1_KERNEL_NAME, [])
+    for uid in candidates:
+        evt = trace_tree.get_UID2event(uid)
+        cur = evt
+        while cur is not None:
+            if cur.get("cat") == "python_function" and _is_mla_decode_fwd_python(
+                cur.get("name", "")
+            ):
+                index[cur["UID"]].append(evt)
+            cur = trace_tree.get_parent_event(cur)
+    return index
+
+
+def _find_stage1_child(parent_evt, stage1_index):
+    """
+    Pick earliest-by-ts ``aiter::mla_decode_stage1_asm_fwd`` under *parent_evt*.
+
+    *stage1_index* maps mla_decode_fwd python_function UID → list of stage1
+    events on any descendant path below that op (same events the legacy
+    parent-walk-from-all-stage1 approach would attach).
     """
 
     py_uid = parent_evt["UID"]
-    candidates = trace_tree.name2event_uids.get(STAGE1_KERNEL_NAME, [])
-    if not candidates:
-        return None
-    under = []
-    for uid in candidates:
-        evt = trace_tree.get_UID2event(uid)
-        cur: dict | None = evt
-        while cur is not None:
-            if cur.get("UID") == py_uid:
-                under.append(evt)
-                break
-            cur = trace_tree.get_parent_event(cur)
+    under = stage1_index.get(py_uid)
     if not under:
         return None
-    under.sort(key=lambda e: e.get("ts", 0))
-    return under[0]
+    return min(under, key=lambda e: e.get("ts", 0))
 
 
-def _create_pseudo_op_mla_decode(trace_tree, py_func_evt):
+def _create_pseudo_op_mla_decode(
+    trace_tree, py_func_evt, stage1_index, cpu_roots_acc
+):
     """Create a single pseudo op for one MLA decode python_function event."""
 
-    stage1_evt = _find_stage1_child(trace_tree, py_func_evt)
+    stage1_evt = _find_stage1_child(py_func_evt, stage1_index)
 
     if stage1_evt is None:
         logger.warning(
@@ -106,4 +145,5 @@ def _create_pseudo_op_mla_decode(trace_tree, py_func_evt):
         py_func_evt,
         "pseudo_mla_decode_fwd",
         shape_donor_evt=stage1_evt,
+        cpu_roots_acc=cpu_roots_acc,
     )
