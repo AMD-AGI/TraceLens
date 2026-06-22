@@ -608,6 +608,6 @@ def merge_capture_trace_into_graph(
                 graph_tree, graph_filtered_events, capture_filtered_events
             )
     # Add a print that tells about moving to the next bit:
-    print("next step: finalize_non_gpu_paths")    
+    print("next step: finalize_non_gpu_paths")
     finalize_non_gpu_paths(graph_tree)
     return graph_tree

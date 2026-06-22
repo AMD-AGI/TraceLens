@@ -202,11 +202,7 @@ def _create_pseudo_op_moe_unfused_triton(trace_tree, moe_op_event: dict):
             "MoE topk": topk,
         }
 
-        specs.append(
-            (kernel, pseudo_op_name, seq_num)
-            + common_tail
-            + (extra_args,)
-        )
+        specs.append((kernel, pseudo_op_name, seq_num) + common_tail + (extra_args,))
 
     finalize_matmul_scatter_kernel = [
         e for e in gpu_events if "matmul_scatter" in e["name"].lower()

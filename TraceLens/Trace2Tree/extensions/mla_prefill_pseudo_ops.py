@@ -17,9 +17,7 @@ PREFILL_CPU_OP_NAME = "aiter::mla_prefill_ps_asm_fwd"
 
 
 def _is_mla_prefill_python(name: str) -> bool:
-    return "mla_fp8_prefill_attn" in name and bool(
-        MLA_PREFILL_FWD_PATTERN.search(name)
-    )
+    return "mla_fp8_prefill_attn" in name and bool(MLA_PREFILL_FWD_PATTERN.search(name))
 
 
 def create_pseudo_ops_mla_prefill(trace_tree):
