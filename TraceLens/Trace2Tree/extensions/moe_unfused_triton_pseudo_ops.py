@@ -5,13 +5,16 @@
 ###############################################################################
 
 import logging
-from weakref import finalize
-from .pseudo_ops_utils import inject_pseudo_op
+import sys
+
+from tqdm import tqdm
+
+from .pseudo_ops_utils import inject_pseudo_ops_batch
 
 logger = logging.getLogger(__name__)
 
 
-def create_pseudo_ops_moe_unfused_triton(trace_tree):
+def create_pseudo_ops_moe_unfused_triton(trace_tree, *, show_progress: bool = False):
     """
     Create pseudo ops for vllm::moe_forward unfused operations.
     Creates separate pseudo ops for each matmul_ogs GEMM kernel.
@@ -30,8 +33,26 @@ def create_pseudo_ops_moe_unfused_triton(trace_tree):
 
     logger.info(f"Processing {len(moe_op_events)} unfused MoE operations")
 
+    total_specs = 0
+    total_injected = 0
+    skipped = 0
+
     for moe_op_event in moe_op_events:
-        _create_pseudo_op_moe_unfused_triton(trace_tree, moe_op_event)
+        n_specs, n_ins, sk = _create_pseudo_op_moe_unfused_triton(
+            trace_tree, moe_op_event
+        )
+        total_specs += n_specs
+        total_injected += n_ins
+        skipped += sk
+
+    msg = (
+        f"MoE_Unfused_Triton: moe_forwards={len(moe_op_events)} batch_specs={total_specs} "
+        f"pseudo_ops_inserted={total_injected} moe_forwards_skipped={skipped} "
+        f"(inject_pseudo_ops_batch: one children rewrite per parent per forward)"
+    )
+    logger.info("pseudo_ops %s", msg)
+    if show_progress:
+        tqdm.write(f"perf: pseudo_ops: {msg}", file=sys.stderr)
 
 
 def is_matmul_ogs_kernel(kernel_event: dict) -> bool:
@@ -128,26 +149,25 @@ def _create_pseudo_op_moe_unfused_triton(trace_tree, moe_op_event: dict):
     """
     Create pseudo ops for each matmul_ogs kernel in unfused MoE.
 
-    Args:
-        trace_tree: TraceToTree instance
-        moe_op_event: vllm::moe_forward event
+    Returns:
+        (num_specs, num_inserted, skipped_flag) where skipped_flag is 1 if this moe_forward did nothing.
     """
 
     if moe_op_event.get("name") != "vllm::moe_forward":
         logger.warning(f"Expected vllm::moe_forward, found {moe_op_event['name']}")
-        return
+        return (0, 0, 1)
 
     gpu_event_ids = moe_op_event.get("gpu_events", [])
     if not gpu_event_ids:
         logger.warning(f"No GPU events for MoE UID {moe_op_event['UID']}")
-        return
+        return (0, 0, 1)
 
     gpu_events = [trace_tree.get_UID2event(uid) for uid in gpu_event_ids]
     matmul_kernels = [e for e in gpu_events if is_matmul_ogs_kernel(e)]
 
     if len(matmul_kernels) == 0:
         logger.warning(f"No matmul_ogs kernels found for UID {moe_op_event['UID']}")
-        return
+        return (0, 0, 1)
 
     # Extract topk from tree (raises ValueError if not found)
     topk = _extract_topk_from_moe(trace_tree, moe_op_event)
@@ -156,6 +176,15 @@ def _create_pseudo_op_moe_unfused_triton(trace_tree, moe_op_event: dict):
 
     # Sort by start time to ensure first GEMM is up, second is down
     matmul_kernels_sorted = sorted(matmul_kernels, key=lambda k: k["ts"])
+
+    common_tail = (
+        moe_op_event["args"].get("Input Dims"),
+        moe_op_event["args"].get("Input type"),
+        moe_op_event["args"].get("Input Strides"),
+        moe_op_event["args"].get("Concrete Inputs"),
+    )
+
+    specs = []
 
     # Create pseudo op for each GEMM
     for idx, kernel in enumerate(matmul_kernels_sorted):
@@ -173,17 +202,12 @@ def _create_pseudo_op_moe_unfused_triton(trace_tree, moe_op_event: dict):
             "MoE topk": topk,
         }
 
-        inject_pseudo_op(
-            trace_tree,
-            kernel,
-            pseudo_op_name,
-            seq_num,
-            dims=moe_op_event["args"].get("Input Dims"),
-            types=moe_op_event["args"].get("Input type"),
-            strides=moe_op_event["args"].get("Input Strides"),
-            concrete_inputs=moe_op_event["args"].get("Concrete Inputs"),
-            extra_args=extra_args,
+        specs.append(
+            (kernel, pseudo_op_name, seq_num)
+            + common_tail
+            + (extra_args,)
         )
+
     finalize_matmul_scatter_kernel = [
         e for e in gpu_events if "matmul_scatter" in e["name"].lower()
     ]
@@ -191,17 +215,18 @@ def _create_pseudo_op_moe_unfused_triton(trace_tree, moe_op_event: dict):
         logger.warning(
             f"Multiple matmul_scatter kernels found for UID {moe_op_event['UID']}"
         )
-        return
+        return (0, 0, 1)
     if len(finalize_matmul_scatter_kernel) == 1:
-        finalize_matmul_scatter_kernel = finalize_matmul_scatter_kernel[0]
-        inject_pseudo_op(
-            trace_tree,
-            finalize_matmul_scatter_kernel,
-            "pseudo_op::moe_triton_unfused_finalize_matmul_scatter",
-            seq_num,
-            dims=moe_op_event["args"].get("Input Dims"),
-            types=moe_op_event["args"].get("Input type"),
-            strides=moe_op_event["args"].get("Input Strides"),
-            concrete_inputs=moe_op_event["args"].get("Concrete Inputs"),
-            extra_args={"MoE GEMM type": "finalize_matmul_scatter"},
+        fin = finalize_matmul_scatter_kernel[0]
+        specs.append(
+            (
+                fin,
+                "pseudo_op::moe_triton_unfused_finalize_matmul_scatter",
+                seq_num,
+            )
+            + common_tail
+            + ({"MoE GEMM type": "finalize_matmul_scatter"},)
         )
+
+    n_ins = inject_pseudo_ops_batch(trace_tree, specs)
+    return (len(specs), n_ins, 0)
