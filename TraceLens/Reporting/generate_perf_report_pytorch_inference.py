@@ -24,6 +24,7 @@ import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
+from TraceLens.Reporting.generate_perf_report_pytorch import _find_entry_point
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
     request_install,
@@ -603,9 +604,12 @@ def generate_perf_report_pytorch(
             "vllm::unified_attention_with_output",
             "aiter::mha_varlen_fwd",
             "pseudo_mla_decode_fwd",
+            "pseudo_mla_prefill_fwd",
             "vllm::gdn_attention_core",
             "aiter::fmha_v3_varlen_fwd",
             "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
+            "sglang_profiler::attention_paged_attention_ragged",
+            "aiter::mha_batch_prefill",
         ]
     )
 
@@ -947,24 +951,15 @@ def generate_perf_report_pytorch(
                     source_col="kernel_details_summary",
                     new_col_name="trunc_kernel_details",
                 )
-                if "call_stack" in df_unified_perf_summary.columns:
-                    df_callstacks = df_unified_perf_summary[
-                        ["name", "op category", "call_stack"]
-                    ].copy()
-                    df_callstacks.insert(0, "row_id", range(len(df_callstacks)))
-                    dict_name2df["unified_perf_callstacks"] = df_callstacks
-
-                    n_frames = 4  # op name + 3 parent frames
-                    cs_col = df_unified_perf_summary.columns.get_loc("call_stack")
+                if "call_stack_full" in df_unified_perf_summary.columns:
+                    cs_col = df_unified_perf_summary.columns.get_loc("call_stack_full")
                     df_unified_perf_summary.insert(
                         cs_col,
-                        "trunc_call_stack",
-                        df_unified_perf_summary["call_stack"].apply(
-                            lambda s: " => ".join(str(s).split(" => ")[:n_frames])
+                        "entry_point",
+                        df_unified_perf_summary.apply(
+                            lambda row: _find_entry_point(row["call_stack_full"], row["name"]),
+                            axis=1,
                         ),
-                    )
-                    df_unified_perf_summary = df_unified_perf_summary.drop(
-                        columns=["call_stack"]
                     )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
 

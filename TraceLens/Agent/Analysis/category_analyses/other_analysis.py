@@ -154,6 +154,7 @@ def main():
         operations,
         category,
         baseline_ms=baseline_ms,
+        comparison_scope=args.comparison_scope,
     )
     category_findings = build_category_findings(
         impact_estimates, comparison_scope=args.comparison_scope

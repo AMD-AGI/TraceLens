@@ -1120,7 +1120,7 @@ class TreePerfAnalyzer:
                     )
                     metrics_event["call_stack"] = call_stack
                     metrics_event["parent_module"] = re.sub(
-                        r"_\d+", "", (call_stack.split("=>") + ["NA", "NA"])[1]
+                        r"_\d+", "", (call_stack + ["NA", "NA"])[1]
                     ).strip("")
             thread_metadata = self.tree.metadata.get(event["pid"], {}).get(
                 event["tid"], {}
@@ -1215,6 +1215,7 @@ class TreePerfAnalyzer:
             },
             inplace=True,
         )
+        df_agg["Categories"] = df_agg["Categories"].map(sorted)
         df_agg.sort_values(
             by="total_direct_kernel_time_sum", ascending=False, inplace=True
         )
@@ -1262,6 +1263,7 @@ class TreePerfAnalyzer:
             },
             inplace=True,
         )
+        df_agg["Categories"] = df_agg["Categories"].map(sorted)
         df_agg.sort_values(
             by="total_direct_kernel_time_sum", ascending=False, inplace=True
         )
@@ -1798,12 +1800,19 @@ class TreePerfAnalyzer:
         collected = []
         visited = set()
 
-        def traverse(event_uid):
+        def traverse(event_uid, call_stack=None):
             if event_uid in visited:
                 return
             visited.add(event_uid)
 
             event = self.tree.get_UID2event(event_uid)
+            # Build running call stack: append this event's name if it matches the filter
+            if self.add_python_func:
+                name = event.get("name", "")
+                if call_stack is None:
+                    call_stack = []
+                if any(f in name for f in ["nn.Module", "::", "/"]) or self.event_to_category(event) == "cpu_op":
+                    call_stack = call_stack + [re.sub(r"_\d+", "", name)]
 
             # Skip non-cpu_op events
             if not self.add_python_func and self.event_to_category(event) != "cpu_op":
@@ -1818,6 +1827,8 @@ class TreePerfAnalyzer:
 
             # Exit condition 1: Has perf model - collect and stop
             if self._has_perf_model(event):
+                if self.add_python_func:
+                    event["_call_stack"] = call_stack
                 collected.append(event)
                 return
 
@@ -1827,8 +1838,10 @@ class TreePerfAnalyzer:
             if self._is_sole_bwd_with_fwd_perf_model(event):
                 if self._has_descendant_cpu_op_with_own_perf_model(event):
                     for child_uid in event.get("children", []):
-                        traverse(child_uid)
+                        traverse(child_uid, call_stack)
                     return
+                if self.add_python_func:
+                    event["_call_stack"] = call_stack
                 collected.append(event)
                 return
 
@@ -1849,20 +1862,33 @@ class TreePerfAnalyzer:
                 if cpu_op_children_with_perf_model:
                     # Traverse children with perf models instead of collecting this leaf
                     for child_uid in cpu_op_children_with_perf_model:
-                        traverse(child_uid)
+                        traverse(child_uid, call_stack)
                 else:
                     # No children with perf models - collect this leaf
                     if not include_nccl and self._is_nccl_event(event):
                         return
+                    if self.add_python_func:
+                        event["_call_stack"] = call_stack
                     collected.append(event)
                 return
 
             # Non-leaf with GPU kernels in subtree but no perf model
             # Traverse children to find more granular ops
             for child_uid in event.get("children", []):
-                traverse(child_uid)
+                traverse(child_uid, call_stack)
 
-        # Start from cpu_root_nodes
+        # When python_function events are in the tree, start from
+        # parentless python_function roots that have GPU work
+        if self.add_python_func:
+            for evt in self.tree.events:
+                if (
+                    self.event_to_category(evt) == "python_function"
+                    and evt.get("parent") is None
+                    and evt.get("gpu_events")
+                ):
+                    traverse(evt["UID"])
+
+        # Start from cpu_root_nodes (any not already visited via python roots)
         for root_uid in self.tree.cpu_root_nodes:
             traverse(root_uid)
 
@@ -2048,6 +2074,9 @@ class TreePerfAnalyzer:
             if include_kernel_details:
                 gpu_event_uids = event.get("gpu_events", [])
                 kernel_details = []
+                event_uid = event.get("UID")
+                has_call_stack = "_call_stack" in event
+                base_call_stack = event.get("_call_stack", []) if has_call_stack else []
                 for gpu_uid in gpu_event_uids:
                     gpu_event = self.tree.get_UID2event(gpu_uid)
                     if gpu_event and self.event_to_category(gpu_event) in {
@@ -2055,14 +2084,23 @@ class TreePerfAnalyzer:
                         "gpu_memcpy",
                         "gpu_memset",
                     }:
-                        kernel_details.append(
-                            {
-                                "name": gpu_event.get("name"),
-                                "dur": gpu_event.get("dur"),
-                                "stream": gpu_event.get("args", {}).get("stream"),
-                                "gpu_op_uid": gpu_event.get("UID"),
-                            }
-                        )
+                        kd = {
+                            "name": gpu_event.get("name"),
+                            "dur": gpu_event.get("dur"),
+                            "stream": gpu_event.get("args", {}).get("stream"),
+                            "gpu_op_uid": gpu_event.get("UID"),
+                        }
+                        if has_call_stack:
+                            suffix = []
+                            cur = self.tree.get_parent_event(gpu_event)
+                            while cur is not None and cur.get("UID") != event_uid:
+                                cname = cur.get("name", "")
+                                if any(f in cname for f in ["nn.Module", "::", "/"]) or self.event_to_category(cur) == "cpu_op":
+                                    suffix.append(re.sub(r"_\d+", "", cname))
+                                cur = self.tree.get_parent_event(cur)
+                            suffix.reverse()
+                            kd["call_stack"] = base_call_stack + suffix
+                        kernel_details.append(kd)
                 row["kernel_details"] = kernel_details if kernel_details else None
 
             # Add perf metrics if available
@@ -2395,19 +2433,65 @@ class TreePerfAnalyzer:
 
         df_summary = df_summary.rename(columns=rename_map)
 
-        if include_call_stack and tree is not None and "ex_UID" in df_summary.columns:
+        if include_call_stack and "kernel_details_summary" in df_summary.columns:
 
-            def _get_call_stack(ex_uid):
+            def _get_call_stack(kd):
+                """Build call_stack_full from pre-computed per-kernel call stacks.
+
+                Single kernel: flat list from root to kernel.
+                Multiple kernels: common prefix as flat elements, then each
+                diverging tail as its own flat sublist (no double-nesting).
+                """
                 try:
-                    event = tree.get_UID2event(int(ex_uid))
-                    cs = tree.traverse_parents_and_get_callstack(
-                        event, filter=["nn.Module", "::", "/"]
-                    )
-                    return re.sub(r"_\d+", "", cs)
+                    if not isinstance(kd, list) or not kd:
+                        return "Not found"
+
+                    per_kernel = []
+                    for k in kd:
+                        chain = list(k.get("call_stack", [])) + [k.get("name", "Unknown")]
+                        per_kernel.append(chain)
+
+                    if len(per_kernel) == 1:
+                        return str(per_kernel[0])
+
+                    # Find common prefix across all chains
+                    min_len = min(len(c) for c in per_kernel)
+                    prefix_len = 0
+                    for idx in range(min_len):
+                        if len(set(c[idx] for c in per_kernel)) == 1:
+                            prefix_len = idx + 1
+                        else:
+                            break
+
+                    common = per_kernel[0][:prefix_len]
+                    tails = [c[prefix_len:] for c in per_kernel]
+                    # Deduplicate tails while preserving order
+                    seen = set()
+                    unique_tails = []
+                    for t in tails:
+                        key = tuple(t)
+                        if key not in seen:
+                            seen.add(key)
+                            unique_tails.append(t)
+                    return str(common + unique_tails)
                 except Exception:
                     return "Not found"
 
-            df_summary["call_stack"] = df_summary["ex_UID"].apply(_get_call_stack)
+            df_summary["call_stack_full"] = df_summary["kernel_details_summary"].apply(
+                _get_call_stack
+            )
+
+            # Drop call_stack and gpu_op_uid from kernel_details_summary
+            if "kernel_details_summary" in df_summary.columns:
+                def _drop_internal_fields(kd):
+                    if isinstance(kd, list):
+                        for k in kd:
+                            k.pop("call_stack", None)
+                            k.pop("gpu_op_uid", None)
+                    return kd
+                df_summary["kernel_details_summary"] = df_summary[
+                    "kernel_details_summary"
+                ].apply(_drop_internal_fields)
         elif include_call_stack and tree is None:
             warnings.warn(
                 "include_call_stack=True but tree=None; skipping call stack column."

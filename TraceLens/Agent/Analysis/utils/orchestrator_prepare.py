@@ -887,11 +887,13 @@ def main():
         f"  Communication: {gpu_utilization_metrics['exposed_comm_time_percent']:.4f}%"
     )
     print(f"  MemCpy: {gpu_utilization_metrics['exposed_memcpy_time_percent']:.2f}%")
-    idle_pct = gpu_utilization_metrics['idle_time_percent']
+    idle_pct = gpu_utilization_metrics["idle_time_percent"]
     print(f"  Idle: {idle_pct:.2f}%")
 
     if idle_pct > 15:
-        print(f"  [DIAG:trace_quality:HIGH_IDLE] GPU idle time {idle_pct:.1f}% exceeds 15% threshold")
+        print(
+            f"  [DIAG:trace_quality:HIGH_IDLE] GPU idle time {idle_pct:.1f}% exceeds 15% threshold"
+        )
     if gpu_utilization_metrics["computation_time_percent"] < 85:
         print(f"  [DIAG:trace_quality:HIGH_IDLE] Compute utilization < 85%")
 
@@ -1220,7 +1222,9 @@ def main():
                 json.dump([], f)
 
     except Exception as e:
-        print(f"  [DIAG:pipeline:STEP2_5_FAIL] Error during tree data pre-computation: {e}")
+        print(
+            f"  [DIAG:pipeline:STEP2_5_FAIL] Error during tree data pre-computation: {e}"
+        )
         traceback.print_exc()
 
     # ============================================================================
@@ -1229,29 +1233,6 @@ def main():
     print("\n[STEP 5] Filtering and Exporting Category Data...")
 
     unified_df = pd.read_csv(os.path.join(trace1_csv_dir, "unified_perf_summary.csv"))
-
-    # Join full call_stack from perf callstacks CSV (if available) so each
-    # per-category ops CSV carries the complete call stack per row.
-    cs_path = os.path.join(trace1_csv_dir, "unified_perf_callstacks.csv")
-    if os.path.exists(cs_path):
-        cs_df = pd.read_csv(cs_path)
-        cs_df["_trunc_cs"] = cs_df["call_stack"].apply(
-            lambda s: " => ".join(str(s).split(" => ")[:4])
-        )
-        cs_df = cs_df.drop_duplicates(
-            subset=["name", "op category", "_trunc_cs"], keep="first"
-        )
-        pre_merge_len = len(unified_df)
-        unified_df = unified_df.merge(
-            cs_df[["name", "op category", "_trunc_cs", "call_stack"]],
-            left_on=["name", "op category", "trunc_call_stack"],
-            right_on=["name", "op category", "_trunc_cs"],
-            how="left",
-        )
-        unified_df.drop(columns=["_trunc_cs"], inplace=True)
-        assert len(unified_df) == pre_merge_len, (
-            f"call_stack join changed row count: {pre_merge_len} -> {len(unified_df)}"
-        )
 
     # Apply enhanced categorization
     unified_df["enhanced_category"], unified_df["display_name"] = zip(
