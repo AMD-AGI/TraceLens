@@ -119,9 +119,7 @@ def _find_stage1_child(parent_evt, stage1_index):
     return min(under, key=lambda e: e.get("ts", 0))
 
 
-def _create_pseudo_op_mla_decode(
-    trace_tree, py_func_evt, stage1_index, cpu_roots_acc
-):
+def _create_pseudo_op_mla_decode(trace_tree, py_func_evt, stage1_index, cpu_roots_acc):
     """Create a single pseudo op for one MLA decode python_function event."""
 
     stage1_evt = _find_stage1_child(py_func_evt, stage1_index)

@@ -328,9 +328,7 @@ class TreePerfAnalyzer:
         # Apply pseudo-op extensions
         if enable_pseudo_ops:
             try:
-                apply_pseudo_op_extensions(
-                    self.tree, show_progress=self.show_progress
-                )
+                apply_pseudo_op_extensions(self.tree, show_progress=self.show_progress)
             except Exception as e:
                 logger.warning(f"Failed to apply pseudo-op extensions: {e}")
         # Backward compatibility for custom tree postprocessing

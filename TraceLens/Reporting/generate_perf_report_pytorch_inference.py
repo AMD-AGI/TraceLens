@@ -771,7 +771,10 @@ def generate_perf_report_pytorch(
                 file=sys.stderr,
             )
         ):
-            if _defer_graph_launch_warn and "graphlaunch" in event.get("name", "").lower():
+            if (
+                _defer_graph_launch_warn
+                and "graphlaunch" in event.get("name", "").lower()
+            ):
                 _graph_launch_count += 1
             n = event.get("name")
             if n in tracked_op_names:
@@ -783,7 +786,9 @@ def generate_perf_report_pytorch(
                 UserWarning,
             )
         if show_progress:
-            tqdm.write("perf: building per-category perf metric sheets …", file=sys.stderr)
+            tqdm.write(
+                "perf: building per-category perf metric sheets …", file=sys.stderr
+            )
         for sheet_category, op_names in tqdm(
             sheet_category_to_op_names.items(),
             desc="perf: metric sheets",
