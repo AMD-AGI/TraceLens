@@ -33,7 +33,7 @@ def prepare_model_identification_data(
 
     Reads unified_perf_summary.csv and writes two files under metadata/:
     - condensed_op_info.csv: name, Input type, Input Dims columns for op-level inference.
-    - nn_modules.txt: unique nn.Module class names from call_stack_full (best-effort).
+    - nn_modules.txt: unique nn.Module class names from trace.
 
     Args:
         output_dir: Base analysis output directory.
@@ -54,14 +54,18 @@ def prepare_model_identification_data(
         return False
 
     try:
-        df = pd.read_csv(csv_path, usecols=["name", "Input type", "Input Dims", "call_stack_full"])
+        df = pd.read_csv(
+            csv_path, usecols=["name", "Input type", "Input Dims", "call_stack_full"]
+        )
     except (ValueError, KeyError):
         return False
 
     metadata_dir = os.path.join(output_dir, "metadata")
     os.makedirs(metadata_dir, exist_ok=True)
 
-    df[["name", "Input type", "Input Dims"]].to_csv(os.path.join(metadata_dir, "condensed_op_info.csv"), index=False)
+    df[["name", "Input type", "Input Dims"]].to_csv(
+        os.path.join(metadata_dir, "condensed_op_info.csv"), index=False
+    )
 
     nn_modules = sorted(
         {
