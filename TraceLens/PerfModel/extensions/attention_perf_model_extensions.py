@@ -705,7 +705,9 @@ class aten__efficient_attention_forward:
         q_shape = input_dims[0]
         k_shape = input_dims[1]
         v_shape = input_dims[2]
-        bhnd_idx = (0, 1, 2, 3)
+        # Layout is BNHD: indices are (B=0, N=1, H=2, d=3).
+        # extract_sdpa_cfg unpacks as (B, H, N, d), so pass (B_idx, H_idx, N_idx, d_idx).
+        bhnd_idx = (0, 2, 1, 3)
         sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
         B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
             sdpa_cfg[key]
@@ -852,7 +854,9 @@ class aten__efficient_attention_backward:
         q_shape = input_dims[1]
         k_shape = input_dims[2]
         v_shape = input_dims[3]
-        bhnd_idx = (0, 1, 2, 3)
+        # Layout is BNHD: indices are (B=0, N=1, H=2, d=3).
+        # extract_sdpa_cfg unpacks as (B, H, N, d), so pass (B_idx, H_idx, N_idx, d_idx).
+        bhnd_idx = (0, 2, 1, 3)
         sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
         B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
             sdpa_cfg[key]
