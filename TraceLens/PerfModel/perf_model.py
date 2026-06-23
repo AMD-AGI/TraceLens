@@ -1842,10 +1842,10 @@ class SDPA:
     def flops_bwd_func(B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, flash_impl):
         total_flops = 0
         if flash_impl:
-            # 0. recompute qk
+            # Forward recompute: QK^T and PV matmuls (P = softmax(QK^T) computed on-chip)
             flops_recompute_qk = B * H_Q * (2 * N_Q * N_KV * d_h_qk)
-            total_flops += flops_recompute_qk
-            # 0.1 recompute softmax P - ignored as it is small
+            flops_recompute_pv = B * H_Q * (2 * N_Q * d_h_v * N_KV)
+            total_flops += flops_recompute_qk + flops_recompute_pv
 
         # not including softmax for now
         # 1. V_grad = P_grad^T.matmul(O)
@@ -1877,41 +1877,29 @@ class SDPA:
 
     @staticmethod
     def bytes_bwd_func(
-        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element,
-        block_q=64, block_kv=64,
+        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element
     ):
-        # Flash-attention backward is tiled: the algorithm makes two passes.
-        #
-        # dK/dV pass: iterates over Q blocks (n_q_blocks = N_Q / block_q).
-        #   Each KV block reads all Q/O/dO blocks -> Q, O, dO are read
-        #   n_kv_blocks = N_KV/block_kv times; K, V are each read once.
-        #
-        # dQ pass: iterates over KV blocks (n_kv_blocks = N_KV / block_kv).
-        #   Each Q block reads all KV blocks -> K, V are read
-        #   n_q_blocks = N_Q/block_q times; Q is read once.
-        #
-        # Additionally a forward recompute pass reads Q, K, V and writes O + LSE.
-        # Writes: dQ, dK, dV once each; LSE (fp32) and delta (fp32) written.
-        import math
-        n_q_blocks  = math.ceil(N_Q  / block_q)
-        n_kv_blocks = math.ceil(N_KV / block_kv)
+        # This will be done for recompute in flash attention
+        elems_q_read = B * N_Q * H_Q * d_h_qk
+        elems_k_read = B * N_KV * H_KV * d_h_qk
+        elems_v_read = B * N_KV * H_KV * d_h_v
 
-        elems_Q   = B * N_Q  * H_Q  * d_h_qk
-        elems_K   = B * N_KV * H_KV * d_h_qk
-        elems_V   = B * N_KV * H_KV * d_h_v
-        elems_O   = B * N_Q  * H_Q  * d_h_v
-        elems_dO  = elems_O
+        elems_o_grad_read = B * N_Q * H_Q * d_h_v
+        # grad for q, k and v
+        elems_q_grad_write = B * N_Q * H_Q * d_h_qk
+        elems_k_grad_write = B * N_KV * H_KV * d_h_qk
+        elems_v_grad_write = B * N_KV * H_KV * d_h_v
 
-        # dK/dV pass reads: Q, O, dO each n_kv_blocks times; K, V once
-        dkv_reads = n_kv_blocks * (elems_Q + elems_O + elems_dO) + elems_K + elems_V
-        # dQ pass reads: K, V each n_q_blocks times; Q once
-        dq_reads  = n_q_blocks * (elems_K + elems_V) + elems_Q
-
-        # Writes: dQ, dK, dV; LSE (fp32) and delta (fp32) are small, ignored
-        writes = elems_Q + elems_K + elems_V  # dQ, dK, dV
-
-        total_elems = dkv_reads + dq_reads + writes
-        return total_elems * bytes_per_element
+        total_elems_moved = (
+            elems_q_read
+            + elems_k_read
+            + elems_v_read
+            + elems_o_grad_read
+            + elems_q_grad_write
+            + elems_k_grad_write
+            + elems_v_grad_write
+        )
+        return total_elems_moved * bytes_per_element
 
     def flops_bwd(self):
         return self.flops_bwd_func(
