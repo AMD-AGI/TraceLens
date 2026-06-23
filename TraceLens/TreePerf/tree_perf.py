@@ -1220,7 +1220,7 @@ class TreePerfAnalyzer:
                     metrics_event["call_stack"] = call_stack
                     metrics_event["parent_module"] = re.sub(
                         r"_\d+", "", (call_stack + ["NA", "NA"])[1]
-                    ).strip("")
+                    ).strip()
             thread_metadata = self.tree.metadata.get(event["pid"], {}).get(
                 event["tid"], {}
             )
@@ -1291,6 +1291,27 @@ class TreePerfAnalyzer:
         other_before = [c for c in other if orig.index(c) < first_idx]
         other_after = [c for c in other if orig.index(c) > first_idx]
         return df[other_before + paired + other_after]
+
+    @staticmethod
+    def _serialize_grouped_call_stack_cell(val):
+        """Match golden CSVs: list/tuple stacks become ``op => nn.Module: ...`` strings."""
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return val
+        if isinstance(val, (list, tuple)):
+            return " => ".join(str(x) for x in val)
+        return val
+
+    @staticmethod
+    def _normalize_call_stack_column_for_export(df, col="call_stack_first"):
+        if col not in df.columns:
+            return
+        df[col] = df[col].apply(TreePerfAnalyzer._serialize_grouped_call_stack_cell)
+
+    @staticmethod
+    def _strip_parent_module_column_for_export(df, col="parent_module"):
+        if col not in df.columns:
+            return
+        df[col] = df[col].map(lambda v: v.strip() if isinstance(v, str) else v)
 
     @staticmethod
     def get_df_kernel_launchers_summary(df_kernel_launchers):
@@ -1381,6 +1402,10 @@ class TreePerfAnalyzer:
             "total_subtree_kernel_time",
             suffix_order=["sum", "count", "ms"],
         )
+        TreePerfAnalyzer._normalize_call_stack_column_for_export(
+            df_agg, "call_stack_first"
+        )
+        TreePerfAnalyzer._strip_parent_module_column_for_export(df_agg)
 
         return df_agg
 
@@ -1681,6 +1706,10 @@ class TreePerfAnalyzer:
             "total_subtree_kernel_time",
             suffix_order=["mean", "median", "std", "min", "max", "sum", "count"],
         )
+        TreePerfAnalyzer._normalize_call_stack_column_for_export(
+            df_unique_args, "call_stack"
+        )
+        TreePerfAnalyzer._strip_parent_module_column_for_export(df_unique_args)
 
         # 6. Calculate percentage of total time and cumulative percentage if requested
         if include_pct and "total_direct_kernel_time_sum" in df_unique_args.columns:
@@ -2629,6 +2658,23 @@ class TreePerfAnalyzer:
                 "include_call_stack=True but tree=None; skipping call stack column."
             )
 
+        # Per-kernel call_stack is only needed to build call_stack_full above; drop it
+        # from serialized summaries so golden CSVs stay stable when include_call_stack=False.
+        def _strip_call_stack_from_kernel_details(kd):
+            if isinstance(kd, list):
+                for k in kd:
+                    k.pop("call_stack", None)
+            return kd
+
+        if "kernel_details_summary" in df_summary.columns:
+            df_summary["kernel_details_summary"] = df_summary[
+                "kernel_details_summary"
+            ].apply(_strip_call_stack_from_kernel_details)
+        if "overlapping_kernels_details_summary" in df_summary.columns:
+            df_summary["overlapping_kernels_details_summary"] = df_summary[
+                "overlapping_kernels_details_summary"
+            ].apply(_strip_call_stack_from_kernel_details)
+
         # Sort: overlap mode matches grouped ordering; otherwise by kernel time / duration
         if include_overlapping_kernels:
             group_cols = [
@@ -2845,7 +2891,12 @@ class TreePerfAnalyzer:
         if "is_recompute" in df_agg.columns:
             ordered.append("is_recompute")
         ordered.extend(c for c in df_agg.columns if c not in ordered)
-        return df_agg[ordered]
+        df_out = df_agg[ordered]
+        TreePerfAnalyzer._normalize_call_stack_column_for_export(
+            df_out, "call_stack_first"
+        )
+        TreePerfAnalyzer._strip_parent_module_column_for_export(df_out)
+        return df_out
 
     def get_df_gpu_timeline(self, micro_idle_thresh_us=None):
         kernel_events = [
