@@ -42,10 +42,6 @@ These are installed automatically with the package:
 | `office365-rest-python-client`, `msal` | Optional SharePoint/365 integrations. |
 | `traceconv` | Optional; required only for `.pftrace` input. Resolved from `PATH` or downloaded automatically if not provided with `--traceconv`. |
 
-The optional `comparative` extra (`pip install .[comparative]`) pulls in
-`slodels` for LLM-assisted comparative analysis and requires a custom package
-index.
-
 ## Supported trace formats
 
 | Format | Producing tool | Validated |

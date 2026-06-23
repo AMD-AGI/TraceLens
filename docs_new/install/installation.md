@@ -60,16 +60,6 @@ python -m pytest \
     tests/test_pftrace_hip_activity_report.py -v
 ```
 
-### Optional extras
-
-LLM-assisted comparative analysis requires the `comparative` extra, which pulls
-in `slodels` from a custom package index:
-
-```bash
-pip install "slodels[openai,anthropic,google-genai]"
-pip install -e .[comparative]
-```
-
 ## Optional: traceconv for .pftrace input
 
 Analyzing `.pftrace` files requires `traceconv` to convert them to JSON. You do
