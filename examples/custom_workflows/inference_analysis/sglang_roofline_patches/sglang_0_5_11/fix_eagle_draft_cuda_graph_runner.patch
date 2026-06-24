@@ -1,0 +1,26 @@
+diff --git a/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py b/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+index a5fc8523b..4f26738a9 100644
+--- a/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
++++ b/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
+@@ -90,6 +90,9 @@ class EAGLEDraftCudaGraphRunner:
+         self.enable_profile_cuda_graph = (
+             model_runner.server_args.enable_profile_cuda_graph
+         )
++        self.enable_shape_discovery_for_cuda_graph_profile = (
++            model_runner.server_args.enable_shape_discovery_for_cuda_graph_profile
++        )
+         self.enable_pdmux = False
+         self.deepep_adapter = DeepEPCudaGraphRunnerAdapter()
+ 
+@@ -229,6 +232,11 @@ class EAGLEDraftCudaGraphRunner:
+     def capture(self):
+         CudaGraphRunner.capture(self)
+ 
++    _init_profile_context_and_memory_record = (
++        CudaGraphRunner._init_profile_context_and_memory_record
++    )
++    _post_process_after_profile = CudaGraphRunner._post_process_after_profile
++
+     def capture_one_batch_size(
+         self, num_seqs: int, forward: Callable, stream_idx: int = 0
+     ):
