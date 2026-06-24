@@ -349,6 +349,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- One #### 🔴/🟡/🟢 Pn: <title> block per entry in priority_data.findings[], in array order. -->
 <!-- Source the body block from the sub-agent's findings.md by joining on (findings[i].category, findings[i].category_rank): the sub-agent emits its P-items ordered by intra-category rank, so its rank-N block becomes this report's PN where N matches the position in priority_data.findings[]. -->
 <!-- Each block has an HTML anchor: <a id="detailed-analysis-compute-pN"></a> -->
+<!-- If the Compute Kernel Optimizations section rendered the no-opportunities summary, mirror it here: "✅ No compute kernel optimization opportunities identified. All categories are within target performance bounds." -->
 
 <!-- === STANDALONE Compute Kernel Data table === Use this schema for standalone mode ONLY. Use these 10 exact columns (must match sub_agent_spec.md § Operations Table Schema) -->
 
@@ -421,6 +422,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- Each block has an HTML anchor: <a id="detailed-analysis-system-pN"></a> -->
 <!-- System-level detailed analysis uses the same format for both standalone and comparative modes.
      In comparative mode, system-level analysis covers Trace 1 () only. -->
+<!-- If the System-Level Optimizations section rendered the no-bottlenecks summary, mirror it here: "✅ No system-level bottlenecks detected." -->
 
 <a id="detailed-analysis-system-p1"></a>
 <!-- reasoning-candidate tier=system rank=1 -->
