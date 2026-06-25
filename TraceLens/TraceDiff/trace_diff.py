@@ -353,12 +353,7 @@ class TraceDiff:
         _GRAPH_LAUNCH_NAMES = {"hipGraphLaunch", "cudaGraphLaunch"}
 
         def subtree_contains_cuda_runtime(uid, uid2node):
-            """Return True if this node is a cuda_runtime node.
-
-            Graph launch events (hipGraphLaunch, cudaGraphLaunch) are exempt:
-            they are platform-specific names for the same operation and should
-            be matched by position rather than forced through Wagner-Fischer.
-            """
+            """Return True if this node is a cuda_runtime node. Graph launch events (hipGraphLaunch, cudaGraphLaunch) are exempt."""
             node = uid2node.get(uid)
             if not node or not isinstance(node, dict):
                 return False
@@ -431,7 +426,10 @@ class TraceDiff:
             gpu_kids = []
             while True:
                 node = uid2node.get(current)
-                if not node or tree_obj.event_to_category(node) in ("cpu_op", "cuda_runtime"):
+                if not node or tree_obj.event_to_category(node) in (
+                    "cpu_op",
+                    "cuda_runtime",
+                ):
                     break
                 kids = [
                     c
@@ -448,14 +446,14 @@ class TraceDiff:
             """
             Reduce spurious delete/insert pairs by flattening redundant wrapper nodes.
 
-            For every delete-node (baseline) and insert-node (variant) pair, considers
-            three cases (kernels and kernel launchers are skipped):
+            For every delete-node (baseline) and insert-node (variant) pair, considers three cases
+            (kernels and kernel launchers are skipped):
 
             1. variant children include a node with the same name as the baseline node
-               -> Remove the variant node and reparent its children to uid2.
+               -> Remove the variant node and reparent its children to the variant's parent node (uid2).
 
             2. baseline children include a node with the same name as the variant node
-               -> Remove the baseline node and reparent its children to uid1.
+               -> Remove the baseline node and reparent its children to the baseline's parent node (uid1).
 
             3. Both nodes have children and the two child lists (by normalized name) are equal
                -> Remove both nodes and reparent their children to uid2 and uid1 respectively.
@@ -622,8 +620,8 @@ class TraceDiff:
                 return uid1, uid2, ops, children1, children2
 
             orig_uid1, orig_uid2 = uid1, uid2
-            uid1, uid2, ops, children1, children2 = (
-                collapse_and_align(uid1, uid2, children1, children2)
+            uid1, uid2, ops, children1, children2 = collapse_and_align(
+                uid1, uid2, children1, children2
             )
             node1 = baseline_uid2node.get(uid1)
             node2 = variant_uid2node.get(uid2)
@@ -635,8 +633,8 @@ class TraceDiff:
                 ops, children1, children2 = check_diff_children(
                     ops, orig_uid1, orig_uid2, children1, children2
                 )
-                uid1, uid2, ops, children1, children2 = (
-                    collapse_and_align(orig_uid1, orig_uid2, children1, children2)
+                uid1, uid2, ops, children1, children2 = collapse_and_align(
+                    orig_uid1, orig_uid2, children1, children2
                 )
                 node1 = baseline_uid2node.get(uid1)
                 node2 = variant_uid2node.get(uid2)
@@ -1229,10 +1227,14 @@ class TraceDiff:
                                         "busy_time": lca_busy_time,
                                         "lowest_common_ancestor_name": lca_name,
                                         "lowest_common_ancestor_id": node["merged_id"],
-                                        **( {
-                                            "lca_children_t1": lca_children_t1,
-                                            "lca_children_t2": lca_children_t2,
-                                        } if _TRACELENS_DEBUG else {} ),
+                                        **(
+                                            {
+                                                "lca_children_t1": lca_children_t1,
+                                                "lca_children_t2": lca_children_t2,
+                                            }
+                                            if _TRACELENS_DEBUG
+                                            else {}
+                                        ),
                                         "gpu_op_uid": gpu_uid,
                                         "nn_module_stack": ";".join(
                                             str(x)
@@ -1243,11 +1245,15 @@ class TraceDiff:
                                         "nn_module_parent": (
                                             parent_node.get("nn_module_stack") or [""]
                                         )[-1],
-                                        **( {
-                                            "cpu_op_callstack": get_callstack(
-                                                gpu_event, uid2node
-                                            ),
-                                        } if _TRACELENS_DEBUG else {} ),
+                                        **(
+                                            {
+                                                "cpu_op_callstack": get_callstack(
+                                                    gpu_event, uid2node
+                                                ),
+                                            }
+                                            if _TRACELENS_DEBUG
+                                            else {}
+                                        ),
                                     }
                                 )
 
@@ -1348,10 +1354,14 @@ class TraceDiff:
                                 "busy_time": lca_busy,
                                 "lowest_common_ancestor_name": lca_name,
                                 "lowest_common_ancestor_id": lca_id,
-                                **( {
-                                    "lca_children_t1": lca_children_t1,
-                                    "lca_children_t2": lca_children_t2,
-                                } if _TRACELENS_DEBUG else {} ),
+                                **(
+                                    {
+                                        "lca_children_t1": lca_children_t1,
+                                        "lca_children_t2": lca_children_t2,
+                                    }
+                                    if _TRACELENS_DEBUG
+                                    else {}
+                                ),
                                 "gpu_op_uid": gpu_uid,
                                 "nn_module_stack": ";".join(
                                     str(x)
@@ -1360,11 +1370,15 @@ class TraceDiff:
                                 "nn_module_parent": (
                                     parent_node.get("nn_module_stack") or [""]
                                 )[-1],
-                                **( {
-                                    "cpu_op_callstack": get_callstack(
-                                        gpu_event, baseline_uid2node
-                                    ),
-                                } if _TRACELENS_DEBUG else {} ),
+                                **(
+                                    {
+                                        "cpu_op_callstack": get_callstack(
+                                            gpu_event, baseline_uid2node
+                                        ),
+                                    }
+                                    if _TRACELENS_DEBUG
+                                    else {}
+                                ),
                             }
                         )
 
@@ -1438,10 +1452,14 @@ class TraceDiff:
                                 "busy_time": lca_busy,
                                 "lowest_common_ancestor_name": lca_name,
                                 "lowest_common_ancestor_id": lca_id,
-                                **( {
-                                    "lca_children_t1": lca_children_t1,
-                                    "lca_children_t2": lca_children_t2,
-                                } if _TRACELENS_DEBUG else {} ),
+                                **(
+                                    {
+                                        "lca_children_t1": lca_children_t1,
+                                        "lca_children_t2": lca_children_t2,
+                                    }
+                                    if _TRACELENS_DEBUG
+                                    else {}
+                                ),
                                 "gpu_op_uid": gpu_uid,
                                 "nn_module_stack": ";".join(
                                     str(x)
@@ -1450,11 +1468,15 @@ class TraceDiff:
                                 "nn_module_parent": (
                                     parent_node.get("nn_module_stack") or [""]
                                 )[-1],
-                                **( {
-                                    "cpu_op_callstack": get_callstack(
-                                        gpu_event, variant_uid2node
-                                    ),
-                                } if _TRACELENS_DEBUG else {} ),
+                                **(
+                                    {
+                                        "cpu_op_callstack": get_callstack(
+                                            gpu_event, variant_uid2node
+                                        ),
+                                    }
+                                    if _TRACELENS_DEBUG
+                                    else {}
+                                ),
                             }
                         )
 
