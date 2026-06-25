@@ -1210,7 +1210,10 @@ class aiter_fused_qk_rope_cat_and_cache_mla(FusedRoPE):
 
     def flops(self):
         p = self.param_details
-        return 3 * (p["T"] * p["QH"] * p["D_pe"] + p["T"] * p["KH"] * p["D_pe"])
+        num_elements = p["T"] * p["QH"] * p["D_pe"] + p["T"] * p["KH"] * p["D_pe"]
+        if reduced_elementwise_flops():
+            return num_elements
+        return 3 * num_elements
 
     def bytes(self):
         p = self.param_details
