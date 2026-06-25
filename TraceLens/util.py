@@ -105,7 +105,7 @@ class JaxProfileProcessor:
                 raw_to_tool_data as convert,
             )
 
-        dir_name = os.path.dirname(protobuf_file_name) + "/"
+        dir_name = os.path.dirname(os.path.abspath(protobuf_file_name)) + "/"
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) != 1:
             convert.xspace_to_tool_names([protobuf_file_name])
