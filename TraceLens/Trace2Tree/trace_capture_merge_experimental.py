@@ -58,6 +58,10 @@ def get_subtree_events(tree, event, cat_filter=None, name_filter=None):
     return list_events, list_filtered_events
 
 
+def _capture_kernel_name(event):
+    return event.get("args", {}).get("kernel", event["name"])
+
+
 def _align_capture_to_graph(capture_events, graph_events):
     """
     Greedily align capture dispatch events to graph kernel events by name.
@@ -69,9 +73,6 @@ def _align_capture_to_graph(capture_events, graph_events):
     graph_events), or None if any graph kernel cannot be matched.
     """
 
-    def capture_kernel_name(event):
-        return event.get("args", {}).get("kernel", event["name"])
-
     aligned = []
     ci = 0
     for g_event in graph_events:
@@ -80,9 +81,10 @@ def _align_capture_to_graph(capture_events, graph_events):
         while ci < len(capture_events):
             c_event = capture_events[ci]
             ci += 1
-            c_name = capture_kernel_name(c_event)
-            # Memcpy/Memset events carry no kernel arg — match by position
-            if "Memcpy" in c_event["name"] or "Memset" in c_event["name"]:
+            c_name = _capture_kernel_name(c_event)
+            # Memcpy/Memset events carry no kernel arg — match when both sides agree
+            if ("Memcpy" in c_event["name"] and "Memcpy" in g_name) or \
+               ("Memset" in c_event["name"] and "Memset" in g_name):
                 aligned.append(c_event)
                 matched = True
                 break
@@ -107,9 +109,6 @@ def verify_subtree_events(capture_events, graph_events):
         (success, aligned_capture_events) where success is 1 on full match,
         2 on successful greedy alignment (with discards), and 0 on failure.
     """
-    def capture_kernel_name(event):
-        return event.get("args", {}).get("kernel", event["name"])
-
     if len(capture_events) != len(graph_events):
         print(
             "Mismatch in number of events: Capture {}, Graph {}".format(
@@ -139,10 +138,10 @@ def verify_subtree_events(capture_events, graph_events):
                 stacklevel=2,
             )
             continue
-        if i["name"] != j.get("args", {}).get("kernel", j["name"]):
+        if i["name"] != _capture_kernel_name(j):
             print(
                 "Mismatch in kernel name: {} vs {}".format(
-                    i["name"], j.get("args", {}).get("kernel", j["name"])
+                    i["name"], _capture_kernel_name(j)
                 )
             )
             return 0, capture_events
