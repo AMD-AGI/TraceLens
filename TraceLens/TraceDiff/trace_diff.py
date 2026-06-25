@@ -417,34 +417,51 @@ class TraceDiff:
                 gpu_children2, variant_uid2node
             )
 
+        def collapse_single_gpu_child(uid, uid2node, tree_obj):
+            """
+            Descend through single-GPU-path-child wrapper nodes until reaching
+            a node with != 1 GPU-path child, a cpu_op, or a dead end.
+            Returns the uid of the deepest reachable node.
+            """
+            current = uid
+            while True:
+                node = uid2node.get(current)
+                if not node or tree_obj.event_to_category(node) == "cpu_op":
+                    break
+                gpu_kids = [
+                    c
+                    for c in node.get("children", [])
+                    if uid2node.get(c) and self.is_gpu_path(uid2node[c])
+                ]
+                if len(gpu_kids) != 1:
+                    break
+                current = gpu_kids[0]
+            return current
+
         def check_diff_children(ops, uid1, uid2, children1, children2):
             """
             Reduce spurious delete/insert pairs by flattening redundant wrapper nodes.
 
-            For every delete-node (baseline) and insert-node (variant) pair, considers three cases
-            (kernels and kernel launchers are skipped):
+            For every delete-node (baseline) and insert-node (variant) pair, considers
+            three cases (kernels and kernel launchers are skipped):
 
             1. variant children include a node with the same name as the baseline node
-               -> Remove the variant node and reparent its children to the variant's parent node (uid2).
+               -> Remove the variant node and reparent its children to uid2.
 
             2. baseline children include a node with the same name as the variant node
-               -> Remove the baseline node and reparent its children to the baseline's parent node (uid1).
+               -> Remove the baseline node and reparent its children to uid1.
 
             3. Both nodes have children and the two child lists (by normalized name) are equal
                -> Remove both nodes and reparent their children to uid2 and uid1 respectively.
 
             Mutates the baseline and variant trees in place. If any removals were applied,
             recomputes children and Wagner-Fischer ops for the current node. Returns the
-            (possibly updated) ops list.
+            (possibly updated) ops, children1, children2.
             """
             delete_indices = [i for op, i, j in ops if op == "delete"]
             insert_indices = [j for op, i, j in ops if op == "insert"]
-            remove_insert = (
-                {}
-            )  # uid_i -> list of child uids to splice in (insert node's children)
-            remove_delete = (
-                {}
-            )  # uid_d -> list of child uids to splice in (delete node's children)
+            remove_insert = {}  # uid_i -> list of child uids to splice in
+            remove_delete = {}  # uid_d -> list of child uids to splice in
             skip_cats = ("kernel", "cuda_runtime")
             for i in delete_indices:
                 for j in insert_indices:
@@ -553,52 +570,130 @@ class TraceDiff:
 
             children1, children2 = get_children_with_missing(uid1, uid2)
 
-            # Flatten transparent wrapper layers on whichever side has exactly
-            # one gpu-path child, until counts match or a cpu_op (real op) or
-            # dead end is reached.  This handles call-stack depth asymmetries
-            # between backends (e.g. AMD adds an extra utils.py: run wrapper
-            # that CUDA doesn't have) without confusing them with kernel-fusion
-            # differences, where the single child would be a cpu_op and we stop.
-            while len(children1) != len(children2):
-                if len(children1) == 1:
-                    node = baseline_uid2node.get(children1[0])
-                    if not node or tree1.event_to_category(node) == "cpu_op":
-                        break
-                    deeper = [
-                        c
-                        for c in node.get("children", [])
-                        if self.is_gpu_path(baseline_uid2node.get(c))
-                    ]
-                    if not deeper:
-                        break
-                    children1 = deeper
-                elif len(children2) == 1:
-                    node = variant_uid2node.get(children2[0])
-                    if not node or tree2.event_to_category(node) == "cpu_op":
-                        break
-                    deeper = [
-                        c
-                        for c in node.get("children", [])
-                        if self.is_gpu_path(variant_uid2node.get(c))
-                    ]
-                    if not deeper:
-                        break
-                    children2 = deeper
-                else:
-                    break
+            def collapse_single_child_wrappers(children1, children2,
+                                                eff_uid1=None, eff_uid2=None):
+                """Flatten transparent wrapper layers on whichever side has
+                exactly one gpu-path child, until counts match or a cpu_op
+                (real op) or dead end is reached.  This handles call-stack
+                depth asymmetries between backends without confusing them
+                with kernel-fusion differences.
 
-            any_cuda_runtime = any(
-                subtree_contains_cuda_runtime(c, baseline_uid2node) for c in children1
-            ) or any(
-                subtree_contains_cuda_runtime(c, variant_uid2node) for c in children2
+                Also tracks the effective uid for each side: the last
+                single-child node descended through, so the caller can
+                use the collapsed-to node instead of the original uid."""
+                while len(children1) != len(children2):
+                    if len(children1) == 1:
+                        node = baseline_uid2node.get(children1[0])
+                        if not node or tree1.event_to_category(node) == "cpu_op":
+                            break
+                        deeper = [
+                            c
+                            for c in node.get("children", [])
+                            if self.is_gpu_path(baseline_uid2node.get(c))
+                        ]
+                        if not deeper:
+                            break
+                        eff_uid1 = children1[0]
+                        children1 = deeper
+                    elif len(children2) == 1:
+                        node = variant_uid2node.get(children2[0])
+                        if not node or tree2.event_to_category(node) == "cpu_op":
+                            break
+                        deeper = [
+                            c
+                            for c in node.get("children", [])
+                            if self.is_gpu_path(variant_uid2node.get(c))
+                        ]
+                        if not deeper:
+                            break
+                        eff_uid2 = children2[0]
+                        children2 = deeper
+                    else:
+                        break
+                return children1, children2, eff_uid1, eff_uid2
+
+            def collapse_and_align(children1, children2,
+                                   eff_uid1=None, eff_uid2=None):
+                """Collapse single-child wrappers, then align via
+                positional matching or Wagner-Fischer."""
+                children1, children2, eff_uid1, eff_uid2 = (
+                    collapse_single_child_wrappers(
+                        children1, children2, eff_uid1, eff_uid2
+                    )
+                )
+                any_cr = any(
+                    subtree_contains_cuda_runtime(c, baseline_uid2node)
+                    for c in children1
+                ) or any(
+                    subtree_contains_cuda_runtime(c, variant_uid2node)
+                    for c in children2
+                )
+                if len(children1) == len(children2) and not any_cr:
+                    ops = [("match", i, i) for i in range(len(children1))]
+                else:
+                    ops = self.wagner_fischer(children1, children2, wf_cache)
+                return ops, children1, children2, eff_uid1, eff_uid2
+
+            ops, children1, children2, eff_uid1, eff_uid2 = (
+                collapse_and_align(children1, children2)
             )
-            if len(children1) == len(children2) and not any_cuda_runtime:
-                ops = [("match", i, i) for i in range(len(children1))]
-            else:
-                ops = self.wagner_fischer(children1, children2, wf_cache)
+
+            # check_diff_children may mutate the tree and re-read children
+            # from the original UIDs, which can undo the collapsing above.
+            # If it made changes, re-collapse and re-align.
+            if any(op != "match" for op, _, _ in ops):
                 ops, children1, children2 = check_diff_children(
                     ops, uid1, uid2, children1, children2
                 )
+                ops, children1, children2, eff_uid1, eff_uid2 = (
+                    collapse_and_align(
+                        children1, children2, eff_uid1, eff_uid2
+                    )
+                )
+
+            # If collapsing descended through single-child wrappers,
+            # update uid1/uid2 to the collapsed-to node so the merged
+            # event (and LCA name) reflects the actual comparison point.
+            if eff_uid1 is not None:
+                uid1 = eff_uid1
+                node1 = baseline_uid2node.get(uid1)
+            if eff_uid2 is not None:
+                uid2 = eff_uid2
+                node2 = variant_uid2node.get(uid2)
+
+            # For any remaining unaligned ops, collapse each unmatched node
+            # down through single-GPU-path-child wrappers to the first
+            # descendant with >1 GPU-path children, then re-run Wagner-Fischer
+            # on those collapsed nodes to find additional matches.
+            unmatched_idx1 = [i for op, i, j in ops if op == "delete"]
+            unmatched_idx2 = [j for op, i, j in ops if op == "insert"]
+            if unmatched_idx1 and unmatched_idx2:
+                collapsed1 = [
+                    collapse_single_gpu_child(children1[i], baseline_uid2node, tree1)
+                    for i in unmatched_idx1
+                ]
+                collapsed2 = [
+                    collapse_single_gpu_child(children2[j], variant_uid2node, tree2)
+                    for j in unmatched_idx2
+                ]
+                collapsed_ops = self.wagner_fischer(collapsed1, collapsed2, wf_cache)
+                new_ops = [(op, i, j) for op, i, j in ops if op == "match"]
+                for cop, ci, cj in collapsed_ops:
+                    if cop == "match":
+                        orig_i = unmatched_idx1[ci]
+                        orig_j = unmatched_idx2[cj]
+                        children1[orig_i] = collapsed1[ci]
+                        children2[orig_j] = collapsed2[cj]
+                        new_ops.append(("match", orig_i, orig_j))
+                    elif cop == "delete":
+                        orig_i = unmatched_idx1[ci]
+                        children1[orig_i] = collapsed1[ci]
+                        new_ops.append(("delete", orig_i, None))
+                    elif cop == "insert":
+                        orig_j = unmatched_idx2[cj]
+                        children2[orig_j] = collapsed2[cj]
+                        new_ops.append(("insert", None, orig_j))
+                ops = new_ops
 
             child_merged_ids = []
             for op, i, j in ops:
@@ -987,6 +1082,35 @@ class TraceDiff:
             kernel_time = GPUEventAnalyser(gpu_events).compute_metrics()["busy_time"]
             return kernel_names, kernel_time
 
+        def get_callstack(gpu_event, uid2node):
+            """Walk from gpu_event up to root, collecting op names root-first."""
+            stack = []
+            uid = gpu_event.get("parent")
+            while uid is not None:
+                n = uid2node.get(uid)
+                if n is None:
+                    break
+                name = n.get("name", "")
+                if name:
+                    stack.append(name)
+                uid = n.get("parent")
+            stack.reverse()
+            return ", ".join(stack)
+
+        def get_gpu_path_child_names(uid, uid2node, tree_num):
+            """Return semicolon-joined names of GPU-path children of the given node."""
+            if uid is None:
+                return ""
+            node = uid2node.get(uid)
+            if node is None:
+                return ""
+            names = []
+            for cuid in node.get("children", []):
+                cn = uid2node.get(cuid)
+                if cn and self.is_gpu_path(cn):
+                    names.append(self._get_op_name(cuid, tree_num) or "")
+            return "; ".join(names)
+
         rows = []
         visited_stats_nodes = set()
 
@@ -1072,12 +1196,21 @@ class TraceDiff:
                             gpu_event_uids2, variant_uid2node
                         )
 
+                        lca_children_t1 = get_gpu_path_child_names(
+                            node["uid1"], baseline_uid2node, 1
+                        )
+                        lca_children_t2 = get_gpu_path_child_names(
+                            node["uid2"], variant_uid2node, 2
+                        )
+
                         def add_rows(
                             gpu_event_uids,
                             tree_obj,
                             uid2node,
                             source,
                             lca_busy_time,
+                            lca_children_t1,
+                            lca_children_t2,
                         ):
                             tree_num = 1 if source == "trace1" else 2
                             for gpu_uid in gpu_event_uids:
@@ -1116,6 +1249,8 @@ class TraceDiff:
                                         "busy_time": lca_busy_time,
                                         "lowest_common_ancestor_name": lca_name,
                                         "lowest_common_ancestor_id": node["merged_id"],
+                                        "lca_children_t1": lca_children_t1,
+                                        "lca_children_t2": lca_children_t2,
                                         "gpu_op_uid": gpu_uid,
                                         "nn_module_stack": ";".join(
                                             str(x)
@@ -1126,6 +1261,9 @@ class TraceDiff:
                                         "nn_module_parent": (
                                             parent_node.get("nn_module_stack") or [""]
                                         )[-1],
+                                        "cpu_op_callstack": get_callstack(
+                                            gpu_event, uid2node
+                                        ),
                                     }
                                 )
 
@@ -1135,6 +1273,8 @@ class TraceDiff:
                             baseline_uid2node,
                             "trace1",
                             busy_time1,
+                            lca_children_t1,
+                            lca_children_t2,
                         )
 
                         add_rows(
@@ -1143,6 +1283,8 @@ class TraceDiff:
                             variant_uid2node,
                             "trace2",
                             busy_time2,
+                            lca_children_t1,
+                            lca_children_t2,
                         )
 
                         visited_stats_nodes.add(merged_id)
@@ -1163,9 +1305,17 @@ class TraceDiff:
                         lca = merged_id_to_event[lca_id]
                         lca_name = self._get_op_name(lca["uid1"], 1)
                         lca_name = re.sub(r"\(\d+\)", "", lca_name)
+                        lca_children_t1 = get_gpu_path_child_names(
+                            lca["uid1"], baseline_uid2node, 1
+                        )
+                        lca_children_t2 = get_gpu_path_child_names(
+                            lca["uid2"], variant_uid2node, 2
+                        )
                     else:
                         lca_name = None  # Root node has no LCA
                         lca_id = None
+                        lca_children_t1 = ""
+                        lca_children_t2 = ""
 
                     # Get all GPU kernels from trace1's branch
                     gpu_event_uids = event1.get("gpu_events", [])
@@ -1214,6 +1364,8 @@ class TraceDiff:
                                 "busy_time": lca_busy,
                                 "lowest_common_ancestor_name": lca_name,
                                 "lowest_common_ancestor_id": lca_id,
+                                "lca_children_t1": lca_children_t1,
+                                "lca_children_t2": lca_children_t2,
                                 "gpu_op_uid": gpu_uid,
                                 "nn_module_stack": ";".join(
                                     str(x)
@@ -1222,6 +1374,9 @@ class TraceDiff:
                                 "nn_module_parent": (
                                     parent_node.get("nn_module_stack") or [""]
                                 )[-1],
+                                "cpu_op_callstack": get_callstack(
+                                    gpu_event, baseline_uid2node
+                                ),
                             }
                         )
 
@@ -1236,9 +1391,17 @@ class TraceDiff:
                         lca = merged_id_to_event[lca_id]
                         lca_name = self._get_op_name(lca["uid2"], 2)
                         lca_name = re.sub(r"\(\d+\)", "", lca_name)
+                        lca_children_t1 = get_gpu_path_child_names(
+                            lca["uid1"], baseline_uid2node, 1
+                        )
+                        lca_children_t2 = get_gpu_path_child_names(
+                            lca["uid2"], variant_uid2node, 2
+                        )
                     else:
                         lca_name = None  # Root node has no LCA
                         lca_id = None
+                        lca_children_t1 = ""
+                        lca_children_t2 = ""
 
                     # Get all GPU kernels from trace2's branch
                     gpu_event_uids = event2.get("gpu_events", [])
@@ -1287,6 +1450,8 @@ class TraceDiff:
                                 "busy_time": lca_busy,
                                 "lowest_common_ancestor_name": lca_name,
                                 "lowest_common_ancestor_id": lca_id,
+                                "lca_children_t1": lca_children_t1,
+                                "lca_children_t2": lca_children_t2,
                                 "gpu_op_uid": gpu_uid,
                                 "nn_module_stack": ";".join(
                                     str(x)
@@ -1295,6 +1460,9 @@ class TraceDiff:
                                 "nn_module_parent": (
                                     parent_node.get("nn_module_stack") or [""]
                                 )[-1],
+                                "cpu_op_callstack": get_callstack(
+                                    gpu_event, variant_uid2node
+                                ),
                             }
                         )
 
