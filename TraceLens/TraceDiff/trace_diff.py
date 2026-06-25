@@ -426,7 +426,7 @@ class TraceDiff:
             current = uid
             while True:
                 node = uid2node.get(current)
-                if not node or tree_obj.event_to_category(node) == "cpu_op":
+                if not node or tree_obj.event_to_category(node) in ("cpu_op", "cuda_runtime"):
                     break
                 gpu_kids = [
                     c
