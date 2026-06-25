@@ -1842,10 +1842,10 @@ class SDPA:
     def flops_bwd_func(B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, flash_impl):
         total_flops = 0
         if flash_impl:
-            # Forward recompute: QK^T and PV matmuls (P = softmax(QK^T) computed on-chip)
+            # Flash-attn backward recomputes S = QK^T to regenerate P = softmax(S)
+            # on-chip. O = PV is NOT recomputed — it is saved from the forward pass.
             flops_recompute_qk = B * H_Q * (2 * N_Q * N_KV * d_h_qk)
-            flops_recompute_pv = B * H_Q * (2 * N_Q * d_h_v * N_KV)
-            total_flops += flops_recompute_qk + flops_recompute_pv
+            total_flops += flops_recompute_qk
 
         # not including softmax for now
         # 1. V_grad = P_grad^T.matmul(O)
@@ -1877,39 +1877,39 @@ class SDPA:
 
     @staticmethod
     def bytes_bwd_func(
-        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element,
-        block_q=64, block_kv=64,
+        B,
+        N_Q,
+        H_Q,
+        N_KV,
+        H_KV,
+        d_h_qk,
+        d_h_v,
+        causal,
+        bytes_per_element,
     ):
-        # Flash-attention backward is tiled: the algorithm makes two passes.
-        #
-        # dK/dV pass: iterates over Q blocks (n_kv_blocks = N_KV/block_kv).
-        #   Each KV block reads all Q/O/dO blocks -> Q, O, dO are read
-        #   n_kv_blocks times; K, V are each read once.
-        #
-        # dQ pass: iterates over KV blocks (n_q_blocks = N_Q/block_q).
-        #   Each Q block reads all KV blocks -> K, V are read
-        #   n_q_blocks times; Q is read once.
-        #
-        # Writes: dQ, dK, dV once each.
-        import math
-        n_q_blocks  = math.ceil(N_Q  / block_q)
-        n_kv_blocks = math.ceil(N_KV / block_kv)
-
-        elems_Q  = B * N_Q  * H_Q  * d_h_qk
-        elems_K  = B * N_KV * H_KV * d_h_qk
-        elems_V  = B * N_KV * H_KV * d_h_v
-        elems_O  = B * N_Q  * H_Q  * d_h_v
-        elems_dO = elems_O
-
-        # dK/dV pass reads: Q, O, dO each n_kv_blocks times; K, V once
-        dkv_reads = n_kv_blocks * (elems_Q + elems_O + elems_dO) + elems_K + elems_V
-        # dQ pass reads: K, V each n_q_blocks times; Q once
-        dq_reads  = n_q_blocks * (elems_K + elems_V) + elems_Q
-
+        # Minimum HBM traffic for attention backward (roofline lower bound).
+        # Reads:  Q, K, V, O (fwd output), dO (grad of output)
         # Writes: dQ, dK, dV
-        writes = elems_Q + elems_K + elems_V
+        elems_q_read = B * N_Q * H_Q * d_h_qk
+        elems_k_read = B * N_KV * H_KV * d_h_qk
+        elems_v_read = B * N_KV * H_KV * d_h_v
+        elems_o_read = B * N_Q * H_Q * d_h_v
+        elems_do_read = elems_o_read
 
-        total_elems = dkv_reads + dq_reads + writes
+        elems_dq_write = B * N_Q * H_Q * d_h_qk
+        elems_dk_write = B * N_KV * H_KV * d_h_qk
+        elems_dv_write = B * N_KV * H_KV * d_h_v
+
+        total_elems = (
+            elems_q_read
+            + elems_k_read
+            + elems_v_read
+            + elems_o_read
+            + elems_do_read
+            + elems_dq_write
+            + elems_dk_write
+            + elems_dv_write
+        )
         return total_elems * bytes_per_element
 
     def flops_bwd(self):

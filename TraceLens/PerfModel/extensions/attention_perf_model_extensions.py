@@ -699,6 +699,7 @@ class aten__efficient_attention_forward:
     @staticmethod
     def get_param_details(event):
         from TraceLens.PerfModel.perf_model import extract_sdpa_cfg
+
         input_dims = event["args"]["Input Dims"]
         concrete_inputs = event["args"]["Concrete Inputs"]
         # Inputs: query=0, key=1, value=2, bias=3 (layout BNHD)
@@ -754,16 +755,30 @@ class aten__efficient_attention_forward:
 
     def flops(self):
         from TraceLens.PerfModel.perf_model import SDPA
+
         return SDPA.flops_func(
-            self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV,
-            self.d_h_qk, self.d_h_v, self.param_details["causal"],
+            self.B,
+            self.N_Q,
+            self.H_Q,
+            self.N_KV,
+            self.H_KV,
+            self.d_h_qk,
+            self.d_h_v,
+            self.param_details["causal"],
         )
 
     def bytes(self, bytes_per_element=2):
         from TraceLens.PerfModel.perf_model import SDPA
+
         return SDPA.bytes_func(
-            self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV,
-            self.d_h_qk, self.d_h_v, self.param_details["causal"],
+            self.B,
+            self.N_Q,
+            self.H_Q,
+            self.N_KV,
+            self.H_KV,
+            self.d_h_qk,
+            self.d_h_v,
+            self.param_details["causal"],
             bytes_per_element,
         )
 
@@ -848,6 +863,7 @@ class aten__efficient_attention_backward:
     @staticmethod
     def get_param_details(event):
         from TraceLens.PerfModel.perf_model import extract_sdpa_cfg
+
         input_dims = event["args"]["Input Dims"]
         concrete_inputs = event["args"]["Concrete Inputs"]
         # Inputs: grad_out=0, query=1, key=2, value=3, bias=4, out=5 (layout BNHD)
@@ -894,21 +910,57 @@ class aten__efficient_attention_backward:
 
     def flops(self):
         from TraceLens.PerfModel.perf_model import SDPA
-        return SDPA.flops_bwd_func(
-            self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV,
-            self.d_h_qk, self.d_h_v,
-            self.param_details["causal"],
-            self.param_details["flash_impl"],
+
+        B = self.B
+        N_Q, H_Q, N_KV, H_KV = self.N_Q, self.H_Q, self.N_KV, self.H_KV
+        d_qk, d_v = self.d_h_qk, self.d_h_v
+        causal = self.param_details["causal"]
+
+        # The CK backward kernel performs 9 matmul-equivalents of compute,
+        # determined empirically via SQ_INSTS_VALU_MFMA_MOPS_BF16 counter
+        # on MI300X (measured ratio 1.02 with d_qk=d_v=128). When d_qk != d_v,
+        # we use the forward FLOPs (which accounts for both dimensions) as the
+        # per-matmul-equivalent unit.
+        fwd_flops = SDPA.flops_func(
+            B,
+            N_Q,
+            H_Q,
+            N_KV,
+            H_KV,
+            d_qk,
+            d_v,
+            causal=False,
         )
+        total = 4.5 * fwd_flops
+
+        if causal:
+            if N_Q == N_KV:
+                total /= 2
+            else:
+                raise ValueError(f"causal=True but N_Q != N_K: {N_Q} != {N_KV}")
+        return total
 
     def bytes(self, bytes_per_element=2):
-        from TraceLens.PerfModel.perf_model import SDPA
-        return SDPA.bytes_bwd_func(
-            self.B, self.N_Q, self.H_Q, self.N_KV, self.H_KV,
-            self.d_h_qk, self.d_h_v,
-            self.param_details["causal"],
-            bytes_per_element,
+        B = self.B
+        N_Q, H_Q, N_KV, H_KV = self.N_Q, self.H_Q, self.N_KV, self.H_KV
+        d_qk, d_v = self.d_h_qk, self.d_h_v
+
+        # Reads: Q, K, V, O, dO (minimum — actual traffic is higher due to
+        # tiled re-reads, see docs/efficient_attn_perf_models.md).
+        elems_read = (
+            B * N_Q * H_Q * d_qk  # Q
+            + B * N_KV * H_KV * d_qk  # K
+            + B * N_KV * H_KV * d_v  # V
+            + B * N_Q * H_Q * d_v  # O
+            + B * N_Q * H_Q * d_v  # dO
         )
+        # Writes: dQ, dK, dV (minimum traffic).
+        elems_write = (
+            B * N_Q * H_Q * d_qk  # dQ
+            + B * N_KV * H_KV * d_qk  # dK
+            + B * N_KV * H_KV * d_v  # dV
+        )
+        return (elems_read + elems_write) * bytes_per_element
 
     def get_compute_precision(self):
         dtype = self.param_details.get("dtype_A_B", [None])[0]
