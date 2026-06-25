@@ -1792,3 +1792,253 @@ class sglang_fused_append_shared_experts(BinaryElementwise):
     def get_compute_precision(self):
         dtype = self.param_details["dtype_in1_in2_out"][1]
         return torch_dtype_map(dtype) if dtype else None
+
+
+# ==============================================================================
+# MoE routing / sort auxiliary models (non-matmul, MoE_aux)
+# ==============================================================================
+
+
+class BiasedGroupedTopk:
+    """
+    Performance model for aiter::biased_grouped_topk_hip -- the DeepSeek-style
+    grouped MoE router top-k selection.
+
+    This is NOT a matmul. Per token it scores all experts, selects the best
+    groups, then the best experts within them. The work is sigmoid + bias add +
+    comparisons / partial sorts, so it is memory-bound (read the [M, E] logits,
+    write the small [M, topk] ids + weights). Modeled as a vector op.
+
+    Reference implementation:
+        sglang/python/sglang/srt/layers/moe/topk.py (biased_grouped_topk ->
+        aiter_biased_grouped_topk; reference math in biased_grouped_topk_impl).
+
+    Signature (aiter_biased_grouped_topk):
+        biased_grouped_topk(gating_output, correction_bias, topk_weights,
+            topk_ids, num_expert_group, topk_group, renormalize,
+            routed_scaling_factor)
+
+    Expected Input Dims from trace:
+        [[M, E], [E], [M, topk], [M, topk], ...]
+          [0] gating_output  (logits, bf16/fp16)
+          [1] correction_bias
+          [2] topk_weights   (fp32 out)
+          [3] topk_ids       (int32 out)
+
+    Expected Concrete Inputs:
+        [..., num_expert_group, topk_group, renormalize, routed_scaling_factor]
+          [4] num_expert_group
+          [5] topk_group
+
+    Roofline -- FLOPs (per token, vector ops over E experts and G groups):
+        sigmoid(E) + bias_add(E) + group top-2 scan(E) + group sum(G)
+        + group select(G*topk_group) + masked expert top-k scan(E)
+        + gather/renorm/scale(3*topk)
+
+    Roofline -- bytes moved:
+        read  = M*E*bpe_logits + E*bpe_bias
+        write = M*topk*bpe_weights + M*topk*bpe_ids
+    """
+
+    category = "MoE_aux"
+    bwd_category = None
+    sheet_category = "MoE_aux"
+
+    # sigmoid ~ exp + add + reciprocal (+ a little); a small constant per score.
+    SIGMOID_FLOPS_PER_ELEM = 4
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def _as_int(value, default):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        dims = args["Input Dims"]
+        types = args.get("Input type", [])
+        concrete = args.get("Concrete Inputs", [])
+
+        logits_shape = dims[0]  # [M, E]
+        num_tokens = logits_shape[0]
+        num_experts = logits_shape[1]
+
+        # topk = trailing dim of the topk_ids / topk_weights output tensor.
+        topk = None
+        for idx in (3, 2):
+            if len(dims) > idx and len(dims[idx]) == 2:
+                topk = dims[idx][1]
+                break
+        if topk is None:
+            topk = 8
+
+        num_expert_group = BiasedGroupedTopk._as_int(
+            concrete[4] if len(concrete) > 4 else None, 1
+        )
+        topk_group = BiasedGroupedTopk._as_int(
+            concrete[5] if len(concrete) > 5 else None, 1
+        )
+
+        return {
+            "num_tokens": num_tokens,
+            "num_experts": num_experts,
+            "topk": topk,
+            "num_expert_group": max(1, num_expert_group),
+            "topk_group": max(1, topk_group),
+            "logits_dtype": types[0] if len(types) > 0 else None,
+            "bias_dtype": types[1] if len(types) > 1 else None,
+            "weights_dtype": types[2] if len(types) > 2 else None,
+            "ids_dtype": types[3] if len(types) > 3 else None,
+        }
+
+    def flops(self):
+        p = self.param_details
+        M = p["num_tokens"]
+        E = p["num_experts"]
+        G = p["num_expert_group"]
+        Kg = p["topk_group"]
+        K = p["topk"]
+        per_token = (
+            self.SIGMOID_FLOPS_PER_ELEM * E  # sigmoid over expert logits
+            + E  # + correction bias
+            + E  # group top-2 scan over experts
+            + G  # group-score sum
+            + G * Kg  # group selection
+            + E  # masked expert top-k scan
+            + 3 * K  # gather + renormalize + routed scaling
+        )
+        return M * per_token
+
+    def bytes(self):
+        p = self.param_details
+        M = p["num_tokens"]
+        E = p["num_experts"]
+        K = p["topk"]
+        bpe_logits = name2bpe(p["logits_dtype"]) or 2
+        bpe_bias = name2bpe(p["bias_dtype"]) or bpe_logits
+        bpe_weights = name2bpe(p["weights_dtype"]) or 4
+        bpe_ids = name2bpe(p["ids_dtype"]) or 4
+        read_bytes = M * E * bpe_logits + E * bpe_bias
+        write_bytes = M * K * bpe_weights + M * K * bpe_ids
+        return read_bytes + write_bytes
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for MoE top-k routing is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for MoE top-k routing is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("logits_dtype")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class MoeSortScatterGather:
+    """
+    Performance model for the MoE token sort / scatter (permute) auxiliary
+    kernels: aiter::moe_sorting_fwd and aiter::mxfp4_moe_sort_hip.
+
+    These kernels do NOT perform matmuls. They sort the (token, expert)
+    routing assignments by expert id and scatter the corresponding per-token
+    data into the expert-contiguous layout the grouped expert GEMMs consume:
+      * moe_sorting_fwd     scatters the [M, hidden] hidden-state buffer
+                            (and emits sorted_token_ids / expert_ids metadata).
+      * mxfp4_moe_sort_hip  scatters the per-token MXFP4 block-scale tensors.
+
+    Cost is dominated by streaming those tensors through HBM, so FLOPs are a
+    small index/copy floor (one op per moved element of the largest operand)
+    and bytes are summed from every tensor operand the kernel touches -- read
+    straight from the trace's Input Dims / Input type, so the model adapts to
+    each kernel's distinct argument layout rather than assuming one shape.
+
+    Reference (SGLang -> AITER fused MoE sort path):
+        sglang/python/sglang/srt/layers/moe/ (moe_align_block_size and the
+        AITER fused_moe sort/scatter); profiler names aiter::moe_sorting_fwd,
+        aiter::mxfp4_moe_sort_hip.
+
+    Expected Input Dims (examples):
+        moe_sorting_fwd:    [[M, topk], [M, topk], [P], [P], [blocks], [2],
+                             [M, hidden], ...]   (topk_ids int, hidden bf16)
+        mxfp4_moe_sort_hip: [[P, S], [M, S], [P], [2], ...]   (E8M0 scales)
+    """
+
+    category = "MoE_aux"
+    bwd_category = None
+    sheet_category = "MoE_aux"
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def _is_tensor_shape(shape):
+        # A real tensor operand is a non-empty shape of ints; scalars are () or
+        # non-int placeholders in the trace.
+        return bool(shape) and all(isinstance(d, int) for d in shape)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        dims = args.get("Input Dims", [])
+        types = args.get("Input type", [])
+
+        operands = []
+        for i, shape in enumerate(dims):
+            if MoeSortScatterGather._is_tensor_shape(shape):
+                dtype = types[i] if i < len(types) else None
+                operands.append((tuple(shape), dtype))
+
+        # Routing fan-out (topk_ids) is the first 2-D int operand [M, topk],
+        # if present (moe_sorting_fwd). Best-effort only.
+        num_tokens = topk = None
+        for shape, dtype in operands:
+            if len(shape) == 2 and dtype == "int":
+                num_tokens, topk = shape[0], shape[1]
+                break
+
+        return {"operands": operands, "num_tokens": num_tokens, "topk": topk}
+
+    def flops(self):
+        operands = self.param_details["operands"]
+        if not operands:
+            return 0
+        # Index/copy op: one vector op per element of the largest moved tensor.
+        return max(prod(shape) for shape, _ in operands)
+
+    def bytes(self):
+        total = 0
+        for shape, dtype in self.param_details["operands"]:
+            bpe = name2bpe(dtype)
+            if bpe is None:
+                continue
+            total += prod(shape) * bpe
+        return total if total > 0 else None
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for MoE sort/scatter is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for MoE sort/scatter is not defined.")
+
+    def get_compute_precision(self):
+        operands = self.param_details["operands"]
+        if not operands:
+            return None
+        _, dtype = max(operands, key=lambda o: prod(o[0]))
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"

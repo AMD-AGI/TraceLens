@@ -47,6 +47,9 @@ def get_pseudo_op_mappings():
         "pseudo_op::moe_flydsl_stage1": moe_perf_model_extensions.moe_flydsl_stage1,
         "pseudo_op::moe_flydsl_stage2": moe_perf_model_extensions.moe_flydsl_stage2,
         "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel": moe_perf_model_extensions.moe_triton_invoke_grouped_gemm,
+        "aiter::biased_grouped_topk_hip": moe_perf_model_extensions.BiasedGroupedTopk,
+        "aiter::moe_sorting_fwd": moe_perf_model_extensions.MoeSortScatterGather,
+        "aiter::mxfp4_moe_sort_hip": moe_perf_model_extensions.MoeSortScatterGather,
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
@@ -147,9 +150,10 @@ def get_pseudo_op_category_only_mappings():
     """
 
     return {
-        # MoE sorting / permutation auxiliary kernel.
-        # Reference: aiter/aiter/ops/triton/moe_op_mxfp4.py (mxfp4_moe_sort_hip).
-        "aiter::mxfp4_moe_sort_hip": "MoE_aux",
+        # MoE sorting / permutation auxiliary kernels.
+        # Reference: aiter/aiter/ops/triton/moe_op_mxfp4.py (mxfp4_moe_sort_hip,
+        # fused_dynamic_mxfp4_quant_moe_sort_hip). Memory-bound shuffle/sort ops
+        # with negligible FLOPs; we only classify them.
         "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": "MoE_aux",
         "aiter::unified_attention_with_output_base->_fused_qk_rope_reshape_and_cache_kernel (Synthetic Op)": "FusedRoPE",
         "hipModuleLaunchKernel->kv_indices_generate_kernel (Synthetic Op)": "InferenceAttention",
