@@ -331,6 +331,9 @@ class JaxProfileProcessor:
                 for opid in op["operands"]:
                     if "[" in opid and "]" in opid:
                         # pb format, shapes in operand list
+                        # Skip scalar operands (e.g. f32[] scale factors in FP8 GEMMs)
+                        if opid.endswith("[]"):
+                            continue
                         operand_list.append(opid)
                     else:
                         output = hlo_ops[opid]["output"]
