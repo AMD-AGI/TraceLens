@@ -325,7 +325,7 @@ index 000000000..6d8563b29
 +            # through the dispatcher.  Stash it for the caller.
 +            _stash_return_value(op_name, result)
 +
-+        _lib.impl(op_name, impl, dispatch_key="CUDA")
++        _lib.impl(op_name, impl, dispatch_key="CompositeExplicitAutograd")
 +
 +        torch_op = getattr(torch.ops.sglang_profiler, op_name)
 +

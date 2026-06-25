@@ -343,6 +343,89 @@ def _compute_last_step(steps):
     return "none"
 
 
+def build_run_level_summary(rows):
+    """Build per-(trace, run) failure counts and flag catastrophic runs.
+
+    A run is catastrophic when >50% of its checks fail, which typically
+    indicates the agent crashed or produced no analysis.md rather than
+    individual eval issues.
+    """
+    counts = defaultdict(lambda: {"pass": 0, "fail": 0, "total": 0})
+    for r in rows:
+        if r["result"] in ("MISSING", ""):
+            continue
+        key = (r["trace_id"], r["run_id"])
+        counts[key]["total"] += 1
+        if r["result"] == "PASS":
+            counts[key]["pass"] += 1
+        else:
+            counts[key]["fail"] += 1
+
+    run_rows = []
+    for (trace_id, run_id), c in sorted(counts.items()):
+        is_catastrophic = c["fail"] > c["total"] * 0.5 if c["total"] > 0 else False
+        run_rows.append(
+            {
+                "trace_id": trace_id,
+                "run_id": run_id,
+                "pass": c["pass"],
+                "fail": c["fail"],
+                "total": c["total"],
+                "is_catastrophic": is_catastrophic,
+            }
+        )
+    return run_rows
+
+
+def build_failure_nature_summary(rows, run_level_rows):
+    """Classify total failures into stable vs flaky vs catastrophic.
+
+    - catastrophic_pipeline: failures from runs where >50% of checks failed
+    - stable: failures for evals that fail in every run for a given trace
+    - flaky: everything else
+    """
+    catastrophic_runs = {
+        (r["trace_id"], r["run_id"]) for r in run_level_rows if r["is_catastrophic"]
+    }
+
+    per_trace_runs = defaultdict(set)
+    per_eval_fail_runs = defaultdict(set)
+    for r in rows:
+        if r["result"] in ("MISSING", ""):
+            continue
+        per_trace_runs[r["trace_id"]].add(r["run_id"])
+        if r["result"] == "FAIL":
+            per_eval_fail_runs[(r["trace_id"], r["issue_summary"])].add(r["run_id"])
+
+    catastrophic_count = 0
+    stable_count = 0
+    flaky_count = 0
+
+    for r in rows:
+        if r["result"] != "FAIL":
+            continue
+        key = (r["trace_id"], r["run_id"])
+        if key in catastrophic_runs:
+            catastrophic_count += 1
+        elif (
+            per_eval_fail_runs[(r["trace_id"], r["issue_summary"])]
+            == per_trace_runs[r["trace_id"]]
+        ):
+            stable_count += 1
+        else:
+            flaky_count += 1
+
+    return {
+        "catastrophic_pipeline": catastrophic_count,
+        "stable": stable_count,
+        "flaky": flaky_count,
+        "total": catastrophic_count + stable_count + flaky_count,
+    }
+
+
+RUN_LEVEL_COLS = ["trace_id", "run_id", "pass", "fail", "total", "is_catastrophic"]
+
+
 def aggregate_stream_diagnostics(runs):
     rows = []
     for trace_id, run_num, run_dir in runs:
@@ -402,7 +485,33 @@ def main():
         os.path.join(OUTPUT_DIR, "pass_rate_summary.csv"), summary_rows, summary_cols
     )
 
-    print("\nPart A2: Building stability classification...")
+    print("\nPart A2: Building run-level summary...")
+    run_level_rows = build_run_level_summary(eval_rows)
+    write_csv(
+        os.path.join(OUTPUT_DIR, "run_level_summary.csv"),
+        run_level_rows,
+        RUN_LEVEL_COLS,
+    )
+    catastrophic = [r for r in run_level_rows if r["is_catastrophic"]]
+    if catastrophic:
+        print(
+            "  Catastrophic runs (>50% fail): {}".format(
+                ", ".join(
+                    "{}/run_{}".format(r["trace_id"], r["run_id"]) for r in catastrophic
+                )
+            )
+        )
+
+    print("\nPart A3: Building failure nature summary...")
+    failure_nature = build_failure_nature_summary(eval_rows, run_level_rows)
+    write_csv(
+        os.path.join(OUTPUT_DIR, "failure_nature_summary.csv"),
+        [failure_nature],
+        ["catastrophic_pipeline", "stable", "flaky", "total"],
+    )
+    print("  Failure nature: {}".format(failure_nature))
+
+    print("\nPart A4: Building stability classification...")
     stability_rows, stability_cols, class_totals = build_stability_summary(eval_rows)
     write_csv(
         os.path.join(OUTPUT_DIR, "stability_summary.csv"),
@@ -441,6 +550,26 @@ def main():
             "(of {} trace-eval pairs)".format(
                 stable_pass, flaky_pass, flaky_fail, stable_fail, ct
             )
+        )
+
+    if failure_nature["total"] > 0:
+        fn = failure_nature
+        print(
+            "Failure nature: {} catastrophic ({:.0f}%), {} stable ({:.0f}%), "
+            "{} flaky ({:.0f}%) of {} total failures".format(
+                fn["catastrophic_pipeline"],
+                100 * fn["catastrophic_pipeline"] / fn["total"],
+                fn["stable"],
+                100 * fn["stable"] / fn["total"],
+                fn["flaky"],
+                100 * fn["flaky"] / fn["total"],
+                fn["total"],
+            )
+        )
+    if catastrophic:
+        print(
+            "Catastrophic runs: {} (agent produced no analysis.md, "
+            "causing all evals to fail)".format(len(catastrophic))
         )
 
     outcomes = defaultdict(int)

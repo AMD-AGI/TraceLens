@@ -36,6 +36,12 @@ TARGET_MID = 87.5
 MIN_PITEM_IMPACT_SCORE = (
     0.5  # Group-sum (% E2E) below which a finding is dropped from priority_data.json.
 )
+# Recoverable fraction of an unmodeled op's %E2E used as its heuristic impact.
+HEURISTIC_FRACTION_LOW = 0.15
+HEURISTIC_FRACTION_MID = 0.30
+HEURISTIC_FRACTION_HIGH = 0.45
+
+# Efficiency Boundary for grouping
 _EFF_BUCKET_BOUNDARIES = (30, 60)
 
 _OP_NAME_LIBRARY_RULES = [
@@ -62,6 +68,25 @@ _COMPARATIVE_SPEEDUP_COL = "speedup (trace2/trace1)"
 _COMPARATIVE_DELTA_COL = "delta_us (trace2 - trace1)"
 _COMPARATIVE_T2_TIME_COL = "lca_total_kernel_time_trace2_us"
 _COMPARATIVE_T2_COUNT_COL = "lca_count_trace2"
+
+_CALL_CHAIN_MAX_OPS = 100
+_CALL_CHAIN_SKIP = frozenset(
+    {
+        "torch/nn/modules/module.py",
+        "torch/utils/_device.py",
+        "torch/overrides.py",
+        "torch/_ops.py",
+        "multiprocessing/spawn.py",
+        "torch/_dynamo/eval_frame.py",
+        "torch/_functorch/",
+        "torch/autograd/function.py",
+        "torch/_inductor/",
+        "torch/cuda/graphs.py",
+        "torch/utils/_contextlib.py",
+    }
+)
+
+_KERNEL_NAME_TRUNC_LEN = 75
 
 
 def _eff_bucket(pct):
@@ -90,29 +115,6 @@ def perf_report_csv_dir(output_dir: str) -> str:
         if scope == "comparative":
             return os.path.join(output_dir, "perf_report_trace1_csvs")
     return os.path.join(output_dir, "perf_report_csvs")
-
-
-_SKIP_PY_PATTERNS = (
-    "torch/",
-    "_functorch/",
-    "_dynamo/",
-    "torch/cuda/",
-    "torch/utils/",
-    "vllm/compilation/",
-    "/tmp/torchinductor",
-    "kernel_shape_profiler",
-)
-
-_KNOWN_PKG_ANCHORS = (
-    "sglang/",
-    "vllm/",
-    "aiter/",
-    "fbgemm_gpu/",
-    "sgl_kernel/",
-    "torchrec/",
-    "components/",
-    "megatron/",
-)
 
 
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
@@ -443,60 +445,97 @@ def _match_fusion_op(kd_str: str, fusion_map: Dict[str, str]) -> Optional[str]:
     return None
 
 
-def _extract_launcher_path(call_stack_str: str, op_name: str) -> str:
-    """Return the first non-infrastructure .py frame from a call stack, relativized.
+def _parse_call_stack(call_stack_full: str) -> List[str]:
+    """Parse call_stack_full"""
+    if not call_stack_full or call_stack_full == "nan":
+        return []
+    try:
+        stack = ast.literal_eval(str(call_stack_full))
+    except Exception:
+        return []
+    if not isinstance(stack, list):
+        return []
+    return [f for f in stack if isinstance(f, str)]
 
-    Absolute container prefixes are stripped using ``_KNOWN_PKG_ANCHORS``; unknown
-    roots fall back to the last 3 path segments.  ``aten::`` ops always return "".
+
+def _extract_module_chain(call_stack_full: str) -> List[str]:
+    """Extract nn.Module names from call_stack_full."""
+    return [
+        f.removeprefix("nn.Module: ")
+        for f in _parse_call_stack(call_stack_full)
+        if f.startswith("nn.Module: ")
+    ]
+
+
+def _extract_call_chain(call_stack_full: str) -> List[str]:
+    """Return meaningful frames from call_stack_full, filtering torch dispatch internals."""
+    return [
+        f
+        for f in _parse_call_stack(call_stack_full)
+        if not any(s in f for s in _CALL_CHAIN_SKIP)
+        and (f.startswith("nn.Module:") or ".py" in f or "::" in f)
+    ]
+
+
+def _extract_kernel_names(call_stack_full: str) -> tuple:
+    """Extract GPU kernel name(s) from call_stack_full.
+
+    Single kernel (flat list): last element is the kernel.
+    Multi-kernel (sublists): last element of each sublist is a kernel.
+
+    Returns ``(kernel_name, kernel_name_trunc)`` where the truncated form
+    clips each individual kernel name to ``_KERNEL_NAME_TRUNC_LEN`` chars.
     """
-    if op_name.startswith("aten::"):
-        return ""
-    if not call_stack_str or call_stack_str == "nan":
-        return ""
-    frames = [f.strip() for f in call_stack_str.split(" => ")]
-    for i, frame in enumerate(frames):
-        if i == 0:
-            continue
-        if ".py" not in frame:
-            continue
-        if any(p in frame for p in _SKIP_PY_PATTERNS):
-            continue
-        for anchor in _KNOWN_PKG_ANCHORS:
-            idx = frame.rfind(anchor)
-            if idx > 0:
-                return frame[idx:]
-        if frame.startswith("/") or frame.startswith("./"):
-            parts = frame.lstrip("./").split("/")
-            if len(parts) > 3:
-                return "/".join(parts[-4:])
-        return frame
-    return ""
+    if not call_stack_full or call_stack_full == "nan":
+        return "", ""
+    try:
+        stack = ast.literal_eval(str(call_stack_full))
+    except Exception:
+        return "", ""
+    if not isinstance(stack, list) or not stack:
+        return "", ""
+
+    sublists = [f for f in stack if isinstance(f, list)]
+
+    if not sublists:
+        # Flat list — last element is the kernel
+        k = stack[-1] if isinstance(stack[-1], str) else ""
+        kernels = [k] if k else []
+    else:
+        # Multi-kernel — last element of each sublist is a kernel
+        kernels = [sub[-1] for sub in sublists if sub and isinstance(sub[-1], str)]
+
+    if not kernels:
+        return "", ""
+
+    def _trunc(name: str) -> str:
+        return (
+            name[:_KERNEL_NAME_TRUNC_LEN] + "..."
+            if len(name) > _KERNEL_NAME_TRUNC_LEN
+            else name
+        )
+
+    if len(kernels) == 1:
+        return kernels[0], _trunc(kernels[0])
+
+    full = "<br>".join(f"Kernel {i+1}: {k}" for i, k in enumerate(kernels))
+    trunc = "<br>".join(f"Kernel {i+1}: {_trunc(k)}" for i, k in enumerate(kernels))
+    return full, trunc
 
 
 def build_operation_metrics(
     ops_df: pd.DataFrame,
     metadata: dict,
     category_config: dict,
-    callstacks_df: Optional[pd.DataFrame] = None,
     comparison_scope: str = "standalone",
 ) -> List[dict]:
-    """
-    Build list of operation metrics for JSON output.
-
-    Automatically loads the high-confidence fusion kernel map from
-    ``kernel_fusion_metrics.json`` (if it exists) via ``metadata["output_dir"]``
-    and tags operations whose GPU kernels are covered by a fusion candidate.
+    """Build operation metric dicts for JSON output.
 
     Args:
-        ops_df: Operations DataFrame
-        metadata: Metadata dict with peak performance values
-        category_config: Category-specific configuration with:
-            - extra_fields: Additional fields to extract (optional)
-            - operation_classifier: Function to classify operations (optional)
-        comparison_scope: Passed to ``calculate_efficiency`` (roofline vs ``100 * t2 / t1``)
-
-    Returns:
-        List of operation metric dicts
+        ops_df: Operations DataFrame (may include a ``call_stack`` column)
+        metadata: Peak performance values and GPU utilization
+        category_config: Optional extra_fields / operation_classifier
+        comparison_scope: ``"standalone"`` or ``"comparative"``
     """
     peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
     maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
@@ -606,18 +645,35 @@ def build_operation_metrics(
                 op_metric["fusion_flagged"] = True
                 op_metric["fusion_candidate_name"] = matched
 
-        cs_str = ""
-        if callstacks_df is not None:
-            match = callstacks_df[
-                (callstacks_df["name"] == op_name)
-                & (callstacks_df["op category"] == row.get("op category", ""))
-            ]
-            if len(match) > 0:
-                cs_str = str(match.iloc[0].get("call_stack", ""))
-        launcher = _extract_launcher_path(cs_str, op_name)
-        op_metric["launcher_path"] = launcher if launcher else "—"
+        cs_raw = row.get("call_stack_full")
+        cs_str = "" if cs_raw is None or pd.isna(cs_raw) else str(cs_raw)
+
+        launcher = row.get("entry_point", "")
+        module_chain = _extract_module_chain(cs_str)
+
+        if not launcher or launcher == "Not found":
+            if module_chain:
+                launcher = " > ".join(module_chain[:3])
+            elif op_metric.get("library"):
+                launcher = f"{op_metric['library']} (vendor)"
+            else:
+                launcher = "Not found"
+
+        op_metric["launcher_path"] = launcher
+        op_metric["kernel_name"], op_metric["kernel_name_trunc"] = (
+            _extract_kernel_names(cs_str)
+        )
+        op_metric["module_chain"] = module_chain
+        op_metric["_raw_call_stack"] = cs_str
 
         operations.append(op_metric)
+
+    if len(operations) <= _CALL_CHAIN_MAX_OPS:
+        for op in operations:
+            op["call_chain"] = _extract_call_chain(op.pop("_raw_call_stack", ""))
+    else:
+        for op in operations:
+            op.pop("_raw_call_stack", None)
 
     return operations
 
@@ -627,87 +683,112 @@ def compute_impact_estimates(
     category: str,
     min_impact_score: float = 0.01,
     baseline_ms: float = 0,
+    comparison_scope: str = "standalone",
 ) -> List[dict]:
     """
-    Deterministically compute kernel_tuning impact estimates from operation metrics.
+    Compute per-op impact estimates via an estimator ladder.
 
-    Two-step computation:
+    Each op gets a numeric ``impact_score`` from the first method that applies:
 
-      1. Per-op roofline headroom ``gap``.
+      - ``quantified`` (``estimate_method="quantified"``): when ``efficiency_percent``
+        is present and not anomalous. Impact comes from an efficiency model
+        (standalone: roofline headroom; comparative: the t2/t1 ratio), as a per-op
+        ``gap`` weighted by the op's share of E2E:
             gap_high = max(0, 1 - efficiency_pct / TARGET_HIGH)
             gap_low  = (TARGET_LOW / TARGET_HIGH) * gap_high
             gap_mid  = (TARGET_MID / TARGET_HIGH) * gap_high
-
-      2. ``impact_score`` = The impact estimate on E2E GPU time obtained by weighting the gap by the op's share
-         of E2E:
             impact_score_high = gap_high * time_ms / baseline_ms * 100
             impact_score_low  = gap_low  * time_ms / baseline_ms * 100
             impact_score      = gap_mid  * time_ms / baseline_ms * 100
-
-    The midpoint (87.5% of the way from 75%->100% target closure) is the
-    primary estimate used for plots and aggregation. Anomalous efficiencies
-    (>100%) are excluded.
-
-    If ``baseline_ms`` is missing or non-positive, ``impact_score`` is undefined
-    (would divide by zero or produce a negative percentage). In that case this
-    function emits a stderr warning and returns an empty list.
+        The midpoint (87.5% of the way from the 75%->100% target closure) is the
+        primary estimate used for plots and aggregation. Anomalous efficiencies
+        (>100%) route to the heuristic instead.
+      - ``heuristic`` (``estimate_method="heuristic"``): the fallback
+        for ops with missing or anomalous efficiency (no perf model). Impact is
+        the op's E2E share scaled by HEURISTIC_FRACTION_*; standalone only
+        (comparative efficiency is a t2/t1 ratio, not a roofline gap).
 
     Args:
         operations: List of operation metric dicts (from build_operation_metrics)
         category: Category name for labelling
-        min_impact_score: Per-op noise floor on ``impact_score_high`` (% E2E).
-        baseline_ms: Total end-to-end GPU time for impact_score calculation.
-            Must be > 0; otherwise an empty list is returned.
+        min_impact_score: Per-op noise floor on quantified ``impact_score_high`` (% E2E).
+        baseline_ms: Total end-to-end GPU time for the quantified calculation. When
+            non-positive, only the heuristic branch runs (it needs no baseline).
+        comparison_scope: ``standalone`` enables the heuristic fallback.
 
     Returns:
         List of impact estimate dicts sorted by ``impact_score`` descending.
     """
-    if baseline_ms is None or baseline_ms <= 0:
+    baseline_ok = baseline_ms is not None and baseline_ms > 0
+    if not baseline_ok:
         print(
             f"[analysis_utils.compute_impact_estimates] baseline_ms="
-            f"{baseline_ms!r} is invalid; skipping impact_score computation "
+            f"{baseline_ms!r} is invalid; skipping impact_score computation"
             f"for category={category!r}",
             file=sys.stderr,
         )
-        return []
 
     estimates = []
     for op in operations:
         if op.get("fusion_flagged"):
             continue
-        eff = op.get("efficiency", {})
-        eff_pct = eff.get("efficiency_percent")
-        if eff_pct is None or eff.get("is_anomaly"):
-            continue
         time_ms = op.get("time_ms", 0)
         if time_ms <= 0:
             continue
+        eff = op.get("efficiency", {})
+        eff_pct = eff.get("efficiency_percent")
 
-        gap_high = max(0, 1 - eff_pct / TARGET_HIGH)
-        gap_low = (TARGET_LOW / TARGET_HIGH) * gap_high
-        gap_mid = (TARGET_MID / TARGET_HIGH) * gap_high
+        if eff_pct is not None and not eff.get("is_anomaly") and baseline_ok:
+            gap_high = max(0, 1 - eff_pct / TARGET_HIGH)
+            gap_low = (TARGET_LOW / TARGET_HIGH) * gap_high
+            gap_mid = (TARGET_MID / TARGET_HIGH) * gap_high
 
-        impact_score_high = gap_high * time_ms / baseline_ms * 100
-        impact_score_low = gap_low * time_ms / baseline_ms * 100
-        impact_score_mid = gap_mid * time_ms / baseline_ms * 100
+            impact_score_high = gap_high * time_ms / baseline_ms * 100
+            impact_score_low = gap_low * time_ms / baseline_ms * 100
+            impact_score_mid = gap_mid * time_ms / baseline_ms * 100
 
-        if impact_score_high < min_impact_score:
-            continue
-        confidence = "high" if time_ms > 5 and eff_pct < 70 else "medium"
-        estimate = {
-            "operation": op.get("name", "Unknown"),
-            "category": category,
-            "type": "kernel_tuning",
-            "impact_score": round(impact_score_mid, 2),
-            "impact_score_low": round(impact_score_low, 2),
-            "impact_score_high": round(impact_score_high, 2),
-            "confidence": confidence,
-            "efficiency_pct": round(eff_pct, 2),
-            "bound_type": eff.get("bound_type"),
-            "library": op.get("library"),
-            "time_ms": round(time_ms, 3),
-        }
-        estimates.append(estimate)
+            if impact_score_high < min_impact_score:
+                continue
+            estimates.append(
+                {
+                    "operation": op.get("name", "Unknown"),
+                    "category": category,
+                    "type": "kernel_tuning",
+                    "estimate_method": "quantified",
+                    "impact_score": round(impact_score_mid, 2),
+                    "impact_score_low": round(impact_score_low, 2),
+                    "impact_score_high": round(impact_score_high, 2),
+                    "efficiency_pct": round(eff_pct, 2),
+                    "bound_type": eff.get("bound_type"),
+                    "library": op.get("library"),
+                    "time_ms": round(time_ms, 3),
+                }
+            )
+        # Heuristic fallback, NOT the default path: reached only when the
+        # quantified branch above did not apply -- i.e. the op has no perf model
+        # (efficiency_percent is None), its efficiency is anomalous, or baseline_ms
+        # was non-positive. Standalone only; comparative efficiency is a t2/t1
+        # ratio, not a roofline gap.
+        elif comparison_scope == "standalone":
+            pct = op.get("percent_of_total")
+            if pct is None or pct <= 0:
+                continue
+            estimates.append(
+                {
+                    "operation": op.get("name", "Unknown"),
+                    "category": category,
+                    "type": "unmodeled_significant",
+                    "estimate_method": "heuristic",
+                    "impact_score": round(pct * HEURISTIC_FRACTION_MID, 2),
+                    "impact_score_low": round(pct * HEURISTIC_FRACTION_LOW, 2),
+                    "impact_score_high": round(pct * HEURISTIC_FRACTION_HIGH, 2),
+                    "efficiency_pct": None,
+                    "bound_type": None,
+                    "library": op.get("library"),
+                    "time_ms": round(time_ms, 3),
+                    "percent_of_total": pct,
+                }
+            )
     return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
 
 
@@ -716,17 +797,20 @@ def build_category_findings(
 ) -> List[dict]:
     """Group one category's per-op impact estimates into P-item findings.
 
-    Standalone mode groups by ``(bound_type, library, eff_bucket)`` so
-    kernels at different roofline-efficiency levels get separate P-items.
-    Comparative mode groups by ``(bound_type, library)`` only because
-    ``efficiency_pct`` represents a trace-time ratio, not roofline utilization.
+    Quantified estimates (``estimate_method != "heuristic"``) group by
+    ``(bound_type, library, eff_bucket)`` in standalone, or ``(bound_type,
+    library)`` in comparative (``efficiency_pct`` is a trace-time ratio there).
+    Heuristic estimates group by op-name (so a kernel fragmented across
+    shapes is judged on its combined %E2E).
 
     Sums impact across members, drops groups below ``MIN_PITEM_IMPACT_SCORE``,
-    sorts by ``impact_score`` desc, attaches intra-category ``rank``. Each
-    surviving group becomes one P-item the sub-agent renders. The orchestrator
-    later concatenates these arrays across categories to derive the global
+    sorts by ``impact_score`` desc, attaches intra-category ``rank``. The
+    orchestrator concatenates these across categories to derive the global
     ``priority_data.json::findings[]`` ranking.
     """
+    quantified = [e for e in estimates if e.get("estimate_method") != "heuristic"]
+    heuristic = [e for e in estimates if e.get("estimate_method") == "heuristic"]
+
     use_eff_bucket = comparison_scope == "standalone"
     groups: dict = defaultdict(
         lambda: {
@@ -736,12 +820,11 @@ def build_category_findings(
             "impact_score_high": 0.0,
         }
     )
-    for e in estimates:
+    for e in quantified:
         bound = e.get("bound_type") or "unknown"
         lib = e.get("library") or "Unknown"
         bucket = _eff_bucket(e.get("efficiency_pct")) if use_eff_bucket else "all"
-        key = (bound, lib, bucket)
-        g = groups[key]
+        g = groups[(bound, lib, bucket)]
         g["members"].append(e)
         g["impact_score"] += e.get("impact_score", 0)
         g["impact_score_low"] += e.get("impact_score_low", 0)
@@ -756,9 +839,52 @@ def build_category_findings(
                 "bound_type": bound,
                 "library": lib,
                 "eff_bucket": bucket,
+                "estimate_method": "quantified",
                 "impact_score": round(g["impact_score"], 2),
                 "impact_score_low": round(g["impact_score_low"], 2),
                 "impact_score_high": round(g["impact_score_high"], 2),
+                "member_count": len(g["members"]),
+                "members": sorted(
+                    g["members"],
+                    key=lambda m: m.get("impact_score", 0),
+                    reverse=True,
+                ),
+            }
+        )
+
+    hgroups: dict = defaultdict(
+        lambda: {
+            "members": [],
+            "impact_score": 0.0,
+            "impact_score_low": 0.0,
+            "impact_score_high": 0.0,
+            "percent_of_total": 0.0,
+            "library": None,
+        }
+    )
+    for e in heuristic:
+        g = hgroups[e.get("operation", "Unknown")]
+        g["members"].append(e)
+        g["impact_score"] += e.get("impact_score", 0)
+        g["impact_score_low"] += e.get("impact_score_low", 0)
+        g["impact_score_high"] += e.get("impact_score_high", 0)
+        g["percent_of_total"] += e.get("percent_of_total", 0) or 0
+        if g["library"] is None:
+            g["library"] = e.get("library")
+
+    for g in hgroups.values():
+        if g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
+            continue
+        findings.append(
+            {
+                "bound_type": "unmodeled",
+                "library": g["library"] or "Unknown",
+                "eff_bucket": "unknown",
+                "estimate_method": "heuristic",
+                "impact_score": round(g["impact_score"], 2),
+                "impact_score_low": round(g["impact_score_low"], 2),
+                "impact_score_high": round(g["impact_score_high"], 2),
+                "percent_of_total": round(g["percent_of_total"], 2),
                 "member_count": len(g["members"]),
                 "members": sorted(
                     g["members"],
@@ -925,18 +1051,10 @@ def run_category_analysis(
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
 
-    callstacks_df = None
-    cs_path = os.path.join(
-        perf_report_csv_dir(output_dir), "unified_perf_callstacks.csv"
-    )
-    if os.path.exists(cs_path):
-        callstacks_df = pd.read_csv(cs_path)
-
     operations = build_operation_metrics(
         ops_df,
         metadata,
         config,
-        callstacks_df=callstacks_df,
         comparison_scope=comparison_scope,
     )
     category_specific = extract_fn(ops_df, metadata)
@@ -947,6 +1065,7 @@ def run_category_analysis(
             operations,
             category,
             baseline_ms=baseline_ms,
+            comparison_scope=comparison_scope,
         )
     else:
         impact_estimates = []

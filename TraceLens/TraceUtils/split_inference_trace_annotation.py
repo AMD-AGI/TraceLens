@@ -221,6 +221,45 @@ def find_events_by_pattern(
     return matches
 
 
+# Iteration marker patterns. The primary pattern is preferred; the backup
+# patterns are only consulted when the primary matches nothing (see
+# find_iteration_roots). The execute_new_<n>_cached_<n> shape is intentionally
+# excluded because get_iter_details_from_name cannot parse it.
+ANNOTATION_PATTERN = [
+    re.compile(
+        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
+    ),
+]
+ANNOTATION_PATTERN_BACKUP = [
+    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
+    re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"),
+    # SGLang profiler per-step annotations, e.g.
+    #   "step[EXTEND bs=1 toks=862]"  (prefill / extend batch)
+    #   "step[DECODE bs=25]"          (decode batch)
+    re.compile(r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]"),
+]
+
+
+def find_iteration_roots(events: List[dict]) -> Optional[List[dict]]:
+    """Return iteration-root events.
+
+    Tries the primary annotation pattern first and only falls back to the
+    backup patterns when the primary matches nothing.
+    """
+    roots = find_events_by_pattern(
+        events, ANNOTATION_PATTERN, "execution steps (iteration)", cat="user_annotation"
+    )
+    if roots is None:
+        print("No primary annotations found; falling back to backup patterns...")
+        roots = find_events_by_pattern(
+            events,
+            ANNOTATION_PATTERN_BACKUP,
+            "execution steps (iteration, backup)",
+            cat="user_annotation",
+        )
+    return roots
+
+
 def preprocess_trace(events: List[dict]):
     gpu_corr_map = {}
     flow_corr_map = {}
@@ -361,39 +400,52 @@ def parse_range(range_str: str, max_len: int) -> Tuple[int, int]:
 
 def get_iter_details_from_name(name: str, prefix: str = "annotation_iteration") -> dict:
 
-    name = name.replace("(", "_").replace(")", "_")
-    if not "annotation_iteration" in prefix:
+    # SGLang profiler step annotations, e.g. "step[EXTEND bs=1 toks=862]" (prefill)
+    # or "step[DECODE bs=25]" (decode). Map to the context/generation request and
+    # token counts that the steady-state logic downstream expects.
+    sglang_step = re.match(r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]", name)
+    if sglang_step:
+        kind, bs = sglang_step.group(1), int(sglang_step.group(2))
+        toks = int(sglang_step.group(3) or 0)
+        if kind == "DECODE":
+            ctx_req, ctx_sum, gen_req, gen_sum, batch_size = 0, 0, bs, bs, bs
+        else:  # EXTEND / MIXED treated as prefill; toks = total prompt tokens.
+            ctx_req, ctx_sum, gen_req, gen_sum, batch_size = (
+                bs,
+                toks,
+                0,
+                0,
+                (toks or bs),
+            )
+        return {
+            "batch_size": batch_size,
+            "num_requests": ctx_req + gen_req,
+            "context_requests": ctx_req,
+            "context_sum": ctx_sum,
+            "generation_requests": gen_req,
+            "generation_sum": gen_sum,
+        }
+
+    if "annotation_iteration" not in prefix:
         return {"batch_size": 0}
-    iter_details = re.sub(r"[sqk]+", "_", name).split("_")
-    if len(iter_details) < 10:
-        ctx_req, ctx_sum, gen_req, gen_sum = (
-            iter_details[2],
-            iter_details[3],
-            iter_details[6],
-            iter_details[7],
-        )
-    elif len(iter_details) < 12:
-        ctx_req, ctx_sum, gen_req, gen_sum = (
-            iter_details[2],
-            iter_details[3],
-            iter_details[7],
-            iter_details[8],
-        )
+
+    # vLLM execute_..._context_..._generation_... annotations: strip parens and the
+    # sq/sk shape letters to a flat token list, then pick counts by index.
+    parts = re.sub(r"[sqk]+", "_", name.replace("(", "_").replace(")", "_")).split("_")
+    if len(parts) < 10:
+        idx = (2, 3, 6, 7)
+    elif len(parts) < 12:
+        idx = (2, 3, 7, 8)
     else:
-        ctx_req, ctx_sum, gen_req, gen_sum = (
-            iter_details[3],
-            iter_details[5],
-            iter_details[11],
-            iter_details[13],
-        )
-    # print(name,iter_details,ctx_req,ctx_sum,gen_req,gen_sum)
+        idx = (3, 5, 11, 13)
+    ctx_req, ctx_sum, gen_req, gen_sum = (int(parts[i]) for i in idx)
     return {
-        "batch_size": int(ctx_sum) + int(gen_sum),
-        "num_requests": int(ctx_req) + int(gen_req),
-        "context_requests": int(ctx_req),
-        "context_sum": int(ctx_sum),
-        "generation_requests": int(gen_req),
-        "generation_sum": int(gen_sum),
+        "batch_size": ctx_sum + gen_sum,
+        "num_requests": ctx_req + gen_req,
+        "context_requests": ctx_req,
+        "context_sum": ctx_sum,
+        "generation_requests": gen_req,
+        "generation_sum": gen_sum,
     }
 
 
@@ -472,19 +524,34 @@ def extract_and_save(
         iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = extract_iteration(
             root, events, trace_json, gpu_corr_map, flow_corr_map, meta_events
         )
-        if "annotation_iteration" in prefix and len(root) == 1:
+        is_annotation = "annotation_iteration" in prefix
+        # Use the structured phase-aware name for any annotation extraction
+        # produced by the steady-state code paths (output_label is set), and
+        # for any multi-step annotation window. Single-step annotations from
+        # --store-single-iteration keep their literal step name.
+        is_structured = is_annotation and (output_label is not None or len(root) > 1)
+
+        if is_structured or not is_annotation:
+            if len(batch_list) == len(iter_details):
+                for bs, iteration in zip(batch_list, iter_details):
+                    iteration["batch_size"] = bs
+
+        phase_details = find_phase_from_window(iter_details)
+
+        if is_structured:
+            name_append = (
+                f"prefill_{phase_details['num_prefill']}"
+                f"_prefilldecode_{phase_details['num_prefilldecode']}"
+                f"_decode_{phase_details['num_decode']}"
+                f"_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
+            )
+        elif is_annotation and len(root) == 1:
             name_append = root[0]["name"].replace("(", "_").replace(")", "")
         else:
             if len(batch_list) == len(iter_details):
                 name_append = f"batch{int(sum(batch_list)/len(batch_list))}_gpu{prefix}"
-                for bs, iteration in zip(batch_list, iter_details):
-                    iteration["batch_size"] = bs
             else:
                 name_append = f"batch_NA_gpu{prefix}"
-
-        phase_details = find_phase_from_window(iter_details)
-        if "annotation_iteration" in prefix and len(root) > 1:
-            name_append = f"prefilldecode_{phase_details['num_prefilldecode']}_decode_{phase_details['num_decode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
 
         if output_label is not None:
             out_path = os.path.join(
@@ -930,6 +997,15 @@ def find_steady_state_window(
     # Build candidate sub-windows from the largest region
     candidates = []
     s, e = largest_start, largest_end
+
+    def _count_mixed(window: List[dict]) -> int:
+        """Count truly-mixed steps (both context and generation requests > 0)."""
+        return sum(
+            1
+            for t in window
+            if t.get("context_requests", 0) > 0 and t.get("generation_requests", 0) > 0
+        )
+
     if (e - s) >= num_steps:
         for s1 in range(s, e - num_steps + 1, step):
             window = iter_details[s1 : s1 + num_steps]
@@ -940,6 +1016,7 @@ def find_steady_state_window(
                     "end": s1 + num_steps,
                     "pd_count": pd_count,
                     "pd_ratio": pd_count / num_steps,
+                    "mixed_count": _count_mixed(window),
                     "avg_requests": mean(t["num_requests"] for t in window),
                 }
             )
@@ -953,6 +1030,7 @@ def find_steady_state_window(
                 "end": e,
                 "pd_count": pd_count,
                 "pd_ratio": pd_count / len(window) if window else 0.0,
+                "mixed_count": _count_mixed(window),
                 "avg_requests": (
                     mean(t["num_requests"] for t in window) if window else 0
                 ),
@@ -960,14 +1038,34 @@ def find_steady_state_window(
         )
 
     if mode == "mixed":
+        # Prefer candidate windows that contain at least one prefill-bearing
+        # step (pure prefill OR truly mixed, i.e. context_requests > 0). Fall
+        # back to all candidates only when no window contains any prefill
+        # activity at all.
+        pd_candidates = [c for c in candidates if c["pd_count"] > 0]
+        if pd_candidates:
+            print(
+                f"[mixed] Filtering to {len(pd_candidates)}/{len(candidates)} "
+                f"candidate windows that contain at least one prefill or "
+                f"prefill-decode step."
+            )
+            selection_pool = pd_candidates
+        else:
+            print(
+                "[mixed] No candidate window contains a prefill or prefill-decode "
+                "step; falling back to the full candidate set."
+            )
+            selection_pool = candidates
+
         best = min(
-            candidates,
+            selection_pool,
             key=lambda c: (abs(c["pd_ratio"] - reference_ratio), -c["avg_requests"]),
         )
         print(
             f"[mixed] Selected window [{best['start']}, {best['end']}): "
             f"prefilldecodemix_to_totalsteps_ratio={best['pd_ratio']:.3f} (target={reference_ratio:.3f}), "
-            f"avg_requests={best['avg_requests']:.1f}"
+            f"avg_requests={best['avg_requests']:.1f}, "
+            f"pd_count={best['pd_count']}, mixed_count={best['mixed_count']}"
         )
 
     elif mode == "decode_only":
@@ -1133,15 +1231,6 @@ def main():
     )
     args = parser.parse_args()
     execution_details = []
-    # Iteration marker patterns
-    ANNOTATION_PATTERN = [
-        re.compile(
-            r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
-        ),
-        re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
-        re.compile(r"execute_new_\d+_cached_\d+"),
-        re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"),
-    ]
     RUNTIME_EVENT_PATTERN = [
         re.compile(r"vllm/v1/worker/gpu_model_runner\.py\(\d+\): _dummy_run"),
         ## re.compile(r"/sgl-workspace/sglang/python/sglang/srt/managers/scheduler\.py\(\d+\): run_batch"),
@@ -1157,9 +1246,7 @@ def main():
     print(f"Loaded {len(events)} events")
 
     # Find iterations and dummy runs
-    iteration_roots = find_events_by_pattern(
-        events, ANNOTATION_PATTERN, "execution steps (iteration)", cat="user_annotation"
-    )
+    iteration_roots = find_iteration_roots(events)
     dummy_roots = find_events_by_pattern(events, RUNTIME_EVENT_PATTERN, "_dummy_run")
 
     # Create output directory

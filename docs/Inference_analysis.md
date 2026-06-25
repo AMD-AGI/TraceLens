@@ -114,6 +114,8 @@ The build script for SGLang supports SGLang 0.5.9 and 0.5.11. It takes the path 
 | `0.5.9`        | MI350/MI355 | `lmsysorg/sglang:v0.5.9-rocm700-mi35x`  |
 | `0.5.11`       | MI300    | `lmsysorg/sglang:v0.5.11-rocm720-mi30x` |
 | `0.5.11`       | MI350/MI355 | `lmsysorg/sglang:v0.5.11-rocm720-mi35x` |
+| `0.5.12`       | MI300    | `lmsysorg/sglang:v0.5.12-rocm720-mi30x` |
+| `0.5.12`       | MI350/MI355 | `lmsysorg/sglang:v0.5.12-rocm720-mi35x` |
 
 
 ```bash
