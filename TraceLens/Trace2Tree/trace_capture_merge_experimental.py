@@ -32,7 +32,7 @@ EXECUTE_CONTEXT_PATTERNS = (
     re.compile(
         r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
     ),
-    re.compile(r"execute_context_\d+\([\d_]+\)_generation_\d+\([\d_]+\)"),
+    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
 )
 
 
@@ -58,95 +58,37 @@ def get_subtree_events(tree, event, cat_filter=None, name_filter=None):
     return list_events, list_filtered_events
 
 
-def _capture_kernel_name(event):
-    return event.get("args", {}).get("kernel", event["name"])
-
-
-def _align_capture_to_graph(capture_events, graph_events):
-    """
-    Greedily align capture dispatch events to graph kernel events by name.
-
-    For each graph kernel, scan forward through capture_events until a
-    dispatch whose args.kernel matches is found, skipping any unmatched
-    dispatches along the way.  Unmatched capture events at the tail are
-    discarded.  Returns the aligned capture list (same length as
-    graph_events), or None if any graph kernel cannot be matched.
-    """
-
-    aligned = []
-    ci = 0
-    for g_event in graph_events:
-        g_name = g_event["name"]
-        matched = False
-        while ci < len(capture_events):
-            c_event = capture_events[ci]
-            ci += 1
-            c_name = _capture_kernel_name(c_event)
-            # Memcpy/Memset events carry no kernel arg — match when both sides agree
-            if ("Memcpy" in c_event["name"] and "Memcpy" in g_name) or \
-               ("Memset" in c_event["name"] and "Memset" in g_name):
-                aligned.append(c_event)
-                matched = True
-                break
-            if c_name == g_name:
-                aligned.append(c_event)
-                matched = True
-                break
-        if not matched:
-            return None
-    return aligned
-
-
 def verify_subtree_events(capture_events, graph_events):
-    """
-    Verify that capture dispatch events align 1-to-1 with graph kernel events.
-
-    If counts match, check names directly.  If counts differ, attempt greedy
-    alignment via _align_capture_to_graph: extra capture dispatches are
-    discarded and the aligned list is returned so the caller can proceed.
-
-    Returns:
-        (success, aligned_capture_events) where success is 1 on full match,
-        2 on successful greedy alignment (with discards), and 0 on failure.
-    """
     if len(capture_events) != len(graph_events):
         print(
             "Mismatch in number of events: Capture {}, Graph {}".format(
                 len(capture_events), len(graph_events)
             )
         )
-        aligned = _align_capture_to_graph(capture_events, graph_events)
-        if aligned is not None:
-            print(
-                "Greedy alignment succeeded: matched {} capture events to {} graph kernels "
-                "({} capture events discarded).".format(
-                    len(aligned),
-                    len(graph_events),
-                    len(capture_events) - len(aligned),
+        return 0
+    else:
+        # print("=========matching ========")
+        for j, i in zip(capture_events, graph_events):
+            if "kernel" not in j.get("args", {}).keys():
+                if "Memcpy" in j["name"] or "Memset" in j["name"]:
+                    continue
+                warnings.warn(
+                    "Kernel name missing in capture event args, "
+                    "alignment has not been verified",
+                    stacklevel=2,
                 )
-            )
-            return 2, aligned
-        return 0, capture_events
-
-    for j, i in zip(capture_events, graph_events):
-        if "kernel" not in j.get("args", {}).keys():
-            if "Memcpy" in j["name"] or "Memset" in j["name"]:
                 continue
-            warnings.warn(
-                "Kernel name missing in capture event args, "
-                "alignment has not been verified",
-                stacklevel=2,
-            )
-            continue
-        if i["name"] != _capture_kernel_name(j):
-            print(
-                "Mismatch in kernel name: {} vs {}".format(
-                    i["name"], _capture_kernel_name(j)
+            if i["name"] != j.get("args", {}).get("kernel", j["name"]):
+                print(
+                    "Mismatch in kernel name: {} vs {}".format(
+                        i["name"], j.get("args", {}).get("kernel", j["name"])
+                    )
                 )
-            )
-            return 0, capture_events
-
-    return 1, capture_events
+                return 0
+    # print(
+    #    "Subtree events match successfully with {} events".format(len(capture_events))
+    # )
+    return 1
 
 
 def update_subtree_uids_and_timestamps(
@@ -320,10 +262,10 @@ def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
     """
     if key in _capture_tree_cache:
         _capture_tree_cache.move_to_end(key)
-        print("Cache hit for capture tree (key={})".format(key[0]))
+        print("Cache hit for capture tree (key={})".format(key))
         return _capture_tree_cache[key]
 
-    print("Loading capture trace: {} (key={})".format(filepath, key[0]))
+    print("Loading capture trace: {} (key={})".format(filepath, key))
     capture_perf_analyzer = TreePerfAnalyzer.from_file(filepath, add_python_func=True)
     capture_tree = capture_perf_analyzer.tree
     capture_roots = find_capture_roots(capture_tree)
@@ -342,7 +284,7 @@ def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
     _capture_tree_cache[key] = (capture_tree, capture_roots, capture_root_data)
     if len(_capture_tree_cache) > _CAPTURE_TREE_CACHE_MAX_SIZE:
         evicted_key, _ = _capture_tree_cache.popitem(last=False)
-        print("Evicted capture tree cache entry (key={})".format(evicted_key[0]))
+        print("Evicted capture tree cache entry (key={})".format(evicted_key))
 
     return capture_tree, capture_roots, capture_root_data
 
@@ -578,9 +520,8 @@ def merge_capture_trace_into_graph(
             mode = "PIECEWISE"
         else:
             mode = "FULL"
-        str_key = "{}_{}".format(closest_batch_size, mode)
-        filepath = capture_map[str_key]
-        key = (str_key, os.path.abspath(filepath))
+        key = "{}_{}".format(closest_batch_size, mode)
+        filepath = capture_map[key]
         capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
             key, filepath, TreePerfAnalyzer
         )
@@ -607,7 +548,7 @@ def merge_capture_trace_into_graph(
                 graph_tree, g_root, cat_filter=["kernel", "gpu_memset", "gpu_memcpy"]
             )
 
-            verify_success, capture_filtered_events = verify_subtree_events(
+            verify_success = verify_subtree_events(
                 capture_filtered_events, graph_filtered_events
             )
 
