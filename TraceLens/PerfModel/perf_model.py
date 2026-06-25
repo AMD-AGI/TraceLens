@@ -1842,10 +1842,10 @@ class SDPA:
     def flops_bwd_func(B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, flash_impl):
         total_flops = 0
         if flash_impl:
-            # 0. recompute qk
+            # Flash-attn backward recomputes S = QK^T to regenerate P = softmax(S)
+            # on-chip. O = PV is NOT recomputed — it is saved from the forward pass.
             flops_recompute_qk = B * H_Q * (2 * N_Q * N_KV * d_h_qk)
             total_flops += flops_recompute_qk
-            # 0.1 recompute softmax P - ignored as it is small
 
         # not including softmax for now
         # 1. V_grad = P_grad^T.matmul(O)
@@ -1877,29 +1877,40 @@ class SDPA:
 
     @staticmethod
     def bytes_bwd_func(
-        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element
+        B,
+        N_Q,
+        H_Q,
+        N_KV,
+        H_KV,
+        d_h_qk,
+        d_h_v,
+        causal,
+        bytes_per_element,
     ):
-        # This will be done for recompute in flash attention
+        # Minimum HBM traffic for attention backward (roofline lower bound).
+        # Reads:  Q, K, V, O (fwd output), dO (grad of output)
+        # Writes: dQ, dK, dV
         elems_q_read = B * N_Q * H_Q * d_h_qk
         elems_k_read = B * N_KV * H_KV * d_h_qk
         elems_v_read = B * N_KV * H_KV * d_h_v
+        elems_o_read = B * N_Q * H_Q * d_h_v
+        elems_do_read = elems_o_read
 
-        elems_o_grad_read = B * N_Q * H_Q * d_h_v
-        # grad for q, k and v
-        elems_q_grad_write = B * N_Q * H_Q * d_h_qk
-        elems_k_grad_write = B * N_KV * H_KV * d_h_qk
-        elems_v_grad_write = B * N_KV * H_KV * d_h_v
+        elems_dq_write = B * N_Q * H_Q * d_h_qk
+        elems_dk_write = B * N_KV * H_KV * d_h_qk
+        elems_dv_write = B * N_KV * H_KV * d_h_v
 
-        total_elems_moved = (
+        total_elems = (
             elems_q_read
             + elems_k_read
             + elems_v_read
-            + elems_o_grad_read
-            + elems_q_grad_write
-            + elems_k_grad_write
-            + elems_v_grad_write
+            + elems_o_read
+            + elems_do_read
+            + elems_dq_write
+            + elems_dk_write
+            + elems_dv_write
         )
-        return total_elems_moved * bytes_per_element
+        return total_elems * bytes_per_element
 
     def flops_bwd(self):
         return self.flops_bwd_func(
