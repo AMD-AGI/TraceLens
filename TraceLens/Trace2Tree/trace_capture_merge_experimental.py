@@ -188,19 +188,15 @@ def update_subtree_uids_and_timestamps(
                     print(
                         "Warning: parent UID {} not found in mapping".format(parent_uid)
                     )
-    # Update timestamps: scale capture time into the graph replay window.
-    # The capture ran for capture_dur; the graph replay runs for g_root_dur.
-    # We shift each event's ts by (new_start_ts - original_start_ts) and
-    # scale both the offset and dur by (g_root_dur / capture_dur) so that
-    # the entire capture subtree fits proportionally within the replay window.
+    # Update timestamps
     original_start_ts = subtree_events[0]["ts"]
-    capture_dur = subtree_events[0].get("dur", g_root_dur) or g_root_dur
-    scale = g_root_dur / capture_dur if capture_dur > 0 else 1.0
+    ts_offset = new_start_ts - original_start_ts
+    # for event in subtree_filtered_events:
+    #    event[UID]=uid_mapping[event[UID]]
     for event in subtree_events:
-        relative_ts = event["ts"] - original_start_ts
-        event["ts"] = new_start_ts + relative_ts * scale
-        if "dur" in event:
-            event["dur"] = event["dur"] * scale
+        event["ts"] += ts_offset
+        event["ts"] = new_start_ts
+        event["dur"] = g_root_dur
     for i in capture_tree.cpu_root_nodes:
         if i in uid_mapping:
             cpu_root_nodes.append(uid_mapping[i])
