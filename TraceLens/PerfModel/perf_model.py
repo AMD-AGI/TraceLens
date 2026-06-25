@@ -18,6 +18,26 @@ from .kernel_name_parser import gemm_name_parser
 from .utils import name2bpe, parse_bool, simulation_dtype_map, torch_dtype_map
 
 
+# Reduced (element-count) FLOP convention for elementwise / norm / quant ops.
+#
+# Default OFF: flops() reports the real arithmetic op count (roofline / MFU
+# semantics are unchanged for all existing consumers). When the environment
+# variable below is set to a truthy token, the elementwise, RMSNorm and quant
+# perf models instead report a bare element count (1 FLOP/element) -- matching
+# MAIDAS's reduced convention so the two perf models can be correlated on the
+# same basis. Read per-call so report generation can toggle it without code
+# edits. See ELEMENTWISE_FLOPS_GAP.md for the rationale.
+_REDUCED_ELEMENTWISE_FLOPS_TOKENS = {"1", "true", "elements", "element", "reduced"}
+
+
+def reduced_elementwise_flops() -> bool:
+    """True when elementwise/norm/quant flops() should return an element count."""
+    return (
+        os.environ.get("TRACELENS_ELEMENTWISE_FLOPS", "").strip().lower()
+        in _REDUCED_ELEMENTWISE_FLOPS_TOKENS
+    )
+
+
 # 1. GEMM
 class GEMM:
     """
@@ -4885,6 +4905,9 @@ class RMSNorm(Normalization):
     # multiply rsqt by each elem, then if weight is not null multiply weight by each elem
     # sample code: https://github.com/pytorch/pytorch/blob/9f1d4f078298856a78e2ef4692061fada6cf567b/torch/_decomp/decompositions.py#L1808
     def flops(self):
+        if reduced_elementwise_flops():
+            # Reduced convention: 1 FLOP/element (element count), matching MAIDAS.
+            return self.num_elems
         non_normalized_elems = self.num_elems / self.num_channels
         flops = non_normalized_elems * (2 * self.num_channels + 2)  # compute rsqt
         flops += self.num_elems * (
@@ -5148,6 +5171,10 @@ class FusedRoPE:
 
     FLOPS: each pair of elements in head_dim requires 4 muls + 2 adds = 6 ops.
     Total = 3 × num_elements (since 6 ops per 2 elements).
+
+    Under the reduced (element-count) convention, flops() instead returns the
+    element count (1 FLOP/element) to match MAIDAS; the element scope (all
+    rotated heads) is unchanged, so genuine scope differences stay visible.
     """
 
     category = "RoPE_fwd"
@@ -5176,6 +5203,8 @@ class FusedRoPE:
         }
 
     def flops(self):
+        if reduced_elementwise_flops():
+            return self.param_details["num_elements"]
         return 3 * self.param_details["num_elements"]
 
     def bytes(self):

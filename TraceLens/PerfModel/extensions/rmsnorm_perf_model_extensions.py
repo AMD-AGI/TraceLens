@@ -9,6 +9,7 @@ Performance models for RMSNorm pseudo-op extensions.
 """
 
 from TraceLens.PerfModel.perf_model import RMSNorm as CoreRMSNorm
+from TraceLens.PerfModel.perf_model import reduced_elementwise_flops
 
 
 class RMSNorm(CoreRMSNorm):
@@ -144,8 +145,10 @@ class aiter_rmsnorm2d_fwd_with_dynamicquant_ck(RMSNorm):
         }
 
     def flops(self):
-        # RMSNorm + per-token quant: max-abs per row + scale each element
-        return super().flops() + 2 * self.num_elems
+        # RMSNorm + per-token quant: max-abs per row + scale each element.
+        # Reduced convention keeps the quant term visible at 1 FLOP/element.
+        quant = self.num_elems if reduced_elementwise_flops() else 2 * self.num_elems
+        return super().flops() + quant
 
     def bytes(self):
         M = self.num_elems // self.num_channels
@@ -248,8 +251,9 @@ class fused_rms_mxfp4_quant(RMSNorm):
             # Approximate x2 RMSNorm cost: same per-elem flop intensity as x1.
             x2_elems = M * self.n2
             flops += int(super().flops() * x2_elems / max(self.num_elems, 1))
-        # MXFP4 quant: max-abs per 32-elem block + per-elem scale
-        flops += 2 * self.num_elems
+        # MXFP4 quant: max-abs per 32-elem block + per-elem scale.
+        # Reduced convention keeps the quant term visible at 1 FLOP/element.
+        flops += self.num_elems if reduced_elementwise_flops() else 2 * self.num_elems
         return flops
 
     def bytes(self):
@@ -315,8 +319,10 @@ class vllm_rocm_aiter_rmsnorm_fp8_group_quant(RMSNorm):
         }
 
     def flops(self):
-        # RMSNorm flops + quantization: max-abs per group + scale each element
-        return super().flops() + 2 * self.num_elems
+        # RMSNorm flops + quantization: max-abs per group + scale each element.
+        # Reduced convention keeps the quant term visible at 1 FLOP/element.
+        quant = self.num_elems if reduced_elementwise_flops() else 2 * self.num_elems
+        return super().flops() + quant
 
     def bytes(self):
         M = self.num_elems // self.num_channels
@@ -455,7 +461,9 @@ class vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant(RMSNorm):
         # residual add: num_elems
         # RMSNorm: super().flops()
         # FP8 quantization: 2 * num_elems (max-abs per group + scale each elem)
-        return super().flops() + 3 * self.num_elems
+        # Reduced convention keeps residual + quant visible at 1 FLOP/element each.
+        quant = self.num_elems if reduced_elementwise_flops() else 2 * self.num_elems
+        return super().flops() + self.num_elems + quant
 
     def bytes(self):
         M = self.num_elems // self.num_channels

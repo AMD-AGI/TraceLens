@@ -15,6 +15,7 @@ from TraceLens.PerfModel.perf_model import (
     BinaryElementwise,
     UnaryElementwise,
     FusedRoPE,
+    reduced_elementwise_flops,
 )
 from math import prod
 
@@ -543,6 +544,8 @@ class per_group_quant(GroupQuant):
         return bytes
 
     def flops(self):
+        if reduced_elementwise_flops():
+            return self.nelems_out
         return self.nelems_out * 2.59375  # Based on the rocprof counter values
 
     def get_compute_precision(self):
@@ -619,6 +622,8 @@ class vllm_triton_per_token_group_quant_fp8(GroupQuant):
     def flops(self):
         M = self.param_details["M"]
         N = self.param_details["N"]
+        if reduced_elementwise_flops():
+            return M * N
         return 6 * M * N
 
     def bytes(self):
@@ -877,6 +882,8 @@ class fused_flatten_mxfp4_quant(UnaryElementwise):
         }
 
     def flops(self):
+        if reduced_elementwise_flops():
+            return self.nelems
         return 2 * self.nelems
 
     def bytes(self):
@@ -970,6 +977,8 @@ class aiter_rope_cached_positions_2c_fwd_impl(FusedRoPE):
         }
 
     def flops(self):
+        if reduced_elementwise_flops():
+            return self.param_details["num_elements"]
         return 3 * self.param_details["num_elements"]
 
     def bytes(self):
