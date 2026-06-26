@@ -194,6 +194,69 @@ def test_sgl_kernel_rotary_embedding(
 
 
 # ---------------------------------------------------------------------------
+# 3. dsv3_fused_qk_rope_cat_and_cache_mla  (aiter triton MLA RoPE + KV cache)
+# ---------------------------------------------------------------------------
+
+def test_dsv3_fused_qk_rope_cat_and_cache_mla(M, num_heads_q=16, head_dim=576,
+                                              group_size=64, num_warmup=3, **_):
+    """``aiter.ops.triton.fusions.fused_kv_cache.fused_qk_rope_cat_and_cache_mla``.
+
+    Constructs the smallest realistic MLA prefill/decode call:
+      * ``--M``         : number of tokens being processed
+      * ``--num_heads_q``: query heads (H_q)
+      * ``--head_dim``  : total head dim D = D_lora + D_pe; defaults to 576 (DSV3)
+      * ``--group_size``: D_pe (rotary dim); defaults to 64 (DSV3)
+
+    The kv_cache buffer is sized to ``T + 4096`` so the random slot_mapping
+    has room. Uses BF16 throughout (matches the DSV3 trace).
+    """
+    import torch
+    from aiter.ops.triton.fusions.fused_kv_cache import fused_qk_rope_cat_and_cache_mla
+
+    device = "cuda"
+    dtype = torch.bfloat16
+    T = M
+    H_q = num_heads_q
+    D_pe = group_size
+    D_lora = head_dim - D_pe
+    if D_lora <= 0:
+        raise ValueError(f"head_dim ({head_dim}) must exceed group_size/D_pe ({D_pe})")
+    KH = 1
+    num_kv_cache_tokens = max(T + 4096, 8192)
+    max_pos = max(T * 16, 4096)
+    print(
+        f"test: dsv3_fused_qk_rope_cat_and_cache_mla T={T} H_q={H_q} "
+        f"D_lora={D_lora} D_pe={D_pe} num_kv_cache_tokens={num_kv_cache_tokens}",
+        flush=True,
+    )
+
+    q_nope = torch.randn(T, H_q, D_lora, dtype=dtype, device=device)
+    q_pe = torch.randn(T, H_q, D_pe, dtype=dtype, device=device)
+    k_nope = torch.randn(T, KH, D_lora, dtype=dtype, device=device)
+    k_pe = torch.randn(T, KH, D_pe, dtype=dtype, device=device)
+    kv_cache = torch.zeros(num_kv_cache_tokens, KH, D_lora + D_pe, dtype=dtype, device=device)
+    pos = torch.randint(0, max_pos, (T,), dtype=torch.int64, device=device)
+    slot_mapping = torch.randperm(num_kv_cache_tokens, device=device, dtype=torch.int64)[:T]
+    cos = torch.randn(max_pos, 1, 1, D_pe // 2, dtype=dtype, device=device)
+    sin = torch.randn(max_pos, 1, 1, D_pe // 2, dtype=dtype, device=device)
+    k_scale = torch.ones((1,), dtype=torch.float32, device=device)[0]
+
+    def _call():
+        return fused_qk_rope_cat_and_cache_mla(
+            q_nope, q_pe, k_nope, k_pe, kv_cache, slot_mapping, pos, cos, sin, k_scale,
+            is_neox=True, num_decode_toks_for_zeros=0, apply_scale=False,
+        )
+
+    for _ in range(num_warmup):
+        _call()
+    torch.cuda.synchronize()
+    print("test: measured iteration...", flush=True)
+    _call()
+    torch.cuda.synchronize()
+    print("test: done", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # OP_METADATA
 # ---------------------------------------------------------------------------
 
@@ -224,6 +287,19 @@ OP_METADATA: dict = {
             "num_heads_kv": 8,
             "head_dim": 128,
             "in_dtype": "bf16",
+        },
+        "required_args": ["M"],
+    },
+    "dsv3_fused_qk_rope_cat_and_cache_mla": {
+        "fn":           test_dsv3_fused_qk_rope_cat_and_cache_mla,
+        "category":     "FusedRoPE",
+        "description":  "DSV3 AITER triton MLA RoPE + KV-cache fusion",
+        "dtypes":       ["bf16"],
+        "defaults":     {
+            "M": 32,
+            "num_heads_q": 16,
+            "head_dim": 576,
+            "group_size": 64,
         },
         "required_args": ["M"],
     },

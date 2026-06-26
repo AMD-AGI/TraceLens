@@ -112,7 +112,58 @@ def _call_vllm_rmsnorm_add_fp8_group_quant(t):
     )
 
 
+def _call_dsv3_fused_qk_rope_cat_and_cache_mla(t):
+    from aiter.ops.triton.fusions.fused_kv_cache import (
+        fused_qk_rope_cat_and_cache_mla,
+    )
+    q_nope = t[0]
+    q_pe = t[1]
+    k_nope = t[2]
+    k_pe = t[3]
+    kv_cache = t[4]
+    cos = t[7]
+    sin = t[8]
+    T = q_nope.shape[0]
+    b_cache = kv_cache.shape[0]
+    slot = torch.randperm(b_cache, device="cuda", dtype=torch.int64)[:T].contiguous()
+    pos = torch.randint(0, cos.shape[0], (T,), device="cuda", dtype=torch.int64)
+    k_scale = torch.ones((1,), dtype=torch.float32, device="cuda")[0]
+    return fused_qk_rope_cat_and_cache_mla(
+        q_nope, q_pe, k_nope, k_pe, kv_cache, slot, pos, cos, sin, k_scale,
+        is_neox=True, num_decode_toks_for_zeros=0, apply_scale=False,
+    )
+
+
+def _call_dsv3_dynamic_per_group_scaled_quant_fp4(t):
+    import aiter
+    x = t[1]
+    M, N = x.shape
+    out = torch.empty((M, N // 2), dtype=torch.uint8, device="cuda")
+    scales = torch.empty((M, N // 32), dtype=torch.uint8, device="cuda")
+    return aiter.dynamic_per_group_scaled_quant_fp4(out, x, scales, 32)
+
+
+def _call_dsv3_quant_dynamic_mxfp4_quant(t):
+    from aiter.utility.fp4_utils import dynamic_mxfp4_quant
+    return dynamic_mxfp4_quant(t[0])
+
+
 OP_CALL_SPEC = {
+    "dsv3_fused_qk_rope_cat_and_cache_mla": {
+        "call": _call_dsv3_fused_qk_rope_cat_and_cache_mla,
+        "output_indices": [],
+        "skip_indices": [],
+    },
+    "dsv3_dynamic_per_group_scaled_quant_fp4": {
+        "call": _call_dsv3_dynamic_per_group_scaled_quant_fp4,
+        "output_indices": [],
+        "skip_indices": [0, 2],
+    },
+    "dsv3_quant_dynamic_mxfp4_quant": {
+        "call": _call_dsv3_quant_dynamic_mxfp4_quant,
+        "output_indices": [],
+        "skip_indices": [],
+    },
     "gemm_a8w8_blockscale": {"call": _call_gemm_a8w8_blockscale, "output_indices": [4], "skip_indices": []},
     "gemm_a16w16_atomic_": {"call": _call_gemm_a16w16_asm, "output_indices": [2], "skip_indices": []},
     "silu_and_mul": {"call": _call_aiter_silu_and_mul, "output_indices": [0], "skip_indices": []},

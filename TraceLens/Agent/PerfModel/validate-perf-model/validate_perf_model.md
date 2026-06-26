@@ -102,8 +102,6 @@ Then:
 | `tests/other.py` | `GroupQuant`, `UnaryElementwise` | same |
 | `tests/rope.py` | `FusedRoPE` | `FusedRoPE` |
 | `tests/collectives.py` | `CustomCollective` | `CustomCollective` |
-| `tests/extensions_new.py` | `GEMM`, `GroupQuant`, `RMSNorm` | various |
-
 ---
 
 ## Step 3 — Run validation
@@ -185,11 +183,7 @@ python validate_perf_model.py --discover
   of zeros to device memory, then synchronizes and frees the buffer.
 
   `FETCH_SIZE` and `WRITE_SIZE` are L2 (TCC) counters — they count bytes that
-  **missed L2** and were fetched from below. On MI300X/MI355X the level below
-  L2 is the **Infinity Cache** (256 MB), not HBM directly. To make these
-  counters reflect true HBM traffic, both the L2 (32 MB) and the Infinity
-  Cache (256 MB) must be cold. 512 MiB = 2× the Infinity Cache size, which
-  guarantees both levels are fully evicted. At ~5 TB/s HBM bandwidth the fill
+  **missed L2** and were fetched from below. The fill
   takes ~0.1 ms — negligible overhead in the validation loop.
 
 ---
@@ -200,7 +194,7 @@ Attention harnesses accept an `annotation` string that encodes the per-sequence
 statistics needed by the `InferenceAttention` perf model.  The format is:
 
 ```
-attn_<prefill_count>_<decode_count>_<total_q_tokens>_<total_kv_tokens>_...
+execute_<bs>_context_<num_prefill_requests>(sq<sum_prefill_q_tokens>sk<sum_prefill_KV_tokens>sqsq<sum_prefill_q*q>sqsk0<sum_prefill_q*KV>_generation_<num_decode_requests>(sq<sum_decode_q_tokens>sk<sum_decode_KV_tokens>sqsq<sum_decode_q*q>sqsk<sum_decode_q*KV>)
 ```
 
 For variable-length scenarios, `--varlen-num-seqs` and `--varlen-scenario`

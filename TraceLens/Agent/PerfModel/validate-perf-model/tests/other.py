@@ -257,6 +257,163 @@ def test_fused_flatten_mxfp4_quant(
 
 
 # ---------------------------------------------------------------------------
+# DSV3 / DSV4 group-quant harnesses
+# ---------------------------------------------------------------------------
+
+def test_dsv3_fused_flatten_fp8_group_quant(M, N, group_size=128, num_warmup=3, **_):
+    """``aiter.ops.triton.quant.fused_fp8_quant.fused_flatten_fp8_group_quant``.
+
+    Reshapes ``(M, N1, N2)`` to ``(M, N1*N2)`` and per-token-group FP8
+    quantizes along the trailing dim with the given ``group_size``.
+
+    We pass ``--M`` and ``--N`` as the input's leading and trailing dims, then
+    pick ``N1 = N / group_size`` and ``N2 = group_size`` so the flattened
+    output matches the DSV3 trace shape ``(32, 16, 128) -> (32, 2048)``.
+    """
+    import torch
+    from aiter.ops.triton.quant.fused_fp8_quant import fused_flatten_fp8_group_quant
+
+    device = "cuda"
+    if N % group_size != 0:
+        raise ValueError(f"N ({N}) must be divisible by group_size ({group_size})")
+    N1 = N // group_size
+    N2 = group_size
+    print(
+        f"test: dsv3_fused_flatten_fp8_group_quant M={M} N1={N1} N2={N2} group_size={group_size}",
+        flush=True,
+    )
+
+    x = torch.randn(M, N1, N2, dtype=torch.bfloat16, device=device)
+
+    for _ in range(num_warmup):
+        out, scale = fused_flatten_fp8_group_quant(x, group_size)
+    torch.cuda.synchronize()
+    print("test: measured iteration...", flush=True)
+    out, scale = fused_flatten_fp8_group_quant(x, group_size)
+    torch.cuda.synchronize()
+    print(f"test: done, out={out.shape} scale={scale.shape}", flush=True)
+
+
+def test_dsv4_dynamic_per_group_scaled_quant(M=1819, N=7168, group_size=32, num_warmup=3, **_):
+    """``aiter.dynamic_per_group_scaled_quant`` — per-group dynamic MX-FP8 quant."""
+    import torch
+    import aiter
+
+    K = N
+    print(f"test: dsv4_dynamic_per_group_scaled_quant M={M} K={K} group_size={group_size}", flush=True)
+    input_t = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    out = torch.empty(M, K, device="cuda", dtype=aiter.dtypes.fp8)
+    scales = torch.empty(M, K // group_size, device="cuda", dtype=aiter.dtypes.fp8_e8m0)
+
+    for _ in range(num_warmup):
+        aiter.dynamic_per_group_scaled_quant(out, input_t, scales,
+                                             group_size=group_size, shuffle_scale=False)
+    torch.cuda.synchronize()
+    print("test: measured iteration...", flush=True)
+    aiter.dynamic_per_group_scaled_quant(out, input_t, scales,
+                                         group_size=group_size, shuffle_scale=False)
+    torch.cuda.synchronize()
+    print(f"test: done out={tuple(out.shape)} scales={tuple(scales.shape)}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# DSV4 mHC (multi-residual hyper-connection) family
+# ---------------------------------------------------------------------------
+
+def test_dsv4_mhc_pre_gemm_sqrsum(M=1819, N=7168, hc_mult=4, num_warmup=3, **_):
+    """``aiter.mhc_pre_gemm_sqrsum`` — flattened-residual GEMM + sum-of-squares."""
+    import torch
+    import aiter
+    from aiter.ops.mhc import mhc_pre_gemm_sqrsum, get_mhc_pre_splitk
+
+    C = N
+    hc_mult3 = hc_mult * 2 + hc_mult * hc_mult  # 24
+    hc_hidden = hc_mult * C                       # 28672
+    print(f"test: dsv4_mhc_pre_gemm_sqrsum M={M} hc_mult={hc_mult} C={C}", flush=True)
+
+    residual = torch.randn(M, hc_mult, C, dtype=torch.bfloat16, device="cuda")
+    fn = torch.randn(hc_mult3, hc_hidden, dtype=torch.float32, device="cuda")
+    split_k, tile_k = get_mhc_pre_splitk(M, hc_hidden)
+
+    out_pad = torch.empty(split_k, M, (hc_mult3 + 31) // 32 * 32,
+                          dtype=torch.float32, device="cuda")
+    out = out_pad[:, :, :hc_mult3]
+    sqrsum = torch.empty(split_k, M, dtype=torch.float32, device="cuda")
+
+    for _ in range(num_warmup):
+        mhc_pre_gemm_sqrsum(out, sqrsum, residual, fn, tile_k)
+    torch.cuda.synchronize()
+    print("test: measured iteration...", flush=True)
+    mhc_pre_gemm_sqrsum(out, sqrsum, residual, fn, tile_k)
+    torch.cuda.synchronize()
+    print(f"test: done split_k={split_k} tile_k={tile_k}", flush=True)
+
+
+def test_dsv4_mhc_pre_big_fuse(M=1819, N=7168, hc_mult=4, split_k=16, num_warmup=3, **_):
+    """``aiter.mhc_pre_big_fuse`` — RMS-norm + Sinkhorn + fused residual mix."""
+    import torch
+    from aiter.ops.mhc import mhc_pre_big_fuse, get_mhc_pre_splitk
+
+    C = N
+    hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
+    try:
+        split_k, _ = get_mhc_pre_splitk(M, hc_mult * C)
+    except Exception:
+        pass
+    print(f"test: dsv4_mhc_pre_big_fuse M={M} hc_mult={hc_mult} C={C} split_k={split_k}", flush=True)
+
+    residual = torch.randn(M, hc_mult, C, dtype=torch.bfloat16, device="cuda")
+    gemm_out_mul = torch.randn(split_k, M, hc_mult3, dtype=torch.float32, device="cuda")
+    gemm_out_sqrsum = torch.rand(split_k, M, dtype=torch.float32, device="cuda") + 0.1
+    hc_scale = torch.randn(3, dtype=torch.float32, device="cuda") * 0.1
+    hc_base = torch.randn(hc_mult3, dtype=torch.float32, device="cuda") * 0.1
+
+    post_mix = torch.empty(M, hc_mult, 1, dtype=torch.float32, device="cuda")
+    comb_mix = torch.empty(M, hc_mult, hc_mult, dtype=torch.float32, device="cuda")
+    layer_input = torch.empty(M, C, dtype=torch.bfloat16, device="cuda")
+
+    def _call():
+        mhc_pre_big_fuse(
+            post_mix, comb_mix, layer_input,
+            gemm_out_mul, gemm_out_sqrsum,
+            hc_scale, hc_base, residual,
+            rms_eps=1e-6, hc_pre_eps=1e-6, hc_sinkhorn_eps=1e-6,
+            hc_post_mult_value=2.0, sinkhorn_repeat=20,
+        )
+
+    for _ in range(num_warmup):
+        _call()
+    torch.cuda.synchronize()
+    print("test: measured iteration...", flush=True)
+    _call()
+    torch.cuda.synchronize()
+    print("test: done", flush=True)
+
+
+def test_dsv4_mhc_post(M=1819, N=7168, hc_mult=4, num_warmup=3, **_):
+    """``aiter.mhc_post`` — merge block output back into n residual streams."""
+    import torch
+    from aiter.ops.mhc import mhc_post
+
+    C = N
+    print(f"test: dsv4_mhc_post M={M} hc_mult={hc_mult} C={C}", flush=True)
+
+    x = torch.randn(M, C, dtype=torch.bfloat16, device="cuda")
+    residual = torch.randn(M, hc_mult, C, dtype=torch.bfloat16, device="cuda")
+    post_layer_mix = torch.randn(M, hc_mult, 1, dtype=torch.float32, device="cuda")
+    comb_res_mix = torch.randn(M, hc_mult, hc_mult, dtype=torch.float32, device="cuda")
+    out = torch.empty_like(residual)
+
+    for _ in range(num_warmup):
+        mhc_post(out, x, residual, post_layer_mix, comb_res_mix)
+    torch.cuda.synchronize()
+    print("test: measured iteration...", flush=True)
+    mhc_post(out, x, residual, post_layer_mix, comb_res_mix)
+    torch.cuda.synchronize()
+    print(f"test: done out={tuple(out.shape)}", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # OP_METADATA
 # ---------------------------------------------------------------------------
 
@@ -307,6 +464,46 @@ OP_METADATA: dict = {
         "description":  "SGLang triton fused flatten + MXFP4 quant",
         "dtypes":       ["bf16", "fp16"],
         "defaults":     {"M": 822, "N": 7168, "group_size": 128, "in_dtype": "bf16"},
+        "required_args": ["M", "N"],
+    },
+    "dsv3_fused_flatten_fp8_group_quant": {
+        "fn":           test_dsv3_fused_flatten_fp8_group_quant,
+        "category":     "GroupQuant",
+        "description":  "DSV3 AITER triton fused flatten + FP8 group quant",
+        "dtypes":       ["bf16"],
+        "defaults":     {"M": 32, "N": 2048, "group_size": 128},
+        "required_args": ["M", "N"],
+    },
+    "dsv4_dynamic_per_group_scaled_quant": {
+        "fn":           test_dsv4_dynamic_per_group_scaled_quant,
+        "category":     "GroupQuant",
+        "description":  "DSV4 per-group dynamic MX-FP8 quant (aiter)",
+        "dtypes":       ["bf16"],
+        "defaults":     {"M": 1819, "N": 7168, "group_size": 32},
+        "required_args": ["M", "N"],
+    },
+    "dsv4_mhc_pre_gemm_sqrsum": {
+        "fn":           test_dsv4_mhc_pre_gemm_sqrsum,
+        "category":     "mHC_pre",
+        "description":  "DSV4 mHC pre GEMM + sum-of-squares (aiter)",
+        "dtypes":       ["bf16"],
+        "defaults":     {"M": 1819, "N": 7168},
+        "required_args": ["M", "N"],
+    },
+    "dsv4_mhc_pre_big_fuse": {
+        "fn":           test_dsv4_mhc_pre_big_fuse,
+        "category":     "mHC_pre",
+        "description":  "DSV4 mHC pre RMS+Sinkhorn+mix fuse (aiter)",
+        "dtypes":       ["bf16"],
+        "defaults":     {"M": 1819, "N": 7168},
+        "required_args": ["M", "N"],
+    },
+    "dsv4_mhc_post": {
+        "fn":           test_dsv4_mhc_post,
+        "category":     "mHC_post",
+        "description":  "DSV4 mHC post stream-merge (aiter)",
+        "dtypes":       ["bf16"],
+        "defaults":     {"M": 1819, "N": 7168},
         "required_args": ["M", "N"],
     },
 }

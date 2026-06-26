@@ -59,9 +59,7 @@ def _build_op_table():
     attention = _try_import("attention")
     rmsnorm = _try_import("rmsnorm")
     other = _try_import("other")
-    dsv3 = _try_import("dsv3")
-    dsv4 = _try_import("dsv4")
-    extensions_new = _try_import("extensions_new")
+    rope = _try_import("rope")
     atom_flydsl = _try_import("atom_flydsl")
 
     table = {}
@@ -71,6 +69,11 @@ def _build_op_table():
         "vllm_unquantized_gemm": "test_vllm_unquantized_gemm",
         "vllm_triton_gemm_a8w8_blockscale": "test_gemm_a8w8_blockscale",
         "vllm_gemm_with_dynamic_quant": "test_vllm_gemm_with_dynamic_quant",
+        "gemm_afp4wfp4": "test_gemm_afp4wfp4",
+        "dsv3_flydsl_hgemm": "test_dsv3_flydsl_hgemm",
+        "dsv3_batched_gemm_a8w8": "test_dsv3_batched_gemm_a8w8",
+        "dsv4_opus_gemm_a16w16": "test_dsv4_opus_gemm_a16w16",
+        "dsv4_gemm_a8w8_blockscale_bpreshuffle_asm": "test_dsv4_gemm_a8w8_blockscale_bpreshuffle_asm",
     })
     _add(table, moe, {
         "fmoe_fp8_blockscale_g1u1": "test_fmoe_fp8_blockscale_g1u1",
@@ -79,6 +82,11 @@ def _build_op_table():
         "ck_moe_stage1": "test_ck_moe_stage1",
         "ck_moe_stage2": "test_ck_moe_stage2",
         "sglang_fused_moe_triton_invoke": "test_sglang_fused_moe_triton_invoke",
+        "dsv3_fused_append_shared_experts": "test_dsv3_fused_append_shared_experts",
+        "dsv3_moe_flydsl_stage1": "test_dsv3_moe_flydsl_stage1",
+        "dsv3_moe_flydsl_stage2": "test_dsv3_moe_flydsl_stage2",
+        "dsv4_topk_softplus": "test_dsv4_topk_softplus",
+        "dsv4_fused_dynamic_mx_quant_moe_sort": "test_dsv4_fused_dynamic_mx_quant_moe_sort",
     })
     _add(table, attention, {
         "_flash_attn_forward": "test__flash_attn_forward",
@@ -87,6 +95,10 @@ def _build_op_table():
         "fmha_v3_varlen_fwd": "test_fmha_v3_varlen_fwd",
         "unified_attention": "test_unified_attention",
         "vllm_unified_attention": "test_vllm_unified_attention",
+        "dsv3_mla_prefill_ps_asm_fwd": "test_dsv3_mla_prefill_ps_asm_fwd",
+        "dsv3_mla_reduce_v1": "test_dsv3_mla_reduce_v1",
+        "dsv3_mla_decode_fwd": "test_dsv3_mla_decode_fwd",
+        "dsv4_pa_sparse_prefill_opus": "test_dsv4_pa_sparse_prefill_opus",
     })
     _add(table, rmsnorm, {
         "rms_norm": "test_rms_norm",
@@ -95,6 +107,7 @@ def _build_op_table():
         "rmsnorm_dynamicquant": "test_rmsnorm_dynamicquant",
         "vllm_rmsnorm_fp8_group_quant": "test_vllm_rmsnorm_fp8_group_quant",
         "vllm_rmsnorm_add_fp8_group_quant": "test_vllm_rmsnorm_add_fp8_group_quant",
+        "fused_rms_mxfp4_quant": "test_fused_rms_mxfp4_quant",
     })
     _add(table, other, {
         "silu_and_mul": "test_silu_and_mul",
@@ -102,36 +115,21 @@ def _build_op_table():
         "gelu_tanh_and_mul": "test_gelu_tanh_and_mul",
         "dynamic_per_token_scaled_quant": "test_dynamic_per_token_scaled_quant",
         "vllm_triton_group_quant_fp8": "test_vllm_triton_group_quant_fp8",
-    })
-    _add(table, dsv3, {
-        "dsv3_flydsl_hgemm": "test_dsv3_flydsl_hgemm",
-        "dsv3_batched_gemm_a8w8": "test_dsv3_batched_gemm_a8w8",
-        "dsv3_fused_flatten_fp8_group_quant": "test_dsv3_fused_flatten_fp8_group_quant",
-        "dsv3_fused_qk_rope_cat_and_cache_mla": "test_dsv3_fused_qk_rope_cat_and_cache_mla",
-        "dsv3_fused_append_shared_experts": "test_dsv3_fused_append_shared_experts",
-        "dsv3_mla_prefill_ps_asm_fwd": "test_dsv3_mla_prefill_ps_asm_fwd",
-        "dsv3_mla_reduce_v1": "test_dsv3_mla_reduce_v1",
-    })
-    _add(table, extensions_new, {
-        "gemm_afp4wfp4": "test_gemm_afp4wfp4",
-        "rope_cached_positions_2c_fwd_impl": "test_rope_cached_positions_2c_fwd_impl",
         "fused_flatten_mxfp4_quant": "test_fused_flatten_mxfp4_quant",
-        "fused_rms_mxfp4_quant": "test_fused_rms_mxfp4_quant",
+        "dsv3_fused_flatten_fp8_group_quant": "test_dsv3_fused_flatten_fp8_group_quant",
+        "dsv4_dynamic_per_group_scaled_quant": "test_dsv4_dynamic_per_group_scaled_quant",
+        "dsv4_mhc_pre_gemm_sqrsum": "test_dsv4_mhc_pre_gemm_sqrsum",
+        "dsv4_mhc_pre_big_fuse": "test_dsv4_mhc_pre_big_fuse",
+        "dsv4_mhc_post": "test_dsv4_mhc_post",
+    })
+    _add(table, rope, {
+        "rope_cached_positions_2c_fwd_impl": "test_rope_cached_positions_2c_fwd_impl",
+        "sgl_kernel_rotary_embedding": "test_sgl_kernel_rotary_embedding",
+        "dsv3_fused_qk_rope_cat_and_cache_mla": "test_dsv3_fused_qk_rope_cat_and_cache_mla",
     })
     _add(table, atom_flydsl, {
         "atom_flydsl_preshuffle_gemm_a8": "test_atom_flydsl_preshuffle_gemm_a8",
         "atom_flydsl_gdr_decode": "test_atom_flydsl_gdr_decode",
-    })
-    _add(table, dsv4, {
-        "dsv4_mhc_pre_gemm_sqrsum": "test_dsv4_mhc_pre_gemm_sqrsum",
-        "dsv4_mhc_pre_big_fuse": "test_dsv4_mhc_pre_big_fuse",
-        "dsv4_mhc_post": "test_dsv4_mhc_post",
-        "dsv4_pa_sparse_prefill_opus": "test_dsv4_pa_sparse_prefill_opus",
-        "dsv4_opus_gemm_a16w16": "test_dsv4_opus_gemm_a16w16",
-        "dsv4_gemm_a8w8_blockscale_bpreshuffle_asm": "test_dsv4_gemm_a8w8_blockscale_bpreshuffle_asm",
-        "dsv4_dynamic_per_group_scaled_quant": "test_dsv4_dynamic_per_group_scaled_quant",
-        "dsv4_topk_softplus": "test_dsv4_topk_softplus",
-        "dsv4_fused_dynamic_mx_quant_moe_sort": "test_dsv4_fused_dynamic_mx_quant_moe_sort",
     })
 
     generic = _try_import("_generic")

@@ -75,8 +75,14 @@ from perf_model_harnesses import (
     run_perf_model_dsv3_fused_flatten_fp8_group_quant,
     run_perf_model_dsv3_fused_qk_rope_cat_and_cache_mla,
     run_perf_model_dsv3_fused_append_shared_experts,
+    run_perf_model_dsv3_dynamic_per_group_scaled_quant_fp4,
+    run_perf_model_dsv3_quant_dynamic_mxfp4_quant,
+    run_perf_model_dsv3_fused_dynamic_mxfp4_quant_moe_sort_hip,
     run_perf_model_dsv3_mla_prefill_ps_asm_fwd,
     run_perf_model_dsv3_mla_reduce_v1,
+    run_perf_model_dsv3_mla_decode_fwd,
+    run_perf_model_dsv3_moe_flydsl_stage1,
+    run_perf_model_dsv3_moe_flydsl_stage2,
     run_perf_model_gemm_afp4wfp4,
     run_perf_model_rope_cached_positions_2c_fwd_impl,
     run_perf_model_fused_flatten_mxfp4_quant,
@@ -183,6 +189,9 @@ _OP_CLASS_MAP = {
     'fused_rms_mxfp4_quant': ('TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions', 'fused_rms_mxfp4_quant'),
     'atom_flydsl_preshuffle_gemm_a8': ('TraceLens.PerfModel.extensions.perf_model_extensions', 'gemm_a8w8_blockscale'),
     'atom_flydsl_gdr_decode': ('TraceLens.PerfModel.extensions.attention_perf_model_extensions', 'gdn_attention_core'),
+    'dsv3_dynamic_per_group_scaled_quant_fp4': ('__dsv3_ext__', 'aiter_dynamic_per_group_scaled_quant_fp4'),
+    'dsv3_quant_dynamic_mxfp4_quant': ('__dsv3_ext__', 'sglang_quant_dynamic_mxfp4_quant'),
+    'dsv3_fused_dynamic_mxfp4_quant_moe_sort_hip': ('__dsv3_ext__', 'aiter_fused_dynamic_mxfp4_quant_moe_sort_hip'),
 }
 
 
@@ -541,6 +550,32 @@ OP_REGISTRY = {
         'defaults': {'M': 32, 'K': 8, 'E': 256},
         'required_args': ['M'],
         'description': 'sglang triton MoE fused-append-shared-experts',
+        # Routing/metadata op: needs valid sorted expert ids to run safely.
+        # Validate the perf model against the CSV-reported roofline only.
+        'perf_model_only': True,
+    },
+    'dsv3_dynamic_per_group_scaled_quant_fp4': {
+        'category': 'dsv3',
+        'model_fn': run_perf_model_dsv3_dynamic_per_group_scaled_quant_fp4,
+        'defaults': {'M': 64575, 'N': 7168},
+        'required_args': ['M', 'N'],
+        'description': 'AITER dynamic per-group (x32) FP4 activation quant',
+    },
+    'dsv3_quant_dynamic_mxfp4_quant': {
+        'category': 'dsv3',
+        'model_fn': run_perf_model_dsv3_quant_dynamic_mxfp4_quant,
+        'defaults': {'M': 64, 'N': 7168},
+        'required_args': ['M', 'N'],
+        'description': 'AITER dynamic MXFP4 activation quant (sglang quark w4a4)',
+    },
+    'dsv3_fused_dynamic_mxfp4_quant_moe_sort_hip': {
+        'category': 'dsv3',
+        'model_fn': run_perf_model_dsv3_fused_dynamic_mxfp4_quant_moe_sort_hip,
+        'defaults': {'M': 64, 'N': 7168},
+        'required_args': ['M', 'N'],
+        'description': 'AITER fused dynamic MXFP4 quant + MoE sort',
+        # Fused quant+sort needs valid sorted ids; validate perf model vs CSV.
+        'perf_model_only': True,
     },
     'dsv3_mla_prefill_ps_asm_fwd': {
         'category': 'dsv3',
@@ -555,6 +590,27 @@ OP_REGISTRY = {
         'defaults': {'seq_len': 1024, 'E': 16, 'num_heads_q': 16, 'head_dim': 192, 'block_n': 1},
         'required_args': ['seq_len'],
         'description': 'AITER MLA cross-split reduce (paired with mla_prefill_ps_asm_fwd)',
+    },
+    'dsv3_mla_decode_fwd': {
+        'category': 'dsv3_mla_decode',
+        'model_fn': run_perf_model_dsv3_mla_decode_fwd,
+        'defaults': {'seq_len': 8677, 'E': 64, 'num_heads_q': 16, 'head_dim': 576},
+        'required_args': ['seq_len', 'E', 'num_heads_q', 'head_dim'],
+        'description': 'AITER FP8 paged MLA decode (pseudo_mla_decode_fwd: core ASM + reduce)',
+    },
+    'dsv3_moe_flydsl_stage1': {
+        'category': 'dsv3_moe_flydsl',
+        'model_fn': run_perf_model_dsv3_moe_flydsl_stage1,
+        'defaults': {'M': 64, 'K': 7168, 'N': 256, 'E': 257, 'topk': 9, 'block_m': 32},
+        'required_args': ['M', 'K', 'N', 'E', 'topk'],
+        'description': 'AITER FlyDSL FP4 MoE stage-1 GEMM (moe_gemm1_0)',
+    },
+    'dsv3_moe_flydsl_stage2': {
+        'category': 'dsv3_moe_flydsl',
+        'model_fn': run_perf_model_dsv3_moe_flydsl_stage2,
+        'defaults': {'M': 64, 'K': 7168, 'N': 256, 'E': 257, 'topk': 9, 'block_m': 32},
+        'required_args': ['M', 'K', 'N', 'E', 'topk'],
+        'description': 'AITER FlyDSL FP4 MoE stage-2 GEMM (moe_gemm2)',
     },
     'gemm_afp4wfp4': {
         'category': 'ext_mxfp4',
@@ -710,6 +766,17 @@ CSV_NAME_TO_REGISTRY = {
     'aiter::rope_cached_positions_2c_fwd_impl': 'rope_cached_positions_2c_fwd_impl',
     'sglang_profiler::fused_mxfp4_quant_fused_flatten_mxfp4_quant': 'fused_flatten_mxfp4_quant',
     'sglang_profiler::fused_mxfp4_quant_fused_rms_mxfp4_quant': 'fused_rms_mxfp4_quant',
+    # DSV3 maidas triage-extension ops (perf models in
+    # dsv3_maidas_traces/decode_perf/unified_perf_summary_triage_extension.py)
+    'aiter::fused_qk_rope_cat_and_cache_mla': 'dsv3_fused_qk_rope_cat_and_cache_mla',
+    'sglang_profiler::fused_moe_triton_kernels_fused_append_shared_experts': 'dsv3_fused_append_shared_experts',
+    'aiter::dynamic_per_group_scaled_quant_fp4': 'dsv3_dynamic_per_group_scaled_quant_fp4',
+    'sglang_profiler::quant_dynamic_mxfp4_quant': 'dsv3_quant_dynamic_mxfp4_quant',
+    'aiter::fused_dynamic_mxfp4_quant_moe_sort_hip': 'dsv3_fused_dynamic_mxfp4_quant_moe_sort_hip',
+    # DSV3 dominant pseudo ops (perf models in TraceLens core op_to_perf_model_class_map)
+    'pseudo_mla_decode_fwd': 'dsv3_mla_decode_fwd',
+    'pseudo_op::moe_flydsl_stage1': 'dsv3_moe_flydsl_stage1',
+    'pseudo_op::moe_flydsl_stage2': 'dsv3_moe_flydsl_stage2',
 }
 
 USE_EXISTING_HARNESS_FOR_CSV = frozenset({
@@ -718,6 +785,7 @@ USE_EXISTING_HARNESS_FOR_CSV = frozenset({
     'vllm_unified_attention', 'vllm_gdn_attention_core', 'fmoe_fp8_blockscale_g1u1',
     'moe_cktile2stages_gemm1_ck', 'moe_cktile2stages_gemm2_ck',
     'atom_flydsl_preshuffle_gemm_a8',
+    'dsv3_mla_decode_fwd', 'dsv3_moe_flydsl_stage1', 'dsv3_moe_flydsl_stage2',
 })
 
 
@@ -1605,11 +1673,33 @@ def _parse_csv_field(value_str):
         return value_str
 
 
-def _extract_dims_for_existing_harness(registry_key, input_dims, input_types, concrete_inputs, attn_params=None):
+def _extract_dims_for_existing_harness(registry_key, input_dims, input_types, concrete_inputs, attn_params=None, perf_params=None):
     """Extract M/N/K/etc. from Input Dims for ops that use existing harness generators."""
     ns = argparse.Namespace()
     reg = OP_REGISTRY[registry_key]
     cat = reg['category']
+    pp = perf_params or {}
+    if cat == 'dsv3_mla_decode':
+        # pseudo_mla_decode_fwd: batch of decode steps (q_len==1) over FP8 paged KV.
+        # B is the trace batch; N_Q is total decode q tokens (== batch since q_len==1).
+        batch = int(pp.get('N_Q') or 64)
+        nhead = int(pp.get('H_Q') or 16)
+        qk = int(pp.get('d_h_qk') or 576)
+        g_sk = int(pp.get('g_sk') or (batch * 8677))
+        ctx = max(1, round(g_sk / batch)) if batch else 8677
+        ns.seq_len = ctx
+        ns.E = batch
+        ns.num_heads_q = nhead
+        ns.head_dim = qk
+        return ns
+    if cat == 'dsv3_moe_flydsl':
+        ns.M = int(pp.get('num_tokens') or 64)
+        ns.K = int(pp.get('hidden_dim') or 7168)
+        ns.N = int(pp.get('inter_dim') or 256)
+        ns.E = int(pp.get('num_experts') or 257)
+        ns.topk = int(pp.get('topk') or 9)
+        ns.block_m = 32
+        return ns
     if cat in ('gemm', 'vllm_gemm'):
         ns.M = input_dims[0][0] if len(input_dims) > 0 and input_dims[0] else 2048
         ns.K = input_dims[0][1] if len(input_dims) > 0 and len(input_dims[0]) > 1 else 8192
@@ -1702,7 +1792,7 @@ def _extract_dims_for_existing_harness(registry_key, input_dims, input_types, co
     return ns
 
 
-def _build_runner_argv_from_csv_entry(registry_key, input_dims, input_types, concrete_inputs, attn_params=None, num_warmup=3):
+def _build_runner_argv_from_csv_entry(registry_key, input_dims, input_types, concrete_inputs, attn_params=None, num_warmup=3, perf_params=None):
     """Decide which runner invocation to use for a CSV-driven validation entry.
 
     Returns ``(argv, num_warmup_iters)``.
@@ -1713,7 +1803,7 @@ def _build_runner_argv_from_csv_entry(registry_key, input_dims, input_types, con
     the generic ``__generic__`` test is dispatched with the raw CSV shapes.
     """
     if registry_key in USE_EXISTING_HARNESS_FOR_CSV:
-        ns = _extract_dims_for_existing_harness(registry_key, input_dims, input_types, concrete_inputs, attn_params)
+        ns = _extract_dims_for_existing_harness(registry_key, input_dims, input_types, concrete_inputs, attn_params, perf_params)
         return _build_runner_argv(registry_key, ns, num_warmup=num_warmup)
     return _build_csv_runner_argv(registry_key, argparse.Namespace(), num_warmup=num_warmup,
                                   input_dims=input_dims, input_types=input_types)
@@ -1803,6 +1893,15 @@ def load_report_dir(report_dir):
             reg_cat = OP_REGISTRY[registry_key]['category']
             if reg_cat in ('attention', 'vllm_attention'):
                 ap = attn_params_map.get((name, dims_str))
+            perf_params = None
+            pp_str = row.get('perf_params', '')
+            if pp_str:
+                try:
+                    pp = ast.literal_eval(pp_str)
+                    if isinstance(pp, dict):
+                        perf_params = pp
+                except (ValueError, SyntaxError):
+                    perf_params = None
             entries.append({
                 'trace_name': name,
                 'registry_key': registry_key,
@@ -1813,6 +1912,7 @@ def load_report_dir(report_dir):
                 'csv_flops': csv_flops,
                 'csv_bytes': csv_bytes,
                 'attn_params': ap,
+                'perf_params': perf_params,
                 'dims_str': dims_str,
             })
     print('\n--- Report Dir Summary ---')
@@ -1844,7 +1944,8 @@ def run_csv_op_validation(entry, args, output_dir):
         try:
             predicted_flops, predicted_bytes, predicted_precision = run_perf_model_from_event(
                 trace_name, entry['input_dims'], entry['input_types'],
-                entry['input_strides'], entry['concrete_inputs'], entry['attn_params'])
+                entry['input_strides'], entry['concrete_inputs'],
+                entry['attn_params'] or entry.get('perf_params'))
         except Exception as e:
             print(f'  WARNING: perf model failed: {e}')
             predicted_flops, predicted_bytes, predicted_precision = (0, 0, 'N/A')
@@ -1875,7 +1976,8 @@ def run_csv_op_validation(entry, args, output_dir):
     print(f'[{step}/{total_steps}] Building test runner command ...')
     runner_argv, num_warmup_iters = _build_runner_argv_from_csv_entry(
         registry_key, entry['input_dims'], entry['input_types'],
-        entry['concrete_inputs'], entry['attn_params'])
+        entry['concrete_inputs'], entry['attn_params'],
+        perf_params=entry.get('perf_params'))
     print(f'       Runner cmd: {" ".join(runner_argv)}')
     step += 1
     if args.kernel_filter:
@@ -1938,7 +2040,8 @@ def run_csv_op_validation(entry, args, output_dir):
     try:
         predicted_flops, predicted_bytes, predicted_precision = run_perf_model_from_event(
             trace_name, entry['input_dims'], entry['input_types'],
-            entry['input_strides'], entry['concrete_inputs'], entry['attn_params'])
+            entry['input_strides'], entry['concrete_inputs'],
+            entry['attn_params'] or entry.get('perf_params'))
     except Exception as e:
         print(f'  WARNING: perf model from event failed: {e}')
         predicted_flops, predicted_bytes, predicted_precision = (0, 0, 'N/A')

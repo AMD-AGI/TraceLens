@@ -28,10 +28,19 @@ from pathlib import Path
 
 def _ensure_tracelens_importable():
     '''Add TraceLens repo root to sys.path so perf model classes are importable.'''
-    repo_root = str(Path(__file__).resolve().parents[3])
+    # If TraceLens is already importable (e.g. installed in the container), do
+    # nothing.  Otherwise walk up to find the repo root, tolerating shallow
+    # staging directories where parents[3] may not exist.
+    try:
+        import TraceLens  # noqa: F401
+        return None
+    except Exception:
+        pass
+    parents = Path(__file__).resolve().parents
+    repo_root = str(parents[3]) if len(parents) > 3 else str(parents[-1])
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
-        return None
+    return None
 
 
 def _tuple_to_list(obj):
@@ -1577,7 +1586,7 @@ def run_perf_model_atom_flydsl_gdr_decode(args):
 
 import importlib.util as _ilu
 import os as _os
-_DSV3_EXT_DEFAULT = '/home/devashah/dsv3_analysis_output/decode_only/unified_perf_summary_triage_extension.py'
+_DSV3_EXT_DEFAULT = '/home/devashah/TraceLens/dsv3_maidas_traces/decode_perf/unified_perf_summary_triage_extension.py'
 _DSV3_EXT_CACHE = { }
 
 def _load_dsv3_extension():
@@ -1960,6 +1969,103 @@ def run_perf_model_dsv3_mla_reduce_v1(args):
     return (model.flops(), model.bytes(), model.get_compute_precision())
 
 
+def run_perf_model_dsv3_mla_decode_fwd(args):
+    '''Perf model for ``pseudo_mla_decode_fwd`` (FP8 paged MLA decode).
+
+    Resolved from the TraceLens core map (InferenceAttention subclass). Builds
+    the chunk-stats annotation the model expects from the decode geometry:
+    ``E`` decode sequences (q_len==1), each attending ``seq_len`` KV tokens.
+    '''
+    _ensure_tracelens_importable()
+    from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map
+    cls = op_to_perf_model_class_map['pseudo_mla_decode_fwd']
+    batch = getattr(args, 'E', None) or 64
+    ctx = args.seq_len
+    nhead = getattr(args, 'num_heads_q', None) or 16
+    qk = getattr(args, 'head_dim', None) or 576
+    # Decode: sq_i == 1 per sequence -> g_sq = batch, g_sqsq = batch,
+    # g_sk = g_sqsk = batch * ctx.
+    g_sq = batch
+    g_sk = batch * ctx
+    g_sqsq = batch
+    g_sqsk = batch * ctx
+    ann = (f'execute_0_context_0(sq0sk0sqsq0sqsk0)'
+           f'_generation_{batch}(sq{g_sq}sk{g_sk}sqsq{g_sqsq}sqsk{g_sqsk})')
+    event = {
+        'name': 'pseudo_mla_decode_fwd',
+        'args': {
+            'Input Dims': [[batch, nhead, qk], [batch, 1, qk]],
+            'Input type': ['c10::Float8_e4m3fn', 'c10::Float8_e4m3fn'],
+        },
+        'annotation': ann,
+        'kernel_names': ['placeholder_kernel'],
+        'kernel_details': [{'name': 'placeholder_kernel'}],
+    }
+    model = cls(event)
+    return (model.flops(), model.bytes(), model.get_compute_precision())
+
+
+def _dsv3_flydsl_moe_event(name, M, K, N, E, topk):
+    '''Build a parent ``aiter::fused_moe_`` style event for the flydsl pseudo ops.
+
+    Layout matches ``_flydsl_extract_param_details``:
+      dims[0] = [tokens, hidden]
+      dims[1] = [E, 2*inter_dim, hidden/2]   (w1, fp4-packed K)
+      dims[2] = [E, hidden, inter_dim/2]     (w2, fp4-packed K)
+      dims[3] = [tokens, topk]
+    '''
+    token, hidden, inter = M, K, N
+    return {
+        'name': name,
+        'args': {
+            'Input Dims': [
+                [token, hidden],
+                [E, 2 * inter, hidden // 2],
+                [E, hidden, inter // 2],
+                [token, topk],
+            ],
+            'Input type': [
+                'c10::BFloat16',
+                'c10::Float4_e2m1fn_x2',
+                'c10::Float4_e2m1fn_x2',
+                'float',
+            ],
+        },
+        'kernel_names': ['placeholder_kernel'],
+        'kernel_details': [{'name': 'placeholder_kernel'}],
+    }
+
+
+def run_perf_model_dsv3_moe_flydsl_stage1(args):
+    '''Perf model for ``pseudo_op::moe_flydsl_stage1`` (FP4 MoE gate+up GEMM).'''
+    _ensure_tracelens_importable()
+    from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map
+    cls = op_to_perf_model_class_map['pseudo_op::moe_flydsl_stage1']
+    M = args.M
+    K = getattr(args, 'K', None) or 7168
+    N = args.N
+    E = getattr(args, 'E', None) or 257
+    topk = getattr(args, 'topk', None) or 9
+    event = _dsv3_flydsl_moe_event('pseudo_op::moe_flydsl_stage1', M, K, N, E, topk)
+    model = cls(event)
+    return (model.flops(), model.bytes(), model.get_compute_precision())
+
+
+def run_perf_model_dsv3_moe_flydsl_stage2(args):
+    '''Perf model for ``pseudo_op::moe_flydsl_stage2`` (FP4 MoE down GEMM).'''
+    _ensure_tracelens_importable()
+    from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map
+    cls = op_to_perf_model_class_map['pseudo_op::moe_flydsl_stage2']
+    M = args.M
+    K = getattr(args, 'K', None) or 7168
+    N = args.N
+    E = getattr(args, 'E', None) or 257
+    topk = getattr(args, 'topk', None) or 9
+    event = _dsv3_flydsl_moe_event('pseudo_op::moe_flydsl_stage2', M, K, N, E, topk)
+    model = cls(event)
+    return (model.flops(), model.bytes(), model.get_compute_precision())
+
+
 def run_perf_model_dsv3_fused_append_shared_experts(args):
     '''Perf model for sglang_profiler::fused_moe_triton_kernels_fused_append_shared_experts_456.'''
     mod = _load_dsv3_extension()
@@ -1981,6 +2087,58 @@ def run_perf_model_dsv3_fused_append_shared_experts(args):
             'Input type': [
                 'int',
                 'float'] } }
+    model = cls(event)
+    return (model.flops(), model.bytes(), model.get_compute_precision())
+
+
+def run_perf_model_dsv3_dynamic_per_group_scaled_quant_fp4(args):
+    '''Perf model for aiter::dynamic_per_group_scaled_quant_fp4.'''
+    mod = _load_dsv3_extension()
+    cls = mod.aiter_dynamic_per_group_scaled_quant_fp4
+    M = args.M
+    N = getattr(args, 'N', None) or 7168
+    in_t = _dtype_from_args(args, 'in_dtype', 'c10::BFloat16')
+    event = {
+        'name': 'aiter::dynamic_per_group_scaled_quant_fp4',
+        'args': {
+            'Input Dims': [[M, N // 2], [M, N], [M, N // 32]],
+            'Input type': ['c10::Float4_e2m1fn_x2', in_t, 'c10::Float8_e8m0fnu'],
+        },
+    }
+    model = cls(event)
+    return (model.flops(), model.bytes(), model.get_compute_precision())
+
+
+def run_perf_model_dsv3_quant_dynamic_mxfp4_quant(args):
+    '''Perf model for sglang_profiler::quant_dynamic_mxfp4_quant.'''
+    mod = _load_dsv3_extension()
+    cls = mod.sglang_quant_dynamic_mxfp4_quant
+    M = args.M
+    N = getattr(args, 'N', None) or 7168
+    in_t = _dtype_from_args(args, 'in_dtype', 'c10::BFloat16')
+    event = {
+        'name': 'sglang_profiler::quant_dynamic_mxfp4_quant',
+        'args': {'Input Dims': [[M, N]], 'Input type': [in_t]},
+    }
+    model = cls(event)
+    return (model.flops(), model.bytes(), model.get_compute_precision())
+
+
+def run_perf_model_dsv3_fused_dynamic_mxfp4_quant_moe_sort_hip(args):
+    '''Perf model for aiter::fused_dynamic_mxfp4_quant_moe_sort_hip.'''
+    mod = _load_dsv3_extension()
+    cls = mod.aiter_fused_dynamic_mxfp4_quant_moe_sort_hip
+    M = args.M
+    N = getattr(args, 'N', None) or 7168
+    in_t = _dtype_from_args(args, 'in_dtype', 'c10::BFloat16')
+    event = {
+        'name': 'aiter::fused_dynamic_mxfp4_quant_moe_sort_hip',
+        'args': {
+            'Input Dims': [[M, N // 2], [8800, N // 32], [M, N], [8791], [2]],
+            'Input type': ['c10::Float4_e2m1fn_x2', 'c10::Float8_e8m0fnu',
+                           in_t, 'int', 'int'],
+        },
+    }
     model = cls(event)
     return (model.flops(), model.bytes(), model.get_compute_precision())
 
@@ -2250,7 +2408,14 @@ def run_perf_model_from_event(trace_name, input_dims, input_types, input_strides
         g_sqsq = _safe_int(g_sqsq)
         g_sqsk = _safe_int(g_sqsk)
         if any((v != 0 for v in (g_sq, g_sk, g_sqsq, g_sqsk))):
-            annotation = f'attn_csq_{c_sq}_csk_{c_sk}_csqsq_{c_sqsq}_csqsk_{c_sqsk}_gsq_{g_sq}_gsk_{g_sk}_gsqsq_{g_sqsq}_gsqsk_{g_sqsk}'
+            # Chunk-stats annotation parsed by InferenceAttention._parse_chunk_stats.
+            # The req counts (context_/generation_) are not parsed; use 0/1 markers.
+            ctx_req = 1 if c_sq else 0
+            gen_req = 1 if g_sq else 0
+            annotation = (
+                f'execute_0_context_{ctx_req}(sq{c_sq}sk{c_sk}sqsq{c_sqsq}sqsk{c_sqsk})'
+                f'_generation_{gen_req}(sq{g_sq}sk{g_sk}sqsq{g_sqsq}sqsk{g_sqsk})'
+            )
         else:
             annotation = f'attn_0_0_{c_sq}_{c_sqsq}_0_0_0'
         event['annotation'] = annotation
@@ -2265,6 +2430,15 @@ def run_perf_model_from_event(trace_name, input_dims, input_types, input_strides
         from TraceLens.PerfModel.extensions.pseudo_ops_perf_utils import get_pseudo_op_mappings
         op_to_perf_model_class_map = get_pseudo_op_mappings()
     model_cls = op_to_perf_model_class_map.get(trace_name)
+    if model_cls is None:
+        # Fall back to the DSV3 triage extension's perf_model_extension map for
+        # ops that are only registered via --extension_file (not in TraceLens
+        # core op_to_perf_model_class_map).
+        try:
+            ext = _load_dsv3_extension()
+            model_cls = getattr(ext, 'perf_model_extension', {}).get(trace_name)
+        except Exception:
+            model_cls = None
     if model_cls is None:
         raise ValueError(f"No perf model class found for trace name '{trace_name}'")
     model = model_cls(event)
