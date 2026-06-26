@@ -41,6 +41,7 @@ set -euo pipefail
 #   DOCKER_RUN_ARGS          Extra whitespace-separated docker run arguments
 #   PI_NPM_PACKAGE           npm package for pi (default: @earendil-works/pi-coding-agent)
 #   SKIP_EVAL=1              Set up server + pi + TraceLens only; skip eval harness
+#   SKIP_SERVER=1            Skip inference server (npm/pi/TraceLens setup only)
 #   TEST_IDS, NUM_REPEATS, … Harness env vars passed to run_repeatability_parallel.sh
 # ---------------------------------------------------------------------------
 
@@ -49,6 +50,7 @@ CONTAINER_NAME="${CONTAINER_NAME:-tracelens_pi_evals}"
 PORT="${PORT:-30000}"
 READY_TIMEOUT="${READY_TIMEOUT:-1800}"
 SKIP_EVAL="${SKIP_EVAL:-0}"
+SKIP_SERVER="${SKIP_SERVER:-0}"
 
 DEFAULT_DOCKER_RUN_ARGS=(
     --device /dev/dri
@@ -75,9 +77,11 @@ Options:
   --container-name NAME  Docker container name (default: tracelens_pi_evals)
   --work-dir DIR         Host directory mounted at /workspace (default: <parent>)
   --port PORT            API port when not set in server args (default: 30000)
+  --setup-only           Install npm, pi, and TraceLens only; skip server and evals
   -h, --help             Show this help
 
   Arguments after -- are the full inference-server command (executable plus flags).
+  Not required with --setup-only (or SKIP_SERVER=1).
 
 Environment:
   PORT                     API port (default: 30000)
@@ -85,6 +89,7 @@ Environment:
   DOCKER_RUN_ARGS          Extra arguments appended to docker run
   PI_NPM_PACKAGE           npm package for pi (default: @earendil-works/pi-coding-agent)
   SKIP_EVAL=1              Set up server + pi + TraceLens only; skip eval harness
+  SKIP_SERVER=1            Skip inference server startup and models.json discovery
 
 Example:
   bash run_pi_analysis_in_docker.sh /data/tracelens_local_testing/tracelens -- \\
@@ -127,6 +132,11 @@ while [[ $# -gt 0 ]]; do
             PORT="$2"
             shift 2
             ;;
+        --setup-only)
+            SKIP_SERVER=1
+            SKIP_EVAL=1
+            shift
+            ;;
         standalone|comparative)
             COMPARISON_SCOPE="$1"
             shift
@@ -150,13 +160,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "${SKIP_SERVER:-}" == "1" || "${SKIP_SERVER:-}" == "true" ]]; then
+    SKIP_SERVER=1
+else
+    SKIP_SERVER=0
+fi
+
 if [[ -z "$TRACELENS_ROOT" ]]; then
     usage >&2
     die "tracelens_root is required"
 fi
 
-if [[ ${#SERVER_ARGS[@]} -eq 0 ]]; then
-    die "inference server command is required after --"
+if [[ "$SKIP_SERVER" != "1" && ${#SERVER_ARGS[@]} -eq 0 ]]; then
+    die "inference server command is required after -- (or use --setup-only)"
 fi
 
 if [[ ! -d "$TRACELENS_ROOT" ]]; then
@@ -187,13 +203,19 @@ for ((i = 0; i < ${#SERVER_ARGS[@]}; i++)); do
 done
 
 SERVER_CMD_QUOTED=""
-for arg in "${SERVER_ARGS[@]}"; do
-    SERVER_CMD_QUOTED+="$(printf '%q ' "$arg")"
-done
+if [[ ${#SERVER_ARGS[@]} -gt 0 ]]; then
+    for arg in "${SERVER_ARGS[@]}"; do
+        SERVER_CMD_QUOTED+="$(printf '%q ' "$arg")"
+    done
+fi
 
 mkdir -p "$WORK_DIR/.pi/agent" "$WORK_DIR/venv_tracelens"
 
-DOCKER_ARGS=("${DEFAULT_DOCKER_RUN_ARGS[@]}")
+if [[ "$SKIP_SERVER" == "1" ]]; then
+    DOCKER_ARGS=(--network host)
+else
+    DOCKER_ARGS=("${DEFAULT_DOCKER_RUN_ARGS[@]}")
+fi
 if [[ -n "${DOCKER_RUN_ARGS:-}" ]]; then
     # shellcheck disable=SC2206
     EXTRA=($DOCKER_RUN_ARGS)
@@ -220,7 +242,11 @@ echo "  Container repo:  $CONTAINER_REPO"
 echo "  Docker image:    $DOCKER_IMAGE"
 echo "  Container:       $CONTAINER_NAME"
 echo "  API port:        $PORT"
-echo "  Server command:  ${SERVER_ARGS[*]}"
+if [[ "$SKIP_SERVER" == "1" ]]; then
+    echo "  Mode:            setup-only (no inference server)"
+else
+    echo "  Server command:  ${SERVER_ARGS[*]}"
+fi
 echo "  Comparison:      $COMPARISON_SCOPE"
 echo "========================================="
 echo ""
@@ -242,6 +268,7 @@ EXEC_ENV=(
     -e "CONTAINER_REPO=$CONTAINER_REPO"
     -e "COMPARISON_SCOPE=$COMPARISON_SCOPE"
     -e "SKIP_EVAL=$SKIP_EVAL"
+    -e "SKIP_SERVER=$SKIP_SERVER"
     -e "SERVER_CMD=$SERVER_CMD_QUOTED"
 )
 for var in TEST_IDS NUM_REPEATS MAX_PARALLEL SLEEP_BETWEEN TEST_TRACES_CSV RESULTS_ROOT REPORT_DIR SUITE_NAME SKIP_POST_PROCESSING PI_NPM_PACKAGE; do
@@ -258,6 +285,7 @@ READY_TIMEOUT="${READY_TIMEOUT:-1800}"
 CONTAINER_REPO="${CONTAINER_REPO:?}"
 COMPARISON_SCOPE="${COMPARISON_SCOPE:-standalone}"
 SKIP_EVAL="${SKIP_EVAL:-0}"
+SKIP_SERVER="${SKIP_SERVER:-0}"
 PI_AGENT_DIR="/workspace/.pi/agent"
 VENV_DIR="/workspace/venv_tracelens"
 SERVER_LOG="/workspace/inference_server.log"
@@ -267,42 +295,45 @@ die() {
     exit 1
 }
 
-echo "==> Starting inference server: ${SERVER_CMD}"
-# shellcheck disable=SC2086
-eval "${SERVER_CMD}" >"$SERVER_LOG" 2>&1 &
-SERVER_PID=$!
+if [[ "$SKIP_SERVER" == "1" ]]; then
+    echo "==> SKIP_SERVER=1 — skipping inference server startup"
+else
+    echo "==> Starting inference server: ${SERVER_CMD}"
+    # shellcheck disable=SC2086
+    eval "${SERVER_CMD}" >"$SERVER_LOG" 2>&1 &
+    SERVER_PID=$!
 
-cleanup_inner() {
-    if kill -0 "$SERVER_PID" 2>/dev/null; then
-        kill "$SERVER_PID" 2>/dev/null || true
-    fi
-}
-trap cleanup_inner EXIT
+    cleanup_inner() {
+        if kill -0 "$SERVER_PID" 2>/dev/null; then
+            kill "$SERVER_PID" 2>/dev/null || true
+        fi
+    }
+    trap cleanup_inner EXIT
 
-echo "==> Waiting for inference server at http://localhost:${PORT}/v1/models (timeout ${READY_TIMEOUT}s)..."
-models_json=""
-deadline=$((SECONDS + READY_TIMEOUT))
-while (( SECONDS < deadline )); do
-    if models_json="$(curl -sf "http://localhost:${PORT}/v1/models" 2>/dev/null)"; then
-        break
-    fi
-    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-        echo "Inference server exited early. Last log lines:" >&2
+    echo "==> Waiting for inference server at http://localhost:${PORT}/v1/models (timeout ${READY_TIMEOUT}s)..."
+    models_json=""
+    deadline=$((SECONDS + READY_TIMEOUT))
+    while (( SECONDS < deadline )); do
+        if models_json="$(curl -sf "http://localhost:${PORT}/v1/models" 2>/dev/null)"; then
+            break
+        fi
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            echo "Inference server exited early. Last log lines:" >&2
+            tail -n 40 "$SERVER_LOG" >&2 || true
+            die "Inference server died before /v1/models became available"
+        fi
+        sleep 5
+    done
+
+    if [[ -z "$models_json" ]]; then
+        echo "Inference server log tail:" >&2
         tail -n 40 "$SERVER_LOG" >&2 || true
-        die "Inference server died before /v1/models became available"
+        die "Timed out waiting for http://localhost:${PORT}/v1/models"
     fi
-    sleep 5
-done
 
-if [[ -z "$models_json" ]]; then
-    echo "Inference server log tail:" >&2
-    tail -n 40 "$SERVER_LOG" >&2 || true
-    die "Timed out waiting for http://localhost:${PORT}/v1/models"
-fi
-
-echo "==> Discovering model id from /v1/models..."
-mkdir -p "$PI_AGENT_DIR"
-python3 - "$PI_AGENT_DIR" "$PORT" <<'PY'
+    echo "==> Discovering model id from /v1/models..."
+    mkdir -p "$PI_AGENT_DIR"
+    python3 - "$PI_AGENT_DIR" "$PORT" <<'PY'
 import json
 import pathlib
 import sys
@@ -351,29 +382,54 @@ out.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 print(f"Wrote {out} with model id(s): {', '.join(m['id'] for m in entries)}")
 PY
 
-export PI_CODING_AGENT_DIR="$PI_AGENT_DIR"
-echo "PI_CODING_AGENT_DIR=$PI_CODING_AGENT_DIR"
+    export PI_CODING_AGENT_DIR="$PI_AGENT_DIR"
+    echo "PI_CODING_AGENT_DIR=$PI_CODING_AGENT_DIR"
+fi
 
 PI_NPM_PACKAGE="${PI_NPM_PACKAGE:-@earendil-works/pi-coding-agent}"
+NODE_MIN_MAJOR=22
 
-install_npm_if_needed() {
-    if command -v npm >/dev/null 2>&1; then
-        return 0
+node_major_version() {
+    if ! command -v node >/dev/null 2>&1; then
+        echo 0
+        return
     fi
-    echo "==> Installing npm..."
+    node -v | sed 's/^v//' | cut -d. -f1
+}
+
+install_nodejs_modern() {
+    echo "==> Installing Node.js ${NODE_MIN_MAJOR}+ and npm..."
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs npm
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl gnupg
+        curl -fsSL "https://deb.nodesource.com/setup_${NODE_MIN_MAJOR}.x" | bash -
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y -q nodejs npm
+        curl -fsSL "https://rpm.nodesource.com/setup_${NODE_MIN_MAJOR}.x" | bash -
+        dnf install -y -q nodejs
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y -q nodejs npm
+        curl -fsSL "https://rpm.nodesource.com/setup_${NODE_MIN_MAJOR}.x" | bash -
+        yum install -y -q nodejs
     elif command -v apk >/dev/null 2>&1; then
         apk add --no-cache nodejs npm
     else
         die "npm not found and no supported package manager (apt, dnf, yum, apk)"
     fi
     command -v npm >/dev/null 2>&1 || die "npm installation failed"
+    major="$(node_major_version)"
+    if [[ "$major" -lt "$NODE_MIN_MAJOR" ]]; then
+        die "Node.js $(node -v) is too old; pi requires >= ${NODE_MIN_MAJOR}.x"
+    fi
+    echo "==> Node $(node -v), npm $(npm -v)"
+}
+
+install_npm_if_needed() {
+    major="$(node_major_version)"
+    if command -v npm >/dev/null 2>&1 && [[ "$major" -ge "$NODE_MIN_MAJOR" ]]; then
+        echo "==> Node $(node -v), npm $(npm -v)"
+        return 0
+    fi
+    install_nodejs_modern
 }
 
 install_pi_if_needed() {
@@ -390,21 +446,28 @@ install_pi_if_needed() {
 install_pi_if_needed
 command -v pi >/dev/null 2>&1 || die "pi not found on PATH after npm install"
 
-if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
-    echo "==> Creating Python venv at $VENV_DIR..."
-    python3 -m venv "$VENV_DIR"
+echo "==> Verifying pi installation..."
+pi --version
+
+if [[ "$SKIP_EVAL" != "1" || "$SKIP_SERVER" != "1" ]]; then
+    if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
+        echo "==> Creating Python venv at $VENV_DIR..."
+        python3 -m venv "$VENV_DIR"
+    fi
+
+    # shellcheck source=/dev/null
+    source "$VENV_DIR/bin/activate"
+
+    echo "==> Installing TraceLens editable from $CONTAINER_REPO..."
+    pip install -q --upgrade pip
+    pip install -q -e "$CONTAINER_REPO"
 fi
-
-# shellcheck source=/dev/null
-source "$VENV_DIR/bin/activate"
-
-echo "==> Installing TraceLens editable from $CONTAINER_REPO..."
-pip install -q --upgrade pip
-pip install -q -e "$CONTAINER_REPO"
 
 if [[ "$SKIP_EVAL" == "1" ]]; then
     echo "SKIP_EVAL=1 — setup complete, skipping eval harness."
-    trap - EXIT
+    if [[ "$SKIP_SERVER" != "1" ]]; then
+        trap - EXIT
+    fi
     exit 0
 fi
 
