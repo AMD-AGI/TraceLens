@@ -34,9 +34,9 @@ TEST_IDS="${TEST_IDS:-}"
 SUITE_NAME="${SUITE_NAME:-eval}"
 SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 
-# Paths (run from repo root on the node)
+# Paths (REPO_ROOT may differ from the shell cwd)
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-ANALYSIS_DIR="TraceLens/Agent/Analysis"
+ANALYSIS_DIR="$REPO_ROOT/TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/agent_evals/Analysis"
 RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_${COMPARISON_SCOPE}}"
 TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
@@ -63,6 +63,15 @@ log_status() {
     flock 1 echo "$@"
 }
 
+repo_abs_path() {
+    local p="$1"
+    if [[ "$p" = /* ]]; then
+        echo "$p"
+    else
+        echo "$REPO_ROOT/$p"
+    fi
+}
+
 expand_archive() {
     local name="$1"
     local archive="$EVALS_DIR/analysis_tests/${name}.tar.gz"
@@ -85,6 +94,12 @@ expand_archive() {
 run_single_job() {
     local id="$1" repeat="$2" trace1_path="$3" trace2_path="$4" reference_dir="$5" platform="$6" platform2="$7"
     local tag="[$id|run_$repeat]"
+
+    trace1_path="$(repo_abs_path "$trace1_path")"
+    if [[ -n "$trace2_path" ]]; then
+        trace2_path="$(repo_abs_path "$trace2_path")"
+    fi
+    reference_dir="$(repo_abs_path "$reference_dir")"
 
     local CASE_RESULTS="$RESULTS_ROOT/$id/run_${repeat}"
     local OUTPUT_DIR="$CASE_RESULTS/analysis_output"
