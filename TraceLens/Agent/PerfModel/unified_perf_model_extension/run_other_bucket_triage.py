@@ -76,23 +76,46 @@ def pick_runtime_column(fieldnames: Sequence[str]) -> str:
     )
 
 
+def normalize_call_stack(row: Dict[str, str]) -> str:
+    """Return the row's call stack, preferring the embedded summary columns.
+
+    Newer TraceLens emits the full call stack inline in unified_perf_summary.csv
+    as a Python-list-style string under `call_stack_full` (with `call_stack` /
+    `trunc_call_stack` as possible truncated variants).  Older pipelines stored
+    it in a companion unified_perf_callstacks.csv.  Prefer the inline value.
+    """
+    for col in ("call_stack_full", "call_stack", "trunc_call_stack"):
+        val = (row.get(col) or "").strip()
+        if val:
+            return val
+    return ""
+
+
 def load_rows(path: Path) -> Tuple[List[Dict[str, str]], str]:
     with path.open(newline="", encoding="utf-8", errors="replace") as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames:
             raise SystemExit(f"Empty or headerless CSV: {path}")
         runtime_col = pick_runtime_column(reader.fieldnames)
+        fieldnames = reader.fieldnames
         rows = list(reader)
 
-    # Merge full call_stack from companion file if available
+    has_inline_callstack = "call_stack_full" in fieldnames or "call_stack" in fieldnames
+
+    # Legacy fallback: merge full call_stack from companion file only when the
+    # summary CSV does not already carry it inline.
     callstacks_path = path.parent / "unified_perf_callstacks.csv"
-    if callstacks_path.is_file() and "call_stack" not in (rows[0] if rows else {}):
+    if not has_inline_callstack and callstacks_path.is_file():
         with callstacks_path.open(newline="", encoding="utf-8", errors="replace") as f:
             cs_reader = csv.DictReader(f)
             cs_rows = list(cs_reader)
         cs_by_id = {r.get("row_id", ""): r.get("call_stack", "") for r in cs_rows}
         for i, r in enumerate(rows):
             r["call_stack"] = cs_by_id.get(str(i), "")
+
+    # Normalize so downstream code can rely on a single `call_stack` key.
+    for r in rows:
+        r["call_stack"] = normalize_call_stack(r)
 
     return rows, runtime_col
 

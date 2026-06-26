@@ -17,8 +17,10 @@ description: >-
 
 ### EP1 — CSV-driven: top ops missing a perf model
 
-Use when a `unified_perf_summary.csv` (and companion `unified_perf_callstacks.csv`)
-is available and you want to prioritize by runtime impact.
+Use when a `unified_perf_summary.csv` is available and you want to prioritize by
+runtime impact.  Newer TraceLens embeds the full call stack inline in this CSV
+(`call_stack_full` column), so no companion `unified_perf_callstacks.csv` is
+needed; the triage script reads the call stack directly from the summary.
 
 **Run the triage script:**
 ```bash
@@ -65,7 +67,7 @@ or SGLang), optionally filtered (e.g. "attention kernels").
 python3 <skill-dir>/scan_framework_ops.py \
     --repo /path/to/aiter \
     --filter attention \
-    [--trace-callstacks /path/to/unified_perf_callstacks.csv]
+    [--trace /path/to/unified_perf_summary.csv]
 ```
 
 The script performs a **static source scan** (no GPU/run required):
@@ -75,8 +77,8 @@ The script performs a **static source scan** (no GPU/run required):
 
 For each matched op it outputs: registered name, source file, reconstructed
 call chain to kernel, and any sibling `test_<op>` / `benchmark_<op>` files
-(roofline reference).  When `--trace-callstacks` is given it annotates which
-ops actually appeared in the trace.
+(roofline reference).  When `--trace` is given it annotates which ops actually
+appeared in the trace.
 
 For deep or ambiguous chains, instruct an explore subagent to traverse the
 repo (same technique used to map FlyDSL ops).
@@ -184,14 +186,55 @@ Use the mandatory docstring template (see below).  Key rules:
   on a runtime flag or dtype check, model that branch.
 
 **Attention annotations:**
-- `InferenceAttention` subclasses read an annotation string with context tokens
-  (`c_sq`, `c_sqsq`) and generation tokens (`g_sq`, `g_sqsq`).
-  `total_tokens = c_sq + g_sq`.
-- **Prefill-only kernel**: set generation token request to 0
-  (`annotation = f"attn_0_0_{T}_{T*T}_0_0_0"`).
-- **Decode-only kernel**: set context token request to 0
-  (`annotation = f"attn_0_0_0_0_{T}_{T}_0"`).
-- Document which annotation format your class expects.
+
+`InferenceAttention` subclasses do **not** read FLOPs/bytes from `Input Dims`
+alone — for chunked-prefill / paged-decode the per-request KV context lengths
+are runtime-only. They come from the trace's `user_annotation` events, which
+`InferenceAttention._parse_chunk_stats(event["annotation"])` turns into:
+- context aggregates: `c_sq` (Σ query tokens), `c_sk` (Σ kv tokens),
+  `c_sqsq` (Σ sq·sq), `c_sqsk` (Σ sq·sk)
+- generation aggregates: `g_sq`, `g_sk`, `g_sqsq`, `g_sqsk`
+
+The annotation event name is produced by `split_inference_trace_annotation.py`
+and looks like:
+```
+execute_<i>_context_<Nctx>(sq<c_sq>sk<c_sk>sqsq<c_sqsq>sqsk<c_sqsk>)_generation_<Ngen>(sq<g_sq>sk<g_sk>sqsq<g_sqsq>sqsk<g_sqsk>)
+```
+- **Prefill-only step**: `generation` group is `0(sq0sk0sqsq0sqsk0)`.
+- **Decode-only step**: `context` group is `0(...)`; each request has `sq=1`,
+  `sk=ctx_len`, so `g_sq = #requests`, `g_sk = Σ ctx_len`, `g_sqsk = g_sk`,
+  `g_sqsq = #requests`.
+
+You normally do **not** synthesize this string yourself — it must be attached to
+the event before the perf model runs (see propagation below). Your job is to map
+`Input Dims` to Q/K/V shapes and `Input type` to dtypes in `get_param_details`,
+then let the base `flops()`/`bytes()` consume the parsed `c_*`/`g_*` stats.
+
+**Propagating the annotation to a new op (required for new attention ops):**
+`apply_annotation` (called by the inference report) only copies annotations onto
+a **hardcoded `name_filters` list** in
+`generate_perf_report_pytorch_inference.py`. If your op is not in that list
+(e.g. `aiter::pa_decode_gluon`), its events will have **no** `annotation` and the
+model silently degrades to no-perf. Re-run annotation for your op from the
+extension via a module-level `tree_postprocess_extension`:
+```python
+def tree_postprocess_extension(trace_tree):
+    trace_tree.apply_annotation(name_filters=["aiter::pa_decode_gluon"])
+```
+This runs after the built-in pass and matches by `name.startswith(...)`. It
+finds the enclosing `user_annotation` event (by timestamp containment) and sets
+`event["annotation"]`. If a trace has no such annotation event, wrap your
+`get_param_details` body in `try/except` returning
+`InferenceAttention.no_perf_param_details()` so `flops()`/`bytes()` return
+`None` gracefully.
+
+**FP8 KV cache:** paged decode kernels often store K/V as FP8 (1 byte) while Q
+and the output stay BF16. KV reads dominate decode bytes, so override `bytes()`
+to use the cache dtype (`name2bpe(Input type[k_cache])`) for the K/V read terms
+rather than the Q dtype. See `pa_decode_gluon` in the lucid_2506 extension for a
+worked example.
+
+- Document which annotation format and `Input Dims` layout your class expects.
 
 ### Step 6 — Register the op
 
@@ -336,8 +379,14 @@ pre-placed in the right file.
 The `--emit-extension` flag of `run_other_bucket_triage.py` produces
 `<csv_stem>_triage_extension.py` with:
 - `perf_model_extension` dict (name → class)
-- `dict_cat2names_extension` dict (category → [names])
+- `op_category_extension` dict (name → category) for categorize-only ops
 - `categorize_extension(row, plugin)` function
+
+Optional module-level hooks the report generator will call if present:
+- `tree_postprocess_extension(trace_tree)` — runs against the built tree before
+  perf models execute (after the built-in `apply_annotation`). Use it to attach
+  attention annotations to ops outside the built-in filter list, e.g.
+  `trace_tree.apply_annotation(name_filters=["aiter::pa_decode_gluon"])`.
 
 Pass it to the report generator via `--extension_file`.
 
@@ -354,8 +403,9 @@ for triage work — those are product code / legacy stubs.
 | Assuming `output_bpe == input_bpe` | Check the output dtype in the binding |
 | Using `bpe = 1` for fp4/mxfp4 weights | Use `bpe = 0.5` |
 | Wrong `get_compute_precision()` | Check which MFMA path the kernel actually uses |
-| Prefill model used for decode-only kernel | Set `c_sq = 0` in annotation for decode-only |
-| Decode model used for prefill-only kernel | Set `g_sq = 0` in annotation for prefill-only |
+| New attention op has no FLOPs/bytes | Its events lack `annotation`; add `tree_postprocess_extension` calling `apply_annotation(name_filters=[...])` |
+| Using BF16 bpe for an FP8 KV cache | Override `bytes()` to read the K/V cache dtype from `Input type`; KV reads dominate decode |
+| Assuming KV context length is in `Input Dims` | It's runtime-only; comes from the `user_annotation` event via `_parse_chunk_stats` |
 | Adding perf model for `(Synthetic Op)` name | Use `categorize_extension` only; names are unstable |
 | Editing TraceLens core in extension-only mode | Only edit extension file; pass via `--extension_file` |
 | Trusting `--check-mapping` "False" as gap | It checks core map before `apply_extension`; extensions show False there |
@@ -374,7 +424,8 @@ for triage work — those are product code / legacy stubs.
 - [ ] FLOPs derived from actual kernel MFMA ops (not output buffer)
 - [ ] Bytes account for all read/write tensors with correct bpe per role
 - [ ] `get_compute_precision()` matches dominant MFMA dtype
-- [ ] Attention annotation: prefill-only sets `g_sq=0`, decode-only sets `c_sq=0`
+- [ ] Attention: annotation propagated to the op (built-in `apply_annotation` list or a `tree_postprocess_extension`), with graceful no-perf fallback when absent
+- [ ] Attention: FP8 KV cache modeled with the cache dtype's bpe in `bytes()`
 - [ ] Class docstring follows template (all headings present)
 - [ ] `py_compile` clean; report regenerated; `has_perf_model` / `op category` correct
 - [ ] User asked whether to run `validate-perf-model` HW-counter validation

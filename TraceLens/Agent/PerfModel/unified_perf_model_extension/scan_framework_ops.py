@@ -4,8 +4,9 @@ EP3 — Framework source scanner for unified-perf-model-extension.
 
 Statically scans one or more framework repos (aiter, vLLM, sglang / sgl_kernel)
 to enumerate CPU-registered GPU ops that TraceLens can model.  Optionally
-cross-checks against a unified_perf_callstacks.csv or unified_perf_summary.csv
-trace file to annotate which ops appeared in real traces.
+cross-checks against a unified_perf_summary.csv trace file (newer TraceLens
+embeds the call stack inline as `call_stack_full`; older traces used a separate
+unified_perf_callstacks.csv) to annotate which ops appeared in real traces.
 
 Usage
 -----
@@ -17,7 +18,7 @@ Usage
 
 # Cross-check against trace callstacks:
   python3 scan_framework_ops.py --aiter /work/aiter \\
-      --trace unified_perf_callstacks.csv
+      --trace unified_perf_summary.csv
 
 # Write the result table to JSON for downstream use (e.g. emit_perf_model.py):
   python3 scan_framework_ops.py --repo-root /work --filter attention \\
@@ -246,10 +247,24 @@ def _dedup_by_op(rows: List[Dict]) -> List[Dict]:
 
 
 def load_trace_ops(trace_csv: Path) -> Dict[str, float]:
-    """Load a unified_perf_callstacks.csv or unified_perf_summary.csv.
+    """Load a unified_perf_summary.csv (newer) or unified_perf_callstacks.csv.
+
+    Newer TraceLens stores the full call stack inline in unified_perf_summary.csv
+    (column `call_stack_full`) instead of a companion callstacks file, so a single
+    summary CSV is sufficient here.
 
     Returns {op_name: total_us} for ops present in the trace.
     """
+    # Runtime columns in preference order across pipeline versions.
+    runtime_cols = (
+        "Kernel Time (µs)_sum",
+        "total_duration_us",
+        "Duration (us)",
+        "duration_us",
+        "mean_us",
+        "total_us",
+        "time_us",
+    )
     op_times: Dict[str, float] = {}
     try:
         with trace_csv.open(newline="", errors="replace") as fh:
@@ -258,7 +273,7 @@ def load_trace_ops(trace_csv: Path) -> Dict[str, float]:
                 name = (row.get("name") or "").strip()
                 if not name:
                     continue
-                for col in ("Duration (us)", "duration_us", "mean_us", "total_us", "time_us"):
+                for col in runtime_cols:
                     val = row.get(col, "")
                     if val:
                         try:
@@ -421,7 +436,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=Path,
         default=None,
         metavar="CSV",
-        help="unified_perf_callstacks.csv or unified_perf_summary.csv to cross-check ops against.",
+        help="unified_perf_summary.csv (call stack inline) to cross-check ops against.",
     )
 
     out_group = p.add_argument_group("output")
