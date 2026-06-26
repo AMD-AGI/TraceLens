@@ -9,7 +9,8 @@ Profiling harness for TraceLens nightly performance dashboard.
 
 Wraps TraceLens report generation in cProfile, extracts per-stage cumtime
 via pstats, records peak RSS, outputs structured timing JSON, and optionally
-emits OTLP metrics to Grafana Cloud.
+emits OTLP metrics to Grafana Cloud or serves them via a Prometheus HTTP
+endpoint for pull-based scraping.
 
 Usage:
     # Single trace file
@@ -28,6 +29,14 @@ Usage:
         --manifest config/trace_manifest.yaml \
         --output-dir ./perf_results \
         --filter "trace_001,trace_003"
+
+    # Serve metrics from an existing timing.json (run once, stays up forever)
+    python scripts/tracelens_perf_harness.py \
+        --serve-only ./perf_results/timing.json
+
+    # Custom port
+    python scripts/tracelens_perf_harness.py \
+        --serve-only ./perf_results/timing.json --metrics-port 9200
 """
 
 import argparse
@@ -177,6 +186,74 @@ def build_metadata():
         "tracelens_version": get_tracelens_version(),
         "environment": os.environ.get("GITHUB_ACTIONS", "local"),
     }
+
+
+def serve_prometheus_metrics(timing_json_path, port=9100):
+    """Serve metrics from a timing.json file via a Prometheus HTTP endpoint.
+
+    Re-reads the file on every scrape so the daily batch job can overwrite it
+    and the server picks up fresh results without a restart.
+    Blocks forever (Ctrl+C to stop).
+    """
+    import time
+
+    from prometheus_client import REGISTRY, MetricsHandler, start_http_server
+    from prometheus_client.core import GaugeMetricFamily
+
+    timing_path = Path(timing_json_path).resolve()
+
+    class TimingCollector:
+        def collect(self):
+            try:
+                with open(timing_path) as f:
+                    data = json.load(f)
+            except Exception as e:
+                print(f"Warning: could not read {timing_path}: {e}")
+                return
+
+            stage_metric = GaugeMetricFamily(
+                "tracelens_stage_duration_seconds",
+                "cumtime for a TraceLens processing stage",
+                labels=["trace_id", "stage"],
+            )
+            total_metric = GaugeMetricFamily(
+                "tracelens_total_duration_seconds",
+                "Total end-to-end processing time",
+                labels=["trace_id"],
+            )
+            rss_metric = GaugeMetricFamily(
+                "tracelens_process_max_rss_bytes",
+                "Peak resident memory after processing",
+                labels=["trace_id"],
+            )
+
+            for trace_result in data.get("traces", []):
+                trace_id = trace_result["trace_id"]
+
+                for stage, duration in trace_result["stages"].items():
+                    stage_metric.add_metric([trace_id, stage], duration)
+
+                total_duration = trace_result["stages"].get("total_report_generation")
+                if total_duration is not None:
+                    total_metric.add_metric([trace_id], total_duration)
+
+                rss_metric.add_metric([trace_id], trace_result["max_rss_bytes"])
+
+            yield stage_metric
+            yield total_metric
+            yield rss_metric
+
+    REGISTRY.register(TimingCollector())
+    start_http_server(port)
+    print(f"Prometheus metrics server started on port {port} — http://localhost:{port}/metrics")
+    print(f"Reading metrics from: {timing_path}")
+    print("Press Ctrl+C to stop.")
+
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("Metrics server stopped.")
 
 
 def emit_otlp_metrics(results, metadata):
@@ -360,6 +437,17 @@ def main():
         metavar="TIMING_JSON",
         help="Skip profiling and push an existing timing.json to Grafana Cloud",
     )
+    parser.add_argument(
+        "--serve-only",
+        metavar="TIMING_JSON",
+        help="Skip profiling and serve metrics from an existing timing.json (blocks forever)",
+    )
+    parser.add_argument(
+        "--metrics-port",
+        type=int,
+        default=9100,
+        help="Port for the Prometheus metrics server (default: 9100)",
+    )
 
     args = parser.parse_args()
 
@@ -367,6 +455,10 @@ def main():
         with open(args.push_only) as f:
             data = json.load(f)
         emit_otlp_metrics(data["traces"], data["metadata"])
+        return
+
+    if args.serve_only:
+        serve_prometheus_metrics(args.serve_only, port=args.metrics_port)
         return
 
     if not args.output_dir:
