@@ -31,7 +31,7 @@ set -euo pipefail
 #   VLLM_PORT           API port if not given in vllm args (default: 30000)
 #   VLLM_READY_TIMEOUT  Seconds to wait for /v1/models (default: 1800)
 #   DOCKER_RUN_ARGS     Extra whitespace-separated docker run arguments
-#   SKIP_EVAL           Set to 1 to configure only (no eval harness)
+#   PI_NPM_PACKAGE        npm package for pi (default: @earendil-works/pi-coding-agent)
 #   Harness env vars (TEST_IDS, NUM_REPEATS, etc.) pass through to run_repeatability_parallel.sh
 # ---------------------------------------------------------------------------
 
@@ -243,7 +243,7 @@ EXEC_ENV=(
     -e "SKIP_EVAL=$SKIP_EVAL"
     -e "VLLM_CMD=$VLLM_CMD_QUOTED"
 )
-for var in TEST_IDS NUM_REPEATS MAX_PARALLEL SLEEP_BETWEEN TEST_TRACES_CSV RESULTS_ROOT REPORT_DIR SUITE_NAME SKIP_POST_PROCESSING; do
+for var in TEST_IDS NUM_REPEATS MAX_PARALLEL SLEEP_BETWEEN TEST_TRACES_CSV RESULTS_ROOT REPORT_DIR SUITE_NAME SKIP_POST_PROCESSING PI_NPM_PACKAGE; do
     if [[ -n "${!var:-}" ]]; then
         EXEC_ENV+=(-e "$var=${!var}")
     fi
@@ -353,13 +353,41 @@ PY
 export PI_CODING_AGENT_DIR="$PI_AGENT_DIR"
 echo "PI_CODING_AGENT_DIR=$PI_CODING_AGENT_DIR"
 
-if ! command -v pi >/dev/null 2>&1; then
-    echo "==> Installing pi..."
-    curl -fsSL https://pi.dev/install.sh | sh
-fi
+PI_NPM_PACKAGE="${PI_NPM_PACKAGE:-@earendil-works/pi-coding-agent}"
 
-export PATH="${HOME}/.local/bin:${PATH}"
-command -v pi >/dev/null 2>&1 || die "pi not found on PATH after install"
+install_npm_if_needed() {
+    if command -v npm >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "==> Installing npm..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs npm
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y -q nodejs npm
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y -q nodejs npm
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache nodejs npm
+    else
+        die "npm not found and no supported package manager (apt, dnf, yum, apk)"
+    fi
+    command -v npm >/dev/null 2>&1 || die "npm installation failed"
+}
+
+install_pi_if_needed() {
+    if command -v pi >/dev/null 2>&1; then
+        return 0
+    fi
+    install_npm_if_needed
+    echo "==> Installing pi via npm ($PI_NPM_PACKAGE)..."
+    npm install -g --ignore-scripts "$PI_NPM_PACKAGE"
+    NPM_PREFIX="$(npm prefix -g 2>/dev/null || npm config get prefix 2>/dev/null || echo /usr/local)"
+    export PATH="${NPM_PREFIX}/bin:${HOME}/.local/bin:${PATH}"
+}
+
+install_pi_if_needed
+command -v pi >/dev/null 2>&1 || die "pi not found on PATH after npm install"
 
 if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
     echo "==> Creating Python venv at $VENV_DIR..."
