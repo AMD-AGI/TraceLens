@@ -8,37 +8,46 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Start a vLLM Docker container, install pi + TraceLens inside it, configure pi
-# from the running vLLM /v1/models endpoint, and run Analysis evals with --pi.
+# Start an inference-server Docker container, install pi + TraceLens inside it,
+# configure pi from /v1/models, and run Analysis evals with --pi.
 #
 # Usage:
-#   bash run_pi_analysis_in_docker.sh <tracelens_root> [standalone|comparative] [options] -- <vllm-args...>
+#   bash run_pi_analysis_in_docker.sh <tracelens_root> [standalone|comparative] [options] -- <server-cmd...>
 #
-# <vllm-args> are passed to vllm (prepend "vllm serve" automatically when omitted).
+# Arguments after -- are the full command used to start the inference server
+# (executable plus flags). They are passed to the shell unchanged.
 #
 # Examples:
 #   bash run_pi_analysis_in_docker.sh /data/tracelens_local_testing/tracelens -- \
-#     MiniMaxAI/MiniMax-M3 --trust-remote-code --port 30000 --tensor-parallel-size 4
+#     <server-cmd> Qwen/Qwen3.6-35B-A3B --port 30000 --tensor-parallel-size 8
 #
 #   TEST_IDS="gemm_01" NUM_REPEATS=1 \
 #     bash run_pi_analysis_in_docker.sh /data/tracelens_local_testing/tracelens standalone -- \
-#     vllm serve MiniMaxAI/MiniMax-M3 --port 30000
+#     <server-cmd> MiniMaxAI/MiniMax-M3 --port 30000
+#
+# Options:
+#   --docker-image IMAGE   Inference server image
+#   --container-name NAME  Docker container name (default: tracelens_pi_evals)
+#   --work-dir DIR         Host directory mounted at /workspace (default: <parent>)
+#   --port PORT            API port when not set in server args (default: 30000)
+#   -h, --help             Show help
 #
 # Environment:
-#   DOCKER_IMAGE        Inference server Docker image (default: vllm/vllm-openai-rocm:nightly)
-#   CONTAINER_NAME      Container name (default: tracelens_pi_evals)
-#   WORK_DIR            Host dir mounted at /workspace (default: parent of tracelens_root)
-#   VLLM_PORT           API port if not given in vllm args (default: 30000)
-#   VLLM_READY_TIMEOUT  Seconds to wait for /v1/models (default: 1800)
-#   DOCKER_RUN_ARGS     Extra whitespace-separated docker run arguments
-#   PI_NPM_PACKAGE        npm package for pi (default: @earendil-works/pi-coding-agent)
-#   Harness env vars (TEST_IDS, NUM_REPEATS, etc.) pass through to run_repeatability_parallel.sh
+#   DOCKER_IMAGE             Same as --docker-image
+#   CONTAINER_NAME           Same as --container-name
+#   WORK_DIR                 Host dir mounted at /workspace (default: parent of tracelens_root)
+#   PORT                     API port (default: 30000; overridden by server --port)
+#   READY_TIMEOUT            Seconds to wait for http://localhost:<port>/v1/models (default: 1800)
+#   DOCKER_RUN_ARGS          Extra whitespace-separated docker run arguments
+#   PI_NPM_PACKAGE           npm package for pi (default: @earendil-works/pi-coding-agent)
+#   SKIP_EVAL=1              Set up server + pi + TraceLens only; skip eval harness
+#   TEST_IDS, NUM_REPEATS, … Harness env vars passed to run_repeatability_parallel.sh
 # ---------------------------------------------------------------------------
 
 DOCKER_IMAGE="${DOCKER_IMAGE:-vllm/vllm-openai-rocm:nightly}"
 CONTAINER_NAME="${CONTAINER_NAME:-tracelens_pi_evals}"
-VLLM_PORT="${VLLM_PORT:-30000}"
-VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-1800}"
+PORT="${PORT:-30000}"
+READY_TIMEOUT="${READY_TIMEOUT:-1800}"
 SKIP_EVAL="${SKIP_EVAL:-0}"
 
 DEFAULT_DOCKER_RUN_ARGS=(
@@ -55,30 +64,31 @@ DEFAULT_DOCKER_RUN_ARGS=(
 )
 
 usage() {
-    cat <<'EOF'
-Usage: bash run_pi_analysis_in_docker.sh <tracelens_root> [standalone|comparative] [options] -- <vllm-args...>
+    cat <<EOF
+Usage: bash run_pi_analysis_in_docker.sh <tracelens_root> [standalone|comparative] [options] -- <server-cmd...>
 
   tracelens_root         TraceLens repo on the host (correct branch already checked out)
   standalone|comparative Harness comparison scope (default: standalone)
 
 Options:
-  --docker-image IMAGE   Inference server Docker image (default: vllm/vllm-openai-rocm:nightly)
-  --container-name NAME    Docker container name (default: tracelens_pi_evals)
-  --work-dir DIR           Host directory mounted at /workspace (default: <parent>)
-  --vllm-port PORT         Default API port when not set in vllm args (default: 30000)
-  -h, --help               Show this help
+  --docker-image IMAGE   Inference server Docker image (default: $DOCKER_IMAGE)
+  --container-name NAME  Docker container name (default: tracelens_pi_evals)
+  --work-dir DIR         Host directory mounted at /workspace (default: <parent>)
+  --port PORT            API port when not set in server args (default: 30000)
+  -h, --help             Show this help
 
-  Arguments after -- are passed to vllm. If they do not start with "vllm" or "serve",
-  "vllm serve" is prepended automatically.
+  Arguments after -- are the full inference-server command (executable plus flags).
 
 Environment:
+  PORT                     API port (default: 30000)
+  READY_TIMEOUT            Seconds to wait for /v1/models (default: 1800)
   DOCKER_RUN_ARGS          Extra arguments appended to docker run
-  VLLM_READY_TIMEOUT       Seconds to wait for http://localhost:<port>/v1/models
-  SKIP_EVAL=1              Set up vLLM + pi only; skip the eval harness
+  PI_NPM_PACKAGE           npm package for pi (default: @earendil-works/pi-coding-agent)
+  SKIP_EVAL=1              Set up server + pi + TraceLens only; skip eval harness
 
 Example:
-  bash run_pi_analysis_in_docker.sh /data/tracelens_local_testing/tracelens -- \
-    MiniMaxAI/MiniMax-M3 --trust-remote-code --block-size 128 --port 30000
+  bash run_pi_analysis_in_docker.sh /data/tracelens_local_testing/tracelens -- \\
+    <server-cmd> Qwen/Qwen3.6-35B-A3B --port 30000 --tensor-parallel-size 8
 EOF
 }
 
@@ -89,7 +99,7 @@ die() {
 
 TRACELENS_ROOT=""
 COMPARISON_SCOPE="${COMPARISON_SCOPE:-standalone}"
-VLLM_ARGS=()
+SERVER_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -112,9 +122,9 @@ while [[ $# -gt 0 ]]; do
             WORK_DIR="$2"
             shift 2
             ;;
-        --vllm-port)
-            [[ $# -ge 2 ]] || die "--vllm-port requires a value"
-            VLLM_PORT="$2"
+        --port)
+            [[ $# -ge 2 ]] || die "--port requires a value"
+            PORT="$2"
             shift 2
             ;;
         standalone|comparative)
@@ -123,7 +133,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --)
             shift
-            VLLM_ARGS=("$@")
+            SERVER_ARGS=("$@")
             break
             ;;
         -*)
@@ -134,7 +144,7 @@ while [[ $# -gt 0 ]]; do
                 TRACELENS_ROOT="$1"
                 shift
             else
-                die "Unexpected argument: $1 (use -- before vllm arguments)"
+                die "Unexpected argument: $1 (use -- before server command arguments)"
             fi
             ;;
     esac
@@ -145,8 +155,8 @@ if [[ -z "$TRACELENS_ROOT" ]]; then
     die "tracelens_root is required"
 fi
 
-if [[ ${#VLLM_ARGS[@]} -eq 0 ]]; then
-    die "vllm arguments are required after --"
+if [[ ${#SERVER_ARGS[@]} -eq 0 ]]; then
+    die "inference server command is required after --"
 fi
 
 if [[ ! -d "$TRACELENS_ROOT" ]]; then
@@ -168,26 +178,17 @@ if [[ ! -f "$HARNESS" ]]; then
     die "Eval harness not found: $HARNESS"
 fi
 
-# Normalize vllm command line.
-if [[ "${VLLM_ARGS[0]}" == vllm ]]; then
-    :
-elif [[ "${VLLM_ARGS[0]}" == serve ]]; then
-    VLLM_ARGS=(vllm "${VLLM_ARGS[@]}")
-else
-    VLLM_ARGS=(vllm serve "${VLLM_ARGS[@]}")
-fi
-
-for ((i = 0; i < ${#VLLM_ARGS[@]}; i++)); do
-    if [[ "${VLLM_ARGS[i]}" == --port && $((i + 1)) -lt ${#VLLM_ARGS[@]} ]]; then
-        VLLM_PORT="${VLLM_ARGS[i + 1]}"
-    elif [[ "${VLLM_ARGS[i]}" == --port=* ]]; then
-        VLLM_PORT="${VLLM_ARGS[i]#--port=}"
+for ((i = 0; i < ${#SERVER_ARGS[@]}; i++)); do
+    if [[ "${SERVER_ARGS[i]}" == --port && $((i + 1)) -lt ${#SERVER_ARGS[@]} ]]; then
+        PORT="${SERVER_ARGS[i + 1]}"
+    elif [[ "${SERVER_ARGS[i]}" == --port=* ]]; then
+        PORT="${SERVER_ARGS[i]#--port=}"
     fi
 done
 
-VLLM_CMD_QUOTED=""
-for arg in "${VLLM_ARGS[@]}"; do
-    VLLM_CMD_QUOTED+="$(printf '%q ' "$arg")"
+SERVER_CMD_QUOTED=""
+for arg in "${SERVER_ARGS[@]}"; do
+    SERVER_CMD_QUOTED+="$(printf '%q ' "$arg")"
 done
 
 mkdir -p "$WORK_DIR/.pi/agent" "$WORK_DIR/venv_tracelens"
@@ -212,14 +213,14 @@ if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
 fi
 
 echo "========================================="
-echo "  pi + vLLM Analysis Eval Launcher"
+echo "  pi Analysis Eval Launcher"
 echo "  TraceLens root:  $TRACELENS_ROOT"
 echo "  Work dir:        $WORK_DIR -> /workspace"
 echo "  Container repo:  $CONTAINER_REPO"
 echo "  Docker image:    $DOCKER_IMAGE"
 echo "  Container:       $CONTAINER_NAME"
-echo "  vLLM port:       $VLLM_PORT"
-echo "  vLLM command:    ${VLLM_ARGS[*]}"
+echo "  API port:        $PORT"
+echo "  Server command:  ${SERVER_ARGS[*]}"
 echo "  Comparison:      $COMPARISON_SCOPE"
 echo "========================================="
 echo ""
@@ -236,12 +237,12 @@ docker run -d --name "$CONTAINER_NAME" \
 echo "Container started. Running setup inside container..."
 
 EXEC_ENV=(
-    -e "VLLM_PORT=$VLLM_PORT"
-    -e "VLLM_READY_TIMEOUT=$VLLM_READY_TIMEOUT"
+    -e "PORT=$PORT"
+    -e "READY_TIMEOUT=$READY_TIMEOUT"
     -e "CONTAINER_REPO=$CONTAINER_REPO"
     -e "COMPARISON_SCOPE=$COMPARISON_SCOPE"
     -e "SKIP_EVAL=$SKIP_EVAL"
-    -e "VLLM_CMD=$VLLM_CMD_QUOTED"
+    -e "SERVER_CMD=$SERVER_CMD_QUOTED"
 )
 for var in TEST_IDS NUM_REPEATS MAX_PARALLEL SLEEP_BETWEEN TEST_TRACES_CSV RESULTS_ROOT REPORT_DIR SUITE_NAME SKIP_POST_PROCESSING PI_NPM_PACKAGE; do
     if [[ -n "${!var:-}" ]]; then
@@ -252,56 +253,56 @@ done
 docker exec "${EXEC_ENV[@]}" -i "$CONTAINER_NAME" bash -s <<'INNER'
 set -euo pipefail
 
-VLLM_PORT="${VLLM_PORT:-30000}"
-VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-1800}"
+PORT="${PORT:-30000}"
+READY_TIMEOUT="${READY_TIMEOUT:-1800}"
 CONTAINER_REPO="${CONTAINER_REPO:?}"
 COMPARISON_SCOPE="${COMPARISON_SCOPE:-standalone}"
 SKIP_EVAL="${SKIP_EVAL:-0}"
 PI_AGENT_DIR="/workspace/.pi/agent"
 VENV_DIR="/workspace/venv_tracelens"
-VLLM_LOG="/workspace/vllm.log"
+SERVER_LOG="/workspace/inference_server.log"
 
 die() {
     echo "ERROR: $*" >&2
     exit 1
 }
 
-echo "==> Starting vLLM: ${VLLM_CMD}"
+echo "==> Starting inference server: ${SERVER_CMD}"
 # shellcheck disable=SC2086
-eval "${VLLM_CMD}" >"$VLLM_LOG" 2>&1 &
-VLLM_PID=$!
+eval "${SERVER_CMD}" >"$SERVER_LOG" 2>&1 &
+SERVER_PID=$!
 
 cleanup_inner() {
-    if kill -0 "$VLLM_PID" 2>/dev/null; then
-        kill "$VLLM_PID" 2>/dev/null || true
+    if kill -0 "$SERVER_PID" 2>/dev/null; then
+        kill "$SERVER_PID" 2>/dev/null || true
     fi
 }
 trap cleanup_inner EXIT
 
-echo "==> Waiting for vLLM at http://localhost:${VLLM_PORT}/v1/models (timeout ${VLLM_READY_TIMEOUT}s)..."
+echo "==> Waiting for inference server at http://localhost:${PORT}/v1/models (timeout ${READY_TIMEOUT}s)..."
 models_json=""
-deadline=$((SECONDS + VLLM_READY_TIMEOUT))
+deadline=$((SECONDS + READY_TIMEOUT))
 while (( SECONDS < deadline )); do
-    if models_json="$(curl -sf "http://localhost:${VLLM_PORT}/v1/models" 2>/dev/null)"; then
+    if models_json="$(curl -sf "http://localhost:${PORT}/v1/models" 2>/dev/null)"; then
         break
     fi
-    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
-        echo "vLLM exited early. Last log lines:" >&2
-        tail -n 40 "$VLLM_LOG" >&2 || true
-        die "vLLM process died before /v1/models became available"
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "Inference server exited early. Last log lines:" >&2
+        tail -n 40 "$SERVER_LOG" >&2 || true
+        die "Inference server died before /v1/models became available"
     fi
     sleep 5
 done
 
 if [[ -z "$models_json" ]]; then
-    echo "vLLM log tail:" >&2
-    tail -n 40 "$VLLM_LOG" >&2 || true
-    die "Timed out waiting for http://localhost:${VLLM_PORT}/v1/models"
+    echo "Inference server log tail:" >&2
+    tail -n 40 "$SERVER_LOG" >&2 || true
+    die "Timed out waiting for http://localhost:${PORT}/v1/models"
 fi
 
 echo "==> Discovering model id from /v1/models..."
 mkdir -p "$PI_AGENT_DIR"
-python3 - "$PI_AGENT_DIR" "$VLLM_PORT" <<'PY'
+python3 - "$PI_AGENT_DIR" "$PORT" <<'PY'
 import json
 import pathlib
 import sys
@@ -420,5 +421,5 @@ echo ""
 echo "Eval run finished. Results are under:"
 echo "  $WORK_DIR/$REPO_BASENAME/agent_evals/Analysis/"
 echo ""
-echo "vLLM log inside container: /workspace/vllm.log"
+echo "Inference server log inside container: /workspace/inference_server.log"
 echo "pi config: $WORK_DIR/.pi/agent/models.json"
