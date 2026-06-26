@@ -454,8 +454,8 @@ class per_group_quant(GroupQuant):
 
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
-        # Use first input dtype as the compute precision
-        dtype = self.dtype_in1_in2_out[1] if self.dtype_in1_in2_out else None
+        # Use the input activation dtype (index 0) as the compute precision;
+        dtype = self.dtype_in1_in2_out[0] if self.dtype_in1_in2_out else None
         return torch_dtype_map(dtype) if dtype else None
 
 
@@ -956,3 +956,62 @@ class sglang_store_cache:
     def get_compute_precision(self):
         dtype = self.param_details.get("dtype")
         return torch_dtype_map(dtype) if dtype else None
+
+class mixed_sample_outer_exponential:
+    """
+    Performance model for ``aiter::mixed_sample_outer_exponential`` (ATOM
+    ``model_ops/sampler.py``, ``mix_sample_outer_exponential_kernel``).
+
+    Exponential-noise sampling: ``token_id[t] = argmax_v(logits[t,v] /
+    exp_noise[t,v])`` over the vocab dim. Memory-bound elementwise reduction.
+    Reads logits ``Input Dims[1]`` [T, V] and exp_noise ``Input Dims[2]``;
+    FLOPs = 2*T*V, bytes = read logits + read exp_noise + write T int32 ids.
+    """
+
+    category = "elementwise"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.T = self.param_details["T"]
+        self.V = self.param_details["V"]
+        self.dtype_logits = self.param_details["dtype_logits"]
+        self.dtype_noise = self.param_details["dtype_noise"]
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        logits_shape = tuple(dims[1])
+        T = logits_shape[0] if len(logits_shape) >= 1 else 1
+        V = logits_shape[1] if len(logits_shape) >= 2 else 1
+        dtype_logits = types[1] if len(types) > 1 else "c10::bfloat16"
+        dtype_noise = types[2] if len(types) > 2 else "float"
+        return {
+            "T": T,
+            "V": V,
+            "dtype_logits": dtype_logits,
+            "dtype_noise": dtype_noise,
+        }
+
+    def flops(self):
+        return 2 * self.T * self.V
+
+    def bytes(self):
+        bpe_logits = name2bpe(self.dtype_logits)
+        bpe_noise = name2bpe(self.dtype_noise)
+        if bpe_logits is None or bpe_noise is None:
+            return None
+        read_logits = self.T * self.V * bpe_logits
+        read_noise = self.T * self.V * bpe_noise
+        write_ids = self.T * 4  # int32 token id per row
+        return read_logits + read_noise + write_ids
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        return torch_dtype_map(self.dtype_logits) if self.dtype_logits else None

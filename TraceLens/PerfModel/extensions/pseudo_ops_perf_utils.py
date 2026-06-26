@@ -55,10 +55,14 @@ def get_pseudo_op_mappings():
         "sglang_profiler::attention_paged_attention_ragged": attention_perf_model_extensions.aiter_paged_attention_ragged,
         "pseudo_mla_decode_fwd": attention_perf_model_extensions.mla_decode_fwd,
         "pseudo_mla_prefill_fwd": attention_perf_model_extensions.pseudo_mla_prefill_fwd,
+        "aiter::pa_decode_gluon": attention_perf_model_extensions.pa_decode_gluon,
         "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
         ## Misc ops
         "aiter::batched_gemm_a16wfp4_": perf_model_extensions.batched_gemm_a16wfp4,
         "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
+        "aiter::dynamic_per_group_scaled_quant": perf_model_extensions.per_group_quant,
+        "aiter::fused_add_rmsnorm_pad_": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
+        "aiter::mixed_sample_outer_exponential": perf_model_extensions.mixed_sample_outer_exponential,
         "sglang_profiler::fp8_utils_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
         "sglang_profiler::gemm_a8w8_blockscale_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_aiter_triton_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
@@ -139,4 +143,6 @@ def get_pseudo_op_category_only_mappings():
         # with negligible FLOPs; we only classify them.
         "aiter::mxfp4_moe_sort_hip": "MoE_aux",
         "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": "MoE_aux",
+        "aiter::unified_attention_with_output_base->_fused_qk_rope_reshape_and_cache_kernel (Synthetic Op)": "FusedRoPE",
+        "hipModuleLaunchKernel->kv_indices_generate_kernel (Synthetic Op)": "InferenceAttention",
     }
