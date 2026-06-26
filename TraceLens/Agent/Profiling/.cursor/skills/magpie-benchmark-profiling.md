@@ -172,6 +172,12 @@ The flags below must be applied **regardless** of whether the user chooses targe
 
 ##### Common vLLM flags
 
+> **Before setting `EXTRA_VLLM_ARGS`:** check which script will run. If `benchmark_script` is not set in the YAML, Magpie looks for an InferenceX native script named `gptoss_{precision}_{runner}.sh` (for vLLM) or `dsr1_{precision}_{runner}.sh` (for SGLang) and selects it if found. SSH to the node and check:
+> ```bash
+> ssh <node> "find <magpie_repo>/InferenceX/benchmarks -name 'gptoss_*' -o -name 'dsr1_*' | head -5"
+> ```
+> If a native script is found (or if `benchmark_script` is explicitly set to an InferenceX native script), `EXTRA_VLLM_ARGS` will be silently ignored. In that case, **stop and ask the user to set `benchmark_script` in their YAML to the appropriate Magpie generic script** (e.g. `vllm_mi300x.sh`) before proceeding.
+
 Add these flags to `EXTRA_VLLM_ARGS` in the user's YAML config (append to any existing value):
 
 ```yaml
@@ -555,7 +561,11 @@ In the Python config dataclass, `TorchProfilerConfig.enabled` defaults to `True`
 
 When `PROFILE=1`, the `run_benchmark_serving` function in `benchmark_lib.sh` **unconditionally** sets `num_prompts="$((max_concurrency * 1))"` *after* parsing all `--num-prompts` arguments. This means even if the calling benchmark script (e.g. `vllm_mi300x.sh`) explicitly passes `--num-prompts $(( $CONC * 10 ))`, that value gets overwritten. When using `delay_iterations` + `max_iterations` for steady-state profiling, you **must** patch `benchmark_lib.sh` to increase this multiplier, otherwise the benchmark ends before the profiling window starts and no trace is captured.
 
-### 9. The `hf_cache_path` field avoids re-downloading models
+### 9. `EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` are silently ignored by InferenceX native scripts
+
+InferenceX native scripts (`gptoss_fp4_mi300x.sh`, `dsr1_fp8_mi300x.sh`, etc.) hardcode their own `vllm serve` invocation and do not reference `$EXTRA_VLLM_ARGS`. Magpie selects these over its own generic scripts for named models, so flags set in `EXTRA_VLLM_ARGS` silently have no effect. Set `benchmark_script` in the YAML to the appropriate Magpie generic script (e.g. `vllm_mi300x.sh`) to ensure `EXTRA_VLLM_ARGS` is passed through.
+
+### 10. The `hf_cache_path` field avoids re-downloading models
 
 If the node has a shared HuggingFace cache, set `hf_cache_path` in the config to avoid multi-hour model downloads. This path is mounted into the container.
 
