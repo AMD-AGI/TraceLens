@@ -608,6 +608,14 @@ def merge_capture_trace_into_graph(
                 graph_tree, g_root, cat_filter=["kernel", "gpu_memset", "gpu_memcpy"]
             )
 
+            if len(graph_filtered_events) == 0:
+                print(
+                    "Warning: no kernel events in graph root {}; skipping merge".format(
+                        g_root["name"]
+                    )
+                )
+                continue
+
             verify_success, capture_filtered_events = verify_subtree_events(
                 capture_filtered_events, graph_filtered_events
             )
