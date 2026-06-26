@@ -1369,9 +1369,7 @@ def main():
 
     args = parser.parse_args()
     if args.comparison_capture_folder and not args.comparison_json_path:
-        parser.error(
-            "--comparison_capture_folder requires --comparison_json_path."
-        )
+        parser.error("--comparison_capture_folder requires --comparison_json_path.")
     if args.capture_folder:
         classify_graph_capture_trace(args.capture_folder)
         metadata_json_path = os.path.join(args.capture_folder, "execution_details.json")
