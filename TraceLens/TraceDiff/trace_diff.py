@@ -1250,7 +1250,7 @@ class TraceDiff:
                                         )[-1],
                                         **(
                                             {
-                                                "cpu_op_callstack": get_callstack(
+                                                "callstack": get_callstack(
                                                     gpu_event, uid2node
                                                 ),
                                             }
@@ -1375,7 +1375,7 @@ class TraceDiff:
                                 )[-1],
                                 **(
                                     {
-                                        "cpu_op_callstack": get_callstack(
+                                        "callstack": get_callstack(
                                             gpu_event, baseline_uid2node
                                         ),
                                     }
@@ -1473,7 +1473,7 @@ class TraceDiff:
                                 )[-1],
                                 **(
                                     {
-                                        "cpu_op_callstack": get_callstack(
+                                        "callstack": get_callstack(
                                             gpu_event, variant_uid2node
                                         ),
                                     }
