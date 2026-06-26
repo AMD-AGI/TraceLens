@@ -442,34 +442,34 @@ class TraceDiff:
                 current = kids[0]
             return current, gpu_kids
 
-        def check_diff_children(ops, uid1, uid2, children1, children2):
+        def reconcile_unmatched(ops, children1, children2):
+            """Reduce spurious delete/insert pairs by detecting wrapper nodes.
+
+            For every delete-node (baseline) and insert-node (variant) pair,
+            checks three cases (kernels and cuda_runtime are skipped):
+
+            1. Deleted name appears in inserted node's GPU-path children
+               -> substitute inserted UID with its GPU-path children.
+            2. Inserted name appears in deleted node's GPU-path children
+               -> substitute deleted UID with its GPU-path children.
+            3. Both have GPU-path children with identical normalized name lists
+               -> substitute both with their GPU-path children.
+
+            Does NOT mutate the tree. Returns (changed, new_children1, new_children2).
             """
-            Reduce spurious delete/insert pairs by flattening redundant wrapper nodes.
+            delete_indices = [i for op, i, _ in ops if op == "delete"]
+            insert_indices = [j for op, _, j in ops if op == "insert"]
 
-            For every delete-node (baseline) and insert-node (variant) pair, considers three cases
-            (kernels and kernel launchers are skipped):
+            if not delete_indices or not insert_indices:
+                return False, children1, children2
 
-            1. variant children include a node with the same name as the baseline node
-               -> Remove the variant node and reparent its children to the variant's parent node (uid2).
-
-            2. baseline children include a node with the same name as the variant node
-               -> Remove the baseline node and reparent its children to the baseline's parent node (uid1).
-
-            3. Both nodes have children and the two child lists (by normalized name) are equal
-               -> Remove both nodes and reparent their children to uid2 and uid1 respectively.
-
-            Mutates the baseline and variant trees in place. If any removals were applied,
-            recomputes children and Wagner-Fischer ops for the current node. Returns the
-            (possibly updated) ops, children1, children2.
-            """
-            delete_indices = [i for op, i, j in ops if op == "delete"]
-            insert_indices = [j for op, i, j in ops if op == "insert"]
-            remove_insert = {}  # uid_i -> list of child uids to splice in
-            remove_delete = {}  # uid_d -> list of child uids to splice in
+            sub1 = {}  # index in children1 -> replacement UIDs
+            sub2 = {}  # index in children2 -> replacement UIDs
             skip_cats = ("kernel", "cuda_runtime")
-            for i in delete_indices:
-                for j in insert_indices:
-                    uid_d, uid_i = children1[i], children2[j]
+
+            for di in delete_indices:
+                for ii in insert_indices:
+                    uid_d, uid_i = children1[di], children2[ii]
                     node_d = baseline_uid2node.get(uid_d)
                     node_i = variant_uid2node.get(uid_i)
                     cat_d = (
@@ -486,49 +486,56 @@ class TraceDiff:
                         continue
                     name_d = get_name_uid(uid_d, 1)
                     name_i = get_name_uid(uid_i, 2)
-                    imm_d = safe_children(baseline_uid2node, uid_d)
-                    imm_i = safe_children(variant_uid2node, uid_i)
+                    imm_d = [
+                        c
+                        for c in safe_children(baseline_uid2node, uid_d)
+                        if baseline_uid2node.get(c)
+                        and self.is_gpu_path(baseline_uid2node[c])
+                    ]
+                    imm_i = [
+                        c
+                        for c in safe_children(variant_uid2node, uid_i)
+                        if variant_uid2node.get(c)
+                        and self.is_gpu_path(variant_uid2node[c])
+                    ]
                     names_imm_d = [get_name_uid(c, 1) for c in imm_d]
                     names_imm_i = [get_name_uid(c, 2) for c in imm_i]
                     if name_d and any(get_name_uid(c, 2) == name_d for c in imm_i):
-                        remove_insert[uid_i] = imm_i
+                        sub2[ii] = imm_i
                     if name_i and any(get_name_uid(c, 1) == name_i for c in imm_d):
-                        remove_delete[uid_d] = imm_d
+                        sub1[di] = imm_d
                     if imm_d and imm_i and names_imm_d == names_imm_i:
-                        remove_insert[uid_i] = imm_i
-                        remove_delete[uid_d] = imm_d
-            if remove_insert:
-                parent_node = variant_uid2node.get(uid2)
-                if parent_node is not None:
-                    new_children = []
-                    for c in parent_node.get("children", []):
-                        if c in remove_insert:
-                            new_children.extend(remove_insert[c])
-                        else:
-                            new_children.append(c)
-                    parent_node["children"] = new_children
-                    for uid_i, imm_i in remove_insert.items():
-                        for c in imm_i:
-                            child_node = variant_uid2node.get(c)
-                            child_node["parent"] = uid2
-            if remove_delete:
-                parent_node = baseline_uid2node.get(uid1)
-                if parent_node is not None:
-                    new_children = []
-                    for c in parent_node.get("children", []):
-                        if c in remove_delete:
-                            new_children.extend(remove_delete[c])
-                        else:
-                            new_children.append(c)
-                    parent_node["children"] = new_children
-                    for uid_d, imm_d in remove_delete.items():
-                        for c in imm_d:
-                            child_node = baseline_uid2node.get(c)
-                            child_node["parent"] = uid1
-            if remove_insert or remove_delete:
-                children1, children2 = get_children_with_missing(uid1, uid2)
-                ops = self.wagner_fischer(children1, children2, wf_cache)
-            return ops, children1, children2
+                        sub1[di] = imm_d
+                        sub2[ii] = imm_i
+
+            if not sub1 and not sub2:
+                return False, children1, children2
+
+            # Apply substitutions (expand wrapper UIDs to their children)
+            new_children1 = []
+            for idx, c in enumerate(children1):
+                if idx in sub1:
+                    new_children1.extend(sub1[idx])
+                else:
+                    new_children1.append(c)
+
+            new_children2 = []
+            for idx, c in enumerate(children2):
+                if idx in sub2:
+                    new_children2.extend(sub2[idx])
+                else:
+                    new_children2.append(c)
+
+            # Sort by timestamp to match get_children_with_missing behavior
+            def sort_by_ts(uids, uid2node):
+                nodes = [(uid2node.get(u), u) for u in uids]
+                nodes.sort(key=lambda x: x[0].get("ts", 0) if x[0] else 0)
+                return [u for _, u in nodes]
+
+            new_children1 = sort_by_ts(new_children1, baseline_uid2node)
+            new_children2 = sort_by_ts(new_children2, variant_uid2node)
+
+            return True, new_children1, new_children2
 
         def traverse_and_merge(uid1, uid2):
             key = (uid1, uid2)
@@ -574,87 +581,83 @@ class TraceDiff:
 
             children1, children2 = get_children_with_missing(uid1, uid2)
 
-            def collapse_single_child_wrappers(uid1, uid2, children1, children2):
-                """Flatten transparent wrapper layers on whichever side has
-                exactly one gpu-path child, until a cpu_op, cuda_runtime, or
-                dead end is reached.  This handles call-stack depth asymmetries
-                between backends without confusing them with kernel-fusion
-                differences.
-
-                Updates uid1/uid2 to the deepest wrapper node descended through
-                so the merged event reflects the actual comparison point."""
-                if len(children1) != len(children2):
-                    if len(children1) == 1:
-                        collapsed, deeper = collapse_single_gpu_child(
-                            children1[0], baseline_uid2node, tree1
-                        )
-                        if deeper:
-                            uid1 = collapsed
-                            children1 = deeper
-                    elif len(children2) == 1:
-                        collapsed, deeper = collapse_single_gpu_child(
-                            children2[0], variant_uid2node, tree2
-                        )
-                        if deeper:
-                            uid2 = collapsed
-                            children2 = deeper
-                return uid1, uid2, children1, children2
-
-            def collapse_and_align(uid1, uid2, children1, children2):
-                """Collapse single-child wrappers, then align via
-                positional matching or Wagner-Fischer."""
-                uid1, uid2, children1, children2 = collapse_single_child_wrappers(
-                    uid1, uid2, children1, children2
-                )
-                any_cr = any(
-                    subtree_contains_cuda_runtime(c, baseline_uid2node)
-                    for c in children1
-                ) or any(
-                    subtree_contains_cuda_runtime(c, variant_uid2node)
-                    for c in children2
-                )
-                if len(children1) == len(children2) and not any_cr:
-                    ops = [("match", i, i) for i in range(len(children1))]
-                else:
-                    ops = self.wagner_fischer(children1, children2, wf_cache)
-                return uid1, uid2, ops, children1, children2
-
-            orig_uid1, orig_uid2 = uid1, uid2
-            uid1, uid2, ops, children1, children2 = collapse_and_align(
-                uid1, uid2, children1, children2
-            )
+            # --- Phase 1: List-level collapse ---
+            # If one side has exactly 1 GPU child while the other has more,
+            # descend the single child through wrappers to find the branch point.
+            if len(children1) != len(children2):
+                if len(children1) == 1:
+                    collapsed, deeper = collapse_single_gpu_child(
+                        children1[0], baseline_uid2node, tree1
+                    )
+                    if deeper:
+                        uid1 = collapsed
+                        children1 = deeper
+                elif len(children2) == 1:
+                    collapsed, deeper = collapse_single_gpu_child(
+                        children2[0], variant_uid2node, tree2
+                    )
+                    if deeper:
+                        uid2 = collapsed
+                        children2 = deeper
             node1 = baseline_uid2node.get(uid1)
             node2 = variant_uid2node.get(uid2)
 
-            # check_diff_children mutates the tree using the original (pre-collapse)
-            # parent UIDs to re-read and splice children correctly.
-            # If it made changes, re-collapse and re-align from the original UIDs.
-            if any(op != "match" for op, _, _ in ops):
-                ops, children1, children2 = check_diff_children(
-                    ops, orig_uid1, orig_uid2, children1, children2
-                )
-                uid1, uid2, ops, children1, children2 = collapse_and_align(
-                    orig_uid1, orig_uid2, children1, children2
-                )
-                node1 = baseline_uid2node.get(uid1)
-                node2 = variant_uid2node.get(uid2)
+            # --- Phase 2: Alignment on original children ---
+            any_cr = any(
+                subtree_contains_cuda_runtime(c, baseline_uid2node)
+                for c in children1
+            ) or any(
+                subtree_contains_cuda_runtime(c, variant_uid2node)
+                for c in children2
+            )
+            if len(children1) == len(children2) and not any_cr:
+                ops = [("match", i, i) for i in range(len(children1))]
+            else:
+                ops = self.wagner_fischer(children1, children2, wf_cache)
 
-            # For any remaining unaligned ops, collapse each unmatched node
-            # down through single-GPU-path-child wrappers to the first
-            # descendant with >1 GPU-path children, then re-run Wagner-Fischer
-            # on those collapsed nodes to find additional matches.
-            unmatched_idx1 = [i for op, i, j in ops if op == "delete"]
-            unmatched_idx2 = [j for op, i, j in ops if op == "insert"]
+            # --- Phase 3: Reconciliation (replaces check_diff_children) ---
+            # For unmatched pairs, check if one node is a wrapper around the
+            # other's operation. Substitutes wrapper UIDs with their GPU-path
+            # children and re-aligns. Does NOT mutate the tree.
+            if any(op != "match" for op, _, _ in ops):
+                changed, recon1, recon2 = reconcile_unmatched(
+                    ops, children1, children2
+                )
+                if changed:
+                    any_cr = any(
+                        subtree_contains_cuda_runtime(c, baseline_uid2node)
+                        for c in recon1
+                    ) or any(
+                        subtree_contains_cuda_runtime(c, variant_uid2node)
+                        for c in recon2
+                    )
+                    if len(recon1) == len(recon2) and not any_cr:
+                        ops = [("match", i, i) for i in range(len(recon1))]
+                    else:
+                        ops = self.wagner_fischer(recon1, recon2, wf_cache)
+                    children1, children2 = recon1, recon2
+
+            # --- Phase 4: Per-node canonicalization of remaining unmatched ---
+            # Collapse each unmatched node through single-GPU-path-child
+            # wrappers and re-align to find additional matches.
+            unmatched_idx1 = [i for op, i, _ in ops if op == "delete"]
+            unmatched_idx2 = [j for op, _, j in ops if op == "insert"]
             if unmatched_idx1 and unmatched_idx2:
                 collapsed1 = [
-                    collapse_single_gpu_child(children1[i], baseline_uid2node, tree1)[0]
+                    collapse_single_gpu_child(
+                        children1[i], baseline_uid2node, tree1
+                    )[0]
                     for i in unmatched_idx1
                 ]
                 collapsed2 = [
-                    collapse_single_gpu_child(children2[j], variant_uid2node, tree2)[0]
+                    collapse_single_gpu_child(
+                        children2[j], variant_uid2node, tree2
+                    )[0]
                     for j in unmatched_idx2
                 ]
-                collapsed_ops = self.wagner_fischer(collapsed1, collapsed2, wf_cache)
+                collapsed_ops = self.wagner_fischer(
+                    collapsed1, collapsed2, wf_cache
+                )
                 new_ops = [(op, i, j) for op, i, j in ops if op == "match"]
                 for cop, ci, cj in collapsed_ops:
                     if cop == "match":
