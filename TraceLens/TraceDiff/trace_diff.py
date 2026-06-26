@@ -604,11 +604,9 @@ class TraceDiff:
 
             # --- Phase 2: Alignment on original children ---
             any_cr = any(
-                subtree_contains_cuda_runtime(c, baseline_uid2node)
-                for c in children1
+                subtree_contains_cuda_runtime(c, baseline_uid2node) for c in children1
             ) or any(
-                subtree_contains_cuda_runtime(c, variant_uid2node)
-                for c in children2
+                subtree_contains_cuda_runtime(c, variant_uid2node) for c in children2
             )
             if len(children1) == len(children2) and not any_cr:
                 ops = [("match", i, i) for i in range(len(children1))]
@@ -620,9 +618,7 @@ class TraceDiff:
             # other's operation. Substitutes wrapper UIDs with their GPU-path
             # children and re-aligns. Does NOT mutate the tree.
             if any(op != "match" for op, _, _ in ops):
-                changed, recon1, recon2 = reconcile_unmatched(
-                    ops, children1, children2
-                )
+                changed, recon1, recon2 = reconcile_unmatched(ops, children1, children2)
                 if changed:
                     any_cr = any(
                         subtree_contains_cuda_runtime(c, baseline_uid2node)
@@ -644,20 +640,14 @@ class TraceDiff:
             unmatched_idx2 = [j for op, _, j in ops if op == "insert"]
             if unmatched_idx1 and unmatched_idx2:
                 collapsed1 = [
-                    collapse_single_gpu_child(
-                        children1[i], baseline_uid2node, tree1
-                    )[0]
+                    collapse_single_gpu_child(children1[i], baseline_uid2node, tree1)[0]
                     for i in unmatched_idx1
                 ]
                 collapsed2 = [
-                    collapse_single_gpu_child(
-                        children2[j], variant_uid2node, tree2
-                    )[0]
+                    collapse_single_gpu_child(children2[j], variant_uid2node, tree2)[0]
                     for j in unmatched_idx2
                 ]
-                collapsed_ops = self.wagner_fischer(
-                    collapsed1, collapsed2, wf_cache
-                )
+                collapsed_ops = self.wagner_fischer(collapsed1, collapsed2, wf_cache)
                 new_ops = [(op, i, j) for op, i, j in ops if op == "match"]
                 for cop, ci, cj in collapsed_ops:
                     if cop == "match":
