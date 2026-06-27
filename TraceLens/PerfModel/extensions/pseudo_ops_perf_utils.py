@@ -77,6 +77,7 @@ def get_pseudo_op_mappings():
         "aiter::gemm_a8w8_bpreshuffle": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::_rocm_aiter_preshuffled_per_token_w8a8_gemm": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
+        "aiter::gemm_a16w16": perf_model_extensions.gemm_a16w16,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
         "aiter::_gemm_a16w16_asm": perf_model_extensions.gemm_a16w16_atomic_,
         "sglang_profiler::gemm_kernels_flydsl_hgemm": perf_model_extensions.gemm_a16w16_atomic_,
@@ -108,6 +109,7 @@ def get_pseudo_op_mappings():
         "sglang_profiler::fused_mxfp4_quant_fused_rms_mxfp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
         ## Collective ops
         "aiter::fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm,
+        "aiter::fused_allreduce_rmsnorm_": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
         "_C_custom_ar::all_reduce": custom_collectives_perf_model_extensions.custom_ar_all_reduce,
         "aiter::reduce_scatter": custom_collectives_perf_model_extensions.aiter_reduce_scatter,
         "aiter::all_gather_reg": custom_collectives_perf_model_extensions.aiter_all_gather_reg,

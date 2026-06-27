@@ -375,6 +375,38 @@ class gemm_a16w16_atomic_(GEMM):
         )
 
 
+class gemm_a16w16(gemm_a16w16_atomic_):
+    """
+    Performance model for AITER's gemm_a16w16 kernel.
+
+    Computes: Y[M, N] = X[M, K] @ W[N, K].T. Both X and W are BF16/FP16.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/gemm/basic/gemm_a16w16.py
+
+    Identical roofline to gemm_a16w16_atomic_; only the output dtype handling
+    differs. The traced arg layout is (x, w, bias, dtype, ...), so Input type[3]
+    is the output ``dtype`` scalar (recorded as ``Scalar``) rather than a tensor.
+    The output dtype therefore follows the input (BF16, per the aiter default),
+    not Input type[3] as in the atomic_ variant (where index 3 is the output
+    tensor ``y``). flops/bytes/compute-precision are inherited.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        bias = len(dims) > 2 and len(dims[2]) > 0
+        return {
+            "B": 1,
+            "M": dims[0][0],
+            "N": dims[1][0],
+            "K": dims[0][1],
+            "bias": bias,
+            "dtype_A_B": (types[0], types[1], types[0]),
+        }
+
+
 class GroupQuant(BinaryElementwise):
     """
     Performance model for group quantization.
@@ -956,6 +988,7 @@ class sglang_store_cache:
     def get_compute_precision(self):
         dtype = self.param_details.get("dtype")
         return torch_dtype_map(dtype) if dtype else None
+
 
 class mixed_sample_outer_exponential:
     """
