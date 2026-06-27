@@ -510,6 +510,7 @@ class mla_tilelang_sparse_fwd(InferenceAttention):
 class vllm_unified_mla_attention_with_output(InferenceAttention):
     pass
 
+
 class pa_decode_gluon(InferenceAttention):
     """
     Performance model for ``aiter::pa_decode_gluon`` (gluon Triton kernel
@@ -575,6 +576,7 @@ class pa_decode_gluon(InferenceAttention):
             }
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return InferenceAttention.no_perf_param_details()
+
 
 class gdn_attention_core(InferenceAttention):
     """
