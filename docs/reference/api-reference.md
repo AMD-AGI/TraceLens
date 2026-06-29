@@ -170,23 +170,23 @@ Split an inference trace into per-iteration or per-phase sub-traces.
 ## Python SDK
 
 The SDK modules live under the `TraceLens` package and can be imported to build
-custom workflows. Each module has a dedicated guide in the repository `docs/`
+custom workflows. Each module has a dedicated guide in the repository `docs_original/`
 directory and an example notebook under `examples/`.
 
 | Module | Purpose | Reference |
 |--------|---------|-----------|
-| `Trace2Tree` | Build and navigate the hierarchical event tree (Python ops → CPU dispatch → GPU kernels). | `docs/Trace2Tree.md`, `examples/trace2tree_example.ipynb` |
-| `TreePerf` | GPU-timeline breakdown, per-op performance, and roofline metrics. | `docs/TreePerf.md`, `examples/tree_perf_example.ipynb` |
-| `PerfModel` | Compute and roofline performance models for operators. | `docs/gemm_dim_eff.md`, `docs/triton_perf_model_walkthrough.md` |
-| `NcclAnalyser` | Multi-rank collective latency/bandwidth/skew analysis. | `docs/NcclAnalyser.md`, `examples/nccl_analyser_example.ipynb` |
-| `TraceDiff` | Morphological comparison of two trace trees. | `docs/TraceDiff.md`, `examples/trace_diff_example.ipynb` |
-| `EventReplay` | Extract and replay isolated operations. | `docs/EventReplay.md`, `examples/event_replayer_example.ipynb` |
-| `TraceFusion` | Merge multi-rank traces for Perfetto visualization. | `docs/TraceFusion.md`, `examples/trace_fusion_example.py` |
-| `Reporting` | The report generators behind the CLI tools; importable to return pandas data frames. | `docs/generate_perf_report.md` |
+| `Trace2Tree` | Build and navigate the hierarchical event tree (Python ops → CPU dispatch → GPU kernels). | `docs_original/Trace2Tree.md`, `examples/trace2tree_example.ipynb` |
+| `TreePerf` | GPU-timeline breakdown, per-op performance, and roofline metrics. | `docs_original/TreePerf.md`, `examples/tree_perf_example.ipynb` |
+| `PerfModel` | Compute and roofline performance models for operators. | `docs_original/gemm_dim_eff.md`, `docs_original/triton_perf_model_walkthrough.md` |
+| `NcclAnalyser` | Multi-rank collective latency/bandwidth/skew analysis. | `docs_original/NcclAnalyser.md`, `examples/nccl_analyser_example.ipynb` |
+| `TraceDiff` | Morphological comparison of two trace trees. | `docs_original/TraceDiff.md`, `examples/trace_diff_example.ipynb` |
+| `EventReplay` | Extract and replay isolated operations. | `docs_original/EventReplay.md`, `examples/event_replayer_example.ipynb` |
+| `TraceFusion` | Merge multi-rank traces for Perfetto visualization. | `docs_original/TraceFusion.md`, `examples/trace_fusion_example.py` |
+| `Reporting` | The report generators behind the CLI tools; importable to return pandas data frames. | `docs_original/generate_perf_report.md` |
 | `TraceUtils` | Trace utilities, including inference-trace splitting. | — |
 
 For report-column definitions across all sheets, see
-`docs/perf_report_columns.md` in the repository.
+`docs_original/perf_report_columns.md` in the repository.
 
 ```{note}
 For a class- and function-level SDK reference generated directly from

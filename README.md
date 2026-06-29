@@ -37,9 +37,9 @@ TraceLens_generate_perf_report_pytorch --profile_json_path path/to/your/trace.js
 ```
 
 This produces an Excel workbook with GPU timeline breakdown, ops summary, roofline metrics, and more.
-See [Performance Report Column Definitions](docs/perf_report_columns.md) for what each column means.
+See [Performance Report Column Definitions](docs_original/perf_report_columns.md) for what each column means.
 
-**Don't have a trace yet?** Follow the [PyTorch profiling guide](docs/conceptual/torch_profiling_guide.ipynb), or use the [demo traces](tests/traces) bundled in the repo.
+**Don't have a trace yet?** Follow the [PyTorch profiling guide](docs_original/conceptual/torch_profiling_guide.ipynb), or use the [demo traces](tests/traces) bundled in the repo.
 
 For the full CLI reference (JAX, rocprofv3, trace comparison, multi-rank collectives), see [Supported Profile Formats](#supported-profile-formats) below.
 
@@ -65,10 +65,10 @@ For community-contributed utilities — including interactive trace dashboards (
 
 | Format | Tool | Documentation |
 |--------|------|---------------|
-| **PyTorch** | `torch.profiler` | [docs/generate_perf_report.md](docs/generate_perf_report.md) |
-| **JAX** | XPlane protobuf | [docs/jax_analyses.md](docs/jax_analyses.md) |
-| **rocprofv3 JSON** | AMD ROCm rocprofiler-sdk | [docs/generate_perf_report_rocprof.md](docs/generate_perf_report_rocprof.md) |
-| **rocprofv3 pftrace** | Perfetto-style | [docs/generate_perf_report_rocprof_pftrace.md](docs/generate_perf_report_rocprof_pftrace.md) |
+| **PyTorch** | `torch.profiler` | [docs_original/generate_perf_report.md](docs_original/generate_perf_report.md) |
+| **JAX** | XPlane protobuf | [docs_original/jax_analyses.md](docs_original/jax_analyses.md) |
+| **rocprofv3 JSON** | AMD ROCm rocprofiler-sdk | [docs_original/generate_perf_report_rocprof.md](docs_original/generate_perf_report_rocprof.md) |
+| **rocprofv3 pftrace** | Perfetto-style | [docs_original/generate_perf_report_rocprof_pftrace.md](docs_original/generate_perf_report_rocprof_pftrace.md) |
 
 ### PyTorch
 
@@ -76,7 +76,7 @@ For community-contributed utilities — including interactive trace dashboards (
 TraceLens_generate_perf_report_pytorch --profile_json_path path/to/your/trace.json
 ```
 
-Detailed docs: [generate_perf_report.md](docs/generate_perf_report.md). Supports compressed traces (`.zip`, `.gz`).
+Detailed docs: [generate_perf_report.md](docs_original/generate_perf_report.md). Supports compressed traces (`.zip`, `.gz`).
 
 ### Compare PyTorch reports
 
@@ -88,7 +88,7 @@ TraceLens_compare_perf_reports_pytorch \
     -o comparison.xlsx
 ```
 
-Detailed docs: [compare_perf_reports_pytorch.md](docs/compare_perf_reports_pytorch.md).
+Detailed docs: [compare_perf_reports_pytorch.md](docs_original/compare_perf_reports_pytorch.md).
 
 ### Multi-rank collective report
 
@@ -98,7 +98,7 @@ TraceLens_generate_multi_rank_collective_report_pytorch \
     --world_size 8
 ```
 
-Detailed docs: [generate_multi_rank_collective_report_pytorch.md](docs/generate_multi_rank_collective_report_pytorch.md).
+Detailed docs: [generate_multi_rank_collective_report_pytorch.md](docs_original/generate_multi_rank_collective_report_pytorch.md).
 
 ### rocprofv3 JSON
 
@@ -110,7 +110,7 @@ TraceLens_generate_perf_report_rocprof \
     --short_kernel_study --kernel_details
 ```
 
-Detailed docs: [generate_perf_report_rocprof.md](docs/generate_perf_report_rocprof.md).
+Detailed docs: [generate_perf_report_rocprof.md](docs_original/generate_perf_report_rocprof.md).
 
 ### pftrace (rocprofv3 / Perfetto)
 
@@ -139,16 +139,16 @@ Deeper dives on the core modules:
 
 | Module | Doc |
 |--------|-----|
-| Trace2Tree | [docs/Trace2Tree.md](docs/Trace2Tree.md) |
-| TreePerf | [docs/TreePerf.md](docs/TreePerf.md) |
-| NCCL Analyser | [docs/NcclAnalyser.md](docs/NcclAnalyser.md) |
-| TraceDiff | [docs/TraceDiff.md](docs/TraceDiff.md) |
-| Event Replay | [docs/EventReplay.md](docs/EventReplay.md) |
-| TraceFusion | [docs/TraceFusion.md](docs/TraceFusion.md) |
-| GPU Event Analyser | [docs/gpu_event_analyser.md](docs/gpu_event_analyser.md) |
-| JAX Analyses | [docs/jax_analyses.md](docs/jax_analyses.md) |
-| pftrace Reports | [docs/generate_perf_report_rocprof_pftrace.md](docs/generate_perf_report_rocprof_pftrace.md) |
-| Performance Report Columns | [docs/perf_report_columns.md](docs/perf_report_columns.md) |
+| Trace2Tree | [docs_original/Trace2Tree.md](docs_original/Trace2Tree.md) |
+| TreePerf | [docs_original/TreePerf.md](docs_original/TreePerf.md) |
+| NCCL Analyser | [docs_original/NcclAnalyser.md](docs_original/NcclAnalyser.md) |
+| TraceDiff | [docs_original/TraceDiff.md](docs_original/TraceDiff.md) |
+| Event Replay | [docs_original/EventReplay.md](docs_original/EventReplay.md) |
+| TraceFusion | [docs_original/TraceFusion.md](docs_original/TraceFusion.md) |
+| GPU Event Analyser | [docs_original/gpu_event_analyser.md](docs_original/gpu_event_analyser.md) |
+| JAX Analyses | [docs_original/jax_analyses.md](docs_original/jax_analyses.md) |
+| pftrace Reports | [docs_original/generate_perf_report_rocprof_pftrace.md](docs_original/generate_perf_report_rocprof_pftrace.md) |
+| Performance Report Columns | [docs_original/perf_report_columns.md](docs_original/perf_report_columns.md) |
 
 ## Development
 
@@ -166,7 +166,7 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on branching, commi
 
 ## Additional Resources
 
-- [PyTorch Conference 2025 Poster](docs/TraceLens%20-%20Democratizing%20AI%20Performance%20Analysis%20-%20Adeem%20Jassani%2C%20AMD.pdf)
-- [GEMMs in AI Models — Conceptual Tutorial](docs/conceptual/aimodels_gemms.md)
-- [Trace2Tree Motivation](docs/conceptual/trace2tree_motivation.md)
-- [PyTorch Profiling Guide](docs/conceptual/torch_profiling_guide.ipynb)
+- [PyTorch Conference 2025 Poster](docs_original/TraceLens%20-%20Democratizing%20AI%20Performance%20Analysis%20-%20Adeem%20Jassani%2C%20AMD.pdf)
+- [GEMMs in AI Models — Conceptual Tutorial](docs_original/conceptual/aimodels_gemms.md)
+- [Trace2Tree Motivation](docs_original/conceptual/trace2tree_motivation.md)
+- [PyTorch Profiling Guide](docs_original/conceptual/torch_profiling_guide.ipynb)

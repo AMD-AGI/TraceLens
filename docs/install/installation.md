@@ -52,23 +52,21 @@ pip install -e .[dev]
 python -m pytest tests/ -v
 ```
 
-To run only the pftrace report tests:
-
-```bash
-python -m pytest \
-    tests/test_pftrace_hip_api_perf_report.py \
-    tests/test_pftrace_hip_activity_report.py -v
-```
-
 ## Optional: traceconv for .pftrace input
 
-Analyzing `.pftrace` files requires `traceconv` to convert them to JSON. You do
-not need to install it manually:
+`traceconv` is needed only when you pass a Perfetto-style `.pftrace` trace
+(produced by `rocprofv3 --output-format pftrace`) to one of the pftrace report
+tools (`TraceLens_generate_perf_report_pftrace_hip_activity`, `..._hip_api`, or
+`..._memory_copy`); it converts the `.pftrace` to JSON. The other report tools
+(PyTorch, JAX, rocprofv3 JSON) do not use it. You do not need to install it
+manually:
 
 - If `traceconv` is on your `PATH`, TraceLens uses it.
-- Otherwise, TraceLens downloads `traceconv` automatically into the trace
-  file's directory.
-- You can also point to a specific binary with `--traceconv /path/to/traceconv`.
+- Otherwise, TraceLens downloads it automatically (from
+  `https://get.perfetto.dev`) into the trace file's directory, so this step
+  needs network access.
+- You can also point a pftrace tool at a specific binary with
+  `--traceconv /path/to/traceconv`.
 
 ## Verify the installation
 
