@@ -9,7 +9,12 @@ Performance models for RMSNorm pseudo-op extensions.
 """
 
 from TraceLens.PerfModel.perf_model import RMSNorm as CoreRMSNorm
-from TraceLens.PerfModel.perf_model import reduced_elementwise_flops
+from TraceLens.PerfModel.perf_model import (
+    SUBOP_GROUP_QUANT,
+    SUBOP_RESIDUAL_ADD,
+    SUBOP_RMSNORM,
+    reduced_elementwise_flops,
+)
 
 
 class RMSNorm(CoreRMSNorm):
@@ -150,6 +155,10 @@ class aiter_rmsnorm2d_fwd_with_dynamicquant_ck(RMSNorm):
         quant = self.num_elems if reduced_elementwise_flops() else 2 * self.num_elems
         return super().flops() + quant
 
+    def flops_breakdown(self):
+        quant = self.num_elems if reduced_elementwise_flops() else 2 * self.num_elems
+        return {SUBOP_RMSNORM: super().flops(), SUBOP_GROUP_QUANT: quant}
+
     def bytes(self):
         M = self.num_elems // self.num_channels
         N = self.num_channels
@@ -158,6 +167,15 @@ class aiter_rmsnorm2d_fwd_with_dynamicquant_ck(RMSNorm):
         bytes_write_quant = self.num_elems * 1  # FP8 = 1 byte/elem
         bytes_write_scales = M * 1 * 4  # FP32 per-token scales [M, 1]
         return bytes_read_x + bytes_read_weight + bytes_write_quant + bytes_write_scales
+
+    def bytes_breakdown(self):
+        # Norm consumes the inputs (x + weight); quant produces the outputs
+        # (packed FP8 + per-token FP32 scales).
+        M = self.num_elems // self.num_channels
+        N = self.num_channels
+        norm_bytes = self.num_elems * self.bpe_in + N * self.bpe_in
+        quant_bytes = self.num_elems * 1 + M * 1 * 4
+        return {SUBOP_RMSNORM: norm_bytes, SUBOP_GROUP_QUANT: quant_bytes}
 
 
 class fused_rms_mxfp4_quant(RMSNorm):
@@ -242,38 +260,50 @@ class fused_rms_mxfp4_quant(RMSNorm):
         }
 
     def flops(self):
+        parts = self.flops_breakdown()
+        return sum(parts.values())
+
+    def flops_breakdown(self):
         M = self.num_elems // self.num_channels
         N1 = self.num_channels
-        flops = super().flops()
-        if self.has_res1:
-            flops += M * N1
+        # RMSNorm on x1, plus the optional separate RMSNorm on x2 (same per-elem
+        # flop intensity), both attributed to the norm sub-category.
+        norm = super().flops()
         if self.has_x2:
-            # Approximate x2 RMSNorm cost: same per-elem flop intensity as x1.
             x2_elems = M * self.n2
-            flops += int(super().flops() * x2_elems / max(self.num_elems, 1))
+            norm += int(super().flops() * x2_elems / max(self.num_elems, 1))
+        out = {SUBOP_RMSNORM: norm}
+        if self.has_res1:
+            out[SUBOP_RESIDUAL_ADD] = M * N1
         # MXFP4 quant: max-abs per 32-elem block + per-elem scale.
         # Reduced convention keeps the quant term visible at 1 FLOP/element.
-        flops += self.num_elems if reduced_elementwise_flops() else 2 * self.num_elems
-        return flops
+        out[SUBOP_GROUP_QUANT] = (
+            self.num_elems if reduced_elementwise_flops() else 2 * self.num_elems
+        )
+        return out
 
     def bytes(self):
+        return sum(self.bytes_breakdown().values())
+
+    def bytes_breakdown(self):
         M = self.num_elems // self.num_channels
         N1 = self.num_channels
-        bytes_read_x1 = self.num_elems * self.bpe_in
-        bytes_read_w1 = N1 * self.bpe_in
-        bytes_write_fp4 = self.num_elems * 0.5
-        bytes_write_scales = (self.num_elems // 32) * 1
-
-        total = bytes_read_x1 + bytes_read_w1 + bytes_write_fp4 + bytes_write_scales
-        if self.has_res1:
-            total += self.num_elems * self.bpe_in  # read residual
-            total += self.num_elems * self.bpe_in  # write updated residual
+        # Norm reads the activation(s) + weight(s); quant writes the packed FP4
+        # output + its E8M0 block scales; residual-add reads/writes the residual.
+        norm_bytes = self.num_elems * self.bpe_in + N1 * self.bpe_in
         if self.has_x2:
             x2_elems = M * self.n2
-            total += x2_elems * self.bpe_in  # read x2
-            total += self.n2 * self.bpe_in  # read x2_weight
-            total += x2_elems * self.bpe_in  # write out2
-        return total
+            norm_bytes += x2_elems * self.bpe_in  # read x2
+            norm_bytes += self.n2 * self.bpe_in  # read x2_weight
+            norm_bytes += x2_elems * self.bpe_in  # write out2
+        out = {SUBOP_RMSNORM: norm_bytes}
+        if self.has_res1:
+            out[SUBOP_RESIDUAL_ADD] = (
+                self.num_elems * self.bpe_in  # read residual
+                + self.num_elems * self.bpe_in  # write updated residual
+            )
+        out[SUBOP_GROUP_QUANT] = self.num_elems * 0.5 + (self.num_elems // 32) * 1
+        return out
 
 
 class vllm_rocm_aiter_rmsnorm_fp8_group_quant(RMSNorm):
@@ -324,6 +354,10 @@ class vllm_rocm_aiter_rmsnorm_fp8_group_quant(RMSNorm):
         quant = self.num_elems if reduced_elementwise_flops() else 2 * self.num_elems
         return super().flops() + quant
 
+    def flops_breakdown(self):
+        quant = self.num_elems if reduced_elementwise_flops() else 2 * self.num_elems
+        return {SUBOP_RMSNORM: super().flops(), SUBOP_GROUP_QUANT: quant}
+
     def bytes(self):
         M = self.num_elems // self.num_channels
         N = self.num_channels
@@ -333,6 +367,14 @@ class vllm_rocm_aiter_rmsnorm_fp8_group_quant(RMSNorm):
         bytes_write_quant = self.num_elems * 1  # FP8 = 1 byte/elem
         bytes_write_scales = M * num_groups * 4  # FP32 scales
         return bytes_read_x + bytes_read_weight + bytes_write_quant + bytes_write_scales
+
+    def bytes_breakdown(self):
+        M = self.num_elems // self.num_channels
+        N = self.num_channels
+        num_groups = (N + self.group_size - 1) // self.group_size
+        norm_bytes = self.num_elems * self.bpe_in + N * self.bpe_in  # read x + weight
+        quant_bytes = self.num_elems * 1 + M * num_groups * 4  # write FP8 + scales
+        return {SUBOP_RMSNORM: norm_bytes, SUBOP_GROUP_QUANT: quant_bytes}
 
 
 class aiter_rmsnorm2d_fwd_with_add_ck(RMSNorm):
@@ -378,6 +420,9 @@ class aiter_rmsnorm2d_fwd_with_add_ck(RMSNorm):
         # residual add: num_elems (input + residual_in -> residual_out)
         return self.num_elems + super().flops()
 
+    def flops_breakdown(self):
+        return {SUBOP_RESIDUAL_ADD: self.num_elems, SUBOP_RMSNORM: super().flops()}
+
     def bytes(self):
         N = self.num_channels
         bytes_read = (
@@ -385,6 +430,21 @@ class aiter_rmsnorm2d_fwd_with_add_ck(RMSNorm):
         )  # input, residual_in, weight
         bytes_write = 2 * self.num_elems * self.bpe_in  # out, residual_out
         return bytes_read + bytes_write
+
+    def bytes_breakdown(self):
+        # Norm reads input + weight and writes the normed output; the residual-add
+        # reads residual_in and writes residual_out.
+        N = self.num_channels
+        norm_bytes = (
+            self.num_elems * self.bpe_in  # read input
+            + N * self.bpe_in  # read weight
+            + self.num_elems * self.bpe_in  # write out
+        )
+        add_bytes = (
+            self.num_elems * self.bpe_in  # read residual_in
+            + self.num_elems * self.bpe_in  # write residual_out
+        )
+        return {SUBOP_RMSNORM: norm_bytes, SUBOP_RESIDUAL_ADD: add_bytes}
 
 
 class aiter_add_rmsnorm(aiter_rmsnorm2d_fwd_with_add_ck):
@@ -465,6 +525,14 @@ class vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant(RMSNorm):
         quant = self.num_elems if reduced_elementwise_flops() else 2 * self.num_elems
         return super().flops() + self.num_elems + quant
 
+    def flops_breakdown(self):
+        quant = self.num_elems if reduced_elementwise_flops() else 2 * self.num_elems
+        return {
+            SUBOP_RMSNORM: super().flops(),
+            SUBOP_RESIDUAL_ADD: self.num_elems,
+            SUBOP_GROUP_QUANT: quant,
+        }
+
     def bytes(self):
         M = self.num_elems // self.num_channels
         N = self.num_channels
@@ -483,6 +551,22 @@ class vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant(RMSNorm):
             + bytes_write_res
             + bytes_write_scales
         )
+
+    def bytes_breakdown(self):
+        M = self.num_elems // self.num_channels
+        N = self.num_channels
+        num_groups = (N + self.group_size - 1) // self.group_size
+        norm_bytes = self.num_elems * self.bpe_in + N * self.bpe_in  # read x + weight
+        add_bytes = (
+            self.num_elems * self.bpe_in  # read residual
+            + self.num_elems * self.bpe_in  # write updated residual
+        )
+        quant_bytes = self.num_elems * 1 + M * num_groups * 4  # write FP8 + scales
+        return {
+            SUBOP_RMSNORM: norm_bytes,
+            SUBOP_RESIDUAL_ADD: add_bytes,
+            SUBOP_GROUP_QUANT: quant_bytes,
+        }
 
 
 class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
@@ -555,6 +639,9 @@ class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
     def flops(self):
         return self.num_elems + super().flops()
 
+    def flops_breakdown(self):
+        return {SUBOP_RESIDUAL_ADD: self.num_elems, SUBOP_RMSNORM: super().flops()}
+
     def bytes(self):
         M = self.num_elems // self.num_channels
         N = self.num_channels
@@ -562,3 +649,19 @@ class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
         bytes_write_out = M * self.n_out * self.bpe_in
         bytes_write_res = M * N * self.bpe_in
         return bytes_read + bytes_write_out + bytes_write_res
+
+    def bytes_breakdown(self):
+        # Norm reads x + weight and writes the padded output; the residual-add
+        # reads the residual and writes residual_out.
+        M = self.num_elems // self.num_channels
+        N = self.num_channels
+        norm_bytes = (
+            self.num_elems * self.bpe_in  # read x
+            + N * self.bpe_in  # read weight
+            + M * self.n_out * self.bpe_in  # write padded out
+        )
+        add_bytes = (
+            self.num_elems * self.bpe_in  # read residual
+            + M * N * self.bpe_in  # write residual_out
+        )
+        return {SUBOP_RMSNORM: norm_bytes, SUBOP_RESIDUAL_ADD: add_bytes}

@@ -38,6 +38,17 @@ def reduced_elementwise_flops() -> bool:
     )
 
 
+# Sub-op categories for the fused-kernel FLOP/byte breakdown (see
+# ``flops_breakdown`` / ``bytes_breakdown``). Fused kernels (e.g. RMSNorm fused
+# with a residual-add and/or an mxfp4/fp8 quant) do work that maps to several
+# distinct logical ops; the breakdown attributes each component to its own
+# sub-category so a downstream consumer can account norm vs residual-add vs
+# quant separately instead of lumping it all under the kernel's single category.
+SUBOP_RMSNORM = "RMSNorm"
+SUBOP_RESIDUAL_ADD = "ResidualAdd"
+SUBOP_GROUP_QUANT = "GroupQuant"
+
+
 # 1. GEMM
 class GEMM:
     """
@@ -4377,6 +4388,26 @@ class Normalization:
             self.num_elems,
             self.num_channels,
         )
+
+    def flops_breakdown(self):
+        """Per-sub-op FLOP breakdown as ``{sub_category: flops}``.
+
+        Default: the whole op under its own ``category`` (i.e. no fusion to
+        split). Fused kernels override this to attribute their residual-add /
+        quant components to ``SUBOP_RESIDUAL_ADD`` / ``SUBOP_GROUP_QUANT`` while
+        the normalization work stays under ``SUBOP_RMSNORM``. The values always
+        sum to ``flops()``.
+        """
+        return {self.category: self.flops()}
+
+    def bytes_breakdown(self):
+        """Per-sub-op byte breakdown as ``{sub_category: bytes}`` (or ``{}``).
+
+        Mirrors :meth:`flops_breakdown`; the default puts all traffic under the
+        op's own ``category``. Returns an empty dict when ``bytes()`` is ``None``.
+        """
+        b = self.bytes()
+        return {self.category: b} if b is not None else {}
 
     def get_compute_precision(self):
         """Return the compute precision for this operation."""

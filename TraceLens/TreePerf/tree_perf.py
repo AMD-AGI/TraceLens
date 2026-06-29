@@ -469,6 +469,28 @@ class TreePerfAnalyzer:
             dict_metrics["FLOPS/Byte"] = float("nan")
             dict_metrics["TB/s"] = float("nan")
 
+        # Per-sub-op FLOP/byte breakdown for fused kernels (e.g. RMSNorm fused
+        # with a residual-add and/or an mxfp4/fp8 quant). Each component is
+        # attributed to its own SUBOP_* sub-category so a downstream consumer can
+        # account norm vs residual-add vs quant separately instead of lumping it
+        # all under the kernel's single category. Emitted only when the model
+        # reports a genuine multi-component split; the values sum to GFLOPS /
+        # Data Moved (MB). Forward only.
+        if not bwd:
+            flops_bd = getattr(perf_model, "flops_breakdown", None)
+            breakdown = flops_bd() if callable(flops_bd) else None
+            if isinstance(breakdown, dict) and len(breakdown) > 1:
+                for sub, sub_flops in breakdown.items():
+                    dict_metrics[f"GFLOPS_{sub}"] = sub_flops / 1e9
+                bytes_bd = getattr(perf_model, "bytes_breakdown", None)
+                bytes_breakdown = bytes_bd() if callable(bytes_bd) else None
+                if isinstance(bytes_breakdown, dict) and len(bytes_breakdown) > 1:
+                    for sub, sub_bytes in bytes_breakdown.items():
+                        if sub_bytes is not None:
+                            dict_metrics[f"Data Moved (MB)_{sub}"] = sub_bytes / (
+                                1024 * 1024
+                            )
+
         # Add compute spec column (e.g., "matrix_fp16", "vector_bf16")
         compute_spec = get_compute_spec(perf_model)
         dict_metrics["Compute Spec"] = compute_spec if compute_spec else ""
@@ -2134,6 +2156,13 @@ class TreePerfAnalyzer:
                     for col in perf_cols:
                         if col in metrics:
                             row[col] = metrics[col]
+                    # Carry per-sub-op breakdown columns (fused-kernel
+                    # attribution) emitted by compute_perf_metrics.
+                    for col, val in metrics.items():
+                        if col.startswith("GFLOPS_") or col.startswith(
+                            "Data Moved (MB)_"
+                        ):
+                            row[col] = val
                     # Extract perf model params (e.g., M, N, K for GEMM)
                     perf_params = {
                         k.replace("param: ", ""): v
@@ -2342,6 +2371,16 @@ class TreePerfAnalyzer:
             if col in df_temp.columns:
                 agg_dict[col] = "first"
 
+        # Per-sub-op FLOP/byte breakdown columns (fused-kernel attribution).
+        # Per-op static like GFLOPS/Data Moved, so aggregate with 'first'.
+        breakdown_cols = [
+            col
+            for col in df_temp.columns
+            if col.startswith("GFLOPS_") or col.startswith("Data Moved (MB)_")
+        ]
+        for col in breakdown_cols:
+            agg_dict[col] = "first"
+
         # Optional simulated metrics from perf model.
         # Keep the flattened "_first" names in unified_perf_summary for visibility.
         origami_static_cols = ["Origami Time (µs)", "Origami TFLOPS/s"]
@@ -2425,6 +2464,9 @@ class TreePerfAnalyzer:
         for col in actual_grouping_cols:
             rename_map[f"{col}_first"] = col
         for col in static_cols:
+            if f"{col}_first" in df_summary.columns:
+                rename_map[f"{col}_first"] = col
+        for col in breakdown_cols:
             if f"{col}_first" in df_summary.columns:
                 rename_map[f"{col}_first"] = col
         # Rename perf_params aggregation column
