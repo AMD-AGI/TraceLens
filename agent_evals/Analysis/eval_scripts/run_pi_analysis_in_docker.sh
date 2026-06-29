@@ -21,7 +21,7 @@ set -euo pipefail
 #   bash run_pi_analysis_in_docker.sh /data/tracelens_local_testing/tracelens -- \
 #     <server-cmd> Qwen/Qwen3.6-35B-A3B --port 30000 --tensor-parallel-size 8
 #
-#   TEST_IDS="gemm_01" NUM_REPEATS=1 \
+#   TEST_IDS="gemm_01" NUM_REPEATS=1 \   # prefix ok: matches gemm_01_compute_few_tiles
 #     bash run_pi_analysis_in_docker.sh /data/tracelens_local_testing/tracelens standalone -- \
 #     <server-cmd> MiniMaxAI/MiniMax-M3 --port 30000
 #

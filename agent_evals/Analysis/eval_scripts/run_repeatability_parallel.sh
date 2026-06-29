@@ -152,6 +152,48 @@ expand_archive() {
     fi
 }
 
+# Return 0 if $id should run given TEST_IDS (empty = all).
+# Supports exact match and underscore-delimited prefix (e.g. gemm_01 -> gemm_01_compute_few_tiles).
+should_run_id() {
+    local id="$1"
+    [[ -z "$TEST_IDS" ]] && return 0
+    local token
+    for token in $TEST_IDS; do
+        if [[ "$id" == "$token" || "$id" == "${token}_"* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+print_scheduled_tests() {
+    local -a scheduled_ids=()
+    local id sub_category trace1_path trace2_path trace_path reference_dir platform platform2
+
+    if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
+        while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2; do
+            [[ -z "$id" ]] && continue
+            should_run_id "$id" && scheduled_ids+=("$id")
+        done < <(tail -n +2 "$TEST_TRACES_CSV")
+    else
+        while IFS=, read -r id sub_category trace_path reference_dir platform; do
+            [[ -z "$id" ]] && continue
+            should_run_id "$id" && scheduled_ids+=("$id")
+        done < <(tail -n +2 "$TEST_TRACES_CSV")
+    fi
+
+    if [[ ${#scheduled_ids[@]} -eq 0 ]]; then
+        return
+    fi
+
+    echo "Tests to run (${#scheduled_ids[@]}):"
+    local scheduled_id
+    for scheduled_id in "${scheduled_ids[@]}"; do
+        echo "  - $scheduled_id ($NUM_REPEATS repeat(s))"
+    done
+    echo ""
+}
+
 # ---------------------------------------------------------------------------
 # Single job: one (test_case, repeat) iteration
 #
@@ -161,6 +203,8 @@ expand_archive() {
 run_single_job() {
     local id="$1" repeat="$2" trace1_path="$3" trace2_path="$4" reference_dir="$5" platform="$6" platform2="$7"
     local tag="[$id|run_$repeat]"
+
+    log_status "  $tag [$(ts)] Running"
 
     trace1_path="$(repo_abs_path "$trace1_path")"
     if [[ -n "$trace2_path" ]]; then
@@ -255,6 +299,7 @@ run_single_job() {
         --results-dir "$CASE_RESULTS" \
         --output "$CASE_RESULTS/eval_summary.csv" || true
     log_status "  $tag Summary -> $CASE_RESULTS/eval_summary.csv"
+    log_status "  $tag [$(ts)] Finished"
 }
 
 # ---------------------------------------------------------------------------
@@ -303,15 +348,13 @@ fi
 echo "========================================="
 echo ""
 
+print_scheduled_tests
+
 _spawn_jobs() {
     local id="$1" trace1_path="$2" trace2_path="$3" reference_dir="$4" platform="$5" platform2="$6"
 
-    if [[ -n "$TEST_IDS" ]]; then
-        case " $TEST_IDS " in
-            *" $id "*) ;;
-            *) return ;;
-        esac
-    fi
+    should_run_id "$id" || return
+    JOBS_SPAWNED=$((JOBS_SPAWNED + 1))
 
     for ((i = 0; i < NUM_REPEATS; i++)); do
         read -r -u4  # acquire semaphore slot
@@ -325,6 +368,8 @@ _spawn_jobs() {
 }
 
 setup_semaphore
+
+JOBS_SPAWNED=0
 
 if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
     # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform,platform2
@@ -341,6 +386,13 @@ else
 fi
 
 wait
+
+if [[ -n "$TEST_IDS" && "$JOBS_SPAWNED" -eq 0 ]]; then
+    echo ""
+    echo "WARNING: TEST_IDS='$TEST_IDS' matched no trace ids in $TEST_TRACES_CSV." >&2
+    echo "  Use exact ids or underscore-delimited prefixes (e.g. gemm_01 -> gemm_01_compute_few_tiles)." >&2
+    echo "  No eval jobs were started; reports will be empty." >&2
+fi
 
 echo ""
 echo "========================================="

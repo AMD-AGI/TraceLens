@@ -189,13 +189,18 @@ fi
 echo "========================================="
 echo ""
 
+# Return 0 if $id should run given TEST_IDS (empty = all).
+# Supports exact match and underscore-delimited prefix (e.g. gemm_01 -> gemm_01_compute_few_tiles).
 should_run_id() {
     local id="$1"
     [[ -z "$TEST_IDS" ]] && return 0
-    case " $TEST_IDS " in
-        *" $id "*) return 0 ;;
-        *) return 1 ;;
-    esac
+    local token
+    for token in $TEST_IDS; do
+        if [[ "$id" == "$token" || "$id" == "${token}_"* ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 setup_semaphore
@@ -236,6 +241,12 @@ failed="$(grep -c '^failed$' "$STATUS_FILE" 2>/dev/null || true)"
 generated="${generated:-0}"
 failed="${failed:-0}"
 total=$(( generated + failed ))
+
+if [[ -n "$TEST_IDS" && "$total" -eq 0 ]]; then
+    echo ""
+    echo "WARNING: TEST_IDS='$TEST_IDS' matched no trace ids in $TEST_TRACES_CSV." >&2
+    echo "  Use exact ids or underscore-delimited prefixes (e.g. gemm_01 -> gemm_01_compute_few_tiles)." >&2
+fi
 
 echo ""
 echo "========================================="
