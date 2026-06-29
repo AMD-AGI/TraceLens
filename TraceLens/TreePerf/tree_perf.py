@@ -720,7 +720,17 @@ class TreePerfAnalyzer:
             )
             if "overlap_pct" in df_perf_metrics.columns:
                 dict_agg["overlap_pct"] = agg_metrics
-        args_cols = ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]
+        # Carry OUTPUT dims/type when a trace actually provides them (e.g. JAX
+        # traces set ``event["args"]["Output Dims"]``). NOTE: torch/kineto traces
+        # record INPUT shapes only (``record_shapes``) — there is no output field —
+        # so for those workloads the output spec is INFERRED by the perf model
+        # instead (see e.g. gemm_a8w8_blockscale.get_param_details ->
+        # output_shape/output_dtype). The ``if arg in columns`` guard makes this a
+        # safe no-op when the trace lacks the columns.
+        args_cols = [
+            "Input Dims", "Input type", "Input Strides", "Concrete Inputs",
+            "Output Dims", "Output type",
+        ]
         for arg in args_cols:
             if arg in df_perf_metrics.columns:
                 dict_agg[arg] = "first"

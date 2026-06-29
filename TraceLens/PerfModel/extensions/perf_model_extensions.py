@@ -67,18 +67,53 @@ class gemm_a8w8_blockscale(GEMM):
 
     @staticmethod
     def get_param_details(event):
-        return {
+        dims = event["args"]["Input Dims"]
+        types = event["args"].get("Input type", []) or []
+        M, K = dims[0][0], dims[0][1]
+        N = dims[1][0]
+        details = {
             "B": 1,
-            "M": event["args"]["Input Dims"][0][0],
-            "N": event["args"]["Input Dims"][1][0],
-            "K": event["args"]["Input Dims"][0][1],
+            "M": M,
+            "N": N,
+            "K": K,
             "bias": False,
             "dtype_A_B": (
-                event["args"]["Input type"][0],
-                event["args"]["Input type"][1],
+                types[0] if len(types) > 0 else "",
+                types[1] if len(types) > 1 else "",
                 "c10::bfloat16",
             ),
         }
+        # FP8/INT8 block-scale quant CONFIG. Without the scheme + block size a
+        # downstream microbenchmark harness can't build matching scale tensors, so
+        # its reference output mismatches and a real speedup is auto-rejected on
+        # correctness. Derive the block sizes from the captured scale-tensor shapes
+        # (x_scale: (M, ceil(K/block_k)); w_scale: (ceil(N/block_n), ceil(K/block_k)))
+        # and emit the scheme + scale dtype. Constant per kernel config, so this is
+        # grouping-neutral; roofline ``bytes()`` only reads ``dtype_A_B`` (unchanged).
+        try:
+            x_scale, w_scale = dims[2], dims[3]
+            block_k = (-(-K // x_scale[-1])) if x_scale and x_scale[-1] else None  # ceil(K/scale_cols)
+            block_n = (-(-N // w_scale[0])) if w_scale and w_scale[0] else None
+            details.update(
+                {
+                    "quant_scheme": "a8w8_blockscale",
+                    "quant_granularity": "per_block",
+                    "block_k": block_k,
+                    "block_n": block_n,
+                    "scale_dtype": types[2] if len(types) > 2 else "float32",
+                }
+            )
+        except (IndexError, TypeError, ZeroDivisionError):
+            pass
+        # OUTPUT spec is INFERRED, not read from the trace: the torch/kineto event
+        # records input shapes only (record_shapes), so there is no "Output Dims"
+        # field. This kernel's output is the GEMM result Y[M, N] in bf16 (the third
+        # element of dtype_A_B). Emitting it here gives downstream consumers the
+        # output tensor for allocation + correctness without depending on a trace
+        # field that doesn't exist for torch traces.
+        details["output_shape"] = (M, N)
+        details["output_dtype"] = "c10::bfloat16"
+        return details
 
     def bytes(self):
         dtype_A_B = self.param_details["dtype_A_B"]
