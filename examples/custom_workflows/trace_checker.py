@@ -189,6 +189,7 @@ class QualityThresholds:
     # phase 2: high-idle ops
     op_high_idle_pct: float = 40.0
 
+
 def coefficient_of_variation(values: Sequence[float]) -> float:
     """std / mean (population std). 0.0 if empty or mean is 0."""
     n = len(values)
@@ -347,8 +348,8 @@ def make_jax_analyzer(xplane_path: str):
     return JaxTreePerfAnalyzer.from_file(profile_filepath=xplane_path)
 
 
-
 # Phase 1 checks (no external tooling)
+
 
 def _check_kernels_present(
     kernels: Sequence[dict], thr: QualityThresholds
@@ -430,7 +431,11 @@ def _check_kernels_not_dropped(
             f"(idx={starved}); likely a phase boundary, verify not dropped kernels"
         )
     return QualityResult(
-        "kernels_not_dropped", "Kernels not intermittently dropped", status, msg, metrics
+        "kernels_not_dropped",
+        "Kernels not intermittently dropped",
+        status,
+        msg,
+        metrics,
     )
 
 
@@ -493,11 +498,17 @@ def _check_runtime_variability(
         status = Status.PASS
         msg = f"kernel durations stable across {eligible} groups (worst CV={worst_cv:.2f})"
     return QualityResult(
-        "runtime_variability", "No spurious kernel-time variability", status, msg, metrics
+        "runtime_variability",
+        "No spurious kernel-time variability",
+        status,
+        msg,
+        metrics,
     )
 
 
-def _check_busy_idle(metrics: Dict[str, float], thr: QualityThresholds) -> QualityResult:
+def _check_busy_idle(
+    metrics: Dict[str, float], thr: QualityThresholds
+) -> QualityResult:
     idle_pct = metrics.get("idle_pct", 0.0)
     out = {k: _round_metric(v) for k, v in metrics.items()}
     if idle_pct >= thr.idle_pct_fail:
@@ -572,12 +583,16 @@ def run_pytorch_phase1(
         if k.get("dur") is None:
             continue
         args = k.get("args") or {}
-        sig = f"{k.get('name')}|grid={args.get('grid', '')}|block={args.get('block', '')}"
+        sig = (
+            f"{k.get('name')}|grid={args.get('grid', '')}|block={args.get('block', '')}"
+        )
         groups[sig].append(float(k["dur"]))
     results.append(_check_runtime_variability(groups, thr))
 
     results.append(_pytorch_busy_idle(trace, thr))
-    results.append(_check_kernel_counts(Counter(k.get("name", "") for k in kernels), thr))
+    results.append(
+        _check_kernel_counts(Counter(k.get("name", "") for k in kernels), thr)
+    )
     results.append(_check_cpu_op_shapes(trace, thr))
     results.append(_check_cpu_call_stack(trace, thr))
     return results
@@ -656,7 +671,11 @@ def _check_cpu_call_stack(trace: PytorchTrace, thr: QualityThresholds) -> Qualit
         status = Status.WARN
         msg = "no python_function events (call stack not captured; with_stack=False)"
     return QualityResult(
-        "cpu_call_stack", "CPU call stack present (PyTorch, optional)", status, msg, metrics
+        "cpu_call_stack",
+        "CPU call stack present (PyTorch, optional)",
+        status,
+        msg,
+        metrics,
     )
 
 
@@ -680,7 +699,9 @@ def run_jax_phase1(
     results.append(_check_runtime_variability(groups, thr))
 
     results.append(_jax_busy_idle(trace, thr))
-    results.append(_check_kernel_counts(Counter(e.get("name", "") for e in gpu_events), thr))
+    results.append(
+        _check_kernel_counts(Counter(e.get("name", "") for e in gpu_events), thr)
+    )
     results.append(_check_jax_metadata_richness(gpu_events, thr))
     return results
 
@@ -740,7 +761,11 @@ def _check_jax_metadata_richness(
         status = Status.PASS
         msg = f"rich HLO metadata: {coverage}"
     return QualityResult(
-        "jax_metadata_richness", "JAX GPU metadata richness (optional)", status, msg, metrics
+        "jax_metadata_richness",
+        "JAX GPU metadata richness (optional)",
+        status,
+        msg,
+        metrics,
     )
 
 
@@ -784,7 +809,9 @@ def find_megatron_extension() -> Optional[str]:
     return None
 
 
-def generate_report(path: str, framework: str, output_dir: Optional[str] = None) -> Dict:
+def generate_report(
+    path: str, framework: str, output_dir: Optional[str] = None
+) -> Dict:
     """Generate the TraceLens perf report. PyTorch gets the Megatron extension."""
     out = output_dir or tempfile.mkdtemp(prefix="trace_quality_")
     if framework == FRAMEWORK_PYTORCH:
@@ -799,7 +826,9 @@ def generate_report(path: str, framework: str, output_dir: Optional[str] = None)
             extension_file=find_megatron_extension(),
         )
     if framework == FRAMEWORK_JAX:
-        from TraceLens.Reporting.generate_perf_report_jax import generate_perf_report_jax
+        from TraceLens.Reporting.generate_perf_report_jax import (
+            generate_perf_report_jax,
+        )
 
         return generate_perf_report_jax(profile_path=path, output_csvs_dir=out)
     raise ValueError(f"unknown framework: {framework}")
@@ -816,10 +845,14 @@ def _check_report_generated(dfs: Dict, sheets: Dict) -> QualityResult:
     else:
         status = Status.PASS
         msg = f"perf report generated with {len(present)} sheets"
-    return QualityResult("perf_report_generated", "Perf report generated", status, msg, metrics)
+    return QualityResult(
+        "perf_report_generated", "Perf report generated", status, msg, metrics
+    )
 
 
-def _check_idle_timeline(dfs: Dict, sheets: Dict, thr: QualityThresholds) -> QualityResult:
+def _check_idle_timeline(
+    dfs: Dict, sheets: Dict, thr: QualityThresholds
+) -> QualityResult:
     tl = dfs.get(sheets["timeline"])
     if tl is None or "type" not in getattr(tl, "columns", []):
         return QualityResult(
@@ -888,11 +921,17 @@ def _check_op_count_consistency(dfs: Dict, sheets: Dict) -> QualityResult:
         status = Status.WARN
         msg = f"{len(counts)} ops have gcd=1 (no common per-step multiple)"
     return QualityResult(
-        "op_count_consistency", "Op-count consistency (perf report)", status, msg, metrics
+        "op_count_consistency",
+        "Op-count consistency (perf report)",
+        status,
+        msg,
+        metrics,
     )
 
 
-def _check_ops_have_shapes(dfs: Dict, sheets: Dict, thr: QualityThresholds) -> QualityResult:
+def _check_ops_have_shapes(
+    dfs: Dict, sheets: Dict, thr: QualityThresholds
+) -> QualityResult:
     df = dfs.get(sheets["unique_args"])
     if df is None or "Input Dims" not in getattr(df, "columns", []):
         return QualityResult(
@@ -933,10 +972,14 @@ def _check_ops_have_shapes(dfs: Dict, sheets: Dict, thr: QualityThresholds) -> Q
     else:
         status = Status.PASS
         msg = f"{coverage:.0%} of ops have shapes"
-    return QualityResult("ops_have_shapes", "Ops carry shapes (perf report)", status, msg, metrics)
+    return QualityResult(
+        "ops_have_shapes", "Ops carry shapes (perf report)", status, msg, metrics
+    )
 
 
-def _check_high_idle_ops(dfs: Dict, sheets: Dict, thr: QualityThresholds) -> QualityResult:
+def _check_high_idle_ops(
+    dfs: Dict, sheets: Dict, thr: QualityThresholds
+) -> QualityResult:
     """Flag ops with a large gap between subtree wall time and kernel time."""
     df = dfs.get(sheets["unique_args"])
     cols = set(df.columns) if df is not None else set()
@@ -966,7 +1009,9 @@ def _check_high_idle_ops(dfs: Dict, sheets: Dict, thr: QualityThresholds) -> Qua
     else:
         status = Status.PASS
         msg = "no ops with excessive non-kernel (idle) time"
-    return QualityResult("high_idle_ops", "High-idle ops (perf report)", status, msg, metrics)
+    return QualityResult(
+        "high_idle_ops", "High-idle ops (perf report)", status, msg, metrics
+    )
 
 
 def _check_sdpa_count(dfs: Dict, sheets: Dict, thr: QualityThresholds) -> QualityResult:
@@ -976,7 +1021,9 @@ def _check_sdpa_count(dfs: Dict, sheets: Dict, thr: QualityThresholds) -> Qualit
     cat_col = sheets["category_col"]
     total = 0
     if cat_df is not None and cat_col in getattr(cat_df, "columns", []):
-        count_col = sheets["count_col"] if sheets["count_col"] in cat_df.columns else None
+        count_col = (
+            sheets["count_col"] if sheets["count_col"] in cat_df.columns else None
+        )
         for _, row in cat_df.iterrows():
             cat = str(row.get(cat_col, ""))
             if matches_any(cat, thr.attn_name_patterns):
@@ -986,7 +1033,8 @@ def _check_sdpa_count(dfs: Dict, sheets: Dict, thr: QualityThresholds) -> Qualit
     # Additional signal: dedicated TE / attention op sheets (e.g. JAX op_te).
     for sheet_name, df in dfs.items():
         if sheet_name.startswith("op_") and (
-            "te" in sheet_name.lower() or matches_any(sheet_name, thr.attn_name_patterns)
+            "te" in sheet_name.lower()
+            or matches_any(sheet_name, thr.attn_name_patterns)
         ):
             counts[sheet_name] = max(counts.get(sheet_name, 0), len(df))
     metrics = {"attention_breakdown": counts, "total_attention_ops": total}
@@ -1055,7 +1103,9 @@ def run_quality_checks(
     """
     framework = framework.lower()
     if framework not in VALID_FRAMEWORKS:
-        raise ValueError(f"framework must be one of {VALID_FRAMEWORKS}, got {framework!r}")
+        raise ValueError(
+            f"framework must be one of {VALID_FRAMEWORKS}, got {framework!r}"
+        )
     thr = thresholds or QualityThresholds()
     phases = {str(p) for p in phases}
     report = QualityReport(trace_path=path, framework=framework)
@@ -1129,7 +1179,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="JAX only: path to the .xplane.pb used for phase 2 perf report",
     )
     p.add_argument(
-        "--output-dir", default=None, help="Directory to write perf-report CSVs (phase 2)"
+        "--output-dir",
+        default=None,
+        help="Directory to write perf-report CSVs (phase 2)",
     )
     p.add_argument("--json", default=None, help="Write the full report as JSON here")
     return p
