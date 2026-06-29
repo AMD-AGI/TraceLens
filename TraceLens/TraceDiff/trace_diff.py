@@ -426,10 +426,7 @@ class TraceDiff:
             gpu_kids = []
             while True:
                 node = uid2node.get(current)
-                if not node or tree_obj.event_to_category(node) in (
-                    "cpu_op",
-                    "cuda_runtime",
-                ):
+                if not node or tree_obj.event_to_category(node) in ("cuda_runtime",):
                     break
                 kids = [
                     c
@@ -1085,7 +1082,7 @@ class TraceDiff:
         rows = []
         visited_stats_nodes = set()
 
-        def traverse(merged_id, combined_parent_node):
+        def traverse(merged_id, combined_parent_node, root_index=0):
             if merged_id in visited_stats_nodes:
                 return
             node = merged_id_to_event[merged_id]
@@ -1228,6 +1225,11 @@ class TraceDiff:
                                             if _TRACELENS_DEBUG
                                             else {}
                                         ),
+                                        **(
+                                            {"root_index": root_index}
+                                            if _TRACELENS_DEBUG
+                                            else {}
+                                        ),
                                         "gpu_op_uid": gpu_uid,
                                         "nn_module_stack": ";".join(
                                             str(x)
@@ -1355,6 +1357,11 @@ class TraceDiff:
                                     if _TRACELENS_DEBUG
                                     else {}
                                 ),
+                                **(
+                                    {"root_index": root_index}
+                                    if _TRACELENS_DEBUG
+                                    else {}
+                                ),
                                 "gpu_op_uid": gpu_uid,
                                 "nn_module_stack": ";".join(
                                     str(x)
@@ -1453,6 +1460,11 @@ class TraceDiff:
                                     if _TRACELENS_DEBUG
                                     else {}
                                 ),
+                                **(
+                                    {"root_index": root_index}
+                                    if _TRACELENS_DEBUG
+                                    else {}
+                                ),
                                 "gpu_op_uid": gpu_uid,
                                 "nn_module_stack": ";".join(
                                     str(x)
@@ -1483,11 +1495,11 @@ class TraceDiff:
 
             if should_traverse_children:
                 for cid in node["children"]:
-                    traverse(cid, node)
+                    traverse(cid, node, root_index)
             return
 
-        for root_id in merged_root_ids:
-            traverse(root_id, None)
+        for root_index, root_id in enumerate(merged_root_ids):
+            traverse(root_id, None, root_index)
 
         df = pd.DataFrame(rows)
 
