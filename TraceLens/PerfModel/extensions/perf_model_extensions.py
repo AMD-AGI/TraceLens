@@ -956,3 +956,191 @@ class sglang_store_cache:
     def get_compute_precision(self):
         dtype = self.param_details.get("dtype")
         return torch_dtype_map(dtype) if dtype else None
+
+
+class aiter_fused_qk_rope_cat_and_cache_mla(FusedRoPE):
+    """
+    Performance model for aiter::fused_qk_rope_cat_and_cache_mla
+    (RoPE on q_pe/k_pe + KV-cache write).
+
+    Reference implementation:
+        aiter/aiter/ops/triton/fusions/fused_kv_cache.py:88
+        (kernel _fused_qk_rope_cat_and_cache_mla_kernel)
+
+    Applies rotary position embedding to the rope (pe) slices of Q and K,
+    concatenates the nope + pe parts into a single head dim, returns the rotated
+    Q, and writes the concatenated K (nope || pe) into kv_cache in place at the
+    slots given by slot_mapping.
+
+    Expected Input Dims from trace:
+        [0] q_nope   = (T, QH, D_lora)
+        [1] q_pe     = (T, QH, D_pe)
+        [2] k_nope   = (T, KH, D_lora)
+        [3] k_pe     = (T, KH, D_pe)
+        [4] kv_cache = (B_cache, KH, D_lora + D_pe)
+        ...
+
+    Expected Input type from trace:
+        [bf16, bf16, bf16, bf16, <kv_cache dtype, e.g. fp8>, ...]
+
+    Roofline -- FLOPs:
+        RoPE rotates only the pe slices of Q and K. ~3 FLOPs/element.
+        flops = 3 * (T*QH*D_pe + T*KH*D_pe)
+
+    Roofline -- bytes moved:
+        read  q_nope + q_pe + k_nope + k_pe : nelems * bpe_in
+        write q_out  (T, QH, D_lora+D_pe)   : T*QH*(D_lora+D_pe) * bpe_out
+        write kv rows (T tokens written)    : T*KH*(D_lora+D_pe) * bpe_kv
+        cos/sin/pos are small + cache-resident; omitted.
+
+    """
+
+    sheet_category = "FusedRoPE"
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.bpe_in = name2bpe(self.param_details["dtype_in"])
+        self.bpe_kv = name2bpe(self.param_details["dtype_kv"])
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        q_nope = tuple(dims[0])
+        q_pe = tuple(dims[1])
+        k_nope = tuple(dims[2])
+        T, QH, D_lora = q_nope
+        D_pe = q_pe[2]
+        KH = k_nope[1]
+        dtype_in = types[0]
+        dtype_kv = types[4] if len(types) > 4 and types[4] else dtype_in
+        return {
+            "T": T,
+            "QH": QH,
+            "KH": KH,
+            "D_lora": D_lora,
+            "D_pe": D_pe,
+            "dtype_in": dtype_in,
+            "dtype_kv": dtype_kv,
+        }
+
+    def flops(self):
+        p = self.param_details
+        return 3 * (p["T"] * p["QH"] * p["D_pe"] + p["T"] * p["KH"] * p["D_pe"])
+
+    def bytes(self):
+        p = self.param_details
+        T, QH, KH, D_lora, D_pe = (p["T"], p["QH"], p["KH"], p["D_lora"], p["D_pe"])
+        bpe_in = self.bpe_in
+        if bpe_in is None:
+            return None
+        bpe_out = bpe_in  # q_out keeps the Q input dtype
+        bpe_kv = self.bpe_kv if self.bpe_kv is not None else bpe_in
+        read_q = (T * QH * D_lora + T * QH * D_pe) * bpe_in
+        read_k = (T * KH * D_lora + T * KH * D_pe) * bpe_in
+        write_q = T * QH * (D_lora + D_pe) * bpe_out
+        write_kv = T * KH * (D_lora + D_pe) * bpe_kv
+        return read_q + read_k + write_q + write_kv
+
+    def get_compute_precision(self):
+        return torch_dtype_map(self.param_details["dtype_in"])
+
+
+class sglang_quant_dynamic_mxfp4_quant(fused_flatten_mxfp4_quant):
+    """
+    Performance model for sglang_profiler::quant_dynamic_mxfp4_quant.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/quant/... dynamic_mxfp4_quant
+        (sglang quark w4a4 mxfp4 scheme).
+
+    Dynamic MXFP4 activation quant. Single BF16 input (M, N); output is packed
+    FP4 + per-32-element E8M0 scales. Shares the MXFP4 quant roofline of
+    fused_flatten_mxfp4_quant (read x + write 0.5 B/elem FP4 + 1/32 B/elem scales).
+
+    Expected Input Dims from trace:
+        [0] = (M, N)   (>2D inputs are flattened along the leading dims)
+    Expected Input type from trace:
+        [bf16]
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        op_shape = tuple(dims[0])
+        dtype_in = types[0]
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_in),
+            "stride_input": None,
+            "stride_output": None,
+        }
+
+
+class aiter_fused_dynamic_mxfp4_quant_moe_sort_hip(fused_flatten_mxfp4_quant):
+    """
+    Performance model for aiter::fused_dynamic_mxfp4_quant_moe_sort_hip.
+
+    Reference implementation:
+        aiter/aiter/ops/quant.py:1103 (fused_dynamic_mxfp4_quant_moe_sort ->
+        fused_dynamic_mx_quant_moe_sort; HIP kernel mxfp4_quant_moe_sort_kernel)
+
+    Fuses dynamic MXFP4 activation quant with MoE token sorting. The sort only
+    touches small index tensors (metadata) and is negligible relative to the
+    activation quant traffic.
+
+    Expected Input Dims from trace:
+        [0] out_fp4   = (M, N // 2)        packed FP4
+        [1] out_scale = (pad_rows, N // 32) E8M0 (sorted layout)
+        [2] input     = (M, N)             BF16   <- modeled input
+        [3] sorted_ids, [4] num_valid_ids  (metadata)
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        op_shape = tuple(dims[2])
+        dtype_in = types[2]
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_in),
+            "stride_input": None,
+            "stride_output": None,
+        }
+
+
+class aiter_dynamic_per_group_scaled_quant_fp4(fused_flatten_mxfp4_quant):
+    """
+    Performance model for aiter::dynamic_per_group_scaled_quant_fp4.
+
+    Reference implementation:
+        aiter/aiter/ops/quant.py:744 (dynamic_per_group_scaled_quant_fp4 ->
+        dynamic_per_group_scaled_quant; HIP kernel
+        dynamic_per_group_scaled_quant_kernel<bf16, fp4_t, 32>).
+
+    Dynamic per-group (group_size=32) FP4 quant of a BF16 activation. The OUTPUT
+    tensor is Input Dims[0] and the BF16 input is Input Dims[1]
+
+    Expected Input Dims from trace:
+        [0] out    = (M, N // 2)   packed FP4
+        [1] input  = (M, N)        BF16   <- modeled input
+        [2] scales = (M, N // 32)  E8M0
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        op_shape = tuple(dims[1])
+        dtype_in = types[1]
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_in),
+            "stride_input": None,
+            "stride_output": None,
+        }
