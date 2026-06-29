@@ -57,6 +57,29 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     # InferenceAttention extras (KV-cache writes).
     "_C_cache_ops::reshape_and_cache_flash": "InferenceAttention",
     "_C_cache_ops::concat_and_cache_mla": "InferenceAttention",
+    # V4 Flash AITER attention ops (CSA/HCA fused attention + output projection).
+    "aiter::v4_attention_with_output": "SDPA_fwd",
+    # V4 Flash AITER Lightning Indexer (CSA sparse KV selection).
+    "aiter::cp_gather_indexer_k_quant_cache": "SDPA_fwd",
+    "aiter::indexer_score_topk": "SDPA_fwd",
+    "aiter::_top_k_per_row_prefill": "SDPA_fwd",
+    # V4 Flash AITER MoE (fused forward, expert routing).
+    "aiter::moe_forward": "MoE_fused",
+    "aiter::topk_use_mulblocks": "MoE_fused",
+    # V4 Flash AITER GEMMs (FP8 block-scaled, BF16).
+    "aiter::gemm_a8w8_blockscale_preshuffle_impl": "GEMM",
+    "aiter::gemm_a16w16_": "GEMM",
+    "aiter::gemm_a16w16": "GEMM",
+    # V4 Flash AITER fused RMSNorm + quantization.
+    "aiter::rmsnorm_quant": "NORM_fwd",
+    "aiter::_aiter_rms_quant": "NORM_fwd",
+    "aiter::rmsnorm": "NORM_fwd",
+    # V4 Flash AITER quantization ops.
+    "aiter::per_group_quant_hip": "elementwise",
+    "aiter::dynamic_per_token_scaled_quant": "elementwise",
+    # V4 Flash AITER elementwise ops (activation, RoPE).
+    "aiter::silu_and_mul": "elementwise",
+    "aiter::rope_rotate_activation": "elementwise",
 }
 
 
