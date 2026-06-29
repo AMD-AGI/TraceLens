@@ -368,6 +368,50 @@ def categorize_torch_op(row):
         return "elementwise"
     elif row["name"] in dict_cat2names.get("Reduce", []):
         return "reduce"
+    # V4 Flash AITER attention ops (CSA/HCA fused attention + output projection)
+    elif row["name"] in [
+        "aiter::v4_attention_with_output",
+    ]:
+        return "SDPA_fwd"
+    # V4 Flash AITER Lightning Indexer (CSA sparse KV selection)
+    elif row["name"] in [
+        "aiter::cp_gather_indexer_k_quant_cache",
+        "aiter::indexer_score_topk",
+        "aiter::_top_k_per_row_prefill",
+    ]:
+        return "SDPA_fwd"
+    # V4 Flash AITER MoE (fused forward, expert routing)
+    elif row["name"] in [
+        "aiter::moe_forward",
+        "aiter::topk_use_mulblocks",
+    ]:
+        return "MoE_fused"
+    # V4 Flash AITER GEMMs (FP8 block-scaled, BF16)
+    elif row["name"] in [
+        "aiter::gemm_a8w8_blockscale_preshuffle_impl",
+        "aiter::gemm_a16w16_",
+        "aiter::gemm_a16w16",
+    ]:
+        return "GEMM"
+    # V4 Flash AITER fused RMSNorm + quantization
+    elif row["name"] in [
+        "aiter::rmsnorm_quant",
+        "aiter::_aiter_rms_quant",
+        "aiter::rmsnorm",
+    ]:
+        return "NORM_fwd"
+    # V4 Flash AITER quantization ops
+    elif row["name"] in [
+        "aiter::per_group_quant_hip",
+        "aiter::dynamic_per_token_scaled_quant",
+    ]:
+        return "elementwise"
+    # V4 Flash AITER elementwise ops (activation, RoPE)
+    elif row["name"] in [
+        "aiter::silu_and_mul",
+        "aiter::rope_rotate_activation",
+    ]:
+        return "elementwise"
     if "kernel_details" in row and len(row["kernel_details"]) > 0:
         kernel_name = row["kernel_details"][0]["name"]
         # else:
