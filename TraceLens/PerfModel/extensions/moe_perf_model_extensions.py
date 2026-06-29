@@ -1802,8 +1802,8 @@ class sglang_fused_append_shared_experts(BinaryElementwise):
 class BiasedGroupedTopk:
     """
     Performance model for aiter::biased_grouped_topk_hip (DeepSeek grouped MoE
-    router top-k). Memory-bound: 1 flop/element over the dominant tensor, bytes
-    summed over all operands.
+    router top-k). Memory-bound: 1 flop per routing-output element (M * topk, the
+    selected-expert decisions), bytes summed over all operands.
 
     Reference:
         sglang/python/sglang/srt/layers/moe/topk.py (biased_grouped_topk).
@@ -1839,9 +1839,18 @@ class BiasedGroupedTopk:
         return {"operands": operands}
 
     def flops(self):
+        # 1 flop per selected-expert decision (M * topk), matching MAIDAS' router
+        # convention rather than counting all M * num_experts gating logits.
         operands = self.param_details["operands"]
         if not operands:
             return 0
+        twod = [shape for shape, _ in operands if len(shape) == 2]
+        if twod:
+            logits = max(twod, key=prod)  # [M, num_experts]
+            m = logits[0]
+            outputs = [s for s in twod if s[0] == m and s[1] < logits[1]]
+            if outputs:
+                return prod(min(outputs, key=lambda s: s[1]))  # [M, topk]
         return max(prod(shape) for shape, _ in operands)
 
     def bytes(self):
