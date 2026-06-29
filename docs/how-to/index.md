@@ -9,21 +9,17 @@ instructions and the output you should expect. Each guide assumes you have
 already installed TraceLens (see
 [Installation instructions](../install/installation.md)).
 
-- [Generate a PyTorch performance report](./generate-perf-report.md) — Produce a
-  multi-sheet Excel report from a `torch.profiler` trace and interpret the key
-  sheets.
-- [Add roofline analysis](./roofline-analysis.md) — Classify operations as
-  compute-bound or memory-bound using a GPU architecture specification.
+- [Generate a PyTorch performance report](./generate-perf-report-pytorch.md) —
+  Produce a multi-sheet Excel report from a `torch.profiler` trace, add roofline
+  classification and recompute detection, and interpret the key sheets.
+- [Generate a JAX performance report](./generate-perf-report-jax.md) — Analyze an
+  XPlane protobuf trace, including GPU-event and GEMM analysis.
+- [Generate a rocprof performance report](./generate-perf-report-rocprof.md) —
+  Analyze `rocprofv3` JSON and `.pftrace` traces.
 - [Compare two traces](./compare-traces.md) — Quantify the impact of a change by
   diffing two reports.
 - [Generate a collective-communication report](./collective-report.md) — Analyze
   multi-GPU collective operations across ranks.
-- [Analyze rocprofv3 JSON traces](./rocprof-reports.md) — Generate a report from
-  a rocprofv3 `*_results.json` trace.
-- [Analyze rocprofv3 pftrace files](./pftrace-reports.md) — Generate activity,
-  API↔kernel, and memory-copy reports from Perfetto-style traces.
-- [Analyze JAX traces](./jax-reports.md) — Generate a report from a JAX XPlane
-  protobuf trace.
 - [Replay a single operation](./event-replay.md) — Extract one operation into a
   standalone reproducer.
 - [Fuse multi-rank traces](./trace-fusion.md) — Merge per-rank traces for

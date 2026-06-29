@@ -4,7 +4,7 @@
 version: 2
 
 sphinx:
-  configuration: docs_new/conf.py
+  configuration: docs/conf.py
 
 build:
   os: ubuntu-22.04
@@ -13,4 +13,4 @@ build:
 
 python:
   install:
-  - requirements: docs_new/sphinx/requirements.txt
+  - requirements: docs/sphinx/requirements.txt

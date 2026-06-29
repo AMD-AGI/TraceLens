@@ -27,13 +27,11 @@ subtrees:
     - file: how-to/index
       title: How-to guides
       entries:
-      - file: how-to/generate-perf-report
-      - file: how-to/roofline-analysis
+      - file: how-to/generate-perf-report-pytorch
+      - file: how-to/generate-perf-report-jax
+      - file: how-to/generate-perf-report-rocprof
       - file: how-to/compare-traces
       - file: how-to/collective-report
-      - file: how-to/rocprof-reports
-      - file: how-to/pftrace-reports
-      - file: how-to/jax-reports
       - file: how-to/event-replay
       - file: how-to/trace-fusion
 

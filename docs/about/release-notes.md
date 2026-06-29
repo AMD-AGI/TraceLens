@@ -21,8 +21,11 @@ automated GPU trace analysis, available as command-line tools and a Python SDK.
   a unique-argument table, roofline metrics, and an optional short-kernel study.
   Compressed traces (`.zip`, `.gz`) are supported.
 - **PyTorch inference reports** — `TraceLens_generate_perf_report_pytorch_inference`
-  adds inference-oriented analysis, including grouping kernel launchers by
-  parent `nn.Module` and optional kernel-overlap sheets.
+  adds analysis for LLM-serving traces (vLLM/SGLang). It merges CUDA-graph
+  capture traces into graph-replay traces (`--capture_folder`) to recover
+  call-stack and shape information lost in graph mode, and uses per-step request
+  annotations (prefill/decode counts and token statistics) to drive
+  inference-specific roofline models for paged attention and fused MoE.
 - **JAX reports** — `TraceLens_generate_perf_report_jax` builds reports from JAX
   XPlane protobuf traces, with optional kernel-metadata keyword filtering.
 - **rocprofv3 JSON reports** — `TraceLens_generate_perf_report_rocprof` builds
