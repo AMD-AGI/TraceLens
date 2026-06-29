@@ -78,6 +78,8 @@ def get_pseudo_op_mappings():
         "vllm::_rocm_aiter_preshuffled_per_token_w8a8_gemm": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
         "aiter::gemm_a16w16": perf_model_extensions.gemm_a16w16,
+        "aiter::fused_dynamic_mx_quant_moe_sort_hip": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip,
+        "aiter::fused_qk_rope_concat_and_cache_mla": perf_model_extensions.fused_qk_rope_concat_and_cache_mla,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
         "aiter::_gemm_a16w16_asm": perf_model_extensions.gemm_a16w16_atomic_,
         "sglang_profiler::gemm_kernels_flydsl_hgemm": perf_model_extensions.gemm_a16w16_atomic_,
@@ -107,6 +109,7 @@ def get_pseudo_op_mappings():
         "vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant,
         "vllm::rocm_aiter_triton_add_rmsnorm_pad": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
         "sglang_profiler::fused_mxfp4_quant_fused_rms_mxfp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
+        "aiter::_fuse_rmsnorm_fp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
         ## Collective ops
         "aiter::fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm,
         "aiter::fused_allreduce_rmsnorm_": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
@@ -150,4 +153,5 @@ def get_pseudo_op_category_only_mappings():
         "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": "MoE_aux",
         "aiter::unified_attention_with_output_base->_fused_qk_rope_reshape_and_cache_kernel (Synthetic Op)": "FusedRoPE",
         "hipModuleLaunchKernel->kv_indices_generate_kernel (Synthetic Op)": "InferenceAttention",
+        "aiter::get_mla_metadata_v1": "InferenceAttention",
     }

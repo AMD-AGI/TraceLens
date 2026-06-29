@@ -827,6 +827,34 @@ class fused_flatten_mxfp4_quant(UnaryElementwise):
         return bytes_read + bytes_write_fp4 + bytes_write_scales
 
 
+class fused_dynamic_mx_quant_moe_sort_hip(fused_flatten_mxfp4_quant):
+    """
+    Performance model for aiter::fused_dynamic_mx_quant_moe_sort_hip
+    (kernel aiter::fused_mx_quant_moe_sort_kernel<bf16, fp4, ...>).
+
+    Fuses dynamic MXFP4 quantization of the BF16 activation with MoE token sort.
+    Trace arg layout differs from fused_flatten_mxfp4_quant only in input
+    position: [0] is the packed FP4 output (M, N/2), [1] the E8M0 block scales,
+    [2] the BF16 activation input (M, N), and [3]/[4] the int sort arrays.
+
+    Approximation: models the quant traffic over the activation input. The MoE
+    sort index permutation (small int arrays) and the padded sorted-layout rows
+    are runtime-dependent and excluded.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][2])
+        dtype_in = event["args"]["Input type"][2]
+        stride_input = tuple(event["args"]["Input Strides"][2])
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_in),
+            "stride_input": stride_input,
+            "stride_output": None,
+        }
+
+
 class aiter_rope_cached_positions_2c_fwd_impl(FusedRoPE):
     """
     Performance model for aiter::rope_cached_positions_2c_fwd_impl.
@@ -1130,6 +1158,60 @@ class aiter_fused_qk_rope_cat_and_cache_mla(FusedRoPE):
 
     def get_compute_precision(self):
         return torch_dtype_map(self.param_details["dtype_in"])
+
+
+class fused_qk_rope_concat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla):
+    """
+    Performance model for aiter::fused_qk_rope_concat_and_cache_mla
+    (kernel fuse_qk_rope_concat_and_cache_mla_per_head_kernel; DeepSeek-V3.1 MLA).
+
+    RoPE on the pe slices of Q/K + static FP8 quant + paged KV-cache write.
+    Trace arg layout: [0] q_nope (T, QH, D_lora), [1] q_pe (T, QH, D_pe),
+    [2] kv_c (T, D_lora), [3] k_pe (T, D_pe), [4] kv_cache (FP8 paged),
+    [5] q_out (T, QH, D_lora + D_pe), FP8.
+
+    the KV is the single MLA latent (kv_c / k_pe are 2D, so KH = 1),
+    and both q_out and the KV cache are FP8
+    (the base assumes q_out keeps the BF16 input dtype).
+
+    Approximation: only the T written KV slots are counted, not the full paged
+    cache tensor at Input Dims[4]; cos/sin/positions are small / cache-resident;
+    the per-tensor FP8 quant flops are omitted.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        T, QH, D_lora = tuple(dims[0])
+        D_pe = dims[1][2]
+        KH = 1  # MLA single latent KV head (kv_c / k_pe are 2D [T, D])
+        dtype_in = types[0]
+        dtype_kv = types[4] if len(types) > 4 and types[4] else dtype_in
+        dtype_out = types[5] if len(types) > 5 and types[5] else dtype_in
+        return {
+            "T": T,
+            "QH": QH,
+            "KH": KH,
+            "D_lora": D_lora,
+            "D_pe": D_pe,
+            "dtype_in": dtype_in,
+            "dtype_kv": dtype_kv,
+            "dtype_out": dtype_out,
+        }
+
+    def bytes(self):
+        p = self.param_details
+        if self.bpe_in is None:
+            return None
+        bpe_out = name2bpe(p["dtype_out"]) or self.bpe_in
+        bpe_kv = self.bpe_kv if self.bpe_kv is not None else self.bpe_in
+        T, QH, KH, D_lora, D_pe = (p["T"], p["QH"], p["KH"], p["D_lora"], p["D_pe"])
+        read_q = (T * QH * D_lora + T * QH * D_pe) * self.bpe_in
+        read_k = (T * KH * D_lora + T * KH * D_pe) * self.bpe_in
+        write_q = T * QH * (D_lora + D_pe) * bpe_out
+        write_kv = T * KH * (D_lora + D_pe) * bpe_kv
+        return read_q + read_k + write_q + write_kv
 
 
 class sglang_quant_dynamic_mxfp4_quant(fused_flatten_mxfp4_quant):
