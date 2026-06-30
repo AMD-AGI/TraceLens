@@ -14,29 +14,26 @@ subtrees:
   - file: reference/compatibility
     title: Compatibility matrix
 
-  - caption: Install
-    entries:
-    - file: install/installation
-      title: Install TraceLens
+- caption: Install
+  entries:
+  - file: install/installation
+    title: Install TraceLens
 
-  - caption: How to
-    entries:
-    - caption: Generate reports
-      entries:
-      - file: how-to/generate-perf-report-pytorch
-      - file: how-to/generate-perf-report-jax
-      - file: how-to/generate-perf-report-rocprof
-    - file: how-to/collective-report
-    - file: how-to/compare-traces
-    - file: how-to/event-replay
-    - file: how-to/trace-fusion
+- caption: How to
+  entries:
+  - glob: how-to/generate-perf-report-*
+    title: Generate reports
+  - file: how-to/collective-report
+  - file: how-to/compare-traces
+  - file: how-to/event-replay
+  - file: how-to/trace-fusion
 
-  - caption: Reference
-    entries:
-    - file: reference/api-reference
-      title: API reference
+- caption: Reference
+  entries:
+  - file: reference/api-reference
+    title: API reference
 
-  - caption: About
-    entries:
-    - file: about/license
-      title: License
+- caption: About
+  entries:
+  - file: about/license
+    title: License
