@@ -21,15 +21,15 @@ subtrees:
 
   - caption: How to
     entries:
-      - caption: Generate reports
-        entries:
-        - file: how-to/generate-perf-report-pytorch
-        - file: how-to/generate-perf-report-jax
-        - file: how-to/generate-perf-report-rocprof
-        - file: how-to/collective-report
-      - file: how-to/compare-traces
-      - file: how-to/event-replay
-      - file: how-to/trace-fusion
+    - caption: Generate reports
+      entries:
+      - file: how-to/generate-perf-report-pytorch
+      - file: how-to/generate-perf-report-jax
+      - file: how-to/generate-perf-report-rocprof
+    - file: how-to/collective-report
+    - file: how-to/compare-traces
+    - file: how-to/event-replay
+    - file: how-to/trace-fusion
 
   - caption: Reference
     entries:
