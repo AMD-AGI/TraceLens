@@ -1,32 +1,63 @@
-###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
-"""Configuration file for the Sphinx documentation builder.
-
-This file only contains a selection of the most common options. For a full
-list see the documentation:
-https://www.sphinx-doc.org/en/master/usage/configuration.html
-
-For options specific to rocm-docs-core, see the user guide:
-https://rocm.docs.amd.com/projects/rocm-docs-core/en/latest/
+"""
+html_theme is usually unchanged (rocm_docs_theme).
+flavor defines the site header display, select the flavor for the corresponding portals
+flavor options: rocm, rocm-docs-home, rocm-blogs, rocm-ds, instinct, ai-developer-hub, local, generic
 """
 
-# project info
+version_number = "0.1.0"
+
+html_theme = "rocm_docs_theme"
+html_theme_options = {
+    "flavor": "generic",
+    "header_title": f"TraceLens {version_number}",
+    "header_link": False,
+    "version_list_link": False,
+    "nav_secondary_items": {
+        "GitHub": False,
+        "Community": False,
+        "Blogs": "https://rocm.blogs.amd.com/",
+        "ROCm Developer Hub": "https://www.amd.com/en/developer/resources/rocm-hub.html",
+        "Instinct™ Docs": "https://instinct.docs.amd.com/",
+        "Infinity Hub": "https://www.amd.com/en/developer/resources/infinity-hub.html",
+        "Support": False,
+    },
+    "link_main_doc": False,
+}
+
+# This section turns on/off article info
+setting_all_article_info = True
+all_article_info_os = ["linux"]
+all_article_info_author = ""
+
+# for PDF output on Read the Docs
 project = "TraceLens"
 author = "Advanced Micro Devices, Inc."
 copyright = "Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved."
-version = "0.1.0"
-release = "0.1.0"
+version = version_number
+release = version_number
 
-# rocm-docs-core provides the ROCm theme, the table-of-contents handling,
-# and the shared "external project" cross-references.
-extensions = ["rocm_docs"]
+external_toc_path = "./sphinx/_toc.yml"  # Defines Table of Content structure definition path
 
-external_toc_path = "./sphinx/_toc.yml"
+"""
+Doxygen Settings
+Ensure Doxyfile is located at docs/doxygen.
+If the component does not need doxygen, delete this section for optimal build time
+"""
+# doxygen_root = "doxygen"
+# doxysphinx_enabled = True
+# doxygen_project = {
+#    "name": "doxygen",
+#    "path": "doxygen/xml",
+# }
 
-html_theme = "rocm_docs_theme"
-html_theme_options = {"flavor": "rocm"}
-html_title = f"{project} {version} documentation"
+# Add more addtional package accordingly
+extensions = [
+    "rocm_docs",
+    "sphinxcontrib.mermaid"
+]
+
+myst_fence_as_directive = ["mermaid"]
+
+html_title = f"{project} {version_number} documentation"
+
+external_projects_current_project = "TraceLens"

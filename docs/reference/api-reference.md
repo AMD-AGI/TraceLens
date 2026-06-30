@@ -1,10 +1,11 @@
-<!--
-Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+---
+myst:
+    html_meta:
+        "description": "Complete reference for TraceLens command-line tools and Python SDK modules, including arguments and output descriptions for all report generators."
+        "keywords": "TraceLens, API reference, command-line tools, Python SDK, ROCm, GPU trace, performance report, PyTorch, JAX, rocprofv3, roofline, CLI"
+---
 
-See LICENSE for license information.
--->
-
-# API reference
+# TraceLens API reference
 
 TraceLens exposes two complementary interfaces:
 
@@ -17,6 +18,8 @@ summarizes the SDK modules. Run any tool with `--help` for the complete,
 version-specific argument list.
 
 ## Command-line tools
+
+The following sections document each tool's main arguments and expected output.
 
 ### TraceLens_generate_perf_report_pytorch
 
@@ -195,3 +198,10 @@ For a class- and function-level SDK reference generated directly from
 docstrings, build the documentation against the TraceLens source with a Sphinx
 autodoc/autosummary extension.
 ```
+
+## Related topics
+
+- [What is TraceLens?](../what-is-tracelens.md)
+- [Install TraceLens](../install/installation.md)
+- [Compatibility matrix](../reference/compatibility.md)
+- [Release notes](../about/release-notes.md)

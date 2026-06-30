@@ -1,14 +1,14 @@
-<!--
-Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
+---
+myst:
+    html_meta:
+        "description": "Full text of the MIT License under which TraceLens is released by Advanced Micro Devices, Inc."
+        "keywords": "TraceLens, MIT License, open source, AMD, license text"
+---
 
 # License
 
 TraceLens is released under the MIT License.
 
-```text
 MIT License
 
 Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
@@ -30,4 +30,4 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-```
+

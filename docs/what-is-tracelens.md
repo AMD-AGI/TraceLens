@@ -1,10 +1,11 @@
-<!--
-Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+---
+myst:
+    html_meta:
+        "description": "Learn what TraceLens is and what it does — an open-source Python library from AMD for automated GPU trace analysis, roofline modeling, and distributed workload profiling."
+        "keywords": "TraceLens, GPU trace analysis, ROCm, AMD, PyTorch profiler, JAX, rocprofv3, roofline, distributed training, performance report, open source"
+---
 
-See LICENSE for license information.
--->
-
-# TraceLens documentation
+# What is TraceLens?
 
 TraceLens is an open-source Python library developed by AMD that automates
 performance analysis from GPU trace files. Instead of manually inspecting raw
@@ -16,8 +17,8 @@ diagnostics.
 
 TraceLens can pinpoint whether a kernel is compute-bound or memory-bound,
 separate true communication time from synchronization skew in distributed
-workloads, and compare traces side by side to quantify the impact of code or
-configuration changes. It is available both as a set of command-line tools for
+workloads, and compare traces side-by-side to quantify the impact of code or
+configuration changes. It's available as a set of command-line tools for
 quick report generation and as a Python SDK for building custom analysis
 workflows, making it useful for one-off debugging and repeatable performance
 regression testing alike.
@@ -26,6 +27,8 @@ The TraceLens source code is hosted at
 [github.com/AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens).
 
 ## What TraceLens does
+
+TraceLens provides these capabilities:
 
 - **Hierarchical performance breakdowns** — Pinpoint bottlenecks with a
   top-down view, moving from the overall GPU timeline (idle/busy) to operator
@@ -42,11 +45,13 @@ The TraceLens source code is hosted at
   hardware and software versions.
 - **Event replay** — Isolate any operation for focused debugging. TraceLens
   generates minimal, self-contained replay scripts from trace metadata, making
-  it simple to share IP-safe reproducers with kernel developers.
+  it straightforward to share IP-safe reproducers with kernel developers.
 - **Extensible SDK** — Start with ready-to-use scripts, then build custom
   workflows with a flexible Python API.
 
 ## Use cases
+
+TraceLens is suited to these scenarios:
 
 - **Performance debugging** — Find the operators and kernels responsible for low
   GPU utilization in a training or inference workload.
@@ -59,35 +64,9 @@ The TraceLens source code is hosted at
 - **Reproducer generation** — Extract a single operator into a standalone replay
   script to share with kernel or framework developers.
 
-## Documentation overview
-
-::::{grid} 1 2 2 2
-:gutter: 3
-
-:::{grid-item-card} Release information
-- [Release notes](./about/release-notes.md)
-- [Compatibility matrix](./reference/compatibility.md)
-:::
-
-:::{grid-item-card} Install
-- [Installation instructions](./install/installation.md)
-:::
-
-:::{grid-item-card} Reference
-- [API reference](./reference/api-reference.md)
-:::
-
-:::{grid-item-card} How to
-- [How-to guides](./how-to/index.md)
-:::
-
-:::{grid-item-card} About
-- [License](./about/license.md)
-:::
-
-::::
-
 ## Supported profile formats
+
+TraceLens supports these trace formats:
 
 | Format | Source tool | Report CLI |
 |--------|-------------|------------|
@@ -103,17 +82,19 @@ Hands-on notebooks in the repository walk through the core features:
 
 | Example | What it covers |
 |---------|----------------|
-| `examples/trace2tree_example.ipynb` | Navigate the hierarchical event tree — link Python ops, CPU dispatches, and GPU kernels |
-| `examples/tree_perf_example.ipynb` | GPU-timeline breakdown, per-op performance, and roofline metrics via the SDK |
-| `examples/nn_module_view.ipynb` | GPU time broken down by `nn.Module` |
-| `examples/nccl_analyser_example.ipynb` | Multi-rank collective analysis: latency, bandwidth, skew |
-| `examples/trace_diff_example.ipynb` | Morphological comparison of two trace trees |
-| `examples/event_replayer_example.ipynb` | Extract and replay operations for isolated debugging |
-| `examples/trace_fusion_example.py` | Merge multi-rank PyTorch traces for Perfetto visualization |
-| `examples/roofline_plots_example.ipynb` | Roofline-style visualizations for specific operators |
-| `examples/jax_nccl_analyser_example.ipynb` | Bandwidth analysis for JAX collectives from XPlane traces |
+| [`examples/trace2tree_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace2tree_example.ipynb) | Navigate the hierarchical event tree — link Python ops, CPU dispatches, and GPU kernels |
+| [`examples/tree_perf_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/tree_perf_example.ipynb) | GPU-timeline breakdown, per-op performance, and roofline metrics using the SDK |
+| [`examples/nn_module_view.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/nn_module_view.ipynb) | GPU time broken down by `nn.Module` |
+| [`examples/nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/nccl_analyser_example.ipynb) | Multi-rank collective analysis: latency, bandwidth, skew |
+| [`examples/trace_diff_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace_diff_example.ipynb) | Morphological comparison of two trace trees |
+| [`examples/event_replayer_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/event_replayer_example.ipynb) | Extract and replay operations for isolated debugging |
+| [`examples/trace_fusion_example.py`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace_fusion_example.py) | Merge multi-rank PyTorch traces for Perfetto visualization |
+| [`examples/roofline_plots_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/roofline_plots_example.ipynb) | Roofline-style visualizations for specific operators |
+| [`examples/jax_nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/jax_nccl_analyser_example.ipynb) | Bandwidth analysis for JAX collectives from XPlane traces |
 
-## License
+## Related topics
 
-TraceLens is released under the MIT License. For the full text, see the
-[License](./about/license.md) page.
+- [Install TraceLens](./install/installation.md)
+- [API reference](./reference/api-reference.md)
+- [Compatibility matrix](./reference/compatibility.md)
+- [Release notes](./about/release-notes.md)

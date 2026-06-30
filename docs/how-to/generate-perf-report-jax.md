@@ -1,8 +1,9 @@
-<!--
-Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
+---
+myst:
+    html_meta:
+        "description": "Learn how to generate a TraceLens performance report from a JAX XPlane protobuf trace, including GPU-event and GEMM analysis."
+        "keywords": "TraceLens, JAX, XPlane, protobuf, GPU trace, GEMM, performance report, roofline, ROCm, AMD Instinct, xprof"
+---
 
 # Generate a JAX performance report
 
@@ -13,13 +14,13 @@ performance.
 
 ## Prerequisites
 
-- TraceLens installed (see [Installation instructions](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/installation.md)).
 - A JAX XPlane protobuf trace (`xplane.pb`). JAX parsing uses the `xprof`
   dependency, installed automatically with TraceLens.
 
 ```{note}
 JAX protobuf parsing has been validated with `tensorboard` 2.19.0,
-`tensorboard-plugin-profile` 2.19.0, and `protobuf` 5.29.2. Other versions may
+`tensorboard-plugin-profile` 2.19.0, and `protobuf` 5.29.2. Other versions might
 not work.
 ```
 
@@ -96,3 +97,9 @@ Options:
   [collective-communication report](./collective-report.md).
 - Analyze [PyTorch](./generate-perf-report-pytorch.md) or
   [rocprof](./generate-perf-report-rocprof.md) traces.
+
+## Related topics
+
+- [What is TraceLens?](../what-is-tracelens.md)
+- [Install TraceLens](../install/installation.md)
+- [API reference](../reference/api-reference.md)

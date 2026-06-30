@@ -1,8 +1,9 @@
-<!--
-Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
+---
+myst:
+    html_meta:
+        "description": "Learn how to compare two TraceLens performance reports side by side to quantify the impact of code, library, or hardware changes on GPU performance."
+        "keywords": "TraceLens, trace comparison, TraceDiff, performance regression, GPU benchmark, ROCm, PyTorch profiler, diff, roofline, GEMM"
+---
 
 # Compare two traces
 
@@ -25,7 +26,7 @@ the matching to be:
 
 ## Prerequisites
 
-- TraceLens installed (see [Installation instructions](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/installation.md)).
 - Two generated reports (`.xlsx`), one per configuration. Generate them with
   [TraceLens_generate_perf_report_pytorch](./generate-perf-report-pytorch.md).
 
@@ -178,3 +179,13 @@ TraceLens_generate_perf_report_pytorch \
 See the
 [`trace_diff_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace_diff_example.ipynb)
 notebook for a worked example.
+
+## Related topics
+
+- [What is TraceLens?](../what-is-tracelens.md)
+- [Install TraceLens](../install/installation.md)
+- [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
+- [Generate a JAX performance report](./generate-perf-report-jax.md)
+- [Generate a rocprof performance report](./generate-perf-report-rocprof.md)
+- [Generate a collective-communication report](./collective-report.md)
+- [API reference](../reference/api-reference.md)

@@ -1,12 +1,13 @@
-<!--
-Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+---
+myst:
+    html_meta:
+        "description": "Step-by-step instructions to install TraceLens from GitHub or source, verify the installation, and set up traceconv for Perfetto pftrace input."
+        "keywords": "TraceLens, install, pip, Python, ROCm, GPU trace analysis, traceconv, pftrace, virtual environment, open source"
+---
 
-See LICENSE for license information.
--->
+# Install TraceLens
 
-# Installation instructions
-
-This page provides step-by-step instructions to install TraceLens and verify
+This topic provides step-by-step instructions to install TraceLens and verify
 the installation. TraceLens is distributed as a Python package; install it with
 `pip` either directly from the public GitHub repository (recommended) or from a
 local source checkout for development.
@@ -54,13 +55,13 @@ pip install -e .[dev]
 python -m pytest tests/ -v
 ```
 
-## Optional: traceconv for .pftrace input
+## Optional: `traceconv` for `.pftrace` input
 
 `traceconv` is needed only when you pass a Perfetto-style `.pftrace` trace
 (produced by `rocprofv3 --output-format pftrace`) to one of the pftrace report
 tools (`TraceLens_generate_perf_report_pftrace_hip_activity`, `..._hip_api`, or
 `..._memory_copy`); it converts the `.pftrace` to JSON. The other report tools
-(PyTorch, JAX, rocprofv3 JSON) do not use it. You do not need to install it
+(PyTorch, JAX, rocprofv3 JSON) don't use it. You don't need to install it
 manually:
 
 - If `traceconv` is on your `PATH`, TraceLens uses it.
@@ -71,6 +72,8 @@ manually:
   `--traceconv /path/to/traceconv`.
 
 ## Verify the installation
+
+Run the following checks to confirm TraceLens is installed correctly:
 
 1. Confirm the package imports:
 
@@ -102,3 +105,9 @@ manually:
 - Follow the [How-to guides](../how-to/index.md) for step-by-step examples.
 - See the [API reference](../reference/api-reference.md) for the full set of
   command-line tools and their arguments.
+
+## Related topics
+
+- [What is TraceLens?](../what-is-tracelens.md)
+- [Release notes](../about/release-notes.md)
+- [Compatibility matrix](../reference/compatibility.md)
