@@ -610,6 +610,7 @@ def generate_perf_report_pytorch(
             "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
             "sglang_profiler::attention_paged_attention_ragged",
             "aiter::mha_batch_prefill",
+            "aiter::pa_decode_gluon",
         ]
     )
 
@@ -1157,15 +1158,14 @@ def generate_perf_report_pytorch(
 
     # Write CSVs and/or Excel (independent options)
     if output_csvs_dir:
-        # Ensure the output directory exists
         os.makedirs(output_csvs_dir, exist_ok=True)
         for sheet_name, df in dict_name2df.items():
             csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
             df.to_csv(csv_path, index=False)
             print(f"DataFrame '{sheet_name}' written to {csv_path}")
-    else:
+
+    if output_xlsx_path is not None or output_csvs_dir is None:
         if output_xlsx_path is None:
-            # split input path at 'json' and take the first part and append '.xlsx'
             base_path = profile_json_path.rsplit(".json", 1)[0]
             output_xlsx_path = base_path + "_perf_report.xlsx"
         try:
