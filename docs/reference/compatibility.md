@@ -1,8 +1,9 @@
-<!--
-Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
+---
+myst:
+    html_meta:
+        "description": "TraceLens compatibility matrix: supported Python versions, operating systems, trace formats, and validated GPU accelerators for roofline analysis."
+        "keywords": "TraceLens, compatibility, Python, ROCm, AMD Instinct, MI300X, PyTorch profiler, JAX, rocprofv3, pftrace, GPU, Linux"
+---
 
 # Compatibility matrix
 
@@ -63,7 +64,7 @@ the peak FLOPS and peak bandwidth for the target accelerator (for example,
 
 | Accelerator | Notes |
 |-------------|-------|
-| AMD Instinct MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
+| AMD Instinct™ MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
 
 ```{note}
 Add validated accelerator and ROCm combinations to these tables as they are
@@ -79,3 +80,10 @@ specific ROCm versions validated for each TraceLens release here.
 | TraceLens version | Validated ROCm versions |
 |-------------------|-------------------------|
 | 0.1.0 | To be confirmed per release |
+
+## Related topics
+
+- [What is TraceLens?](../what-is-tracelens.md)
+- [Install TraceLens](../install/installation.md)
+- [Release notes](../about/release-notes.md)
+- [API reference](../reference/api-reference.md)

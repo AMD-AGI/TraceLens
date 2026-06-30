@@ -1,8 +1,9 @@
-<!--
-Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
+---
+myst:
+    html_meta:
+        "description": "Learn how to generate a multi-GPU collective-communication report with TraceLens to diagnose scaling issues and separate communication from skew."
+        "keywords": "TraceLens, collective communication, NCCL, multi-GPU, distributed training, AllReduce, AllGather, bandwidth, skew, straggler, ROCm, PyTorch profiler"
+---
 
 # Generate a collective-communication report
 
@@ -12,7 +13,7 @@ synchronization skew.
 
 ## Prerequisites
 
-- TraceLens installed (see [Installation instructions](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/installation.md)).
 - Per-rank PyTorch profiler traces from a distributed run (one trace per rank).
 
 ## Step 1: Generate the report
@@ -160,3 +161,11 @@ TraceLens_generate_multi_rank_collective_report_pytorch \
   [`nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/nccl_analyser_example.ipynb)
   notebook in the repository.
 - For JAX collectives, see [Generate a JAX performance report](./generate-perf-report-jax.md).
+
+## Related topics
+
+- [What is TraceLens?](../what-is-tracelens.md)
+- [Install TraceLens](../install/installation.md)
+- [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
+- [Fuse multi-rank traces](./trace-fusion.md)
+- [API reference](../reference/api-reference.md)

@@ -1,8 +1,9 @@
-<!--
-Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
+---
+myst:
+    html_meta:
+        "description": "Learn how to generate a multi-sheet Excel performance report from a PyTorch torch.profiler trace using TraceLens, including roofline analysis."
+        "keywords": "TraceLens, PyTorch profiler, torch.profiler, GPU trace, performance report, roofline, GEMM, ROCm, AMD Instinct, activation recompute, CUDA migration"
+---
 
 # Generate a PyTorch performance report
 
@@ -11,10 +12,14 @@ performance report, then read the sheets to find what dominates GPU time.
 
 ## Prerequisites
 
-- TraceLens installed (see [Installation instructions](../install/installation.md)).
+Before generating a report, confirm you have the following:
+
+- TraceLens installed (see [Install TraceLens](../install/installation.md)).
 - A `torch.profiler` Chrome trace (`.json` or `.json.gz`).
 
 ## Generate the report
+
+Pass the trace path to generate the default Excel report:
 
 ```bash
 TraceLens_generate_perf_report_pytorch --profile_json_path path/to/trace.json
@@ -43,6 +48,8 @@ output, while passing it together with `--output_xlsx_path` produces both. The
 missing.
 
 ## The report sheets
+
+The generated workbook contains the following sheets:
 
 | Sheet | Description |
 |-------|-------------|
@@ -124,7 +131,7 @@ as `is_recompute=True`. This requires `python_function` events in the trace,
 which the flag enables automatically. The `is_recompute` column is added to the
 `gpu_timeline`, `ops_summary_by_category`, `ops_summary`, `ops_unique_args`, and
 `unified_perf_summary` sheets, splitting rows into recompute vs non-recompute.
-This makes it easy to answer questions like what percentage of GPU time is
+Use it to answer questions like what percentage of GPU time is
 recomputation, which layers are recomputed and at what cost, and whether the
 overhead is acceptable for the memory saved. When the flag is not set there is
 zero overhead — no extra columns and no `python_function` parsing.
@@ -143,11 +150,11 @@ print(df["is_recompute"].value_counts())
 
 `--extension_file` injects custom logic into the report pipeline — useful for
 pseudo-op injection, custom perf models, or new op categories. The Python file
-may define any of:
+can define any of:
 
 | Symbol | Type | Purpose |
 |--------|------|---------|
-| `tree_postprocess_extension` | `Callable` | Called with `perf_analyzer.tree`; modify the tree post-construction. |
+| `tree_postprocess_extension` | `Callable` | Called with `perf_analyzer.tree`; update the tree post-construction. |
 | `perf_model_extension` | `dict` | Map op name → custom perf-model class; overrides or extends built-in models. |
 | `op_category_extension` | `dict` | Map category-only op names to final categories, so an op appears in unified reports without a perf model. |
 
@@ -193,3 +200,9 @@ See the example extension file for MegatronLM in the
   [EventReplay](./event-replay.md).
 - Analyze [JAX](./generate-perf-report-jax.md) or
   [rocprof](./generate-perf-report-rocprof.md) traces.
+
+## Related topics
+
+- [What is TraceLens?](../what-is-tracelens.md)
+- [Install TraceLens](../install/installation.md)
+- [API reference](../reference/api-reference.md)

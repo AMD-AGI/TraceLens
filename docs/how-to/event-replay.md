@@ -1,8 +1,9 @@
-<!--
-Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
+---
+myst:
+    html_meta:
+        "description": "Learn how to isolate a single GPU operation into a minimal, self-contained replay script using TraceLens EventReplay for focused debugging."
+        "keywords": "TraceLens, EventReplay, GPU debugging, reproducer, operator replay, PyTorch profiler, ROCm, kernel isolation, IP-safe"
+---
 
 # Replay a single operation
 
@@ -12,7 +13,7 @@ reproducers with kernel or framework developers.
 
 ## Prerequisites
 
-- TraceLens installed (see [Installation instructions](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/installation.md)).
 - A PyTorch profiler trace containing the operation you want to isolate.
 
 ## How it works
@@ -98,3 +99,10 @@ runs without TraceLens or the original model. The bundle contains:
 See the
 [`event_replayer_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/event_replayer_example.ipynb)
 notebook for end-to-end IR extraction and packaging.
+
+## Related topics
+
+- [What is TraceLens?](../what-is-tracelens.md)
+- [Install TraceLens](../install/installation.md)
+- [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
+- [API reference](../reference/api-reference.md)

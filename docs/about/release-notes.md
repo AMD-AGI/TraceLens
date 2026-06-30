@@ -1,8 +1,9 @@
-<!--
-Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
+---
+myst:
+    html_meta:
+        "description": "Release notes for TraceLens. Learn what features and SDK modules are available in each version, and see links to the compatibility matrix."
+        "keywords": "TraceLens, release notes, changelog, ROCm, GPU trace analysis, PyTorch, JAX, rocprofv3, SDK, performance report"
+---
 
 # Release notes
 
@@ -70,7 +71,7 @@ automated GPU trace analysis, available as command-line tools and a Python SDK.
   across hardware or software versions.
 - **Trace diff** — `TraceDiff` provides morphological comparison of two trace
   trees to pinpoint structural divergences (also available inline in the
-  PyTorch report via `--comparison_json_path`).
+  PyTorch report using `--comparison_json_path`).
 
 ### SDK modules
 
@@ -90,3 +91,9 @@ Version numbers, dates, and per-release validated configurations should be
 updated in this page and in the [Compatibility matrix](../reference/compatibility.md)
 with each new TraceLens release.
 ```
+
+## Related topics
+
+- [What is TraceLens?](../what-is-tracelens.md)
+- [Compatibility matrix](../reference/compatibility.md)
+- [Install TraceLens](../install/installation.md)
