@@ -1,4 +1,5 @@
 ---
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 myst:
     html_meta:
         "description": "Learn how to generate a TraceLens performance report from a JAX XPlane protobuf trace, including GPU-event and GEMM analysis."

@@ -1,4 +1,5 @@
 ---
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 myst:
     html_meta:
         "description": "Step-by-step instructions to install TraceLens from GitHub or source, verify the installation, and set up traceconv for Perfetto pftrace input."
@@ -100,14 +101,10 @@ Run the following checks to confirm TraceLens is installed correctly:
    Expected output: an Excel report (`.xlsx`) is written next to the trace,
    containing the GPU-timeline and operator-summary sheets.
 
-## Next steps
-
-- Follow the [How-to guides](../how-to/index.md) for step-by-step examples.
-- See the [API reference](../reference/api-reference.md) for the full set of
-  command-line tools and their arguments.
-
 ## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
-- [Release notes](../about/release-notes.md)
-- [Compatibility matrix](../reference/compatibility.md)
+- [Generate TraceLens reports](../how-to/generate-reports.md)
+- [Compare two traces](../how-to/compare-traces.md)
+- [Replay a single operation](../how-to/event-replay.md)
+- [Fuse multi-rank traces](../how-to/trace-fusion.md)

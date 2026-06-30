@@ -1,4 +1,5 @@
 ---
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 myst:
     html_meta:
         "description": "Learn how to build a performance report from AMD ROCm rocprofiler-sdk traces (rocprofv3 JSON and Perfetto pftrace) using TraceLens."
