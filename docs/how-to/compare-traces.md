@@ -1,4 +1,5 @@
 ---
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 myst:
     html_meta:
         "description": "Learn how to compare two TraceLens performance reports side by side to quantify the impact of code, library, or hardware changes on GPU performance."

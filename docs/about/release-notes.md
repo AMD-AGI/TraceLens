@@ -1,4 +1,5 @@
 ---
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 myst:
     html_meta:
         "description": "Release notes for TraceLens. Learn what features and SDK modules are available in each version, and see links to the compatibility matrix."

@@ -1,4 +1,5 @@
 ---
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 myst:
     html_meta:
         "description": "Learn how to generate a multi-GPU collective-communication report with TraceLens to diagnose scaling issues and separate communication from skew."

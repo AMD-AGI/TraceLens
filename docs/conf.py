@@ -7,6 +7,7 @@ https://www.sphinx-doc.org/en/master/usage/configuration.html
 For options specific to rocm-docs-core, see the user guide:
 https://rocm.docs.amd.com/projects/rocm-docs-core/en/latest/
 """
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 # project info
 project = "TraceLens"

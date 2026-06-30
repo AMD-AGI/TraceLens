@@ -1,4 +1,5 @@
 ---
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 myst:
     html_meta:
         "description": "Complete reference for TraceLens command-line tools and Python SDK modules, including arguments and output descriptions for all report generators."

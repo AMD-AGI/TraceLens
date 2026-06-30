@@ -1,4 +1,5 @@
 ---
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 myst:
     html_meta:
         "description": "TraceLens compatibility matrix: supported Python versions, operating systems, trace formats, and validated GPU accelerators for roofline analysis."
