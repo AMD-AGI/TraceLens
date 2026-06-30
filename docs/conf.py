@@ -22,5 +22,21 @@ extensions = ["rocm_docs"]
 external_toc_path = "./sphinx/_toc.yml"
 
 html_theme = "rocm_docs_theme"
-html_theme_options = {"flavor": "rocm"}
+html_theme_options = {
+    "flavor": "generic",
+    "header_title": f"GEAK {version_number}",
+    "header_link": False,
+    "version_list_link": False,
+    "nav_secondary_items": {
+        "GitHub": False,
+        "Community": False,
+        "Blogs": "https://rocm.blogs.amd.com/",
+        "ROCm Developer Hub": "https://www.amd.com/en/developer/resources/rocm-hub.html",
+        "Instinct™ Docs": "https://instinct.docs.amd.com/",
+        "Infinity Hub": "https://www.amd.com/en/developer/resources/infinity-hub.html",
+        "Support": False,
+    },
+    "link_main_doc": False,
+}
+
 html_title = f"{project} {version} documentation"
