@@ -24,7 +24,7 @@ The TraceLens source code is hosted at `github.com/AMD-AGI/TraceLens <https://gi
 
    .. grid-item-card:: Install
 
-      * :doc:` Install TraceLens <install/installation>`
+      * :doc:`Install TraceLens <install/installation>`
 
    .. grid-item-card:: How to
 
