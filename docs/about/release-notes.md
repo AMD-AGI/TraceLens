@@ -1,12 +1,13 @@
 ---
 # Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# See LICENSE for license information.
 myst:
     html_meta:
         "description": "Release notes for TraceLens. Learn what features and SDK modules are available in each version, and see links to the compatibility matrix."
         "keywords": "TraceLens, release notes, changelog, ROCm, GPU trace analysis, PyTorch, JAX, rocprofv3, SDK, performance report"
 ---
 
-# Release notes
+# TraceLens release notes
 
 This page summarizes the features available in each TraceLens release. For the
 hardware and software versions validated for a release, see the

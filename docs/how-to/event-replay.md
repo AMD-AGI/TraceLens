@@ -1,12 +1,13 @@
 ---
 # Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# See LICENSE for license information.
 myst:
     html_meta:
         "description": "Learn how to isolate a single GPU operation into a minimal, self-contained replay script using TraceLens EventReplay for focused debugging."
         "keywords": "TraceLens, EventReplay, GPU debugging, reproducer, operator replay, PyTorch profiler, ROCm, kernel isolation, IP-safe"
 ---
 
-# Replay a single operation
+# Replay a single operation in TraceLens
 
 This guide shows how to isolate an operation from a trace into a minimal,
 self-contained replay — useful for focused debugging and for sharing IP-safe
