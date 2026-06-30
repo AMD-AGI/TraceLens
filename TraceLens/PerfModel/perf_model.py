@@ -47,6 +47,12 @@ def reduced_elementwise_flops() -> bool:
 SUBOP_RMSNORM = "RMSNorm"
 SUBOP_RESIDUAL_ADD = "ResidualAdd"
 SUBOP_GROUP_QUANT = "GroupQuant"
+# Fused rope+cat+cache kernels: the rotation acts on the pe slices only, while
+# the concatenation passthrough + KV-cache write moves the (un-rotated) nope
+# slices. Splitting them lets a consumer credit only the rotation traffic to a
+# rope leaf and account the concat/cache movement separately.
+SUBOP_ROPE = "ROPE"
+SUBOP_CONCAT_CACHE = "ConcatCache"
 
 
 # 1. GEMM
@@ -146,9 +152,28 @@ class GEMM:
         return bytes_mat1 + bytes_mat2 + bytes_output + bytes_bias
 
     def bytes(self, bpe_mat1, bpe_mat2, bpe_bias, bpe_output):
-        return self.bytes_func(
+        total = self.bytes_func(
             self.M, self.N, self.K, self.bias, bpe_mat1, bpe_mat2, bpe_bias, bpe_output
         )
+        # Stash the weight (mat2) component so weight_bytes() can report the
+        # token-invariant part of the transfer separately. Per-(M,N,K) here; a
+        # batched subclass that scales bytes() by B picks the scaling up in
+        # weight_bytes() via self.B. None when bytes_func bailed (missing bpe).
+        self._weight_bytes_per_call = (
+            None if (total is None or bpe_mat2 is None) else self.K * self.N * bpe_mat2
+        )
+        return total
+
+    def weight_bytes(self):
+        """Weight (mat2) bytes only -- the M-independent part of the transfer.
+
+        Used by the byte-decomposition consumer to separate the per-forward
+        weight read from the per-token activation traffic. Returns None when the
+        byte model itself could not be evaluated. ``self.B`` carries the batched
+        scaling so this matches the (possibly B-scaled) total from ``bytes()``.
+        """
+        wb = getattr(self, "_weight_bytes_per_call", None)
+        return None if wb is None else self.B * wb
 
     """
     bwd pass for Y = X.matmul(W^T) + B

@@ -472,6 +472,22 @@ class UnfusedMoE_Up:
 
         return total_bytes
 
+    def weight_bytes(self):
+        """Up-projection weight bytes only (token-invariant part of the read).
+
+        Mirrors the ``weight_bytes`` term inside ``bytes_func`` exactly,
+        including the activated-expert (``E_active``) scaling, so the consumer
+        can separate per-forward weight traffic from per-token activation. Uses
+        the same ``weight_bpe`` default as ``bytes()`` so the two never diverge.
+        """
+        p = self.param_details
+        weight_bpe = DTYPE_TO_BYTES.get(p["weight_dtype"], 1)
+        M, K, N = p["num_tokens"], p["hidden_dim"], p["inter_dim"]
+        E, topk = p["num_experts"], p["topk"]
+        E_active = E * (1 - ((E - topk) / E) ** M)
+        gating_factor = 2 if p.get("gated") else 1
+        return E_active * gating_factor * K * N * weight_bpe
+
 
 class UnfusedMoE_Down:
     """
@@ -557,6 +573,20 @@ class UnfusedMoE_Down:
         total_bytes = input_bytes + weight_bytes + output_bytes
 
         return total_bytes
+
+    def weight_bytes(self):
+        """Down-projection weight bytes only (token-invariant part of the read).
+
+        Mirrors the ``weight_bytes`` term inside ``bytes_func`` exactly,
+        including the activated-expert (``E_active``) scaling. Uses the same
+        ``weight_bpe`` default as ``bytes()`` so the two never diverge.
+        """
+        p = self.param_details
+        weight_bpe = DTYPE_TO_BYTES.get(p["weight_dtype"], 1)
+        M, K, N = p["num_tokens"], p["hidden_dim"], p["inter_dim"]
+        E, topk = p["num_experts"], p["topk"]
+        E_active = E * (1 - ((E - topk) / E) ** M)
+        return E_active * N * K * weight_bpe
 
 
 class moe_triton_unfused_up(UnfusedMoE_Up):

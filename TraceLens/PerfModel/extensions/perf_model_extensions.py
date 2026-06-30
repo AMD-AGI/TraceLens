@@ -15,6 +15,8 @@ from TraceLens.PerfModel.perf_model import (
     BinaryElementwise,
     UnaryElementwise,
     FusedRoPE,
+    SUBOP_ROPE,
+    SUBOP_CONCAT_CACHE,
     reduced_elementwise_flops,
 )
 from math import prod
@@ -1232,6 +1234,35 @@ class aiter_fused_qk_rope_cat_and_cache_mla(FusedRoPE):
         write_q = T * QH * (D_lora + D_pe) * bpe_out
         write_kv = T * KH * (D_lora + D_pe) * bpe_kv
         return read_q + read_k + write_q + write_kv
+
+    def flops_breakdown(self):
+        """All compute is the rotation on the pe slices; the concat/cache
+        passthrough does no math. Two keys (the 0 included) so the byte
+        breakdown emission is unlocked downstream. Sums to ``flops()``."""
+        return {SUBOP_ROPE: self.flops(), SUBOP_CONCAT_CACHE: 0.0}
+
+    def bytes_breakdown(self):
+        """Split traffic into the rotated pe slices (``SUBOP_ROPE``) vs the
+        un-rotated nope slices that are merely concatenated and written to the
+        KV cache (``SUBOP_CONCAT_CACHE``). Sums to ``bytes()``."""
+        p = self.param_details
+        T, QH, KH, D_lora, D_pe = (p["T"], p["QH"], p["KH"], p["D_lora"], p["D_pe"])
+        bpe_in = self.bpe_in
+        if bpe_in is None:
+            return {}
+        bpe_out = bpe_in  # q_out keeps the Q input dtype
+        bpe_kv = self.bpe_kv if self.bpe_kv is not None else bpe_in
+        rope_bytes = (
+            (T * QH * D_pe + T * KH * D_pe) * bpe_in  # read q_pe + k_pe
+            + T * QH * D_pe * bpe_out  # write pe part of q_out
+            + T * KH * D_pe * bpe_kv  # write pe part of kv rows
+        )
+        concat_cache_bytes = (
+            (T * QH * D_lora + T * KH * D_lora) * bpe_in  # read q_nope + k_nope
+            + T * QH * D_lora * bpe_out  # write nope part of q_out
+            + T * KH * D_lora * bpe_kv  # write nope part of kv rows
+        )
+        return {SUBOP_ROPE: rope_bytes, SUBOP_CONCAT_CACHE: concat_cache_bytes}
 
     def get_compute_precision(self):
         return torch_dtype_map(self.param_details["dtype_in"])
