@@ -8,7 +8,10 @@
 Performance models for pseudo-op extensions.
 """
 
-from TraceLens.PerfModel.utils import torch_dtype_map
+from math import prod
+
+from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
+from TraceLens.PerfModel.perf_model import BinaryElementwise
 
 DTYPE_TO_BYTES = {
     "Float8_e4m3fn": 1,
@@ -1722,3 +1725,70 @@ class moe_gptq_awq_down(UnfusedMoE_Down):
 
     def get_maf_type(self):
         return "matrix"
+
+
+class sglang_fused_append_shared_experts(BinaryElementwise):
+    """
+    Performance model for
+    sglang_profiler::fused_moe_triton_kernels_fused_append_shared_experts.
+
+    Reference implementation:
+        sglang/python/sglang/srt/layers/moe/fused_moe_triton/
+        fused_moe_triton_kernels.py (fused_append_shared_experts)
+        called from sglang/srt/layers/moe/topk.py:1264 (_post_process_topk_ids)
+
+    Appends shared-expert routing entries onto the per-token (topk_ids,
+    topk_weights) tensors produced by the router. This is a routing/metadata op:
+    no GEMM-style arithmetic, dominated by reading + rewriting the small
+    (num_tokens, topk) id/weight tensors.
+
+    Expected Input Dims from trace:
+        [0] = (M, topk)   ids      (int32)
+        [1] = (M, topk)   weights  (float32)
+
+    Roofline -- FLOPs:
+        ~0 (index/weight gather + write); modeled as 1 op/element for a
+        non-zero roofline floor.
+
+    Roofline -- bytes moved:
+        read + write both id and weight tensors:
+        2 * (M*topk*bpe_ids + M*topk*bpe_wts)
+
+    Reuses core BinaryElementwise (2-input machinery, get_maf_type);
+    overrides the roofline for the read+write pattern.
+    """
+
+    category = "MoE_aux"
+    bwd_category = None
+    sheet_category = "MoE_aux"
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        ids_shape = tuple(dims[0])
+        wts_shape = tuple(dims[1]) if len(dims) > 1 and dims[1] else ids_shape
+        dtype_ids = types[0] if types else "int"
+        dtype_wts = types[1] if len(types) > 1 else "float"
+        return {
+            "shape_in1": ids_shape,
+            "shape_in2": wts_shape,
+            "dtype_in1_in2_out": (dtype_ids, dtype_wts, dtype_wts),
+            "stride_input1": None,
+            "stride_input2": None,
+            "stride_output": None,
+        }
+
+    def flops(self):
+        return prod(self.param_details["shape_in1"])
+
+    def bytes(self):
+        n_ids = self.nelems_in1
+        n_wts = self.nelems_in2
+        bpe_ids = self.bpe_in1 or 4
+        bpe_wts = self.bpe_in2 or 4
+        return 2 * (n_ids * bpe_ids + n_wts * bpe_wts)
+
+    def get_compute_precision(self):
+        dtype = self.param_details["dtype_in1_in2_out"][1]
+        return torch_dtype_map(dtype) if dtype else None
