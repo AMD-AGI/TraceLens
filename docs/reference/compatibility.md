@@ -1,12 +1,13 @@
 ---
 # Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# See LICENSE for license information.
 myst:
     html_meta:
         "description": "TraceLens compatibility matrix: supported Python versions, operating systems, trace formats, and validated GPU accelerators for roofline analysis."
         "keywords": "TraceLens, compatibility, Python, ROCm, AMD Instinct, MI300X, PyTorch profiler, JAX, rocprofv3, pftrace, GPU, Linux"
 ---
 
-# Compatibility matrix
+# TraceLens compatibility matrix
 
 This page lists the hardware and software configurations for TraceLens. Only
 configurations that have been verified and tested should appear in the

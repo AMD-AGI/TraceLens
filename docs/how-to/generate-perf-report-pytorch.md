@@ -1,12 +1,13 @@
 ---
 # Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# See LICENSE for license information.
 myst:
     html_meta:
         "description": "Learn how to generate a multi-sheet Excel performance report from a PyTorch torch.profiler trace using TraceLens, including roofline analysis."
         "keywords": "TraceLens, PyTorch profiler, torch.profiler, GPU trace, performance report, roofline, GEMM, ROCm, AMD Instinct, activation recompute, CUDA migration"
 ---
 
-# Generate a PyTorch performance report
+# Generate a PyTorch performance report in TraceLens
 
 Turn a `torch.profiler` Chrome trace into a multi-sheet Excel (or CSV)
 performance report, then read the sheets to find what dominates GPU time.

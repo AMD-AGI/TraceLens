@@ -1,5 +1,6 @@
 ---
 # Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# See LICENSE for license information.
 myst:
     html_meta:
         "description": "Step-by-step instructions to install TraceLens from GitHub or source, verify the installation, and set up traceconv for Perfetto pftrace input."

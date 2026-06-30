@@ -1,12 +1,13 @@
 ---
 # Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# See LICENSE for license information.
 myst:
     html_meta:
         "description": "Learn how to merge per-rank PyTorch traces from a distributed run into a single file for cross-rank visualization in Perfetto using TraceLens."
         "keywords": "TraceLens, TraceFuse, trace fusion, multi-rank, distributed training, Perfetto, PyTorch profiler, ROCm, visualization, straggler"
 ---
 
-# Fuse multi-rank traces
+# Fuse multi-rank traces in TraceLens
 
 This guide shows how to merge per-rank PyTorch traces from a distributed run into
 a single file that can be visualized together in Perfetto, using the `TraceFuse`

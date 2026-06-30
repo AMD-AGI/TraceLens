@@ -1,5 +1,6 @@
 ---
 # Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# See LICENSE for license information.
 myst:
     html_meta:
         "description": "Learn how to generate TraceLens performance reports from PyTorch, JAX, rocprofv3, and collective-communication traces."

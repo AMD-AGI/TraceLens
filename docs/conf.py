@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Configuration file for the Sphinx documentation builder.
 
 This file only contains a selection of the most common options. For a full
@@ -8,6 +9,7 @@ For options specific to rocm-docs-core, see the user guide:
 https://rocm.docs.amd.com/projects/rocm-docs-core/en/latest/
 """
 # Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# See LICENSE for license information.
 
 # project info
 project = "TraceLens"
