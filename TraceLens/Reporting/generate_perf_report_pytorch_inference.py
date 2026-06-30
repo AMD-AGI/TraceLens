@@ -610,6 +610,7 @@ def generate_perf_report_pytorch(
             "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
             "sglang_profiler::attention_paged_attention_ragged",
             "aiter::mha_batch_prefill",
+            "aiter::pa_decode_gluon",
         ]
     )
 

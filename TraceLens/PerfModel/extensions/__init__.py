@@ -50,6 +50,7 @@ from .rmsnorm_perf_model_extensions import (
 )
 from .custom_collectives_perf_model_extensions import (
     aiter_fused_allreduce_rmsnorm,
+    aiter_fused_allreduce_rmsnorm_,
     custom_ar_all_reduce,
     aiter_reduce_scatter,
     aiter_all_gather_reg,
@@ -96,6 +97,7 @@ __all__ = [
     "vllm_rocm_aiter_triton_add_rmsnorm_pad",
     # Collective classes
     "aiter_fused_allreduce_rmsnorm",
+    "aiter_fused_allreduce_rmsnorm_",
     "custom_ar_all_reduce",
     "aiter_reduce_scatter",
     "aiter_all_gather_reg",

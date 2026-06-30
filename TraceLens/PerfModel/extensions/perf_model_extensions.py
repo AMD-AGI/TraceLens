@@ -375,6 +375,38 @@ class gemm_a16w16_atomic_(GEMM):
         )
 
 
+class gemm_a16w16(gemm_a16w16_atomic_):
+    """
+    Performance model for AITER's gemm_a16w16 kernel.
+
+    Computes: Y[M, N] = X[M, K] @ W[N, K].T. Both X and W are BF16/FP16.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/gemm/basic/gemm_a16w16.py
+
+    Identical roofline to gemm_a16w16_atomic_; only the output dtype handling
+    differs. The traced arg layout is (x, w, bias, dtype, ...), so Input type[3]
+    is the output ``dtype`` scalar (recorded as ``Scalar``) rather than a tensor.
+    The output dtype therefore follows the input (BF16, per the aiter default),
+    not Input type[3] as in the atomic_ variant (where index 3 is the output
+    tensor ``y``). flops/bytes/compute-precision are inherited.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        bias = len(dims) > 2 and len(dims[2]) > 0
+        return {
+            "B": 1,
+            "M": dims[0][0],
+            "N": dims[1][0],
+            "K": dims[0][1],
+            "bias": bias,
+            "dtype_A_B": (types[0], types[1], types[0]),
+        }
+
+
 class GroupQuant(BinaryElementwise):
     """
     Performance model for group quantization.
@@ -454,8 +486,8 @@ class per_group_quant(GroupQuant):
 
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
-        # Use first input dtype as the compute precision
-        dtype = self.dtype_in1_in2_out[1] if self.dtype_in1_in2_out else None
+        # Use the input activation dtype (index 0) as the compute precision;
+        dtype = self.dtype_in1_in2_out[0] if self.dtype_in1_in2_out else None
         return torch_dtype_map(dtype) if dtype else None
 
 
@@ -795,6 +827,34 @@ class fused_flatten_mxfp4_quant(UnaryElementwise):
         return bytes_read + bytes_write_fp4 + bytes_write_scales
 
 
+class fused_dynamic_mx_quant_moe_sort_hip(fused_flatten_mxfp4_quant):
+    """
+    Performance model for aiter::fused_dynamic_mx_quant_moe_sort_hip
+    (kernel aiter::fused_mx_quant_moe_sort_kernel<bf16, fp4, ...>).
+
+    Fuses dynamic MXFP4 quantization of the BF16 activation with MoE token sort.
+    Trace arg layout differs from fused_flatten_mxfp4_quant only in input
+    position: [0] is the packed FP4 output (M, N/2), [1] the E8M0 block scales,
+    [2] the BF16 activation input (M, N), and [3]/[4] the int sort arrays.
+
+    Approximation: models the quant traffic over the activation input. The MoE
+    sort index permutation (small int arrays) and the padded sorted-layout rows
+    are runtime-dependent and excluded.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][2])
+        dtype_in = event["args"]["Input type"][2]
+        stride_input = tuple(event["args"]["Input Strides"][2])
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, dtype_in),
+            "stride_input": stride_input,
+            "stride_output": None,
+        }
+
+
 class aiter_rope_cached_positions_2c_fwd_impl(FusedRoPE):
     """
     Performance model for aiter::rope_cached_positions_2c_fwd_impl.
@@ -958,6 +1018,57 @@ class sglang_store_cache:
         return torch_dtype_map(dtype) if dtype else None
 
 
+class mixed_sample_outer_exponential:
+    """
+    Performance model for ``aiter::mixed_sample_outer_exponential`` (ATOM
+    ``model_ops/sampler.py``, ``mix_sample_outer_exponential_kernel``).
+
+    Exponential-noise sampling: ``token_id[t] = argmax_v(logits[t,v] /
+    exp_noise[t,v])`` over the vocab dim. Memory-bound elementwise reduction.
+    Reads logits ``Input Dims[1]`` [T, V] and exp_noise ``Input Dims[2]``;
+    FLOPs = 2*T*V, bytes = read logits + read exp_noise + write T int32 ids.
+    """
+
+    category = "elementwise"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.T = self.param_details["T"]
+        self.V = self.param_details["V"]
+        self.dtype_logits = self.param_details["dtype_logits"]
+        self.dtype_noise = self.param_details["dtype_noise"]
+        logits_shape = tuple(dims[1])
+        T = logits_shape[0] if len(logits_shape) >= 1 else 1
+        V = logits_shape[1] if len(logits_shape) >= 2 else 1
+        dtype_logits = types[1] if len(types) > 1 else "c10::bfloat16"
+        dtype_noise = types[2] if len(types) > 2 else "float"
+        return {
+            "T": T,
+            "V": V,
+            "dtype_logits": dtype_logits,
+            "dtype_noise": dtype_noise,
+        }
+
+    def flops(self):
+        return 2 * self.T * self.V
+
+    def bytes(self):
+        bpe_logits = name2bpe(self.dtype_logits)
+        bpe_noise = name2bpe(self.dtype_noise)
+        if bpe_logits is None or bpe_noise is None:
+            return None
+        read_logits = self.T * self.V * bpe_logits
+        read_noise = self.T * self.V * bpe_noise
+        write_ids = self.T * 4  # int32 token id per row
+        return read_logits + read_noise + write_ids
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        return torch_dtype_map(self.dtype_logits) if self.dtype_logits else None
+
+
 class aiter_fused_qk_rope_cat_and_cache_mla(FusedRoPE):
     """
     Performance model for aiter::fused_qk_rope_cat_and_cache_mla
@@ -1047,6 +1158,60 @@ class aiter_fused_qk_rope_cat_and_cache_mla(FusedRoPE):
 
     def get_compute_precision(self):
         return torch_dtype_map(self.param_details["dtype_in"])
+
+
+class fused_qk_rope_concat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla):
+    """
+    Performance model for aiter::fused_qk_rope_concat_and_cache_mla
+    (kernel fuse_qk_rope_concat_and_cache_mla_per_head_kernel; DeepSeek-V3.1 MLA).
+
+    RoPE on the pe slices of Q/K + static FP8 quant + paged KV-cache write.
+    Trace arg layout: [0] q_nope (T, QH, D_lora), [1] q_pe (T, QH, D_pe),
+    [2] kv_c (T, D_lora), [3] k_pe (T, D_pe), [4] kv_cache (FP8 paged),
+    [5] q_out (T, QH, D_lora + D_pe), FP8.
+
+    the KV is the single MLA latent (kv_c / k_pe are 2D, so KH = 1),
+    and both q_out and the KV cache are FP8
+    (the base assumes q_out keeps the BF16 input dtype).
+
+    Approximation: only the T written KV slots are counted, not the full paged
+    cache tensor at Input Dims[4]; cos/sin/positions are small / cache-resident;
+    the per-tensor FP8 quant flops are omitted.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        T, QH, D_lora = tuple(dims[0])
+        D_pe = dims[1][2]
+        KH = 1  # MLA single latent KV head (kv_c / k_pe are 2D [T, D])
+        dtype_in = types[0]
+        dtype_kv = types[4] if len(types) > 4 and types[4] else dtype_in
+        dtype_out = types[5] if len(types) > 5 and types[5] else dtype_in
+        return {
+            "T": T,
+            "QH": QH,
+            "KH": KH,
+            "D_lora": D_lora,
+            "D_pe": D_pe,
+            "dtype_in": dtype_in,
+            "dtype_kv": dtype_kv,
+            "dtype_out": dtype_out,
+        }
+
+    def bytes(self):
+        p = self.param_details
+        if self.bpe_in is None:
+            return None
+        bpe_out = name2bpe(p["dtype_out"]) or self.bpe_in
+        bpe_kv = self.bpe_kv if self.bpe_kv is not None else self.bpe_in
+        T, QH, KH, D_lora, D_pe = (p["T"], p["QH"], p["KH"], p["D_lora"], p["D_pe"])
+        read_q = (T * QH * D_lora + T * QH * D_pe) * self.bpe_in
+        read_k = (T * KH * D_lora + T * KH * D_pe) * self.bpe_in
+        write_q = T * QH * (D_lora + D_pe) * bpe_out
+        write_kv = T * KH * (D_lora + D_pe) * bpe_kv
+        return read_q + read_k + write_q + write_kv
 
 
 class sglang_quant_dynamic_mxfp4_quant(fused_flatten_mxfp4_quant):
