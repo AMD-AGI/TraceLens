@@ -1,3 +1,6 @@
+..
+   Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+
 .. meta::
    :description: TraceLens is an open-source Python library for automated GPU trace analysis. Generate performance reports from PyTorch, JAX, and rocprofv3 traces.
    :keywords: TraceLens, GPU trace analysis, ROCm, AMD Instinct, PyTorch profiler, JAX, rocprofv3, roofline analysis, performance report, distributed training, CUDA migration

@@ -38,25 +38,10 @@ release = version_number
 
 external_toc_path = "./sphinx/_toc.yml"  # Defines Table of Content structure definition path
 
-"""
-Doxygen Settings
-Ensure Doxyfile is located at docs/doxygen.
-If the component does not need doxygen, delete this section for optimal build time
-"""
-# doxygen_root = "doxygen"
-# doxysphinx_enabled = True
-# doxygen_project = {
-#    "name": "doxygen",
-#    "path": "doxygen/xml",
-# }
-
 # Add more addtional package accordingly
 extensions = [
-    "rocm_docs",
-    "sphinxcontrib.mermaid"
+    "rocm_docs"
 ]
-
-myst_fence_as_directive = ["mermaid"]
 
 html_title = f"{project} {version_number} documentation"
 
