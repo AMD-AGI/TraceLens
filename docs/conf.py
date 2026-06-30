@@ -3,8 +3,6 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-
-# -*- coding: utf-8 -*-
 """Configuration file for the Sphinx documentation builder.
 
 This file only contains a selection of the most common options. For a full
@@ -29,6 +27,7 @@ extensions = ["rocm_docs"]
 external_toc_path = "./sphinx/_toc.yml"
 
 html_theme = "rocm_docs_theme"
+# fmt: off
 html_theme_options = {
     "flavor": "generic",
     "header_title": f"TraceLens {version}",
@@ -45,6 +44,6 @@ html_theme_options = {
     },
     "link_main_doc": False,
 }
+# fmt: on
 
 html_title = f"{project} {version} documentation"
-
