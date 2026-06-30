@@ -3444,9 +3444,14 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             for operand in operands:
                 dtype, shape, layout = parse_dtype_shape_layout(operand)
                 if shape and dtype:
-                    total_input_bytes = (
-                        total_input_bytes + np.prod(shape) * dtype_to_bytes[dtype]
+                    nbytes = dtype_to_bytes.get(dtype, 1 if dtype.startswith(("f8", "s8")) else None
                     )
+                    if nbytes is None:
+                        logger.warning(
+                            "Unknown dtype '%s' in operand, skipping byte count", dtype
+                        )
+                        continue
+                    total_input_bytes = total_input_bytes + np.prod(shape) * nbytes
 
             total_input_bytes_list.append(total_input_bytes)
 

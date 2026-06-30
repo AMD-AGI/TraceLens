@@ -32,6 +32,8 @@ Usage:
 
 import argparse
 import cProfile
+import importlib
+import importlib.metadata
 import json
 import os
 import platform
@@ -47,7 +49,7 @@ from pathlib import Path
 import yaml
 
 # Add project root to path so TraceLens can be imported
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from TraceLens.TreePerf import TreePerfAnalyzer
@@ -128,29 +130,39 @@ def load_manifest(manifest_path):
 def get_tracelens_version():
     """Attempt to read TraceLens version from setup.py or package metadata."""
     try:
-        from importlib.metadata import version
-
-        return version("TraceLens")
+        return importlib.metadata.version("TraceLens")
     except Exception:
         return "unknown"
 
 
 def get_commit_sha():
-    """Get the current git commit SHA, warning if it cannot be determined."""
+    """Extract the short commit SHA from the installed TraceLens wheel version"""
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-e", "."],
             cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+    except Exception as e:
+        print(
+            f"Warning: 'pip install -e .' failed: {e}. commit SHA will be set to 'unknown'."
+        )
+        return "unknown"
+
+    try:
+        importlib.invalidate_caches()
+        ver = importlib.metadata.version("TraceLens")
+        # Version format: 0.1.0.dev20260612+gabcd123
+        if "+" in ver:
+            local = ver.split("+", 1)[1]  # e.g. "gabcd123"
+            if local.startswith("g"):
+                return local[1:]  # strip the leading 'g'
     except Exception:
         pass
 
     print(
-        "Warning: could not determine commit SHA."
+        "Warning: could not determine commit SHA from installed TraceLens version. "
         "commit SHA will be set to 'unknown'."
     )
     return "unknown"
