@@ -117,3 +117,4 @@ cmake-build-*/
 *.exe
 *.dll
 *.dylib
+.claude/settings.json

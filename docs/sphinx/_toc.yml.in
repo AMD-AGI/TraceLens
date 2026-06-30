@@ -1,0 +1,43 @@
+# Anywhere {branch} is used, the branch name will be substituted.
+# These comments will also be removed.
+defaults:
+  numbered: False
+  maxdepth: 6
+root: index
+
+subtrees:
+- entries:
+  - file: what-is-tracelens
+    title: What is TraceLens?
+  - file: about/release-notes
+    title: Release notes
+  - file: reference/compatibility
+    title: Compatibility matrix
+
+- caption: Install
+  entries:
+  - file: install/installation
+    title: Install TraceLens
+
+- caption: How to
+  entries:
+  - file: how-to/generate-reports
+    title: Generate TraceLens reports
+    entries:
+    - file: how-to/generate-perf-report-pytorch
+    - file: how-to/generate-perf-report-jax
+    - file: how-to/generate-perf-report-rocprof
+    - file: how-to/collective-report
+  - file: how-to/compare-traces
+  - file: how-to/event-replay
+  - file: how-to/trace-fusion
+
+- caption: Reference
+  entries:
+  - file: reference/api-reference
+    title: API reference
+
+- caption: About
+  entries:
+  - file: about/license
+    title: License
