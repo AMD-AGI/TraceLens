@@ -83,13 +83,7 @@ class gemm_a8w8_blockscale(GEMM):
                 "c10::bfloat16",
             ),
         }
-        # FP8/INT8 block-scale quant CONFIG. Without the scheme + block size a
-        # downstream microbenchmark harness can't build matching scale tensors, so
-        # its reference output mismatches and a real speedup is auto-rejected on
-        # correctness. Derive the block sizes from the captured scale-tensor shapes
-        # (x_scale: (M, ceil(K/block_k)); w_scale: (ceil(N/block_n), ceil(K/block_k)))
-        # and emit the scheme + scale dtype. Constant per kernel config, so this is
-        # grouping-neutral; roofline ``bytes()`` only reads ``dtype_A_B`` (unchanged).
+        # FP8/INT8 block-scale quant config; block sizes derived from scale-tensor shapes.
         try:
             x_scale, w_scale = dims[2], dims[3]
             block_k = (-(-K // x_scale[-1])) if x_scale and x_scale[-1] else None  # ceil(K/scale_cols)
@@ -105,12 +99,7 @@ class gemm_a8w8_blockscale(GEMM):
             )
         except (IndexError, TypeError, ZeroDivisionError):
             pass
-        # OUTPUT spec is INFERRED, not read from the trace: the torch/kineto event
-        # records input shapes only (record_shapes), so there is no "Output Dims"
-        # field. This kernel's output is the GEMM result Y[M, N] in bf16 (the third
-        # element of dtype_A_B). Emitting it here gives downstream consumers the
-        # output tensor for allocation + correctness without depending on a trace
-        # field that doesn't exist for torch traces.
+        # Output spec is inferred (torch traces record input dims only): Y[M, N] in bf16.
         details["output_shape"] = (M, N)
         details["output_dtype"] = "c10::bfloat16"
         return details
