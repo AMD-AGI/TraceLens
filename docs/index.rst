@@ -28,10 +28,7 @@ The TraceLens source code is hosted at `github.com/AMD-AGI/TraceLens <https://gi
 
    .. grid-item-card:: How to
 
-      * :doc:`Generate a PyTorch performance report <how-to/generate-perf-report-pytorch>`
-      * :doc:`Generate a JAX performance report <how-to/generate-perf-report-jax>`
-      * :doc:`Generate a rocprof performance report <how-to/generate-perf-report-rocprof>`
-      * :doc:`Generate a collective-communication report <how-to/collective-report>`
+      * :doc:`Generate TraceLens reports <how-to/generate-reports>`
       * :doc:`Compare two traces <how-to/compare-traces>`
       * :doc:`Replay a single operation <how-to/event-replay>`
       * :doc:`Fuse multi-rank traces <how-to/trace-fusion>`
