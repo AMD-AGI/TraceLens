@@ -177,12 +177,14 @@ Add these flags to `EXTRA_VLLM_ARGS` in the user's YAML config (append to any ex
 ```yaml
 benchmark:
   envs:
-    EXTRA_VLLM_ARGS: "... --profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces --profiler-config.detailed_trace_annotation True"
+    EXTRA_VLLM_ARGS: "... --profiler-config.profiler torch --profiler-config.torch_profiler_dir /workspace/torch_trace --profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces --profiler-config.detailed_trace_annotation True"
 ```
 
-Use the literal path `/workspace/torch_trace/capture_traces` rather than `${TRACE_DIR}/capture_traces`. Bash does not recursively expand variables — `$EXTRA_VLLM_ARGS` is word-split but its contents are not re-evaluated for variable references, so `${TRACE_DIR}` would be passed as a literal string to vLLM. For `--run-mode local`, replace `/workspace/torch_trace` with the actual host-side trace directory.
+Use the literal path `/workspace/torch_trace` rather than `${TRACE_DIR}`. Bash does not recursively expand variables — `$EXTRA_VLLM_ARGS` is word-split but its contents are not re-evaluated for variable references, so `${TRACE_DIR}` would be passed as a literal string to vLLM. For `--run-mode local`, replace `/workspace/torch_trace` with the actual host-side trace directory.
 
-- `--profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces` — enables graph-capture tracing. vLLM writes separate traces for CUDA graph capture phases into this directory, which are needed for downstream TraceLens analysis of graph-replayed operations.
+- `--profiler-config.profiler torch` — selects the torch profiler backend. **Required prerequisite**: the `ProfilerConfig` validator raises a pydantic `ValueError` and aborts server startup if `capture_torch_profiler_dir` is set without `profiler` being `"torch"`.
+- `--profiler-config.torch_profiler_dir /workspace/torch_trace` — sets the output directory for the main inference trace. **Required prerequisite** when `profiler=torch`: vLLM raises a pydantic `ValueError` at startup if this is not set.
+- `--profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces` — enables graph-capture tracing and sets the directory where capture traces are written. vLLM writes separate traces for CUDA graph capture phases into this directory, which are needed for downstream TraceLens analysis of graph-replayed operations.
 - `--profiler-config.detailed_trace_annotation True` — enables detailed annotations in the trace (iteration boundaries, phase labels, scheduling metadata). These annotations are required by `split_inference_trace_annotation` for accurate trace splitting.
 
 ##### Common SGLang flags
