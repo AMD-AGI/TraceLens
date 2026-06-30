@@ -1,13 +1,15 @@
----
-# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-# See LICENSE for license information.
-myst:
-    html_meta:
-        "description": "Step-by-step instructions to install TraceLens from GitHub or source, verify the installation, and set up traceconv for Perfetto pftrace input."
-        "keywords": "TraceLens, install, pip, Python, ROCm, GPU trace analysis, traceconv, pftrace, virtual environment, open source"
----
+<!--
+Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
 
 # Install TraceLens
+```{meta}
+:description: Step-by-step instructions to install TraceLens from GitHub or source, verify the installation, and set up traceconv for Perfetto pftrace input.
+:keywords: TraceLens, install, pip, Python, ROCm, GPU trace analysis, traceconv, pftrace, virtual environment, open source
+```
+
 
 This topic provides step-by-step instructions to install TraceLens and verify
 the installation. TraceLens is distributed as a Python package; install it with
