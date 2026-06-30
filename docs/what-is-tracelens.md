@@ -1,13 +1,16 @@
----
-# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-# See LICENSE for license information.
-myst:
-    html_meta:
-        "description": "Learn what TraceLens is and what it does — an open-source Python library from AMD for automated GPU trace analysis, roofline modeling, and distributed workload profiling."
-        "keywords": "TraceLens, GPU trace analysis, ROCm, AMD, PyTorch profiler, JAX, rocprofv3, roofline, distributed training, performance report, open source"
----
+<!--
+Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 
 # What is TraceLens?
+```{meta}
+:description: Learn what TraceLens is and what it does — an open-source Python library from AMD for automated GPU trace analysis, roofline modeling, and distributed workload profiling.
+:keywords: TraceLens, GPU trace analysis, ROCm, AMD, PyTorch profiler, JAX, rocprofv3, roofline, distributed training, performance report, open source
+```
+
 
 TraceLens is an open-source Python library developed by AMD that automates
 performance analysis from GPU trace files. Instead of manually inspecting raw

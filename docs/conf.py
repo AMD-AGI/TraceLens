@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 # -*- coding: utf-8 -*-
 """Configuration file for the Sphinx documentation builder.
 
@@ -8,8 +14,6 @@ https://www.sphinx-doc.org/en/master/usage/configuration.html
 For options specific to rocm-docs-core, see the user guide:
 https://rocm.docs.amd.com/projects/rocm-docs-core/en/latest/
 """
-# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-# See LICENSE for license information.
 
 # project info
 project = "TraceLens"
@@ -43,3 +47,4 @@ html_theme_options = {
 }
 
 html_title = f"{project} {version} documentation"
+

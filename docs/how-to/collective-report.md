@@ -1,13 +1,16 @@
----
-# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-# See LICENSE for license information.
-myst:
-    html_meta:
-        "description": "Learn how to generate a multi-GPU collective-communication report with TraceLens to diagnose scaling issues and separate communication from skew."
-        "keywords": "TraceLens, collective communication, NCCL, multi-GPU, distributed training, AllReduce, AllGather, bandwidth, skew, straggler, ROCm, PyTorch profiler"
----
+<!--
+Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 
-# Generate a collective-communication report in TraceLens
+See LICENSE for license information.
+-->
+
+
+# Generate a collective-communication report
+```{meta}
+:description: Learn how to generate a multi-GPU collective-communication report with TraceLens to diagnose scaling issues and separate communication from skew.
+:keywords: TraceLens, collective communication, NCCL, multi-GPU, distributed training, AllReduce, AllGather, bandwidth, skew, straggler, ROCm, PyTorch profiler
+```
+
 
 This guide shows how to analyze multi-GPU collective operations across ranks to
 diagnose scaling issues, separating true communication time from

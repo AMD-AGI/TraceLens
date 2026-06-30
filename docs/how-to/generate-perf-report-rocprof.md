@@ -1,13 +1,16 @@
----
-# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-# See LICENSE for license information.
-myst:
-    html_meta:
-        "description": "Learn how to build a performance report from AMD ROCm rocprofiler-sdk traces (rocprofv3 JSON and Perfetto pftrace) using TraceLens."
-        "keywords": "TraceLens, rocprofv3, rocprofiler-sdk, ROCm, pftrace, Perfetto, GPU trace, kernel summary, performance report, AMD Instinct, HIP"
----
+<!--
+Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 
-# Generate a rocprof performance report in TraceLens
+See LICENSE for license information.
+-->
+
+
+# Generate a rocprof performance report
+```{meta}
+:description: Learn how to build a performance report from AMD ROCm rocprofiler-sdk traces (rocprofv3 JSON and Perfetto pftrace) using TraceLens.
+:keywords: TraceLens, rocprofv3, rocprofiler-sdk, ROCm, pftrace, Perfetto, GPU trace, kernel summary, performance report, AMD Instinct, HIP
+```
+
 
 Build a performance report from AMD ROCm rocprofiler-sdk traces. TraceLens
 supports both `rocprofv3` JSON results and Perfetto-style `.pftrace` files.

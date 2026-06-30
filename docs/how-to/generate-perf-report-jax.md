@@ -1,13 +1,16 @@
----
-# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-# See LICENSE for license information.
-myst:
-    html_meta:
-        "description": "Learn how to generate a TraceLens performance report from a JAX XPlane protobuf trace, including GPU-event and GEMM analysis."
-        "keywords": "TraceLens, JAX, XPlane, protobuf, GPU trace, GEMM, performance report, roofline, ROCm, AMD Instinct, xprof"
----
+<!--
+Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 
-# Generate a JAX performance report in TraceLens
+See LICENSE for license information.
+-->
+
+
+# Generate a JAX performance report
+```{meta}
+:description: Learn how to generate a TraceLens performance report from a JAX XPlane protobuf trace, including GPU-event and GEMM analysis.
+:keywords: TraceLens, JAX, XPlane, protobuf, GPU trace, GEMM, performance report, roofline, ROCm, AMD Instinct, xprof
+```
+
  
 TraceLens offers two JAX reports from an XPlane protobuf trace: the **standard
 report** (operator and roofline analysis, like the PyTorch report) and a

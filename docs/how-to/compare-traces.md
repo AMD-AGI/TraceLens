@@ -1,13 +1,16 @@
----
-# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-# See LICENSE for license information.
-myst:
-    html_meta:
-        "description": "Learn how to compare two TraceLens performance reports side by side to quantify the impact of code, library, or hardware changes on GPU performance."
-        "keywords": "TraceLens, trace comparison, TraceDiff, performance regression, GPU benchmark, ROCm, PyTorch profiler, diff, roofline, GEMM"
----
+<!--
+Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 
 # Compare two traces in TraceLens
+```{meta}
+:description: Learn how to compare two TraceLens performance reports side by side to quantify the impact of code, library, or hardware changes on GPU performance.
+:keywords: TraceLens, trace comparison, TraceDiff, performance regression, GPU benchmark, ROCm, PyTorch profiler, diff, roofline, GEMM
+```
+
 
 This guide shows how to quantify the impact of a change by comparing two
 TraceLens reports side by side — for example, a baseline against a candidate
