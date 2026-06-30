@@ -24,7 +24,7 @@ external_toc_path = "./sphinx/_toc.yml"
 html_theme = "rocm_docs_theme"
 html_theme_options = {
     "flavor": "generic",
-    "header_title": f"GEAK {version_number}",
+    "header_title": f"TraceLens {version}",
     "header_link": False,
     "version_list_link": False,
     "nav_secondary_items": {
