@@ -86,7 +86,9 @@ class gemm_a8w8_blockscale(GEMM):
         # FP8/INT8 block-scale quant config; block sizes derived from scale-tensor shapes.
         try:
             x_scale, w_scale = dims[2], dims[3]
-            block_k = (-(-K // x_scale[-1])) if x_scale and x_scale[-1] else None  # ceil(K/scale_cols)
+            block_k = (
+                (-(-K // x_scale[-1])) if x_scale and x_scale[-1] else None
+            )  # ceil(K/scale_cols)
             block_n = (-(-N // w_scale[0])) if w_scale and w_scale[0] else None
             details.update(
                 {
