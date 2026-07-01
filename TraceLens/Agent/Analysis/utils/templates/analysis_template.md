@@ -366,7 +366,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Resolution:**
 **Impact estimate:**
 
-<!-- === COMPARATIVE Compute Kernel Data table === Use this schema for comparative mode ONLY. Use these 8 exact columns (Kernel Name/Path are omitted in comparative mode) -->
+<!-- === COMPARATIVE Compute Kernel Data table === Use this schema for comparative mode ONLY. Use these 10 exact columns (must match sub_agent_spec.md § Operations Table Schema) -->
 <!-- Trace 1 ms = operations[i].time_ms. Trace 2 ms = operations[i].t2_time_ms.
      Count T1/T2 = operations[i].count / operations[i].count_trace2 when present.
      Difference (ms) = operations[i].difference_ms (negative ⇒ Trace 1 slower), or —. -->
@@ -377,9 +377,9 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Identification:** [1-2 sentences - How this opportunity was surfaced relative to the target trace. Must end with (source: <artifact> → <keys>).]
 **Data:** [1 sentence summary of table]
 
-| Operation | Args (T1) | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
-|-----------|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
-| ...       | ...       | ...               | ...               | .../...       | ...             | ...             | ...        |
+| Operation | Args (T1) | Kernel Path | Kernel Name | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) |
+|-----------|-----------|-------------|-------------|-------------------|-------------------|---------------|-----------------|-----------------|------------|
+| ...       | ...       | ...         | ...         | ...               | ...               | .../...       | ...             | ...             | ...        |
 
 **Reasoning for Slowdown:** [2-3 sentences - Why Trace 1 is slower than Trace 2 for these operations as the traces show. No micro-architecture speculation.]
 **Resolution:** [1-2 sentences - Why the suggested optimization helps close the gap — not merely restating what to do.]
