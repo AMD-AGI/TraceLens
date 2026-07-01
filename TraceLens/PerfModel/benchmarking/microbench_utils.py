@@ -83,7 +83,11 @@ def _check_amd_gpu_idle(
                 other_pids.append(int(pid))
 
         mem_busy = mem_pct is not None and mem_pct > mem_threshold_pct
-        mem_str = f"{mem_pct:.1f}% of {mem_total_mib}MiB" if mem_pct is not None else "total unknown"
+        mem_str = (
+            f"{mem_pct:.1f}% of {mem_total_mib}MiB"
+            if mem_pct is not None
+            else "total unknown"
+        )
         if util > util_threshold or mem_busy or other_pids:
             return False, (
                 f"amdsmi {dev_tag}: util={util}% mem={mem_used_mib}MiB "
@@ -137,8 +141,12 @@ def check_gpu_idle(
             parts = [p.strip() for p in (r.stdout or "").split(",")]
             util = int(parts[0]) if parts and parts[0].isdigit() else 0
             mem_used_mib = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-            mem_total_mib = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-            mem_pct = 100.0 * mem_used_mib / mem_total_mib if mem_total_mib > 0 else None
+            mem_total_mib = (
+                int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+            )
+            mem_pct = (
+                100.0 * mem_used_mib / mem_total_mib if mem_total_mib > 0 else None
+            )
             r2 = subprocess.run(
                 [
                     "nvidia-smi",
@@ -157,7 +165,11 @@ def check_gpu_idle(
                 if p.strip() and p.strip() != str(os.getpid())
             ]
             mem_busy = mem_pct is not None and mem_pct > mem_threshold_pct
-            mem_str = f"{mem_pct:.1f}% of {mem_total_mib}MiB" if mem_pct is not None else "total unknown"
+            mem_str = (
+                f"{mem_pct:.1f}% of {mem_total_mib}MiB"
+                if mem_pct is not None
+                else "total unknown"
+            )
             if util > util_threshold or mem_busy or other_pids:
                 return False, (
                     f"nvidia-smi {dev_tag}: util={util}% mem={mem_used_mib}MiB "
