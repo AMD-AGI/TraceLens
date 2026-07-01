@@ -20,6 +20,8 @@ from .moe_perf_model_extensions import (
     moe_flydsl_stage1,
     moe_flydsl_stage2,
     sglang_fused_append_shared_experts,
+    BiasedGroupedTopk,
+    MoeSortScatterGather,
 )
 from .attention_perf_model_extensions import (
     InferenceAttention,
@@ -74,6 +76,8 @@ __all__ = [
     "moe_gptq_awq_down",
     "moe_flydsl_stage1",
     "moe_flydsl_stage2",
+    "BiasedGroupedTopk",
+    "MoeSortScatterGather",
     "mha_varlen_fwd",
     "aiter_fmha_v3_varlen_fwd",
     "vllm_unified_attention_with_output",
