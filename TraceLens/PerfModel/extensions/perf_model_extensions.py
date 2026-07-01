@@ -67,18 +67,44 @@ class gemm_a8w8_blockscale(GEMM):
 
     @staticmethod
     def get_param_details(event):
-        return {
+        dims = event["args"]["Input Dims"]
+        types = event["args"].get("Input type", []) or []
+        M, K = dims[0][0], dims[0][1]
+        N = dims[1][0]
+        details = {
             "B": 1,
-            "M": event["args"]["Input Dims"][0][0],
-            "N": event["args"]["Input Dims"][1][0],
-            "K": event["args"]["Input Dims"][0][1],
+            "M": M,
+            "N": N,
+            "K": K,
             "bias": False,
             "dtype_A_B": (
-                event["args"]["Input type"][0],
-                event["args"]["Input type"][1],
+                types[0] if len(types) > 0 else "",
+                types[1] if len(types) > 1 else "",
                 "c10::bfloat16",
             ),
         }
+        # FP8/INT8 block-scale quant config; block sizes derived from scale-tensor shapes.
+        try:
+            x_scale, w_scale = dims[2], dims[3]
+            block_k = (
+                (-(-K // x_scale[-1])) if x_scale and x_scale[-1] else None
+            )  # ceil(K/scale_cols)
+            block_n = (-(-N // w_scale[0])) if w_scale and w_scale[0] else None
+            details.update(
+                {
+                    "quant_scheme": "a8w8_blockscale",
+                    "quant_granularity": "per_block",
+                    "block_k": block_k,
+                    "block_n": block_n,
+                    "scale_dtype": types[2] if len(types) > 2 else "float32",
+                }
+            )
+        except (IndexError, TypeError, ZeroDivisionError):
+            pass
+        # Output spec is inferred (torch traces record input dims only): Y[M, N] in bf16.
+        details["output_shape"] = (M, N)
+        details["output_dtype"] = "c10::bfloat16"
+        return details
 
     def bytes(self):
         dtype_A_B = self.param_details["dtype_A_B"]
