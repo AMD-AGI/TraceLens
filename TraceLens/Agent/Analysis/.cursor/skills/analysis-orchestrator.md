@@ -95,6 +95,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      2. **Graph replay + capture** (`<inference_exec_mode>` = `graph_capture`) — also requires a capture folder path
    - If **Graph replay + capture**, ask for **Capture Folder Path** → `<capture_folder_path>`:
      - Ask: "Please provide the full path to the graph capture traces folder"
+   - If **Graph replay + capture** and **comparative**, ask for **Trace2 Capture Folder Path** -> `<capture_folder_path_2>`
 
 5. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
@@ -185,6 +186,14 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 | `comparative` trace1 | `--comparison_json_path <trace2_path>` |
 | `comparative` trace2 | none |
 
+**`<suffix_3>`** — extension flags:
+
+| scope | value |
+|-------|-------|
+| `standalone` | none |
+| `comparative` trace1 if `<capture_folder_path_2>` provided | `--comparison_capture_folder <capture_folder_path_2>` |
+| `comparative` trace2 | none |
+
 **`<suffix_ext>`** — user extension file:
 
 | condition | value |
@@ -236,6 +245,7 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
   --include_call_stack \
   <suffix_1> \
   <suffix_2> \
+  <suffix_3> \
   <suffix_ext>
 ```
 
