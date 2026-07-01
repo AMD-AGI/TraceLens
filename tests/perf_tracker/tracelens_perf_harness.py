@@ -245,7 +245,9 @@ def serve_prometheus_metrics(timing_json_path, port=9100):
 
     REGISTRY.register(TimingCollector())
     start_http_server(port)
-    print(f"Prometheus metrics server started on port {port} — http://localhost:{port}/metrics")
+    print(
+        f"Prometheus metrics server started on port {port} — http://localhost:{port}/metrics"
+    )
     print(f"Reading metrics from: {timing_path}")
     print("Press Ctrl+C to stop.")
 
