@@ -7,17 +7,19 @@ See LICENSE for license information.
 # TraceLens Performance Harness
 
 `tracelens_perf_harness.py` is the nightly performance tracking tool for TraceLens.
-It runs the full TraceLens pipeline, extracting runtime metrics, and optionally pushing metrics to the Grafana Cloud dashboard.
+It runs the full TraceLens pipeline, extracting runtime metrics, optionally pushing metrics to a Grafana Cloud dashboard or hosting metrics on an endpoint.
 
 ## Installation
 
-The harness requires `pyyaml`. For emission to a Grafana endpoint it also needs the OpenTelemetry
-SDK packages:
+The harness requires `pyyaml`. For OTLP emission to Grafana Cloud it also needs the OpenTelemetry
+SDK packages. For the pull-based Prometheus server it needs `prometheus_client`:
 
 ```bash
 pip install pyyaml
-# optional — only needed with --emit-otlp
+# optional — only needed with --emit-otlp / --push-only
 pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+# optional — only needed with --serve-only
+pip install prometheus_client
 ```
 
 ## Single-trace usage
@@ -116,6 +118,30 @@ After a successful run, `<output-dir>/timing.json` contains the runtime info of 
 
 A `<trace_id>_profile.prof` binary artifact is also written and can be further inspected.
 
+## Prometheus metrics server
+
+Start the server pointing at an existing `timing.json`:
+
+```bash
+python tests/perf_tracker/tracelens_perf_harness.py \
+    --serve-only ./perf_results/timing.json
+```
+
+Metrics are available at `http://localhost:9100/metrics`. Use `--metrics-port` to change the port:
+
+```bash
+python tests/perf_tracker/tracelens_perf_harness.py \
+    --serve-only ./perf_results/timing.json --metrics-port 9200
+```
+
+Metrics exposed:
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `tracelens_stage_duration_seconds` | `trace_id`, `stage` | cumtime for each tracked pipeline stage |
+| `tracelens_total_duration_seconds` | `trace_id` | end-to-end report generation time |
+| `tracelens_process_max_rss_bytes` | `trace_id` | peak resident memory after processing |
+
 ## OTLP / Grafana Cloud
 
 Set the following environment variables before running with `--emit-otlp`:
@@ -124,14 +150,6 @@ Set the following environment variables before running with `--emit-otlp`:
 |---|---|
 | `GRAFANA_CLOUD_OTLP_ENDPOINT` | OTLP/HTTP base URL |
 | `GRAFANA_CLOUD_OTLP_TOKEN` | Token for endpoints |
-
-The harness emits three metrics to the endpoint:
-
-| Metric | Unit | Attributes |
-|---|---|---|
-| `tracelens.stage.duration_seconds` | s | `trace_id`, `stage` |
-| `tracelens.total.duration_seconds` | s | `trace_id` |
-| `tracelens.process.max_rss_bytes` | bytes | `trace_id` |
 
 Run with OTLP emission:
 
@@ -153,12 +171,20 @@ python tests/perf_tracker/tracelens_perf_harness.py \
     --push-only ./perf_results/timing.json
 ```
 
+Metrics exposed:
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `tracelens_stage_duration_seconds` | `trace_id`, `stage` | cumtime for each tracked pipeline stage |
+| `tracelens_total_duration_seconds` | `trace_id` | end-to-end report generation time |
+| `tracelens_process_max_rss_bytes` | `trace_id` | peak resident memory after processing |
+
 ## Example workflow
 
-A typical nightly CI workflow looks like:
+**Push-based (OTLP to Grafana Cloud):**
 
 ```bash
-# 1. Profile all enabled traces
+# 1. Profile all enabled traces and push metrics
 python tests/perf_tracker/tracelens_perf_harness.py \
     --manifest config/trace_manifest.yaml \
     --output-dir ./perf_results_$(date +%Y%m%d) \
@@ -169,6 +195,19 @@ cat ./perf_results_$(date +%Y%m%d)/timing.json | python -m json.tool
 
 # 3. Drill into a slow trace with snakeviz (pip install snakeviz)
 snakeviz ./perf_results_$(date +%Y%m%d)/trace1_profile.prof
+```
+
+**Pull-based (Prometheus scraping):**
+
+```bash
+# 1. Profile all enabled traces (no --emit-otlp needed)
+python tests/perf_tracker/tracelens_perf_harness.py \
+    --manifest config/trace_manifest.yaml \
+    --output-dir ./perf_results
+
+# 2. Start the metrics server (leave this running; re-run step 1 nightly)
+python tests/perf_tracker/tracelens_perf_harness.py \
+    --serve-only ./perf_results/timing.json
 ```
 
 For a one-off local check on a single trace without pushing metrics:
