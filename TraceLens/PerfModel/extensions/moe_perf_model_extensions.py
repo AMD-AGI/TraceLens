@@ -1066,7 +1066,7 @@ class moe_aiter_ck_stage1(UnfusedMoE_Up):
         Extract MoE dimensions and data types from event args.
 
         Expected Input Dims format (from aiter::ck_moe_stage1):
-        [[tokens, hidden_dim], [E, N, K_packed], [E, hidden_dim, inter_dim_packed],
+        [[tokens, hidden_dim_packed], [E, N, K_packed], [E, hidden_dim, inter_dim_packed],
          [sorted_ids], [sorted_expert_ids], [num_valid_ids],
          [tokens, topk, inter_dim], ...]
 
@@ -1082,12 +1082,13 @@ class moe_aiter_ck_stage1(UnfusedMoE_Up):
         out_shape = kernel_input_shape[6]
 
         num_tokens = input_shape[0]
-        hidden_dim = input_shape[1]
 
-        E, hidden_dim_w2, inter_dim = w2_shape
+        E, hidden_dim, inter_dim = w2_shape
 
-        # Account for INT4 weight packing: w1's K dim may be compressed
-        int4_war = hidden_dim_w2 // w1_shape[-1]
+        # Account for FP4/INT4 weight packing: w1's K dim may be compressed.
+        # The packing factor is the ratio of the unpacked hidden_dim (from w2)
+        # to w1's packed K dim, and also applies to inter_dim.
+        int4_war = hidden_dim // w1_shape[-1]
         inter_dim *= int4_war
 
         num_experts = E
@@ -1169,7 +1170,7 @@ class moe_aiter_ck_stage2(UnfusedMoE_Down):
         Extract MoE dimensions and data types from event args.
 
         Expected Input Dims format (from aiter::ck_moe_stage2):
-        [[tokens, topk, inter_dim], [E, N, K], [E, hidden_dim, inter_dim_packed],
+        [[tokens, topk, inter_dim_packed], [E, N, K_packed], [E, hidden_dim, inter_dim_packed],
          [sorted_ids], [sorted_expert_ids], [num_valid_ids],
          [tokens, hidden_dim], ...]
 
@@ -1180,10 +1181,17 @@ class moe_aiter_ck_stage2(UnfusedMoE_Down):
 
         kernel_input_shape = args["Input Dims"]
         input_shape = kernel_input_shape[0]
+        w1_shape = kernel_input_shape[1]
         w2_shape = kernel_input_shape[2]
 
         num_tokens, topk, inter_dim = input_shape
         num_experts, hidden_dim, _ = w2_shape
+
+        # Account for FP4/INT4 packing: inter_states' last dim (and w2's last
+        # dim) may be packed. The packing factor is the ratio of the unpacked
+        # hidden_dim (w2's middle dim) to w1's packed K dim.
+        int4_war = hidden_dim // w1_shape[-1] if w1_shape else 1
+        inter_dim *= int4_war
 
         input_dtype = args["Input type"][0]
         weight_dtype = args["Input type"][2]
