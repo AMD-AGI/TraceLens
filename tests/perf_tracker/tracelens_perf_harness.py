@@ -14,28 +14,28 @@ endpoint for pull-based scraping.
 
 Usage:
     # Single trace file
-    python scripts/tracelens_perf_harness.py \
+    python tests/perf_tracker/tracelens_perf_harness.py \
         --trace-file /path/to/trace.json.gz \
         --output-dir ./perf_results
 
     # Manifest-driven, with OTLP emission
-    python scripts/tracelens_perf_harness.py \
+    python tests/perf_tracker/tracelens_perf_harness.py \
         --manifest config/trace_manifest.yaml \
         --output-dir ./perf_results \
         --emit-otlp
 
     # Manifest with filter
-    python scripts/tracelens_perf_harness.py \
+    python tests/perf_tracker/tracelens_perf_harness.py \
         --manifest config/trace_manifest.yaml \
         --output-dir ./perf_results \
         --filter "trace_001,trace_003"
 
     # Serve metrics from an existing timing.json (run once, stays up forever)
-    python scripts/tracelens_perf_harness.py \
+    python tests/perf_tracker/tracelens_perf_harness.py \
         --serve-only ./perf_results/timing.json
 
     # Custom port
-    python scripts/tracelens_perf_harness.py \
+    python tests/perf_tracker/tracelens_perf_harness.py \
         --serve-only ./perf_results/timing.json --metrics-port 9200
 """
 
