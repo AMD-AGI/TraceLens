@@ -40,9 +40,12 @@ def create_pseudo_ops_moe_flydsl(trace_tree):
     # Resolve full event names that contain each marker.
     marker_to_event_names = {marker: [] for marker in STAGE_WRAPPERS.values()}
     for name in trace_tree.name2event_uids:
+        if "flydsl_moe_stage" not in name:
+            continue
         for marker in marker_to_event_names:
             if name.endswith(": " + marker):
                 marker_to_event_names[marker].append(name)
+                break
 
     for pseudo_name, marker in STAGE_WRAPPERS.items():
         matched_names = marker_to_event_names[marker]

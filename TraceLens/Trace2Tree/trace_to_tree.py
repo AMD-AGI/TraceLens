@@ -53,6 +53,17 @@ class BaseTraceToTree(ABC):
         self.cpu_root_nodes = []
         self.prune_nongpu_paths = prune_nongpu_paths
         self.name2event_uids = defaultdict(list)
+        self._next_uid = max(self.events_by_uid.keys(), default=-1) + 1
+
+    def reserve_uids(self, count: int) -> int:
+        """Reserve *count* contiguous UIDs; return the first id (inclusive)."""
+        if count < 0:
+            raise ValueError("count must be non-negative")
+        if count == 0:
+            return self._next_uid
+        start = self._next_uid
+        self._next_uid += count
+        return start
 
     @abstractmethod
     def default_categorizer(self) -> None:
@@ -229,6 +240,47 @@ class BaseTraceToTree(ABC):
             return []
         return [self.get_UID2event(child_UID) for child_UID in event["children"]]
 
+    def assert_parent_pointers_acyclic(self) -> None:
+        """Raise ``ValueError`` if ``parent`` links contain a cycle.
+
+        Each event has at most one ``parent`` UID, so parent edges form a
+        pseudoforest toward roots. Cycles are invalid and can hang parent-walking
+        code. This check is **O(N)** in the number of events.
+
+        Not run automatically from ``build_tree``; call after building or
+        mutating a tree when you want a strict sanity check.
+        """
+        UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
+        gray: set[int] = set()
+        black: set[int] = set()
+
+        def visit(u: int) -> None:
+            if u in black:
+                return
+            if u in gray:
+                raise ValueError(
+                    f"Parent-pointer cycle detected (UID {u} revisited on parent chain)"
+                )
+            if u not in self.events_by_uid:
+                raise ValueError(
+                    f"Invalid parent reference: UID {u} not present in events_by_uid"
+                )
+            gray.add(u)
+            p = self.events_by_uid[u].get("parent")
+            if p is not None:
+                visit(p)
+            gray.remove(u)
+            black.add(u)
+
+        for event in self.events:
+            uid = event[UID]
+            if uid not in black:
+                visit(uid)
+
+    def _max_parent_walk_steps(self) -> int:
+        """Upper bound on parent-chain length; longer chains imply a cycle or bug."""
+        return len(self.events) + 10
+
     def _compute_event_end_times(self) -> None:
         TraceLens.util.TraceEventUtils.compute_event_end_times(self.events)
 
@@ -394,7 +446,15 @@ class JaxTraceToTree(BaseTraceToTree):
                         TraceLens.util.TraceEventUtils.TraceKeys.UID
                     ]
                 ]
+                max_steps = self._max_parent_walk_steps()
+                steps = 0
                 while self.get_parent_event(event):
+                    steps += 1
+                    if steps > max_steps:
+                        raise ValueError(
+                            "Parent chain exceeded event count while propagating "
+                            "gpu_events; possible parent-pointer cycle"
+                        )
                     parent = self.get_parent_event(event)
                     parent.setdefault("gpu_events", []).append(
                         corresponding_gpu_event[
@@ -744,7 +804,15 @@ class TraceToTree(BaseTraceToTree):
 
                 # Walk parent chain to propagate gpu_events
                 parent_uid = runtime_event.get("parent")
+                max_steps = self._max_parent_walk_steps()
+                steps = 0
                 while parent_uid is not None:
+                    steps += 1
+                    if steps > max_steps:
+                        raise ValueError(
+                            "Parent chain exceeded event count while propagating "
+                            "gpu_events; possible parent-pointer cycle"
+                        )
                     parent = events_by_uid[parent_uid]
                     parent.setdefault("gpu_events", []).append(gpu_evt_uid)
                     parent_uid = parent.get("parent")
@@ -1227,7 +1295,15 @@ class TraceToTree(BaseTraceToTree):
             return nn_module_event["nn_module_parent"]
         # find the parent, traverse up the tree until we find a nn.Module event or parent is None
         parent_UID = nn_module_event.get("parent")
+        max_steps = self._max_parent_walk_steps()
+        steps = 0
         while parent_UID is not None:
+            steps += 1
+            if steps > max_steps:
+                raise ValueError(
+                    "Parent chain exceeded event count in get_nn_module_parent; "
+                    "possible parent-pointer cycle"
+                )
             parent = self.get_UID2event(parent_UID)
             if self._is_nn_module_event(parent):
                 nn_module_event["nn_module_parent"] = parent_UID
