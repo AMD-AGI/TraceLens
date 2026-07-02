@@ -336,6 +336,8 @@ class JaxTraceToTree(BaseTraceToTree):
 
         self.linking_key_to_uid_map = defaultdict(list)
         self.hlo_ops = defaultdict(list)
+        self.hlo_op_aliases = {}
+        self._warned_missing_hlo_ops = set()
         self.metadata = dict
 
     def default_categorizer(self):
@@ -437,6 +439,9 @@ class JaxTraceToTree(BaseTraceToTree):
 
         self._categorize_gpu_kernel_ops()
 
+    # Kernel-name FA labels are authoritative; do not replace with TE via hlo_op.
+    _FA_KERNEL_NAME_CATEGORIES = frozenset({"FA BWD", "FA FWD", "FA V3"})
+
     def _categorize_gpu_kernel_ops(self) -> None:
         """
         Categorizes GPU kernel operations in the event list based on their names and HLO operation types.
@@ -446,6 +451,9 @@ class JaxTraceToTree(BaseTraceToTree):
         category by matching the event's name and, if available, its 'hlo_op' argument against
         predefined category filters in `TraceEventUtils.JaxOpKeys.ClassCategories`. If no category is
         matched, assigns a default 'Uncategorized/XLA' category.
+
+        When the kernel name matches an FA category (FA FWD / FA BWD / FA V3), that label is kept
+        even if ``hlo_op`` would match TE (e.g. ``te_fused_attn_forward_ffi`` inside Transformer Engine).
 
         Modifies:
             Each relevant event in `self.events` by adding or updating the 'gpu_kernel_op_cat' key.
@@ -457,21 +465,27 @@ class JaxTraceToTree(BaseTraceToTree):
             if event.get("cat") != "kernel":
                 continue
             name = event.get("name", "")
-            gpu_kernel_op_cat_not_found = True
+            name_category = None
 
             for (
                 category,
                 filters,
             ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
                 if any(f in name for f in filters):
-                    event["gpu_kernel_op_cat"] = category
-                    gpu_kernel_op_cat_not_found = False
+                    name_category = category
                     break
+
+            gpu_kernel_op_cat_not_found = name_category is None
+            if name_category is not None:
+                event["gpu_kernel_op_cat"] = name_category
 
             args = event.get("args")
             if args and "hlo_op" in args:
                 hlo_op = args.get("hlo_op")
-                if hlo_op:
+                if (
+                    hlo_op
+                    and name_category not in self._FA_KERNEL_NAME_CATEGORIES
+                ):
                     for (
                         category,
                         filters,
@@ -532,6 +546,40 @@ class JaxTraceToTree(BaseTraceToTree):
                                 pb_file_name, hlo_module
                             )
                         )
+        self._build_hlo_op_alias_maps()
+
+    def _build_hlo_op_alias_maps(self) -> None:
+        """Build per-module aliases for runtime vs HLO-dump collective names."""
+        trace_ops_by_module = defaultdict(set)
+        for event in self.events:
+            args = event.get("args") or {}
+            hlo_module = args.get("hlo_module")
+            hlo_op = args.get("hlo_op")
+            if hlo_module and hlo_op:
+                trace_ops_by_module[hlo_module].add(
+                    JaxProfileProcessor._normalize_hlo_op_key(hlo_op)
+                )
+
+        self.hlo_op_aliases = {}
+        for hlo_module, trace_ops in trace_ops_by_module.items():
+            module_ops = self.hlo_ops.get(hlo_module)
+            if not module_ops:
+                continue
+            self.hlo_op_aliases[hlo_module] = (
+                JaxProfileProcessor.build_collective_hlo_aliases(
+                    module_ops, trace_ops
+                )
+            )
+
+    def _lookup_hlo_metadata(self, hlo_module: str, hlo_op: str) -> Optional[dict]:
+        module_ops = self.hlo_ops.get(hlo_module, {})
+        aliases = self.hlo_op_aliases.get(hlo_module, {})
+        resolved_key = JaxProfileProcessor.resolve_hlo_op_key(
+            hlo_op, module_ops, aliases
+        )
+        if resolved_key is None:
+            return None
+        return module_ops.get(resolved_key)
 
     def _create_linking_key_to_uid_map(self) -> None:
         """
@@ -589,17 +637,22 @@ class JaxTraceToTree(BaseTraceToTree):
                                 if "hlo_op" in GPU_event.get("args").keys():
                                     hlo_op = "%" + GPU_event.get("args").get("hlo_op")
                                     hlo_module = GPU_event.get("args").get("hlo_module")
-                                    if (hlo_module in self.hlo_ops.keys()) and (
-                                        hlo_op in self.hlo_ops.get(hlo_module).keys()
-                                    ):
-                                        GPU_event["metadata"] = self.hlo_ops.get(
-                                            hlo_module
-                                        ).get(hlo_op)
+                                    metadata = self._lookup_hlo_metadata(
+                                        hlo_module, hlo_op
+                                    )
+                                    if metadata is not None:
+                                        GPU_event["metadata"] = metadata
                                     else:
-                                        logger.warning(f"Missing hlo_op: {hlo_op}")
-                                        logger.warning(
-                                            f"in hlo_module: {GPU_event['args']['hlo_module']}"
-                                        )
+                                        warn_key = (hlo_module, hlo_op)
+                                        if warn_key not in self._warned_missing_hlo_ops:
+                                            self._warned_missing_hlo_ops.add(warn_key)
+                                            logger.warning(
+                                                f"Missing hlo_op: {hlo_op}"
+                                            )
+                                            logger.warning(
+                                                "in hlo_module: "
+                                                f"{GPU_event['args']['hlo_module']}"
+                                            )
 
 
 class TraceToTree(BaseTraceToTree):
