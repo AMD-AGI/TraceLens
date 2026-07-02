@@ -302,13 +302,13 @@ def _detect_iteration_roots_from_tree(
     ``roots`` may be a single event dict or a list of event dicts — all are
     seeded into the BFS at depth 0 so they are explored level-by-level together.
 
-    Pattern detection uses only GPU-path children (dur > 1us) to avoid noise
-    from utility calls. Block boundaries are expanded to the full unfiltered
-    child list to include CPU-only events (e.g. scheduler.step) that follow
-    the GPU work within each iteration.
+    Pattern detection uses all children (not just GPU-path ones) so that
+    leading CPU-only events (e.g. ``next`` in the OWL pipeline) are included
+    as part of the iteration anchor. A minimum child count guards against false
+    positives from short utility-function child lists.
 
     Returns a list of synthetic root events, one per detected iteration, where
-    each event's ``dur`` spans the full block from first to last child.
+    each event's ``dur`` spans from the first to the last child of the block.
     """
     from collections import deque
 
@@ -322,18 +322,12 @@ def _detect_iteration_roots_from_tree(
         if not children:
             continue
 
-        # Use GPU-path children (dur > 1us) for pattern detection to avoid noise
-        # from utility calls. Skip nodes with no qualifying children — recurse
-        # only into GPU-bearing subtrees.
-        gpu_children = [
-            c for c in children
-            if c.get("gpu_events") and c.get("dur", 0) > 1
-        ]
-        if not gpu_children:
+        # Only recurse into GPU-bearing subtrees.
+        if not any(c.get("gpu_events") for c in children):
             continue
 
         p, _, start = _find_repeating_period(
-            [c.get("name", "") for c in gpu_children]
+            [c.get("name", "") for c in children]
         )
         if p is None:
             for child in children:
@@ -342,39 +336,34 @@ def _detect_iteration_roots_from_tree(
             continue
 
         print(f"Generic fallback: repeating pattern found under '{current.get('name')}' at depth {depth}")
+        print(f"Generic fallback: period={p}")
 
-        # Map detection indices back to the full child list so each block spans
-        # the complete iteration including CPU-only tail events.
-        first_full_idx = children.index(gpu_children[start])
-        if start + p < len(gpu_children):
-            next_iter_ts = gpu_children[start + p]["ts"]
-            last_full_idx = next(
-                (i - 1 for i, c in enumerate(children) if c["ts"] >= next_iter_ts),
-                len(children) - 1,
-            )
-        else:
-            last_full_idx = len(children) - 1
-        full_block_size = last_full_idx - first_full_idx + 1
-        full_pattern = [
-            c.get("name", "")
-            for c in children[first_full_idx : first_full_idx + full_block_size]
+        # Anchor each iteration between the Nth occurrence of the first and last
+        # events in the detected pattern. Using all-children anchors means
+        # CPU-only leading/trailing events are included naturally.
+        first_anchor_name = children[start]["name"]
+        last_anchor_name = children[start + p - 1]["name"]
+
+        first_anchors = [
+            i for i, c in enumerate(children)
+            if i >= start and c.get("name") == first_anchor_name
         ]
-        print(f"Generic fallback: GPU-path period={p}, full block size={full_block_size}")
+        last_anchors = [
+            i for i, c in enumerate(children)
+            if i >= start and c.get("name") == last_anchor_name
+        ]
 
-        # Group into iteration blocks and synthesize a root event for each.
         iteration_roots = []
-        remaining = children[first_full_idx:]
-        names = [c.get("name", "") for c in remaining]
-        i = 0
-        while i + full_block_size <= len(names):
-            if names[i : i + full_block_size] != full_pattern:
+        for n in range(min(len(first_anchors), len(last_anchors))):
+            block_start = first_anchors[n]
+            block_end = last_anchors[n]
+            if block_end < block_start:
                 break
-            block = remaining[i : i + full_block_size]
+            block = children[block_start : block_end + 1]
             first, last = block[0], block[-1]
             root_event = dict(first)
             root_event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
             iteration_roots.append(root_event)
-            i += full_block_size
 
         print(f"Generic fallback: identified {len(iteration_roots)} iterations.")
         return iteration_roots if iteration_roots else None
@@ -726,7 +715,22 @@ def extract_and_save(
                 f"_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
             )
         elif is_annotation and len(root) == 1:
-            name_append = root[0]["name"].replace("(", "_").replace(")", "")
+            root_name = root[0]["name"]
+            is_known_annotation = any(
+                pat.match(root_name)
+                for pat in ANNOTATION_PATTERN + ANNOTATION_PATTERN_BACKUP
+            )
+            if is_known_annotation:
+                name_append = (
+                    root_name
+                    .replace("/", "_")
+                    .replace("(", "_")
+                    .replace(")", "")
+                    .replace(":", "")
+                    .replace(" ", "_")
+                )
+            else:
+                name_append = ""
         else:
             if len(batch_list) == len(iter_details):
                 name_append = f"batch{int(sum(batch_list)/len(batch_list))}_gpu{prefix}"
@@ -738,8 +742,9 @@ def extract_and_save(
                 output_dir, f"{output_label}_{name_append}_{base_name}.json.gz"
             )
         else:
+            suffix = f"_{name_append}" if name_append else ""
             out_path = os.path.join(
-                output_dir, f"{base_name}_{prefix}_{idx}_{name_append}.json.gz"
+                output_dir, f"{base_name}_{prefix}_{idx}{suffix}.json.gz"
             )
         with gzip.open(out_path, "wb") as f:
             f.write(json.dumps(iter_trace).encode("utf-8"))
