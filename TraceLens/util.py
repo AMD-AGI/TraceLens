@@ -88,6 +88,43 @@ class DataLoader:
 class JaxProfileProcessor:
     gemm_columns = ["Batch", "M", "N", "K", "Beta", "Type"]
 
+    # Substrings used to detect parseable HLO graph-viewer text lines.
+    # The legacy list only covered float types; integer/bool lines were skipped and
+    # later showed up as "Missing hlo_op" when the profiler trace referenced them.
+    _HLO_LINE_ELEMENT_TYPE_HINTS_LEGACY = [
+        "get-tuple-element",
+        "bf16",
+        "f8",
+        "f16",
+        "f32",
+        "f64",
+    ]
+    _HLO_LINE_ELEMENT_TYPE_HINTS = _HLO_LINE_ELEMENT_TYPE_HINTS_LEGACY + [
+        "s32",
+        "s64",
+        "u32",
+        "u64",
+        "pred",
+    ]
+
+    @staticmethod
+    def _should_parse_hlo_graph_line(line: str) -> bool:
+        """Return True if a graph-viewer text line should be parsed into hlo_ops."""
+        line_processed = line.strip()
+        if not line_processed or line_processed.startswith("HloModule "):
+            return False
+        if line_processed.startswith("ROOT"):
+            return False
+        if (
+            "metadata" in line_processed
+            and not re.search(r"\)$", line_processed)
+        ):
+            return True
+        return any(
+            hint in line_processed
+            for hint in JaxProfileProcessor._HLO_LINE_ELEMENT_TYPE_HINTS
+        )
+
     @staticmethod
     def process_xla_file(xla_file_name):
         hlo_ops = {}
@@ -172,22 +209,84 @@ class JaxProfileProcessor:
     @staticmethod
     def process_line(hlo_ops: dict, line: str):
         line_processed = line.strip()
-        if (
-            (
-                "metadata" in line_processed
-                and not (re.search(r"\)$", line_processed))
-                and not (line_processed.startswith("ROOT"))
-            )
-            or any(
-                t in line_processed
-                for t in ["get-tuple-element", "bf16", "f8", "f16", "f32", "f64"]
-            )
-            and not (line_processed.startswith("HloModule "))
-        ):
-            k, v = JaxProfileProcessor.get_dict(hlo_ops, line_processed)
-            hlo_ops[k] = v
-            return True
-        return False
+        if not JaxProfileProcessor._should_parse_hlo_graph_line(line_processed):
+            return False
+        k, v = JaxProfileProcessor.get_dict(hlo_ops, line_processed)
+        hlo_ops[k] = v
+        return True
+
+    # Async collectives in HLO text use *-start/*-done names; runtime traces may
+    # use numbered aliases (e.g. reduce-scatter.12 -> reduce-scatter-start).
+    _ASYNC_COLLECTIVE_FAMILIES = ("all-to-all", "reduce-scatter", "all-gather")
+
+    @staticmethod
+    def _normalize_hlo_op_key(hlo_op: str) -> str:
+        return hlo_op if hlo_op.startswith("%") else f"%{hlo_op}"
+
+    @staticmethod
+    def _collective_start_keys(module_ops: dict, family: str) -> list:
+        start_keys = sorted(
+            k for k in module_ops if k.startswith(f"%{family}-start")
+        )
+        if start_keys:
+            return start_keys
+        return sorted(k for k in module_ops if k.startswith(f"%{family}-done"))
+
+    @classmethod
+    def build_collective_hlo_aliases(cls, module_ops: dict, trace_hlo_ops) -> dict:
+        """Map numbered runtime collective tags to parsed HLO dump keys."""
+        aliases = {}
+        normalized_ops = {cls._normalize_hlo_op_key(op) for op in trace_hlo_ops}
+
+        for family in cls._ASYNC_COLLECTIVE_FAMILIES:
+            numbered = []
+            for op_key in normalized_ops:
+                if op_key in module_ops:
+                    continue
+                bare = op_key.lstrip("%")
+                prefix = f"{family}."
+                if not bare.startswith(prefix):
+                    continue
+                suffix = bare[len(prefix) :]
+                if suffix.isdigit():
+                    numbered.append((int(suffix), op_key))
+
+            if not numbered:
+                continue
+
+            start_keys = cls._collective_start_keys(module_ops, family)
+            if not start_keys:
+                continue
+
+            numbered.sort()
+            if len(start_keys) == 1:
+                for _, op_key in numbered:
+                    aliases[op_key] = start_keys[0]
+            else:
+                for idx, (_, op_key) in enumerate(numbered):
+                    aliases[op_key] = start_keys[min(idx, len(start_keys) - 1)]
+
+        return aliases
+
+    @classmethod
+    def resolve_hlo_op_key(cls, hlo_op: str, module_ops: dict, aliases=None):
+        """Resolve a trace hlo_op to a key present in module_ops."""
+        key = cls._normalize_hlo_op_key(hlo_op)
+        if key in module_ops:
+            return key
+        if aliases and key in aliases and aliases[key] in module_ops:
+            return aliases[key]
+
+        bare = key.lstrip("%")
+        match = re.match(
+            r"^(all-to-all|reduce-scatter|all-gather)\.(\d+)$",
+            bare,
+        )
+        if match:
+            start_keys = cls._collective_start_keys(module_ops, match.group(1))
+            if start_keys:
+                return start_keys[0]
+        return None
 
     @staticmethod
     def get_operands(operands):
