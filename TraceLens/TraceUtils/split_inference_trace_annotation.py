@@ -293,9 +293,7 @@ def _find_repeating_period(
     return None, None, None
 
 
-def _detect_iteration_roots_from_tree(
-    tree: TraceToTree, roots
-) -> Optional[List[dict]]:
+def _detect_iteration_roots_from_tree(tree: TraceToTree, roots) -> Optional[List[dict]]:
     """BFS down the tree from one or more root nodes to find and return synthetic
     iteration-root events.
 
@@ -326,16 +324,16 @@ def _detect_iteration_roots_from_tree(
         if not any(c.get("gpu_events") for c in children):
             continue
 
-        p, _, start = _find_repeating_period(
-            [c.get("name", "") for c in children]
-        )
+        p, _, start = _find_repeating_period([c.get("name", "") for c in children])
         if p is None:
             for child in children:
                 if child.get("gpu_events"):
                     queue.append((child, depth + 1))
             continue
 
-        print(f"Generic fallback: repeating pattern found under '{current.get('name')}' at depth {depth}")
+        print(
+            f"Generic fallback: repeating pattern found under '{current.get('name')}' at depth {depth}"
+        )
         print(f"Generic fallback: period={p}")
 
         # Anchor each iteration between the Nth occurrence of the first and last
@@ -345,11 +343,13 @@ def _detect_iteration_roots_from_tree(
         last_anchor_name = children[start + p - 1]["name"]
 
         first_anchors = [
-            i for i, c in enumerate(children)
+            i
+            for i, c in enumerate(children)
             if i >= start and c.get("name") == first_anchor_name
         ]
         last_anchors = [
-            i for i, c in enumerate(children)
+            i
+            for i, c in enumerate(children)
             if i >= start and c.get("name") == last_anchor_name
         ]
 
@@ -591,7 +591,9 @@ def get_iter_details_from_name(name: str, prefix: str = "annotation_iteration") 
     # vLLM execute_..._context_..._generation_... annotations: strip parens and the
     # sq/sk shape letters to a flat token list, then pick counts by index.
     try:
-        parts = re.sub(r"[sqk]+", "_", name.replace("(", "_").replace(")", "_")).split("_")
+        parts = re.sub(r"[sqk]+", "_", name.replace("(", "_").replace(")", "_")).split(
+            "_"
+        )
         if len(parts) < 10:
             idx = (2, 3, 6, 7)
         elif len(parts) < 12:
@@ -722,8 +724,7 @@ def extract_and_save(
             )
             if is_known_annotation:
                 name_append = (
-                    root_name
-                    .replace("/", "_")
+                    root_name.replace("/", "_")
                     .replace("(", "_")
                     .replace(")", "")
                     .replace(":", "")
