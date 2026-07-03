@@ -11,8 +11,7 @@ See LICENSE for license information.
 :keywords: TraceLens, collective communication, NCCL, multi-GPU, distributed training, AllReduce, AllGather, bandwidth, skew, straggler, ROCm, PyTorch profiler
 ```
 
-
-This guide shows how to analyze multi-GPU collective operations across ranks to
+This topic shows how to analyze multi-GPU collective operations across ranks to
 diagnose scaling issues, separating true communication time from
 synchronization skew.
 
@@ -54,7 +53,7 @@ TraceLens_generate_multi_rank_collective_report_pytorch \
 
 `--rank_regex` must contain a named group `rank` (or a single capture group).
 
-**Expected output:** an Excel report summarizing collective operations across
+**Expected output**: An Excel report summarizing collective operations across
 ranks, with aggregation metrics (`mean`, `median`, `min`, `max` by default). If
 neither `--output_xlsx_path` nor `--output_csvs_dir` is given, the workbook is
 written to `--trace_dir` (or the lowest common directory of the resolved
@@ -69,13 +68,13 @@ collective type and analysis. The most useful:
 
 | Sheet | Granularity | What it contains |
 |-------|-------------|------------------|
-| `nccl_summary_implicit_sync` | one row per (collective name, dtype, message size) | Aggregated latency, skew, and bandwidth (algorithm and bus) for collectives that incur implicit sync (AllReduce, AllGather, ReduceScatter, balanced AllToAll). |
-| `nccl_summary_long` | one row per (collective name, dtype, message size) | Duration aggregates (sum/mean/std/min/max) and counts across all ranks. |
-| `nccl_implicit_sync` | one row per collective | Per-collective implicit-sync breakdown; per-rank timestamps, durations, and `wait_time` are spread across `rank_<i>_*` columns. |
-| `nccl_long` | one row per (collective, rank) | Per-event, per-rank NCCL records (timestamps, durations, stream, message sizes) for drilling into specific ops. |
-| `nccl_summary_all2allv` / `nccl_all2allv` | per (process group, dtype) / per (collective, rank) | All-to-all-v metrics (throughput, wall time, size imbalance, skew), aggregated and per-rank. |
-| `nccl_all2allv_heatmap` | one row per rank, one column per rank | Per rank-pair send volumes (only with `--all2allv_heatmap`). |
-| `straggler_summary` | one row per rank | Aggregated straggler metrics — see Step 3. |
+| `nccl_summary_implicit_sync` | One row per (collective name, dtype, message size) | Aggregated latency, skew, and bandwidth (algorithm and bus) for collectives that incur implicit sync (AllReduce, AllGather, ReduceScatter, balanced AllToAll). |
+| `nccl_summary_long` | One row per (collective name, dtype, message size) | Duration aggregates (sum/mean/std/min/max) and counts across all ranks. |
+| `nccl_implicit_sync` | One row per collective | Per-collective implicit-sync breakdown; per-rank timestamps, durations, and `wait_time` are spread across `rank_<i>_*` columns. |
+| `nccl_long` | One row per (collective, rank) | Per-event, per-rank NCCL records (timestamps, durations, stream, message sizes) for drilling into specific ops. |
+| `nccl_summary_all2allv` / `nccl_all2allv` | Per (process group, dtype) / per (collective, rank) | All-to-all-v metrics (throughput, wall time, size imbalance, skew), aggregated and per-rank. |
+| `nccl_all2allv_heatmap` | One row per rank, one column per rank | Per rank-pair send volumes (only with `--all2allv_heatmap`). |
+| `straggler_summary` | One row per rank | Aggregated straggler metrics — see [Step 3: Find the straggler rank](#step-3-find-the-straggler-rank). |
 
 Each sheet is produced only when the corresponding collective type is present in
 the trace (for example, the all2allv sheets are skipped if the run has no
@@ -89,7 +88,7 @@ time a rank spends waiting for other ranks to arrive. The key metrics:
 
 | Metric | Meaning |
 |--------|---------|
-| `comm_latency` | Communication time for the collective, taken as the **minimum duration across ranks** — this strips out per-rank waiting so it reflects real data movement. |
+| `comm_latency` | Communication time for the collective, taken as the *minimum duration across ranks* — this strips out per-rank waiting so it reflects real data movement. |
 | `algo bw` | Algorithm bandwidth: message size / `comm_latency`. |
 | `bus bw` | Bus bandwidth (link utilization). |
 | `wait_time`, `skew in start time` | How much later some ranks arrive than the earliest rank — the synchronization cost. |
@@ -99,8 +98,8 @@ High skew points to load imbalance upstream rather than a slow network; high
 
 ### Interpret all-to-all-v collectives (MoE / expert parallel)
 
-All-to-all-v sends a different amount of data per rank, so there is no single
-message size and the ring/tree `algo bw` / `bus bw` formulas do not apply.
+All-to-all-v sends a different amount of data per rank, so there's no single
+message size and the ring/tree `algo bw` / `bus bw` formulas don't apply.
 The all2allv sheets instead report:
 
 | Metric | Meaning |
@@ -110,24 +109,33 @@ The all2allv sheets instead report:
 | `size_imbalance` | Max rank's data ÷ mean. `1.0` = balanced; `>> 1.0` = some ranks carry disproportionate load (common when some MoE experts are hotter than others). |
 | `skew in start time` | How far apart ranks enter the collective — large skew means some ranks are blocked by upstream compute. |
 
-Reading it: low `throughput` with `size_imbalance` ≈ 1.0 → software/driver
-overhead; low `throughput` with `size_imbalance` >> 1.0 → expert-routing
-imbalance, where the busiest rank gates the collective. Use
-`--all2allv_heatmap` to see which rank pairs carry the most traffic.
+To diagnose low throughput, check `size_imbalance`:
+
+- **`size_imbalance` ≈ 1.0** — all ranks are sending roughly equal amounts of
+  data, so the slow throughput isn't caused by one rank doing more work than
+  others. Look for software or driver overhead instead (launch latency, kernel
+  scheduling).
+- **`size_imbalance` >> 1.0** — some ranks are sending more data than
+  others. This is common in Mixture-of-Experts models where certain experts
+  attract more tokens. The busiest rank takes the longest, and all other ranks
+  wait for it to finish before the collective can complete.
+
+To see which specific rank pairs are exchanging the most data and identify the
+overloaded rank, add `--all2allv_heatmap`.
 
 ## Step 3: Find the straggler rank
 
 A *straggler* is the rank that consistently arrives last at collectives, forcing
 the others to wait in implicit synchronization. Open the `straggler_summary`
-sheet: it is sorted so the **straggler is the first row** (lowest total wait
+sheet: it's sorted so the *straggler is the first row* (lowest total wait
 time — it arrives last, so it rarely waits itself).
 
 | Column | What it tells you |
 |--------|-------------------|
-| `total_wait_time_us` | Sum of this rank's wait across all collectives. The straggler has the **lowest** value. |
+| `total_wait_time_us` | Sum of this rank's wait across all collectives. The straggler has the *lowest* value. |
 | `times_arrived_last` / `pct_arrived_last` | How often this rank was last. The straggler dominates these. |
 | `times_arrived_first` | How often this rank was first; the rank highest here pays the biggest sync penalty. |
-| `total_nccl_dur_us` | Time inside NCCL kernels; the straggler is typically **lowest** (others are inflated by wait time). |
+| `total_nccl_dur_us` | Time inside NCCL kernels; the straggler is typically *lowest* (others are inflated by wait time). |
 
 Once you know the straggler, merge its trace with a fast rank using
 [trace fusion](./trace-fusion.md) and open the result in Perfetto to see what
@@ -166,11 +174,3 @@ TraceLens_generate_multi_rank_collective_report_pytorch \
   [`nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/nccl_analyser_example.ipynb)
   notebook in the repository.
 - For JAX collectives, see [Generate a JAX performance report](./generate-perf-report-jax.md).
-
-## Related topics
-
-- [What is TraceLens?](../what-is-tracelens.md)
-- [Install TraceLens](../install/installation.md)
-- [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
-- [Fuse multi-rank traces](./trace-fusion.md)
-- [API reference](../reference/api-reference.md)

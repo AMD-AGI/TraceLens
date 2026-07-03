@@ -11,8 +11,7 @@ See LICENSE for license information.
 :keywords: TraceLens, TraceFuse, trace fusion, multi-rank, distributed training, Perfetto, PyTorch profiler, ROCm, visualization, straggler
 ```
 
-
-This guide shows how to merge per-rank PyTorch traces from a distributed run into
+This topic shows how to merge per-rank PyTorch traces from a distributed run into
 a single file that can be visualized together in Perfetto, using the `TraceFuse`
 SDK.
 
@@ -30,7 +29,7 @@ ranks line up on a common timeline. `TraceFuse` merges the per-rank traces into 
 single file so all ranks render together in Perfetto, with clear per-rank CPU/GPU
 separation and correct flow linking.
 
-`TraceFuse` is **for visual analysis in the Perfetto UI only** — not for
+`TraceFuse` is *for visual analysis in the Perfetto UI only* — not for
 automated analysis. For quantitative cross-rank metrics, use a
 [collective-communication report](./collective-report.md) instead.
 
@@ -58,7 +57,7 @@ fuser.merge_and_save(output_file)
 A ready-to-edit version of this script is at
 [`examples/trace_fusion_example.py`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace_fusion_example.py).
 
-**Expected output:** a single merged trace file containing the events from all
+**Expected output**: A single merged trace file containing the events from all
 ranks, aligned on a common timeline with per-rank `RANK N - CPU` / `RANK N - GPU`
 process labels.
 
@@ -132,10 +131,3 @@ them so they render correctly together:
   [Generate a collective-communication report](./collective-report.md).
 - Profile a single rank's operations with a
   [PyTorch performance report](./generate-perf-report-pytorch.md).
-
-## Related topics
-
-- [What is TraceLens?](../what-is-tracelens.md)
-- [Install TraceLens](../install/installation.md)
-- [Compare two traces](./compare-traces.md)
-- [API reference](../reference/api-reference.md)

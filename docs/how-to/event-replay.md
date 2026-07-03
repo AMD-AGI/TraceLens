@@ -11,8 +11,7 @@ See LICENSE for license information.
 :keywords: TraceLens, EventReplay, GPU debugging, reproducer, operator replay, PyTorch profiler, ROCm, kernel isolation, IP-safe
 ```
 
-
-This guide shows how to isolate an operation from a trace into a minimal,
+This topic shows how to isolate an operation from a trace into a minimal,
 self-contained replay — useful for focused debugging and for sharing IP-safe
 reproducers with kernel or framework developers.
 

@@ -11,7 +11,6 @@ See LICENSE for license information.
 :keywords: TraceLens, rocprofv3, rocprofiler-sdk, ROCm, pftrace, Perfetto, GPU trace, kernel summary, performance report, AMD Instinct, HIP
 ```
 
-
 Build a performance report from AMD ROCm rocprofiler-sdk traces. TraceLens
 supports both `rocprofv3` JSON results and Perfetto-style `.pftrace` files.
 
@@ -54,9 +53,9 @@ Options:
 Kernels are categorized from name patterns (GEMM, elementwise, reduction,
 convolution, normalization, attention, memory, and other).
 
-Because rocprofv3 captures GPU activity directly, it has **no CPU call stack or
-operator hierarchy**, categorization is name-based rather than semantic, and
-PyTorch-specific metadata (input shapes, op args) is not available. For
+Because rocprofv3 captures GPU activity directly, it has no CPU call stack or
+operator hierarchy, categorization is name-based rather than semantic, and
+PyTorch-specific metadata (input shapes, op args) isn't available. For
 operator-level shape analysis, use a PyTorch trace instead. The two sources
 compare as follows:
 
@@ -69,13 +68,13 @@ compare as follows:
 | API calls | HIP / HSA | CUDA runtime |
 | CPU call-stack tree | Not available | Available |
 
-**Troubleshooting:**
+**Troubleshooting**:
 
-- *"Not a valid rocprofv3 file"* — ensure the input is a `*_results.json` file
+- `"Not a valid rocprofv3 file"` — ensure the input is a `*_results.json` file
   from rocprofv3, not another format.
-- *"No kernel events found"* — the trace captured no GPU activity; check that GPU
+- `"No kernel events found"` — the trace captured no GPU activity; check that the GPU
   work ran during profiling and that rocprofv3 recorded kernel dispatches.
-- *openpyxl not installed* — install it for Excel output (`pip install openpyxl`)
+- `openpyxl not installed` — install it for the Excel output (`pip install openpyxl`)
   or use `--output_csvs_dir` for CSV output instead.
 
 ## rocprofv3 pftrace
@@ -87,7 +86,7 @@ reports. Each takes `--trace_path` and writes an Excel workbook (or CSVs with
 binary), `.json` (Perfetto-style JSON with a `traceEvents` array), and `.json.gz`.
 
 ```{note}
-`.pftrace` input requires `traceconv` to convert the trace to JSON. You do not
+`.pftrace` input requires `traceconv` to convert the trace to JSON. You don't
 need to install it manually: TraceLens uses it from `PATH` if present, otherwise
 downloads it into the trace's directory. You can also pass
 `--traceconv /path/to/traceconv`.
@@ -142,9 +141,3 @@ returning a dictionary of pandas DataFrames (for example `api_kernel_summary`,
   [collective-communication report](./collective-report.md).
 - Analyze [PyTorch](./generate-perf-report-pytorch.md) or
   [JAX](./generate-perf-report-jax.md) traces.
-
-## Related topics
-
-- [What is TraceLens?](../what-is-tracelens.md)
-- [Install TraceLens](../install/installation.md)
-- [API reference](../reference/api-reference.md)

@@ -11,8 +11,7 @@ See LICENSE for license information.
 :keywords: TraceLens, release notes, changelog, ROCm, GPU trace analysis, PyTorch, JAX, rocprofv3, SDK, performance report
 ```
 
-
-This page summarizes the features available in each TraceLens release. For the
+This topic summarizes the features available in each TraceLens release. For the
 hardware and software versions validated for a release, see the
 [Compatibility matrix](../reference/compatibility.md).
 

@@ -11,8 +11,7 @@ See LICENSE for license information.
 :keywords: TraceLens, compatibility, Python, ROCm, AMD Instinct, MI300X, PyTorch profiler, JAX, rocprofv3, pftrace, GPU, Linux
 ```
 
-
-This page lists the hardware and software configurations for TraceLens. Only
+This topic lists the hardware and software configurations for TraceLens. Only
 configurations that have been verified and tested should appear in the
 validated tables below.
 

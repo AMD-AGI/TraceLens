@@ -11,7 +11,6 @@ See LICENSE for license information.
 :keywords: TraceLens, performance report, PyTorch profiler, JAX, rocprofv3, collective communication, ROCm, GPU trace analysis
 ```
 
-
 TraceLens generates structured performance reports from GPU trace files produced by PyTorch, JAX, and the AMD ROCm profiler. Choose the guide for your trace format:
 
 - [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)

@@ -11,7 +11,6 @@ See LICENSE for license information.
 :keywords: TraceLens, GPU trace analysis, ROCm, AMD, PyTorch profiler, JAX, rocprofv3, roofline, distributed training, performance report, open source
 ```
 
-
 TraceLens is an open-source Python library developed by AMD that automates
 performance analysis from GPU trace files. Instead of manually inspecting raw
 profiling data in tools such as Perfetto or Chrome Trace Viewer, TraceLens
