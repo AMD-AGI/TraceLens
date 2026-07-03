@@ -11,8 +11,7 @@ See LICENSE for license information.
 :keywords: TraceLens, trace comparison, TraceDiff, performance regression, GPU benchmark, ROCm, PyTorch profiler, diff, roofline, GEMM
 ```
 
-
-This guide shows how to quantify the impact of a change by comparing two
+This topic shows how to quantify the impact of a change by comparing two
 TraceLens reports side by side — for example, a baseline against a candidate
 after a code, library, or hardware change.
 
@@ -24,8 +23,8 @@ the matching to be:
   and modelled ops like GEMM/SDPA) across the two reports. CLI-driven, and
   produces a side-by-side Excel workbook.
 - **[TraceDiff comparison](#tracediff-comparison-morphological)** — an SDK that
-  compares traces by their **morphological tree structure**, matching ops at the
-  lowest common node. Use it when op names differ between traces (e.g. across
+  compares traces by their *morphological tree structure*, matching ops at the
+  lowest common node. Use it when op names differ between traces (for example, across
   hardware, libraries, or framework versions) or when you need finer-grained,
   programmatic analysis.
 
@@ -64,7 +63,7 @@ TraceLens_compare_perf_reports_pytorch \
   `kernel_summary`, `ops_all`, `roofline`, or `all`.
 - `-o` sets the output workbook path; add `--output_csvs_dir` to also emit CSVs.
 
-**Expected output:** `comparison.xlsx`, a workbook with side-by-side columns for
+**Expected output**: `comparison.xlsx`, a workbook with side-by-side columns for
 each report. Rows are matched by op name, so this works best when the two runs
 share the same op names (typically the same workload across configurations). When
 names diverge — for example across hardware or library versions — use the
@@ -97,7 +96,7 @@ Things to know when reading the workbook:
 - **Outer merge, never inner** — if an op exists in only one report it still
   appears (in the `only_baseline` / `only_variant` sheets), so you can see ops
   that vanished or were newly introduced.
-- **Baseline is the first report** you pass — choose its order deliberately.
+- **Baseline is the first report you pass** — choose its order deliberately.
 - **Column prefixing** — every metric is written as `<tag>::metric`, so multiple
   reports can be compared safely.
 - **Noise is hidden, not deleted** — columns like `median`, `std`, `min`, `max`,
@@ -116,7 +115,7 @@ directly, giving finer-grained, programmatic analysis.
 ### Why morphological diffing
 
 Unlike a leaf-level operation comparison, TraceDiff considers the morphological
-structure of each trace to find the **lowest common node** between them. This
+structure of each trace to find the *lowest common node* between them. This
 matters when the same logical operation lowers to different leaf ops — for
 example, `aten::convolution` becomes `aten::miopen_convolution` on ROCm and
 `aten::cudnn_convolution` on CUDA. A leaf-level diff would treat these as
@@ -189,8 +188,5 @@ notebook for a worked example.
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Install TraceLens](../install/installation.md)
-- [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
-- [Generate a JAX performance report](./generate-perf-report-jax.md)
-- [Generate a rocprof performance report](./generate-perf-report-rocprof.md)
-- [Generate a collective-communication report](./collective-report.md)
+- [Generate a report](generate-reports.md)
 - [API reference](../reference/api-reference.md)

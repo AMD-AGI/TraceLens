@@ -22,15 +22,22 @@ subtrees:
 - caption: How to
   entries:
   - file: how-to/generate-reports
-    title: Generate TraceLens reports
+    title: Generate reports
     entries:
     - file: how-to/generate-perf-report-pytorch
+      title: PyTorch performance report 
     - file: how-to/generate-perf-report-jax
+      title: JAX performance report 
     - file: how-to/generate-perf-report-rocprof
+      title: rocprof performance report 
     - file: how-to/collective-report
+      title: Collective-communication report 
   - file: how-to/compare-traces
+    title: Compare two traces
   - file: how-to/event-replay
+    title: Replay a single operation
   - file: how-to/trace-fusion
+    title: Fuse multi-rank traces
 
 - caption: Reference
   entries:

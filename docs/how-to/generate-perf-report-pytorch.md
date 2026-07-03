@@ -11,7 +11,6 @@ See LICENSE for license information.
 :keywords: TraceLens, PyTorch profiler, torch.profiler, GPU trace, performance report, roofline, GEMM, ROCm, AMD Instinct, activation recompute, CUDA migration
 ```
 
-
 Turn a `torch.profiler` Chrome trace into a multi-sheet Excel (or CSV)
 performance report, then read the sheets to find what dominates GPU time.
 
@@ -44,7 +43,7 @@ TraceLens_generate_perf_report_pytorch \
     --output_csvs_dir ./report_csvs
 ```
 
-**Output behavior:** by default a single Excel workbook is written next to the
+**Output behavior**: By default a single Excel workbook is written next to the
 trace, with the name inferred from the trace (`profile.json` →
 `profile_perf_report.xlsx`). `--output_xlsx_path` changes that location.
 `--output_csvs_dir` writes one CSV per sheet; passing it alone replaces the Excel
@@ -59,12 +58,12 @@ The generated workbook contains the following sheets:
 | Sheet | Description |
 |-------|-------------|
 | `gpu_timeline` | End-to-end GPU activity: computation, communication, memory copy, and idle time. |
-| `ops_summary_by_category` | Compute time grouped by operation category (GEMM, SDPA_fwd, elementwise, …) — the most aggregated view. |
+| `ops_summary_by_category` | Compute time grouped by operation category (GEMM, SDPA_fwd, elementwise, and so on) — the most aggregated view. |
 | `ops_summary` | Per-operation aggregate; one row per unique operation name. |
 | `ops_unique_args` | Most detailed view; one row per unique (operation name, argument) combination. |
 | `unified_perf_summary` | Unified perf metrics for ops with perf models or leaf ops that launch kernels — `GFLOPS`, `TFLOPS/s`, `Data Moved (MB)`, `FLOPS/Byte`, `TB/s`, aggregated by unique args. |
 | `coll_analysis` | Collective-communication analysis (enabled by default; disable with `--disable_coll_analysis`). |
-| Roofline sheets | One per operation category (`GEMM`, `CONV_fwd`, `SDPA_fwd`, …) with the intensity/roofline metrics described below. |
+| Roofline sheets | One per operation category (`GEMM`, `CONV_fwd`, `SDPA_fwd`, and so on) with the intensity/roofline metrics described below. |
 | `kernel_summary` | Per-kernel summary — added with `--enable_kernel_summary`. |
 | `short_kernels_summary`, `short_kernel_histogram` | Short-kernel table and duration histogram — added with `--short_kernel_study`. |
 
@@ -80,21 +79,21 @@ for what each column means.
 Every per-category roofline sheet includes operation-intensity columns by
 default: `GFLOPS`, `Data Moved (MB)`, `FLOPS/Byte`, `TFLOPS/s`, and `TB/s`.
 
-To add the roofline **bound classification**, supply a GPU architecture spec.
+To add the roofline *bound classification*, supply a GPU architecture spec.
 This adds:
 
-- **`Compute Spec`** — combined compute type and precision (e.g. `matrix_bf16`,
+- `Compute Spec` — combined compute type and precision (for example, `matrix_bf16`,
   `vector_fp32`).
-- **`Roofline Time (µs)`** — theoretical minimum time from the GPU's peak
+- `Roofline Time (µs)` — theoretical minimum time from the GPU's peak
   capabilities.
-- **`Roofline Bound`** — `COMPUTE_BOUND` or `MEMORY_BOUND`.
-- **`Pct Roofline`** — how close the measured kernel time runs to the roofline.
+- `Roofline Bound` — `COMPUTE_BOUND` or `MEMORY_BOUND`.
+- `Pct Roofline` — how close the measured kernel time runs to the roofline.
 
-```bash
-TraceLens_generate_perf_report_pytorch \
-    --profile_json_path path/to/trace.json \
-    --gpu_arch_platform MI300X
-```
+  ```bash
+  TraceLens_generate_perf_report_pytorch \
+      --profile_json_path path/to/trace.json \
+      --gpu_arch_platform MI300X
+  ```
 
 - `--gpu_arch_platform` takes a bundled platform name (`MI300X`, `MI325X`, under
   `TraceLens/Agent/Analysis/utils/arch/`); use `--gpu_arch_json_path` to supply
@@ -206,8 +205,3 @@ See the example extension file for MegatronLM in the
 - Analyze [JAX](./generate-perf-report-jax.md) or
   [rocprof](./generate-perf-report-rocprof.md) traces.
 
-## Related topics
-
-- [What is TraceLens?](../what-is-tracelens.md)
-- [Install TraceLens](../install/installation.md)
-- [API reference](../reference/api-reference.md)

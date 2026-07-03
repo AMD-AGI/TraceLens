@@ -14,11 +14,11 @@ See LICENSE for license information.
 
 TraceLens exposes two complementary interfaces:
 
-- A set of **command-line tools** (installed as `console_scripts`) for
+- A set of command-line tools (installed as `console_scripts`) for
   generating and comparing reports.
-- A **Python SDK** for building custom analysis workflows.
+- A Python SDK for building custom analysis workflows.
 
-This page documents the command-line tools and their main arguments, and
+This topic documents the command-line tools and their main arguments, and
 summarizes the SDK modules. Run any tool with `--help` for the complete,
 version-specific argument list.
 

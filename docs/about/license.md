@@ -11,9 +11,6 @@ See LICENSE for license information.
 :keywords: TraceLens, MIT License, open source, AMD, license text
 ```
 
-
-TraceLens is released under the MIT License.
-
 MIT License
 
 

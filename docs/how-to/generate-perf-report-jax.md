@@ -11,10 +11,9 @@ See LICENSE for license information.
 :keywords: TraceLens, JAX, XPlane, protobuf, GPU trace, GEMM, performance report, roofline, ROCm, AMD Instinct, xprof
 ```
 
- 
-TraceLens offers two JAX reports from an XPlane protobuf trace: the **standard
-report** (operator and roofline analysis, like the PyTorch report) and a
-**GPU-event and GEMM analysis** focused on event-type breakdowns and GEMM
+TraceLens offers two JAX reports from an XPlane protobuf trace: the *standard
+report* (operator and roofline analysis, like the PyTorch report) and a
+*GPU-event and GEMM analysis* focused on event-type breakdowns and GEMM
 performance.
 
 ## Prerequisites
@@ -39,11 +38,11 @@ TraceLens_generate_perf_report_jax --profile_path path/to/xplane.pb
 
 The same `--profile_path` argument also accepts a PyTorch `trace.json`.
 
-**Expected output:** an Excel report analogous to the
+**Expected output**: An Excel report analogous to the
 [PyTorch report](./generate-perf-report-pytorch.md), with the operator and
 roofline analysis derived from the XPlane trace (the operator sheets are named
 `kernel_launchers*`, alongside `xla_summary` and `df_xla_perf`). JAX output does
-**not** include the `short_kernels_summary` / `short_kernel_histogram` sheets —
+*not* include the `short_kernels_summary` / `short_kernel_histogram` sheets —
 those are PyTorch-only.
 
 Options:
@@ -103,8 +102,3 @@ Options:
 - Analyze [PyTorch](./generate-perf-report-pytorch.md) or
   [rocprof](./generate-perf-report-rocprof.md) traces.
 
-## Related topics
-
-- [What is TraceLens?](../what-is-tracelens.md)
-- [Install TraceLens](../install/installation.md)
-- [API reference](../reference/api-reference.md)

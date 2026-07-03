@@ -10,7 +10,6 @@ See LICENSE for license information.
 :keywords: TraceLens, install, pip, Python, ROCm, GPU trace analysis, traceconv, pftrace, virtual environment, open source
 ```
 
-
 This topic provides step-by-step instructions to install TraceLens and verify
 the installation. TraceLens is distributed as a Python package; install it with
 `pip` either directly from the public GitHub repository (recommended) or from a
