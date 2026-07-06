@@ -440,9 +440,9 @@ class gemm_a16w16_asm(gemm_a16w16_atomic_):
     output Y all BF16/FP16.
 
     The ASM kernel has a distinct argument layout from the Triton atomic variant: the output tensor
-    appears at Input index 2 (shape [M, N]), while Input index 3 is a non-tensor split-K workspace with 
-    dtype "unsigned int." Using the parent's logic to infer the output dtype from index 3 results in 
-    incorrect data movement accounting (Data Moved = NaN); this model explicitly references the correct 
+    appears at Input index 2 (shape [M, N]), while Input index 3 is a non-tensor split-K workspace with
+    dtype "unsigned int." Using the parent's logic to infer the output dtype from index 3 results in
+    incorrect data movement accounting (Data Moved = NaN); this model explicitly references the correct
     output tensor and its dtype.
 
     Expected Input Dims from trace:
