@@ -2274,6 +2274,18 @@ class TreePerfAnalyzer:
         if include_kernel_details:
             col_order.append("kernel_details")
 
+        # Retain the dynamic per-sub-op FLOP/byte breakdown columns
+        # (GFLOPS_<subop> / Data Moved (MB)_<subop>) emitted by
+        # compute_perf_metrics for fused kernels. They are not in the static
+        # col_order, so without this they would be silently dropped by the
+        # df[col_order] slice below (the aggregation path already keeps them).
+        if include_perf_metrics:
+            col_order.extend(
+                c
+                for c in df.columns
+                if c.startswith("GFLOPS_") or c.startswith("Data Moved (MB)_")
+            )
+
         col_order = [c for c in col_order if c in df.columns]
         return df[col_order]
 
