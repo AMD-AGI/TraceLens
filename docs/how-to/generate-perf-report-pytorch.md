@@ -186,7 +186,7 @@ See the example extension file for MegatronLM in the
 | `--short_kernel_study` | `False` | Add the short-kernel study sheets. |
 | `--short_kernel_threshold_us X` | `10` | Threshold (µs) to classify a kernel as "short". |
 | `--short_kernel_histogram_bins B` | `100` | Number of bins for the short-kernel histogram. |
-| `--enable_pseudo_ops` | `False` | Augment the tree with pseudo-ops to isolate kernels (e.g. `FusedMoE`). |
+| `--enable_pseudo_ops` | `False` | Augment the tree with pseudo-ops to isolate kernels (for example, `FusedMoE`). |
 | `--include_overlap_info` | `False` | Add kernel-overlap sheets. |
 | `--include_unlinked_kernels` | `False` | Include kernels not linked to a host call stack in the GPU timeline. |
 | `--micro_idle_thresh_us X` | `None` | Split idle gaps shorter than this into a separate micro-idle category. |

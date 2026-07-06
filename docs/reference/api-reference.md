@@ -116,7 +116,7 @@ Generate a collective-communication report across ranks.
 | `--agg_metrics` | `mean median min max` | Aggregation metrics in the summary. |
 | `--gpus_per_node` | auto | Adds `node_id`/`node_span` columns and labels each process group `intra_node` or `inter_node`. |
 | `--all2allv_heatmap` | off | Add an `nccl_all2allv_heatmap` sheet with per rank-pair send volumes. |
-| `--use_multiprocessing` / `--max_workers` | off / cpu_count | Parallel trace loading. |
+| `--use_multiprocessing` / `--max_workers` | off / `cpu_count` | Parallel trace loading. |
 
 `--trace_dir`, `--trace_pattern`, and `--trace_glob` are mutually exclusive
 ways to locate the per-rank traces.

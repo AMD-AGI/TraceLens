@@ -82,7 +82,7 @@ python batched_replay.py event_replay_ir.json
 
 - `--device {cuda,cpu}` — device to run on (default `cuda`).
 - `--op-filter <substring>` — only replay ops whose name contains the substring
-  (e.g. `aten::convolution`).
+  (for example, `aten::convolution`).
 - `--op-limit <N>` — replay at most `N` ops.
 - `--stop-on-error` — abort on the first failure instead of continuing.
 - `--verbose` / `-v` — print reconstructed arguments and per-op detail.

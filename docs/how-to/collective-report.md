@@ -125,7 +125,7 @@ overloaded rank, add `--all2allv_heatmap`.
 
 ## Step 3: Find the straggler rank
 
-A *straggler* is the rank that consistently arrives last at collectives, forcing
+A straggler is the rank that consistently arrives last at collectives, forcing
 the others to wait in implicit synchronization. Open the `straggler_summary`
 sheet: it's sorted so the *straggler is the first row* (lowest total wait
 time — it arrives last, so it rarely waits itself).

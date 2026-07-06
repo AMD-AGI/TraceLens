@@ -78,7 +78,7 @@ The output workbook contains one sheet per group you requested with `--sheets`:
 
 | Sheet | When you get it | What it shows |
 |-------|-----------------|---------------|
-| `gpu_timeline` | `gpu_timeline` or `all` | GPU activity by type (compute, memcpy, etc.) with per-report timings plus `time ms__<tag>_diff` and `time ms__<tag>_pct`. |
+| `gpu_timeline` | `gpu_timeline` or `all` | GPU activity by type (compute, memcpy, and so on) with per-report timings plus `time ms__<tag>_diff` and `time ms__<tag>_pct`. |
 | `ops_summary` | `ops_summary` or `all` | Per-op aggregates keyed on `name`, sorted by the baseline's total kernel time. Generated for PyTorch traces; for rocprof traces without `ops_summary` it falls back to `kernel_summary`. |
 | `kernel_summary` | `kernel_summary` or `all` | Kernel-level summary for rocprof reports keyed on `name`, using rocprof columns like `Total Kernel Time (ms)` and `Count`. |
 | `ops_all_*` | `ops_all` or `all` | Three sheets per variant tag: `ops_all_intersect_<tag>` (ops in both), `ops_all_only_baseline_<tag>` (baseline only), `ops_all_only_variant_<tag>` (variant only). |
@@ -171,7 +171,7 @@ uid2 = td.get_corresponding_uid(1, uid1)
 ### Inline diff during report generation
 
 To run TraceDiff automatically while generating the primary PyTorch report, pass
-`--comparison_json_path`. This adds speedup, delta, and LCA columns to
+`--comparison_json_path`. This adds speedup, delta, and lowest common ancestor (LCA) columns to
 `unified_perf_summary`, plus a `diff_stats` sheet:
 
 ```bash
