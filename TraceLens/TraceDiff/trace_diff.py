@@ -22,6 +22,7 @@ from ..TreePerf import GPUEventAnalyser
 _TRACELENS_DEBUG = os.environ.get("TRACELENS_DEBUG", "0") == "1"
 _GRAPH_LAUNCH_NAMES = ["hipGraphLaunch", "cudaGraphLaunch"]
 
+
 class TraceDiff:
     def __init__(self, tree1: TraceToTree, tree2: TraceToTree):
         self.baseline = tree1
@@ -232,7 +233,10 @@ class TraceDiff:
                     if len(children) == 1:
                         child = tree.get_UID2event(children[0])
                         child_cat = child.get("cat") or child.get("category")
-                        if child_cat in ("cpu_op", "cuda_runtime") and child.get("name") not in _GRAPH_LAUNCH_NAMES:
+                        if (
+                            child_cat in ("cpu_op", "cuda_runtime")
+                            and child.get("name") not in _GRAPH_LAUNCH_NAMES
+                        ):
                             break
                         current = child
                     else:
@@ -482,7 +486,13 @@ class TraceDiff:
                         if node_i
                         else None
                     )
-                    if (cat_d in skip_cats and node_d.get("name") not in _GRAPH_LAUNCH_NAMES) or (cat_i in skip_cats and node_i.get("name") not in _GRAPH_LAUNCH_NAMES):
+                    if (
+                        cat_d in skip_cats
+                        and node_d.get("name") not in _GRAPH_LAUNCH_NAMES
+                    ) or (
+                        cat_i in skip_cats
+                        and node_i.get("name") not in _GRAPH_LAUNCH_NAMES
+                    ):
                         continue
                     name_d = get_name_uid(uid_d, 1)
                     name_i = get_name_uid(uid_i, 2)
