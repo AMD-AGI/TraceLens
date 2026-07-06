@@ -14,7 +14,7 @@
 
 # TraceDiff module and docs require Spandan review
 /TraceLens/TraceDiff/         @spandoesai
-/docs/TraceDiff.md            @spandoesai
+/docs_original/TraceDiff.md   @spandoesai
 
 # Extensions and experimental trace merge require Deval review
 /TraceLens/PerfModel/extensions/                         @devalshahamd
@@ -25,6 +25,6 @@
 /TraceLens/Reporting/generate_perf_report_pytorch_inference.py @devalshahamd
 /TraceLens/TraceUtils/split_inference_trace_annotation.py      @devalshahamd
 /examples/custom_workflows/inference_analysis/               @devalshahamd
-/docs/Inference_analysis.md                                  @devalshahamd
+/docs_original/Inference_analysis.md                         @devalshahamd
 /tests/test_inference_perf_report.py                         @devalshahamd
 /tests/traces/inference/                                     @devalshahamd
