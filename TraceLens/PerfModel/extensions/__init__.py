@@ -19,6 +19,7 @@ from .moe_perf_model_extensions import (
     moe_gptq_awq_down,
     moe_flydsl_stage1,
     moe_flydsl_stage2,
+    sglang_fused_append_shared_experts,
 )
 from .attention_perf_model_extensions import (
     InferenceAttention,
@@ -32,6 +33,10 @@ from .perf_model_extensions import (
     gemm_a8w8_blockscale,
     aiter_gelu_and_mul,
     aiter_gelu_tanh_and_mul,
+    aiter_fused_qk_rope_cat_and_cache_mla,
+    sglang_quant_dynamic_mxfp4_quant,
+    aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,
+    aiter_dynamic_per_group_scaled_quant_fp4,
 )
 from .rmsnorm_perf_model_extensions import (
     aiter_rms_norm,
@@ -45,6 +50,7 @@ from .rmsnorm_perf_model_extensions import (
 )
 from .custom_collectives_perf_model_extensions import (
     aiter_fused_allreduce_rmsnorm,
+    aiter_fused_allreduce_rmsnorm_,
     custom_ar_all_reduce,
     aiter_reduce_scatter,
     aiter_all_gather_reg,
@@ -75,6 +81,11 @@ __all__ = [
     "gemm_a8w8_blockscale",
     "aiter_gelu_and_mul",
     "aiter_gelu_tanh_and_mul",
+    "aiter_fused_qk_rope_cat_and_cache_mla",
+    "sglang_quant_dynamic_mxfp4_quant",
+    "aiter_fused_dynamic_mxfp4_quant_moe_sort_hip",
+    "aiter_dynamic_per_group_scaled_quant_fp4",
+    "sglang_fused_append_shared_experts",
     # RMSNorm classes
     "aiter_rms_norm",
     "aiter_rmsnorm",
@@ -86,6 +97,7 @@ __all__ = [
     "vllm_rocm_aiter_triton_add_rmsnorm_pad",
     # Collective classes
     "aiter_fused_allreduce_rmsnorm",
+    "aiter_fused_allreduce_rmsnorm_",
     "custom_ar_all_reduce",
     "aiter_reduce_scatter",
     "aiter_all_gather_reg",
