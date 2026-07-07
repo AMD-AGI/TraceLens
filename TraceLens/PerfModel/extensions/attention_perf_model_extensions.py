@@ -159,7 +159,17 @@ class InferenceAttention:
             q_shape, k_shape = input_dims[0], input_dims[1]
             N_Q, H_Q, d_h_qk = q_shape
             N_KV, H_KV, d_h_v = k_shape[-3:]
-            dtype_Q = event["args"]["Input type"][0]
+            input_types = event["args"]["Input type"]
+            dtype_Q = input_types[0]
+
+            propagated_kv = (event.get("attention_perf_meta") or {}).get(
+                "k_cache_dtype"
+            )
+            dtype_KV = (
+                propagated_kv
+                if propagated_kv
+                else (input_types[1] if len(input_types) > 1 else dtype_Q)
+            )
             return {
                 "B": 1,
                 "N_Q": N_Q,
@@ -182,6 +192,7 @@ class InferenceAttention:
                 "g_sqsq": g_sqsq,
                 "g_sqsk": g_sqsk,
                 "dtype_Q": dtype_Q,
+                "dtype_KV": dtype_KV,
             }
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return InferenceAttention.no_perf_param_details()
@@ -217,7 +228,17 @@ class InferenceAttention:
 
     @staticmethod
     def bytes_func(
-        B, H_Q, H_KV, d_h_qk, d_h_v, c_sq, c_sk, g_sq, g_sk, bytes_per_element
+        B,
+        H_Q,
+        H_KV,
+        d_h_qk,
+        d_h_v,
+        c_sq,
+        c_sk,
+        g_sq,
+        g_sk,
+        bytes_per_element,
+        bytes_per_element_KV=None,
     ):
         """Calculate bytes moved for attention (context + generation).
 
@@ -227,25 +248,56 @@ class InferenceAttention:
             d_h_qk / d_h_v: Head dimensions for Q-K / V.
             c_sq / c_sk: Aggregate sequence lengths for context Q / KV.
             g_sq / g_sk: Aggregate sequence lengths for generation Q / KV.
-            bytes_per_element: Bytes per tensor element.
+            bytes_per_element: Bytes per Q / output / current-chunk K-V element.
+            bytes_per_element_KV: Bytes per cached K / V element. Defaults to
+                ``bytes_per_element`` (e.g. when KV-cache dtype matches Q).
         """
-        ctx_elems = (
+        if bytes_per_element_KV is None:
+            bytes_per_element_KV = bytes_per_element
+        ctx_elems_q = (
             B * c_sq * H_Q * d_h_qk  # Q read
-            + B * c_sk * H_KV * d_h_qk  # K read
-            + B * c_sk * H_KV * d_h_v  # V read
             + B * c_sq * H_Q * d_h_v  # output write
+            + B * c_sq * H_KV * d_h_qk  # K read (current chunk, Q-dtype)
+            + B * c_sq * H_KV * d_h_v  # V read (current chunk, Q-dtype)
         )
-        gen_elems = (
+        ctx_elems_kv = (
+            B * (c_sk - c_sq) * H_KV * d_h_qk  # K read (cached, KV-dtype)
+            + B * (c_sk - c_sq) * H_KV * d_h_v  # V read (cached, KV-dtype)
+        )
+        gen_elems_q = (
             B * g_sq * H_Q * d_h_qk
-            + B * g_sk * H_KV * d_h_qk
-            + B * g_sk * H_KV * d_h_v
             + B * g_sq * H_Q * d_h_v
+            + B * g_sq * H_KV * d_h_qk  # K read (current token, Q-dtype)
+            + B * g_sq * H_KV * d_h_v  # V read (current token, Q-dtype)
         )
-        return (ctx_elems + gen_elems) * bytes_per_element
+        gen_elems_kv = (
+            B * (g_sk - g_sq) * H_KV * d_h_qk  # K read (cached, KV-dtype)
+            + B * (g_sk - g_sq) * H_KV * d_h_v  # V read (cached, KV-dtype)
+        )
+
+        return (ctx_elems_q + gen_elems_q) * bytes_per_element + (
+            ctx_elems_kv + gen_elems_kv
+        ) * bytes_per_element_KV
 
     # ------------------------------------------------------------------
     # Instance methods – work for any subclass with valid param_details
     # ------------------------------------------------------------------
+
+    def _cap_gen_kv(self, value):
+        """Cap a generation KV aggregate to the sliding window.
+
+        Opt-in via ``param_details["sliding_window"]`` (W). Generation (decode)
+        tokens have ``sq = 1``, so each attends to ``min(ctx_i, W)`` KV tokens.
+        With only aggregates available (``g_sk = Σ ctx``, ``g_sq = #requests``),
+        ``Σ min(ctx_i, W)`` is approximated by ``min(value, g_sq * W)`` -- exact
+        when all contexts are on one side of W (typical in steady-state decode),
+        an upper bound otherwise. No-op when ``sliding_window`` is unset or <= 0,
+        so non-windowed attention models are unaffected.
+        """
+        w = self.param_details.get("sliding_window")
+        if w and w > 0 and self.param_details.get("g_sq"):
+            return min(value, self.param_details["g_sq"] * w)
+        return value
 
     def flops(self):
         if self.param_details.get("_no_perf"):
@@ -260,7 +312,7 @@ class InferenceAttention:
             self.d_h_v,
             self.param_details["c_sqsk"],
             self.param_details["c_sqsq"],
-            self.param_details["g_sqsk"],
+            self._cap_gen_kv(self.param_details["g_sqsk"]),
         )
 
     def bytes(self, bytes_per_element=None):
@@ -269,6 +321,8 @@ class InferenceAttention:
         bpe = bytes_per_element
         if bpe is None:
             bpe = name2bpe(self.param_details.get("dtype_Q")) or 2
+        dtype_kv = self.param_details.get("dtype_KV")
+        bpe_kv = (name2bpe(dtype_kv) if dtype_kv else None) or bpe
         return self.bytes_func(
             self.B,
             self.H_Q,
@@ -278,8 +332,9 @@ class InferenceAttention:
             self.param_details["c_sq"],
             self.param_details["c_sk"],
             self.param_details["g_sq"],
-            self.param_details["g_sk"],
+            self._cap_gen_kv(self.param_details["g_sk"]),
             bpe,
+            bpe_kv,
         )
 
     def flops_bwd(self):
@@ -463,6 +518,73 @@ class mla_tilelang_sparse_fwd(InferenceAttention):
 
 class vllm_unified_mla_attention_with_output(InferenceAttention):
     pass
+
+
+class pa_decode_gluon(InferenceAttention):
+    """
+    Performance model for ``aiter::pa_decode_gluon`` (gluon Triton kernel
+    ``paged_attention_decode_sliding_window``; inference: ATOM/vLLM).
+
+    Grouped-query paged decode attention over an FP8 E4M3 KV cache.
+
+    Decode-only kernel — it never processes prefill/context requests (a separate
+    extend kernel does). So ``get_param_details`` forces the context aggregates
+    (``c_*``) to 0, which collapses the inherited ``flops``/``bytes`` to the
+    generation-only roofline, and sets ``dtype_KV`` from the FP8 cache.
+
+    Sliding window: the ``sliding_window`` arg (``Concrete Inputs[19]``) caps the
+    KV each query attends to at ``min(ctx_i, W)``. It is surfaced as
+    ``param_details["sliding_window"]`` and the base roofline applies the cap
+    (aggregate approximation ``min(g_sk, g_sq*W)``). ``-1`` layers (full
+    attention) are unaffected.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+
+            dims = event["args"]["Input Dims"]
+            types = event["args"]["Input type"]
+            q_shape = dims[0]
+            N_Q, H_Q, d_h_qk = q_shape[0], q_shape[1], q_shape[2]
+            # k_cache: [num_blocks, H_KV, ...] -> H_KV at index 1
+            H_KV = dims[2][1]
+            d_h_v = d_h_qk  # logical V head dim matches Q for this kernel
+            # Decode-only kernel: it never processes prefill/context requests
+            stats["c_sq"] = stats["c_sk"] = stats["c_sqsq"] = stats["c_sqsk"] = 0
+            N_KV = stats["g_sk"]
+            dtype_Q = types[0]
+            dtype_KV = types[2] if len(types) > 2 else types[0]
+            # sliding_window is the positional `sliding_window` arg; <= 0 (e.g.
+            # -1) means full attention. Capping is applied by the base roofline.
+            conc = event["args"].get("Concrete Inputs") or []
+            try:
+                sliding_window = int(conc[19])
+            except (IndexError, ValueError, TypeError):
+                sliding_window = 0
+
+            return {
+                "B": 1,
+                "N_Q": N_Q,
+                "H_Q": H_Q,
+                "H_V": H_KV,
+                "H_K": H_KV,
+                "N_KV": N_KV,
+                "H_KV": H_KV,
+                "d_h_qk": d_h_qk,
+                "d_h_v": d_h_v,
+                "dropout": 0.0,
+                "causal": False,
+                "flash_impl": True,
+                **stats,
+                "dtype_Q": dtype_Q,
+                "dtype_KV": dtype_KV,
+                "sliding_window": sliding_window,
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return InferenceAttention.no_perf_param_details()
 
 
 class gdn_attention_core(InferenceAttention):

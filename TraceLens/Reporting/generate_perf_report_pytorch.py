@@ -5,9 +5,11 @@
 ###############################################################################
 
 import argparse
+import ast
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import warnings
@@ -23,6 +25,162 @@ from TraceLens.Reporting.reporting_utils import (
     request_install,
     resolve_gpu_arch,
 )
+
+_WRAPPER_FILE_PATTERNS = frozenset(
+    {
+        "torch/_ops.py",
+        "torch/nn/modules/module.py",
+        "torch/utils/_contextlib.py",
+        "torch/utils/_device.py",
+        "torch/_tensor.py",
+        "torch/functional.py",
+        "torch/overrides.py",
+        "torch/_inductor/",
+        "torch/_functorch/",
+        "torch/distributed/c10d_logger.py",
+        "triton/backends/",
+    }
+)
+
+_WRAPPER_NAME_PREFIXES = frozenset(
+    {
+        "<built-in",
+        "pybind11_builtins",
+        "nn.Module:",
+    }
+)
+
+_WRAPPER_FUNC_NAMES = frozenset(
+    {
+        "__torch_function__",
+        "_call_impl",
+        "_wrapped_call_impl",
+        "decorate_context",
+        "dispatch_wrapper",
+        "handle_torch_function",
+        "wrapper",
+        "custom_wrapper",
+        "wrapper_custom",
+        "outer_wrapper",
+    }
+)
+
+
+def _is_wrapper_frame(frame):
+    """Return True if *frame* is a wrapper/dispatch function that should be
+    skipped when searching outward for the dispatch entry point."""
+    for prefix in _WRAPPER_NAME_PREFIXES:
+        if frame.startswith(prefix):
+            return True
+    for pat in _WRAPPER_FILE_PATTERNS:
+        if pat in frame:
+            return True
+    # Extract function name from "path.py(line): func_name" format
+    if "): " in frame:
+        func_name = frame.split("): ")[-1]
+        if func_name in _WRAPPER_FUNC_NAMES:
+            return True
+    return False
+
+
+def _find_entry_point(call_stack_value, op_name):
+    """Find the dispatch entry point for a CPU op from its call stack.
+
+    Returns a dict with keys:
+    - ``entry_point``: the matched frame string, or ``""``
+    - ``num_wrappers``: number of frames between entry point and the CPU op
+    - ``traversal``: ``"inward"`` or ``"outward"`` (which strategy matched)
+    - ``wrappers``: list of frames between the CPU op and the entry point
+
+    Strategy:
+    1. **Inward matching** – search the call stack for a .py frame whose
+       function name contains the op name (part after '::').
+    2. **Outward matching** (fallback) – if inward matching fails, walk the
+       call stack from innermost frame outward, skip wrapper/dispatch
+       functions, and return the first non-wrapper .py frame.
+    """
+    empty = {
+        "entry_point": "Not found",
+        "num_wrappers": -1,
+        "traversal": "",
+        "wrappers": "",
+    }
+    try:
+        stack = ast.literal_eval(str(call_stack_value))
+        if not isinstance(stack, list):
+            return empty
+    except Exception:
+        return empty
+
+    def flatten(frames):
+        flat = []
+        for frame in frames:
+            if isinstance(frame, list):
+                flat.extend(flatten(frame))
+            else:
+                flat.append(frame)
+        return flat
+
+    flat_stack = flatten(stack)
+
+    # Use the local name part after '::' if present
+    local_name = op_name.split("::")[-1].lower() if "::" in op_name else op_name.lower()
+
+    # Find the CPU op position in the flat stack (search from end for exact match).
+    # If exact match fails, try with trailing numeric suffix stripped — the call
+    # stack builder applies re.sub(r"_\d+", "") to frame names for deduplication,
+    # so e.g. "sglang_profiler::foo_triton_340" is stored as "sglang_profiler::foo_triton".
+    op_idx = -1
+    for i in range(len(flat_stack) - 1, -1, -1):
+        if flat_stack[i] == op_name:
+            op_idx = i
+            break
+    if op_idx == -1:
+        stripped_op_name = re.sub(r"_\d+$", "", op_name)
+        if stripped_op_name != op_name:
+            for i in range(len(flat_stack) - 1, -1, -1):
+                if flat_stack[i] == stripped_op_name:
+                    op_idx = i
+                    break
+    if op_idx == -1:
+        return empty
+
+    # --- Inward matching: from CPU op toward leaf (children), find a .py frame
+    #     whose function name contains the op name ---
+    for i in range(op_idx + 1, len(flat_stack)):
+        frame = flat_stack[i]
+        if ".py" in frame:
+            func_name = (
+                frame.split("): ")[-1].lower() if "): " in frame else frame.lower()
+            )
+            if local_name in func_name:
+                between = flat_stack[op_idx + 1 : i]
+                wrappers_list = [op_name] + between + [frame]
+                return {
+                    "entry_point": frame,
+                    "num_wrappers": len(between),
+                    "traversal": "inward",
+                    "wrappers": str(wrappers_list),
+                }
+
+    # --- Outward matching (fallback): from CPU op toward root (parents),
+    #     skip wrappers, return first non-wrapper .py frame ---
+    for i in range(op_idx - 1, -1, -1):
+        frame = flat_stack[i]
+        if ".py" not in frame:
+            continue
+        if _is_wrapper_frame(frame):
+            continue
+        between = flat_stack[i + 1 : op_idx]
+        wrappers_list = [frame] + between + [op_name]
+        return {
+            "entry_point": frame,
+            "num_wrappers": len(between),
+            "traversal": "outward",
+            "wrappers": str(wrappers_list),
+        }
+
+    return empty
 
 
 def get_dfs_short_kernels(
@@ -661,25 +819,35 @@ def generate_perf_report_pytorch(
                     source_col="kernel_details_summary",
                     new_col_name="trunc_kernel_details",
                 )
-                if "call_stack" in df_unified_perf_summary.columns:
-                    df_callstacks = df_unified_perf_summary[
-                        ["name", "op category", "call_stack"]
-                    ].copy()
-                    df_callstacks.insert(0, "row_id", range(len(df_callstacks)))
-                    dict_name2df["unified_perf_callstacks"] = df_callstacks
-
-                    n_frames = 4  # op name + 3 parent frames
-                    cs_col = df_unified_perf_summary.columns.get_loc("call_stack")
+                if "call_stack_full" in df_unified_perf_summary.columns:
+                    cs_col = df_unified_perf_summary.columns.get_loc("call_stack_full")
+                    ep_results = df_unified_perf_summary.apply(
+                        lambda row: _find_entry_point(
+                            row["call_stack_full"], row["name"]
+                        ),
+                        axis=1,
+                    )
                     df_unified_perf_summary.insert(
                         cs_col,
-                        "trunc_call_stack",
-                        df_unified_perf_summary["call_stack"].apply(
-                            lambda s: " => ".join(str(s).split(" => ")[:n_frames])
-                        ),
+                        "entry_point",
+                        ep_results.apply(lambda x: x["entry_point"]),
                     )
-                    df_unified_perf_summary = df_unified_perf_summary.drop(
-                        columns=["call_stack"]
-                    )
+                    if os.environ.get("TRACELENS_DEBUG"):
+                        df_unified_perf_summary.insert(
+                            cs_col + 1,
+                            "num_wrappers",
+                            ep_results.apply(lambda x: x["num_wrappers"]),
+                        )
+                        df_unified_perf_summary.insert(
+                            cs_col + 2,
+                            "traversal",
+                            ep_results.apply(lambda x: x["traversal"]),
+                        )
+                        df_unified_perf_summary.insert(
+                            cs_col + 3,
+                            "wrappers",
+                            ep_results.apply(lambda x: x["wrappers"]),
+                        )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
 
             if _tracediff_diff_stats is not None and not _tracediff_diff_stats.empty:
@@ -1038,7 +1206,7 @@ def main():
         "--include_call_stack",
         action="store_true",
         default=False,
-        help="Add trunc_call_stack to unified_perf_summary and write unified_perf_callstacks with full call stacks.",
+        help="Add call_stack_trimmed and call_stack_full columns to unified_perf_summary.",
     )
 
     args = parser.parse_args()

@@ -200,7 +200,7 @@ Found N kernel fusion opportunities across M module types.
 
 ## Detailed Analysis
 
-<!-- reasoning-candidate tier=system rank=1 -->
+<!-- reasoning-candidate tier=fusion rank=1 -->
 #### <Pattern Name> (<time_ms> ms, <instance_count> instances)
 
 **Identification:** <1-2 sentences: how this fusion candidate was surfaced>
@@ -276,7 +276,7 @@ if not passed:
         print('  - ' + e)
     sys.exit(1)
 print('PASS: Findings file is valid')
-" '<output_dir>/system_findings/kernel_fusion_findings.md' 'system' '<comparison_scope>'
+" '<output_dir>/system_findings/kernel_fusion_findings.md' 'fusion' '<comparison_scope>'
 ```
 
 If validation fails, fix the findings file and re-run. Max 2 retries.

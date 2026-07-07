@@ -44,6 +44,9 @@ _MV_ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
 _TOP_OPS_ROW_RE = re.compile(r"<!--\s*top-ops-row\s+([^>]*?)-->")
 _DETAIL_P_HEADER_RE = re.compile(r"^####\s+.+P(\d+):", re.MULTILINE)
 _DETAIL_P_HEADER_FALLBACK_RE = re.compile(r"^(?:####|###)\s+.+P(\d+):", re.MULTILINE)
+_REASONING_CANDIDATE_RE = re.compile(
+    r"<!--\s*reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->"
+)
 _NOT_QUANTIFIABLE_RE = re.compile(
     r"not\s+quantifiable\s+from\s+trace\s+data", re.IGNORECASE
 )
@@ -1155,6 +1158,99 @@ def _check_marker_detail_estimates(output_dir, comparison_scope=None):
     return rows
 
 
+def _extract_detailed_analysis_subsection(content, subsection_header):
+    """Extract a ### subsection from ## Detailed Analysis."""
+    da_match = re.search(
+        r"^## Detailed Analysis[^\n]*\n(.*?)(?=^## |\Z)",
+        content,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not da_match:
+        return None
+    da_text = da_match.group(0)
+    sub_start = da_text.find(subsection_header)
+    if sub_start < 0:
+        return None
+    sub_text = da_text[sub_start + len(subsection_header) :]
+    next_h3 = re.search(r"^### ", sub_text, re.MULTILINE)
+    next_h2 = re.search(r"^## ", sub_text, re.MULTILINE)
+    ends = [pos.start() for pos in [next_h3, next_h2] if pos is not None]
+    end = min(ends) if ends else len(sub_text)
+    return sub_text[:end]
+
+
+def _check_marker_reasoning_candidates(output_dir, comparison_scope=None):
+    """Marker eval 4: reasoning-candidate markers match P-item headings per tier."""
+    content = _read_report(output_dir)
+    if content is None:
+        return [
+            _make_marker_row(
+                "marker_eval_4",
+                "Reasoning-candidate markers",
+                "FAIL",
+                "analysis.md not found",
+                "pipeline",
+                "Re-run report generation",
+            )
+        ]
+
+    rows = []
+    checks = [
+        ("compute", "### Compute Kernel Insights"),
+        ("fusion", "### Kernel Fusion Insights"),
+        ("system", "### System-Level Insights"),
+    ]
+    for tier, header in checks:
+        subsection = _extract_detailed_analysis_subsection(content, header)
+        if subsection is None:
+            continue
+        n_headings = len(_DETAIL_P_HEADER_RE.findall(subsection))
+        n_markers = sum(
+            1
+            for m in _REASONING_CANDIDATE_RE.finditer(subsection)
+            if m.group(1).lower() == tier
+        )
+        if n_headings == 0:
+            continue
+        result = "PASS" if n_markers == n_headings else "FAIL"
+        detail = (
+            ""
+            if result == "PASS"
+            else (
+                f"{n_headings} #### P<N>: headings but "
+                f"{n_markers} reasoning-candidate tier={tier} markers"
+            )
+        )
+        rows.append(
+            _make_marker_row(
+                f"marker_eval_4_{tier}",
+                f"reasoning-candidate markers ({tier})",
+                result,
+                detail,
+                "template" if result == "FAIL" else "",
+                (
+                    f"Add <!-- reasoning-candidate tier={tier} rank=N --> before each "
+                    f"#### P<N>: heading in {header}"
+                    if result == "FAIL"
+                    else ""
+                ),
+            )
+        )
+
+    if not rows:
+        rows.append(
+            _make_marker_row(
+                "marker_eval_4",
+                "Reasoning-candidate markers",
+                "PASS",
+                "No Detailed Analysis subsections with P-items found",
+                "",
+                "",
+            )
+        )
+    return rows
+
+
 _MULTI_EVAL_CHECKS = [
     _check_report_template,
     _check_exec_summary,
@@ -1163,6 +1259,7 @@ _MULTI_EVAL_CHECKS = [
     _check_marker_top_ops,
     _check_marker_p_items,
     _check_marker_detail_estimates,
+    _check_marker_reasoning_candidates,
 ]
 
 _GATE_FAIL_NEW_EVALS = [
@@ -1173,6 +1270,7 @@ _GATE_FAIL_NEW_EVALS = [
     ("marker_eval_1", "Top Operations markers (kind=top_ops)"),
     ("marker_eval_2", "P-item markers (kind=p_item)"),
     ("marker_eval_3", "Detail estimate markers (kind=detail_estimate)"),
+    ("marker_eval_4", "Reasoning-candidate markers"),
 ]
 
 

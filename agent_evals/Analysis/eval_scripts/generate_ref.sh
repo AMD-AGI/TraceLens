@@ -20,6 +20,7 @@ fi
 CONTAINER="${CONTAINER:-}"
 MAX_PARALLEL="${MAX_PARALLEL:-5}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
+LAUNCH_STAGGER="${LAUNCH_STAGGER:-8}"
 TEST_IDS="${TEST_IDS:-}"
 
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
@@ -99,10 +100,10 @@ generate_single_ref() {
         (
             cd "$ANALYSIS_DIR" || exit
             if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
-                agent --model claude-4.6-opus-high --print --force --trust --output-format stream-json \
+                agent --model claude-opus-4-8-thinking-medium --print --force --trust --output-format stream-json \
                     "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (trace1) and $platform2 (trace2), analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             else
-                agent --model claude-4.6-opus-high --print --force --trust --output-format stream-json \
+                agent --model claude-opus-4-8-thinking-medium --print --force --trust --output-format stream-json \
                     "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path with platform $platform, analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             fi
         ) < /dev/null > "$CASE_DIR/analysis_stream.ndjson" 2>&1
@@ -212,6 +213,7 @@ if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
             sleep "$SLEEP_BETWEEN"
             echo >&4  # release semaphore slot
         ) &
+        sleep "$LAUNCH_STAGGER"  # stagger agent startup to avoid ~/.cursor/cli-config.json rename race
     done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
 else
     # standalone CSV: id,sub_category,trace_path,reference_dir,platform
@@ -225,6 +227,7 @@ else
             sleep "$SLEEP_BETWEEN"
             echo >&4  # release semaphore slot
         ) &
+        sleep "$LAUNCH_STAGGER"  # stagger agent startup to avoid ~/.cursor/cli-config.json rename race
     done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
 fi
 
