@@ -84,8 +84,8 @@ well-formed traces should work. If a particular ROCm build produces malformed or
 incomplete traces, TraceLens reports the problem and stops rather than silently
 producing misleading results.
 
-TraceLens also supports NVIDIA CUDA PyTorch profiler traces, which are part of
-the tested trace set, so the same PyTorch report workflow applies to CUDA runs.
+The PyTorch report workflow works on any `torch.profiler` trace regardless of
+the GPU backend, and is well tested on both AMD ROCm and NVIDIA CUDA traces.
 
 ## Related topics
 
