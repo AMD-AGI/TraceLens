@@ -95,10 +95,12 @@ Run the following checks to confirm TraceLens is installed correctly:
    arguments (for example, `--profile_json_path`) and exits without error.
 
 3. (Optional) Generate a report from a bundled demo trace to confirm end-to-end
-   operation:
+   operation. The repository ships sample traces under `tests/traces/`, so run
+   this from a source checkout (see Method 2):
 
    ```bash
-   TraceLens_generate_perf_report_pytorch --profile_json_path tests/traces/<demo_trace>.json
+   TraceLens_generate_perf_report_pytorch \
+       --profile_json_path tests/traces/mi300/Qwen_Qwen1.5-0.5B-Chat__1016005.json.gz
    ```
 
    Expected output: an Excel report (`.xlsx`) is written next to the trace,
