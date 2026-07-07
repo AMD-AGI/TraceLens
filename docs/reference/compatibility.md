@@ -71,19 +71,21 @@ the peak FLOPS and peak bandwidth for the target accelerator (for example,
 | AMD Instinct™ MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
 
 ```{note}
-Add validated accelerator and ROCm combinations to these tables as they are
-tested for each release.
+Add validated accelerators to this table as they are tested for each release.
 ```
 
-## ROCm compatibility
+## ROCm and CUDA compatibility
 
-`rocprofv3`-based capture (JSON and pftrace) requires a ROCm installation that
-provides `rocprofv3` and, for `.pftrace` conversion, `traceconv`. Record the
-specific ROCm versions validated for each TraceLens release here.
+TraceLens analyzes trace files rather than talking to the GPU or runtime
+directly, so it isn't tied to a specific ROCm version. `rocprofv3`-based capture
+(JSON and pftrace) only requires a ROCm installation that provides `rocprofv3`
+and, for `.pftrace` conversion, `traceconv`; any ROCm version that emits
+well-formed traces should work. If a particular ROCm build produces malformed or
+incomplete traces, TraceLens reports the problem and stops rather than silently
+producing misleading results.
 
-| TraceLens version | Validated ROCm versions |
-|-------------------|-------------------------|
-| 0.1.0 | To be confirmed per release |
+TraceLens also supports NVIDIA CUDA PyTorch profiler traces, which are part of
+the tested trace set, so the same PyTorch report workflow applies to CUDA runs.
 
 ## Related topics
 
