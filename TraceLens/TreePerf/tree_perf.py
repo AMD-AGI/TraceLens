@@ -3617,7 +3617,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             for operand in operands:
                 dtype, shape, layout = parse_dtype_shape_layout(operand)
                 if shape and dtype:
-                    nbytes = dtype_to_bytes.get(dtype, 1 if dtype.startswith(("f8", "s8")) else None
+                    nbytes = dtype_to_bytes.get(
+                        dtype, 1 if dtype.startswith(("f8", "s8")) else None
                     )
                     if nbytes is None:
                         logger.warning(
