@@ -80,9 +80,9 @@ TraceLens analyzes trace files rather than talking to the GPU or runtime
 directly, so it isn't tied to a specific ROCm version. `rocprofv3`-based capture
 (JSON and pftrace) only requires a ROCm installation that provides `rocprofv3`
 and, for `.pftrace` conversion, `traceconv`; any ROCm version that emits
-well-formed traces should work. If a particular ROCm build produces malformed or
-incomplete traces, TraceLens reports the problem and stops rather than silently
-producing misleading results.
+well-formed traces should work. If a particular ROCm build produces malformed
+traces (for example, missing required fields), TraceLens reports the problem and
+stops rather than silently producing misleading results.
 
 The PyTorch report workflow works on any `torch.profiler` trace regardless of
 the GPU backend, and is well tested on both AMD ROCm and NVIDIA CUDA traces.
