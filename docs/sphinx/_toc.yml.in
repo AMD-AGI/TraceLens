@@ -26,6 +26,8 @@ subtrees:
     entries:
     - file: how-to/generate-perf-report-pytorch
       title: PyTorch performance report 
+    - file: how-to/generate-perf-report-pytorch-inference
+      title: PyTorch inference performance report 
     - file: how-to/generate-perf-report-jax
       title: JAX performance report 
     - file: how-to/generate-perf-report-rocprof
