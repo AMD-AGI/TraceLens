@@ -68,7 +68,7 @@ automated GPU trace analysis, available as command-line tools and a Python SDK.
 
 - **Collective communication analysis** —
   `TraceLens_generate_multi_rank_collective_report_pytorch` reports time spent
-  in collectives across ranks, including aggregation metrics, intra-/inter-node
+  in collectives across ranks, including aggregation metrics, intra- and inter-node
   labeling, and an optional all-to-all-v heatmap.
 - **Trace comparison** — `TraceLens_compare_perf_reports_pytorch` diffs two
   generated reports at the CPU-dispatch level to quantify the impact of a change
