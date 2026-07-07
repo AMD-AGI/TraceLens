@@ -1,0 +1,2 @@
+name,Input Dims,Input type
+aten::scaled_dot_product_attention,"((8, 16, 512, 64), (8, 16, 512, 64), (8, 16, 512, 64))","('c10::bfloat16', 'c10::bfloat16', 'c10::bfloat16')"

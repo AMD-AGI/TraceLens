@@ -1,0 +1,69 @@
+{
+  "baseline_ms": 0.65,
+  "priorities": [
+    {
+      "rank": 1,
+      "category": "gemm",
+      "display_name": "GEMM",
+      "impact_score": 44.42,
+      "impact_score_low": 38.08,
+      "impact_score_high": 50.77,
+      "source": "findings_rollup"
+    }
+  ],
+  "recommendations": [
+    {
+      "category": "gemm",
+      "impact_score": 44.42,
+      "impact_score_low": 38.08,
+      "impact_score_high": 50.77,
+      "operation_count": 0,
+      "type": "kernel_tuning"
+    }
+  ],
+  "findings": [
+    {
+      "bound_type": "compute",
+      "library": "Tensile",
+      "eff_bucket": "all",
+      "estimate_method": "quantified",
+      "impact_score": 44.42,
+      "impact_score_low": 38.08,
+      "impact_score_high": 50.77,
+      "member_count": 1,
+      "members": [
+        {
+          "operation": "aten::mm",
+          "category": "gemm",
+          "type": "kernel_tuning",
+          "estimate_method": "quantified",
+          "impact_score": 44.42,
+          "impact_score_low": 38.08,
+          "impact_score_high": 50.77,
+          "efficiency_pct": 49.23,
+          "bound_type": "compute",
+          "library": "Tensile",
+          "time_ms": 0.65
+        }
+      ],
+      "category": "gemm",
+      "category_rank": 1,
+      "global_rank": 1
+    }
+  ],
+  "all_estimates": [
+    {
+      "operation": "aten::mm",
+      "category": "gemm",
+      "type": "kernel_tuning",
+      "estimate_method": "quantified",
+      "impact_score": 44.42,
+      "impact_score_low": 38.08,
+      "impact_score_high": 50.77,
+      "efficiency_pct": 49.23,
+      "bound_type": "compute",
+      "library": "Tensile",
+      "time_ms": 0.65
+    }
+  ]
+}

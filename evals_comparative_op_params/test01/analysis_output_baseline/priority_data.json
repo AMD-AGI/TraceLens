@@ -1,0 +1,69 @@
+{
+  "baseline_ms": 0.52,
+  "priorities": [
+    {
+      "rank": 1,
+      "category": "other",
+      "display_name": "other",
+      "impact_score": 40.38,
+      "impact_score_low": 34.61,
+      "impact_score_high": 46.15,
+      "source": "findings_rollup"
+    }
+  ],
+  "recommendations": [
+    {
+      "category": "other",
+      "impact_score": 40.38,
+      "impact_score_low": 34.61,
+      "impact_score_high": 46.15,
+      "operation_count": 0,
+      "type": "kernel_tuning"
+    }
+  ],
+  "findings": [
+    {
+      "bound_type": "unknown",
+      "library": "Unknown",
+      "eff_bucket": "all",
+      "estimate_method": "quantified",
+      "impact_score": 40.38,
+      "impact_score_low": 34.61,
+      "impact_score_high": 46.15,
+      "member_count": 1,
+      "members": [
+        {
+          "operation": "aten::scaled_dot_product_attention",
+          "category": "other",
+          "type": "kernel_tuning",
+          "estimate_method": "quantified",
+          "impact_score": 40.38,
+          "impact_score_low": 34.61,
+          "impact_score_high": 46.15,
+          "efficiency_pct": 53.85,
+          "bound_type": null,
+          "library": null,
+          "time_ms": 0.52
+        }
+      ],
+      "category": "other",
+      "category_rank": 1,
+      "global_rank": 1
+    }
+  ],
+  "all_estimates": [
+    {
+      "operation": "aten::scaled_dot_product_attention",
+      "category": "other",
+      "type": "kernel_tuning",
+      "estimate_method": "quantified",
+      "impact_score": 40.38,
+      "impact_score_low": 34.61,
+      "impact_score_high": 46.15,
+      "efficiency_pct": 53.85,
+      "bound_type": null,
+      "library": null,
+      "time_ms": 0.52
+    }
+  ]
+}

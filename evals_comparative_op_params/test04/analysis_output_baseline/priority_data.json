@@ -1,0 +1,127 @@
+{
+  "baseline_ms": 2.07,
+  "priorities": [
+    {
+      "rank": 1,
+      "category": "conv_fwd",
+      "display_name": "CONV_fwd",
+      "impact_score": 29.59,
+      "impact_score_low": 25.36,
+      "impact_score_high": 33.81,
+      "source": "findings_rollup"
+    },
+    {
+      "rank": 2,
+      "category": "other",
+      "display_name": "other",
+      "impact_score": 6.76,
+      "impact_score_low": 5.8,
+      "impact_score_high": 7.73,
+      "source": "findings_rollup"
+    }
+  ],
+  "recommendations": [
+    {
+      "category": "conv_fwd",
+      "impact_score": 29.59,
+      "impact_score_low": 25.36,
+      "impact_score_high": 33.81,
+      "operation_count": 0,
+      "type": "kernel_tuning"
+    },
+    {
+      "category": "other",
+      "impact_score": 6.76,
+      "impact_score_low": 5.8,
+      "impact_score_high": 7.73,
+      "operation_count": 0,
+      "type": "kernel_tuning"
+    }
+  ],
+  "findings": [
+    {
+      "bound_type": "compute",
+      "library": "Unknown",
+      "eff_bucket": "all",
+      "estimate_method": "quantified",
+      "impact_score": 29.59,
+      "impact_score_low": 25.36,
+      "impact_score_high": 33.81,
+      "member_count": 1,
+      "members": [
+        {
+          "operation": "aten::convolution",
+          "category": "conv_fwd",
+          "type": "kernel_tuning",
+          "estimate_method": "quantified",
+          "impact_score": 29.59,
+          "impact_score_low": 25.36,
+          "impact_score_high": 33.81,
+          "efficiency_pct": 63.16,
+          "bound_type": "compute",
+          "library": null,
+          "time_ms": 1.9
+        }
+      ],
+      "category": "conv_fwd",
+      "category_rank": 1,
+      "global_rank": 1
+    },
+    {
+      "bound_type": "unknown",
+      "library": "Unknown",
+      "eff_bucket": "all",
+      "estimate_method": "quantified",
+      "impact_score": 6.76,
+      "impact_score_low": 5.8,
+      "impact_score_high": 7.73,
+      "member_count": 1,
+      "members": [
+        {
+          "operation": "aten::transpose",
+          "category": "other",
+          "type": "kernel_tuning",
+          "estimate_method": "quantified",
+          "impact_score": 6.76,
+          "impact_score_low": 5.8,
+          "impact_score_high": 7.73,
+          "efficiency_pct": 0.0,
+          "bound_type": null,
+          "library": null,
+          "time_ms": 0.16
+        }
+      ],
+      "category": "other",
+      "category_rank": 1,
+      "global_rank": 2
+    }
+  ],
+  "all_estimates": [
+    {
+      "operation": "aten::convolution",
+      "category": "conv_fwd",
+      "type": "kernel_tuning",
+      "estimate_method": "quantified",
+      "impact_score": 29.59,
+      "impact_score_low": 25.36,
+      "impact_score_high": 33.81,
+      "efficiency_pct": 63.16,
+      "bound_type": "compute",
+      "library": null,
+      "time_ms": 1.9
+    },
+    {
+      "operation": "aten::transpose",
+      "category": "other",
+      "type": "kernel_tuning",
+      "estimate_method": "quantified",
+      "impact_score": 6.76,
+      "impact_score_low": 5.8,
+      "impact_score_high": 7.73,
+      "efficiency_pct": 0.0,
+      "bound_type": null,
+      "library": null,
+      "time_ms": 0.16
+    }
+  ]
+}

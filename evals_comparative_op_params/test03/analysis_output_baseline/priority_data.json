@@ -1,0 +1,69 @@
+{
+  "baseline_ms": 1.8,
+  "priorities": [
+    {
+      "rank": 1,
+      "category": "conv_fwd",
+      "display_name": "CONV_fwd",
+      "impact_score": 46.18,
+      "impact_score_low": 39.59,
+      "impact_score_high": 52.78,
+      "source": "findings_rollup"
+    }
+  ],
+  "recommendations": [
+    {
+      "category": "conv_fwd",
+      "impact_score": 46.18,
+      "impact_score_low": 39.59,
+      "impact_score_high": 52.78,
+      "operation_count": 0,
+      "type": "kernel_tuning"
+    }
+  ],
+  "findings": [
+    {
+      "bound_type": "compute",
+      "library": "Unknown",
+      "eff_bucket": "all",
+      "estimate_method": "quantified",
+      "impact_score": 46.18,
+      "impact_score_low": 39.59,
+      "impact_score_high": 52.78,
+      "member_count": 1,
+      "members": [
+        {
+          "operation": "aten::convolution",
+          "category": "conv_fwd",
+          "type": "kernel_tuning",
+          "estimate_method": "quantified",
+          "impact_score": 46.18,
+          "impact_score_low": 39.59,
+          "impact_score_high": 52.78,
+          "efficiency_pct": 47.22,
+          "bound_type": "compute",
+          "library": null,
+          "time_ms": 1.8
+        }
+      ],
+      "category": "conv_fwd",
+      "category_rank": 1,
+      "global_rank": 1
+    }
+  ],
+  "all_estimates": [
+    {
+      "operation": "aten::convolution",
+      "category": "conv_fwd",
+      "type": "kernel_tuning",
+      "estimate_method": "quantified",
+      "impact_score": 46.18,
+      "impact_score_low": 39.59,
+      "impact_score_high": 52.78,
+      "efficiency_pct": 47.22,
+      "bound_type": "compute",
+      "library": null,
+      "time_ms": 1.8
+    }
+  ]
+}

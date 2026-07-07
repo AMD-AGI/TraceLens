@@ -1,0 +1,2 @@
+name,Input Dims,Input type
+aten::mm,"((1024, 4096), (4096, 2048))","('c10::bfloat16', 'c10::bfloat16')"

@@ -1,0 +1,6 @@
+{
+    "model": "Vision",
+    "architecture": "CNN",
+    "scale": "Cannot be inferred from trace",
+    "precision": "BF16"
+}

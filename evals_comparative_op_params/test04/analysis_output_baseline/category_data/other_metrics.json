@@ -1,0 +1,99 @@
+{
+  "category": "other",
+  "status": "OK",
+  "comparison_scope": "comparative",
+  "total_time_ms": 0.16,
+  "percent_of_compute": 7.73,
+  "operation_count": 1,
+  "operations": [
+    {
+      "name": "aten::transpose",
+      "count": 1,
+      "time_ms": 0.16,
+      "percent_of_category": 100.0,
+      "percent_of_total": 7.73,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": 0.0,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 708,
+        "resolved_peak_hbm_bw": 5.3,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((4, 256, 56, 56),)",
+      "Input type": "('c10::bfloat16',)",
+      "args": "(4,256,56,56) bf16",
+      "t2_time_ms": 0.0,
+      "count_trace2": 0,
+      "difference_ms": -0.16,
+      "classification": {
+        "sub_category": "miscellaneous"
+      },
+      "library": null,
+      "launcher_path": "Conv2d",
+      "kernel_name": "batched_transpose_64x64_pack_4x4_ediv_4x4_bf16",
+      "kernel_name_trunc": "batched_transpose_64x64_pack_4x4_ediv_4x4_bf16",
+      "module_chain": [
+        "Conv2d"
+      ],
+      "call_chain": [
+        "nn.Module: Conv2d",
+        "aten::transpose"
+      ]
+    }
+  ],
+  "category_specific": {
+    "communication_count": 0,
+    "graph_count": 0,
+    "miscellaneous_count": 1,
+    "peak_maf_tflops": 708,
+    "peak_hbm_bw_tbs": 5.3
+  },
+  "impact_estimates": [
+    {
+      "operation": "aten::transpose",
+      "category": "other",
+      "type": "kernel_tuning",
+      "estimate_method": "quantified",
+      "impact_score": 6.76,
+      "impact_score_low": 5.8,
+      "impact_score_high": 7.73,
+      "efficiency_pct": 0.0,
+      "bound_type": null,
+      "library": null,
+      "time_ms": 0.16
+    }
+  ],
+  "category_findings": [
+    {
+      "bound_type": "unknown",
+      "library": "Unknown",
+      "eff_bucket": "all",
+      "estimate_method": "quantified",
+      "impact_score": 6.76,
+      "impact_score_low": 5.8,
+      "impact_score_high": 7.73,
+      "member_count": 1,
+      "members": [
+        {
+          "operation": "aten::transpose",
+          "category": "other",
+          "type": "kernel_tuning",
+          "estimate_method": "quantified",
+          "impact_score": 6.76,
+          "impact_score_low": 5.8,
+          "impact_score_high": 7.73,
+          "efficiency_pct": 0.0,
+          "bound_type": null,
+          "library": null,
+          "time_ms": 0.16
+        }
+      ],
+      "rank": 1
+    }
+  ]
+}

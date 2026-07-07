@@ -1,0 +1,97 @@
+{
+  "category": "other",
+  "status": "OK",
+  "comparison_scope": "comparative",
+  "total_time_ms": 0.52,
+  "percent_of_compute": 100.0,
+  "operation_count": 1,
+  "operations": [
+    {
+      "name": "aten::scaled_dot_product_attention",
+      "count": 1,
+      "time_ms": 0.52,
+      "percent_of_category": 100.0,
+      "percent_of_total": 100.0,
+      "efficiency": {
+        "tflops_achieved": null,
+        "tb_s_achieved": null,
+        "efficiency_percent": 53.85,
+        "bound_type": null,
+        "flops_per_byte": null,
+        "compute_spec": null,
+        "resolved_peak_maf": 708,
+        "resolved_peak_hbm_bw": 5.3,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((8, 16, 512, 64), (8, 16, 512, 64), (8, 16, 512, 64))",
+      "Input type": "('c10::bfloat16', 'c10::bfloat16', 'c10::bfloat16')",
+      "args": "(8,16,512,64) bf16<br>(8,16,512,64) bf16<br>(8,16,512,64) bf16",
+      "t2_time_ms": 0.28,
+      "count_trace2": 1,
+      "difference_ms": -0.24,
+      "classification": {
+        "sub_category": "miscellaneous"
+      },
+      "library": null,
+      "launcher_path": "Not found",
+      "kernel_name": "flash_fwd_hdim64_bf16_sm80<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::bfloat16_t>>",
+      "kernel_name_trunc": "flash_fwd_hdim64_bf16_sm80<Flash_fwd_kernel_traits<64, 128, 128, 4, false, ...",
+      "module_chain": [],
+      "call_chain": [
+        "aten::scaled_dot_product_attention",
+        "flash_fwd_hdim64_bf16_sm80<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::bfloat16_t>>"
+      ]
+    }
+  ],
+  "category_specific": {
+    "communication_count": 0,
+    "graph_count": 0,
+    "miscellaneous_count": 1,
+    "peak_maf_tflops": 708,
+    "peak_hbm_bw_tbs": 5.3
+  },
+  "impact_estimates": [
+    {
+      "operation": "aten::scaled_dot_product_attention",
+      "category": "other",
+      "type": "kernel_tuning",
+      "estimate_method": "quantified",
+      "impact_score": 40.38,
+      "impact_score_low": 34.61,
+      "impact_score_high": 46.15,
+      "efficiency_pct": 53.85,
+      "bound_type": null,
+      "library": null,
+      "time_ms": 0.52
+    }
+  ],
+  "category_findings": [
+    {
+      "bound_type": "unknown",
+      "library": "Unknown",
+      "eff_bucket": "all",
+      "estimate_method": "quantified",
+      "impact_score": 40.38,
+      "impact_score_low": 34.61,
+      "impact_score_high": 46.15,
+      "member_count": 1,
+      "members": [
+        {
+          "operation": "aten::scaled_dot_product_attention",
+          "category": "other",
+          "type": "kernel_tuning",
+          "estimate_method": "quantified",
+          "impact_score": 40.38,
+          "impact_score_low": 34.61,
+          "impact_score_high": 46.15,
+          "efficiency_pct": 53.85,
+          "bound_type": null,
+          "library": null,
+          "time_ms": 0.52
+        }
+      ],
+      "rank": 1
+    }
+  ]
+}

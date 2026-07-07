@@ -1,0 +1,96 @@
+{
+  "category": "conv_fwd",
+  "status": "OK",
+  "comparison_scope": "comparative",
+  "total_time_ms": 1.9,
+  "percent_of_compute": 91.79,
+  "operation_count": 1,
+  "operations": [
+    {
+      "name": "aten::convolution",
+      "count": 1,
+      "time_ms": 1.9,
+      "percent_of_category": 100.0,
+      "percent_of_total": 91.79,
+      "efficiency": {
+        "tflops_achieved": 15.58,
+        "tb_s_achieved": 0.01,
+        "efficiency_percent": 63.16,
+        "bound_type": "compute",
+        "flops_per_byte": 1368.67,
+        "compute_spec": "matrix_bf16",
+        "resolved_peak_maf": 708,
+        "resolved_peak_hbm_bw": 5.3,
+        "warning": null,
+        "is_anomaly": false
+      },
+      "Input Dims": "((4, 256, 56, 56), (512, 256, 3, 3), ())",
+      "Input type": "('c10::bfloat16', 'c10::bfloat16', 'c10::bfloat16')",
+      "args": "(4,256,56,56) bf16<br>(512,256,3,3) bf16<br>() bf16",
+      "t2_time_ms": 1.2,
+      "count_trace2": 1,
+      "difference_ms": -0.7,
+      "library": null,
+      "launcher_path": "Conv2d",
+      "kernel_name": "miopenConvolutionForwardAlgo_BwdDataB<BF16, BF16, float, 3, 3>",
+      "kernel_name_trunc": "miopenConvolutionForwardAlgo_BwdDataB<BF16, BF16, float, 3, 3>",
+      "module_chain": [
+        "Conv2d"
+      ],
+      "call_chain": [
+        "nn.Module: Conv2d",
+        "aten::convolution"
+      ]
+    }
+  ],
+  "category_specific": {
+    "transpose_count": 0,
+    "transpose_time_ms": 0,
+    "transpose_overhead_percent": 0.0,
+    "peak_maf_tflops": 708,
+    "peak_hbm_bw_tbs": 5.3
+  },
+  "impact_estimates": [
+    {
+      "operation": "aten::convolution",
+      "category": "conv_fwd",
+      "type": "kernel_tuning",
+      "estimate_method": "quantified",
+      "impact_score": 29.59,
+      "impact_score_low": 25.36,
+      "impact_score_high": 33.81,
+      "efficiency_pct": 63.16,
+      "bound_type": "compute",
+      "library": null,
+      "time_ms": 1.9
+    }
+  ],
+  "category_findings": [
+    {
+      "bound_type": "compute",
+      "library": "Unknown",
+      "eff_bucket": "all",
+      "estimate_method": "quantified",
+      "impact_score": 29.59,
+      "impact_score_low": 25.36,
+      "impact_score_high": 33.81,
+      "member_count": 1,
+      "members": [
+        {
+          "operation": "aten::convolution",
+          "category": "conv_fwd",
+          "type": "kernel_tuning",
+          "estimate_method": "quantified",
+          "impact_score": 29.59,
+          "impact_score_low": 25.36,
+          "impact_score_high": 33.81,
+          "efficiency_pct": 63.16,
+          "bound_type": "compute",
+          "library": null,
+          "time_ms": 1.9
+        }
+      ],
+      "rank": 1
+    }
+  ]
+}

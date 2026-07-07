@@ -1,0 +1,7 @@
+{
+  "total_time_ms": 1.2,
+  "computation_time_percent": 100.0,
+  "exposed_comm_time_percent": 0.0,
+  "exposed_memcpy_time_percent": 0.0,
+  "idle_time_percent": 0.0
+}

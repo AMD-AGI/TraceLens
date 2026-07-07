@@ -1,0 +1,3 @@
+name,Input Dims,Input type
+aten::convolution,"((4, 256, 56, 56), (512, 256, 3, 3), ())","('c10::bfloat16', 'c10::bfloat16', 'c10::bfloat16')"
+aten::transpose,"((4, 256, 56, 56),)","('c10::bfloat16',)"

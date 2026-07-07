@@ -1,0 +1,6 @@
+{
+  "model": "Cannot be inferred from trace",
+  "architecture": "Cannot be inferred from trace",
+  "scale": "Cannot be inferred from trace",
+  "precision": "BF16"
+}
