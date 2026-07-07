@@ -35,12 +35,11 @@
       },
       "library": null,
       "launcher_path": "Not found",
-      "kernel_name": "flash_fwd_hdim64_bf16_sm80<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::bfloat16_t>>",
-      "kernel_name_trunc": "flash_fwd_hdim64_bf16_sm80<Flash_fwd_kernel_traits<64, 128, 128, 4, false, ...",
+      "kernel_name": "attn_fwd",
+      "kernel_name_trunc": "attn_fwd",
       "module_chain": [],
       "call_chain": [
-        "aten::scaled_dot_product_attention",
-        "flash_fwd_hdim64_bf16_sm80<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::bfloat16_t>>"
+        "aten::scaled_dot_product_attention"
       ]
     }
   ],

@@ -188,7 +188,7 @@
     {
       "ph": "X",
       "cat": "kernel",
-      "name": "flash_fwd_hdim64_bf16_sm80<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::bfloat16_t>>",
+      "name": "void pytorch_flash::flash_fwd_kernel<pytorch_flash::Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::bfloat16_t, pytorch_flash::Flash_kernel_traits<64, 128, 128, 4, cutlass::bfloat16_t> >, false, true, false, false, false, true, false>(pytorch_flash::Flash_fwd_params)",
       "pid": 0,
       "tid": 7,
       "ts": 2200000000060.0,
@@ -199,13 +199,7 @@
         "stream": 7,
         "correlation": 1001,
         "grid": [512, 16, 8],
-        "block": [128, 1, 1],
-        "queued": 0,
-        "context": 1,
-        "registers per thread": 64,
-        "blocks per SM": 32,
-        "warps per SM": 128.0,
-        "est. achieved occupancy %": 100
+        "block": [128, 1, 1]
       }
     }
   ],

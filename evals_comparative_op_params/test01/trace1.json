@@ -162,7 +162,7 @@
       "dur": 2.0,
       "args": {
         "External id": 1,
-        "kernel": "flash_fwd_hdim64_bf16_sm80<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::bfloat16_t>>",
+        "kernel": "attn_fwd",
         "cid": 1001,
         "correlation": 1001,
         "grid": [512, 16, 8],
@@ -192,7 +192,7 @@
     {
       "ph": "X",
       "cat": "kernel",
-      "name": "flash_fwd_hdim64_bf16_sm80<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::bfloat16_t>>",
+      "name": "attn_fwd",
       "pid": 2,
       "tid": 0,
       "ts": 2200000000060.0,

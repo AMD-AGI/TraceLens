@@ -1,6 +1,6 @@
 {
   "model": "LLM",
   "architecture": "Transformer",
-  "scale": "Cannot be inferred from trace",
+  "scale": "base",
   "precision": "BF16"
 }

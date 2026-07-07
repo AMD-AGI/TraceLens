@@ -1,48 +1,66 @@
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
+# Other Operations Analysis
+
 ## Overview
 
-**Status:** SUCCESS
-**Category:** Other Operations
-**Comparison Scope:** Comparative (Trace 1 vs Trace 2)
-**Total GPU Kernel Time:** 0.52 ms (Trace 1)
-**Operations Analyzed:** 1
+This report covers GPU operations in the **other** category — operations that do not fit standard categories (GEMM, SDPA, Elementwise, Reduce, Norm, Convolution, MoE, Triton). Analysis is performed in **comparative** mode: `efficiency_percent` = 100 × (Trace 2 kernel time) / (Trace 1 kernel time). Values below 100% indicate Trace 1 is slower than Trace 2.
 
-### Category Breakdown
+**Platform:** MI300X
+**Total category kernel time (Trace 1):** 0.52 ms
+**Category share of E2E GPU time:** 100.0%
+**Operations analyzed:** 1
 
-| Sub-Category | Count |
-|---|---|
-| Miscellaneous | 1 |
-| Communication | 0 |
-| Graph | 0 |
+## Operations Breakdown
+
+| Operation | Trace 1 Time (ms) | Trace 2 Time (ms) | Efficiency (T2/T1) | Count (T1/T2) | Sub-Category |
+|-----------|-------------------|-------------------|--------------------|---------------|--------------|
+| aten::scaled_dot_product_attention | 0.52 | 0.28 | 53.85% | 1 / 1 | miscellaneous |
+
+## Key Findings
+
+One operation (`aten::scaled_dot_product_attention`) is 46% slower in Trace 1 than Trace 2. Trace 1 executes the `attn_fwd` kernel in 0.52 ms versus 0.28 ms in Trace 2 — a gap of 0.24 ms. This operation accounts for 100% of the E2E GPU time in this trace segment, making it the primary bottleneck.
+
+**Note on sub-category attribution:** Sub-category is heuristic — verify against op semantics before acting on it.
+
+**Note on potential miscategorization:** `aten::scaled_dot_product_attention` is semantically an SDPA operation. Its presence in the `other` category suggests it was not matched by the SDPA category filter (possibly due to a missing or non-standard kernel signature). Cross-category fusion potential not assessed here — defer to the kernel fusion analysis.
+
+---
 
 ## Recommendations
 
-### P1: Flash Attention Forward Kernel Slower in Trace 1
+### P1: aten::scaled_dot_product_attention — Trace 1 Slower Than Trace 2
 
-**Insight**: The `aten::scaled_dot_product_attention` operation in Trace 1 takes 0.52 ms compared to 0.28 ms in Trace 2, making Trace 1 approximately 46% slower for this operation.
-**Action**: Investigate the Flash Attention configuration differences between traces. Ensure the same Flash Attention library version and kernel variant are used, and check for differences in memory layout or padding that could explain the performance gap.
+**Insight**: `aten::scaled_dot_product_attention` takes 0.52 ms in Trace 1 versus 0.28 ms in Trace 2, making Trace 1 approximately 46% slower for this operation.
+**Action**: Profile the `attn_fwd` kernel in Trace 1 for tile-size and wave-occupancy tuning relative to the Trace 2 configuration. Compare the launch parameters (batch size, head count, sequence length, head dimension) and kernel dispatch settings between both traces to identify what changed between configurations.
 <!-- impact-begin kind=p_item low=34.61 mid=40.38 high=46.15 -->
 **Impact**: impact_score: 40.38
 <!-- impact-end -->
 
+---
+
 ## Detailed Analysis
 
 <!-- reasoning-candidate tier=compute rank=1 -->
-#### Flash Attention Forward Kernel Slower in Trace 1
+#### aten::scaled_dot_product_attention — Trace 1 Slower Than Trace 2
 
-**Identification:** The `aten::scaled_dot_product_attention` operation was flagged because Trace 1 is significantly slower than Trace 2 for this operation (0.52 ms vs 0.28 ms). The operation dispatches a Flash Attention forward GPU kernel (`flash_fwd_hdim64_bf16_sm80`) processing bf16 inputs with shape (8, 16, 512, 64). Sub-category is heuristic -- verify against op semantics before acting on it. (source: `other_metrics.json` -> `operations[].efficiency.efficiency_percent` = 53.85, `category_findings[0].impact_score` = 40.38)
+**Identification:** `aten::scaled_dot_product_attention` was flagged because its Trace 2 kernel time is 53.85% of its Trace 1 kernel time (efficiency_percent < 100%), indicating Trace 1 is the slower configuration. The operation dispatches the `attn_fwd` GPU kernel with input shape (8, 16, 512, 64) in bfloat16. No launcher path was resolved in the trace. No model module chain is available (source: `other_metrics.json` → `operations[].efficiency.efficiency_percent`, `operations[].call_chain`).
 
 **Data:**
 
 | Operation | Args (T1) | Trace 1 Time (ms) | Trace 2 Time (ms) | Count (T1/T2) | Difference (ms) | FLOPS/Byte (T1) | Bound (T1) | Sub-Category |
-|---|---|---|---|---|---|---|---|---|
+|-----------|-----------|-------------------|-------------------|---------------|-----------------|-----------------|------------|--------------|
 | aten::scaled_dot_product_attention | (8,16,512,64) bf16<br>(8,16,512,64) bf16<br>(8,16,512,64) bf16 | 0.52 | 0.28 | 1 / 1 | -0.24 | — | — | miscellaneous |
 
-**Reasoning for Slowdown:** Trace 1 is approximately 46% slower than Trace 2 for this Flash Attention operation, with a time gap of 0.24 ms. Both traces invoke the same kernel (`flash_fwd_hdim64_bf16_sm80`) once with identical input shapes (batch=8, heads=16, seq_len=512, head_dim=64) in bf16. The absolute time difference of 0.24 ms indicates a meaningful regression in Trace 1. Since both executions share the same op signature and invocation count, the slowdown likely stems from runtime conditions such as different memory states, HBM bandwidth contention, or differences in the kernel dispatch path. Bottleneck identified -- generate reproducer for kernel team.
+**Reasoning for Slowdown:** Trace 1 takes 0.52 ms for this operation versus 0.28 ms in Trace 2 — Trace 2 is approximately 46% faster (absolute gap: 0.24 ms). Both traces run the same `attn_fwd` kernel on identical input shapes (batch=8, heads=16, seq=512, head_dim=64, dtype=bfloat16), so the performance difference is not due to shape or dtype divergence. The bound type cannot be determined from the trace alone (no FLOPS/byte estimate available); profiling with hardware counters is needed to diagnose whether the gap stems from occupancy, memory access pattern differences, or kernel parameter differences between the two runs. Bottleneck identified — generate a reproducer for the kernel team.
 
-**Resolution:** Investigating the runtime environment differences between the two traces will clarify the root cause. Check whether the Flash Attention library version, GPU memory fragmentation state, or concurrent workload differs between Trace 1 and Trace 2. If the same software stack is used, the performance gap may indicate memory bandwidth contention in Trace 1 that can be mitigated by optimizing the surrounding memory access patterns.
+**Resolution:** Comparing the kernel dispatch configuration and any surrounding context (e.g., compiler flags, runtime settings, or op fusion changes) between the two traces may reveal what changed to produce the 46% speedup in Trace 2. If the improvement in Trace 2 results from a different kernel variant or updated tuning parameters, applying the same configuration to Trace 1 would close the gap. Kernel running slower than expected — profile occupancy with hardware counters.
 
 **Impact estimate:**
-
 <!-- impact-begin kind=detail_estimate low=34.61 high=46.15 -->
 - Low end impact_score: 34.61
 - High end impact_score: 46.15
