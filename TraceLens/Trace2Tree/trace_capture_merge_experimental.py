@@ -64,7 +64,8 @@ def _capture_kernel_name(event):
 
 def _align_capture_to_graph(capture_events, graph_events):
     """
-    Greedily align capture dispatch events to graph kernel events by name.
+    Robust greedy alignment of capture dispatch events to graph kernel
+    events in case of minor mismatch due to profiler error.
 
     For each graph kernel, scan forward through capture_events until a
     dispatch whose args.kernel matches is found, skipping any unmatched
