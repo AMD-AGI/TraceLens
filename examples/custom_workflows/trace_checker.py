@@ -34,17 +34,51 @@ Set ``TRACELENS_VERBOSE_NATIVE_LOGS=1`` to keep the raw native XLA/xprof logs.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import enum
 import functools
 import json
 import math
 import os
+import re
 import statistics
 import sys
 import tempfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+# Native absl/XLA logs (e.g. "Instruction with id > INT_MAX") go to the stderr
+# fd before absl init, so TF_CPP_MIN_LOG_LEVEL can't gate them.
+_NATIVE_LOG_NOISE = re.compile(
+    r"^[IWE]\d{4} |^WARNING: All log messages before absl::InitializeLog"
+)
+
+
+@contextlib.contextmanager
+def _filter_native_stderr(enabled: bool = True):
+    """Redirect the stderr fd and replay only non-native-noise lines."""
+    if not enabled:
+        yield
+        return
+    sys.stderr.flush()
+    saved_fd = os.dup(2)
+    tmp = tempfile.TemporaryFile(mode="w+b")
+    try:
+        os.dup2(tmp.fileno(), 2)
+        yield
+    finally:
+        sys.stderr.flush()
+        os.dup2(saved_fd, 2)
+        os.close(saved_fd)
+        tmp.seek(0)
+        captured = tmp.read().decode("utf-8", "replace")
+        tmp.close()
+        for line in captured.splitlines():
+            if not _NATIVE_LOG_NOISE.match(line):
+                sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+
 
 from TraceLens import GPUEventAnalyser
 from TraceLens.util import DataLoader
@@ -881,23 +915,26 @@ def generate_report(
 ) -> Dict:
     """Generate the TraceLens perf report. PyTorch gets the Megatron extension."""
     out = output_dir or tempfile.mkdtemp(prefix="trace_quality_")
+    quiet = os.environ.get("TRACE_QUALITY_VERBOSE_NATIVE_LOGS") != "1"
     if framework == FRAMEWORK_PYTORCH:
         from TraceLens.Reporting.generate_perf_report_pytorch import (
             generate_perf_report_pytorch,
         )
 
-        return generate_perf_report_pytorch(
-            profile_json_path=path,
-            output_csvs_dir=out,
-            collective_analysis=True,
-            extension_file=find_megatron_extension(),
-        )
+        with _filter_native_stderr(quiet):
+            return generate_perf_report_pytorch(
+                profile_json_path=path,
+                output_csvs_dir=out,
+                collective_analysis=True,
+                extension_file=find_megatron_extension(),
+            )
     if framework == FRAMEWORK_JAX:
         from TraceLens.Reporting.generate_perf_report_jax import (
             generate_perf_report_jax,
         )
 
-        return generate_perf_report_jax(profile_path=path, output_csvs_dir=out)
+        with _filter_native_stderr(quiet):
+            return generate_perf_report_jax(profile_path=path, output_csvs_dir=out)
     raise ValueError(f"unknown framework: {framework}")
 
 
