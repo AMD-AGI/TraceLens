@@ -4,9 +4,7 @@ Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
-# TraceLens Agent: Trace Analysis
-
-> **⚠️ Experimental**: This feature is under active development and may change.
+# TraceLens Agent
 
 The TraceLens Agent is an agentic performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. The system supports automated analysis of training and inference traces supported by TraceLens. Skills have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability. The output is a single stakeholder-facing report (`analysis.md`) organized as a prioritized bottleneck list. Findings are ranked and grouped into three tiers (Compute Kernel Optimizations, Kernel Fusion Opportunities, and System-Level Optimizations), and each finding carries the supporting evidence, the reasoning behind the call-out and a possible concrete resolution.
 
