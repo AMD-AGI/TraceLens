@@ -4,12 +4,15 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import contextlib
 import itertools
 import json
 import logging
 import os
 import re
 import glob
+import sys
+import tempfile
 from collections import defaultdict
 
 try:
@@ -23,6 +26,47 @@ except ImportError:
 from typing import List, Dict, Callable, Iterable, Tuple, Optional
 
 logger = logging.getLogger(__name__)
+
+
+# Benign native XLA logs (id > INT_MAX, from packed HLO instruction ids in xprof
+# 2.20.1). Emitted to fd 2 before absl init, so only filterable at the fd level.
+_NATIVE_LOG_NOISE = re.compile(
+    r"Instruction with id > INT_MAX"
+    r"|not intended behavior and might indicate a bug in the HLO proto serialization"
+    r"|hlo_instruction\.cc"
+)
+
+
+@contextlib.contextmanager
+def suppress_native_hlo_logs():
+    """Filter benign native XLA ``id > INT_MAX`` stderr during a call.
+
+    Set ``TRACELENS_VERBOSE_NATIVE_LOGS=1`` to disable filtering.
+    """
+    if os.environ.get("TRACELENS_VERBOSE_NATIVE_LOGS"):
+        yield
+        return
+
+    sys.stderr.flush()
+    saved_fd = os.dup(2)
+    tmp = tempfile.TemporaryFile(mode="w+b")
+    try:
+        os.dup2(tmp.fileno(), 2)
+        yield
+    finally:
+        sys.stderr.flush()
+        os.dup2(saved_fd, 2)
+        os.close(saved_fd)
+        tmp.seek(0)
+        for raw in tmp.read().splitlines(keepends=True):
+            try:
+                line = raw.decode("utf-8", "replace")
+            except Exception:
+                os.write(2, raw)
+                continue
+            if not _NATIVE_LOG_NOISE.search(line):
+                os.write(2, raw)
+        tmp.close()
 
 
 # generic data loader class for json, json.gz, or tensorboard pb files
@@ -46,7 +90,10 @@ class DataLoader:
                     "for trace conversion. Install xprof for JAX 0.8+ support."
                 )
 
-            data, _ = convert.xspace_to_tool_data([filename_path], "trace_viewer@^", {})
+            with suppress_native_hlo_logs():
+                data, _ = convert.xspace_to_tool_data(
+                    [filename_path], "trace_viewer@^", {}
+                )
             if data is None:
                 raise RuntimeError(
                     f"Trace conversion using '{converter_lib}' returned None for "
@@ -142,7 +189,8 @@ class JaxProfileProcessor:
         dir_name = os.path.dirname(os.path.abspath(protobuf_file_name)) + "/"
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) != 1:
-            convert.xspace_to_tool_names([protobuf_file_name])
+            with suppress_native_hlo_logs():
+                convert.xspace_to_tool_names([protobuf_file_name])
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) > 1:
             logger.warning(f"Multiple matching hlo_filenames: {hlo_filename}")
@@ -167,7 +215,8 @@ class JaxProfileProcessor:
             "type": "long_txt",
         }
         params = {"graph_viewer_options": graph_viewer_options}
-        data, _ = convert.xspace_to_tool_data([dir_name], "graph_viewer^", params)
+        with suppress_native_hlo_logs():
+            data, _ = convert.xspace_to_tool_data([dir_name], "graph_viewer^", params)
         data = data.decode("utf-8").split("\n")
         for line in data:
             JaxProfileProcessor.process_line(hlo_ops, line)
