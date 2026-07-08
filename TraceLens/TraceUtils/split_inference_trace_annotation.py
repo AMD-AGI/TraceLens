@@ -179,6 +179,7 @@ from dataclasses import dataclass, field
 import csv
 from statistics import mean
 from TraceLens.util import DataLoader
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 import pandas as pd
 
 # Try to use faster JSON parser (orjson is 2-10x faster than json)
@@ -243,8 +244,8 @@ ANNOTATION_PATTERN_BACKUP = [
 def find_iteration_roots(events: List[dict]) -> Optional[List[dict]]:
     """Return iteration-root events.
 
-    Tries the primary annotation pattern first and only falls back to the
-    backup patterns when the primary matches nothing.
+    Tries the primary annotation pattern first, then backup patterns, then
+    falls back to generic call-tree traversal via Trace2Tree.
     """
     roots = find_events_by_pattern(
         events, ANNOTATION_PATTERN, "execution steps (iteration)", cat="user_annotation"
@@ -257,6 +258,155 @@ def find_iteration_roots(events: List[dict]) -> Optional[List[dict]]:
             "execution steps (iteration, backup)",
             cat="user_annotation",
         )
+    if roots is None:
+        print("No annotation patterns found; trying generic call-tree traversal...")
+        roots = find_iteration_roots_generic(events)
+    return roots
+
+
+def _find_repeating_period(
+    names: List[str], min_repeats: int = 3
+) -> Tuple[Optional[int], Optional[List[str]], Optional[int]]:
+    """Find the shortest repeating name sequence anywhere in ``names``.
+
+    Slides a start offset forward to skip any non-repeating prefix (setup
+    events before the loop body). Returns ``(period, pattern, start_offset)``
+    where ``start_offset`` is the index in ``names`` where the first block
+    begins. Returns ``(None, None, None)`` if no qualifying period is found.
+
+    Requires at least ``min_repeats`` consecutive repetitions covering more
+    than half of the suffix starting at ``start_offset``.
+    """
+    n = len(names)
+    for start in range(n):
+        suffix = names[start:]
+        m = len(suffix)
+        for p in range(1, m // 2 + 1):
+            pattern = suffix[:p]
+            count = 0
+            i = 0
+            while i + p <= m and suffix[i : i + p] == pattern:
+                count += 1
+                i += p
+            if count >= min_repeats and count * p > m * 0.5:
+                return p, pattern, start
+    return None, None, None
+
+
+def _detect_iteration_roots_from_tree(tree: TraceToTree, roots) -> Optional[List[dict]]:
+    """BFS down the tree from one or more root nodes to find and return synthetic
+    iteration-root events.
+
+    ``roots`` may be a single event dict or a list of event dicts — all are
+    seeded into the BFS at depth 0 so they are explored level-by-level together.
+
+    Pattern detection uses all children (not just GPU-path ones) so that
+    leading CPU-only events (e.g. ``next`` in the OWL pipeline) are included
+    as part of the iteration anchor. A minimum child count guards against false
+    positives from short utility-function child lists.
+
+    Returns a list of synthetic root events, one per detected iteration, where
+    each event's ``dur`` spans from the first to the last child of the block.
+    """
+    from collections import deque
+
+    if isinstance(roots, dict):
+        roots = [roots]
+
+    queue = deque((node, 0) for node in roots)
+    while queue:
+        current, depth = queue.popleft()
+        children = tree.get_children_events(current)
+        if not children:
+            continue
+
+        # Only recurse into GPU-bearing subtrees.
+        if not any(c.get("gpu_events") for c in children):
+            continue
+
+        p, _, start = _find_repeating_period([c.get("name", "") for c in children])
+        if p is None:
+            for child in children:
+                if child.get("gpu_events"):
+                    queue.append((child, depth + 1))
+            continue
+
+        print(
+            f"Generic fallback: repeating pattern found under '{current.get('name')}' at depth {depth}"
+        )
+        print(f"Generic fallback: period={p}")
+
+        # Anchor each iteration between the Nth occurrence of the first and last
+        # events in the detected pattern. Using all-children anchors means
+        # CPU-only leading/trailing events are included naturally.
+        first_anchor_name = children[start]["name"]
+        last_anchor_name = children[start + p - 1]["name"]
+
+        first_anchors = [
+            i
+            for i, c in enumerate(children)
+            if i >= start and c.get("name") == first_anchor_name
+        ]
+        last_anchors = [
+            i
+            for i, c in enumerate(children)
+            if i >= start and c.get("name") == last_anchor_name
+        ]
+
+        iteration_roots = []
+        for n in range(min(len(first_anchors), len(last_anchors))):
+            block_start = first_anchors[n]
+            block_end = last_anchors[n]
+            if block_end < block_start:
+                break
+            block = children[block_start : block_end + 1]
+            first, last = block[0], block[-1]
+            root_event = dict(first)
+            root_event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
+            iteration_roots.append(root_event)
+
+        print(f"Generic fallback: identified {len(iteration_roots)} iterations.")
+        return iteration_roots if iteration_roots else None
+
+    return None
+
+
+def find_iteration_roots_generic(events: List[dict]) -> Optional[List[dict]]:
+    """Fallback: detect iteration roots by finding a repeating child pattern in
+    the call tree, using Trace2Tree for parent/child relationships.
+
+    Works for any workload (diffusion, training, etc.) where the iteration loop
+    body is a repeating sequence of top-level calls under a common parent.
+    """
+    try:
+        tree = TraceToTree(events, prune_nongpu_paths=False)
+        tree.build_tree(add_python_func=True)
+    except Exception as e:
+        print(f"Generic fallback: Trace2Tree build failed ({e}), skipping.")
+        return None
+
+    # Walk every cpu_root_node upward through python_function parents until
+    # reaching a parentless node — these are the true per-thread entry points.
+    seen_roots: set = set()
+    trace_roots = []
+    for uid in tree.cpu_root_nodes:
+        e = tree.get_UID2event(uid)
+        while True:
+            parent = tree.get_parent_event(e)
+            if parent is None:
+                break
+            e = parent
+        if id(e) not in seen_roots:
+            seen_roots.add(id(e))
+            trace_roots.append(e)
+
+    if not trace_roots:
+        print("Generic fallback: no root nodes found.")
+        return None
+
+    roots = _detect_iteration_roots_from_tree(tree, trace_roots)
+    if roots is None:
+        print("Generic fallback: no repeating child pattern found.")
     return roots
 
 
@@ -427,26 +577,47 @@ def get_iter_details_from_name(name: str, prefix: str = "annotation_iteration") 
         }
 
     if "annotation_iteration" not in prefix:
-        return {"batch_size": 0}
+        # Generic workload (e.g. diffusion): treat every iteration as one
+        # decode-equivalent step so steady-state detection sees a flat line.
+        return {
+            "batch_size": 1,
+            "num_requests": 1,
+            "context_requests": 0,
+            "context_sum": 0,
+            "generation_requests": 1,
+            "generation_sum": 1,
+        }
 
     # vLLM execute_..._context_..._generation_... annotations: strip parens and the
     # sq/sk shape letters to a flat token list, then pick counts by index.
-    parts = re.sub(r"[sqk]+", "_", name.replace("(", "_").replace(")", "_")).split("_")
-    if len(parts) < 10:
-        idx = (2, 3, 6, 7)
-    elif len(parts) < 12:
-        idx = (2, 3, 7, 8)
-    else:
-        idx = (3, 5, 11, 13)
-    ctx_req, ctx_sum, gen_req, gen_sum = (int(parts[i]) for i in idx)
-    return {
-        "batch_size": ctx_sum + gen_sum,
-        "num_requests": ctx_req + gen_req,
-        "context_requests": ctx_req,
-        "context_sum": ctx_sum,
-        "generation_requests": gen_req,
-        "generation_sum": gen_sum,
-    }
+    try:
+        parts = re.sub(r"[sqk]+", "_", name.replace("(", "_").replace(")", "_")).split(
+            "_"
+        )
+        if len(parts) < 10:
+            idx = (2, 3, 6, 7)
+        elif len(parts) < 12:
+            idx = (2, 3, 7, 8)
+        else:
+            idx = (3, 5, 11, 13)
+        ctx_req, ctx_sum, gen_req, gen_sum = (int(parts[i]) for i in idx)
+        return {
+            "batch_size": ctx_sum + gen_sum,
+            "num_requests": ctx_req + gen_req,
+            "context_requests": ctx_req,
+            "context_sum": ctx_sum,
+            "generation_requests": gen_req,
+            "generation_sum": gen_sum,
+        }
+    except (ValueError, IndexError):
+        return {
+            "batch_size": 1,
+            "num_requests": 1,
+            "context_requests": 0,
+            "context_sum": 0,
+            "generation_requests": 1,
+            "generation_sum": 1,
+        }
 
 
 def find_phase_from_window(iter_details: List[dict]) -> dict:
@@ -546,7 +717,21 @@ def extract_and_save(
                 f"_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
             )
         elif is_annotation and len(root) == 1:
-            name_append = root[0]["name"].replace("(", "_").replace(")", "")
+            root_name = root[0]["name"]
+            is_known_annotation = any(
+                pat.match(root_name)
+                for pat in ANNOTATION_PATTERN + ANNOTATION_PATTERN_BACKUP
+            )
+            if is_known_annotation:
+                name_append = (
+                    root_name.replace("/", "_")
+                    .replace("(", "_")
+                    .replace(")", "")
+                    .replace(":", "")
+                    .replace(" ", "_")
+                )
+            else:
+                name_append = ""
         else:
             if len(batch_list) == len(iter_details):
                 name_append = f"batch{int(sum(batch_list)/len(batch_list))}_gpu{prefix}"
@@ -558,8 +743,9 @@ def extract_and_save(
                 output_dir, f"{output_label}_{name_append}_{base_name}.json.gz"
             )
         else:
+            suffix = f"_{name_append}" if name_append else ""
             out_path = os.path.join(
-                output_dir, f"{base_name}_{prefix}_{idx}_{name_append}.json.gz"
+                output_dir, f"{base_name}_{prefix}_{idx}{suffix}.json.gz"
             )
         with gzip.open(out_path, "wb") as f:
             f.write(json.dumps(iter_trace).encode("utf-8"))
@@ -738,7 +924,7 @@ def identify_steady_state_regions(
     if len(regions) == 0:
         delta = min(n, max(8, num_steps - n))
         start = max(0, delta // 2)
-        end = min(n, n - delta // 2)
+        end = max(start + 1, min(n, n - delta // 2))
         regions = [(start, end)]
         print(
             "Warning: no steady state region found; discarding initial/final iterations "

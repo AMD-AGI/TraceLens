@@ -4,12 +4,15 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import contextlib
 import itertools
 import json
 import logging
 import os
 import re
 import glob
+import sys
+import tempfile
 from collections import defaultdict
 
 try:
@@ -23,6 +26,47 @@ except ImportError:
 from typing import List, Dict, Callable, Iterable, Tuple, Optional
 
 logger = logging.getLogger(__name__)
+
+
+# Benign native XLA logs (id > INT_MAX, from packed HLO instruction ids in xprof
+# 2.20.1). Emitted to fd 2 before absl init, so only filterable at the fd level.
+_NATIVE_LOG_NOISE = re.compile(
+    r"Instruction with id > INT_MAX"
+    r"|not intended behavior and might indicate a bug in the HLO proto serialization"
+    r"|hlo_instruction\.cc"
+)
+
+
+@contextlib.contextmanager
+def suppress_native_hlo_logs():
+    """Filter benign native XLA ``id > INT_MAX`` stderr during a call.
+
+    Set ``TRACELENS_VERBOSE_NATIVE_LOGS=1`` to disable filtering.
+    """
+    if os.environ.get("TRACELENS_VERBOSE_NATIVE_LOGS"):
+        yield
+        return
+
+    sys.stderr.flush()
+    saved_fd = os.dup(2)
+    tmp = tempfile.TemporaryFile(mode="w+b")
+    try:
+        os.dup2(tmp.fileno(), 2)
+        yield
+    finally:
+        sys.stderr.flush()
+        os.dup2(saved_fd, 2)
+        os.close(saved_fd)
+        tmp.seek(0)
+        for raw in tmp.read().splitlines(keepends=True):
+            try:
+                line = raw.decode("utf-8", "replace")
+            except Exception:
+                os.write(2, raw)
+                continue
+            if not _NATIVE_LOG_NOISE.search(line):
+                os.write(2, raw)
+        tmp.close()
 
 
 # generic data loader class for json, json.gz, or tensorboard pb files
@@ -46,7 +90,10 @@ class DataLoader:
                     "for trace conversion. Install xprof for JAX 0.8+ support."
                 )
 
-            data, _ = convert.xspace_to_tool_data([filename_path], "trace_viewer@^", {})
+            with suppress_native_hlo_logs():
+                data, _ = convert.xspace_to_tool_data(
+                    [filename_path], "trace_viewer@^", {}
+                )
             if data is None:
                 raise RuntimeError(
                     f"Trace conversion using '{converter_lib}' returned None for "
@@ -88,6 +135,40 @@ class DataLoader:
 class JaxProfileProcessor:
     gemm_columns = ["Batch", "M", "N", "K", "Beta", "Type"]
 
+    # Substrings used to detect parseable HLO graph-viewer text lines.
+    # The legacy list only covered float types; integer/bool lines were skipped and
+    # later showed up as "Missing hlo_op" when the profiler trace referenced them.
+    _HLO_LINE_ELEMENT_TYPE_HINTS_LEGACY = [
+        "get-tuple-element",
+        "bf16",
+        "f8",
+        "f16",
+        "f32",
+        "f64",
+    ]
+    _HLO_LINE_ELEMENT_TYPE_HINTS = _HLO_LINE_ELEMENT_TYPE_HINTS_LEGACY + [
+        "s32",
+        "s64",
+        "u32",
+        "u64",
+        "pred",
+    ]
+
+    @staticmethod
+    def _should_parse_hlo_graph_line(line: str) -> bool:
+        """Return True if a graph-viewer text line should be parsed into hlo_ops."""
+        line_processed = line.strip()
+        if not line_processed or line_processed.startswith("HloModule "):
+            return False
+        if line_processed.startswith("ROOT"):
+            return False
+        if "metadata" in line_processed and not re.search(r"\)$", line_processed):
+            return True
+        return any(
+            hint in line_processed
+            for hint in JaxProfileProcessor._HLO_LINE_ELEMENT_TYPE_HINTS
+        )
+
     @staticmethod
     def process_xla_file(xla_file_name):
         hlo_ops = {}
@@ -105,10 +186,11 @@ class JaxProfileProcessor:
                 raw_to_tool_data as convert,
             )
 
-        dir_name = os.path.dirname(protobuf_file_name) + "/"
+        dir_name = os.path.dirname(os.path.abspath(protobuf_file_name)) + "/"
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) != 1:
-            convert.xspace_to_tool_names([protobuf_file_name])
+            with suppress_native_hlo_logs():
+                convert.xspace_to_tool_names([protobuf_file_name])
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) > 1:
             logger.warning(f"Multiple matching hlo_filenames: {hlo_filename}")
@@ -133,7 +215,8 @@ class JaxProfileProcessor:
             "type": "long_txt",
         }
         params = {"graph_viewer_options": graph_viewer_options}
-        data, _ = convert.xspace_to_tool_data([dir_name], "graph_viewer^", params)
+        with suppress_native_hlo_logs():
+            data, _ = convert.xspace_to_tool_data([dir_name], "graph_viewer^", params)
         data = data.decode("utf-8").split("\n")
         for line in data:
             JaxProfileProcessor.process_line(hlo_ops, line)
@@ -172,22 +255,82 @@ class JaxProfileProcessor:
     @staticmethod
     def process_line(hlo_ops: dict, line: str):
         line_processed = line.strip()
-        if (
-            (
-                "metadata" in line_processed
-                and not (re.search(r"\)$", line_processed))
-                and not (line_processed.startswith("ROOT"))
-            )
-            or any(
-                t in line_processed
-                for t in ["get-tuple-element", "bf16", "f8", "f16", "f32", "f64"]
-            )
-            and not (line_processed.startswith("HloModule "))
-        ):
-            k, v = JaxProfileProcessor.get_dict(hlo_ops, line_processed)
-            hlo_ops[k] = v
-            return True
-        return False
+        if not JaxProfileProcessor._should_parse_hlo_graph_line(line_processed):
+            return False
+        k, v = JaxProfileProcessor.get_dict(hlo_ops, line_processed)
+        hlo_ops[k] = v
+        return True
+
+    # Async collectives in HLO text use *-start/*-done names; runtime traces may
+    # use numbered aliases (e.g. reduce-scatter.12 -> reduce-scatter-start).
+    _ASYNC_COLLECTIVE_FAMILIES = ("all-to-all", "reduce-scatter", "all-gather")
+
+    @staticmethod
+    def _normalize_hlo_op_key(hlo_op: str) -> str:
+        return hlo_op if hlo_op.startswith("%") else f"%{hlo_op}"
+
+    @staticmethod
+    def _collective_start_keys(module_ops: dict, family: str) -> list:
+        start_keys = sorted(k for k in module_ops if k.startswith(f"%{family}-start"))
+        if start_keys:
+            return start_keys
+        return sorted(k for k in module_ops if k.startswith(f"%{family}-done"))
+
+    @classmethod
+    def build_collective_hlo_aliases(cls, module_ops: dict, trace_hlo_ops) -> dict:
+        """Map numbered runtime collective tags to parsed HLO dump keys."""
+        aliases = {}
+        normalized_ops = {cls._normalize_hlo_op_key(op) for op in trace_hlo_ops}
+
+        for family in cls._ASYNC_COLLECTIVE_FAMILIES:
+            numbered = []
+            for op_key in normalized_ops:
+                if op_key in module_ops:
+                    continue
+                bare = op_key.lstrip("%")
+                prefix = f"{family}."
+                if not bare.startswith(prefix):
+                    continue
+                suffix = bare[len(prefix) :]
+                if suffix.isdigit():
+                    numbered.append((int(suffix), op_key))
+
+            if not numbered:
+                continue
+
+            start_keys = cls._collective_start_keys(module_ops, family)
+            if not start_keys:
+                continue
+
+            numbered.sort()
+            if len(start_keys) == 1:
+                for _, op_key in numbered:
+                    aliases[op_key] = start_keys[0]
+            else:
+                for idx, (_, op_key) in enumerate(numbered):
+                    aliases[op_key] = start_keys[min(idx, len(start_keys) - 1)]
+
+        return aliases
+
+    @classmethod
+    def resolve_hlo_op_key(cls, hlo_op: str, module_ops: dict, aliases=None):
+        """Resolve a trace hlo_op to a key present in module_ops."""
+        key = cls._normalize_hlo_op_key(hlo_op)
+        if key in module_ops:
+            return key
+        if aliases and key in aliases and aliases[key] in module_ops:
+            return aliases[key]
+
+        bare = key.lstrip("%")
+        match = re.match(
+            r"^(all-to-all|reduce-scatter|all-gather)\.(\d+)$",
+            bare,
+        )
+        if match:
+            start_keys = cls._collective_start_keys(module_ops, match.group(1))
+            if start_keys:
+                return start_keys[0]
+        return None
 
     @staticmethod
     def get_operands(operands):

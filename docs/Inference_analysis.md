@@ -69,7 +69,7 @@ The remainder of Step 2 covers manual trace collection — building or patching 
 
 ###### vLLM Script
 
-A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, `v17`, `v18`, `v19`, `v20`, or `v21`) as the first argument, followed by the path to your local TraceLens clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
+A unified build script is provided that supports multiple vLLM versions. It takes a version tag (`v14`, `v15`, `v16`, `v17`, `v18`, `v19`, `v20`, `v21`, `v22`, `v23`, or `v24`) as the first argument, followed by the path to your local TraceLens clone and any standard `docker build` flags. The script selects the correct base image and patch file automatically.
 
 
 | Version | Base Image                                                    | vLLM Version | Patch File                  |
@@ -82,6 +82,9 @@ A unified build script is provided that supports multiple vLLM versions. It take
 | `v19`   | `vllm/vllm-openai-rocm:v0.19.0`                               | v0.19.0      | `config_vllm_v0.19.0.patch` |
 | `v20`   | `rocm/vllm-dev:preview_v0.20.0_20260429`                      | v0.20.0      | `config_vllm_v0.20.0.patch` |
 | `v21`   | `vllm/vllm-openai-rocm:v0.21.0`                               | v0.21.0      | `config_vllm_v0.21.0.patch` |
+| `v22`   | `vllm/vllm-openai-rocm:v0.22.0`                               | v0.22.0      | `config_vllm_v0.22.0.patch` |
+| `v23`   | `vllm/vllm-openai-rocm:v0.23.0`                               | v0.23.0      | `config_vllm_v0.23.0.patch` |
+| `v24`   | `vllm/vllm-openai-rocm:v0.24.0`                               | v0.24.0      | `config_vllm_v0.24.0.patch` |
 
 
 ```bash
@@ -163,7 +166,7 @@ If you prefer to patch an existing environment instead of building a new image, 
 
 ###### vLLM
 
-The `config_vllm_v*.patch` patches add two `ProfilerConfig` flags that control graph-capture profiling and trace annotation detail. These patches are available for v0.14–v0.20. Pass the flags as server arguments:
+The `config_vllm_v*.patch` patches add two `ProfilerConfig` flags that control graph-capture profiling and trace annotation detail. These patches are available for v0.14–v0.24. Pass the flags as server arguments:
 
 
 | Flag                                               | Type   | Default | Description                                                                                                                                                                                                                                                                                |
@@ -196,7 +199,7 @@ The `config_vllm_v*.patch` patches add two `ProfilerConfig` flags that control g
 
 This optional step reads the collected trace and splits it into smaller trace files or execution‑phase‑specific trace files.
 
-Option 1: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14–v0.20 and SGLang v0.5.9; using the patchfile is recommended). This is recommended if the tracefile is large and the user wants to extract a few representative steps automatically.
+Option 1: Find steady-state region of execution (highest concurrency) and separate prefill-decode and decode-only execution steps (supports vLLM v0.14–v0.24 and SGLang v0.5.9; using the patchfile is recommended). This is recommended if the tracefile is large and the user wants to extract a few representative steps automatically.
 
 ```python
 python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz  -o ./steady_state_analysis \
@@ -708,7 +711,7 @@ delay_iters = ( ((R+1)/2) * 5 * OSL ) - (max_iters/2) # The execution step where
 
 #### Trace Splitting
 
-The trace splitting workflow provides three key features. Note that trace splitting assumes vLLM v0.14 or higher (tested through v0.20), or use of our provided patches, to ensure that relevant annotations (batch size, request counts, etc.) are included in execution step metadata.
+The trace splitting workflow provides three key features. Note that trace splitting assumes vLLM v0.14 or higher (tested through v0.24), or use of our provided patches, to ensure that relevant annotations (batch size, request counts, etc.) are included in execution step metadata.
 
 1. **Split into individual execution steps:** Decompose the entire trace into per-step files, extracting batch size from annotations or kernels for shape-focused analysis and comparison.
 2. **Identify steady-state region:** Detect execution steps with near-maximum concurrency. The algorithm identifies large windows with concurrency close to peak levels and selects a representative steady-state region based on prefill-decode and decode-only step composition. When benchmark parameters are known, pass `--CONC`, `--OSL`, and `--R` to `split_inference_trace_annotation` to override the empirical reference ratio with the analytically derived ideal PD ratio — see [Step 3](#step-3-trace-preparation-optional) for details.

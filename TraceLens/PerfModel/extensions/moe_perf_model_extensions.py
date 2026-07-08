@@ -8,7 +8,10 @@
 Performance models for pseudo-op extensions.
 """
 
-from TraceLens.PerfModel.utils import torch_dtype_map
+from math import prod
+
+from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
+from TraceLens.PerfModel.perf_model import BinaryElementwise
 
 DTYPE_TO_BYTES = {
     "Float8_e4m3fn": 1,
@@ -1063,7 +1066,7 @@ class moe_aiter_ck_stage1(UnfusedMoE_Up):
         Extract MoE dimensions and data types from event args.
 
         Expected Input Dims format (from aiter::ck_moe_stage1):
-        [[tokens, hidden_dim], [E, N, K_packed], [E, hidden_dim, inter_dim_packed],
+        [[tokens, hidden_dim_packed], [E, N, K_packed], [E, hidden_dim, inter_dim_packed],
          [sorted_ids], [sorted_expert_ids], [num_valid_ids],
          [tokens, topk, inter_dim], ...]
 
@@ -1079,12 +1082,13 @@ class moe_aiter_ck_stage1(UnfusedMoE_Up):
         out_shape = kernel_input_shape[6]
 
         num_tokens = input_shape[0]
-        hidden_dim = input_shape[1]
 
-        E, hidden_dim_w2, inter_dim = w2_shape
+        E, hidden_dim, inter_dim = w2_shape
 
-        # Account for INT4 weight packing: w1's K dim may be compressed
-        int4_war = hidden_dim_w2 // w1_shape[-1]
+        # Account for FP4/INT4 weight packing: w1's K dim may be compressed.
+        # The packing factor is the ratio of the unpacked hidden_dim (from w2)
+        # to w1's packed K dim, and also applies to inter_dim.
+        int4_war = hidden_dim // w1_shape[-1]
         inter_dim *= int4_war
 
         num_experts = E
@@ -1166,7 +1170,7 @@ class moe_aiter_ck_stage2(UnfusedMoE_Down):
         Extract MoE dimensions and data types from event args.
 
         Expected Input Dims format (from aiter::ck_moe_stage2):
-        [[tokens, topk, inter_dim], [E, N, K], [E, hidden_dim, inter_dim_packed],
+        [[tokens, topk, inter_dim_packed], [E, N, K_packed], [E, hidden_dim, inter_dim_packed],
          [sorted_ids], [sorted_expert_ids], [num_valid_ids],
          [tokens, hidden_dim], ...]
 
@@ -1177,10 +1181,17 @@ class moe_aiter_ck_stage2(UnfusedMoE_Down):
 
         kernel_input_shape = args["Input Dims"]
         input_shape = kernel_input_shape[0]
+        w1_shape = kernel_input_shape[1]
         w2_shape = kernel_input_shape[2]
 
         num_tokens, topk, inter_dim = input_shape
         num_experts, hidden_dim, _ = w2_shape
+
+        # Account for FP4/INT4 packing: inter_states' last dim (and w2's last
+        # dim) may be packed. The packing factor is the ratio of the unpacked
+        # hidden_dim (w2's middle dim) to w1's packed K dim.
+        int4_war = hidden_dim // w1_shape[-1] if w1_shape else 1
+        inter_dim *= int4_war
 
         input_dtype = args["Input type"][0]
         weight_dtype = args["Input type"][2]
@@ -1714,3 +1725,216 @@ class moe_gptq_awq_down(UnfusedMoE_Down):
 
     def get_maf_type(self):
         return "matrix"
+
+
+class sglang_fused_append_shared_experts(BinaryElementwise):
+    """
+    Performance model for
+    sglang_profiler::fused_moe_triton_kernels_fused_append_shared_experts.
+
+    Reference implementation:
+        sglang/python/sglang/srt/layers/moe/fused_moe_triton/
+        fused_moe_triton_kernels.py (fused_append_shared_experts)
+        called from sglang/srt/layers/moe/topk.py:1264 (_post_process_topk_ids)
+
+    Appends shared-expert routing entries onto the per-token (topk_ids,
+    topk_weights) tensors produced by the router. This is a routing/metadata op:
+    no GEMM-style arithmetic, dominated by reading + rewriting the small
+    (num_tokens, topk) id/weight tensors.
+
+    Expected Input Dims from trace:
+        [0] = (M, topk)   ids      (int32)
+        [1] = (M, topk)   weights  (float32)
+
+    Roofline -- FLOPs:
+        ~0 (index/weight gather + write); modeled as 1 op/element for a
+        non-zero roofline floor.
+
+    Roofline -- bytes moved:
+        read + write both id and weight tensors:
+        2 * (M*topk*bpe_ids + M*topk*bpe_wts)
+
+    Reuses core BinaryElementwise (2-input machinery, get_maf_type);
+    overrides the roofline for the read+write pattern.
+    """
+
+    category = "MoE_aux"
+    bwd_category = None
+    sheet_category = "MoE_aux"
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        ids_shape = tuple(dims[0])
+        wts_shape = tuple(dims[1]) if len(dims) > 1 and dims[1] else ids_shape
+        dtype_ids = types[0] if types else "int"
+        dtype_wts = types[1] if len(types) > 1 else "float"
+        return {
+            "shape_in1": ids_shape,
+            "shape_in2": wts_shape,
+            "dtype_in1_in2_out": (dtype_ids, dtype_wts, dtype_wts),
+            "stride_input1": None,
+            "stride_input2": None,
+            "stride_output": None,
+        }
+
+    def flops(self):
+        return prod(self.param_details["shape_in1"])
+
+    def bytes(self):
+        n_ids = self.nelems_in1
+        n_wts = self.nelems_in2
+        bpe_ids = self.bpe_in1 or 4
+        bpe_wts = self.bpe_in2 or 4
+        return 2 * (n_ids * bpe_ids + n_wts * bpe_wts)
+
+    def get_compute_precision(self):
+        dtype = self.param_details["dtype_in1_in2_out"][1]
+        return torch_dtype_map(dtype) if dtype else None
+
+
+# ==============================================================================
+# MoE routing / sort auxiliary models (non-matmul, MoE_aux)
+# ==============================================================================
+
+
+class BiasedGroupedTopk:
+    """
+    Performance model for aiter::biased_grouped_topk_hip (DeepSeek grouped MoE
+    router top-k). Memory-bound: 1 flop/element over the dominant tensor, bytes
+    summed over all operands.
+
+    Reference:
+        sglang/python/sglang/srt/layers/moe/topk.py (biased_grouped_topk).
+
+    Expected Input Dims:
+        [[M, E], [E], [M, topk], [M, topk], ...]
+          [0] gating_output  (logits)
+          [1] correction_bias
+          [2] topk_weights   (out)
+          [3] topk_ids        (out)
+    """
+
+    category = "MoE_aux"
+    bwd_category = None
+    sheet_category = "MoE_aux"
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        dims = args["Input Dims"]
+        types = args.get("Input type", [])
+        operands = [
+            (tuple(shape), types[i] if i < len(types) else None)
+            for i, shape in enumerate(dims)
+            if shape and all(isinstance(d, int) for d in shape)
+        ]
+        return {"operands": operands}
+
+    def flops(self):
+        operands = self.param_details["operands"]
+        if not operands:
+            return 0
+        return max(prod(shape) for shape, _ in operands)
+
+    def bytes(self):
+        total = 0
+        for shape, dtype in self.param_details["operands"]:
+            bpe = name2bpe(dtype)
+            if bpe is not None:
+                total += prod(shape) * bpe
+        return total if total > 0 else None
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for MoE top-k routing is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for MoE top-k routing is not defined.")
+
+    def get_compute_precision(self):
+        operands = self.param_details["operands"]
+        if not operands:
+            return None
+        _, dtype = max(operands, key=lambda o: prod(o[0]))
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class MoeSortScatterGather:
+    """
+    Performance model for the MoE token sort/scatter kernels
+    aiter::moe_sorting_fwd and aiter::mxfp4_moe_sort_hip (permute per-token data
+    into the expert-contiguous layout). Memory-bound: 1 flop/element over the
+    dominant tensor, bytes summed over all operands.
+
+    Reference:
+        aiter/aiter/ops/triton/moe_op_mxfp4.py (mxfp4_moe_sort_hip); SGLang
+        AITER fused_moe sort path (moe_align_block_size).
+
+    Expected Input Dims (examples):
+        moe_sorting_fwd:    [[M, topk], [M, topk], [P], [P], [blocks], [2],
+                             [M, hidden], ...]
+        mxfp4_moe_sort_hip: [[P, S], [M, S], [P], [2], ...]
+    """
+
+    category = "MoE_aux"
+    bwd_category = None
+    sheet_category = "MoE_aux"
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        dims = args.get("Input Dims", [])
+        types = args.get("Input type", [])
+        operands = [
+            (tuple(shape), types[i] if i < len(types) else None)
+            for i, shape in enumerate(dims)
+            if shape and all(isinstance(d, int) for d in shape)
+        ]
+        return {"operands": operands}
+
+    def flops(self):
+        operands = self.param_details["operands"]
+        if not operands:
+            return 0
+        return max(prod(shape) for shape, _ in operands)
+
+    def bytes(self):
+        total = 0
+        for shape, dtype in self.param_details["operands"]:
+            bpe = name2bpe(dtype)
+            if bpe is None:
+                continue
+            total += prod(shape) * bpe
+        return total if total > 0 else None
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for MoE sort/scatter is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for MoE sort/scatter is not defined.")
+
+    def get_compute_precision(self):
+        operands = self.param_details["operands"]
+        if not operands:
+            return None
+        _, dtype = max(operands, key=lambda o: prod(o[0]))
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"
