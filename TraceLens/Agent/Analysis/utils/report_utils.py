@@ -248,8 +248,9 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             }
         )
         for f in findings:
-            # impact_score=None (no perf model): excluded from rollup/plot, ranked last.
-            if f.get("impact_score") is None:
+            # Heuristic findings rank in findings[] but are kept out of the
+            # quantified savings rollup/plot (a guess must not inflate projected savings).
+            if f.get("estimate_method") == "heuristic":
                 continue
             cat = f["category"]
             quantified[cat]["impact_score"] += f.get("impact_score", 0)
@@ -294,12 +295,15 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             )
 
         quantified_cats = set(quantified.keys())
+        heuristic_cats = {
+            f["category"] for f in findings if f.get("estimate_method") == "heuristic"
+        }
         unmodeled = []
         for cat_entry in manifest.get("categories", []):
             cat_name = cat_entry.get("name")
             if cat_entry.get("tier") != "compute_kernel":
                 continue
-            if cat_name in quantified_cats:
+            if cat_name in quantified_cats or cat_name in heuristic_cats:
                 continue
             gpu_time = cat_entry.get("gpu_kernel_time_ms", 0)
             if gpu_time >= threshold_ms:
@@ -326,15 +330,9 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             )
             next_rank += 1
 
-        # Quantified findings sort by impact_score descending; non-quantifiable
-        # (impact_score=None) findings always rank last.
-        findings.sort(
-            key=lambda f: (
-                f.get("impact_score") is not None,
-                f.get("impact_score") or 0,
-            ),
-            reverse=True,
-        )
+        # Every finding now carries a numeric impact_score (quantified or
+        # heuristic); sort descending for the global P-item ranking.
+        findings.sort(key=lambda f: f.get("impact_score", 0), reverse=True)
         for global_rank, f in enumerate(findings, start=1):
             f["global_rank"] = global_rank
 

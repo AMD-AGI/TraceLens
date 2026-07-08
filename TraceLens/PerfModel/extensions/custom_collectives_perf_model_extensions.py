@@ -80,6 +80,37 @@ class aiter_fused_allreduce_rmsnorm(CustomCollective):
         return bytes_read + bytes_write
 
 
+class aiter_fused_allreduce_rmsnorm_(aiter_fused_allreduce_rmsnorm):
+    """
+    Performance model for the high-level Python op aiter::fused_allreduce_rmsnorm_.
+
+    Same fused AllReduce + residual-add + RMSNorm math as the base class, but the
+    recorded argument layout follows the Python wrapper's signature
+    (inp, res_inp, w, eps, group_name, prefill_support, x_pad_to_multiple, gemma_norm)
+    rather than the low-level C++ op's (ptr, reg, inp, res_inp, res_out, out, w, eps, ...).
+
+    Expected Input Dims from trace:
+        [inp_shape, res_inp_shape, w_shape, eps, group_name, prefill_support, x_pad_to_multiple]
+        e.g. ((64, 7168), (64, 7168), (7168,), (), (), (), ())
+
+    So inp is at index 0 and weight at index 2 (vs [2] / [6] in the base class).
+    __init__, flops(), and bytes() are inherited unchanged.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][0])  # inp: [M, N]
+        dtype_in = event["args"]["Input type"][0]  # BFloat16
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        num_channels = event["args"]["Input Dims"][2][0]  # weight.shape[0] = N
+        return {
+            "op_shape": op_shape,
+            "dtype_in": dtype_in,
+            "stride_input": stride_input,
+            "num_channels": num_channels,
+        }
+
+
 class custom_ar_all_reduce(CustomCollective):
     """
     Performance model for _C_custom_ar::all_reduce.

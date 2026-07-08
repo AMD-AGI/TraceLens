@@ -49,11 +49,11 @@ curl https://cursor.com/install -fsS | bash
 ```
 Verify with `agent --version`
 
-### 4. Set Model to Claude Opus 4.7
+### 4. Set Model to Claude Opus 4.8 (Thinking, Medium)
 
-The `agent` invocations in this repo require model `claude-opus-4-7-high`. The eval shell scripts under `eval_scripts/` pass `--model claude-opus-4-7-high` explicitly so they work regardless of your CLI default, but for ad-hoc `agent` runs it is convenient to set the same default in `~/.cursor/cli-config.json` (or via the Cursor IDE model picker).
+The `agent` invocations in this repo use model `claude-opus-4-8-thinking-medium`. The eval shell scripts under `eval_scripts/` pass `--model claude-opus-4-8-thinking-medium` explicitly so they work regardless of your CLI default, but for ad-hoc `agent` runs it is convenient to set the same default in `~/.cursor/cli-config.json` (or via the Cursor IDE model picker).
 
-The orchestrator and all 13 sub-agents currently inherit `claude-opus-4-7-high` (declared in each agent file's front matter under `TraceLens/Agent/Analysis/.cursor/agents/`).
+The eval scripts pass `--model claude-opus-4-8-thinking-medium` to the top-level orchestrator agent. The 13 sub-agents still declare `claude-opus-4-7-high` in their own front matter under `TraceLens/Agent/Analysis/.cursor/agents/`; update those separately if you want the sub-agents on the same model.
 
 ## Running Scripts
 
@@ -61,7 +61,7 @@ All scripts run **on the node** from the repo root. They use `docker exec` to ru
 
 ### Repeatability Study
 
-Dispatches all `(test_case, repeat)` jobs concurrently with a configurable concurrency limit. After all jobs finish, the harness automatically invokes a Cursor agent to aggregate results and generate reports (see [Post-Processing Skill](#post-processing-skill)). For a single-pass eval, set `NUM_REPEATS=1`.
+Dispatches all `(test_case, repeat)` jobs concurrently with a configurable concurrency limit. After all jobs finish, the harness automatically invokes a Cursor agent to aggregate results and generate reports (see [Post-Processing Skill](#post-processing-skill)). `NUM_REPEATS=3` is the recommended setting (good stability signal at lower cost than the default 5); for a single-pass eval, set `NUM_REPEATS=1`.
 
 ```bash
 CONTAINER=my_container bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh
@@ -82,12 +82,12 @@ Environment variables:
 | `TEST_IDS` | (empty = all) | Space-separated trace IDs to run (filter) |
 | `SKIP_POST_PROCESSING` | (empty) | Set to `1` to skip report generation after the eval loop |
 
-Example (subset of traces, 3 repeats, 2 parallel):
+Example (subset of traces, 3 repeats, 5 parallel):
 
 ```bash
 CONTAINER=my_container \
 TEST_IDS="qwen1.5_mi300 06_llama3_2_mi300" \
-NUM_REPEATS=3 MAX_PARALLEL=2 \
+NUM_REPEATS=3 MAX_PARALLEL=5 \
     bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh
 ```
 
@@ -122,7 +122,7 @@ You can run each stage independently using the `agent` CLI. Examples:
 
 ```bash
 cd TraceLens/Agent/Analysis
-agent --model claude-opus-4-7-high --print --force --trust \
+agent --model claude-opus-4-8-thinking-medium --print --force --trust \
     "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <trace_path> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
@@ -130,7 +130,7 @@ agent --model claude-opus-4-7-high --print --force --trust \
 
 ```bash
 cd agent_evals/Analysis
-agent --model claude-opus-4-7-high --print --force --trust \
+agent --model claude-opus-4-8-thinking-medium --print --force --trust \
     "Run the workflow eval skill on <output_dir> for test case <id>. Write results to <results_path>"
 ```
 
@@ -138,7 +138,7 @@ agent --model claude-opus-4-7-high --print --force --trust \
 
 ```bash
 cd agent_evals/Analysis
-agent --model claude-opus-4-7-high --print --force --trust \
+agent --model claude-opus-4-8-thinking-medium --print --force --trust \
     "Run the quality eval skill on <output_dir> with reference <reference_dir> for test case <id>. Write results to <results_path>"
 ```
 
@@ -159,7 +159,7 @@ You can re-run the post-processing skill on any previous results without re-runn
 
 ```bash
 cd agent_evals/Analysis
-agent --model claude-opus-4-7-high --print --force --trust \
+agent --model claude-opus-4-8-thinking-medium --print --force --trust \
     "Run eval post processing on results_root=<results_root> suite=<suite> test_traces_csv=<csv_path> report_dir=<report_dir> container=<container>"
 ```
 
@@ -167,7 +167,7 @@ Example:
 
 ```bash
 cd agent_evals/Analysis
-agent --model claude-opus-4-7-high --print --force --trust \
+agent --model claude-opus-4-8-thinking-medium --print --force --trust \
     "Run eval post processing on results_root=agent_evals/Analysis/eval_reports/my_run/results/repeatability_results suite=eval test_traces_csv=agent_evals/Analysis/analysis_tests/combined_traces.csv report_dir=agent_evals/Analysis/eval_reports/my_run/reports container=modular_evals"
 ```
 

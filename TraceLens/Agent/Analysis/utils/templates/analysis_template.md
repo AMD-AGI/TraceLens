@@ -158,7 +158,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 <!-- Icon mapping by PRIORITY NUMBER (not severity): P1=🔴, P2=🟡, P3+=🟢 -->
 <!-- One card per entry in priority_data.findings[] in array order. Title uses the entry's category and library; Action text is category-appropriate. Do NOT recommend "fuse the SDPA kernel" (already fused — defer upstream/downstream fusion to Kernel Fusion section). -->
 <!-- Skip categories that have empty category_findings[] in category_data/<cat>_metrics.json (no P-items for that category). -->
-<!-- Non-quantifiable findings (priority_data.findings[i].members[0].type == "unmodeled_significant") sort last; render per sub_agent_spec.md § Non-quantifiable findings. -->
+<!-- Heuristic findings (priority_data.findings[i].estimate_method == "heuristic") carry a numeric estimated impact and sort by impact_score like any other compute finding; render per sub_agent_spec.md § Heuristic findings. -->
 
 ### 🔴 P1: <Brief Title> (<Library>)
 
@@ -350,7 +350,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 <!-- Source the body block from the sub-agent's findings.md by joining on (findings[i].category, findings[i].category_rank): the sub-agent emits its P-items ordered by intra-category rank, so its rank-N block becomes this report's PN where N matches the position in priority_data.findings[]. -->
 <!-- Each block has an HTML anchor: <a id="detailed-analysis-compute-pN"></a> -->
 
-<!-- === STANDALONE Compute Kernel Data table === Use this schema for standalone mode ONLY. Use these 8 exact columns-->
+<!-- === STANDALONE Compute Kernel Data table === Use this schema for standalone mode ONLY. Use these 10 exact columns (must match sub_agent_spec.md § Operations Table Schema) -->
 
 <a id="detailed-analysis-compute-p1"></a>
 <!-- reasoning-candidate tier=compute rank=1 -->
@@ -358,15 +358,15 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 **Identification:**
 **Data:**
 
-| Operation | Args |                 Kernel Path                          | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
-|-----------|------|------------------------------------------------------|-----------|------|-------|------------|------------|-------|
-| ...       | ...  | ...                                                  | ...       | ...  | ...   | ...        | ...        | ...   |
+| Operation | Args | Kernel Path | Kernel Name | Time (ms) | %E2E | Count | FLOPS/Byte | Efficiency | Bound |
+|-----------|------|-------------|-------------|-----------|------|-------|------------|------------|-------|
+| ...       | ...  | ...         | ...         | ...       | ...  | ...   | ...        | ...        | ...   |
 
 **Reasoning for Slowdown:**
 **Resolution:**
 **Impact estimate:**
 
-<!-- === COMPARATIVE Compute Kernel Data table === Use this schema for comparative mode ONLY. Use these 8 exact columns-->
+<!-- === COMPARATIVE Compute Kernel Data table === Use this schema for comparative mode ONLY. Use these 8 exact columns (Kernel Name/Path are omitted in comparative mode) -->
 <!-- Trace 1 ms = operations[i].time_ms. Trace 2 ms = operations[i].t2_time_ms.
      Count T1/T2 = operations[i].count / operations[i].count_trace2 when present.
      Difference (ms) = operations[i].difference_ms (negative ⇒ Trace 1 slower), or —. -->
