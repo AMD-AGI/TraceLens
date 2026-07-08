@@ -115,7 +115,12 @@ def _names_match(c_event, g_name):
 
 def is_multistream(graph_filtered_events):
     """True when the graph root's kernels span more than one CUDA stream."""
-    return len({_stream_of(e) for e in graph_filtered_events}) > 1
+    streams = set()
+    for e in graph_filtered_events:
+        streams.add(_stream_of(e))
+        if len(streams) > 1:
+            return True
+    return False
 
 
 def capture_has_kernel_names(capture_filtered_events):
