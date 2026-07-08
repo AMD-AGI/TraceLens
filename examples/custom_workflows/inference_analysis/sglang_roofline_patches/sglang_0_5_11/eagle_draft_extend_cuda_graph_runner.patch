@@ -1,0 +1,61 @@
+diff --git a/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py b/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py
+index a5ae5b5b3..add252bba 100644
+--- a/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py
++++ b/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py
+@@ -28,6 +28,7 @@ from sglang.srt.model_executor.forward_batch_info import (
+ from sglang.srt.model_executor.input_buffers import ForwardInputBuffers
+ from sglang.srt.speculative.eagle_info import EagleDraftInput
+ from sglang.srt.speculative.spec_utils import fast_topk
++from sglang.srt.utils.kernel_shape_profiler import enable, is_enabled
+ from sglang.srt.utils import (
+     require_attn_tp_gather,
+     require_gathered_buffer,
+@@ -97,6 +98,9 @@ class EAGLEDraftExtendCudaGraphRunner:
+         self.enable_profile_cuda_graph = (
+             model_runner.server_args.enable_profile_cuda_graph
+         )
++        self.enable_shape_discovery_for_cuda_graph_profile = (
++            model_runner.server_args.enable_shape_discovery_for_cuda_graph_profile
++        )
+         self.enable_pdmux = False
+         self.deepep_adapter = DeepEPCudaGraphRunnerAdapter()
+ 
+@@ -276,6 +280,16 @@ class EAGLEDraftExtendCudaGraphRunner:
+             torch.cuda.synchronize()
+             self.model_runner.tp_group.barrier()
+             run_once_fn()
++            if self.enable_profile_cuda_graph:
++                # Activate kernel shape profiler AFTER warmup runs so that all
++                # lazily-imported modules (e.g. tilelang_kernel) are in sys.modules
++                # and auto-discovery can find them.
++                if (
++                    self.enable_shape_discovery_for_cuda_graph_profile
++                    and not is_enabled()
++                ):
++                    enable()
++                self._profiler.step()
+ 
+     def _capture_graph(self, graph, pool, stream, run_once_fn):
+         with torch.cuda.graph(graph, pool=pool, stream=stream):
+@@ -296,6 +310,11 @@ class EAGLEDraftExtendCudaGraphRunner:
+     def capture(self):
+         CudaGraphRunner.capture(self)
+ 
++    _init_profile_context_and_memory_record = (
++        CudaGraphRunner._init_profile_context_and_memory_record
++    )
++    _post_process_after_profile = CudaGraphRunner._post_process_after_profile
++
+     def capture_one_batch_size(self, bs: int, forward: Callable, stream_idx: int = 0):
+         buffers = self.buffers
+         graph = self._create_graph()
+@@ -441,6 +460,9 @@ class EAGLEDraftExtendCudaGraphRunner:
+             graph, get_global_graph_memory_pool(), stream, run_once
+         )
+ 
++        if self.enable_profile_cuda_graph:
++            self._profiler.step()
++
+         set_global_graph_memory_pool(graph.pool())
+         return graph, out
+ 
