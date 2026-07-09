@@ -1847,7 +1847,10 @@ class TreePerfAnalyzer:
                     event["_call_stack"] = call_stack
                 collected.append(event)
                 return
-
+            if self._has_descendant_cpu_op_with_own_perf_model(event):
+                    for child_uid in event.get("children", []):
+                        traverse(child_uid, call_stack)
+                    return
             # Exit condition 3: Leaf cpu_op (direct kernel launcher) with GPU kernels
             if self._is_leaf_cpu_op(event):
                 # Before collecting, check if any cpu_op children have perf models
