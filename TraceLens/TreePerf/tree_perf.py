@@ -1848,9 +1848,9 @@ class TreePerfAnalyzer:
                 collected.append(event)
                 return
             if self._has_descendant_cpu_op_with_own_perf_model(event):
-                    for child_uid in event.get("children", []):
-                        traverse(child_uid, call_stack)
-                    return
+                for child_uid in event.get("children", []):
+                    traverse(child_uid, call_stack)
+                return
             # Exit condition 3: Leaf cpu_op (direct kernel launcher) with GPU kernels
             if self._is_leaf_cpu_op(event):
                 # Before collecting, check if any cpu_op children have perf models
@@ -3447,7 +3447,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             for operand in operands:
                 dtype, shape, layout = parse_dtype_shape_layout(operand)
                 if shape and dtype:
-                    nbytes = dtype_to_bytes.get(dtype, 1 if dtype.startswith(("f8", "s8")) else None
+                    nbytes = dtype_to_bytes.get(
+                        dtype, 1 if dtype.startswith(("f8", "s8")) else None
                     )
                     if nbytes is None:
                         logger.warning(
