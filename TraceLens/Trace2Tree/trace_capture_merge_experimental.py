@@ -98,14 +98,13 @@ def _align_capture_to_graph(capture_events, graph_events):
             return None
     return aligned
 
-def _align_capture_to_graph_by_group(capture_events, graph_events):
+def _align_graph_to_capture_by_group(capture_events, graph_events):
     """
     Align capture dispatch events to graph kernel events by grouping on kernel
     name and matching positionally within each group.
-    Returns the capture events reordered to match graph_events order, or None
+    Returns the graph_events reordered to match capture_events order, or None
     if any kernel name has a count mismatch between capture and graph.
     """
-
     capture_groups = defaultdict(list)
     for e in capture_events:
         capture_groups[_capture_kernel_name(e)].append(e)
@@ -126,13 +125,13 @@ def _align_capture_to_graph_by_group(capture_events, graph_events):
             )
             return None
 
-    # Reassemble capture events in graph order using per-group position
+    # Reassemble graph events in capture order using per-group position
     group_idx = defaultdict(int)
     aligned = []
-    for g_event in graph_events:
-        name = g_event["name"]
+    for c_event in capture_events:
+        name = _capture_kernel_name(c_event)
         idx = group_idx[name]
-        aligned.append(capture_groups[name][idx])
+        aligned.append(graph_groups[name][idx])
         group_idx[name] += 1
 
     return aligned
@@ -230,13 +229,12 @@ def verify_subtree_events(capture_events, graph_events):
          in the same order (return code 1).
       2. Greedy forward-scan by name — handles count mismatches by discarding
          extra capture dispatches (return code 2).
-      3. Group-by-name positional match — handles cases where the HIP graph
-         scheduler reorders independent nodes relative to CPU dispatch order
-         (return code 3).  See docs/capture_merge_error.md.
+      3. Group-by-name positional match — handles cases graph replay events
+         and capture events are in different order (return code 3).
 
     Returns:
-        (success, aligned_capture_events) where success is 1, 2, or 3 on
-        success and 0 on failure.
+        (success, aligned_capture_events, aligned_graph_events) where success
+        is 1, 2, or 3 on success and 0 on failure.
     """
     if len(capture_events) != len(graph_events):
         print(
@@ -254,8 +252,8 @@ def verify_subtree_events(capture_events, graph_events):
                     len(capture_events) - len(aligned),
                 )
             )
-            return 2, aligned
-        return 0, capture_events
+            return 2, aligned, graph_events
+        return 0, capture_events, graph_events
 
     for j, i in zip(capture_events, graph_events):
         if "kernel" not in j.get("args", {}).keys():
@@ -268,13 +266,16 @@ def verify_subtree_events(capture_events, graph_events):
             )
             continue
         if i["name"] != _capture_kernel_name(j):
-            aligned = _align_capture_to_graph_by_group(capture_events, graph_events)
-            if aligned is not None:
+            # Counts match but order differs
+            aligned_graph = _align_graph_to_capture_by_group(
+                capture_events, graph_events
+            )
+            if aligned_graph is not None:
                 print("Group-by-name alignment succeeded.")
-                return 3, aligned
-            return 0, capture_events
+                return 3, capture_events, aligned_graph
+            return 0, capture_events, graph_events
 
-    return 1, capture_events
+    return 1, capture_events, graph_events
 
 
 def update_subtree_uids_and_timestamps(
@@ -762,7 +763,11 @@ def merge_capture_trace_into_graph(
                     continue
                 capture_filtered_events = aligned
             else:
-                verify_success, capture_filtered_events = verify_subtree_events(
+                (
+                    verify_success,
+                    capture_filtered_events,
+                    graph_filtered_events,
+                ) = verify_subtree_events(
                     capture_filtered_events, graph_filtered_events
                 )
 
