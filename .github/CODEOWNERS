@@ -28,3 +28,6 @@
 /docs/Inference_analysis.md                                  @devalshahamd
 /tests/test_inference_perf_report.py                         @devalshahamd
 /tests/traces/inference/                                     @devalshahamd
+
+# Performance tracking require Kyle review
+/tests/perf_tracker/                                         @kyle-hoffmeyer
