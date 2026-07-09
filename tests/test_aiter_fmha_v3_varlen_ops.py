@@ -18,6 +18,9 @@ from TraceLens.PerfModel.perf_model import (
     aiter__fmha_v3_varlen_backward,
     aten___flash_attention_forward,
 )
+from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+    aiter_fmha_v3_varlen_fwd as aiter_fmha_v3_varlen_fwd_extension,
+)
 from TraceLens.PerfModel.torch_op_mapping import (
     categorize_torch_op,
     op_to_perf_model_class_map,
@@ -27,7 +30,7 @@ from TraceLens.PerfModel.torch_op_mapping import (
 def test_new_attention_ops_are_mapped():
     assert (
         op_to_perf_model_class_map["aiter::fmha_v3_varlen_fwd"]
-        is aiter__fmha_v3_varlen_fwd
+        is aiter_fmha_v3_varlen_fwd_extension
     )
     assert (
         op_to_perf_model_class_map["aiter::fmha_v3_varlen_bwd"]
@@ -68,12 +71,29 @@ def test_varlen_bwd_categorizes_as_sdpa_bwd():
         assert categorize_torch_op(row) == "SDPA_bwd", op
 
 
-def test_extension_no_longer_overrides_core_for_varlen_fwd():
-    """``aiter::fmha_v3_varlen_fwd`` must resolve to the core SDPA-derived class
-    on training traces (no annotation), not the InferenceAttention extension."""
+def test_extension_mapping_falls_back_to_core_for_unannotated_varlen_fwd():
+    """The extension mapping has priority, but plain training traces still use
+    the core shape-based SDPA model because they have no inference annotation."""
     cls = op_to_perf_model_class_map["aiter::fmha_v3_varlen_fwd"]
-    assert cls.__module__.endswith("PerfModel.perf_model"), cls.__module__
-    assert cls is aiter__fmha_v3_varlen_fwd
+    assert cls is aiter_fmha_v3_varlen_fwd_extension
+    mapped = cls(_WAN22_VARLEN_FWD)
+    core = aiter__fmha_v3_varlen_fwd(_WAN22_VARLEN_FWD)
+    assert mapped.param_details["_fallback_core"] is True
+    assert mapped.param_details["dtype_A_B"] == ("c10::BFloat16", "c10::BFloat16")
+    assert mapped.flops() == core.flops()
+
+
+def test_extension_mapping_uses_annotation_when_available():
+    event = {
+        **_WAN22_VARLEN_FWD,
+        "annotation": "attn_req_ctx_10_100_tail_a_b_c",
+    }
+    mapped = op_to_perf_model_class_map["aiter::fmha_v3_varlen_fwd"](event)
+    assert "_fallback_core" not in mapped.param_details
+    assert mapped.param_details["c_sq"] == 10
+    assert mapped.param_details["c_sqsq"] == 100
+    expected = 2 * 40 * (2 * 100 * 128 - 100 * 128)
+    assert mapped.flops() == expected
 
 
 # Real Wan 2.2 event payloads (Primus BF16 training, mbs=1)
@@ -228,6 +248,7 @@ def test_varlen_fwd_param_extraction():
     assert p["max_seqlen_kv"] == 32760.0
     assert p["num_seqs_q"] == 1
     assert p["num_seqs_kv"] == 1
+    assert p["dtype_A_B"] == ("c10::BFloat16", "c10::BFloat16")
 
 
 def test_varlen_fwd_flops_matches_sdpa_formula():
@@ -250,6 +271,7 @@ def test_varlen_bwd_param_extraction_cross_attention():
     assert p["causal"] is False
     assert p["max_seqlen_q"] == 32760.0
     assert p["max_seqlen_kv"] == 512.0
+    assert p["dtype_A_B"] == ("c10::BFloat16", "c10::BFloat16")
 
 
 def test_varlen_fwd_multi_seq_packing_accumulates_flops():
@@ -479,6 +501,7 @@ def test_aten_flash_attention_forward_param_extraction():
     assert p["d_h_v"] == 384
     assert p["dropout"] == 0.0
     assert p["causal"] is False
+    assert p["dtype_A_B"] == ("c10::BFloat16", "c10::BFloat16")
 
 
 def test_aten_flash_attention_forward_flops_matches_expected():

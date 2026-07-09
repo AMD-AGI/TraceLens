@@ -3133,6 +3133,7 @@ def _parse_aiter_fmha_v3_varlen_fwd_args(event, tensor_offset=0):
     supported: K/V may have different T than Q.
     """
     input_dims = event["args"]["Input Dims"]
+    input_types = event["args"].get("Input type", [])
     concrete_inputs = event["args"]["Concrete Inputs"]
 
     q_idx = tensor_offset + 0
@@ -3150,6 +3151,10 @@ def _parse_aiter_fmha_v3_varlen_fwd_args(event, tensor_offset=0):
         input_dims[q_idx],
         input_dims[k_idx],
         input_dims[v_idx],
+    )
+    dtype_A_B = (
+        input_types[q_idx] if q_idx < len(input_types) else None,
+        input_types[k_idx] if k_idx < len(input_types) else None,
     )
     hnd_idx = 1, 0, 2  # (T, H, d_h) layout
     sdpa_cfg = extract_sdpa_varlen_cfg(q_shape, k_shape, v_shape, hnd_idx)
@@ -3195,6 +3200,7 @@ def _parse_aiter_fmha_v3_varlen_fwd_args(event, tensor_offset=0):
         "num_seqs_kv": num_seqs_kv,
         "max_seqlen_q": max_seqlen_q,
         "max_seqlen_kv": max_seqlen_kv,
+        "dtype_A_B": dtype_A_B,
     }
 
 
@@ -3214,6 +3220,7 @@ def _parse_aiter_fmha_v3_varlen_bwd_args(event, tensor_offset=0):
     differing N_Q vs N_KV is supported.
     """
     input_dims = event["args"]["Input Dims"]
+    input_types = event["args"].get("Input type", [])
     concrete_inputs = event["args"]["Concrete Inputs"]
 
     q_idx = tensor_offset + 1
@@ -3231,6 +3238,10 @@ def _parse_aiter_fmha_v3_varlen_bwd_args(event, tensor_offset=0):
         input_dims[q_idx],
         input_dims[k_idx],
         input_dims[v_idx],
+    )
+    dtype_A_B = (
+        input_types[q_idx] if q_idx < len(input_types) else None,
+        input_types[k_idx] if k_idx < len(input_types) else None,
     )
     hnd_idx = 1, 0, 2  # (T, H, d_h) layout
     sdpa_cfg = extract_sdpa_varlen_cfg(q_shape, k_shape, v_shape, hnd_idx)
@@ -3276,6 +3287,7 @@ def _parse_aiter_fmha_v3_varlen_bwd_args(event, tensor_offset=0):
         "num_seqs_kv": num_seqs_kv,
         "max_seqlen_q": max_seqlen_q,
         "max_seqlen_kv": max_seqlen_kv,
+        "dtype_A_B": dtype_A_B,
     }
 
 
@@ -3506,12 +3518,17 @@ class aten___flash_attention_forward(SDPA):
     @staticmethod
     def get_param_details(event):
         input_dims = event["args"]["Input Dims"]
+        input_types = event["args"].get("Input type", [])
         concrete_inputs = event["args"]["Concrete Inputs"]
         q_idx, k_idx, v_idx = 0, 1, 2
         q_shape, k_shape, v_shape = (
             input_dims[q_idx],
             input_dims[k_idx],
             input_dims[v_idx],
+        )
+        dtype_A_B = (
+            input_types[q_idx] if q_idx < len(input_types) else None,
+            input_types[k_idx] if k_idx < len(input_types) else None,
         )
         bhnd_idx = 0, 2, 1, 3
         sdpa_cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx)
@@ -3539,6 +3556,7 @@ class aten___flash_attention_forward(SDPA):
             "dropout": dropout_p,
             "causal": is_causal,
             "flash_impl": True,
+            "dtype_A_B": dtype_A_B,
         }
 
 
