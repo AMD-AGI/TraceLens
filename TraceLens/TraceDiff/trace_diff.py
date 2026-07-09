@@ -25,14 +25,6 @@ _KERNEL_LAUNCH_EQUIVALENTS = {
 }
 
 
-def _normalize_name_for_comparison(name):
-    if name is None:
-        return name
-    normalized = re.sub(r"0x[0-9a-fA-F]+", "0xXXXX", name)
-    normalized = re.sub(r"\.py\(\d+\):", ".py:", normalized)
-    return _KERNEL_LAUNCH_EQUIVALENTS.get(normalized, normalized)
-
-
 class TraceDiff:
     def __init__(self, tree1: TraceToTree, tree2: TraceToTree):
         self.baseline = tree1
@@ -121,7 +113,11 @@ class TraceDiff:
         Returns:
             The normalized name, or the original name if it's None
         """
-        return _normalize_name_for_comparison(name)
+        if name is None:
+            return name
+        normalized = re.sub(r"0x[0-9a-fA-F]+", "0xXXXX", name)
+        normalized = re.sub(r"\.py\(\d+\):", ".py:", normalized)
+        return _KERNEL_LAUNCH_EQUIVALENTS.get(normalized, normalized)
 
     def _bfs_child_name_levels(self, uid, tree_num, max_depth=4):
         """
@@ -475,6 +471,7 @@ class TraceDiff:
                 ops.append(("insert", None, j - 1))
                 j -= 1
         ops.reverse()
+        ops = self._disambiguate_same_name_candidates(ops, items1, items2)
         wf_cache[cache_key] = ops
         return ops
 
@@ -499,12 +496,6 @@ class TraceDiff:
         baseline_uid2node = self._get_baseline_uid2node()
         variant_uid2node = self._get_variant_uid2node()
         wf_cache = {}
-
-        def aligned_wf(items1, items2):
-            ops = self.wagner_fischer(items1, items2, wf_cache)
-            return self._disambiguate_same_name_candidates(
-                ops, items1, items2
-            )
 
         merged_events = []
         merged_id_counter = [0]
@@ -811,7 +802,7 @@ class TraceDiff:
             if len(children1) == len(children2) and not any_cr:
                 ops = [("match", i, i) for i in range(len(children1))]
             else:
-                ops = aligned_wf(children1, children2)
+                ops = self.wagner_fischer(children1, children2, wf_cache)
 
             # --- Phase 3: Reconciliation (replaces check_diff_children) ---
             # For unmatched pairs, check if one node is a wrapper around the
@@ -859,7 +850,7 @@ class TraceDiff:
                         if len(free_items1) == len(free_items2) and not any_cr:
                             free_ops = [("match", i, i) for i in range(len(free_items1))]
                         else:
-                            free_ops = aligned_wf(free_items1, free_items2)
+                            free_ops = self.wagner_fischer(free_items1, free_items2, wf_cache)
                         # Remap free_ops indices back to recon1/recon2 indices
                         for fop, fi, fj in free_ops:
                             if fop == "match":
@@ -891,7 +882,7 @@ class TraceDiff:
                     collapse_single_gpu_child(children2[j], variant_uid2node, tree2)[0]
                     for j in unmatched_idx2
                 ]
-                collapsed_ops = aligned_wf(collapsed1, collapsed2)
+                collapsed_ops = self.wagner_fischer(collapsed1, collapsed2, wf_cache)
                 new_ops = [(op, i, j) for op, i, j in ops if op == "match"]
                 for cop, ci, cj in collapsed_ops:
                     if cop == "match":
