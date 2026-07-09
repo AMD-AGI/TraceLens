@@ -120,12 +120,11 @@ class TraceDiff:
         return _KERNEL_LAUNCH_EQUIVALENTS.get(normalized, normalized)
 
     def _bfs_child_name_levels(self, uid, tree_num, max_depth=4):
-        """
-        Return a list of sorted tuples, one per BFS level (1..max_depth),
-        each containing normalized GPU-path child names at that depth.
-        """
+        """Return a list of sorted tuples, one per BFS level (1..max_depth),
+        each containing normalized GPU-path child names at that depth."""
         uid2node = (
-            self._get_baseline_uid2node() if tree_num == 1
+            self._get_baseline_uid2node()
+            if tree_num == 1
             else self._get_variant_uid2node()
         )
         levels = []
@@ -143,8 +142,7 @@ class TraceDiff:
                         next_frontier.append(child_uid)
                         name = self._get_op_name(child_uid, tree_num)
                         names_this_level.append(
-                            self._normalize_name_for_comparison(name)
-                            if name else None
+                            self._normalize_name_for_comparison(name) if name else None
                         )
             levels.append(tuple(sorted(names_this_level)))
             current_frontier = next_frontier
@@ -178,6 +176,7 @@ class TraceDiff:
 
         Does not mutate children1/children2.  Returns a new ops list.
         """
+
         def norm_name(uid, tree_num):
             name = self._get_op_name(uid, tree_num)
             return self._normalize_name_for_comparison(name) if name else None
@@ -226,13 +225,10 @@ class TraceDiff:
                 if len(survivors1) == 1 and survivors1[0] != orig_i:
                     effective_j = (
                         reassignments[-1][3]
-                        if (extra2 and reassignments
-                            and reassignments[-1][0] == orig_i)
+                        if (extra2 and reassignments and reassignments[-1][0] == orig_i)
                         else orig_j
                     )
-                    reassignments.append(
-                        (orig_i, orig_j, survivors1[0], effective_j)
-                    )
+                    reassignments.append((orig_i, orig_j, survivors1[0], effective_j))
 
         if not reassignments:
             return ops
@@ -598,8 +594,7 @@ class TraceDiff:
                     has_cr_child = any(
                         tree_obj.event_to_category(uid2node[c])
                         in ("cuda_runtime", "cuda_driver")
-                        and uid2node[c].get("name")
-                        not in _GRAPH_LAUNCH_NAMES
+                        and uid2node[c].get("name") not in _GRAPH_LAUNCH_NAMES
                         for c in node.get("children", [])
                         if uid2node.get(c)
                     )
@@ -804,7 +799,8 @@ class TraceDiff:
                     # since expansion + re-sort changes indices).
                     pinned_uid_pairs = [
                         (children1[i], children2[j])
-                        for op_type, i, j in ops if op_type == "match"
+                        for op_type, i, j in ops
+                        if op_type == "match"
                     ]
 
                     # Locate pinned UIDs in the expanded+re-sorted lists
@@ -837,9 +833,13 @@ class TraceDiff:
                             for c in free_items2
                         )
                         if len(free_items1) == len(free_items2) and not any_cr:
-                            free_ops = [("match", i, i) for i in range(len(free_items1))]
+                            free_ops = [
+                                ("match", i, i) for i in range(len(free_items1))
+                            ]
                         else:
-                            free_ops = self.wagner_fischer(free_items1, free_items2, wf_cache)
+                            free_ops = self.wagner_fischer(
+                                free_items1, free_items2, wf_cache
+                            )
                         # Remap free_ops indices back to recon1/recon2 indices
                         for fop, fi, fj in free_ops:
                             if fop == "match":
