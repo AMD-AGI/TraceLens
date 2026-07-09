@@ -433,6 +433,41 @@ class gemm_a16w16(gemm_a16w16_atomic_):
         }
 
 
+class gemm_a16w16_asm(gemm_a16w16_atomic_):
+    """
+    Performance model for AITER's _gemm_a16w16_asm kernel (the ASM variant of
+    gemm_a16w16_atomic_).  Computes Y[M, N] = X[M, K] @ W[N, K].T with X, W and
+    output Y all BF16/FP16.
+
+    The ASM kernel has a distinct argument layout from the Triton atomic variant: the output tensor
+    appears at Input index 2 (shape [M, N]), while Input index 3 is a non-tensor split-K workspace with
+    dtype "unsigned int." Using the parent's logic to infer the output dtype from index 3 results in
+    incorrect data movement accounting (Data Moved = NaN); this model explicitly references the correct
+    output tensor and its dtype.
+
+    Expected Input Dims from trace:
+        [[M, K], [N, K], [M, N], [split-K workspace], ...]
+
+    Expected Input type from trace:
+        [dtype_x, dtype_w, dtype_output, ...]
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        itype = event["args"]["Input type"]
+        out_dtype = (
+            itype[2] if len(itype) > 2 and name2bpe(itype[2]) is not None else itype[0]
+        )
+        return {
+            "B": 1,
+            "M": event["args"]["Input Dims"][0][0],
+            "N": event["args"]["Input Dims"][1][0],
+            "K": event["args"]["Input Dims"][0][1],
+            "bias": False,
+            "dtype_A_B": (itype[0], itype[1], out_dtype),
+        }
+
+
 class GroupQuant(BinaryElementwise):
     """
     Performance model for group quantization.
