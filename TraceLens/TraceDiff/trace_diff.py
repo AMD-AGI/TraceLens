@@ -237,48 +237,37 @@ class TraceDiff:
         if not reassignments:
             return ops
 
-        # Apply reassignments
-        new_match_pairs = set()
-        demoted1 = set()
-        demoted2 = set()
-        promoted1 = set()
-        promoted2 = set()
-
+        # Apply reassignments: build substitution maps
+        swap_i = {}  # orig_i -> new_i
+        swap_j = {}  # orig_j -> new_j
         for orig_i, orig_j, new_i, new_j in reassignments:
-            new_match_pairs.add((new_i, new_j))
             if new_i != orig_i:
-                demoted1.add(orig_i)
-                promoted1.add(new_i)
+                swap_i[orig_i] = new_i
             if new_j != orig_j:
-                demoted2.add(orig_j)
-                promoted2.add(new_j)
+                swap_j[orig_j] = new_j
+        promoted1 = set(swap_i.values())
+        promoted2 = set(swap_j.values())
 
         final_ops = []
-        emitted_matches = set()
         for op, i, j in ops:
             if op == "match":
-                i_demoted = i in demoted1
-                j_demoted = j in demoted2
-                if i_demoted and j_demoted:
-                    final_ops.append(("delete", i, None))
-                    final_ops.append(("insert", None, j))
-                elif i_demoted:
-                    final_ops.append(("delete", i, None))
-                elif j_demoted:
-                    final_ops.append(("insert", None, j))
+                ni = swap_i.get(i, i)
+                nj = swap_j.get(j, j)
+                if ni != i or nj != j:
+                    if ni == i:
+                        final_ops.append(("insert", None, j))
+                    elif nj == j:
+                        final_ops.append(("delete", i, None))
+                    else:
+                        final_ops.append(("delete", i, None))
+                        final_ops.append(("insert", None, j))
+                    final_ops.append(("match", ni, nj))
                 else:
                     final_ops.append(("match", i, j))
-                    emitted_matches.add((i, j))
-            elif op == "delete":
-                if i not in promoted1:
-                    final_ops.append(("delete", i, None))
-            elif op == "insert":
-                if j not in promoted2:
-                    final_ops.append(("insert", None, j))
-
-        for new_i, new_j in new_match_pairs:
-            if (new_i, new_j) not in emitted_matches:
-                final_ops.append(("match", new_i, new_j))
+            elif op == "delete" and i not in promoted1:
+                final_ops.append(("delete", i, None))
+            elif op == "insert" and j not in promoted2:
+                final_ops.append(("insert", None, j))
 
         return final_ops
 
