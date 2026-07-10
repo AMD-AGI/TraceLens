@@ -129,8 +129,17 @@ def parse_ck_gemm(kernel_name):
         else:
             return None
 
+        # A and B layouts are the first two type parameters before GemmSpecialization.
+        # RowMajor = not transposed, ColumnMajor = transposed.
+        layouts = re.findall(r"(RowMajor|ColumnMajor)", kernel_name)
+        if len(layouts) >= 2:
+            trans_a = layouts[0] == "ColumnMajor"
+            trans_b = layouts[1] == "ColumnMajor"
+        else:
+            trans_a, trans_b = None, None
+
         return {
-            "transpose": (None, None),
+            "transpose": (trans_a, trans_b),
             "mt_m": mt_m,
             "mt_n": mt_n,
             "mt_k": mt_k,

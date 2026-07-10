@@ -7,24 +7,21 @@
 """
 Integration tests using verbatim kernel names extracted from trace files.
 
-Tracked traces used where possible; untracked traces (sglang, vllm) used only
-for kernel families (Triton, CK demangled) not present in tracked traces.
-
 Trace sources:
-  Tensile  — tests/traces/mi300/Qwen_Qwen1.5-0.5B-Chat__1016005.json.gz        (tracked)
-  iGEMM    — tests/traces/mi300/resnet_act_checkpoint.json.gz                   (tracked)
-  cuBLAS   — tests/traces/h100/{Qwen,Wan-AI,Falconsai}.json.gz                  (tracked)
-  CUTLASS  — tests/traces/h100/{bert,Falconsai,Wan-AI}.json.gz                  (tracked)
-  CK       — tests/traces/mi300/vllm_dsr1_eager_bs32.json.gz                    (untracked)
-  Triton   — tests/traces/mi300/{sglang,vllm}_dsr1_eager_bs32.json.gz           (untracked)
-  nvjet    — no trace available; names sourced from NVIDIA developer forums
+  Tensile  — MI300 Qwen inference trace
+  iGEMM    — MI300 ResNet training trace
+  cuBLAS   — H100 Qwen, Wan-AI, Falconsai inference traces
+  CUTLASS  — H100 BERT, Falconsai, Wan-AI inference traces
+  CK       — MI300 vLLM FP8 inference trace
+  Triton   — MI300 SGLang and vLLM FP8 inference traces
+  nvjet    — B200 and H100 graph capture traces
 """
 
 from TraceLens.PerfModel.kernel_name_parser import gemm_name_parser
 
 
 class TestRealTensile:
-    # Source: mi300/Qwen_Qwen1.5-0.5B-Chat__1016005.json.gz (tracked)
+    # Source: MI300 Qwen inference trace
 
     def test_mt256x128x64_tn(self):
         name = (
@@ -75,7 +72,7 @@ class TestRealTensile:
         assert result["transpose"] == (False, False)
 
     def test_mt16x16x256_tn(self):
-        # Source: mi300/Qwen_Qwen1.5-0.5B-Chat__1016005.json.gz
+        # Source: MI300 Qwen inference trace
         name = (
             "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT16x16x256_MI16x16x1_SN_LDSB1_"
             "AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_"
@@ -92,7 +89,7 @@ class TestRealTensile:
         assert result["transpose"] == (True, False)
 
     def test_mt64x32x256_tn(self):
-        # Source: mi300/Qwen_Qwen1.5-0.5B-Chat__1016005.json.gz
+        # Source: MI300 Qwen inference trace
         name = (
             "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x32x256_MI16x16x1_SN_LDSB1_"
             "AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_"
@@ -110,7 +107,7 @@ class TestRealTensile:
 
 
 class TestRealIgemm:
-    # Source: mi300/resnet_act_checkpoint.json.gz (tracked)
+    # Source: MI300 ResNet training trace
 
     def test_wrw_64x32x32(self):
         name = (
@@ -174,7 +171,7 @@ class TestRealIgemm:
 
 
 class TestRealCublasXmma:
-    # Source: h100/{Qwen,Wan-AI,Falconsai}.json.gz (tracked)
+    # Source: H100 Qwen, Wan-AI, and Falconsai inference traces
 
     def test_sm90_128x128x64_tn(self):
         name = (
@@ -216,7 +213,7 @@ class TestRealCublasXmma:
         assert result["transpose"] == (True, False)
 
     def test_sm90_256x128x64_tn(self):
-        # Source: h100/Wan-AI_Wan2.1-T2V-1.3B-Diffusers__1016009.json.gz
+        # Source: H100 Wan-AI inference trace
         name = (
             "sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n"
             "_tilesize256x128x64_warpgroupsize2x1x1"
@@ -230,7 +227,7 @@ class TestRealCublasXmma:
         assert result["transpose"] == (True, False)
 
     def test_sm90_implicit_gemm_128x128x64(self):
-        # Source: h100/Wan-AI_Wan2.1-T2V-1.3B-Diffusers__1016009.json.gz
+        # Source: H100 Wan-AI inference trace
         name = (
             "sm90_xmma_fprop_implicit_gemm_bf16bf16_bf16f32_f32_nhwckrsc_nhwc"
             "_tilesize128x128x64_warpgroupsize1x1x1_g1"
@@ -244,7 +241,7 @@ class TestRealCublasXmma:
 
 
 class TestRealCutlass:
-    # Source: h100/{bert,Falconsai,Wan-AI}.json.gz (tracked)
+    # Source: H100 BERT, Falconsai, and Wan-AI inference traces
 
     def test_wmma_32x32x128_tn(self):
         name = (
@@ -299,7 +296,7 @@ class TestRealCutlass:
         assert result["mt_k"] == 32
 
     def test_tensorop_128x64x64_tn(self):
-        # Source: h100/Falconsai_nsfw_image_detection__1016002.json.gz
+        # Source: H100 Falconsai inference trace
         name = (
             "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16"
             "_128x64_64x6_tn_align8>"
@@ -314,7 +311,7 @@ class TestRealCutlass:
 
 
 class TestRealCKDemangled:
-    # Source: mi300/vllm_dsr1_eager_bs32.json.gz (untracked — no CK kernels in tracked traces)
+    # Source: MI300 vLLM FP8 inference trace
 
     def test_kernel_gemm_xdl_abscale(self):
         # ABScale layout: BlockSize=256, ScaleBlockM=1, ScaleBlockN=128, ScaleBlockK=128,
@@ -357,7 +354,7 @@ class TestRealCKDemangled:
         assert result["mt_m"] == 16
         assert result["mt_n"] == 128
         assert result["mt_k"] == 256
-        assert result["transpose"] == (None, None)
+        assert result["transpose"] == (False, True)  # RowMajor A, ColumnMajor B
 
     def test_kernel_gemm_xdl_abscale_gemspec0(self):
         # Same class, different GemmSpecialization enum value (0 vs 2)
@@ -443,7 +440,7 @@ class TestRealCKDemangled:
         assert result["mt_m"] == 16
         assert result["mt_n"] == 128
         assert result["mt_k"] == 256
-        assert result["transpose"] == (None, None)
+        assert result["transpose"] == (False, True)  # RowMajor A, ColumnMajor B
 
     def test_kernel_moe_gemm_blockscale_tailnumber0(self):
         # Same class, different TailNumber (0 vs 1) and InMemoryDataOperationEnum (1 vs 0)
@@ -489,7 +486,7 @@ class TestRealCKDemangled:
         assert result["mt_k"] == 256
 
     def test_kernel_gemm_xdl_abscale_via_sglang(self):
-        # Source: mi300/sglang_dsr1_eager_bs32.json.gz — different GemmSpec variant
+        # Source: MI300 SGLang FP8 inference trace — different GemmSpec variant
         name = (
             "void ck::kernel_gemm_xdl_cshuffle_v3<ck::GridwiseGemmMultiD_ABScale_xdl_cshuffle_v3<"
             "ck::tensor_layout::gemm::RowMajor, ck::tensor_layout::gemm::ColumnMajor, "
@@ -516,7 +513,7 @@ class TestRealCKDemangled:
 
 
 class TestRealTriton:
-    # Source: mi300/{sglang,vllm}_dsr1_eager_bs32.json.gz (untracked)
+    # Source: MI300 SGLang and vLLM FP8 inference traces
 
     def test_blockscale_128x128x128_splitk_7168_grid17(self):
         name = (
@@ -559,7 +556,7 @@ class TestRealTriton:
         assert result["mt_k"] == 128
 
     def test_batched_gemm_16x128x128(self):
-        # Source: mi300/vllm_dsr1_eager_bs32.json.gz
+        # Source: MI300 vLLM FP8 inference trace
         name = (
             "_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_kernel"
             "_HAS_BIAS_0_BLOCK_SIZE_M_16_BLOCK_SIZE_N_128_BLOCK_SIZE_K_128"
@@ -572,7 +569,7 @@ class TestRealTriton:
         assert result["mt_k"] == 128
 
     def test_batched_gemm_16x64x128(self):
-        # Source: mi300/vllm_dsr1_eager_bs32.json.gz
+        # Source: MI300 vLLM FP8 inference trace
         name = (
             "_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_kernel"
             "_HAS_BIAS_0_BLOCK_SIZE_M_16_BLOCK_SIZE_N_64_BLOCK_SIZE_K_128"
@@ -586,37 +583,35 @@ class TestRealTriton:
 
 
 class TestRealNvjet:
-    # Source: tests/traces/b200/eager_trace.json.gz and
-    #         tests/traces/graph_capture/h100/1767829072465568325-rank-0.*.pt.trace.json.gz
-    # (both untracked)
+    # Source: B200 eager inference trace and H100 graph capture trace
     # Transpose is the last 3 chars: T=transposed, N=not transposed, order = A, B, C.
 
     def test_tst_bias_tnt(self):
-        # B200 eager trace
+        # Source: B200 eager inference trace
         result = gemm_name_parser("nvjet_tst_64x64_64x16_2x1_2cta_v_bz_bias_TNT")
         assert result is not None
         assert result["transpose"] == (True, False)
 
     def test_tst_bias_tnn(self):
-        # B200 eager trace
+        # Source: B200 eager inference trace
         result = gemm_name_parser("nvjet_tst_144x128_64x6_2x1_v_bz_bias_TNN")
         assert result is not None
         assert result["transpose"] == (True, False)
 
     def test_tst_no_bias_tnt(self):
-        # B200 eager trace
+        # Source: B200 eager inference trace
         result = gemm_name_parser("nvjet_tst_192x8_64x8_4x1_v_bz_TNT")
         assert result is not None
         assert result["transpose"] == (True, False)
 
     def test_hsh_coopa_tnt(self):
-        # H100 graph capture trace
+        # Source: H100 graph capture trace
         result = gemm_name_parser("nvjet_hsh_256x144_64x4_1x2_h_bz_coopA_TNT")
         assert result is not None
         assert result["transpose"] == (True, False)
 
     def test_hsh_coopa_bias_tnn(self):
-        # H100 graph capture trace
+        # Source: H100 graph capture trace
         result = gemm_name_parser("nvjet_hsh_128x256_64x4_2x1_v_bz_coopA_bias_TNN")
         assert result is not None
         assert result["transpose"] == (True, False)
