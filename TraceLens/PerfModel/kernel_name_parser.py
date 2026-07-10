@@ -66,9 +66,9 @@ def parse_tensile_gemm(kernel_name):
     if macro_tile_match:
         mt_m = int(macro_tile_match.group(1))
         mt_n = int(macro_tile_match.group(2))
-        depth_u = int(macro_tile_match.group(3))
+        mt_k = int(macro_tile_match.group(3))
     else:
-        mt_m, mt_n, depth_u = None, None, None  # Fallback in case pattern is not found
+        mt_m, mt_n, mt_k = None, None, None  # Fallback in case pattern is not found
 
     # Feel free to add more details as needed.
     # https://github.com/ROCm/Tensile/wiki/Kernel-Parameters#kernel-names
@@ -77,7 +77,7 @@ def parse_tensile_gemm(kernel_name):
         "transpose": (trans_a, trans_b),
         "mt_m": mt_m,
         "mt_n": mt_n,
-        "depth_u": depth_u,
+        "mt_k": mt_k,
     }
 
 
@@ -115,17 +115,17 @@ def parse_ck_gemm(kernel_name):
         if "MoeGemmMX" in kernel_name:
             if len(ints) < 5:
                 return None
-            mt_m, mt_n, depth_u = ints[2], ints[3], ints[4]
+            mt_m, mt_n, mt_k = ints[2], ints[3], ints[4]
         # ABScale / MoeGemmBlockScale: BlockSize, ScaleBlockM, ScaleBlockN,
         #   ScaleBlockK, MPerBlock, NPerBlock, KPerBlock, ...
         elif "GridwiseGemmMultiD_ABScale" in kernel_name or "MoeGemmBlockScale" in kernel_name:
             if len(ints) < 7:
                 return None
-            mt_m, mt_n, depth_u = ints[4], ints[5], ints[6]
+            mt_m, mt_n, mt_k = ints[4], ints[5], ints[6]
         # GemmMultiD_xdl (no ABScale), MoeGemm (non-BlockScale):
         #   BlockSize, MPerBlock, NPerBlock, KPerBlock, ...
         elif len(ints) >= 4:
-            mt_m, mt_n, depth_u = ints[1], ints[2], ints[3]
+            mt_m, mt_n, mt_k = ints[1], ints[2], ints[3]
         else:
             return None
 
@@ -133,7 +133,7 @@ def parse_ck_gemm(kernel_name):
             "transpose": (None, None),
             "mt_m": mt_m,
             "mt_n": mt_n,
-            "depth_u": depth_u,
+            "mt_k": mt_k,
         }
 
     # ── Mangled CK kernels ──
@@ -148,7 +148,7 @@ def parse_ck_gemm(kernel_name):
                 "transpose": (None, None),
                 "mt_m": ints[1],
                 "mt_n": ints[2],
-                "depth_u": ints[3],
+                "mt_k": ints[3],
             }
 
     # Anchor 2: InMemoryDataOperationEnumE — conv fwd_multiple_abd, bwd_data
@@ -162,7 +162,7 @@ def parse_ck_gemm(kernel_name):
                 "transpose": (None, None),
                 "mt_m": ints[2],
                 "mt_n": ints[3],
-                "depth_u": ints[4],
+                "mt_k": ints[4],
             }
 
     # Anchor 3: PassThroughES{n}_S{n}_ — bwd_weight (no GemmSpecialization)
@@ -175,7 +175,7 @@ def parse_ck_gemm(kernel_name):
                 "transpose": (None, None),
                 "mt_m": ints[0],
                 "mt_n": ints[1],
-                "depth_u": ints[2],
+                "mt_k": ints[2],
             }
 
     return None
@@ -192,8 +192,8 @@ def parse_triton_gemm(kernel_name):
     m_k = re.search(r"BLOCK_SIZE_K_(\d+)", kernel_name)
     mt_m = int(m_m.group(1)) if m_m else None
     mt_n = int(m_n.group(1)) if m_n else None
-    depth_u = int(m_k.group(1)) if m_k else None
-    return {"transpose": (None, None), "mt_m": mt_m, "mt_n": mt_n, "depth_u": depth_u}
+    mt_k = int(m_k.group(1)) if m_k else None
+    return {"transpose": (None, None), "mt_m": mt_m, "mt_n": mt_n, "mt_k": mt_k}
 
 
 def is_igemm(kernel_name):
@@ -206,12 +206,12 @@ def parse_igemm(kernel_name):
     bt = re.search(r"bt(\d+)x(\d+)x(\d+)", kernel_name)
     mt_m = int(bt.group(1)) if bt else None
     mt_n = int(bt.group(2)) if bt else None
-    depth_u = int(bt.group(3)) if bt else None
+    mt_k = int(bt.group(3)) if bt else None
     return {
         "transpose": (trans_a, trans_b),
         "mt_m": mt_m,
         "mt_n": mt_n,
-        "depth_u": depth_u,
+        "mt_k": mt_k,
     }
 
 
@@ -224,7 +224,7 @@ def parse_cublas_xmma_gemm(kernel_name):
     ts = re.search(r"tilesize(\d+)x(\d+)x(\d+)", kernel_name)
     mt_m = int(ts.group(1)) if ts else None
     mt_n = int(ts.group(2)) if ts else None
-    depth_u = int(ts.group(3)) if ts else None
+    mt_k = int(ts.group(3)) if ts else None
 
     trans_a, trans_b = None, None
     tr = re.search(r"_([tn])([tn])_", kernel_name)
@@ -236,7 +236,7 @@ def parse_cublas_xmma_gemm(kernel_name):
         "transpose": (trans_a, trans_b),
         "mt_m": mt_m,
         "mt_n": mt_n,
-        "depth_u": depth_u,
+        "mt_k": mt_k,
     }
 
 
@@ -255,9 +255,9 @@ def parse_cutlass_gemm(kernel_name):
     if m:
         mt_m = int(m.group(1))
         mt_n = int(m.group(2))
-        depth_u = int(m.group(3))
+        mt_k = int(m.group(3))
     else:
-        mt_m, mt_n, depth_u = None, None, None
+        mt_m, mt_n, mt_k = None, None, None
 
     trans_a, trans_b = None, None
     tr = re.search(r"_([tn]{2})_", kernel_name)
@@ -269,7 +269,7 @@ def parse_cutlass_gemm(kernel_name):
         "transpose": (trans_a, trans_b),
         "mt_m": mt_m,
         "mt_n": mt_n,
-        "depth_u": depth_u,
+        "mt_k": mt_k,
     }
 
 
