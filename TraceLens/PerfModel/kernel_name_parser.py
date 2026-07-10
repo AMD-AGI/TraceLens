@@ -118,7 +118,10 @@ def parse_ck_gemm(kernel_name):
             mt_m, mt_n, mt_k = ints[2], ints[3], ints[4]
         # ABScale / MoeGemmBlockScale: BlockSize, ScaleBlockM, ScaleBlockN,
         #   ScaleBlockK, MPerBlock, NPerBlock, KPerBlock, ...
-        elif "GridwiseGemmMultiD_ABScale" in kernel_name or "MoeGemmBlockScale" in kernel_name:
+        elif (
+            "GridwiseGemmMultiD_ABScale" in kernel_name
+            or "MoeGemmBlockScale" in kernel_name
+        ):
             if len(ints) < 7:
                 return None
             mt_m, mt_n, mt_k = ints[4], ints[5], ints[6]
