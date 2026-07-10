@@ -59,6 +59,10 @@ def get_pseudo_op_mappings():
         "pseudo_mla_decode_fwd": attention_perf_model_extensions.mla_decode_fwd,
         "pseudo_mla_prefill_fwd": attention_perf_model_extensions.pseudo_mla_prefill_fwd,
         "aiter::pa_decode_gluon": attention_perf_model_extensions.pa_decode_gluon,
+        # DeepSeek-V4 sparse paged decode (mode-specific pseudo ops)
+        "pseudo_v4_paged_decode_swa": attention_perf_model_extensions.pseudo_v4_paged_decode_swa,
+        "pseudo_v4_paged_decode_csa": attention_perf_model_extensions.pseudo_v4_paged_decode_csa,
+        "pseudo_v4_paged_decode_hca": attention_perf_model_extensions.pseudo_v4_paged_decode_hca,
         "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
         ## Misc ops
         "aiter::batched_gemm_a16wfp4_": perf_model_extensions.batched_gemm_a16wfp4,

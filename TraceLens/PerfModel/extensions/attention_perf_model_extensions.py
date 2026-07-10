@@ -9,8 +9,8 @@ Performance models for pseudo-op extensions.
 """
 
 from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
+import math
 import re
-
 
 class InferenceAttention:
     """
@@ -351,6 +351,141 @@ class InferenceAttention:
 
     def get_maf_type(self):
         return "matrix"
+
+
+class _V4PagedDecodeBase(InferenceAttention):
+    """Base perf model for the DeepSeek-V4 sparse paged-decode pseudo ops.
+
+    Decode-only kernel: context aggregates (``c_*``) are zeroed so only the
+    generation (``g_*``) terms remain, and KV cache is modeled as bf16. Geometry
+    (``H_Q`` / ``d_h``) comes from ``v4_H_Q`` / ``v4_d_h`` extra_args (parsed from
+    the ``qk_norm_rope`` kernel), falling back to ``n_heads // tp`` from the
+    variant config. Per-mode KV span (``sliding_window``) is set by ``MODE``:
+    ``swa`` = window, ``csa`` = window + index_topk, ``hca`` = window +
+    hierarchical-compressed history.
+    """
+
+    MODE = "swa"
+
+    HCA_COMPRESS_STRIDE = 128  # HCA compresses history in blocks of 128 tokens
+
+    # Hardcoded per-variant scalars not recoverable from a single decode op:
+    #   index_topk = sparse indexer budget, window = sliding-window size,
+    #   n_heads = global query-head count (H_Q fallback = n_heads // tp),
+    #   d_h = head dim fallback.
+    _CONFIGS = {
+        "DeepSeek-V4-Pro": {
+            "index_topk": 1024,
+            "window": 128,
+            "n_heads": 128,
+            "d_h": 512,
+        },
+        "DeepSeek-V4-Flash": {
+            "index_topk": 512,
+            "window": 128,
+            "n_heads": 64,
+            "d_h": 512,
+        },
+    }
+
+    @classmethod
+    def _config_for(cls, model_name):
+        """Config for a DeepSeek-V4 variant (substring match, Flash fallback)."""
+        if model_name:
+            for key, cfg in cls._CONFIGS.items():
+                if key.lower() in str(model_name).lower():
+                    return cfg
+        return cls._CONFIGS["DeepSeek-V4-Flash"]
+
+    @classmethod
+    def get_param_details(cls, event):
+        try:
+            args = event.get("args") or {}
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+
+            # Decode-only kernel: drop any context (prefill) aggregates so mixed
+            # prefill+decode traces only model the generation terms.
+            stats["c_sq"] = stats["c_sk"] = stats["c_sqsq"] = stats["c_sqsk"] = 0
+
+            model_name = args.get("v4_model_name")
+            cfg = cls._config_for(model_name)
+
+            # Geometry: prefer trace-derived (qk_norm_rope kernel), else config.
+            H_Q = args.get("v4_H_Q")
+            if not H_Q:
+                tp = args.get("v4_tp") or 1
+                H_Q = max(1, cfg["n_heads"] // int(tp))
+            d_h = args.get("v4_d_h") or cfg["d_h"]
+            H_Q = int(H_Q)
+            d_h = int(d_h)
+
+            # N_Q = number of decode query tokens (batch); donor Input Dims[0][0]
+            # if available, else the number of generation requests.
+            N_Q = stats["g_sq"]
+            dims = args.get("Input Dims") or []
+            if dims and dims[0] and len(dims[0]) >= 1:
+                N_Q = dims[0][0] or N_Q
+
+            window = int(args.get("v4_window") or cfg["window"])
+            index_topk = int(args.get("v4_index_topk") or cfg["index_topk"])
+            sliding_window = cls._sliding_window(stats, window, index_topk)
+
+            return {
+                "B": 1,
+                "N_Q": N_Q,
+                "H_Q": H_Q,
+                "H_V": 1,
+                "H_K": 1,
+                "N_KV": stats["g_sk"],
+                "H_KV": 1,  # single MLA-absorbed latent KV head
+                "d_h_qk": d_h,
+                "d_h_v": d_h,
+                "dropout": 0.0,
+                "causal": False,
+                "flash_impl": True,
+                **stats,
+                "dtype_Q": "torch.bfloat16",
+                "dtype_KV": "torch.bfloat16",  # V4 KV cache modeled as bf16
+                "sliding_window": sliding_window,
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return InferenceAttention.no_perf_param_details()
+
+    @classmethod
+    def _sliding_window(cls, stats, window, index_topk):
+        """Per-mode cap on the KV span each decode query attends to."""
+        if cls.MODE == "csa":
+            # dense local window + sparse indexer budget
+            return window + index_topk
+        if cls.MODE == "hca":
+            # hierarchical-compressed history: local window plus one entry per
+            # 128-token compressed block of mean context.
+            g_sq = stats.get("g_sq") or 0
+            g_sk = stats.get("g_sk") or 0
+            if g_sq <= 0:
+                return 0  # uncapped / dense fallback when annotation missing
+            mean_ctx = g_sk / g_sq
+            return int(window + math.ceil(mean_ctx / cls.HCA_COMPRESS_STRIDE))
+        return window  # swa (dense sliding window)
+
+
+class pseudo_v4_paged_decode_swa(_V4PagedDecodeBase):
+    """DeepSeek-V4 dense / sliding-window sparse paged decode."""
+
+    MODE = "swa"
+
+
+class pseudo_v4_paged_decode_csa(_V4PagedDecodeBase):
+    """DeepSeek-V4 compressed sparse attention (CSA) paged decode."""
+
+    MODE = "csa"
+
+
+class pseudo_v4_paged_decode_hca(_V4PagedDecodeBase):
+    """DeepSeek-V4 hierarchical compressed attention (HCA) paged decode."""
+
+    MODE = "hca"
 
 
 class vllm_unified_attention_with_output(InferenceAttention):
