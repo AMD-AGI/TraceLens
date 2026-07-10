@@ -6,16 +6,25 @@ See LICENSE for license information.
 
 ---
 name: semantic-comparison-agent
-description: End-to-end semantic comparison of two GPU traces. Runs deterministic breakdown per trace (extraction + tree context + classification + pattern finding + label assembly), then a single LLM harmonization pass to assign and unify semantic_block names, followed by a comparison pipeline.
-model: claude-opus-4-7-high
+description: End-to-end semantic comparison of two graph-mode GPU traces. Runs deterministic breakdown per trace (extraction + tree context + classification + pattern finding + label assembly), then a name-first LLM kernel-name unification pass that establishes cross-trace matching anchors in the semantic_block field, followed by a comparison pipeline.
+model: claude-opus-4-8
 ---
 
 # Semantic Comparison
 
 Orchestrate end-to-end semantic comparison of two GPU traces. The user
 provides two raw trace files and the orchestrator handles everything:
-deterministic parallel breakdown (no LLM), single-pass LLM harmonization
-that assigns and unifies semantic_block names, and the comparison pipeline.
+deterministic parallel breakdown (no LLM), a name-first LLM kernel-name
+unification pass that establishes cross-trace matching anchors, and the
+comparison pipeline.
+
+**Why name-first.** In graph mode the CPU->GPU call stack collapses under
+`hip/cudaGraphLaunch`, so `nn_module` / `cpu_op` context is unavailable and
+block-alignment harmonization cannot work. The only reliable cross-trace
+signal is the raw GPU **kernel name**. This workflow unifies kernel names
+across the two traces (e.g. `moe_attn_vllm` and `sglang_moe_attention` ->
+`moe_attn`) and writes the unified name into each kernel's `semantic_block`
+field, which the downstream comparison uses as its matching key.
 
 Use vendor-agnostic terminology (GPU kernels, vendor GEMM library, etc.)
 except when quoting actual kernel names from traces.
@@ -27,7 +36,7 @@ except when quoting actual kernel names from traces.
 ```
 0.   Query User Inputs
 1.   Semantic Breakdown (PARALLEL shell commands, one per trace)
-2.   Semantic Harmonization (single agent, cross-trace)
+2.   Kernel-Name Unification (name-first anchors + coherence refinement, LLM)
 3.   Generate TraceDiff Output (script)
 4.   Generate Comparison CSV (script)
 ```
@@ -140,43 +149,125 @@ and stop.
 
 ---
 
-## Step 2: Semantic Harmonization (LLM -- Label + Harmonize)
+## Step 2: Kernel-Name Unification (Name-First, LLM)
 
-The harmonization agent is the **only LLM call** in the pipeline. It
-assigns descriptive `semantic_block` names to each block AND ensures
-cross-trace consistency. The enriched context includes `cpu_ops`,
-`nn_module`, kernel names, and `perf_category` per block.
+Replaces the old block-alignment harmonization. Instead of aligning blocks
+via CPU-op / nn_module context (absent in graph mode), the LLM unifies raw
+**kernel names** across the two traces. The unified name is written into each
+kernel's `semantic_block` field, which Steps 3-4 use as the matching key.
+Kernel names already identical in both traces unify by default (no map entry
+needed); the LLM only maps names that differ but denote the same operation.
 
-### 2.1 Read the Agent Definition
+Scripts: `TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py`
 
-Read: `TraceLens/Agent/Analysis/.cursor/agents/semantic-harmonization-agent.md`
+### 2.1 Prepare Unification Context [S]
 
-### 2.2 Launch Harmonization Agent
-
-```
----BEGIN AGENT INSTRUCTIONS---
-<full contents of semantic-harmonization-agent.md>
----END AGENT INSTRUCTIONS---
-
-**Execution Context:**
-- Trace A directory: <output_dir>/_work/<name_a>/
-- Trace B directory: <output_dir>/_work/<name_b>/
-- Output directory: <output_dir>/_work/
-- Name A: <name_a>
-- Name B: <name_b>
-
-Follow the agent instructions above to label and harmonize the blocks.
-Return the summary described in the "Return Value" section.
+```bash
+KU=TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py
+python $KU prepare-context \
+    --labels-a <output_dir>/_work/<name_a>/semantic_labels.json \
+    --labels-b <output_dir>/_work/<name_b>/semantic_labels.json \
+    --name-a <name_a> --name-b <name_b> \
+    -o <output_dir>/_work/kernel_unification_context.json
 ```
 
-For multi-region vLLM: run once per matching region pair.
+The context lists each trace's unique kernel names with `perf_categories`,
+`kernel_count`, `total_dur_us`, and a `sample_input_dims`, split into
+`only_in_<name_a>` / `only_in_<name_b>` / `in_both`.
 
-### 2.3 Verify Harmonization
+### 2.2 Stem Preprocessing (conditional, only if flagged)
 
-Check that `alignment.json`, `harmonization_context.json`, and
-`harmonization_corrections.json` exist in `<output_dir>/_work/`.
-Verify that `semantic_labels.json` files now contain `semantic_block`
-fields on all kernels.
+If Step 2.1 prints `STEM PREPROCESSING NEEDED` (combined unique names exceed
+the threshold, default 5000), the raw name set is too large for the LLM.
+Follow `TraceLens/Agent/Analysis/.cursor/agents/kernel-stem-preprocessing-agent.md`:
+the LLM inspects the emitted `sample`, authors `stem_rules.json` (custom
+regexes that collapse high-cardinality families to stems, preserve families
+whose parameters matter for later analysis, drop noise), then:
+
+```bash
+python $KU apply-stem-rules \
+    --labels-a <output_dir>/_work/<name_a>/semantic_labels.json \
+    --labels-b <output_dir>/_work/<name_b>/semantic_labels.json \
+    --name-a <name_a> --name-b <name_b> \
+    --rules <output_dir>/_work/stem_rules.json \
+    --raw-to-stem <output_dir>/_work/raw_to_stem.json \
+    -o <output_dir>/_work/kernel_unification_context.json
+```
+
+Re-run until the printed stem count is within budget. This rewrites
+`kernel_unification_context.json` at the stem level and emits
+`raw_to_stem.json` (needed by 2.4). **Skip this step entirely when not flagged.**
+
+### 2.3 Launch Kernel Unification Agent [LLM]
+
+Read `TraceLens/Agent/Analysis/.cursor/agents/kernel-unification-agent.md` and
+launch it with `kernel_unification_context.json` inline. It writes
+`<output_dir>/_work/kernel_unification_map.json` (`map_a` / `map_b`), mapping
+only names it is certain are equivalent, using the same unified value on both
+sides for a matched pair. For multi-region vLLM: run once per matching region
+pair.
+
+### 2.4 Apply the Map [S]
+
+```bash
+python $KU apply-map \
+    --labels-a <output_dir>/_work/<name_a>/semantic_labels.json \
+    --labels-b <output_dir>/_work/<name_b>/semantic_labels.json \
+    --name-a <name_a> --name-b <name_b> \
+    --map <output_dir>/_work/kernel_unification_map.json \
+    --raw-to-stem <output_dir>/_work/raw_to_stem.json   # only if 2.2 ran
+```
+
+### 2.5 Verify Unification
+
+Check that `kernel_unification_context.json` and `kernel_unification_map.json`
+exist in `<output_dir>/_work/`, and that `apply-map` reported a non-empty
+shared vocabulary. Every kernel now carries a `semantic_block` set to its
+unified kernel name.
+
+### 2.6 Coherence Pass (second pass, LLM)
+
+The first pass leaves **one-sided** buckets -- kernels whose unified name
+appears in only one trace (most importantly vendor GEMM families: MI300
+`Cijk_*` vs B300 `nvjet_*`, which cannot be paired by name). This pass uses
+the first-pass **shared** buckets as cross-trace positional anchors and
+re-labels one-sided buckets by their shared-neighbor context, which (a) pairs
+GEMMs across vendors by position and (b) splits a name that occurs in different
+contexts. Skip it only if `apply-map` already reported no meaningful one-sided
+buckets.
+
+**2.6a Prepare coherence context [S]**
+```bash
+KC=TraceLens/Agent/Analysis/semantic_analyses/kernel_coherence.py
+python $KC prepare-context \
+    --labels-a <output_dir>/_work/<name_a>/semantic_labels.json \
+    --labels-b <output_dir>/_work/<name_b>/semantic_labels.json \
+    --name-a <name_a> --name-b <name_b> \
+    --neighbor-radius 1 \
+    -o <output_dir>/_work/kernel_coherence_context.json
+```
+
+**2.6b Launch coherence agent [LLM]** -- read
+`TraceLens/Agent/Analysis/.cursor/agents/kernel-coherence-agent.md` and launch
+it with `kernel_coherence_context.json` inline. It writes
+`<output_dir>/_work/kernel_coherence_decisions.json` (`context_renames` +
+`fallback_remap_a` / `fallback_remap_b`), pairing same-context one-sided buckets
+across traces into new shared names.
+
+**2.6c Apply [S]**
+```bash
+python $KC apply \
+    --context <output_dir>/_work/kernel_coherence_context.json \
+    --decisions <output_dir>/_work/kernel_coherence_decisions.json \
+    --audit-csv-a <output_dir>/_work/per_kernel_final_<name_a>.csv \
+    --audit-csv-b <output_dir>/_work/per_kernel_final_<name_b>.csv
+```
+
+`apply` rewrites `semantic_block` in place and prints any residual one-sided
+condensed symbols. If meaningful (non-singleton) symbols remain, revise the
+decisions and re-run 2.6b--2.6c; residual pre/post-layer singletons (setup /
+copy / prefix-scan kernels with no counterpart) may be accepted. Increase
+`--neighbor-radius` in 2.6a if one-sided buckets share an ambiguous context.
 
 ---
 
@@ -239,11 +330,13 @@ python TraceLens/Agent/Analysis/semantic_analyses/match_and_compare.py \
 1. **Seamless flow** -- user provides two trace paths, orchestrator handles
    everything
 2. **Parallel breakdown** -- both traces processed as parallel shell jobs
-3. **Cross-trace harmonization** -- separate step unifies labels for
-   consistent comparison
-4. **Vendor-agnostic language** -- generic terms for all recommendations
-5. **Complete coverage** -- every semantic block is labeled and compared
-6. **No script creation** -- subagents use only existing scripts
+3. **Name-first unification** -- kernel names are unified across traces to
+   establish matching anchors; identical names unify by default
+4. **Conservative anchors** -- map only certain equivalences; preserve
+   granularity and leave uncertain names unmapped
+5. **Vendor-agnostic language** -- generic terms for all recommendations
+6. **No script creation** -- subagents use only existing scripts (the stem
+   preprocessing authors regex *rules*, not new scripts)
 
 ---
 
@@ -252,8 +345,14 @@ python TraceLens/Agent/Analysis/semantic_analyses/match_and_compare.py \
 ```
 <output_dir>/
   _work/
-    <name_a>/semantic_labels.json     # Per-trace semantic labels
+    <name_a>/semantic_labels.json     # Per-trace labels (semantic_block = unified kernel name)
     <name_b>/semantic_labels.json
+    kernel_unification_context.json    # Pass 1 LLM input: unique kernel names + stats
+    kernel_unification_map.json        # Pass 1 LLM output: cross-trace name map
+    raw_to_stem.json                   # Only when stem preprocessing ran
+    kernel_coherence_context.json      # Pass 2 LLM input: one-sided buckets + neighbor context
+    kernel_coherence_decisions.json    # Pass 2 LLM output: context_renames + fallbacks
+    per_kernel_final_<name>.csv        # Pass 2 audit: first_pass -> final block per kernel
     comparison.csv                     # Cross-trace comparison
   tracediff_output/                    # TraceDiff-compatible output
     diff_stats.csv
