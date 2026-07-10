@@ -63,6 +63,7 @@ def get_pseudo_op_mappings():
         "pseudo_v4_paged_decode_swa": attention_perf_model_extensions.pseudo_v4_paged_decode_swa,
         "pseudo_v4_paged_decode_csa": attention_perf_model_extensions.pseudo_v4_paged_decode_csa,
         "pseudo_v4_paged_decode_hca": attention_perf_model_extensions.pseudo_v4_paged_decode_hca,
+        "aiter::pa_sparse_prefill_opus_fwd": attention_perf_model_extensions.pa_sparse_prefill_opus_fwd,
         "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
         ## Misc ops
         "aiter::batched_gemm_a16wfp4_": perf_model_extensions.batched_gemm_a16wfp4,
@@ -137,6 +138,14 @@ def get_pseudo_op_mappings():
         "sglang_profiler::quant_dynamic_mxfp4_quant": perf_model_extensions.sglang_quant_dynamic_mxfp4_quant,
         "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": perf_model_extensions.aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,
         "aiter::dynamic_per_group_scaled_quant_fp4": perf_model_extensions.aiter_dynamic_per_group_scaled_quant_fp4,
+        "aiter::_gemm_a8w8_blockscale_bpreshuffle_asm": perf_model_extensions.gemm_a8w8_blockscale,
+        "aiter::mhc_post": perf_model_extensions.mhc_post,
+        "aiter::mhc_pre_gemm_sqrsum": perf_model_extensions.mhc_pre_gemm_sqrsum,
+        "aiter::mhc_pre_big_fuse_rmsnorm": perf_model_extensions.mhc_pre_big_fuse_rmsnorm,
+        "aiter::mhc_fused_post_pre_gemm_sqrsum": perf_model_extensions.mhc_fused_post_pre_gemm_sqrsum,
+        "aiter::topk_softplus": perf_model_extensions.topk_softplus,
+        ## Fused RMSNorm + per-group dynamic FP8 quant.
+        "aiter::rmsnorm_quant": rmsnorm_perf_model_extensions.aiter_rmsnorm_quant,
     }
 
     return pseudo_op_mappings
@@ -162,4 +171,30 @@ def get_pseudo_op_category_only_mappings():
         "aiter::unified_attention_with_output_base->_fused_qk_rope_reshape_and_cache_kernel (Synthetic Op)": "FusedRoPE",
         "hipModuleLaunchKernel->kv_indices_generate_kernel (Synthetic Op)": "InferenceAttention",
         "aiter::get_mla_metadata_v1": "InferenceAttention",
+        # DeepSeek-V4 sparse-attention indexer (lightning indexer + top-k). Its
+        # FLOPs/bytes depend on the per-forward KV context length, which is not
+        # present in the trace Input Dims, so it is classified only (no roofline).
+        # Reference: ATOM/atom/model_ops/module_dispatch_ops.py (indexer_score_topk),
+        # aiter kernel cp_gather_indexer_k_quant_cache_kernel.
+        "aiter::indexer_score_topk": "InferenceAttention",
+        # DeepSeek-V4 attention synthetic child ops with FIXED names (no shape
+        # params).
+        "aiter::v4_attention_with_output->_inverse_rope_gptj_kernel (Synthetic Op)": "FusedRoPE",
+        "aiter::v4_attention_with_output->_update_compressor_states_kernel (Synthetic Op)": "InferenceAttention",
+        "aiter::v4_attention_with_output->_swa_write_kernel (Synthetic Op)": "InferenceAttention",
+        # DeepSeek-V4 attention synthetic child ops whose names embed shape/
+        # template params (D512/D128, H32/H64, RD64, KB32, NW4/NW8, ...). Listed
+        # by exact full name; add new shape variants here as they appear in
+        # traces. Reference: ATOM flydsl v4 attention kernels.
+        "aiter::v4_attention_with_output->qk_norm_rope_H32_D512_RD64_flydsl (Synthetic Op)": "FusedRoPE",
+        "aiter::v4_attention_with_output->qk_norm_rope_H64_D512_RD64_flydsl (Synthetic Op)": "FusedRoPE",
+        "aiter::v4_attention_with_output->hca_norm_rope_scatter_D512_RD64_R128_KB1_rmsbf16_flydsl (Synthetic Op)": "FusedRoPE",
+        "aiter::v4_attention_with_output->fused_compress_attn_D512_RD64_R4_OVL_SS8_KB32_rmsbf16_pf_flydsl (Synthetic Op)": "InferenceAttention",
+        "aiter::v4_attention_with_output->fused_compress_attn_D128_RD64_R4_OVL_SS8_KB32_Q_ue8m0_psh_rmsbf16_pf_flydsl (Synthetic Op)": "InferenceAttention",
+        "aiter::v4_attention_with_output->hca_compress_forward_D512_R128_NW4_SL256_S128_flydsl (Synthetic Op)": "InferenceAttention",
+        "aiter::v4_attention_with_output->hca_compress_forward_D512_R128_NW8_SL128_S128_flydsl (Synthetic Op)": "InferenceAttention",
+        # DeepSeek-V4 fused all-gather (custom collective); one entry per world
+        # size (template arg). Add new world sizes/dtypes here as needed.
+        "aiter::allgather_lastdim<std::bfloat16_t, 2>(aiter::RankData*, aiter::RankSignals, aiter::Signal*, std::bfloat16_t*, int, int, int) (Synthetic Op)": "CustomCollective",
+        "aiter::allgather_lastdim<std::bfloat16_t, 4>(aiter::RankData*, aiter::RankSignals, aiter::Signal*, std::bfloat16_t*, int, int, int) (Synthetic Op)": "CustomCollective",
     }

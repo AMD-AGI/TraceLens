@@ -1370,3 +1370,316 @@ class aiter_dynamic_per_group_scaled_quant_fp4(fused_flatten_mxfp4_quant):
             "stride_input": None,
             "stride_output": None,
         }
+
+
+# mHC (manifold-constrained Hyper-Connection) family
+# Shared notation
+#     M   = tokens (batch * seq)
+#     n   = number of streams (hc_mult); residual is (M, n, C)
+#     C   = hidden dim per stream (hidden_size)
+#     K   = n * C (flattened stream dim, hc_hidden_size)
+#     hc3 = fn rows = n^2 + 2n (pre[n] | post[n] | res[n^2] projection outputs)
+
+
+class _MHCBase:
+    """Common base class for mHC perf models."""
+
+    category = "mHC"
+    bwd_category = None
+    sheet_category = "mHC"
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.M = self.param_details["M"]
+        self.n = self.param_details["n"]
+        self.C = self.param_details["C"]
+        self.dtype_in = self.param_details.get("dtype_in", "c10::BFloat16")
+        self.bpe_in = name2bpe(self.dtype_in)
+
+    def get_compute_precision(self):
+        return torch_dtype_map(self.dtype_in) if self.dtype_in else None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class mhc_post(_MHCBase):
+    """
+    Performance model for aiter::mhc_post.
+
+    Reference implementation:
+      aiter/aiter/ops/mhc.py
+
+    mHC "post" step: recombine the transformer block output back into the
+    n-stream residual manifold.
+
+    Signature: mhc_post(out, x, residual, post_layer_mix, comb_res_mix, store_nt)
+        out             — (M, n, C),    (next residual)
+        x (layer_input) — (M, C),
+        residual        — (M, n, C),
+        post_layer_mix  — (M, n, 1),
+        comb_res_mix    — (M, n, n),
+
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"].get("Input type", []) or []
+        M, C = dims[1][0], dims[1][1]
+        n = dims[0][1]
+        return {
+            "M": M,
+            "n": n,
+            "C": C,
+            "hc3": None,
+            "dtype_in": types[1] if len(types) > 1 else "c10::BFloat16",
+        }
+
+    def flops(self):
+        return 2 * self.M * self.n * self.C * (self.n + 1)
+
+    def bytes(self):
+        if self.bpe_in is None:
+            return None
+        read_x = self.M * self.C * self.bpe_in
+        read_residual = self.M * self.n * self.C * self.bpe_in
+        read_mixes = self.M * self.n * 4 + self.M * self.n * self.n * 4
+        write_out = self.M * self.n * self.C * self.bpe_in
+        return read_x + read_residual + read_mixes + write_out
+
+
+class mhc_pre_gemm_sqrsum(_MHCBase):
+    """
+    Performance model for aiter::mhc_pre_gemm_sqrsum.
+
+    Reference implementation:
+        aiter/aiter/ops/mhc.py
+
+    mHC "pre" projection GEMM + RMS square-sum: for every token it projects the
+    flattened residual through the unified projection matrix fn and accumulates
+    the per-token squared L2 sum used for the RMS normalization.
+
+    Signature: mhc_pre_gemm_sqrsum(out, sqrsum, x, fn, tile_k, is_fn_pack_bf16)
+        out    — (split_k, M, hc3),   (projection logits, split-K partials)
+        sqrsum — (split_k, M),        (partial sum of x^2 per token)
+        x      — (M, n, C),            (flattened residual, K = n*C)
+        fn     — (hc3, K),             (projection matrix, hc3 = n^2 + 2n)
+
+    """
+
+    def get_maf_type(self):
+        return "matrix"
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"].get("Input type", []) or []
+        M, n, C = dims[2][0], dims[2][1], dims[2][2]
+        hc3, K = dims[3][0], dims[3][1]
+        split_k = dims[0][0]
+        return {
+            "M": M,
+            "n": n,
+            "C": C,
+            "hc3": hc3,
+            "K": K,
+            "split_k": split_k,
+            "dtype_in": types[2] if len(types) > 2 else "c10::BFloat16",
+        }
+
+    def flops(self):
+        return 2 * self.M * self.param_details["hc3"] * self.param_details["K"]
+
+    def bytes(self):
+        if self.bpe_in is None:
+            return None
+        hc3 = self.param_details["hc3"]
+        K = self.param_details["K"]
+        split_k = self.param_details["split_k"]
+        read_x = self.M * self.n * self.C * self.bpe_in
+        read_fn = hc3 * K * 4
+        write_out = split_k * self.M * hc3 * 4
+        write_ss = split_k * self.M * 4
+        return read_x + read_fn + write_out + write_ss
+
+
+class mhc_pre_big_fuse_rmsnorm(_MHCBase):
+    """
+    Performance model for aiter::mhc_pre_big_fuse_rmsnorm.
+
+    Reference implementation:
+        aiter/aiter/ops/mhc.py
+    mHC "pre" epilogue: reduce the split-K projection partials, apply RMS scale
+    + bias, sigmoid/Sinkhorn to produce the pre/post/res mixes, then fold the
+    pre-mix into the residual (apply-pre) with a fused RMSNorm to emit the next
+    layer input.
+
+    Signature: mhc_pre_big_fuse_rmsnorm(post_mix, comb_mix, out, gemm_out_mul,
+        gemm_out_sqrsum, hc_scale, hc_base, residual, norm_weight, rms_eps,
+        hc_pre_eps, hc_sinkhorn_eps, norm_eps, hc_post_mult_value, sinkhorn_repeat)
+        post_mix        — (M, n, 1)
+        comb_mix        — (M, n, n)
+        out(layer_input)— (M, C)
+        gemm_out_mul    — (split_k, M, hc3)
+        gemm_out_sqrsum — (split_k, M)
+        ...
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"].get("Input type", []) or []
+        M, C = dims[2][0], dims[2][1]
+        n = dims[0][1]
+        hc3 = dims[6][0]
+        split_k = dims[3][0]
+        return {
+            "M": M,
+            "n": n,
+            "C": C,
+            "hc3": hc3,
+            "split_k": split_k,
+            "dtype_in": types[7] if len(types) > 7 else "c10::BFloat16",
+        }
+
+    def flops(self):
+        return 2 * self.M * self.C * self.n + 5 * self.M * self.C
+
+    def bytes(self):
+        if self.bpe_in is None:
+            return None
+        hc3 = self.param_details["hc3"]
+        split_k = self.param_details["split_k"]
+        read_residual = self.M * self.n * self.C * self.bpe_in
+        read_gemm = split_k * self.M * hc3 * 4
+        read_weight = self.C * self.bpe_in
+        write_layer = self.M * self.C * self.bpe_in
+        write_mixes = self.M * self.n * 4 + self.M * self.n * self.n * 4
+        return read_residual + read_gemm + read_weight + write_layer + write_mixes
+
+
+class mhc_fused_post_pre_gemm_sqrsum(_MHCBase):
+    """
+    Performance model for aiter::mhc_fused_post_pre_gemm_sqrsum.
+
+    Reference implementation:
+        aiter/aiter/ops/mhc.py
+    Fused mHC post + next-layer pre projection: compute next_residual (post
+    step) then immediately project it through fn and accumulate the RMS
+    square-sum (pre step), all in one kernel.
+
+    Signature: mhc_fused_post_pre_gemm_sqrsum(gemm_out_mul, gemm_out_sqrsum,
+        next_residual, layer_input, residual_in, post_layer_mix, comb_res_mix,
+        fn, tile_m, tile_n, tile_k, is_fn_pack_bf16)
+        gemm_out_mul    — (split_k, M, hc3)
+        gemm_out_sqrsum — (split_k, M)
+        next_residual   — (M, n, C)
+        layer_input     — (M, C)
+        residual_in     — (M, n, C)
+        ...)
+
+    """
+
+    def get_maf_type(self):
+        return "matrix"
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"].get("Input type", []) or []
+        M, C = dims[3][0], dims[3][1]
+        n = dims[2][1]
+        hc3, K = dims[7][0], dims[7][1]
+        split_k = dims[0][0]
+        return {
+            "M": M,
+            "n": n,
+            "C": C,
+            "hc3": hc3,
+            "K": K,
+            "split_k": split_k,
+            "dtype_in": types[3] if len(types) > 3 else "c10::BFloat16",
+        }
+
+    def flops(self):
+        hc3 = self.param_details["hc3"]
+        K = self.param_details["K"]
+        post = 2 * self.M * self.n * self.C * (self.n + 1)
+        gemm = 2 * self.M * hc3 * K
+        return post + gemm
+
+    def bytes(self):
+        if self.bpe_in is None:
+            return None
+        hc3 = self.param_details["hc3"]
+        K = self.param_details["K"]
+        split_k = self.param_details["split_k"]
+        mnc = self.M * self.n * self.C * self.bpe_in
+        read_layer_input = self.M * self.C * self.bpe_in
+        read_residual_in = mnc
+        write_next_res = mnc
+        read_next_res = mnc
+        read_mixes = self.M * self.n * 4 + self.M * self.n * self.n * 4
+        read_fn = hc3 * K * 4
+        write_gemm = split_k * self.M * hc3 * 4 + split_k * self.M * 4
+        return (
+            read_layer_input
+            + read_residual_in
+            + write_next_res
+            + read_next_res
+            + read_mixes
+            + read_fn
+            + write_gemm
+        )
+
+
+class topk_softplus(_MHCBase):
+    """
+    Performance model for aiter::topk_softplus.
+
+    Reference implementation:
+        aiter/aiter/ops/topk.py
+
+    Fused MoE router: score the gating logits
+
+    Signature: topk_softplus(topk_weights, topk_indices, gating_output,...)
+        topk_weights    — (M, topk), FP32 (output)
+        topk_indices    — (M, topk), int  (output)
+        gating_output   — (M, E),    BFloat16 (input)
+    """
+
+    category = "MoE_aux"
+    sheet_category = "MoE_aux"
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"].get("Input type", []) or []
+        M, E = dims[2][0], dims[2][1]
+        topk = dims[0][1]
+        return {
+            "M": M,
+            "n": 1,
+            "C": E,
+            "E": E,
+            "topk": topk,
+            "dtype_in": types[2] if len(types) > 2 else "c10::BFloat16",
+        }
+
+    def flops(self):
+        return 6 * self.M * self.param_details["E"]
+
+    def bytes(self):
+        if self.bpe_in is None:
+            return None
+        E = self.param_details["E"]
+        topk = self.param_details["topk"]
+        read_gating = self.M * E * self.bpe_in
+        read_bias = E * 4
+        write_w = self.M * topk * 4
+        write_idx = self.M * topk * 4
+        return read_gating + read_bias + write_w + write_idx
