@@ -26,9 +26,8 @@ When invoked by the orchestrator, you will receive the following context:
 - `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/reduce_ops.csv` - Filtered reduce operations
+1. `<output_dir>/category_data/reduce_ops.csv` - Filtered reduce operations (includes `call_stack` column for architecture context)
 2. `<output_dir>/metadata/reduce_metadata.json` - Hardware specs
-3. `<output_dir>/category_data/reduce_tree_data.json` - Pre-computed parent chains
 
 **Output file you must write:**
 - `<output_dir>/category_findings/reduce_findings.md`

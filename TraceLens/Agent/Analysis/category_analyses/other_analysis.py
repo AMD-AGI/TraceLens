@@ -26,7 +26,6 @@ from analysis_utils import (
     build_operation_metrics,
     build_category_findings,
     compute_impact_estimates,
-    perf_report_csv_dir,
     write_metrics_json,
 )
 
@@ -142,18 +141,10 @@ def main():
 
     time_metrics = calculate_time_metrics(ops_df, metadata)
 
-    callstacks_df = None
-    cs_path = os.path.join(
-        perf_report_csv_dir(args.output_dir), "unified_perf_callstacks.csv"
-    )
-    if os.path.exists(cs_path):
-        callstacks_df = pd.read_csv(cs_path)
-
     operations = build_operation_metrics(
         ops_df,
         metadata,
         config,
-        callstacks_df=callstacks_df,
         comparison_scope=args.comparison_scope,
     )
     category_specific = extract_category_specific(ops_df, metadata, skipped_comm_ops)
@@ -163,6 +154,7 @@ def main():
         operations,
         category,
         baseline_ms=baseline_ms,
+        comparison_scope=args.comparison_scope,
     )
     category_findings = build_category_findings(
         impact_estimates, comparison_scope=args.comparison_scope

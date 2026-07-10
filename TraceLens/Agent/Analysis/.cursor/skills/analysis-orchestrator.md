@@ -96,7 +96,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
    - If **Graph replay + capture**, ask for the **Capture Folder Path(s)**:
      - `standalone`: one folder → `<capture_folder_path>`. Ask: "Please provide the full path to the graph capture traces folder"
      - `comparative`: one folder per trace → `<capture_folder_path>` (primary/trace1) and `<capture_folder_path2>` (comparison/trace2). Ask: "Please provide the graph capture traces folder for the primary trace and for the comparison trace."
-   - **Comparative + graph replay is routed in Step 0.5** (do not abort): collect capture folders for both traces, and Step 0.5 decides tracediff vs semantic.
+   - **Comparative + graph replay is routed in Step 0.5** (do not abort): collect capture folders for both traces when available. Step 0.5 routes on capture availability — graph traces **with** capture use the direct capture-folder comparison (tracediff + `--comparison_capture_folder`); graph traces **without** capture use the **semantic** path.
 
 5. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
@@ -109,6 +109,11 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 6. **Output Directory** (Optional)
    - Ask: "Where should we save analysis results? (Press Enter for default: <trace_directory>/analysis_output)"
    - Default: Same directory as trace file, in `analysis_output/` subdirectory
+
+7. **Extension File** (Optional) → `<extension_file>`
+   - Ask: "Do you have a TraceLens extension file to apply? Press Enter to skip."
+   - If provided, resolve to an absolute path and assign to `<extension_file>`.
+   - If skipped, set `<extension_file>` to empty (no `--extension_file` flag is added to any command).
 
 ### Build and Cache Command Prefix
 
@@ -144,7 +149,7 @@ Write the resolved template to `<output_dir>/cache/cmd_prefix.txt`. Then validat
 <prefix> python3 -c "import TraceLens; print('PREFIX_OK')"
 ```
 
-If this fails, check that `<tracelens_dir>` is the **parent** of TraceLens (not the repo root itself), verify the container/venv is accessible, rebuild, and retry. Do NOT proceed to Step 1 until validation passes.
+If this fails, inform the user with `[DIAG:pipeline:PREFIX_FAIL]` and check that `<tracelens_dir>` is the **parent** of TraceLens (not the repo root itself), verify the container/venv is accessible, rebuild, and retry. Do NOT proceed to Step 1 until validation passes.
 
 ### Command Execution Pattern
 
@@ -204,6 +209,21 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 
 For the **semantic** comparative method, the semantic diff must be generated **before** the trace1 report (so its `diff_stats.csv` exists). Follow the ordering in **Step 1.S** below. Both methods converge on the same artifacts: an enriched `perf_report_trace1_csvs/unified_perf_summary.csv` plus a `perf_report_trace1_csvs/diff_stats.csv`, so Steps 2-11 are identical for either method.
 
+**`<suffix_3>`** — extension flags:
+
+| scope | value |
+|-------|-------|
+| `standalone` | none |
+| `comparative` trace1 if `<capture_folder_path2>` provided | `--comparison_capture_folder <capture_folder_path2>` |
+| `comparative` trace2 | none |
+
+**`<suffix_ext>`** — user extension file:
+
+| condition | value |
+|-----------|-------|
+| `<extension_file>` provided | `--extension_file <extension_file>` |
+| not provided | none |
+
 ---
 
 **Default (training and non-vLLM/SGLang eager inference)** (`<analysis_mode>` = `default`):
@@ -216,7 +236,8 @@ For the **semantic** comparative method, the semantic diff must be generated **b
   --group_by_num_kernels \
   --include_call_stack \
   <suffix_1> \
-  <suffix_2>
+  <suffix_2> \
+  <suffix_ext>
 ```
 
 **Inference eager mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `eager`):
@@ -230,7 +251,8 @@ For the **semantic** comparative method, the semantic diff must be generated **b
   --group_by_num_kernels \
   --include_call_stack \
   <suffix_1> \
-  <suffix_2>
+  <suffix_2> \
+  <suffix_ext>
 ```
 
 **Inference graph replay + capture mode** (`<analysis_mode>` = `inference`, `<inference_exec_mode>` = `graph_capture`):
@@ -245,7 +267,9 @@ For the **semantic** comparative method, the semantic diff must be generated **b
   --group_by_num_kernels \
   --include_call_stack \
   <suffix_1> \
-  <suffix_2>
+  <suffix_2> \
+  <suffix_3> \
+  <suffix_ext>
 ```
 
 (For comparative graph mode, the trace2 report uses `--capture_folder <capture_folder_path2>`.)
@@ -295,7 +319,7 @@ Execute the TraceLens Agentic Mode orchestrator preparation script:
   TraceLens/Agent/Analysis/utils/orchestrator_prepare.py \
   --trace-path <trace_path> \
   --platform <platform> \
-  --output-dir <output_dir>
+  --output-dir <output_dir> \
   --comparison-scope <comparison_scope>
 ```
 
@@ -309,7 +333,6 @@ This script performs:
 **Outputs:**
 - `category_data/<category>_ops.csv` - Filtered operations per category
 - `metadata/<category>_metadata.json` - Platform specs, GPU utilization, config
-- `category_data/<category>_tree_data.json` - Pre-computed tree analysis
 - `category_data/multi_kernel_data.json` - Memcpy/NCCL/overlap pre-computed data
 - `category_data/category_manifest.json` - Workflow metadata with categories (includes `tier` field: `system` or `compute_kernel`)
 - `system_findings/` - Directory for system-level analysis outputs
@@ -461,8 +484,7 @@ Read and follow the FULL instructions in:
 
 - Category: {category}
 - Input files: category_data/{category}_ops.csv, metadata/{category}_metadata.json,
-  category_data/{category}_tree_data.json (if available),
-  category_data/{category}_metrics.json (P-items come from `category_findings[]`)
+  category_data/{category}_metrics.json (P-items come from `category_findings[]`; `operations[i].module_chain` provides model layer context)
 - Output file: category_findings/{category}_findings.md
 
 Execute every step in the agent file. Return "DONE" when complete.
@@ -566,20 +588,37 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
 
 ## Step 11: Generate Final Report (<output_dir>/analysis.md)
 
-**CRITICAL: Do NOT delegate Step 10 to a Task subagent.** The orchestrator must write the report directly.
+**CRITICAL: Do NOT delegate Step 11 to a Task subagent.** The orchestrator must write the report directly.
 
 1. **Read** the report template: `TraceLens/Agent/Analysis/utils/templates/analysis_template.md`
-2. **Write** the filled-in report to `<output_dir>/analysis.md` using `<prefix> tee <output_dir>/analysis.md << 'REPORT_EOF'` with a **single-quoted heredoc delimiter**. Do not use the local Write/file-write tool — the report must be written on the same NFS client that Step 11.3 reads.
-3. **Fill in** each section by substituting placeholders with data using `<prefix>`. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
-   - `category_data/category_manifest.json` (metrics, GPU utilization)
-   - `category_findings/*.md` (compute kernel P-items)
-   - `system_findings/*.md` (system-level P-items)
-   - `category_data/*_metrics.json` (per-op tables, impact estimates)
-   - `priority_data.json` — compute kernel P-items: P1 = `findings[0]`, P2 = `findings[1]`, ... (`findings[]` is globally sorted by `impact_score`); each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting) — see the template for cell mapping. Render exactly one P-item per entry in `findings[]` — never merge entries.
-   - `metadata/model_info.json` — for `### Model Architecture` in Appendix: substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
-   - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/Agent/Analysis/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
-   - **IMPORTANT: Card sourcing:** For each findings file, copy its `## Recommendations` P-items into the report card slots and its `## Detailed Analysis` blocks into the Detailed Analysis section. Follow the template for formatting. **Copy table cells verbatim** from the source `category_findings/<cat>_findings.md` — do NOT reformat, shorten, or strip prefixes from any cell. Preserve the `<!-- reasoning-candidate tier=… rank=… -->` HTML comment that precedes each `####` heading in the source findings file. Follow the template for formatting.
-   - **Exclude failures:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a Warnings section only if failures exist.
+2. **Write the report in sections** to `<output_dir>/analysis.md` using **only** `<prefix> tee` / `<prefix> tee -a` with single-quoted heredoc delimiters (see write order below). You MUST NOT use the IDE Write tool, Edit tool, StrReplace tool, `cat >`, `echo >`, `>>` redirect, or any other write method for `analysis.md` unless tee fails.
+3. **Fill in** each section by substituting placeholders with actual data. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
+
+**Write order (one heredoc per step):**
+
+   a. **Initialize** — truncate and write the title line + `## Executive Summary` (metrics table, `{{PERF_PLOT}}` placeholder). Use `<prefix> tee <output_dir>/analysis.md << 'SECTION_EOF'` (truncating `tee`, not append) for this first write only.
+      - Data sources: `category_data/category_manifest.json` (`gpu_utilization` keys), `priority_data.json` (top bottleneck).
+
+   b. **Compute Kernel Optimizations** — append `## Compute Kernel Optimizations` with `### Top Operations` table and P-item cards. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
+      - Data sources: `priority_data.json` — P1 = `findings[0]`, P2 = `findings[1]`, ... ; each card joins its sub-agent's Detailed Analysis block by `(findings[i].category, findings[i].category_rank)`. The Top Operations table materializes `priorities[]` verbatim (one row per entry, array order, no re-sorting).
+      - `category_findings/*.md` — for each findings file, copy its `## Recommendations` P-items into the report card slots. **Copy table cells verbatim** from the source `category_findings/<cat>_findings.md`.
+      - Heuristic findings (`findings[i].estimate_method == "heuristic"`) carry a numeric estimated impact and sort by `impact_score` like any other compute finding — render them (do NOT skip them) per `sub_agent_spec.md § Heuristic findings`.
+
+   c. **Kernel Fusion** — append `## Kernel Fusion Opportunities (Experimental)`. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
+      - Data source: `system_findings/kernel_fusion_findings.md`.
+
+   d. **System-Level** — append `## System-Level Optimizations`. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
+      - Data sources: remaining `system_findings/*.md` (cpu_idle, multi_kernel).
+
+   e. **Detailed Analysis** — append `## Detailed Analysis` with `### Compute Kernel Insights`, `### Kernel Fusion Insights`, `### System-Level Insights` subsections. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
+      - Data sources: copy the `## Detailed Analysis` blocks verbatim from each `*_findings.md` file. Follow the template for formatting.
+      - `category_data/*_metrics.json` (per-op tables, impact estimates).
+
+   f. **Appendix** — append `## Appendix` with `### Model Architecture` and `### Hardware Reference`. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
+      - `metadata/model_info.json` — substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
+      - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/Agent/Analysis/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak HBM BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
+
+**Failure exclusion:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`. Include a `## Warnings` section (between Executive Summary and Compute Kernel Optimizations) only if failures exist.
 
 The report at `<output_dir>/analysis.md` must use these exact `##` headers — do NOT rename them:
 1. `## Executive Summary`
@@ -600,14 +639,14 @@ After writing `analysis.md`, validate that the report contains all required `##`
 <prefix> python3 -c \"
 import sys
 from TraceLens.Agent.Analysis.utils.validation_utils import validate_report
-passed, missing = validate_report(sys.argv[1])
+passed, missing = validate_report(sys.argv[1], comparison_scope=sys.argv[2])
 if not passed:
     print('FAIL:')
     for m in missing:
         print('  - ' + m)
     sys.exit(1)
 print('PASS: All required sections present')
-\" '<output_dir>'
+\" '<output_dir>' '<comparison_scope>'
 ```
 
 **If validation fails (exit code 1):**
@@ -660,12 +699,10 @@ embed_plot_in_report(sys.argv[1])
 If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report remains clean.
 ---
 
-## Unsupported Trace Features
+## Trace Feature Detection
 
-If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses unsupported features before retrying:
-
-- **Torch Compile**: `ops_summary.csv` contains op names matching `triton_poi_fused_*`, `triton_red_fused_*`, `triton_per_fused_*`, or `CompiledFunction`. If found, inform the user.
+If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses the following features before retrying:
 - **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
-  - **Comparative scope** (`<comparison_scope>` = `comparative`): graph replay is **supported via the semantic comparison path** (Step 0.5 routes it; do not abort). Ensure capture folders were collected for both traces and follow Step 1.S.
-  - **Default mode, standalone** (analysis_mode = `default`): Inform the user that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
+  - **Comparative scope** (`<comparison_scope>` = `comparative`): graph replay is **supported — do not abort**. Step 0.5 routes on capture availability: graph traces **with** capture folders use the direct capture-folder comparison path (tracediff + `--comparison_capture_folder`); graph traces **without** capture use the **semantic** comparison path (follow Step 1.S). Ensure capture folders were collected for both traces when available.
+  - **Default mode, standalone** (analysis_mode = `default`): Inform the user with `[DIAG:trace_quality:GPU_GRAPH_REPLAY]` that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
   - **Inference mode, standalone** (analysis_mode = `inference`): Graph launches are expected and supported if graph capture folder is provided, do not abort. If inference_exec_mode is `eager` (no capture folder was provided), continue.

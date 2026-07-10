@@ -26,9 +26,8 @@ When invoked by the orchestrator, you will receive the following context:
 - `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/elementwise_ops.csv` - Filtered elementwise operations
+1. `<output_dir>/category_data/elementwise_ops.csv` - Filtered elementwise operations (includes `call_stack` column for architecture context)
 2. `<output_dir>/metadata/elementwise_metadata.json` - Hardware specs
-3. `<output_dir>/category_data/elementwise_tree_data.json` - Pre-computed parent chains
 
 **Output file you must write:**
 - `<output_dir>/category_findings/elementwise_findings.md`

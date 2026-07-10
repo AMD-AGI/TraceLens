@@ -36,7 +36,8 @@ _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _KERNEL_FUSION_FINDINGS = "kernel_fusion_findings.md"
 # Optional icon / prefix before P<N> (e.g. kernel fusion `### 🟢 P1:`).
 _P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
-_CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=\w+\s+rank=(\d+)\s*-->")
+_CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->")
+_DA_HEADING_RE = re.compile(r"^####\s+.*?P(\d+)\s*:", re.MULTILINE)
 _NOT_QUANTIFIABLE_SENTINEL = re.compile(
     r"not quantifiable from trace data", re.IGNORECASE
 )
@@ -49,6 +50,7 @@ _COMPUTE_DATA_REQUIRED_COLS_STANDALONE = (
     "Operation",
     "Args",
     "Kernel Path",
+    "Kernel Name",
     "Time (ms)",
     "%E2E",
     "Count",
@@ -137,12 +139,11 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
     - Compute tier only: per-block Data table shape + Args/Kernel Path cells
       verbatim vs <cat>_metrics.json (see _validate_compute_data_tables)
     - Marker structure: pairing, kind= attribute, per-kind required attrs,
-      no mixed null/numeric values, mandatory kind=p_item (except for
-      triton_findings.md)
+      no mixed null/numeric values, mandatory kind=p_item
 
     Args:
         filepath: Path to the *_findings.md file
-        tier: "compute" or "system"
+        tier: "compute", "system", or "fusion"
         comparison_scope: "standalone" or "comparative". When omitted, inferred
             from the category metrics JSON.
 
@@ -210,6 +211,15 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
             f"reasoning-candidate count ({len(candidates)})"
         )
 
+    if candidates:
+        wrong_tier = [(t, r) for t, r in candidates if t.lower() != tier]
+        if wrong_tier:
+            bad = ", ".join(f"tier={t} rank={r}" for t, r in wrong_tier)
+            errors.append(
+                f"reasoning-candidate tier mismatch: expected tier={tier}, "
+                f"found {bad}"
+            )
+
     # Compute tier only: shape + Args verbatim + Kernel Path verbatim, all
     # scoped to <!-- reasoning-candidate tier=compute --> blocks.
     if tier == "compute":
@@ -275,12 +285,12 @@ def _load_valid_args(*metrics_paths):
 
 
 def _load_compute_data_metrics(metrics_path):
-    """Return (args_set, launcher_paths_set) from one metrics JSON; empty on read failure."""
+    """Return (args_set, launcher_paths_set, kernel_names_set) from one metrics JSON; empty on read failure."""
     try:
         with open(metrics_path) as f:
             d = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return set(), set()
+        return set(), set(), set()
     ops = d.get("operations", [])
     args = {op["args"] for op in ops if isinstance(op.get("args"), str)}
     paths = {
@@ -288,7 +298,12 @@ def _load_compute_data_metrics(metrics_path):
         for op in ops
         if isinstance(op.get("launcher_path"), str) and op["launcher_path"]
     }
-    return args, paths
+    kernel_names = {
+        op["kernel_name_trunc"]
+        for op in ops
+        if isinstance(op.get("kernel_name_trunc"), str) and op["kernel_name_trunc"]
+    }
+    return args, paths, kernel_names
 
 
 def _iter_compute_candidate_blocks(content):
@@ -343,8 +358,9 @@ def _find_data_table(lines, start, end):
 def _validate_compute_data_tables(content, findings_path, comparison_scope=None):
     """For each <!-- reasoning-candidate tier=compute --> block: shape check
     (Args column required for standalone; comparative schema for comparative),
-    Args cells verbatim vs operations[].args, and Kernel Path cells verbatim
-    vs operations[].launcher_path when present.
+    Args cells verbatim vs operations[].args, Kernel Path cells verbatim
+    vs operations[].launcher_path, and Kernel Name cells verbatim vs
+    operations[].kernel_name_trunc when present.
     Skips silently when the metrics JSON is absent.
     """
     metrics_path = _metrics_json_for_findings(findings_path)
@@ -355,7 +371,9 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
         if is_comparative
         else _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
     )
-    valid_args, valid_paths = _load_compute_data_metrics(metrics_path)
+    valid_args, valid_paths, valid_kernel_names = _load_compute_data_metrics(
+        metrics_path
+    )
     lines = content.splitlines()
     errors = []
     for start, end in _iter_compute_candidate_blocks(content):
@@ -377,6 +395,7 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
             continue
         args_idx = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE.index("Args")
         kp_idx = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE.index("Kernel Path")
+        kn_idx = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE.index("Kernel Name")
         for row_line, cells in row_iter:
             if is_comparative:
                 continue
@@ -393,6 +412,18 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
                         f"Kernel Path cell on line {row_line} does not match "
                         f"operations[].launcher_path in {cat_metrics_basename} "
                         f"(paste verbatim): {cells[kp_idx]}"
+                    )
+            if (
+                valid_kernel_names
+                and kn_idx < len(cells)
+                and cells[kn_idx]
+                and cells[kn_idx] != "—"
+            ):
+                if cells[kn_idx] not in valid_kernel_names:
+                    errors.append(
+                        f"Kernel Name cell on line {row_line} does not match "
+                        f"operations[].kernel_name_trunc in {cat_metrics_basename} "
+                        f"(paste verbatim): {cells[kn_idx]}"
                     )
     return errors
 
@@ -533,8 +564,14 @@ def _check_priority_consistency(output_dir, manifest):
         if p.get("source") != "findings_rollup":
             continue
         cat = p.get("category")
+        # Mirror generate_priority_data: the findings_rollup excludes
+        # heuristic findings, so the consistency sum must too.
         expected = sum(
-            f.get("impact_score", 0) for f in findings if f.get("category") == cat
+            f.get("impact_score", 0)
+            for f in findings
+            if f.get("category") == cat
+            and f.get("impact_score") is not None
+            and f.get("estimate_method") != "heuristic"
         )
         actual = p.get("impact_score", 0) or 0
         if abs(actual - expected) > _ROLLUP_IMPACT_TOL:
@@ -631,6 +668,8 @@ def validate_report(output_dir, comparison_scope=None):
 
     missing.extend(_validate_report_priority_consistency(content, output_dir))
 
+    missing.extend(_validate_report_reasoning_candidates(content))
+
     # Report-level marker structure
     missing.extend(MarkerValidator.check_report(report_path))
 
@@ -711,14 +750,16 @@ def _validate_report_args_column(content, output_dir):
 def _validate_report_priority_consistency(content, output_dir):
     """Cross-check analysis.md against priority_data.json.
 
-    R1: Compute Kernel Optimizations P-item heading count == len(quantified findings).
+    R1: Compute Kernel Optimizations P-item heading count == len(findings).
     R2: Each kind=p_item marker's category attr (in doc order) == findings[N-1].category.
     R3: Each marker's low/mid/high attrs match findings[N-1] impact_score_low / impact_score / impact_score_high.
     R4: Top Operations marker rows == len(priorities).
 
     Silently skips when priority_data.json is absent (Step 8 already warns).
     Numeric attrs are compared as 2-decimal strings to match the writer's
-    rounding in generate_priority_data.
+    rounding in generate_priority_data. Every compute-tier finding now carries
+    a numeric impact_score (quantified or heuristic estimate), so p_item
+    markers in this section must use numeric low/mid/high (never null).
     """
     pd_path = os.path.join(output_dir, "priority_data.json")
     if not os.path.exists(pd_path):
@@ -728,9 +769,7 @@ def _validate_report_priority_consistency(content, output_dir):
             pd = json.load(f)
     except (OSError, json.JSONDecodeError):
         return []
-    findings = [
-        f for f in (pd.get("findings", []) or []) if f.get("impact_score") is not None
-    ]
+    findings = pd.get("findings", []) or []
     priorities = pd.get("priorities", []) or []
     errors = []
 
@@ -744,7 +783,7 @@ def _validate_report_priority_consistency(content, output_dir):
     if n_p != len(findings):
         errors.append(
             f"R1: Compute Kernel Optimizations has {n_p} P-item headings but "
-            f"priority_data.json has {len(findings)} quantified findings"
+            f"priority_data.json has {len(findings)} findings"
         )
 
     p_markers = []
@@ -759,7 +798,7 @@ def _validate_report_priority_consistency(content, output_dir):
         if idx >= len(findings):
             errors.append(
                 f"R2: extra kind=p_item marker #{idx + 1} in Compute Kernel "
-                f"Optimizations beyond {len(findings)} quantified findings"
+                f"Optimizations beyond {len(findings)} findings"
             )
             break
         f = findings[idx]
@@ -814,6 +853,58 @@ def _validate_report_priority_consistency(content, output_dir):
     return errors
 
 
+def _extract_detailed_analysis_subsection(content, subsection_header):
+    """Extract a ### subsection from ## Detailed Analysis.
+
+    Returns the text from the subsection header to the next ### or ## header,
+    or None if not found.
+    """
+    da_start = content.find("## Detailed Analysis")
+    if da_start < 0:
+        return None
+    da_text = content[da_start:]
+    sub_start = da_text.find(subsection_header)
+    if sub_start < 0:
+        return None
+    sub_text = da_text[sub_start + len(subsection_header) :]
+    next_h3 = re.search(r"^### ", sub_text, re.MULTILINE)
+    next_h2 = re.search(r"^## ", sub_text, re.MULTILINE)
+    ends = [pos.start() for pos in [next_h3, next_h2] if pos is not None]
+    end = min(ends) if ends else len(sub_text)
+    return sub_text[:end]
+
+
+def _validate_report_reasoning_candidates(content):
+    """Check reasoning-candidate markers in Detailed Analysis match P-item headings.
+
+    For each tier (compute / system), the number of
+    ``<!-- reasoning-candidate tier=<tier> -->`` markers must equal the number
+    of ``#### P<N>:`` headings in the corresponding subsection. Missing markers
+    break Hyperloom's ``parse_analysis_md()`` which uses them as block delimiters.
+    """
+    errors = []
+    checks = [
+        ("compute", "### Compute Kernel Insights"),
+        ("fusion", "### Kernel Fusion Insights"),
+        ("system", "### System-Level Insights"),
+    ]
+    for tier, header in checks:
+        subsection = _extract_detailed_analysis_subsection(content, header)
+        if subsection is None:
+            continue
+        n_headings = len(_DA_HEADING_RE.findall(subsection))
+        n_markers = sum(
+            1 for m in _CANDIDATE_RE.finditer(subsection) if m.group(1).lower() == tier
+        )
+        if n_headings > 0 and n_markers != n_headings:
+            label = header.lstrip("# ")
+            errors.append(
+                f"R5: {label} has {n_headings} #### P<N>: headings but "
+                f"{n_markers} reasoning-candidate tier={tier} markers"
+            )
+    return errors
+
+
 class MarkerValidator:
     """All marker (`<!-- impact-begin ... -->` / `<!-- impact-end -->`) checks.
 
@@ -832,7 +923,7 @@ class MarkerValidator:
         "detail_estimate": ("low", "high"),
     }
     # Compute findings files that do NOT need a p_item marker.
-    COMPUTE_NO_P_ITEM = {"triton_findings.md"}
+    COMPUTE_NO_P_ITEM: set = set()
 
     @classmethod
     def scan(cls, text, rel):
@@ -885,8 +976,7 @@ class MarkerValidator:
         """Marker checks for a sub-agent findings file.
 
         file_class must be "category_findings" or "system_findings". Adds
-        the per-tier "p_item required" check on top of `scan`, with the
-        triton exemption for category findings.
+        the per-tier "p_item required" check on top of `scan`.
         skip_p_item_required: when True (empty category_findings[] per metrics), omit kind=p_item requirement.
         """
         rel = os.path.basename(path)

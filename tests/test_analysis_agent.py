@@ -114,7 +114,6 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "impact_score": 100.0,
                 "impact_score_low": 85.0,
                 "impact_score_high": 115.0,
-                "confidence": "high",
             },
             {
                 "operation": "aten::mm",
@@ -123,7 +122,6 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "impact_score": 50.0,
                 "impact_score_low": 42.0,
                 "impact_score_high": 58.0,
-                "confidence": "medium",
             },
         ],
         "category_findings": [
@@ -153,7 +151,6 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "impact_score": 80.0,
                 "impact_score_low": 68.0,
                 "impact_score_high": 92.0,
-                "confidence": "medium",
             },
         ],
         "category_findings": [

@@ -93,7 +93,7 @@ blank line between them. The validator checks for these as substring matches.
 
 | Label | Purpose |
 |-------|---------|
-| `**Identification:**` | Why these operations were flagged. Body text must be plain language — JSON keys, dotted paths, and internal variable names belong **only** in the closing `(source: \`artifact\` → \`keys\`)` parenthetical (artifact + keys backticked, e.g. `(source: \`gemm_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). When any flagged op has a non-null `library` (e.g. `Tensile`, `CK`, `AITER`, `Triton`, `rocBLAS`), state the backend in prose (e.g. "These operations use the **Tensile** backend.") and include `operations[].library` in the `(source:)` parenthetical. |
+| `**Identification:**` | Why these operations were flagged. Body text must be plain language — JSON keys, dotted paths, and internal variable names belong **only** in the closing `(source: \`artifact\` → \`keys\`)` parenthetical (artifact + keys backticked, e.g. `(source: \`<cat>_metrics.json\` → \`operations[].efficiency.efficiency_percent\` < 70)`). When any flagged op has a non-null `library` (e.g. `Tensile`, `CK`, `AITER`, `Triton`, `rocBLAS`), state the backend in prose and include `operations[].library` in the `(source:)` parenthetical. When `operations[i].module_chain` is non-empty, name the model layer the ops belong to. When `operations[i].call_chain` is present, use it for deeper context. |
 | `**Data:**` | **Compute** (`tier=compute`): exactly one trace-grounded kernel breakdown table (see § Operations Table Schema). **All columns in the schema are mandatory — never drop a column.** Use `—` for any individual cell whose value is missing or null. **System** (`tier=system`): **must not** include kernel breakdown tables. include metric table (see § Metric Table Schema). |
 | `**Reasoning for Slowdown:**` | Why the workload is slow *as the trace shows*: **Standalone:** low % of roofline, low arithmetic intensity, unfused patterns, etc. **Comparative:** how Trace 1 is slower than Trace 2 for these operations — express speed differences as "X% faster" or "X% slower", plus absolute time gaps. Never use raw efficiency ratios or `efficiency_percent` values in prose. **Forbidden:** micro-architecture speculation (bank conflicts, L1 miss rates, etc.). |
 | `**Resolution:**` | **Why** the suggested optimization helps — not merely restating *what* to do. Must align with the P-item **Action** on the card. **Forbidden tautologies:** Do not restate the roofline definition (e.g. "raising bandwidth toward the roofline reduces kernel time"). Instead, explain the **mechanism** (e.g. "fusion eliminates the intermediate write-back, cutting bytes moved per invocation in half"). If the mechanism is not inferable from the trace, state only the action. |
@@ -155,16 +155,17 @@ inside `## Detailed Analysis` blocks.
 ### Standalone (`comparison_scope` = `standalone`)
 
 ```markdown
-| Operation |  Args  |            Kernel Path                  | Time (ms) | %E2E | Count |FLOPS/Byte| Efficiency | Bound |
-|-----------|--------|-----------------------------------------|-----------|------|-------|----------|------------|-------|
+| Operation |  Args  |            Kernel Path                  | Kernel Name | Time (ms) | %E2E | Count |FLOPS/Byte| Efficiency | Bound |
+|-----------|--------|-----------------------------------------|-------------|-----------|------|-------|----------|------------|-------|
 ```
 
-**All nine columns above are mandatory.** Never drop a column because some or all of its values are missing — render `—` in any cell whose value is null/absent and keep the column. The header row of every `**Data:**` table must contain exactly these nine column names in this order. (Agents may append extra columns at the end when needed, e.g. `Sub-Category` in the generic-op analyzer, but must not remove or reorder the nine standard columns.)
+**All ten columns above are mandatory.** Never drop a column because some or all of its values are missing — render `—` in any cell whose value is null/absent and keep the column. The header row of every `**Data:**` table must contain exactly these ten column names in this order. (Agents may append extra columns at the end when needed, e.g. `Sub-Category` in the generic-op analyzer, but must not remove or reorder the ten standard columns.)
 
 **Column mappings** (source: `metrics['operations']`):
 - **Operation**: `operations[i].name`. Bare op name only — shape/dtype go in Args. Allowed suffix: `(decode)`/`(prefill)` to disambiguate the same op at multiple shapes.
 - **Args**: `operations[i].args`. Pre-rendered shape/dtype string, already joined with `<br>` — paste verbatim, do not reformat or re-join. `—` when absent.
 - **Kernel Path**: `operations[i].launcher_path`. Relative Python path that launched the kernel (e.g. `sglang/srt/layers/quantization/fp8_utils.py(549): aiter_w8a8_block_fp8_linear`). **Copy the value exactly as-is — do NOT truncate, shorten, or extract just the function name.** `—` when absent.
+- **Kernel Name**: `operations[i].kernel_name_trunc`. Truncated GPU kernel name(s) launched by this operation. For multi-kernel ops, formatted as `Kernel 1: <name><br>Kernel 2: <name>`. **Copy the value exactly as-is.** `—` when absent. (The full untruncated name is available in `operations[i].kernel_name` if needed for identification.)
 - **Time (ms)**: `operations[i].time_ms` — kernel time in milliseconds.
 - **%E2E**: `operations[i].percent_of_total` — kernel time as % of E2E GPU time. `—` when null. (`percent_of_category` is still in the JSON for screening thresholds but no longer rendered.)
 - **Count**: `operations[i].count` — total invocations, not unique signatures. `—` when absent.
@@ -207,7 +208,7 @@ Standard schema for the `**Data:**` table inside system-tier `## Detailed Analys
 **Column rules:**
 - **Metric**: Copy metric label directly from earlier findings sections — do not rename or reformat.
 - **Value**: `X.X ms` or `X.X%` or `X.X ms (X.X%)`
-- **Flagged**: `false` when the metric's threshold is exceeded; `true` otherwise.
+- **Flagged**: `true` when the metric's threshold is exceeded (issue present); `false` otherwise.
 
 ---
 
@@ -239,13 +240,30 @@ The set of P-items is decided by `category_findings[]` alone — `MIN_PITEM_IMPA
 | `library` | One per finding. Drives the `(<Library>)` title suffix. |
 | `eff_bucket` | Roofline-efficiency band: `"0-30"`, `"30-60"`, `"60-100"`, or `"unknown"` (standalone); `"all"` (comparative). Members within a finding share the same band. |
 | `impact_score` / `_low` / `_high` | Group-summed % of E2E. Render verbatim into `kind=p_item` and `kind=detail_estimate` markers. |
-| `member_count`, `members[]` | Underlying per-op estimate rows (operation, time_ms, efficiency_pct, …) — rows of the `**Data:**` table. |
+| `estimate_method` | `"quantified"` (impact from a perf model — standalone roofline gap or comparative t2/t1 ratio) or `"heuristic"` (op has no perf model; impact estimated from E2E share — see below). |
+| `percent_of_total` | Heuristic findings only: the op's combined E2E GPU-time share (summed across shapes). Drives the warning line in § Heuristic findings. Absent on quantified findings. |
+| `member_count`, `members[]` | Underlying per-op estimate rows (operation, time_ms, efficiency_pct, `type`, …) — rows of the `**Data:**` table. `members[].type == "unmodeled_significant"` marks a heuristic finding; `"kernel_tuning"` is a quantified (perf-modeled) finding. |
 
 ### Empty category_findings
 
 If `category_findings[]` is empty, emit `## Recommendations` with no P-items
 and `## Detailed Analysis` with no candidates. Do not manufacture sub-threshold
 cards to fill the section — that is the honest "no actionable issues" answer.
+
+### Heuristic findings (`estimate_method == "heuristic"`)
+
+An op with no perf model: `impact_score` / `_low` / `_high` are estimated from a
+recoverable fraction of its E2E share (`percent_of_total`, summed across shapes)
+and ranked alongside quantified findings.
+
+Render like a normal P-item card (numeric `low`/`mid`/`high` on `kind=p_item`,
+normal `kind=detail_estimate` bullets) with two additions:
+- Immediately **after** the `kind=p_item` impact marker block (i.e. *outside* the `impact-begin`/`impact-end` markers), add a warning line, substituting the finding's `percent_of_total`:
+
+```markdown
+> **Warning — estimated:** No performance model for this op; impact is derived from its E2E GPU-time share (<percent_of_total>%), not a gap projection.
+```
+- In the `## Detailed Analysis` `**Data:**` row, render `—` for `Efficiency` and `Bound`.
 
 ### Rendering in `## Detailed Analysis` (compute tier)
 
@@ -258,8 +276,6 @@ Two bullets — low and high. Wrap in `kind=detail_estimate` markers (see
 - High end impact_score: <impact_score_high>
 <!-- impact-end -->
 ```
-
-**Non-quantifiable:** `Impact estimate is not quantifiable from trace data.`
 
 ## Impact markers (REQUIRED)
 
@@ -282,8 +298,8 @@ The block between them is exactly the `impact_score`-based markdown you would ot
 
 | `kind` | Where | Required attributes | Optional attributes |
 |--------|-------|--------------------|---------------------|
-| `p_item` | Around every P-item `**Impact**` line in `## Recommendations`. | `low`, `mid`, `high` (all three; use `null` for non-quantifiable). | `category` is reserved for the orchestrator template; sub-agents do **not** emit it. |
-| `detail_estimate` | Around the two-bullet `Low end ... / High end ...` block under `**Impact estimate:**` in each `## Detailed Analysis` candidate. Skip for non-quantifiable estimates. | `low`, `high` (impact_score values, % of E2E). | none |
+| `p_item` | Around every P-item `**Impact**` line in `## Recommendations`. | `low`, `mid`, `high` (all three; use `null` only for system-tier non-quantifiable). | `category` is reserved for the orchestrator template; sub-agents do **not** emit it. |
+| `detail_estimate` | Around the two-bullet `Low end ... / High end ...` block under `**Impact estimate:**` in each `## Detailed Analysis` candidate. Skip only for system-tier non-quantifiable estimates. | `low`, `high` (impact_score values, % of E2E). | none |
 
 ### Value-source rule
 
@@ -307,7 +323,7 @@ mandatory `kind=p_item` for category/system findings unless exempt) per
 <prefix> python3 -c "
 import sys
 from TraceLens.Agent.Analysis.utils.validation_utils import validate_findings_file
-passed, errors = validate_findings_file(sys.argv[1], sys.argv[2])
+passed, errors = validate_findings_file(sys.argv[1], sys.argv[2], sys.argv[3])
 if not passed:
     print('FAIL:')
     for e in errors:
