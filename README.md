@@ -22,6 +22,8 @@ TraceLens is a Python library focused on **automating analysis from trace files*
 
 **Extensible SDK** — Get started instantly with ready-to-use scripts, then build your own custom workflows using a flexible and hackable Python API.
 
+**TraceLens Agent** — Receive a prioritized human-readable optimization report, derived through an agentic workflow, covering compute kernels, system bottlenecks, and kernel fusion opportunities with root-cause reasoning and concrete resolutions.
+
 ## Quick Start
 
 ### 1. Install
