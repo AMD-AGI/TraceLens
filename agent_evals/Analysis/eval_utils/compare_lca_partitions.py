@@ -27,6 +27,14 @@ Reporting both catches degenerate collapses: if the no-capture analysis dumped
 every kernel into one LCA, forward purity stays high (each gold group trivially
 agrees with the single label) but reverse purity collapses.
 
+Strict consistency
+------------------
+An all-or-nothing variant of purity: a kernel is *consistent* iff its ENTIRE
+group maps to a single group on the other side (no partial credit for the
+majority). Strict forward = fraction of kernels whose whole gold group lands in
+one no-capture LCA; strict reverse swaps the roles. Always <= the matching
+purity, with equality only when every multi-kernel group is perfectly pure.
+
 Random baselines
 ----------------
 To judge whether the real no-capture purity reflects genuine semantic signal or
@@ -127,6 +135,35 @@ def both_purities(gold: np.ndarray, nc: np.ndarray):
     return purity_frac(gold, nc), purity_frac(nc, gold)
 
 
+def strict_consistency_frac(group_labels: np.ndarray, other_labels: np.ndarray) -> float:
+    """Fraction of items whose entire group is homogeneous in ``other_labels``.
+
+    Group items by ``group_labels``; an item is *consistent* iff every item that
+    shares its group carries the same ``other_labels`` value (so the whole group
+    maps to a single other-bin). Report the fraction of consistent items.
+
+    This is an all-or-nothing variant of ``purity_frac``: a group contributes its
+    full size when perfectly pure, else 0 (no partial credit for the majority).
+    Hence ``strict_consistency_frac <= purity_frac`` always, with equality only
+    when every multi-item group is perfectly pure.
+    """
+    df = pd.DataFrame({"g": group_labels, "o": other_labels})
+    consistent = 0
+    for _, grp in df.groupby("g", sort=False):
+        if grp["o"].nunique() == 1:
+            consistent += len(grp)
+    return consistent / len(df)
+
+
+def both_strict(gold: np.ndarray, nc: np.ndarray):
+    """Return (strict_forward, strict_reverse).
+
+    strict_forward = fraction of items whose gold group is fully pure in nc
+    strict_reverse = fraction of items whose nc   group is fully pure in gold
+    """
+    return strict_consistency_frac(gold, nc), strict_consistency_frac(nc, gold)
+
+
 def agreement_report(gold: pd.DataFrame, ncap: pd.DataFrame) -> None:
     """Print the LCA-partition agreement (forward/reverse purity) section."""
     print("=" * 78)
@@ -158,6 +195,13 @@ def agreement_report(gold: pd.DataFrame, ncap: pd.DataFrame) -> None:
     # Reverse purity: no-capture groups -> majority gold LCA.
     r_matched, r_total, r_frac, r_recs = purity(df, "lca_nc", "lca_gold")
 
+    # Strict consistency (all-or-nothing per group; no partial credit).
+    gold_lbl = df["lca_gold"].to_numpy()
+    nc_lbl = df["lca_nc"].to_numpy()
+    sf = strict_consistency_frac(gold_lbl, nc_lbl)  # gold groups fully pure in nc
+    sr = strict_consistency_frac(nc_lbl, gold_lbl)  # nc groups fully pure in gold
+    n_tot = len(df)
+
     print("=" * 78)
     print("RESULTS")
     print("=" * 78)
@@ -168,6 +212,14 @@ def agreement_report(gold: pd.DataFrame, ncap: pd.DataFrame) -> None:
     print(
         f"Reverse purity (no-capture group -> majority gold LCA): "
         f"{r_matched}/{r_total} = {r_frac:.4f}"
+    )
+    print(
+        f"Strict forward consistency (whole gold group -> one nc LCA): "
+        f"{int(round(sf * n_tot))}/{n_tot} = {sf:.4f}"
+    )
+    print(
+        f"Strict reverse consistency (whole nc group -> one gold LCA): "
+        f"{int(round(sr * n_tot))}/{n_tot} = {sr:.4f}"
     )
     print("=" * 78)
 
@@ -203,27 +255,35 @@ def baseline_report(merged: pd.DataFrame, title: str, n_trials: int) -> None:
 
     # ---- Real no-capture ----
     real_fwd, real_rev = both_purities(gold, nc_real)
+    real_sfwd, real_srev = both_strict(gold, nc_real)
 
     # ---- Baseline 1: random shuffle of the pool over matched kernels ----
     rng = np.random.default_rng(SEED)
     fwds = np.empty(n_trials)
     revs = np.empty(n_trials)
+    sfwds = np.empty(n_trials)
+    srevs = np.empty(n_trials)
     for t in range(n_trials):
         shuffled = pool.copy()
         rng.shuffle(shuffled)
         fwds[t], revs[t] = both_purities(gold, shuffled)
+        sfwds[t], srevs[t] = both_strict(gold, shuffled)
     b1_fwd_m, b1_fwd_s = fwds.mean(), fwds.std()
     b1_rev_m, b1_rev_s = revs.mean(), revs.std()
+    b1_sfwd_m, b1_sfwd_s = sfwds.mean(), sfwds.std()
+    b1_srev_m, b1_srev_s = srevs.mean(), srevs.std()
 
     # ---- Baseline 2: sequential blocks, buckets ordered most->least popular ----
     # Kernels ordered by key (lexicographic string: source then string uid).
     seq = pool.copy()
     b2_fwd, b2_rev = both_purities(gold, seq)
+    b2_sfwd, b2_srev = both_strict(gold, seq)
 
     # ---- Baseline 3: sequential blocks, kernels ordered by INT gpu_op_uid ----
     order3 = np.lexsort((merged["gpu_op_uid"].to_numpy(), merged["source"].to_numpy()))
     gold3 = gold[order3]
     b3_fwd, b3_rev = both_purities(gold3, pool)
+    b3_sfwd, b3_srev = both_strict(gold3, pool)
 
     # ---------------- report ----------------
     print("=" * 74)
@@ -246,6 +306,19 @@ def baseline_report(merged: pd.DataFrame, title: str, n_trials: int) -> None:
     )
     print(f"{'Baseline 2 (seq, key str)':<26}{b2_fwd:>24.4f}{b2_rev:>24.4f}")
     print(f"{'Baseline 3 (seq, int uid)':<26}{b3_fwd:>24.4f}{b3_rev:>24.4f}")
+    print("-" * 74)
+    print("Strict consistency (fraction of items in a FULLY pure group):")
+    sh = f"{'partition':<26}{'strict fwd (gold pure)':>24}{'strict rev (nc pure)':>24}"
+    print(sh)
+    print("-" * 74)
+    print(f"{'Real no-capture':<26}{real_sfwd:>24.4f}{real_srev:>24.4f}")
+    print(
+        f"{'Baseline 1 (random)':<26}"
+        f"{f'{b1_sfwd_m:.4f} +/- {b1_sfwd_s:.4f}':>24}"
+        f"{f'{b1_srev_m:.4f} +/- {b1_srev_s:.4f}':>24}"
+    )
+    print(f"{'Baseline 2 (seq, key str)':<26}{b2_sfwd:>24.4f}{b2_srev:>24.4f}")
+    print(f"{'Baseline 3 (seq, int uid)':<26}{b3_sfwd:>24.4f}{b3_srev:>24.4f}")
     print("=" * 74)
 
 
