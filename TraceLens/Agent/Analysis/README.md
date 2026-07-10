@@ -138,7 +138,7 @@ All parameters are passed inline so no interactive prompts are needed. This is u
 
 ## Integrating with Model Optimization Flows
 
-`analysis.md` is designed to be consumed by both readers and optimization systems to iteratively resolve bottlenecks (kernel tuning, fusion, batching, precision narrowing, etc.).
+`analysis.md` is designed to be consumed by both readers and optimization systems to iteratively resolve bottlenecks (kernel tuning, kernel fusion, model codebase updates, etc.).
 
 ### Anatomy of `analysis.md`
 
