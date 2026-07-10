@@ -145,14 +145,14 @@ All parameters are passed inline so no interactive prompts are needed. This is u
 Every report has the same top-level structure, in this order:
 
 1. **Executive Summary**: Narrative one-paragraph workload characterization, a metrics table (Total Time, Compute %, Idle %, Exposed Communication %, Top Bottleneck Category), and an embedded performance-improvement chart.
-2. **Compute Kernel Optimizations**: Top Operations table followed by per-category P-items (P1, P2, …) sorted by `impact_score`. Each P-item has an summarizing Insight / Action / Impact triplet.
+2. **Compute Kernel Optimizations**: Top Operations table followed by per-category P-items (P1, P2, …) sorted by `impact_score` (Score highlighting the impact of an optimization). Each P-item has an summarizing Insight / Action / Impact triplet.
 3. **Kernel Fusion Opportunities (Experimental)**: Kernel fusion candidates 
 4. **System-Level Optimizations (Experimental)**: System-level P-items (idle, memcpy, compute/comm overlap)
 5. **Detailed Analysis**: Per-P-item drill-down (`Compute Kernel Insights`, `Kernel Fusion Insights`, `System-Level Insights`) with identification rationale, data tables, and reasoning.
 
 ### Reference snippets
 
-The snippets below are illustrative excerpts showing the format of the agent's analysis report.
+The snippets below are illustrative excerpts showing the format of the agent's analysis report in the standalone mode.
 
 *Note: All performance data shown here are example outputs from TraceLens, intended to illustrate the agent's capabilities. They are not official performance benchmarks.*
 
