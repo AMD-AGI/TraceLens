@@ -6,11 +6,11 @@ See LICENSE for license information.
 
 # GPU Microbenchmarking Suite
 
-This suite measures a GPU's **max-achievable performance baseline** — matrix (MFMA / tensor-core) TFLOPS across dtypes, vector (SIMD) TFLOPS, and HBM bandwidth — and writes it as a GPU-arch JSON in the exact shape TraceLens uses for roofline analysis (see [`Agent/Analysis/utils/arch/`](../../Agent/Analysis/utils/arch/) and [`examples/gpu_arch_example.md`](../../../examples/gpu_arch_example.md)).
+This suite measures a GPU's **performance baseline driven by benchmarks** — matrix (MFMA / tensor-core) TFLOPS across dtypes, vector (SIMD) TFLOPS, and HBM bandwidth — and writes it as a GPU-arch JSON in the exact shape TraceLens uses for roofline analysis (see [`Agent/Analysis/utils/arch/`](../../Agent/Analysis/utils/arch/) and [`examples/gpu_arch_example.md`](../../../examples/gpu_arch_example.md)).
 
 Run it once per platform to produce a `<platform>.json` arch file. Roofline-based analysis (including the [TraceLens Agent](../../Agent/Analysis/README.md)) compares each measured kernel against these values to estimate optimization headroom, so an accurate, hardware-specific baseline directly improves the quality of the analysis.
 
-> **These are Max-Achievable FLOPS (MAF), not theoretical peak.** Values reflect what the current software stack (PyTorch, ROCm/HIP, Triton, hipBLASLt, aiter/CK) can actually reach on an **idle** device.
+> **These are Benchmark driven achievable FLOPs, not theoretical peak.** Values reflect what the current software stack (PyTorch, ROCm/HIP, Triton, hipBLASLt, aiter/CK) can actually reach on an **idle** device.
 
 ## Contents
 
@@ -91,7 +91,7 @@ The output filename is used as the arch `name` heuristically (memory tier → `M
 }
 ```
 
-Drop this file into an arch directory the tooling searches (a `$TL_EXTENSION` package's `Agent/Analysis/utils/arch/`, or the bundled [`Agent/Analysis/utils/arch/`](../../Agent/Analysis/utils/arch/)) as `<platform>.json`, then pass `--gpu_arch_json_path <platform>.json` to the perf-report CLIs. See [`examples/gpu_arch_example.md`](../../../examples/gpu_arch_example.md) for the field reference.
+Drop this file into an arch directory (the bundled [`Agent/Analysis/utils/arch/`](../../Agent/Analysis/utils/arch/)) as `<platform>.json`, then pass `--gpu_arch_json_path <platform>.json` to the perf-report CLIs. See [`examples/gpu_arch_example.md`](../../../examples/gpu_arch_example.md) for the field reference.
 
 ## Validating against hardware counters (AMD)
 
