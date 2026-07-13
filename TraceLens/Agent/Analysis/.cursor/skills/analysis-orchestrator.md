@@ -93,9 +93,9 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
    - If **Inference (vLLM/SGLang)** is selected, ask **Execution Mode** → `<inference_exec_mode>`:
      1. **Eager mode** (`<inference_exec_mode>` = `eager`) — only the trace file is needed
      2. **Graph replay + capture** (`<inference_exec_mode>` = `graph_capture`) — also requires a capture folder path
-   - If **Graph replay + capture**, ask for **Capture Folder Path** → `<capture_folder_path>`:
+   - If **Graph replay + capture**, ask for **Capture Folder Path** → `<capture_folder_path_1>`:
      - Ask: "Please provide the full path to the graph capture traces folder"
-   - If **Graph replay + capture** and **comparative**, ask for **Trace2 Capture Folder Path** -> `<capture_folder_path_2>`
+   - If **Graph replay + capture** and **comparative**, ask for **Trace2 Capture Folder Path** → `<capture_folder_path_2>`
 
 5. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
@@ -178,21 +178,22 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 | `comparative` trace1 | `--output_xlsx_path <output_dir>/perf_report_trace1.xlsx --output_csvs_dir <output_dir>/perf_report_trace1_csvs` |
 | `comparative` trace2 | `--profile_json_path <trace2_path> --output_xlsx_path <output_dir>/perf_report_trace2.xlsx --output_csvs_dir <output_dir>/perf_report_trace2_csvs` |
 
-**`<suffix_2>`** — extension flags:
+**`<suffix_2>`** — comparison flags:
 
 | scope | value |
 |-------|-------|
 | `standalone` | none |
 | `comparative` trace1 | `--comparison_json_path <trace2_path>` |
+| `comparative` trace1 if `<capture_folder_path_2>` provided | `--comparison_json_path <trace2_path> --comparison_capture_folder <capture_folder_path_2>` |
 | `comparative` trace2 | none |
 
-**`<suffix_3>`** — extension flags:
+**`<suffix_3>`** — graph capture flags:
 
 | scope | value |
 |-------|-------|
-| `standalone` | none |
-| `comparative` trace1 if `<capture_folder_path_2>` provided | `--comparison_capture_folder <capture_folder_path_2>` |
-| `comparative` trace2 | none |
+| `standalone` if `<capture_folder_path_1>` provided | `--capture_folder <capture_folder_path_1>` |
+| `comparative` trace1 if `<capture_folder_path_1>` provided | `--capture_folder <capture_folder_path_1>` |
+| `comparative` trace2 if `<capture_folder_path_2>` provided | `--capture_folder <capture_folder_path_2>` |
 
 **`<suffix_ext>`** — user extension file:
 
@@ -237,7 +238,6 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch_inference \
   --profile_json_path <trace_path> \
-  --capture_folder <capture_folder_path> \
   --gpu_arch_json_path <platform_file> \
   --group_by_parent_module \
   --enable_pseudo_ops \
