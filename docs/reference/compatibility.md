@@ -25,6 +25,8 @@ accelerator.
 
 ## Software requirements
 
+TraceLens requires the following software.
+
 | Component | Requirement | Notes |
 |-----------|-------------|-------|
 | Python | 3.6 or later (3.10 recommended) | `python_requires>=3.6`; the 3.10 toolchain is used for documentation and CI builds. |
@@ -50,6 +52,8 @@ These are installed automatically with the package:
 | `traceconv` | Optional; required only for `.pftrace` input. Resolved from `PATH` or downloaded automatically if not provided with `--traceconv`. |
 
 ## Supported trace formats
+
+TraceLens supports the following trace formats.
 
 | Format | Producing tool | Validated |
 |--------|----------------|-----------|
@@ -87,7 +91,7 @@ stops rather than silently producing misleading results.
 The PyTorch report workflow works on any `torch.profiler` trace regardless of
 the GPU backend, and is well tested on both AMD ROCm and NVIDIA CUDA traces.
 
-## Related topics
+## See also
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Install TraceLens](../install/installation.md)

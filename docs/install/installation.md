@@ -16,7 +16,9 @@ the installation. TraceLens is distributed as a Python package; install it with
 `pip` either directly from the public GitHub repository (recommended) or from a
 local source checkout for development.
 
-## Prerequisites
+## Before you begin
+
+Confirm you have the following before installing TraceLens.
 
 - Python 3.6 or later (3.10 recommended). Confirm your version:
 
@@ -106,7 +108,7 @@ Run the following checks to confirm TraceLens is installed correctly:
    Expected output: an Excel report (`.xlsx`) is written next to the trace,
    containing the GPU-timeline and operator-summary sheets.
 
-## Related topics
+## See also
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Generate TraceLens reports](../how-to/generate-reports.md)

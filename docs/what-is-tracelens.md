@@ -70,7 +70,7 @@ TraceLens is suited to these scenarios:
 
 ## Supported profile formats
 
-TraceLens supports these trace formats:
+TraceLens supports the following trace formats:
 
 | Format | Source tool | Report CLI |
 |--------|-------------|------------|
@@ -96,7 +96,7 @@ Hands-on notebooks in the repository walk through the core features:
 | [`examples/roofline_plots_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/roofline_plots_example.ipynb) | Roofline-style visualizations for specific operators |
 | [`examples/jax_nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/jax_nccl_analyser_example.ipynb) | Bandwidth analysis for JAX collectives from XPlane traces |
 
-## Related topics
+## See also
 
 - [Install TraceLens](./install/installation.md)
 - [API reference](./reference/api-reference.md)

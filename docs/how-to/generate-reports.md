@@ -19,7 +19,7 @@ TraceLens generates structured performance reports from GPU trace files produced
 - [Generate a rocprof performance report](./generate-perf-report-rocprof.md)
 - [Generate a collective-communication report](./collective-report.md)
 
-## Related topics
+## See also
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Installation instructions](../install/installation.md)

@@ -22,6 +22,8 @@ automated GPU trace analysis, available as command-line tools and a Python SDK.
 
 ### Report generation
 
+This release includes the following report generators.
+
 - **PyTorch profiler reports** — `TraceLens_generate_perf_report_pytorch`
   builds a multi-sheet Excel report from a `torch.profiler` Chrome trace,
   including a GPU-timeline breakdown, operator-category and operator summaries,
@@ -50,6 +52,8 @@ automated GPU trace analysis, available as command-line tools and a Python SDK.
 
 ### Analysis features
 
+This release includes the following analysis features.
+
 - **Hierarchical GPU-timeline breakdown** — Splits GPU time into computation,
   communication, memory copy, and idle time, with optional micro-idle
   classification.
@@ -66,6 +70,8 @@ automated GPU trace analysis, available as command-line tools and a Python SDK.
 
 ### Multi-GPU and comparison
 
+This release includes the following multi-GPU and comparison tools.
+
 - **Collective communication analysis** —
   `TraceLens_generate_multi_rank_collective_report_pytorch` reports time spent
   in collectives across ranks, including aggregation metrics, intra- and inter-node
@@ -78,6 +84,8 @@ automated GPU trace analysis, available as command-line tools and a Python SDK.
   PyTorch report using `--comparison_json_path`).
 
 ### SDK modules
+
+This release ships the following Python SDK modules.
 
 - **Trace2Tree** — Build and navigate the hierarchical event tree.
 - **TreePerf** — GPU-timeline breakdown, per-op performance, and roofline
@@ -96,7 +104,7 @@ updated in this page and in the [Compatibility matrix](../reference/compatibilit
 with each new TraceLens release.
 ```
 
-## Related topics
+## See also
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Compatibility matrix](../reference/compatibility.md)

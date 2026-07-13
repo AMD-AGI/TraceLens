@@ -204,7 +204,7 @@ docstrings, build the documentation against the TraceLens source with a Sphinx
 autodoc/autosummary extension.
 ```
 
-## Related topics
+## See also
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Install TraceLens](../install/installation.md)

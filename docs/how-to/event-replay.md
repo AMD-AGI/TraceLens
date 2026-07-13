@@ -15,7 +15,7 @@ This topic shows how to isolate an operation from a trace into a minimal,
 self-contained replay — useful for focused debugging and for sharing IP-safe
 reproducers with kernel or framework developers.
 
-## Prerequisites
+## Before you begin
 
 - TraceLens installed (see [Install TraceLens](../install/installation.md)).
 - A PyTorch profiler trace containing the operation you want to isolate.
@@ -104,7 +104,7 @@ See the
 [`event_replayer_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/event_replayer_example.ipynb)
 notebook for end-to-end IR extraction and packaging.
 
-## Related topics
+## See also
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Install TraceLens](../install/installation.md)

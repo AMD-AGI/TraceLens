@@ -21,7 +21,7 @@ For training or single-run PyTorch traces, use
 [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 instead.
 
-## Prerequisites
+## Before you begin
 
 Before generating a report, confirm you have the following:
 
@@ -85,7 +85,7 @@ relevant to serving traces:
 
 Run the tool with `--help` for the complete, version-specific argument list.
 
-## Related topics
+## See also
 
 - [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 - [Generate TraceLens reports](./generate-reports.md)

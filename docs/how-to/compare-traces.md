@@ -28,7 +28,7 @@ the matching to be:
   hardware, libraries, or framework versions) or when you need finer-grained,
   programmatic analysis.
 
-## Prerequisites
+## Before you begin
 
 - TraceLens installed (see [Install TraceLens](../install/installation.md)).
 - Two generated reports (`.xlsx`), one per configuration. Generate them with
@@ -147,6 +147,8 @@ TraceDiff operates on PyTorch profiler JSON traces, which it builds into the
 
 ### Output files
 
+`print_tracediff_report_files()` writes the following files to disk.
+
 | File | Contents |
 |------|----------|
 | `merged_tree_output.txt` | Text visualization of the merged tree, showing matched and unmatched nodes. |
@@ -184,7 +186,7 @@ See the
 [`trace_diff_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace_diff_example.ipynb)
 notebook for a worked example.
 
-## Related topics
+## See also
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Install TraceLens](../install/installation.md)
