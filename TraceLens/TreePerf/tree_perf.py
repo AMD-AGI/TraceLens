@@ -431,7 +431,12 @@ class TreePerfAnalyzer:
             )
         )
 
-        gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
+        # A perf model may return None from flops()/bytes() when it cannot build
+        # a roofline for this event (e.g. an unparseable/insufficient annotation,
+        # such as SGLang decode attention with no per-request KV length). Treat
+        # that as "not modeled" (NaN) instead of dividing None by 1e9 and crashing.
+        raw_flops = perf_model.flops() if not bwd else perf_model.flops_bwd()
+        gflops = raw_flops / 1e9 if raw_flops is not None else float("nan")
 
         tflops_per_s = (
             (gflops / 1e3) / (busy_kernel_time / 1e6)

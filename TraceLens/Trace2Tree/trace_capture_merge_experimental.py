@@ -35,6 +35,13 @@ EXECUTE_CONTEXT_PATTERNS = (
     re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
 )
 
+# SGLang-style step annotations (e.g. ``step[DECODE bs=8]`` / ``step[EXTEND
+# bs=1 toks=937]``). Used ONLY as a fallback for execution-root detection when
+# no vLLM ``execute_context_*`` roots are present: SGLang step annotations only
+# appear when the proper TraceLens annotation patch was not applied, so the
+# vLLM path stays the default and its behavior is unchanged.
+STEP_ANNOTATION_PATTERN = re.compile(r"step\[")
+
 
 def get_subtree_events(tree, event, cat_filter=None, name_filter=None):
     list_events = []
@@ -339,13 +346,26 @@ def find_capture_roots(capture_tree):
 
 
 def find_execution_roots(graph_tree):
-    """Find execution root events matching ``execute_context_*`` in the graph tree."""
+    """Find execution root events in the graph tree.
+
+    Primary: vLLM-style ``execute_context_*`` user annotations. Fallback: when
+    none are found, SGLang-style ``step[...]`` user annotations (e.g.
+    ``step[DECODE bs=8]``). The fallback only triggers when the vLLM patterns
+    match nothing, so vLLM traces are unaffected.
+    """
     roots = [
         event
         for event in graph_tree.events
         if any(p.match(event.get("name", "")) for p in EXECUTE_CONTEXT_PATTERNS)
         and event.get("cat") == "user_annotation"
     ]
+    if not roots:
+        roots = [
+            event
+            for event in graph_tree.events
+            if event.get("cat") == "user_annotation"
+            and STEP_ANNOTATION_PATTERN.match(event.get("name", ""))
+        ]
     roots.sort(key=lambda x: x.get("ts", 0))
     return roots
 
@@ -457,6 +477,10 @@ def find_execution_details(execution_root):
     if name.startswith("execute_context_"):
         paren_values = re.findall(r"\((\d+)\)", name)
         return str(sum(int(v) for v in paren_values))
+    # SGLang step annotation fallback, e.g. "step[DECODE bs=8]" -> "8".
+    step_bs = re.search(r"bs=(\d+)", name)
+    if step_bs:
+        return step_bs.group(1)
     return name.split("_")[1]
 
 

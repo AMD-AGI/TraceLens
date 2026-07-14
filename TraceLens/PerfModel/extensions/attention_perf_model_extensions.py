@@ -103,6 +103,69 @@ class InferenceAttention:
                 "VLLM attention without annotation is not supported"
             )
 
+        # SGLang profiler step annotations, e.g. "step[EXTEND bs=1 toks=937]"
+        # (chunked prefill / extend) or "step[DECODE bs=8]" (decode). These carry
+        # per-step batch (bs) and, for EXTEND, the total prompt tokens (toks), but
+        # NOT the vLLM-style per-request sq/sk aggregates. Reconstruct the
+        # ``c_*``/``g_*`` aggregates the roofline consumes:
+        #   EXTEND: prefill-from-scratch causal self-attention. Assume ``bs``
+        #     equal-length requests summing to ``toks`` tokens (sk == sq per
+        #     request), so c_sq = c_sk = toks and the causal products are
+        #     Σ sq_i^2 = Σ sq_i·sk_i = toks^2 / bs.
+        #   DECODE: each of the ``bs`` requests contributes one query token
+        #     (g_sq = bs), but the per-request KV/context length (g_sk, g_sqsk)
+        #     is absent from both the annotation and the captured cuda-graph
+        #     kernel inputs -- it lives only in kv_indptr *values*, which the
+        #     trace does not record. Return the batch-derived stats and flag the
+        #     KV-dependent aggregates unknown (``_kv_unknown``) so the caller
+        #     reports real shapes/dims (and Q-side bytes) while leaving FLOPs --
+        #     and the cached-KV byte term -- as N/A. We deliberately do NOT infer
+        #     the KV length from incidental shapes (e.g. the paged-cache pool): a
+        #     wrong g_sqsk would silently corrupt correlation, which is worse than
+        #     an honest N/A. Full completion needs a real context length (the
+        #     proper SGLang annotation patch, or an external/config-provided KV
+        #     length).
+        sglang_step = re.match(
+            r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]", annotation
+        )
+        if sglang_step:
+            kind = sglang_step.group(1)
+            bs = int(sglang_step.group(2))
+            toks = int(sglang_step.group(3) or 0)
+            if kind == "DECODE" or (kind != "EXTEND" and kind != "MIXED"):
+                if bs <= 0:
+                    raise NotImplementedError(
+                        "SGLang decode annotation without batch size is not "
+                        "supported"
+                    )
+                return {
+                    "c_sq": 0,
+                    "c_sk": 0,
+                    "c_sqsq": 0,
+                    "c_sqsk": 0,
+                    "g_sq": bs,
+                    "g_sk": 0,
+                    "g_sqsq": 0,
+                    "g_sqsk": 0,
+                    "_kv_unknown": True,
+                }
+            # EXTEND / MIXED -> prefill.
+            if toks <= 0 or bs <= 0:
+                raise NotImplementedError(
+                    "SGLang EXTEND annotation without token count is not supported"
+                )
+            causal_prod = (toks * toks) / bs
+            return {
+                "c_sq": toks,
+                "c_sk": toks,
+                "c_sqsq": causal_prod,
+                "c_sqsk": causal_prod,
+                "g_sq": 0,
+                "g_sk": 0,
+                "g_sqsq": 0,
+                "g_sqsk": 0,
+            }
+
         if "sq" not in annotation:
             requests = annotation.replace("(", "_").replace(")", "_").split("_")
             if len(requests) < 8:
@@ -170,7 +233,16 @@ class InferenceAttention:
                 if propagated_kv
                 else (input_types[1] if len(input_types) > 1 else dtype_Q)
             )
-            return {
+            # SGLang decode: KV length is unknown (see _parse_chunk_stats). Keep
+            # the real shapes but null the KV-dependent outputs: set g_sk = g_sq
+            # so the cached-KV byte term (g_sk - g_sq) vanishes (Q-side bytes are
+            # still reported), and flag _no_flops so flops() returns N/A instead
+            # of a bogus 0. This is distinct from _no_perf, which zeros shapes and
+            # disables bytes too.
+            kv_unknown = bool(stats.get("_kv_unknown"))
+            if kv_unknown:
+                g_sk = g_sq
+            params = {
                 "B": 1,
                 "N_Q": N_Q,
                 "H_Q": H_Q,
@@ -194,6 +266,12 @@ class InferenceAttention:
                 "dtype_Q": dtype_Q,
                 "dtype_KV": dtype_KV,
             }
+            # Only surface the KV-unknown markers for the SGLang-decode partial
+            # path; the common path stays byte-identical to before (no extra keys).
+            if kv_unknown:
+                params["_no_flops"] = True
+                params["_kv_unknown"] = True
+            return params
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return InferenceAttention.no_perf_param_details()
 
@@ -300,7 +378,10 @@ class InferenceAttention:
         return value
 
     def flops(self):
-        if self.param_details.get("_no_perf"):
+        if self.param_details.get("_no_perf") or self.param_details.get("_no_flops"):
+            # _no_flops: shapes are known but a KV-dependent term is not (e.g.
+            # SGLang decode with no per-request KV length) -> report FLOPs as N/A
+            # rather than fabricating a number.
             return None
         if self.param_details["c_sq"] == 0 and self.param_details["g_sq"] == 0:
             raise NotImplementedError(
