@@ -196,7 +196,7 @@ def _build_measured_arch_json(
         "mem_bw_gbps": int(round(float(read_bw_gbps))),
         "memory_gb": int(round(mem_gb)),
         "max_achievable_tflops": maf,
-        "source": "These are benchmark derived peak flops",
+        "source": "These are benchmark derived peak flops and bw",
     }
 
 

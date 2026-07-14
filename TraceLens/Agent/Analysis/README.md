@@ -65,7 +65,7 @@ The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json
 
 ### 3. Establish a hardware performance baseline
 
-Roofline analysis compares each measured kernel against your GPU's max-achievable TFLOPS and HBM bandwidth, so the analysis needs a `<platform>.json` arch file for your hardware. Bundled arch files live in [`utils/arch/`](utils/arch/); if your platform is not already there (or you want stack-specific measured values instead of published specs), generate one with the GPU microbenchmarking suite. It measures matrix/vector TFLOPS and HBM bandwidth and writes the arch JSON in the exact shape the roofline expects. See the [Benchmarking README](../../PerfModel/benchmarking/README.md).
+Roofline analysis compares each measured kernel against your GPU's max-achievable TFLOPS and HBM bandwidth, so the analysis needs a `<platform>.json` arch file for your hardware. Bundled arch files live in [`utils/arch/`](utils/arch/); if your platform is not already there (or you want stack-specific measured values instead of published specs), generate benchmark-derived peak TFLOPS and HBM with the GPU microbenchmarking suite. It measures matrix/vector TFLOPS and HBM bandwidth and writes the arch JSON in the exact shape the roofline expects. See the [Benchmarking README](../../PerfModel/benchmarking/README.md).
 
 ---
 
