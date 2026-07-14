@@ -170,7 +170,7 @@ TraceLens_generate_multi_rank_collective_report_pytorch \
     --use_multiprocessing
 ```
 
-## Continue learning
+## Related topics
 
 - For SDK-level collective analysis, see the
   [`nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/nccl_analyser_example.ipynb)

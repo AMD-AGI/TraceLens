@@ -94,7 +94,7 @@ Options:
 - `--output_filename NAME` — base name for the output files (default
   `trace_analysis_results`).
 
-## Continue learning
+## Related topics
 
 - Quantify the effect of a change by [comparing two traces](./compare-traces.md).
 - Analyze multi-GPU collectives with a

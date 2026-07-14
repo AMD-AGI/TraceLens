@@ -125,7 +125,7 @@ them so they render correctly together:
   `External id`) and the `ac2g` flow `id`s per rank, so CPU→GPU launch arrows
   stay correct.
 
-## Continue learning
+## Related topics
 
 - For quantitative collective analysis instead of visualization, see
   [Generate a collective-communication report](./collective-report.md).

@@ -134,7 +134,7 @@ Each pftrace generator can also be imported and called with a trace path,
 returning a dictionary of pandas DataFrames (for example `api_kernel_summary`,
 `category_summary`, `kernel_summary`, `hip_summary`).
 
-## Continue learning
+## Related topics
 
 - Quantify the effect of a change by [comparing two traces](./compare-traces.md).
 - Analyze multi-GPU collectives with a

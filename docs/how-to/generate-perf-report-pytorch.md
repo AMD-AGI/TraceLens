@@ -203,7 +203,7 @@ The following table describes all optional arguments.
 | `--topk_short_kernels N` | `None` | Cap rows in the short-kernel table. |
 | `--topk_roofline_ops N` | `None` | Cap rows in the roofline sheets. |
 
-## Continue learning
+## Related topics
 
 - Quantify the effect of a change by [comparing two traces](./compare-traces.md).
 - Analyze multi-GPU collectives with a
