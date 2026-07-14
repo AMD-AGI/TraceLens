@@ -20,6 +20,11 @@ local source checkout for development.
 
 Confirm you have the following before installing TraceLens.
 
+- **No GPU required to run TraceLens.** TraceLens analyzes trace files on any
+  host; it does not execute GPU kernels. GPU hardware and ROCm are only required
+  by the profiling tools that *produce* the traces (for example, `rocprofv3`).
+  See the [compatibility matrix](../reference/compatibility.md) for details.
+
 - Python 3.6 or later (3.10 recommended). Confirm your version:
 
   ```bash

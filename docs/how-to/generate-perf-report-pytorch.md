@@ -21,6 +21,12 @@ Before generating a report, confirm you have the following:
 - TraceLens installed (see [Install TraceLens](../install/installation.md)).
 - A `torch.profiler` Chrome trace (`.json` or `.json.gz`).
 
+```{note}
+If you don't have a trace yet, see the
+[PyTorch profiling guide](https://github.com/AMD-AGI/TraceLens/blob/main/docs_original/conceptual/torch_profiling_guide.ipynb)
+for instructions on capturing one with `torch.profiler`.
+```
+
 ## Generate the report
 
 Pass the trace path to generate the default Excel report:
