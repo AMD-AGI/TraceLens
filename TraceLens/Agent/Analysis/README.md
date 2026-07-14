@@ -63,6 +63,10 @@ The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json
 - **Training and eager inference traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of training/inference steps, post-warmup) and dump the trace via `prof.export_chrome_trace(...)`. A single rank's trace is sufficient for per-rank analysis.
 - **vLLM / SGLang inference traces**: Trace collection has framework-, version-, and execution-mode-specific requirements (custom Docker images or framework patches to add roofline annotations, profiler-config flags for graph-capture profiling, steady-state window selection, optional trace splitting). Follow the canonical guide in [Inference Analysis](../../../docs/Inference_analysis.md). For graph-mode workloads you will produce **two artifacts**: a graph-replay trace and a graph-capture folder; TraceLens (in inference mode with execution mode `graph replay + capture`) merges call-stack and shape information from the capture folder into the replay tree before analysis.
 
+### 3. Establish a hardware performance baseline
+
+Roofline analysis compares each measured kernel against your GPU's max-achievable TFLOPS and HBM bandwidth, so the analysis needs a `<platform>.json` arch file for your hardware. Bundled arch files live in [`utils/arch/`](utils/arch/); if your platform is not already there (or you want stack-specific measured values instead of published specs), generate benchmark-derived peak TFLOPS and HBM with the GPU microbenchmarking suite. It measures matrix/vector TFLOPS and HBM bandwidth and writes the arch JSON in the exact shape the roofline expects. See the [Benchmarking README](../../PerfModel/benchmarking/README.md).
+
 ---
 
 ## Quick Start - How to Use
