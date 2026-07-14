@@ -29,11 +29,17 @@ _KERNEL_LAUNCH_EQUIVALENTS = {
 }
 
 
-def _normalize_name_for_comparison(name):
+def _normalize_name_for_comparison(name, strip_details=False):
     if name is None:
         return name
     normalized = re.sub(r"0x[0-9a-fA-F]+", "0xXXXX", name)
     normalized = re.sub(r"\.py\(\d+\):", ".py:", normalized)
+    if strip_details:
+        # Strip function name and directory path from python_function-style event names.
+        # After line-number stripping, names look like "/path/to/file.py: func_name".
+        # Remove everything from ": " onward, then strip leading directory components.
+        normalized = re.sub(r":\s+\S+$", "", normalized)
+        normalized = re.sub(r"^.*/([^/]+\.py)$", r"\1", normalized)
     return _KERNEL_LAUNCH_EQUIVALENTS.get(normalized, normalized)
 
 
@@ -326,24 +332,6 @@ class TraceDiff:
                 pass
         return cat in ("kernel", "gpu_memcpy")
 
-    @staticmethod
-    def _normalize_name_for_comparison(name):
-        """
-        Normalize node names by removing variable parts (hex memory addresses and line numbers)
-        to enable comparison of functionally identical nodes across traces.
-
-        Removes:
-        - Hex memory addresses: 0x7fe640752310 -> 0xXXXX
-        - Line numbers in Python stack: path/file.py(715): func -> path/file.py: func
-
-        Args:
-            name: The name string to normalize
-
-        Returns:
-            The normalized name, or the original name if it's None
-        """
-        return _normalize_name_for_comparison(name)
-
     def _get_op_name(self, uid, tree_num):
         """
         Unified method to get operation name from UID.
@@ -473,7 +461,7 @@ class TraceDiff:
                 return current.get(TraceLens.util.TraceEventUtils.TraceKeys.UID)
             current = tree.get_UID2event(parent_uid)
 
-    def wagner_fischer(self, items1, items2, wf_cache):
+    def wagner_fischer(self, items1, items2, wf_cache, strip_details=False):
         """
         Wagner-Fischer algorithm that works with any items and name lookup functions.
 
@@ -481,17 +469,19 @@ class TraceDiff:
             items1: List of items
             items2: List of items
             wf_cache: Dictionary for caching results
+            strip_details: Passed to _normalize_name_for_comparison to enable
+                aggressive matching that ignores function names in python_function events.
 
         Returns:
             List of operations: [("match", i, j), ("delete", i, None), ("insert", None, j), ...]
         """
         # Pre-compute names for cache key
         names1 = [
-            self._normalize_name_for_comparison(self._get_op_name(item, 1))
+            _normalize_name_for_comparison(self._get_op_name(item, 1), strip_details)
             for item in items1
         ]
         names2 = [
-            self._normalize_name_for_comparison(self._get_op_name(item, 2))
+            _normalize_name_for_comparison(self._get_op_name(item, 2), strip_details)
             for item in items2
         ]
 
@@ -555,8 +545,8 @@ class TraceDiff:
         variant_uid2node = self._get_variant_uid2node()
         wf_cache = {}
 
-        def aligned_wf(items1, items2):
-            ops = self.wagner_fischer(items1, items2, wf_cache)
+        def aligned_wf(items1, items2, strip_details=False):
+            ops = self.wagner_fischer(items1, items2, wf_cache, strip_details)
             return _disambiguate_same_name_candidates(
                 ops, items1, items2, baseline_uid2node, variant_uid2node
             )
@@ -600,7 +590,7 @@ class TraceDiff:
 
         def get_name_uid(uid, tree_num):
             name = self._get_op_name(uid, tree_num)
-            return self._normalize_name_for_comparison(name) if name else None
+            return _normalize_name_for_comparison(name) if name else None
 
         def get_children_with_missing(uid1, uid2):
             """Get aligned children lists, adding missing-by-name from full child list."""
@@ -936,7 +926,7 @@ class TraceDiff:
                     collapse_single_gpu_child(children2[j], variant_uid2node, tree2)[0]
                     for j in unmatched_idx2
                 ]
-                collapsed_ops = aligned_wf(collapsed1, collapsed2)
+                collapsed_ops = aligned_wf(collapsed1, collapsed2, strip_details=True)
                 new_ops = [(op, i, j) for op, i, j in ops if op == "match"]
                 for cop, ci, cj in collapsed_ops:
                     if cop == "match":
