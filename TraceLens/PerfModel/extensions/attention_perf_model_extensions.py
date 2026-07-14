@@ -9,6 +9,7 @@ Performance models for pseudo-op extensions.
 """
 
 from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
+import math
 import re
 
 
@@ -351,6 +352,220 @@ class InferenceAttention:
 
     def get_maf_type(self):
         return "matrix"
+
+
+class _V4PagedDecodeBase(InferenceAttention):
+    """Base perf model for the DeepSeek-V4 sparse paged-decode pseudo ops.
+
+    Decode-only kernel: context aggregates (``c_*``) are zeroed so only the
+    generation (``g_*``) terms remain, and KV cache is modeled as bf16. Per-mode KV span (``sliding_window``) is set by ``MODE``:
+    ``swa`` = window, ``csa`` = window + min(ctx / CSA stride, index_topk)
+    compressed slots, ``hca`` = window + hierarchical-compressed history.
+    """
+
+    MODE = "swa"
+
+    CSA_COMPRESS_STRIDE = 4
+    HCA_COMPRESS_STRIDE = 128
+
+    # Hardcoded per-variant scalars not recoverable from a single decode op:
+    #   index_topk = sparse indexer budget, window = sliding-window size,
+    #   n_heads = global query-head count (H_Q fallback = n_heads // tp),
+    #   d_h = head dim fallback.
+    _CONFIGS = {
+        "DeepSeek-V4-Pro": {
+            "index_topk": 1024,
+            "window": 128,
+            "n_heads": 128,
+            "d_h": 512,
+        },
+        "DeepSeek-V4-Flash": {
+            "index_topk": 512,
+            "window": 128,
+            "n_heads": 64,
+            "d_h": 512,
+        },
+    }
+
+    @classmethod
+    def _config_for(cls, model_name):
+        """Config for a DeepSeek-V4 variant (substring match, Flash fallback)."""
+        if model_name:
+            for key, cfg in cls._CONFIGS.items():
+                if key.lower() in str(model_name).lower():
+                    return cfg
+        return cls._CONFIGS["DeepSeek-V4-Flash"]
+
+    @classmethod
+    def get_param_details(cls, event):
+        try:
+            args = event.get("args") or {}
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+
+            # Decode-only kernel: drop any context (prefill) aggregates
+            stats["c_sq"] = stats["c_sk"] = stats["c_sqsq"] = stats["c_sqsk"] = 0
+
+            model_name = args.get("v4_model_name")
+            cfg = cls._config_for(model_name)
+
+            H_Q = args.get("v4_H_Q")
+            if not H_Q:
+                tp = args.get("v4_tp") or 1
+                H_Q = max(1, cfg["n_heads"] // int(tp))
+            d_h = args.get("v4_d_h") or cfg["d_h"]
+            H_Q = int(H_Q)
+            d_h = int(d_h)
+
+            N_Q = stats["g_sq"]
+            dims = args.get("Input Dims") or []
+            if dims and dims[0] and len(dims[0]) >= 1:
+                N_Q = dims[0][0] or N_Q
+
+            window = int(args.get("v4_window") or cfg["window"])
+            index_topk = int(args.get("v4_index_topk") or cfg["index_topk"])
+            sliding_window = cls._sliding_window(stats, window, index_topk)
+
+            return {
+                "B": 1,
+                "N_Q": N_Q,
+                "H_Q": H_Q,
+                "H_V": 1,
+                "H_K": 1,
+                "N_KV": stats["g_sk"],
+                "H_KV": 1,  # single MLA-absorbed latent KV head
+                "d_h_qk": d_h,
+                "d_h_v": d_h,
+                "dropout": 0.0,
+                "causal": False,
+                "flash_impl": True,
+                **stats,
+                "dtype_Q": "c10::bfloat16",
+                "dtype_KV": "c10::bfloat16",  # V4 KV cache modeled as bf16
+                "sliding_window": sliding_window,
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return InferenceAttention.no_perf_param_details()
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return torch_dtype_map("c10::bfloat16")
+
+    @classmethod
+    def _sliding_window(cls, stats, window, index_topk):
+        """Per-mode cap on the KV span each decode query attends to."""
+        if cls.MODE == "csa":
+            # CSA attends window + min(ceil(ctx / stride), index_topk) compressed slots per query.
+            g_sq = stats.get("g_sq") or 0
+            g_sk = stats.get("g_sk") or 0
+            if g_sq <= 0:
+                return window + index_topk  # saturated fallback (no annotation)
+            mean_ctx = g_sk / g_sq
+            n_committed = math.ceil(mean_ctx / cls.CSA_COMPRESS_STRIDE)
+            return int(window + min(n_committed, index_topk))
+        if cls.MODE == "hca":
+            g_sq = stats.get("g_sq") or 0
+            g_sk = stats.get("g_sk") or 0
+            if g_sq <= 0:
+                return 0  # uncapped / dense fallback when annotation missing
+            mean_ctx = g_sk / g_sq
+            return int(window + math.ceil(mean_ctx / cls.HCA_COMPRESS_STRIDE))
+        return window  # swa (dense sliding window)
+
+
+class pseudo_v4_paged_decode_swa(_V4PagedDecodeBase):
+    """DeepSeek-V4 dense / sliding-window sparse paged decode."""
+
+    MODE = "swa"
+
+
+class pseudo_v4_paged_decode_csa(_V4PagedDecodeBase):
+    """DeepSeek-V4 compressed sparse attention (CSA) paged decode."""
+
+    MODE = "csa"
+
+
+class pseudo_v4_paged_decode_hca(_V4PagedDecodeBase):
+    """DeepSeek-V4 hierarchical compressed attention (HCA) paged decode."""
+
+    MODE = "hca"
+
+
+class pa_sparse_prefill_opus_fwd(InferenceAttention):
+    """Perf model for ``aiter::pa_sparse_prefill_opus_fwd`` (DeepSeek-V4 sparse
+    prefill main attention).
+
+        Input Dims[0] = Q                 (N_Q, H_Q, d_h)
+        Input Dims[2] = kv_indices_prefix (P_prefix,)   selected history slots
+        Input Dims[5] = kv_indices_extend (P_extend,)   in-chunk local-window slots
+
+    ``pairs = P_prefix + P_extend`` is the exact number of (query-token, KV-slot)
+    pairs the kernel attends
+
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            dims = event["args"]["Input Dims"]
+            types = event["args"]["Input type"]
+            q_shape = dims[0]
+            N_Q, H_Q, d_h = q_shape[0], q_shape[1], q_shape[2]
+            pairs = int(dims[2][0]) + int(dims[5][0])
+            dtype_Q = types[0]
+            dtype_KV = types[1] if len(types) > 1 else dtype_Q
+            return {
+                "B": 1,
+                "N_Q": N_Q,
+                "H_Q": H_Q,
+                "H_V": 1,
+                "H_K": 1,
+                "N_KV": pairs,
+                "H_KV": 1,  # single MLA-absorbed latent KV head
+                "d_h_qk": d_h,
+                "d_h_v": d_h,
+                "dropout": 0.0,
+                "causal": False,
+                "flash_impl": True,
+                "prefill_pairs": pairs,
+                "dtype_Q": dtype_Q,
+                "dtype_KV": dtype_KV,
+            }
+        except (ValueError, IndexError, KeyError, TypeError):
+            return InferenceAttention.no_perf_param_details()
+
+    def flops(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        pairs = self.param_details["prefill_pairs"]
+        # per pair, per head: QK (2*d_h_qk) + PV (2*d_h_v)
+        return pairs * self.H_Q * 2 * (self.d_h_qk + self.d_h_v)
+
+    def bytes(self, bytes_per_element=None):
+        if self.param_details.get("_no_perf"):
+            return None
+        bpe = bytes_per_element
+        if bpe is None:
+            bpe = name2bpe(self.param_details.get("dtype_Q")) or 2
+        dtype_kv = self.param_details.get("dtype_KV")
+        bpe_kv = (name2bpe(dtype_kv) if dtype_kv else None) or bpe
+        pairs = self.param_details["prefill_pairs"]
+        qo_bytes = 2 * self.N_Q * self.H_Q * self.d_h_qk * bpe
+        kv_bytes = pairs * self.d_h_v * bpe_kv
+        return qo_bytes + kv_bytes
+
+    def get_compute_precision(self):
+        """Compute precision: BF16 (bf16 MFMA), taken from the Q dtype.
+
+        DeepSeek-V4 sparse prefill runs bf16 MFMA (validated against
+        ``SQ_INSTS_VALU_MFMA_MOPS_BF16`` counters). Falls back to bf16 if the
+        Q dtype is missing from the trace.
+        """
+        if self.param_details.get("_no_perf"):
+            return None
+        dtype = self.param_details.get("dtype_Q")
+        return torch_dtype_map(dtype) if dtype else torch_dtype_map("c10::bfloat16")
 
 
 class vllm_unified_attention_with_output(InferenceAttention):
