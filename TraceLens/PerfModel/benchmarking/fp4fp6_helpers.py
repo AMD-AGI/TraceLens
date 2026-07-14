@@ -33,6 +33,16 @@ except Exception:  # pragma: no cover
 MX_BLOCK = 32
 
 
+def mx_available() -> bool:
+    """True if any block-scaled MX GEMM path is usable.
+    Covers the Triton ``tl.dot_scaled`` MXFP4/MXFP6 path as well as aiter's
+    gfx950 CK ``gemm_a4w4`` MXFP4 path
+    """
+    if triton_available() and (_MXFP4_SUPPORTED or bool(_MXFP6_DTYPE)):
+        return True
+    return _aiter_mxfp4_ready()
+
+
 def triton_available() -> bool:
     return triton is not None and tl is not None
 
