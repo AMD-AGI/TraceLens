@@ -4,9 +4,7 @@ Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
-# TraceLens Agent: Trace Analysis
-
-> **⚠️ Experimental**: This feature is under active development and may change.
+# TraceLens Agent
 
 The TraceLens Agent is an agentic performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. The system supports automated analysis of training and inference traces supported by TraceLens. Skills have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability. The output is a single stakeholder-facing report (`analysis.md`) organized as a prioritized bottleneck list. Findings are ranked and grouped into three tiers (Compute Kernel Optimizations, Kernel Fusion Opportunities, and System-Level Optimizations), and each finding carries the supporting evidence, the reasoning behind the call-out and a possible concrete resolution.
 
@@ -63,7 +61,7 @@ pip install -e .
 The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json.gz`). Collection is workload-specific:
 
 - **Training and eager inference traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of training/inference steps, post-warmup) and dump the trace via `prof.export_chrome_trace(...)`. A single rank's trace is sufficient for per-rank analysis.
-- **vLLM / SGLang inference traces**: Trace collection has framework-, version-, and execution-mode-specific requirements (custom Docker images or framework patches to add roofline annotations, profiler-config flags for graph-capture profiling, steady-state window selection, optional trace splitting). Follow the canonical guide in [Inference Analysis](../../../docs/Inference_analysis.md). For graph-mode workloads you will produce **two artifacts**: a graph-replay trace and a graph-capture folder; TraceLens (in inference mode with execution mode `graph replay + capture`) merges call-stack and shape information from the capture folder into the replay tree before analysis.
+- **vLLM / SGLang inference traces**: Trace collection has framework-, version-, and execution-mode-specific requirements (custom Docker images or framework patches to add roofline annotations, profiler-config flags for graph-capture profiling, steady-state window selection, optional trace splitting). Follow the canonical guide in [Inference Analysis](../../../docs_original/Inference_analysis.md). For graph-mode workloads you will produce **two artifacts**: a graph-replay trace and a graph-capture folder; TraceLens (in inference mode with execution mode `graph replay + capture`) merges call-stack and shape information from the capture folder into the replay tree before analysis.
 
 ---
 
