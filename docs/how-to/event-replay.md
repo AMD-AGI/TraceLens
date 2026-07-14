@@ -39,9 +39,10 @@ original run.
 Generate a PyTorch report (see
 [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)) and use the
 `ops_unique_args` sheet to find the operation and input shape you want to
-isolate, noting its UID. The UID is a unique integer identifier assigned by
-TraceLens to each event; it appears in the `UID` column of the
-`ops_unique_args` sheet.
+isolate, noting its UID. The UID is a unique integer identifier TraceLens
+assigns to each event. In the `ops_unique_args` sheet, each row aggregates a
+unique (operation, arguments) group, and a representative UID for the group
+appears in the `ex_UID` column.
 
 ## Step 2: Replay a single event (SDK)
 
