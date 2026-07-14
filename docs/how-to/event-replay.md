@@ -115,7 +115,7 @@ must be run from that location.
 Each replayed op prints its reconstructed arguments, average time, and result
 tensor, followed by a summary of attempted, successful, and failed replays.
 
-## See also
+## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Install TraceLens](../install/installation.md)

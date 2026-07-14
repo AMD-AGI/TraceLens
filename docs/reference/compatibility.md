@@ -91,7 +91,7 @@ stops rather than silently producing misleading results.
 The PyTorch report workflow works on any `torch.profiler` trace regardless of
 the GPU backend, and is well tested on both AMD ROCm and NVIDIA CUDA traces.
 
-## See also
+## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Install TraceLens](../install/installation.md)

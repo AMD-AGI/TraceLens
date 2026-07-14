@@ -108,7 +108,7 @@ Hands-on notebooks in the repository walk through the core features:
 | [`examples/roofline_plots_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/roofline_plots_example.ipynb) | Roofline-style visualizations for specific operators |
 | [`examples/jax_nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/jax_nccl_analyser_example.ipynb) | Bandwidth analysis for JAX collectives from XPlane traces |
 
-## See also
+## Related topics
 
 - [Install TraceLens](./install/installation.md)
 - [API reference](./reference/api-reference.md)

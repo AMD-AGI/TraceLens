@@ -85,7 +85,7 @@ relevant to serving traces:
 
 Run the tool with `--help` for the complete, version-specific argument list.
 
-## See also
+## Related topics
 
 - [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 - [Generate TraceLens reports](./generate-reports.md)

@@ -186,7 +186,7 @@ See the
 [`trace_diff_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace_diff_example.ipynb)
 notebook for a worked example.
 
-## See also
+## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Install TraceLens](../install/installation.md)

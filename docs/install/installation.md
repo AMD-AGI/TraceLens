@@ -113,7 +113,7 @@ Run the following checks to confirm TraceLens is installed correctly:
    Expected output: an Excel report (`.xlsx`) is written next to the trace,
    containing the GPU-timeline and operator-summary sheets.
 
-## See also
+## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Generate TraceLens reports](../how-to/generate-reports.md)

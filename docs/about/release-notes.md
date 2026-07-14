@@ -104,7 +104,7 @@ updated in this page and in the [Compatibility matrix](../reference/compatibilit
 with each new TraceLens release.
 ```
 
-## See also
+## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Compatibility matrix](../reference/compatibility.md)
