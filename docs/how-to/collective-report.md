@@ -15,7 +15,7 @@ This topic shows how to analyze multi-GPU collective operations across ranks to
 diagnose scaling issues, separating true communication time from
 synchronization skew.
 
-## Prerequisites
+## Before you begin
 
 - TraceLens installed (see [Install TraceLens](../install/installation.md)).
 - Per-rank PyTorch profiler traces from a distributed run (one trace per rank).
@@ -143,6 +143,8 @@ compute or memory work delays the straggler before each collective.
 
 ## Command-line options
 
+The following table describes all available options.
+
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--trace_dir` / `--trace_pattern` / `--trace_glob` | — | Mutually exclusive ways to locate the per-rank traces (directory, `*`-pattern, or glob). Exactly one is required. |
@@ -168,7 +170,7 @@ TraceLens_generate_multi_rank_collective_report_pytorch \
     --use_multiprocessing
 ```
 
-## Next steps
+## Related topics
 
 - For SDK-level collective analysis, see the
   [`nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/nccl_analyser_example.ipynb)

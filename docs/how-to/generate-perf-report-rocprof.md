@@ -14,7 +14,7 @@ See LICENSE for license information.
 Build a performance report from AMD ROCm rocprofiler-sdk traces. TraceLens
 supports both `rocprofv3` JSON results and Perfetto-style `.pftrace` files.
 
-## Prerequisites
+## Before you begin
 
 - TraceLens installed (see [Install TraceLens](../install/installation.md)).
 - A `rocprofv3` trace — either a `*_results.json` file or a `.pftrace` file.
@@ -134,7 +134,7 @@ Each pftrace generator can also be imported and called with a trace path,
 returning a dictionary of pandas DataFrames (for example `api_kernel_summary`,
 `category_summary`, `kernel_summary`, `hip_summary`).
 
-## Next steps
+## Related topics
 
 - Quantify the effect of a change by [comparing two traces](./compare-traces.md).
 - Analyze multi-GPU collectives with a
