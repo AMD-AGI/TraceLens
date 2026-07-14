@@ -82,8 +82,7 @@ def _check_amd_gpu_idle(
         )
         if util > util_threshold or mem_busy:
             return False, (
-                f"amdsmi {dev_tag}: util={util}% mem={mem_used_mib}MiB "
-                f"({mem_str})"
+                f"amdsmi {dev_tag}: util={util}% mem={mem_used_mib}MiB " f"({mem_str})"
             )
         return True, (
             f"amdsmi {dev_tag}: idle (util={util}% mem={mem_used_mib}MiB {mem_str})"
