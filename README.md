@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # TraceLens
 
 TraceLens is a Python library for **automated performance analysis of training and inference workloads** from trace files. Built with simplicity and extensibility in mind, it turns raw profiler traces into actionable insights for debugging and optimizing complex, distributed workloads.
