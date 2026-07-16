@@ -26,31 +26,27 @@ TraceLens is a Python library for **automated performance analysis of training a
 pip install git+https://github.com/AMD-AGI/TraceLens.git
 ```
 
-### 2. Collect a trace
+### 2. Collect Traces
 
-TraceLens analyses a profiler trace (`.json` or `.json.gz`). 
-
+TraceLens analyses profiler traces from PyTorch, JAX, and AMD rocprofv3; see [Supported Profile Formats](#supported-profile-formats) for the full list. The instructions below cover collecting a PyTorch trace:
 - **Training and eager inference**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling guide](docs_original/conceptual/torch_profiling_guide.ipynb) walks through this end to end.
 - **vLLM / SGLang inference**: Collection has framework-, version-, and execution-mode-specific requirements (custom images, profiler-config flags, steady-state window selection). Follow the canonical guide in [Inference Analysis](docs_original/Inference_analysis.md). The [Profiling skill](TraceLens/Agent/Profiling/README.md) automates vLLM/SGLang benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces.
 
 To evaluate TraceLens without collecting your own trace, use the [demo traces](tests/traces) bundled in the repository.
 
-### 3. Generate a report from your PyTorch trace
+### 3. Analye your Workload:
+
+### Building with TraceLens
+
+Generate a performance analysis report from a eager execution PyTorch trace with a single command:
 
 ```bash
 TraceLens_generate_perf_report_pytorch --profile_json_path path/to/your/trace.json
 ```
 
-This produces an Excel workbook with GPU timeline breakdown, ops summary, roofline metrics, and more.
-See [Performance Report Column Definitions](docs_original/perf_report_columns.md) for what each column means.
+This produces an Excel workbook with GPU timeline breakdown, ops summary, roofline metrics, and more; see [Performance Report Column Definitions](docs_original/perf_report_columns.md) for what each column means. For other input formats, see [Supported Profile Formats](#supported-profile-formats).
 
-For the full list of supported inputs and their per-format docs, see [Supported Profile Formats](#supported-profile-formats) below.
-
-## Usage
-
-### Building with TraceLens
-
-Call TraceLens modules directly to build your own analysis. These hands-on notebooks walk through the core features:
+To dig deeper, call TraceLens modules directly and build your own analysis. These hands-on notebooks walk through the core features:
 
 | Example                                                       | What it covers                                                                            |
 | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
@@ -68,7 +64,7 @@ For community-contributed utilities, including interactive trace dashboards (tra
 
 ### TraceLens Agent
 
-Point an agent at a trace to obtain a prioritized, human-readable optimization report covering compute kernels, kernel fusion, and system-level bottlenecks, each with root-cause reasoning and a concrete resolution. The report is structured and can be integrated into automated optimization platforms to drive kernel tuning, fusion, and model-code changes. See the [TraceLens Agent](TraceLens/Agent/Analysis/README.md).
+Analyze a workload autonomously using an agentic system that automates performance analysis and bottleneck prioritization for PyTorch traces. The agent orchestrates the entire analysis workflow to pinpoint underperforming kernels, highlight kernel fusion opportunities, and flag system-level bottlenecks, each backed by root-cause reasoning and a concrete resolution. The result is a prioritized, human-readable markdown report that turns a raw trace into a ranked action list. This report can also be plugged directly into automated performance optimization platforms to drive kernel tuning, system configuration, kernel fusion, and model-code changes. See the [TraceLens Agent](TraceLens/Agent/Analysis/README.md).
 
 ## Supported Profile Formats
 
