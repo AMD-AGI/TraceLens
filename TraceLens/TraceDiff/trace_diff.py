@@ -486,7 +486,7 @@ class TraceDiff:
         ]
 
         # Check cache
-        cache_key = (tuple(items1), tuple(items2))
+        cache_key = (tuple(items1), tuple(items2), strip_details)
         if cache_key in wf_cache:
             return wf_cache[cache_key]
 
@@ -926,7 +926,29 @@ class TraceDiff:
                     collapse_single_gpu_child(children2[j], variant_uid2node, tree2)[0]
                     for j in unmatched_idx2
                 ]
-                collapsed_ops = aligned_wf(collapsed1, collapsed2, strip_details=True)
+                # Pass 1: normal WF
+                collapsed_ops_p1 = aligned_wf(collapsed1, collapsed2, strip_details=False)
+                still_ci = [ci for cop, ci, _ in collapsed_ops_p1 if cop == "delete"]
+                still_cj = [cj for cop, _, cj in collapsed_ops_p1 if cop == "insert"]
+
+                # Pass 2: aggressive WF on leftovers
+                if still_ci and still_cj:
+                    pass2_ops = aligned_wf(
+                        [collapsed1[ci] for ci in still_ci],
+                        [collapsed2[cj] for cj in still_cj],
+                        strip_details=True,
+                    )
+                    collapsed_ops = [op for op in collapsed_ops_p1 if op[0] == "match"]
+                    for p2op, p2i, p2j in pass2_ops:
+                        if p2op == "match":
+                            collapsed_ops.append(("match", still_ci[p2i], still_cj[p2j]))
+                        elif p2op == "delete":
+                            collapsed_ops.append(("delete", still_ci[p2i], None))
+                        elif p2op == "insert":
+                            collapsed_ops.append(("insert", None, still_cj[p2j]))
+                else:
+                    collapsed_ops = collapsed_ops_p1
+
                 new_ops = [(op, i, j) for op, i, j in ops if op == "match"]
                 for cop, ci, cj in collapsed_ops:
                     if cop == "match":
