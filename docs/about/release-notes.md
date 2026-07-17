@@ -20,7 +20,7 @@ hardware and software versions validated for a release, see the
 The initial release establishes TraceLens as an end-to-end toolkit for
 automated GPU trace analysis, available as command-line tools and a Python SDK.
 
-### Highlights
+### Release highlights
 
 #### Report generation
 
