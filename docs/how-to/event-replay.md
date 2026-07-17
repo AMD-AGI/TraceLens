@@ -83,10 +83,10 @@ Before running `batched_replay.py`, package the IR and its companion scripts
 into a self-contained bundle. The bundle can be run without TraceLens or the
 original model and is safe to share without exposing model IP. It contains:
 
-- `event_replay_ir.json` — serialized operator replay instructions.
-- `utils.py` — tensor-creation and helper utilities that `batched_replay.py` imports.
-- `batched_replay.py` — batch replay and benchmark script.
-- `batched_replay_readme.md` — run instructions.
+- `event_replay_ir.json:` serialized operator replay instructions.
+- `utils.py:` tensor-creation and helper utilities that `batched_replay.py` imports.
+- `batched_replay.py:` batch replay and benchmark script.
+- `batched_replay_readme.md:` run instructions.
 
 See the
 [`event_replayer_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/event_replayer_example.ipynb)
@@ -106,12 +106,12 @@ must be run from that location.
 
 `batched_replay.py` accepts:
 
-- `--device {cuda,cpu}` — device to run on (default `cuda`).
-- `--op-filter <substring>` — only replay ops whose name contains the substring
+- `--device {cuda,cpu}:` device to run on (default `cuda`).
+- `--op-filter <substring>:` only replay ops whose name contains the substring
   (for example, `aten::convolution`).
-- `--op-limit <N>` — replay at most `N` ops.
-- `--stop-on-error` — abort on the first failure instead of continuing.
-- `--verbose` / `-v` — print reconstructed arguments and per-op detail.
+- `--op-limit <N>:` replay at most `N` ops.
+- `--stop-on-error:` abort on the first failure instead of continuing.
+- `--verbose` / `-v:` print reconstructed arguments and per-op detail.
 
 Each replayed op prints its reconstructed arguments, average time, and result
 tensor, followed by a summary of attempted, successful, and failed replays.

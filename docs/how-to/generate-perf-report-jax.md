@@ -85,13 +85,13 @@ This writes one file per table into `--output_path`, named
 
 Options:
 
-- `--profile_xplane_pb_path PATH` (required) — the JAX XPlane protobuf trace.
-- `--output_path DIR` (required) — output directory.
-- `--num_cus N` — GPU compute units for the GEMM model (default `304` for MI300X;
+- `--profile_xplane_pb_path PATH` (required): the JAX XPlane protobuf trace.
+- `--output_path DIR` (required): output directory.
+- `--num_cus N:` GPU compute units for the GEMM model (default `304` for MI300X;
   use `104` for MI210). `--name` sets the architecture label (default `mi300x`).
-- `--output_table_formats {.xlsx,.csv} ...` — one or both output formats (default
+- `--output_table_formats {.xlsx,.csv} ...:` one or both output formats (default
   both).
-- `--output_filename NAME` — base name for the output files (default
+- `--output_filename NAME:` base name for the output files (default
   `trace_analysis_results`).
 
 ## Related topics

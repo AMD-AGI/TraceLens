@@ -34,38 +34,38 @@ The TraceLens source code is hosted at
 
 TraceLens provides these capabilities:
 
-- **Hierarchical performance breakdowns** — Pinpoint bottlenecks with a
+- **Hierarchical performance breakdowns:** Pinpoint bottlenecks with a
   top-down view, moving from the overall GPU timeline (idle/busy) to operator
   categories, individual operators, and right down to unique argument shapes.
-- **Compute and roofline modeling** — Translate raw timings into efficiency
+- **Compute and roofline modeling:** Translate raw timings into efficiency
   metrics such as TFLOP/s and TB/s. Determine whether an operation is compute-
   or memory-bound and see how effectively your code uses the hardware.
-- **Multi-GPU communication analysis** — Diagnose scaling issues by dissecting
+- **Multi-GPU communication analysis:** Diagnose scaling issues by dissecting
   collective operations. TraceLens separates pure communication time from
   synchronization skew and calculates effective bandwidth on your real
   workload.
-- **Trace comparison** — Quantify the impact of changes with trace diffing at
+- **Trace comparison:** Quantify the impact of changes with trace diffing at
   the CPU-dispatch level, enabling meaningful side-by-side comparisons across
   hardware and software versions.
-- **Event replay** — Isolate any operation for focused debugging. TraceLens
+- **Event replay:** Isolate any operation for focused debugging. TraceLens
   generates minimal, self-contained replay scripts from trace metadata, making
   it straightforward to share IP-safe reproducers with kernel developers.
-- **Extensible SDK** — Start with ready-to-use scripts, then build custom
+- **Extensible SDK:** Start with ready-to-use scripts, then build custom
   workflows with a flexible Python API.
 
 ## Use cases
 
 TraceLens is suited to these scenarios:
 
-- **Performance debugging** — Find the operators and kernels responsible for low
+- **Performance debugging:** Find the operators and kernels responsible for low
   GPU utilization in a training or inference workload.
-- **Roofline efficiency analysis** — Measure how close each operator runs to the
+- **Roofline efficiency analysis:** Measure how close each operator runs to the
   hardware's compute and memory-bandwidth limits on a given accelerator.
-- **Distributed scaling analysis** — Quantify exposed communication and
+- **Distributed scaling analysis:** Quantify exposed communication and
   synchronization skew across ranks in multi-GPU and multi-node runs.
-- **Regression testing** — Compare a baseline trace against a candidate to
+- **Regression testing:** Compare a baseline trace against a candidate to
   quantify the effect of a code, library, or hardware change.
-- **Reproducer generation** — Extract a single operator into a standalone replay
+- **Reproducer generation:** Extract a single operator into a standalone replay
   script to share with kernel or framework developers.
 
 ## Supported profile formats
@@ -108,9 +108,3 @@ Hands-on notebooks in the repository walk through the core features:
 | [`examples/roofline_plots_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/roofline_plots_example.ipynb) | Roofline-style visualizations for specific operators |
 | [`examples/jax_nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/jax_nccl_analyser_example.ipynb) | Bandwidth analysis for JAX collectives from XPlane traces |
 
-## Related topics
-
-- [Install TraceLens](./install/install.md)
-- [API reference](./reference/api-reference.md)
-- [Compatibility matrix](./reference/compatibility.md)
-- [Release notes](./about/release-notes.md)
