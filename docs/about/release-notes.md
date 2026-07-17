@@ -15,12 +15,14 @@ This topic summarizes the features available in each TraceLens release. For the
 hardware and software versions validated for a release, see the
 [Compatibility matrix](../reference/compatibility.md).
 
-## TraceLens 0.1.0 (initial release)
+## TraceLens 0.1.0
 
 The initial release establishes TraceLens as an end-to-end toolkit for
 automated GPU trace analysis, available as command-line tools and a Python SDK.
 
-### Report generation
+### Release highlights
+
+#### Report generation
 
 This release includes the following report generators.
 
@@ -50,7 +52,7 @@ This release includes the following report generators.
   - `TraceLens_generate_perf_report_pftrace_memory_copy` — memory-copy counts
     per `copy_bytes` with direction (h2d/d2h/d2d) and the GPUs involved.
 
-### Analysis features
+#### Analysis features
 
 This release includes the following analysis features.
 
@@ -68,7 +70,7 @@ This release includes the following analysis features.
 - **Activation-recompute detection** and **kernel-overlap** sheets for deeper
   PyTorch analysis.
 
-### Multi-GPU and comparison
+#### Multi-GPU and comparison
 
 This release includes the following multi-GPU and comparison tools.
 
@@ -83,7 +85,7 @@ This release includes the following multi-GPU and comparison tools.
   trees to pinpoint structural divergences (also available inline in the
   PyTorch report using `--comparison_json_path`).
 
-### SDK modules
+#### SDK modules
 
 This release ships the following Python SDK modules.
 

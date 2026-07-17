@@ -17,7 +17,7 @@ synchronization skew.
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - Per-rank PyTorch profiler traces from a distributed run (one trace per rank).
 
 ## Step 1: Generate the report

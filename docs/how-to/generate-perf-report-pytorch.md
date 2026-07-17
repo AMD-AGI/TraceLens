@@ -18,7 +18,7 @@ performance report, then read the sheets to find what dominates GPU time.
 
 Before generating a report, confirm you have the following:
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - A `torch.profiler` Chrome trace (`.json` or `.json.gz`).
 
 ```{note}

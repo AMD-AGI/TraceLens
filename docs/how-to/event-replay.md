@@ -17,7 +17,7 @@ reproducers with kernel or framework developers.
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - A PyTorch profiler trace containing the operation you want to isolate.
 
 ## How it works
@@ -119,6 +119,6 @@ tensor, followed by a summary of attempted, successful, and failed replays.
 ## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
-- [Install TraceLens](../install/installation.md)
+- [Install TraceLens](../install/install.md)
 - [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 - [API reference](../reference/api-reference.md)
