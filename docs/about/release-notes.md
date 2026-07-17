@@ -103,9 +103,3 @@ Version numbers, dates, and per-release validated configurations should be
 updated in this page and in the [Compatibility matrix](../reference/compatibility.md)
 with each new TraceLens release.
 ```
-
-## Related topics
-
-- [What is TraceLens?](../what-is-tracelens.md)
-- [Compatibility matrix](../reference/compatibility.md)
-- [Install TraceLens](../install/installation.md)
