@@ -14,12 +14,18 @@ See LICENSE for license information.
 Turn a `torch.profiler` Chrome trace into a multi-sheet Excel (or CSV)
 performance report, then read the sheets to find what dominates GPU time.
 
-## Prerequisites
+## Before you begin
 
 Before generating a report, confirm you have the following:
 
 - TraceLens installed (see [Install TraceLens](../install/installation.md)).
 - A `torch.profiler` Chrome trace (`.json` or `.json.gz`).
+
+```{note}
+If you don't have a trace yet, see the
+[PyTorch profiling guide](https://github.com/AMD-AGI/TraceLens/blob/main/docs_original/conceptual/torch_profiling_guide.ipynb)
+for instructions on capturing one with `torch.profiler`.
+```
 
 ## Generate the report
 
@@ -173,6 +179,8 @@ See the example extension file for MegatronLM in the
 
 ## Optional arguments
 
+The following table describes all optional arguments.
+
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--output_xlsx_path PATH` | auto-inferred | Excel output path (see output behavior above). |
@@ -195,7 +203,7 @@ See the example extension file for MegatronLM in the
 | `--topk_short_kernels N` | `None` | Cap rows in the short-kernel table. |
 | `--topk_roofline_ops N` | `None` | Cap rows in the roofline sheets. |
 
-## Next steps
+## Related topics
 
 - Quantify the effect of a change by [comparing two traces](./compare-traces.md).
 - Analyze multi-GPU collectives with a

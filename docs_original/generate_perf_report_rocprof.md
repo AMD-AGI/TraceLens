@@ -237,7 +237,7 @@ TraceLens_generate_perf_report_rocprof \
 
 ---
 
-## 📚 See Also
+## 📚 Related topics
 
 - [PyTorch Performance Report](generate_perf_report.md)
 - [JAX Performance Report](generate_perf_report_jax.md)
