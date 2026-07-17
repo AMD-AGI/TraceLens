@@ -16,7 +16,7 @@ supports both `rocprofv3` JSON results and Perfetto-style `.pftrace` files.
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - A `rocprofv3` trace — either a `*_results.json` file or a `.pftrace` file.
 
 ## rocprofv3 JSON

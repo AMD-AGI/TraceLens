@@ -22,5 +22,5 @@ TraceLens generates structured performance reports from GPU trace files produced
 ## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
-- [Installation instructions](../install/installation.md)
+- [Installation instructions](../install/install.md)
 - [API reference](../reference/api-reference.md)

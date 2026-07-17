@@ -30,7 +30,7 @@ the matching to be:
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - Two generated reports (`.xlsx`), one per configuration. Generate them with
   [TraceLens_generate_perf_report_pytorch](./generate-perf-report-pytorch.md).
 
@@ -189,6 +189,6 @@ notebook for a worked example.
 ## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
-- [Install TraceLens](../install/installation.md)
+- [Install TraceLens](../install/install.md)
 - [Generate a report](generate-reports.md)
 - [API reference](../reference/api-reference.md)

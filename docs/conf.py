@@ -48,4 +48,8 @@ html_theme_options = {
 }
 # fmt: on
 
+setting_all_article_info = True
+all_article_info_os = ["linux"]
+all_article_info_author = ""
+
 html_title = f"{project} {version} documentation"

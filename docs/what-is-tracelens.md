@@ -110,7 +110,7 @@ Hands-on notebooks in the repository walk through the core features:
 
 ## Related topics
 
-- [Install TraceLens](./install/installation.md)
+- [Install TraceLens](./install/install.md)
 - [API reference](./reference/api-reference.md)
 - [Compatibility matrix](./reference/compatibility.md)
 - [Release notes](./about/release-notes.md)

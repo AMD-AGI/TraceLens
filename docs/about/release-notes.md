@@ -15,7 +15,7 @@ This topic summarizes the features available in each TraceLens release. For the
 hardware and software versions validated for a release, see the
 [Compatibility matrix](../reference/compatibility.md).
 
-## TraceLens 0.1.0 (initial release)
+## TraceLens 0.1.0
 
 The initial release establishes TraceLens as an end-to-end toolkit for
 automated GPU trace analysis, available as command-line tools and a Python SDK.
