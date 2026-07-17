@@ -13,6 +13,8 @@ See LICENSE for license information.
 
 TraceLens is a Python library for **automated performance analysis of training and inference workloads** from trace files. It reads profiler traces (PyTorch, JAX, rocprofv3) and shows you where GPU time actually goes: which kernels are slow, whether they are compute or memory bound, and where communication or idle gaps are costing you, so you can find and fix bottlenecks without hand-reading traces.
 
+---
+
 ## Key Features
 
 **Hierarchical Performance Breakdowns**: Pinpoint bottlenecks with a top-down view, moving from the overall GPU timeline (idle/busy) to operator categories, individual operators, and right down to unique argument shapes.
@@ -28,6 +30,8 @@ TraceLens is a Python library for **automated performance analysis of training a
 **Extensible SDK**: Get started instantly with ready-to-use scripts, then build your own custom workflows using a flexible and hackable Python API.
 
 **TraceLens Agent**: Receive a prioritized human-readable optimization report, derived through an agentic workflow, covering compute kernels, system bottlenecks, and kernel fusion opportunities with root-cause reasoning and concrete resolutions.
+
+---
 
 ## Quick Start
 
@@ -89,11 +93,13 @@ To dig deeper, call TraceLens modules directly and build your own analysis. Thes
 | [Roofline Plots](examples/roofline_plots_example.ipynb)       | Build roofline-style visualizations for specific operators                                |
 | [JAX NCCL Analyser](examples/jax_nccl_analyser_example.ipynb) | Bandwidth analysis for JAX collective operations from XPlane traces                       |
 
-For community-contributed utilities, including interactive trace dashboards (traceMap), roofline analysis tooling, and a Streamlit UI, see `[examples/custom_workflows/](examples/custom_workflows/)`.
+For community-contributed utilities, including interactive trace dashboards (traceMap), roofline analysis tooling, and a Streamlit UI, see [examples/custom_workflows/](examples/custom_workflows/).
 
 ### TraceLens Agent
 
 Analyze a workload autonomously using an agentic system that automates performance analysis and bottleneck prioritization for PyTorch traces. The agent orchestrates the entire analysis workflow to pinpoint underperforming kernels, highlight kernel fusion opportunities, and flag system-level bottlenecks, each backed by root-cause reasoning and a concrete resolution. The result is a prioritized, human-readable markdown report that turns a raw trace into a ranked action list. This report can also be plugged directly into automated performance optimization platforms to drive kernel tuning, system configuration, kernel fusion, and model-code changes. Refer to [TraceLens Agent](TraceLens/Agent/Analysis/README.md) for more details.
+
+---
 
 ## Supported Profile Formats
 
@@ -105,6 +111,8 @@ Analyze a workload autonomously using an agentic system that automates performan
 | **rocprofv3 pftrace** | Perfetto-style           | [docs_original/generate_perf_report_rocprof_pftrace.md](docs_original/generate_perf_report_rocprof_pftrace.md) |
 
 Each format's linked doc covers its full CLI reference. For PyTorch report comparison and multi-rank collective analysis, see the corresponding docs in the [Documentation](#documentation) table.
+
+---
 
 ## Documentation
 
@@ -123,6 +131,8 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 | Multi-Rank Collective Report | [docs_original/generate_multi_rank_collective_report_pytorch.md](docs_original/generate_multi_rank_collective_report_pytorch.md) |
 | Performance Report Columns   | [docs_original/perf_report_columns.md](docs_original/perf_report_columns.md)                                                     |
 
+---
+
 ## Development
 
 ```bash
@@ -131,11 +141,15 @@ pip install -e .[dev]
 python -m pytest tests/ -v
 ```
 
+---
+
 ## Contributing
 
 Contributions are welcome across the entire project, including new analysis modules, performance models, documentation, examples, and bug fixes.
 
 Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on branching, commit style, and project structure.
+
+---
 
 ## Additional Resources
 
