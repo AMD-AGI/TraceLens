@@ -12,7 +12,7 @@ TraceLens is a Python library for **automated performance analysis of training a
 
 **Hierarchical Performance Breakdowns**: Pinpoint bottlenecks with a top-down view, moving from the overall GPU timeline (idle/busy) to operator categories, individual operators, and right down to unique argument shapes.
 
-**Compute & Roofline Modeling**: Automatically translate raw timings into efficiency metrics like TFLOP/s and TB/s for popular operations. Determine if an op is compute or memory bound and see how effectively the hardware is utilized.
+**Compute & Roofline Modeling**: Automatically translate raw timings into efficiency metrics like TFLOP/s and TB/s for popular operations. Determine if an op is compute or memory bound and see how effectively your workload utilizes the hardware.
 
 **Multi-GPU Communication Analysis**: Accurately diagnose scaling issues by dissecting collective operations. TraceLens separates pure communication time from synchronization skew and calculates effective bandwidth on your workload.
 
@@ -35,10 +35,10 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 ### 2. Collect Traces
 
 TraceLens analyses profiler traces from PyTorch, JAX, and AMD rocprofv3; see [Supported Profile Formats](#supported-profile-formats) for the full list. The instructions below cover collecting a PyTorch trace:
-- **Training and eager inference**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling guide](docs_original/conceptual/torch_profiling_guide.ipynb) walks through this end to end.
-- **vLLM / SGLang inference**: Collection has framework-, version-, and execution-mode-specific requirements (custom images, profiler-config flags, steady-state window selection). Follow the canonical guide in [Inference Analysis](docs_original/Inference_analysis.md). The [Profiling skill](TraceLens/Agent/Profiling/README.md) automates vLLM/SGLang benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces.
+- **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling guide](docs_original/conceptual/torch_profiling_guide.ipynb) walks through this end to end.
+- **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Inference Analysis](docs_original/Inference_analysis.md). The [Profiling skill](TraceLens/Agent/Profiling/README.md) automates vLLM/SGLang benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces.
 
-To evaluate TraceLens without collecting your own trace, use the [demo traces](tests/traces) bundled in the repository.
+To try out TraceLens without collecting your own trace, use the [demo traces](tests/traces) bundled in the repository.
 
 ### 3. Analyze your Workload
 
@@ -50,7 +50,7 @@ Generate a performance analysis report from an eager execution PyTorch trace wit
 TraceLens_generate_perf_report_pytorch --profile_json_path path/to/your/trace.json
 ```
 
-This produces an Excel workbook with GPU timeline breakdown, ops summary, roofline metrics, and more; see [Performance Report Column Definitions](docs_original/perf_report_columns.md) for what each column means. For other input formats, see [Supported Profile Formats](#supported-profile-formats).
+This produces an Excel workbook with GPU timeline breakdown, ops summary, roofline metrics and more. For additional details, see [Performance Report Generation](docs_original/generate_perf_report.md) and [Performance Report Column Definitions](docs_original/perf_report_columns.md). For other input formats, see [Supported Profile Formats](#supported-profile-formats).
 
 Compare two reports to quantify the impact of a change (see [compare_perf_reports_pytorch.md](docs_original/compare_perf_reports_pytorch.md)):
 
@@ -88,7 +88,7 @@ For community-contributed utilities, including interactive trace dashboards (tra
 
 ### TraceLens Agent
 
-Analyze a workload autonomously using an agentic system that automates performance analysis and bottleneck prioritization for PyTorch traces. The agent orchestrates the entire analysis workflow to pinpoint underperforming kernels, highlight kernel fusion opportunities, and flag system-level bottlenecks, each backed by root-cause reasoning and a concrete resolution. The result is a prioritized, human-readable markdown report that turns a raw trace into a ranked action list. This report can also be plugged directly into automated performance optimization platforms to drive kernel tuning, system configuration, kernel fusion, and model-code changes. See the [TraceLens Agent](TraceLens/Agent/Analysis/README.md).
+Analyze a workload autonomously using an agentic system that automates performance analysis and bottleneck prioritization for PyTorch traces. The agent orchestrates the entire analysis workflow to pinpoint underperforming kernels, highlight kernel fusion opportunities, and flag system-level bottlenecks, each backed by root-cause reasoning and a concrete resolution. The result is a prioritized, human-readable markdown report that turns a raw trace into a ranked action list. This report can also be plugged directly into automated performance optimization platforms to drive kernel tuning, system configuration, kernel fusion, and model-code changes. Refer to [TraceLens Agent](TraceLens/Agent/Analysis/README.md) for more details.
 
 ## Supported Profile Formats
 
