@@ -40,7 +40,7 @@ The TraceLens source code is hosted at `github.com/AMD-AGI/TraceLens <https://gi
       * :doc:`The Trace2Tree data model <conceptual/trace2tree>`
       * :doc:`Understanding PyTorch traces <conceptual/torch-profiling-analysis>`
       * :doc:`GEMM analysis <conceptual/gemm-analysis>`
-      * :doc:`Triton kernel performance model <conceptual/perf-model-walkthrough>`
+      * :doc:`Triton kernel performance model <conceptual/triton-perf-model-walkthrough>`
 
    .. grid-item-card:: Tutorials
 

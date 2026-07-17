@@ -464,7 +464,7 @@ For hands-on usage, work through the [`examples/gemm_dim_eff.ipynb`](https://git
 ## Related topics
 
 - [Trace2Tree](../conceptual/trace2tree.md)
-- [Perf model walkthrough](../conceptual/perf-model-walkthrough.md)
+- [Perf model walkthrough](../conceptual/triton-perf-model-walkthrough.md)
 - [Torch profiling analysis](../conceptual/torch-profiling-analysis.md)
 - [Performance report columns](../reference/perf-report-columns.md)
 - [Generate a performance report from PyTorch](../how-to/generate-perf-report-pytorch.md)

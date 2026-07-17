@@ -63,7 +63,7 @@ subtrees:
     title: Tensor shape metadata
   - file: conceptual/gemm-analysis
     title: GEMM analysis
-  - file: conceptual/perf-model-walkthrough
+  - file: conceptual/triton-perf-model-walkthrough
     title: Triton kernel performance model
 
 - caption: Tutorials
