@@ -43,7 +43,9 @@ def _normalize_name_for_comparison(name, strip_details=False):
     return _KERNEL_LAUNCH_EQUIVALENTS.get(normalized, normalized)
 
 
-def _gpu_path_child_names_at_bfs_levels(uid, uid2node, tree_num, max_depth, normalize_fn, get_name_fn):
+def _gpu_path_child_names_at_bfs_levels(
+    uid, uid2node, tree_num, max_depth, normalize_fn, get_name_fn
+):
     """
     Return a list of frozensets, one per BFS level (1..max_depth), each containing
     the multiset (as a sorted tuple) of normalized GPU-path child names at that depth
@@ -51,6 +53,7 @@ def _gpu_path_child_names_at_bfs_levels(uid, uid2node, tree_num, max_depth, norm
 
     A node is on the GPU path when it does not have non_gpu_path=True.
     """
+
     def is_gpu_path(node):
         return node is not None and not node.get("non_gpu_path", False)
 
@@ -68,7 +71,9 @@ def _gpu_path_child_names_at_bfs_levels(uid, uid2node, tree_num, max_depth, norm
                 if child_node and is_gpu_path(child_node):
                     next_frontier.append(child_uid)
                     raw_name = get_name_fn(child_uid, tree_num)
-                    names_this_level.append(normalize_fn(raw_name) if raw_name else None)
+                    names_this_level.append(
+                        normalize_fn(raw_name) if raw_name else None
+                    )
         levels.append(tuple(sorted(names_this_level)))
         current_frontier = next_frontier
         if not current_frontier:
@@ -76,9 +81,9 @@ def _gpu_path_child_names_at_bfs_levels(uid, uid2node, tree_num, max_depth, norm
     return levels
 
 
-def _disambiguate_same_name_candidates(ops, children1, children2,
-                                        baseline_uid2node, variant_uid2node,
-                                        max_depth=4):
+def _disambiguate_same_name_candidates(
+    ops, children1, children2, baseline_uid2node, variant_uid2node, max_depth=4
+):
     """
     Post-WF pass: when a match op pairs trace1[i] with trace2[j] (name N), but
     there are also insert ops for other trace2 nodes also named N, WF chose
@@ -118,9 +123,9 @@ def _disambiguate_same_name_candidates(ops, children1, children2,
         )
 
     # Index existing ops by type for easy lookup
-    match_ops  = [(i, j) for op, i, j in ops if op == "match"]
-    delete_idxs = [i for op, i, _ in ops if op == "delete"]   # trace1 unmatched
-    insert_idxs = [j for op, _, j in ops if op == "insert"]   # trace2 unmatched
+    match_ops = [(i, j) for op, i, j in ops if op == "match"]
+    delete_idxs = [i for op, i, _ in ops if op == "delete"]  # trace1 unmatched
+    insert_idxs = [j for op, _, j in ops if op == "insert"]  # trace2 unmatched
 
     # Build name → list-of-indices for unmatched nodes on each side
     unmatched1_by_name = {}  # name -> [idx in children1]
@@ -142,8 +147,8 @@ def _disambiguate_same_name_candidates(ops, children1, children2,
         name2 = normalized_name(children2[orig_j], 2)
 
         # Only act when there are extra same-named candidates on at least one side
-        extra1 = unmatched1_by_name.get(name1, [])   # other trace1 nodes named name1
-        extra2 = unmatched2_by_name.get(name2, [])   # other trace2 nodes named name2
+        extra1 = unmatched1_by_name.get(name1, [])  # other trace1 nodes named name1
+        extra2 = unmatched2_by_name.get(name2, [])  # other trace2 nodes named name2
 
         if not extra1 and not extra2:
             continue  # no ambiguity – leave this match alone
@@ -159,7 +164,7 @@ def _disambiguate_same_name_candidates(ops, children1, children2,
                 evicted = False
                 for d in range(max(len(anchor_levels), len(cand_levels))):
                     al = anchor_levels[d] if d < len(anchor_levels) else ()
-                    cl = cand_levels[d]  if d < len(cand_levels)  else ()
+                    cl = cand_levels[d] if d < len(cand_levels) else ()
                     if al != cl:
                         evicted = True
                         break
@@ -185,7 +190,7 @@ def _disambiguate_same_name_candidates(ops, children1, children2,
                 evicted = False
                 for d in range(max(len(anchor_levels), len(cand_levels))):
                     al = anchor_levels[d] if d < len(anchor_levels) else ()
-                    cl = cand_levels[d]  if d < len(cand_levels)  else ()
+                    cl = cand_levels[d] if d < len(cand_levels) else ()
                     if al != cl:
                         evicted = True
                         break
@@ -197,7 +202,11 @@ def _disambiguate_same_name_candidates(ops, children1, children2,
 
             # Only override WF when disambiguation produced a unique survivor.
             if len(survivors1) == 1 and survivors1[0] != orig_i:
-                effective_j = reassignments[-1][3] if (extra2 and reassignments and reassignments[-1][0] == orig_i) else orig_j
+                effective_j = (
+                    reassignments[-1][3]
+                    if (extra2 and reassignments and reassignments[-1][0] == orig_i)
+                    else orig_j
+                )
                 reassignments.append((orig_i, orig_j, survivors1[0], effective_j))
 
     if not reassignments:
@@ -253,7 +262,7 @@ def _disambiguate_same_name_candidates(ops, children1, children2,
                 final_ops.append(("insert", None, j))
 
     # Emit new match ops for winner pairs not already in the list
-    for (new_i, new_j) in new_match_pairs:
+    for new_i, new_j in new_match_pairs:
         if (new_i, new_j) not in emitted_matches:
             final_ops.append(("match", new_i, new_j))
 
@@ -446,7 +455,10 @@ class TraceDiff:
                     if len(children) == 1:
                         child = tree.get_UID2event(children[0])
                         child_cat = child.get("cat") or child.get("category")
-                        if child_cat in ("cpu_op", "cuda_runtime", "cuda_driver") and child.get("name") not in _GRAPH_LAUNCH_NAMES:
+                        if (
+                            child_cat in ("cpu_op", "cuda_runtime", "cuda_driver")
+                            and child.get("name") not in _GRAPH_LAUNCH_NAMES
+                        ):
                             break
                         current = child
                     else:
@@ -659,7 +671,8 @@ class TraceDiff:
                 cat = tree_obj.event_to_category(node)
                 if cat == "cpu_op":
                     has_cr_child = any(
-                        tree_obj.event_to_category(uid2node[c]) in ("cuda_runtime", "cuda_driver")
+                        tree_obj.event_to_category(uid2node[c])
+                        in ("cuda_runtime", "cuda_driver")
                         and uid2node[c].get("name") not in _GRAPH_LAUNCH_NAMES
                         for c in node.get("children", [])
                         if uid2node.get(c)
@@ -717,7 +730,13 @@ class TraceDiff:
                         if node_i
                         else None
                     )
-                    if (cat_d in skip_cats and node_d.get("name") not in _GRAPH_LAUNCH_NAMES) or (cat_i in skip_cats and node_i.get("name") not in _GRAPH_LAUNCH_NAMES):
+                    if (
+                        cat_d in skip_cats
+                        and node_d.get("name") not in _GRAPH_LAUNCH_NAMES
+                    ) or (
+                        cat_i in skip_cats
+                        and node_i.get("name") not in _GRAPH_LAUNCH_NAMES
+                    ):
                         continue
                     name_d = get_name_uid(uid_d, 1)
                     name_i = get_name_uid(uid_i, 2)
@@ -859,7 +878,8 @@ class TraceDiff:
                     # since expansion + re-sort changes indices).
                     pinned_uid_pairs = [
                         (children1[i], children2[j])
-                        for op_type, i, j in ops if op_type == "match"
+                        for op_type, i, j in ops
+                        if op_type == "match"
                     ]
 
                     # Locate pinned UIDs in the expanded+re-sorted lists
@@ -892,7 +912,9 @@ class TraceDiff:
                             for c in free_items2
                         )
                         if len(free_items1) == len(free_items2) and not any_cr:
-                            free_ops = [("match", i, i) for i in range(len(free_items1))]
+                            free_ops = [
+                                ("match", i, i) for i in range(len(free_items1))
+                            ]
                         else:
                             free_ops = aligned_wf(free_items1, free_items2)
                         # Remap free_ops indices back to recon1/recon2 indices
