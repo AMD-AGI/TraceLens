@@ -25,6 +25,8 @@ accelerator.
 
 ## Software requirements
 
+TraceLens requires the following software.
+
 | Component | Requirement | Notes |
 |-----------|-------------|-------|
 | Python | 3.6 or later (3.10 recommended) | `python_requires>=3.6`; the 3.10 toolchain is used for documentation and CI builds. |
@@ -50,6 +52,8 @@ These are installed automatically with the package:
 | `traceconv` | Optional; required only for `.pftrace` input. Resolved from `PATH` or downloaded automatically if not provided with `--traceconv`. |
 
 ## Supported trace formats
+
+TraceLens supports the following trace formats.
 
 | Format | Producing tool | Validated |
 |--------|----------------|-----------|

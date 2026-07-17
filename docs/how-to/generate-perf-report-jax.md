@@ -16,7 +16,7 @@ report* (operator and roofline analysis, like the PyTorch report) and a
 *GPU-event and GEMM analysis* focused on event-type breakdowns and GEMM
 performance.
 
-## Prerequisites
+## Before you begin
 
 - TraceLens installed (see [Install TraceLens](../install/installation.md)).
 - A JAX XPlane protobuf trace (`xplane.pb`). JAX parsing uses the `xprof`
@@ -94,7 +94,7 @@ Options:
 - `--output_filename NAME` — base name for the output files (default
   `trace_analysis_results`).
 
-## Next steps
+## Related topics
 
 - Quantify the effect of a change by [comparing two traces](./compare-traces.md).
 - Analyze multi-GPU collectives with a

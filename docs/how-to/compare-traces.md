@@ -28,7 +28,7 @@ the matching to be:
   hardware, libraries, or framework versions) or when you need finer-grained,
   programmatic analysis.
 
-## Prerequisites
+## Before you begin
 
 - TraceLens installed (see [Install TraceLens](../install/installation.md)).
 - Two generated reports (`.xlsx`), one per configuration. Generate them with
@@ -146,6 +146,8 @@ TraceDiff operates on PyTorch profiler JSON traces, which it builds into the
 ```
 
 ### Output files
+
+`print_tracediff_report_files()` writes the following files to disk.
 
 | File | Contents |
 |------|----------|
