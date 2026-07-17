@@ -15,6 +15,18 @@ This topic lists the hardware and software configurations for TraceLens. Only
 configurations that have been verified and tested should appear in the
 validated tables below.
 
+## Hardware requirements (roofline analysis)
+
+Roofline classification requires a GPU architecture specification that provides
+the peak FLOPS and peak bandwidth for the target accelerator (for example,
+`mi300.json`). Architecture specifications are bundled under
+`TraceLens/Agent/Analysis/utils/arch/`; supply your own JSON with
+`--gpu_arch_json_path` for accelerators not listed.
+
+| AMD Instinct GPU | Notes |
+|-------------|-------|
+| MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
+
 ## ROCm and CUDA compatibility
 
 TraceLens analyzes trace files rather than talking to the GPU or runtime
@@ -27,18 +39,6 @@ stops rather than silently producing misleading results.
 
 The PyTorch report workflow works on any `torch.profiler` trace regardless of
 the GPU backend, and is well tested on both AMD ROCm and NVIDIA CUDA traces.
-
-## Hardware requirements (roofline analysis)
-
-Roofline classification requires a GPU architecture specification that provides
-the peak FLOPS and peak bandwidth for the target accelerator (for example,
-`mi300.json`). Architecture specifications are bundled under
-`TraceLens/Agent/Analysis/utils/arch/`; supply your own JSON with
-`--gpu_arch_json_path` for accelerators not listed.
-
-| AMD Instinct GPU | Notes |
-|-------------|-------|
-| MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
 
 ## Software requirements
 
