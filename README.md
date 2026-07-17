@@ -40,17 +40,35 @@ TraceLens analyses profiler traces from PyTorch, JAX, and AMD rocprofv3; see [Su
 
 To evaluate TraceLens without collecting your own trace, use the [demo traces](tests/traces) bundled in the repository.
 
-### 3. Analye your Workload:
+### 3. Analyze your Workload
 
 ### Building with TraceLens
 
-Generate a performance analysis report from a eager execution PyTorch trace with a single command:
+Generate a performance analysis report from an eager execution PyTorch trace with a single command:
 
 ```bash
 TraceLens_generate_perf_report_pytorch --profile_json_path path/to/your/trace.json
 ```
 
 This produces an Excel workbook with GPU timeline breakdown, ops summary, roofline metrics, and more; see [Performance Report Column Definitions](docs_original/perf_report_columns.md) for what each column means. For other input formats, see [Supported Profile Formats](#supported-profile-formats).
+
+Compare two reports to quantify the impact of a change (see [compare_perf_reports_pytorch.md](docs_original/compare_perf_reports_pytorch.md)):
+
+```bash
+TraceLens_compare_perf_reports_pytorch \
+    baseline.xlsx candidate.xlsx \
+    --names baseline candidate \
+    --sheets all \
+    -o comparison.xlsx
+```
+
+For multi-rank runs, generate a collective-communication report across ranks (see [generate_multi_rank_collective_report_pytorch.md](docs_original/generate_multi_rank_collective_report_pytorch.md)):
+
+```bash
+TraceLens_generate_multi_rank_collective_report_pytorch \
+    --trace_dir /path/to/traces \
+    --world_size 8
+```
 
 To dig deeper, call TraceLens modules directly and build your own analysis. These hands-on notebooks walk through the core features:
 
