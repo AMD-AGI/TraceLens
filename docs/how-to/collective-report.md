@@ -111,11 +111,11 @@ The all2allv sheets instead report:
 
 To diagnose low throughput, check `size_imbalance`:
 
-- **`size_imbalance` ≈ 1.0** — all ranks are sending roughly equal amounts of
+- **`size_imbalance` ≈ 1.0:** all ranks are sending roughly equal amounts of
   data, so the slow throughput isn't caused by one rank doing more work than
   others. Look for software or driver overhead instead (launch latency, kernel
   scheduling).
-- **`size_imbalance` >> 1.0** — some ranks are sending more data than
+- **`size_imbalance` >> 1.0:** some ranks are sending more data than
   others. This is common in Mixture-of-Experts models where certain experts
   attract more tokens. The busiest rank takes the longest, and all other ranks
   wait for it to finish before the collective can complete.

@@ -88,12 +88,12 @@ default: `GFLOPS`, `Data Moved (MB)`, `FLOPS/Byte`, `TFLOPS/s`, and `TB/s`.
 To add the roofline *bound classification*, supply a GPU architecture spec.
 This adds:
 
-- `Compute Spec` — combined compute type and precision (for example, `matrix_bf16`,
+- `Compute Spec:` combined compute type and precision (for example, `matrix_bf16`,
   `vector_fp32`).
-- `Roofline Time (µs)` — theoretical minimum time from the GPU's peak
+- `Roofline Time (µs):` theoretical minimum time from the GPU's peak
   capabilities.
-- `Roofline Bound` — `COMPUTE_BOUND` or `MEMORY_BOUND`.
-- `Pct Roofline` — how close the measured kernel time runs to the roofline.
+- `Roofline Bound:` `COMPUTE_BOUND` or `MEMORY_BOUND`.
+- `Pct Roofline:` how close the measured kernel time runs to the roofline.
 
   ```bash
   TraceLens_generate_perf_report_pytorch \
