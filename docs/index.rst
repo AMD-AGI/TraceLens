@@ -32,10 +32,25 @@ The TraceLens source code is hosted at `github.com/AMD-AGI/TraceLens <https://gi
       * :doc:`Compare two traces <how-to/compare-traces>`
       * :doc:`Replay a single operation <how-to/event-replay>`
       * :doc:`Fuse multi-rank traces <how-to/trace-fusion>`
+      * :doc:`Analyze performance with TreePerf <how-to/tree-perf-analysis>`
+
+   .. grid-item-card:: Concepts
+
+      * :doc:`The Trace2Tree data model <conceptual/trace2tree>`
+      * :doc:`Understanding PyTorch traces <conceptual/torch-profiling-analysis>`
+      * :doc:`GEMM analysis <conceptual/gemm-analysis>`
+      * :doc:`Triton kernel performance model <conceptual/perf-model-walkthrough>`
+
+   .. grid-item-card:: Tutorials
+
+      * :doc:`PyTorch profiling walkthrough <tutorials/torch-profiling>`
+      * :doc:`Distributed profiling walkthrough <tutorials/distributed-profiling>`
+      * :doc:`Anomaly detection walkthrough <tutorials/anomaly-detection>`
 
    .. grid-item-card:: Reference
 
       * :doc:`API reference <reference/api-reference>`
+      * :doc:`Performance report columns <reference/perf-report-columns>`
 
 For information on contributing to TraceLens, see the
 `Contributing guide <https://github.com/AMD-AGI/TraceLens/blob/main/CONTRIBUTING.md>`_.
