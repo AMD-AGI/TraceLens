@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 # TraceLens
 
-TraceLens is a Python library for **automated performance analysis of training and inference workloads** from trace files. Built with simplicity and extensibility in mind, it turns raw profiler traces into actionable insights for debugging and optimizing complex, distributed workloads.
+TraceLens is a Python library for **automated performance analysis of training and inference workloads** from trace files. It reads profiler traces (PyTorch, JAX, rocprofv3) and shows you where GPU time actually goes: which kernels are slow, whether they are compute or memory bound, and where communication or idle gaps are costing you, so you can find and fix bottlenecks without hand-reading traces.
 
 ## Key Features
 
