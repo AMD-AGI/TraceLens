@@ -36,9 +36,9 @@ the peak FLOPS and peak bandwidth for the target accelerator (for example,
 `TraceLens/Agent/Analysis/utils/arch/`; supply your own JSON with
 `--gpu_arch_json_path` for accelerators not listed.
 
-| Accelerator | Notes |
+| AMD Instinct GPU | Notes |
 |-------------|-------|
-| AMD Instinct™ MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
+| MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
 
 ## Software requirements
 
