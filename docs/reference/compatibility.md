@@ -64,7 +64,7 @@ These are installed automatically with the package:
 | `matplotlib` | Roofline and other plots. |
 | `xprof==2.20.1` | JAX XPlane parsing (HLO sidecar generation; supports JAX 0.8+). |
 | `protobuf>=6.31.1,<7.0.0` | Required by `xprof`'s `grpcio-status` dependency. |
-| `backports.strenum`, `StrEnum` | `StrEnum` backport for Python < 3.11. |
+| `backports.strenum` | `StrEnum` backport for Python < 3.11. |
 | `office365-rest-python-client`, `msal` | Optional SharePoint/365 integrations. |
 | `traceconv` | Optional; required only for `.pftrace` input. Resolved from `PATH` or downloaded automatically if not provided with `--traceconv`. |
 
