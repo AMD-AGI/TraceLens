@@ -33,6 +33,7 @@ The TraceLens source code is hosted at `github.com/AMD-AGI/TraceLens <https://gi
       * :doc:`Replay a single operation <how-to/event-replay>`
       * :doc:`Fuse multi-rank traces <how-to/trace-fusion>`
       * :doc:`Analyze performance with TreePerf <how-to/tree-perf-analysis>`
+      * :doc:`Generate optimization recommendations <how-to/agentic-mode>`
 
    .. grid-item-card:: Concepts
 
