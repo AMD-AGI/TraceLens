@@ -15,13 +15,38 @@ This topic lists the hardware and software configurations for TraceLens. Only
 configurations that have been verified and tested should appear in the
 validated tables below.
 
-```{note}
-TraceLens analyzes trace files and does not execute GPU kernels itself, so its
-core report generation runs on any host with a supported Python version. GPU
-and ROCm requirements apply to the *profiling tools* that produce the traces
-(for example, `rocprofv3`) and to the roofline specifications used for a given
-accelerator.
-```
+## ROCm and CUDA compatibility
+
+TraceLens analyzes trace files rather than talking to the GPU or runtime
+directly, so it isn't tied to a specific ROCm version. `rocprofv3`-based capture
+(JSON and pftrace) only requires a ROCm installation that provides `rocprofv3`
+and, for `.pftrace` conversion, `traceconv`; any ROCm version that emits
+well-formed traces should work. If a particular ROCm build produces malformed
+traces (for example, missing required fields), TraceLens reports the problem and
+stops rather than silently producing misleading results.
+
+The PyTorch report workflow works on any `torch.profiler` trace regardless of
+the GPU backend, and is well tested on both AMD ROCm and NVIDIA CUDA traces.
+
+## Hardware requirements
+
+TraceLens runs on a CPU host. It parses trace files and never executes kernels or
+talks to a GPU, so no accelerator is required to install or run it — you can
+analyze traces on a laptop or CI runner with no GPU present.
+
+### Target accelerators for roofline analysis
+
+The GPU details below describe the *target accelerator whose traces you analyze*
+(the tracing environment), not a requirement for the machine running TraceLens.
+Roofline classification needs a GPU architecture specification that provides the
+peak FLOPS and peak bandwidth for that target accelerator (for example,
+`mi300.json`). Architecture specifications are bundled under
+`TraceLens/Agent/Analysis/utils/arch/`; supply your own JSON with
+`--gpu_arch_json_path` for accelerators not listed.
+
+| Target accelerator | Notes |
+|--------------------|-------|
+| AMD Instinct MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
 
 ## Software requirements
 
@@ -47,7 +72,7 @@ These are installed automatically with the package:
 | `matplotlib` | Roofline and other plots. |
 | `xprof==2.20.1` | JAX XPlane parsing (HLO sidecar generation; supports JAX 0.8+). |
 | `protobuf>=6.31.1,<7.0.0` | Required by `xprof`'s `grpcio-status` dependency. |
-| `backports.strenum`, `StrEnum` | `StrEnum` backport for Python < 3.11. |
+| `backports.strenum` | `StrEnum` backport for Python < 3.11. |
 | `office365-rest-python-client`, `msal` | Optional SharePoint/365 integrations. |
 | `traceconv` | Optional; required only for `.pftrace` input. Resolved from `PATH` or downloaded automatically if not provided with `--traceconv`. |
 
@@ -55,38 +80,11 @@ These are installed automatically with the package:
 
 TraceLens supports the following trace formats.
 
-| Format | Producing tool | Validated |
-|--------|----------------|-----------|
-| PyTorch Chrome trace (`.json`, `.json.gz`, `.zip`) | `torch.profiler` | Yes |
-| JAX XPlane protobuf (`.pb`) | JAX profiler / `xprof` | Yes |
-| rocprofv3 JSON (`*_results.json`) | AMD ROCm rocprofiler-sdk | Yes |
-| rocprofv3 pftrace / Perfetto-style | `rocprofv3 --output-format pftrace` | Yes |
+| Format | Producing tool |
+|--------|----------------|
+| PyTorch Chrome trace (`.json`, `.json.gz`, `.zip`) | `torch.profiler` |
+| JAX XPlane protobuf (`.pb`) | JAX profiler / `xprof` | 
+| rocprofv3 JSON (`*_results.json`) | AMD ROCm rocprofiler-sdk | 
+| rocprofv3 pftrace / Perfetto-style | `rocprofv3 --output-format pftrace` | 
 
-## Accelerators (roofline analysis)
 
-Roofline classification requires a GPU architecture specification that provides
-the peak FLOPS and peak bandwidth for the target accelerator (for example,
-`mi300.json`). Architecture specifications are bundled under
-`TraceLens/Agent/Analysis/utils/arch/`; supply your own JSON with
-`--gpu_arch_json_path` for accelerators not listed.
-
-| Accelerator | Notes |
-|-------------|-------|
-| AMD Instinct™ MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
-
-```{note}
-Add validated accelerators to this table as they are tested for each release.
-```
-
-## ROCm and CUDA compatibility
-
-TraceLens analyzes trace files rather than talking to the GPU or runtime
-directly, so it isn't tied to a specific ROCm version. `rocprofv3`-based capture
-(JSON and pftrace) only requires a ROCm installation that provides `rocprofv3`
-and, for `.pftrace` conversion, `traceconv`; any ROCm version that emits
-well-formed traces should work. If a particular ROCm build produces malformed
-traces (for example, missing required fields), TraceLens reports the problem and
-stops rather than silently producing misleading results.
-
-The PyTorch report workflow works on any `torch.profiler` trace regardless of
-the GPU backend, and is well tested on both AMD ROCm and NVIDIA CUDA traces.
