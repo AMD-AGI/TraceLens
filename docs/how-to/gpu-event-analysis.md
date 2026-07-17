@@ -14,7 +14,7 @@ See LICENSE for license information.
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - A trace file containing GPU events: an unzipped PyTorch profiler JSON trace, or a gzipped JAX trace for the JAX workflow.
 
 ## Key features

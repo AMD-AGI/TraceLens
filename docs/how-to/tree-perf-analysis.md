@@ -14,7 +14,7 @@ See LICENSE for license information.
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - A PyTorch profiler trace JSON file for the model you want to analyze.
 - A basic understanding of how `Trace2Tree` builds the tree (see [Trace2Tree](../conceptual/trace2tree.md)).
 

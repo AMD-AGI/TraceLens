@@ -48,7 +48,7 @@ Support depends on the execution mode of the traced workload:
 ### Install TraceLens
 
 Install locally, or into your container or virtual environment (see
-[Install TraceLens](../install/installation.md)):
+[Install TraceLens](../install/install.md)):
 
 ```bash
 pip install git+https://github.com/AMD-AGI/TraceLens.git
