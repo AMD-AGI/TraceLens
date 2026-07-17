@@ -15,18 +15,6 @@ This topic lists the hardware and software configurations for TraceLens. Only
 configurations that have been verified and tested should appear in the
 validated tables below.
 
-## Hardware requirements (roofline analysis)
-
-Roofline classification requires a GPU architecture specification that provides
-the peak FLOPS and peak bandwidth for the target accelerator (for example,
-`mi300.json`). Architecture specifications are bundled under
-`TraceLens/Agent/Analysis/utils/arch/`; supply your own JSON with
-`--gpu_arch_json_path` for accelerators not listed.
-
-| AMD Instinct GPU | Notes |
-|-------------|-------|
-| MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
-
 ## ROCm and CUDA compatibility
 
 TraceLens analyzes trace files rather than talking to the GPU or runtime
@@ -39,6 +27,26 @@ stops rather than silently producing misleading results.
 
 The PyTorch report workflow works on any `torch.profiler` trace regardless of
 the GPU backend, and is well tested on both AMD ROCm and NVIDIA CUDA traces.
+
+## Hardware requirements
+
+TraceLens runs on a CPU host. It parses trace files and never executes kernels or
+talks to a GPU, so no accelerator is required to install or run it — you can
+analyze traces on a laptop or CI runner with no GPU present.
+
+### Target accelerators for roofline analysis
+
+The GPU details below describe the *target accelerator whose traces you analyze*
+(the tracing environment), not a requirement for the machine running TraceLens.
+Roofline classification needs a GPU architecture specification that provides the
+peak FLOPS and peak bandwidth for that target accelerator (for example,
+`mi300.json`). Architecture specifications are bundled under
+`TraceLens/Agent/Analysis/utils/arch/`; supply your own JSON with
+`--gpu_arch_json_path` for accelerators not listed.
+
+| Target accelerator | Notes |
+|--------------------|-------|
+| AMD Instinct MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
 
 ## Software requirements
 
