@@ -26,6 +26,7 @@
 /TraceLens/TraceUtils/split_inference_trace_annotation.py      @devalshahamd
 /examples/custom_workflows/inference_analysis/               @devalshahamd
 /docs/how-to/generate-perf-report-pytorch-inference.md      @devalshahamd
+/docs/conceptual/inference-analysis.md                      @devalshahamd
 /tests/test_inference_perf_report.py                         @devalshahamd
 /tests/traces/inference/                                     @devalshahamd
 
