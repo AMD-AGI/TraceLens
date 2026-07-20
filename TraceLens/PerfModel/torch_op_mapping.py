@@ -26,6 +26,9 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     "aten::_scaled_dot_product_cudnn_attention_backward": "SDPA_bwd",
     "aten::_scaled_dot_product_efficient_attention_backward": "SDPA_bwd",
     "aten::_scaled_dot_product_flash_attention_backward": "SDPA_bwd",
+    # xFormers-style efficient attention (ROCm/older PyTorch backend).
+    "aten::_efficient_attention_forward": "SDPA_fwd",
+    "aten::_efficient_attention_backward": "SDPA_bwd",
     # SSM / Mamba category-only backward ops.
     "MambaSplitConv1dScanCombinedFnBackward": "SSM_bwd",
     "DaoAILab::_causal_conv1d_bwd_cpp": "SSM_bwd",
@@ -42,7 +45,6 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     "FusedRoPEFuncBackward": "RoPE_bwd",
     "CrossEntropyFunctionBackward": "CrossEntropy_bwd",
     # MoE auxiliary ops.
-    "aiter::moe_sorting_fwd": "MoE_aux",
     "aiter::moe_sorting_opus_fwd": "MoE_aux",
     "aiter::moe_align_block_size": "MoE_aux",
     "_moe_C::moe_align_block_size": "MoE_aux",
@@ -51,7 +53,6 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     "aiter::topk_softmax": "MoE_aux",
     "aiter::topk_softmax_asm": "MoE_aux",
     "aiter::topk_sigmoid": "MoE_aux",
-    "aiter::biased_grouped_topk_hip": "MoE_aux",
     "aiter::grouped_topk": "MoE_aux",
     "aiter::moe_fused_gate": "MoE_aux",
     # InferenceAttention extras (KV-cache writes).

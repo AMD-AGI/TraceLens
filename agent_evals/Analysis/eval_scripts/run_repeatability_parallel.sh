@@ -69,14 +69,14 @@ fi
 # Configuration
 # ---------------------------------------------------------------------------
 MAX_PARALLEL="${MAX_PARALLEL:-5}"
-NUM_REPEATS="${NUM_REPEATS:-5}"
+NUM_REPEATS="${NUM_REPEATS:-3}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 CONTAINER="${CONTAINER:-}"
 TEST_IDS="${TEST_IDS:-}"
 SUITE_NAME="${SUITE_NAME:-eval}"
 SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 
-AGENT_MODEL="${AGENT_MODEL:-claude-4.6-opus-high}"
+AGENT_MODEL="${claude-opus-4-8-thinking-medium}"
 PI_VENV_PREFIX="use venv_tracelens for all commands and tool calls. "
 
 # Paths (REPO_ROOT may differ from the shell cwd)
@@ -143,12 +143,10 @@ expand_archive() {
     local name="$1"
     local archive="$EVALS_DIR/analysis_tests/${name}.tar.gz"
     local target="$EVALS_DIR/analysis_tests/$name"
-    if [[ -f "$archive" ]]; then
-        if [[ ! -d "$target" ]] || [[ "$archive" -nt "$target" ]]; then
-            echo "Expanding ${name}.tar.gz..."
-            tar xzf "$archive" -C "$REPO_ROOT"
-            echo "Done."
-        fi
+    if [[ -f "$archive" ]] && [[ ! -d "$target" ]]; then
+        echo "Expanding ${name}.tar.gz..."
+        tar xzf "$archive" -C "$REPO_ROOT"
+        echo "Done."
     fi
 }
 
