@@ -186,7 +186,7 @@ example notebook under `examples/`.
 | Module | Purpose | Reference |
 |--------|---------|-----------|
 | `Trace2Tree` | Build and navigate the hierarchical event tree (Python ops → CPU dispatch → GPU kernels). | [Trace2Tree data model](../conceptual/trace2tree.md), [`trace2tree_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace2tree_example.ipynb) |
-| `TreePerf` | GPU-timeline breakdown, per-op performance, and roofline metrics. | [Analyze performance with TreePerf](../how-to/tree-perf-analysis.md), [`tree_perf_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/tree_perf_example.ipynb) |
+| `TreePerf` | GPU-timeline breakdown, per-op performance, and roofline metrics. | [Analyze traces with the TraceLens SDK](../how-to/sdk-analysis.md), [`tree_perf_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/tree_perf_example.ipynb) |
 | `PerfModel` | Compute and roofline performance models for operators. | [GEMM analysis](../conceptual/gemm-analysis.md), [Triton kernel performance model](../conceptual/triton-perf-model-walkthrough.md) |
 | `NcclAnalyser` | Multi-rank collective latency/bandwidth/skew analysis. | [Analyze collectives with NcclAnalyser](../how-to/nccl-analysis.md), [`nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/nccl_analyser_example.ipynb) |
 | `TraceDiff` | Morphological comparison of two trace trees. | [Compare two traces](../how-to/compare-traces.md), [`trace_diff_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace_diff_example.ipynb) |

@@ -224,6 +224,6 @@ node, or an SSH plus container-exec wrapper for a containerized node.
 
 - [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 - [Generate a PyTorch inference performance report](./generate-perf-report-pytorch-inference.md)
-- [Analyze performance with TreePerf](./tree-perf-analysis.md)
+- [Analyze traces with the TraceLens SDK](./sdk-analysis.md)
 - [GEMM analysis](../conceptual/gemm-analysis.md)
 - [The Trace2Tree data model](../conceptual/trace2tree.md)

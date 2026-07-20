@@ -42,10 +42,10 @@ subtrees:
     title: Replay a single operation
   - file: how-to/trace-fusion
     title: Fuse multi-rank traces
-  - file: how-to/tree-perf-analysis
-    title: Analyze performance with TreePerf
-  - file: how-to/gpu-event-analysis
-    title: Analyze a GPU timeline
+  - file: how-to/sdk-analysis
+    title: Analyze traces with the SDK
+  - file: how-to/perf-model-without-trace
+    title: Model op performance without a trace
   - file: how-to/nccl-analysis
     title: Analyze collective communication
   - file: how-to/origami-integration

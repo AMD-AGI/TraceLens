@@ -45,105 +45,16 @@ Kernel names are volatile and context-free. Trace2Tree anchors analysis at the s
 
 That said, kernel names are often useful — they can offer clues about the backend implementation, algorithm variant, or compiler choices. TraceLens intends to serve as a one-stop solution for extracting every bit of useful signal from a trace file, so it includes features to extract and parse relevant information from kernel names where applicable. But it treats them as supplementary, not foundational.
 
-## Key features
+## A powerful IR for deeper analysis
 
-- *Hierarchical dependency tree*: constructs a tree structure linking CPU operations to GPU kernel launches, enabling detailed analysis of ops lowering and performance.
-- *Extensible SDK*: provides a framework for custom analyses, such as identifying GPU time for CPU operations or pinpointing bottlenecks.
-- *Lightweight design*: minimal dependencies and a straightforward codebase for easy integration and use.
-- *PyTorch support*: built for PyTorch profiler JSON traces, with potential for future support of other frameworks.
+This tree is a powerful intermediate representation (IR) that forms the foundation of many TraceLens features. It captures both the structural and performance semantics of a workload: the hierarchical dependency between CPU operations and GPU kernel launches, the argument metadata that disambiguates each operation, and the forward-versus-backward relationship between operations. Because it's a lightweight, framework-agnostic structure (built today for PyTorch profiler JSON, with JAX support and room for more), higher-level analyses — GPU-timeline breakdowns, roofline metrics, `nn.Module` attribution, event replay, and trace diffing — all build on top of it.
 
-## Build and traverse the tree
-
-```{note}
-See [`examples/trace2tree_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace2tree_example.ipynb) for a complete interactive tutorial.
-```
-
-### Load the trace data through TreePerfAnalyzer
-
-```python
-from TraceLens.TreePerf import TreePerfAnalyzer
-
-# Load trace data using TreePerfAnalyzer
-# Set add_python_func=True to include the Python function call stack in the tree
-# This lets you trace GPU kernels all the way back to your Python code
-trace_file = '/path/to/trace.json'
-analyzer = TreePerfAnalyzer.from_file(trace_file, add_python_func=True)
-
-# Access the underlying tree structure
-tree = analyzer.tree
-```
-
-### Find an operation to analyze
-
-```python
-# Find an operation of interest
-event_interest = next(
-    evt for evt in tree.events
-    if evt.get('name') == 'aten::convolution' and evt.get('cat') == 'cpu_op'
-)
-```
-
-### Traverse a subtree
-
-Visualize the entire subtree rooted at this operation:
-
-```python
-tree.traverse_subtree_and_print(event_interest)
-```
-
-```
-└── UID: 41, Category: cpu_op, Name: aten::convolution
-    └── UID: 42, Category: cpu_op, Name: aten::_convolution
-        └── UID: 43, Category: cpu_op, Name: aten::miopen_convolution
-            ├── UID: 104314, Category: cuda_runtime, Name: hipExtModuleLaunchKernel
-            │   └── UID: 107846, Category: kernel, Name: Im2d2Col_v2, Duration: 45.063
-            └── UID: 104318, Category: cuda_runtime, Name: hipExtModuleLaunchKernel
-                └── UID: 107848, Category: kernel, Name: Cijk_Ailk_Bljk_BBS_BH...
-```
-
-### Traverse the parent chain
-
-Trace back through all parent events to see the full call stack. You can optionally include CPU operation details such as input dimensions, types, and strides using the `cpu_op_fields` parameter.
-
-Available fields: `'Input Dims'`, `'Input type'`, `'Input Strides'`, `'Concrete Inputs'`.
-
-```python
-root = tree.traverse_parents_and_print(
-    event_interest,
-    cpu_op_fields=('Input Dims', 'Input type')
-)
-```
-
-```
-Node:
-  UID: 41, Category: cpu_op, Name: aten::convolution
-    Input Dims: [[1, 768, 24, 24], [768, 768, 3, 3], []]
-    Input type: [float, float, float]
-1-up:
-  UID: 40, Category: cpu_op, Name: aten::conv2d
-    Input Dims: [[1, 768, 24, 24], [768, 768, 3, 3], [1], [2, 2], [1, 1], [1, 1], [1]]
-    Input type: [float, float, int, int, int, int, int]
-2-up:
-  UID: 40139, Category: python_function, Name: <built-in method conv2d of type object at 0x...>
-3-up:
-  UID: 40138, Category: python_function, Name: torch/utils/_device.py(100): __torch_function__
-4-up:
-  UID: 40137, Category: python_function, Name: torch/nn/modules/conv.py(554): _conv_forward
-5-up:
-  UID: 40136, Category: python_function, Name: torch/nn/modules/conv.py(558): forward
-6-up:
-  UID: 40135, Category: python_function, Name: torch/nn/modules/module.py(1736): _wrapped_call_impl
-7-up:
-  UID: 40134, Category: python_function, Name: torch/nn/modules/module.py(1747): _call_impl
-8-up:
-  UID: 40133, Category: python_function, Name: transformers/models/owlv2/modeling_owlv2.py(395): forward
-...
-```
+You typically don't construct or traverse the tree by hand. It's accessed through the `TreePerfAnalyzer` interface, which builds the tree from a trace and exposes the navigation and metric APIs. To work with the tree in practice, see [Analyze traces with the TraceLens SDK](../how-to/sdk-analysis.md).
 
 ## Related topics
 
-- [Tree performance analysis](../how-to/tree-perf-analysis.md)
-- [Event replay](../how-to/event-replay.md)
-- [Torch profiling analysis](../conceptual/torch-profiling-analysis.md)
+- [Analyze traces with the TraceLens SDK](../how-to/sdk-analysis.md)
+- [Replay a single operation in TraceLens](../how-to/event-replay.md)
+- [Understanding PyTorch traces](../conceptual/torch-profiling-analysis.md)
 - [API reference](../reference/api-reference.md)
 - [What is TraceLens?](../what-is-tracelens.md)
