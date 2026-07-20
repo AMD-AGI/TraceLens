@@ -4,16 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import json
+import os
 import re
 from typing import Any, Callable, cast, Dict, Optional
 
 import pandas as pd
-import json
-import os
-import re
-import json
-import os
-import re
 
 import TraceLens.util
 from TraceLens import TraceToTree
@@ -21,6 +17,12 @@ from ..TreePerf import GPUEventAnalyser
 
 _TRACELENS_DEBUG = os.environ.get("TRACELENS_DEBUG", "0") == "1"
 _GRAPH_LAUNCH_NAMES = ["hipGraphLaunch", "cudaGraphLaunch"]
+
+
+_KERNEL_LAUNCH_EQUIVALENTS = {
+    "hipModuleLaunchKernel": "__kernel_launch__",
+    "cuLaunchKernel": "__kernel_launch__",
+}
 
 
 class TraceDiff:
@@ -113,11 +115,157 @@ class TraceDiff:
         """
         if name is None:
             return name
-        # Remove hex memory addresses but keep the "at 0x" part for context
         normalized = re.sub(r"0x[0-9a-fA-F]+", "0xXXXX", name)
-        # Remove line numbers from Python stack frames (filename.py(line_number): function)
         normalized = re.sub(r"\.py\(\d+\):", ".py:", normalized)
-        return normalized
+        return _KERNEL_LAUNCH_EQUIVALENTS.get(normalized, normalized)
+
+    def _bfs_child_name_levels(self, uid, tree_num, max_depth=4):
+        """Return a list of sorted tuples, one per BFS level (1..max_depth),
+        each containing normalized GPU-path child names at that depth."""
+        uid2node = (
+            self._get_baseline_uid2node()
+            if tree_num == 1
+            else self._get_variant_uid2node()
+        )
+        levels = []
+        current_frontier = [uid]
+        for _ in range(max_depth):
+            next_frontier = []
+            names_this_level = []
+            for u in current_frontier:
+                node = uid2node.get(u)
+                if not node:
+                    continue
+                for child_uid in node.get("children", []):
+                    child_node = uid2node.get(child_uid)
+                    if child_node and self.is_gpu_path(child_node):
+                        next_frontier.append(child_uid)
+                        name = self._get_op_name(child_uid, tree_num)
+                        names_this_level.append(
+                            self._normalize_name_for_comparison(name) if name else None
+                        )
+            levels.append(tuple(sorted(names_this_level)))
+            current_frontier = next_frontier
+            if not current_frontier:
+                break
+        return levels
+
+    def _find_bfs_survivors(self, anchor_levels, candidates, children, tree_num):
+        """Return candidates whose BFS child-name levels match anchor_levels."""
+        survivors = []
+        for c in candidates:
+            cand_levels = self._bfs_child_name_levels(children[c], tree_num)
+            evicted = False
+            for d in range(max(len(anchor_levels), len(cand_levels))):
+                al = anchor_levels[d] if d < len(anchor_levels) else ()
+                cl = cand_levels[d] if d < len(cand_levels) else ()
+                if al != cl:
+                    evicted = True
+                    break
+            if not evicted:
+                survivors.append(c)
+        return survivors if survivors else candidates
+
+    def _disambiguate_same_name_candidates(self, ops, children1, children2):
+        """
+        Post-WF pass: when a match op pairs trace1[i] with trace2[j] (name N),
+        but there are also insert ops for other trace2 nodes also named N, WF
+        chose arbitrarily among equally-named candidates.  This picks the best
+        candidate using BFS-level GPU-path child name comparison.  Symmetric:
+        also handles multiple trace1 candidates vs one trace2.
+
+        Does not mutate children1/children2.  Returns a new ops list.
+        """
+
+        def norm_name(uid, tree_num):
+            name = self._get_op_name(uid, tree_num)
+            return self._normalize_name_for_comparison(name) if name else None
+
+        match_ops = [(i, j) for op, i, j in ops if op == "match"]
+        delete_idxs = [i for op, i, _ in ops if op == "delete"]
+        insert_idxs = [j for op, _, j in ops if op == "insert"]
+
+        # Build name -> list-of-indices for unmatched nodes on each side
+        unmatched1_by_name = {}
+        for i in delete_idxs:
+            unmatched1_by_name.setdefault(norm_name(children1[i], 1), []).append(i)
+
+        unmatched2_by_name = {}
+        for j in insert_idxs:
+            unmatched2_by_name.setdefault(norm_name(children2[j], 2), []).append(j)
+
+        reassignments = []  # (orig_i, orig_j, new_i, new_j)
+
+        for orig_i, orig_j in match_ops:
+            name1 = norm_name(children1[orig_i], 1)
+            name2 = norm_name(children2[orig_j], 2)
+
+            extra1 = unmatched1_by_name.get(name1, [])
+            extra2 = unmatched2_by_name.get(name2, [])
+
+            if not extra1 and not extra2:
+                continue
+
+            # Disambiguate trace2 candidates against the fixed trace1 anchor
+            if extra2:
+                anchor_levels = self._bfs_child_name_levels(children1[orig_i], 1)
+                survivors2 = self._find_bfs_survivors(
+                    anchor_levels, [orig_j] + extra2, children2, 2
+                )
+                # Only override WF when disambiguation produced a unique survivor.
+                if len(survivors2) == 1 and survivors2[0] != orig_j:
+                    reassignments.append((orig_i, orig_j, orig_i, survivors2[0]))
+
+            # Disambiguate trace1 candidates against the fixed trace2 anchor
+            if extra1:
+                anchor_levels = self._bfs_child_name_levels(children2[orig_j], 2)
+                survivors1 = self._find_bfs_survivors(
+                    anchor_levels, [orig_i] + extra1, children1, 1
+                )
+                if len(survivors1) == 1 and survivors1[0] != orig_i:
+                    effective_j = (
+                        reassignments[-1][3]
+                        if (extra2 and reassignments and reassignments[-1][0] == orig_i)
+                        else orig_j
+                    )
+                    reassignments.append((orig_i, orig_j, survivors1[0], effective_j))
+
+        if not reassignments:
+            return ops
+
+        # Apply reassignments: build substitution maps
+        swap_i = {}  # orig_i -> new_i
+        swap_j = {}  # orig_j -> new_j
+        for orig_i, orig_j, new_i, new_j in reassignments:
+            if new_i != orig_i:
+                swap_i[orig_i] = new_i
+            if new_j != orig_j:
+                swap_j[orig_j] = new_j
+        promoted1 = set(swap_i.values())
+        promoted2 = set(swap_j.values())
+
+        final_ops = []
+        for op, i, j in ops:
+            if op == "match":
+                ni = swap_i.get(i, i)
+                nj = swap_j.get(j, j)
+                if ni != i or nj != j:
+                    if ni == i:
+                        final_ops.append(("insert", None, j))
+                    elif nj == j:
+                        final_ops.append(("delete", i, None))
+                    else:
+                        final_ops.append(("delete", i, None))
+                        final_ops.append(("insert", None, j))
+                    final_ops.append(("match", ni, nj))
+                else:
+                    final_ops.append(("match", i, j))
+            elif op == "delete" and i not in promoted1:
+                final_ops.append(("delete", i, None))
+            elif op == "insert" and j not in promoted2:
+                final_ops.append(("insert", None, j))
+
+        return final_ops
 
     def _get_op_name(self, uid, tree_num):
         """
@@ -234,7 +382,7 @@ class TraceDiff:
                         child = tree.get_UID2event(children[0])
                         child_cat = child.get("cat") or child.get("category")
                         if (
-                            child_cat in ("cpu_op", "cuda_runtime")
+                            child_cat in ("cpu_op", "cuda_runtime", "cuda_driver")
                             and child.get("name") not in _GRAPH_LAUNCH_NAMES
                         ):
                             break
@@ -308,6 +456,7 @@ class TraceDiff:
                 ops.append(("insert", None, j - 1))
                 j -= 1
         ops.reverse()
+        ops = self._disambiguate_same_name_candidates(ops, items1, items2)
         wf_cache[cache_key] = ops
         return ops
 
@@ -332,6 +481,7 @@ class TraceDiff:
         baseline_uid2node = self._get_baseline_uid2node()
         variant_uid2node = self._get_variant_uid2node()
         wf_cache = {}
+
         merged_events = []
         merged_id_counter = [0]
         uid_pair_to_merged_id = {}
@@ -421,20 +571,35 @@ class TraceDiff:
         def collapse_single_gpu_child(uid, uid2node, tree_obj):
             """
             Descend through single-GPU-path-child wrapper nodes until reaching
-            a node with != 1 GPU-path child, a cpu_op, or a dead end.
+            a node with != 1 GPU-path child, a cpu_op with a cuda_runtime
+            child, or a dead end.
             Returns (uid, gpu_path_children) of the deepest reachable node.
             gpu_path_children is the list of GPU-path children at that node
-            (empty if stopped at a cpu_op, cuda_runtime, or missing node).
+            (empty if stopped at a cuda_runtime or missing node).
             """
             current = uid
             gpu_kids = []
             while True:
                 node = uid2node.get(current)
-                if not node or (
-                    tree_obj.event_to_category(node) == "cuda_runtime"
+                if not node:
+                    break
+                cat = tree_obj.event_to_category(node)
+                if (
+                    cat in ("cuda_runtime", "cuda_driver")
                     and node.get("name") not in _GRAPH_LAUNCH_NAMES
                 ):
                     break
+                # Stop at cpu_ops that directly launch cuda_runtime/cuda_driver calls
+                if cat == "cpu_op":
+                    has_cr_child = any(
+                        tree_obj.event_to_category(uid2node[c])
+                        in ("cuda_runtime", "cuda_driver")
+                        and uid2node[c].get("name") not in _GRAPH_LAUNCH_NAMES
+                        for c in node.get("children", [])
+                        if uid2node.get(c)
+                    )
+                    if has_cr_child:
+                        break
                 kids = [
                     c
                     for c in node.get("children", [])
@@ -469,7 +634,7 @@ class TraceDiff:
 
             sub1 = {}  # index in children1 -> replacement UIDs
             sub2 = {}  # index in children2 -> replacement UIDs
-            skip_cats = ("kernel", "cuda_runtime")
+            skip_cats = ("kernel", "cuda_runtime", "cuda_driver")
 
             for di in delete_indices:
                 for ii in insert_indices:
@@ -630,17 +795,66 @@ class TraceDiff:
             if any(op != "match" for op, _, _ in ops):
                 changed, recon1, recon2 = reconcile_unmatched(ops, children1, children2)
                 if changed:
-                    any_cr = any(
-                        subtree_contains_cuda_runtime(c, baseline_uid2node)
-                        for c in recon1
-                    ) or any(
-                        subtree_contains_cuda_runtime(c, variant_uid2node)
-                        for c in recon2
-                    )
-                    if len(recon1) == len(recon2) and not any_cr:
-                        ops = [("match", i, i) for i in range(len(recon1))]
+                    # Preserve Phase 2 match ops: track by UID pair (not index,
+                    # since expansion + re-sort changes indices).
+                    pinned_uid_pairs = [
+                        (children1[i], children2[j])
+                        for op_type, i, j in ops
+                        if op_type == "match"
+                    ]
+
+                    # Locate pinned UIDs in the expanded+re-sorted lists
+                    uid_to_ri = {c: idx for idx, c in enumerate(recon1)}
+                    uid_to_rj = {c: idx for idx, c in enumerate(recon2)}
+
+                    new_ops = []
+                    pinned_ri = set()
+                    pinned_rj = set()
+                    for u1, u2 in pinned_uid_pairs:
+                        ri = uid_to_ri.get(u1)
+                        rj = uid_to_rj.get(u2)
+                        if ri is not None and rj is not None:
+                            new_ops.append(("match", ri, rj))
+                            pinned_ri.add(ri)
+                            pinned_rj.add(rj)
+
+                    # Run WF only on unpinned (expanded/unmatched) indices
+                    free1 = [i for i in range(len(recon1)) if i not in pinned_ri]
+                    free2 = [j for j in range(len(recon2)) if j not in pinned_rj]
+
+                    if free1 and free2:
+                        free_items1 = [recon1[i] for i in free1]
+                        free_items2 = [recon2[j] for j in free2]
+                        any_cr = any(
+                            subtree_contains_cuda_runtime(c, baseline_uid2node)
+                            for c in free_items1
+                        ) or any(
+                            subtree_contains_cuda_runtime(c, variant_uid2node)
+                            for c in free_items2
+                        )
+                        if len(free_items1) == len(free_items2) and not any_cr:
+                            free_ops = [
+                                ("match", i, i) for i in range(len(free_items1))
+                            ]
+                        else:
+                            free_ops = self.wagner_fischer(
+                                free_items1, free_items2, wf_cache
+                            )
+                        # Remap free_ops indices back to recon1/recon2 indices
+                        for fop, fi, fj in free_ops:
+                            if fop == "match":
+                                new_ops.append(("match", free1[fi], free2[fj]))
+                            elif fop == "delete":
+                                new_ops.append(("delete", free1[fi], None))
+                            elif fop == "insert":
+                                new_ops.append(("insert", None, free2[fj]))
                     else:
-                        ops = self.wagner_fischer(recon1, recon2, wf_cache)
+                        for i in free1:
+                            new_ops.append(("delete", i, None))
+                        for j in free2:
+                            new_ops.append(("insert", None, j))
+
+                    ops = new_ops
                     children1, children2 = recon1, recon2
 
             # --- Phase 4: Per-node canonicalization of remaining unmatched ---
