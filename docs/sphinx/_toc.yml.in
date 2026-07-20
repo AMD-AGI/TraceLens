@@ -50,8 +50,8 @@ subtrees:
     title: Analyze collective communication
   - file: how-to/origami-integration
     title: Estimate kernel times with Origami
-  - file: how-to/agentic-mode
-    title: Generate optimization recommendations
+  - file: how-to/agent
+    title: Agentic performance analysis with the TraceLens Agent
 
 - caption: Concepts
   entries:

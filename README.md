@@ -130,6 +130,7 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 | Compare PyTorch Reports      | [docs/how-to/compare-perf-reports.md](docs/how-to/compare-perf-reports.md)                                                       |
 | Multi-Rank Collective Report | [docs/how-to/collective-report.md](docs/how-to/collective-report.md)                                                             |
 | Performance Report Columns   | [docs/reference/perf-report-columns.md](docs/reference/perf-report-columns.md)                                                   |
+| TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
 
 ---
 
@@ -156,5 +157,3 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on branching, commi
 - [GEMM analysis in TraceLens](docs/conceptual/gemm-analysis.md)
 - [The Trace2Tree data model](docs/conceptual/trace2tree.md)
 - [PyTorch profiling walkthrough](docs/tutorials/torch-profiling.ipynb)
-
-For more background and conceptual topics, browse the [documentation site](docs/index.rst).

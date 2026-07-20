@@ -14,9 +14,9 @@ See LICENSE for license information.
 This topic shows how to run the *TraceLens Agent*, an agentic performance-analysis
 workflow that reads a GPU trace and produces a single stakeholder-facing report,
 `analysis.md`, organized as a prioritized bottleneck list. Findings are ranked and
-grouped into three tiers — compute kernel optimizations, kernel fusion
-opportunities, and system-level optimizations — and each finding carries the
-supporting evidence, the reasoning behind the call-out, and a concrete resolution.
+grouped into three tiers: compute kernel optimizations, kernel fusion
+opportunities, and system-level optimizations. Each finding carries the supporting
+evidence, the reasoning behind the call-out, and a concrete resolution.
 
 The agent combines a structured, skill-driven workflow with codified TraceLens
 analysis for repeatable, reliable results.
@@ -25,14 +25,13 @@ analysis for repeatable, reliable results.
 
 The agent runs in one of two modes:
 
-- *Standalone* — single-trace roofline analysis. Use this when you have one trace
-  and want to find where performance falls short of hardware limits. This is the
-  recommended default.
-- *Comparative* — two-trace gap analysis. The agent compares a primary trace
-  against a reference trace (for example, a different platform or a tuned config)
+- *Standalone*: Single-trace roofline analysis. Use this when you have one trace
+  and want to find where performance falls short of hardware limits, find system bottlenecks or fusion opportunities. This is the recommended default.
+- *Comparative*: Two-trace gap analysis. The agent compares a primary trace
+  against a reference trace, for example a different platform or a tuned config,
   and identifies inefficiencies in the primary trace relative to the reference.
-  Comparative analysis works best when both traces come from the same framework;
-  cross-framework comparisons can produce misleading gap estimates because of
+  Comparative analysis works best when both traces come from the same framework.
+  Cross-framework comparisons can produce misleading gap estimates because of
   structural differences in operation call stacks.
 
 Support depends on the execution mode of the traced workload:
@@ -59,16 +58,19 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 The orchestrator runs against a single `torch.profiler` trace (`.json` or
 `.json.gz`). Collection is workload-specific:
 
-- *Training and eager inference traces* — instrument your loop with
+- *Generic Eager Traces*: Instrument your loop with
   `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture
   (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state
-  window (a handful of post-warmup steps) and export with
+  window of a handful of post-warmup steps, then log the trace with
   `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank
   analysis.
-- *vLLM or SGLang inference traces* — collection has framework-, version-, and
-  execution-mode-specific requirements. Follow
+- *Inference Traces with Graph Capture*: Collection has framework-specific
+  requirements. Follow
   [Generate a PyTorch inference performance report](./generate-perf-report-pytorch-inference.md).
-  For graph-mode workloads you produce two artifacts: a graph-replay trace and a
+  The Profiling Skill automates
+  vLLM/SGLang benchmarking and PyTorch profiler trace collection via
+  Magpie, producing analysis-ready traces. For
+  graph-mode workloads you produce two artifacts: a graph-replay trace and a
   graph-capture folder. In inference mode with execution mode
   `graph replay + capture`, TraceLens merges call-stack and shape information from
   the capture folder into the replay tree before analysis.
@@ -77,10 +79,10 @@ The orchestrator runs against a single `torch.profiler` trace (`.json` or
 
 Roofline analysis compares each measured kernel against your GPU's max-achievable
 TFLOPS and HBM bandwidth, so it needs a `<platform>.json` arch file for your
-hardware. Bundled arch files ship with the package; if your platform isn't
-included — or you want stack-specific measured values instead of published specs —
+hardware. Bundled arch files ship with the package. If your platform isn't
+included, or you want stack-specific measured values instead of published specs,
 generate benchmark-derived peak TFLOPS and HBM bandwidth with the GPU
-microbenchmarking suite, which writes the arch JSON in the shape the roofline
+microbenchmarking suite. It writes the arch JSON in the shape the roofline
 expects.
 
 ## Run the agent from a chat
@@ -99,7 +101,7 @@ In a chat with a capable model, invoke one of:
   agentic analysis workflow on <path_to_trace.json>
   ```
 
-- Comparative (two traces) — always pass the *baseline* trace first:
+- Comparative (two traces)
 
   ```text
   Follow the analysis orchestrator installed with TraceLens and run the full
@@ -120,8 +122,8 @@ Use the `agent` CLI to run the orchestrator non-interactively. Install it with:
 curl https://cursor.com/install -fsS | bash
 ```
 
-Pass every parameter inline so no interactive prompts are needed — useful for
-batch runs and continuous-integration pipelines. For example, for a default
+Pass every parameter inline so no interactive prompts are needed. This is useful
+for batch runs and continuous-integration pipelines. For example, for a default
 standalone run on a remote node with a container:
 
 ```bash
@@ -140,23 +142,21 @@ For vLLM or SGLang inference, set `analysis mode inference` and add
 ## Read the results
 
 Only `analysis.md` is intended for end-user review. Everything else under
-`analysis_output/` is agent internals — intermediates the orchestrator and
-sub-agents pass between steps (for example `system_findings/`,
-`category_findings/`, `category_data/`, `metadata/`, `perf_report_csvs/`, and
-`perf_report.xlsx`).
+`analysis_output/` is agent internal: intermediates the orchestrator and
+sub-agents pass between steps.
 
 Every report has the same top-level structure:
 
-1. *Executive summary* — a one-paragraph workload characterization, a metrics
+1. *Executive summary*: A one-paragraph workload characterization, a metrics
    table (total time, compute percentage, idle percentage, exposed-communication
-   percentage, and top bottleneck category), and a performance-improvement chart.
-2. *Compute kernel optimizations* — a top-operations table followed by per-category
-   priority items (`P1`, `P2`, and so on) sorted by `impact_score`, each with an
-   Insight, Action, and Impact triplet.
-3. *Kernel fusion opportunities* (experimental) — candidate modules to fuse.
-4. *System-level optimizations* (experimental) — idle time, memory-copy overhead,
+   percentage, and top bottleneck category), and a representative chart.
+2. *Compute kernel optimizations*: Top-operations table followed by per-category
+   priority items (`P1`, `P2`, and so on) sorted by `impact_score`. Each item
+   carries an Insight, Action, and Impact triplet.
+3. *Kernel fusion opportunities* (experimental): Candidate modules to fuse.
+4. *System-level optimizations* (experimental): Idle time, memory-copy overhead,
    and compute/communication overlap.
-5. *Detailed analysis* — per-priority-item drill-down with identification
+5. *Detailed analysis*: Per-priority-item drill-down with identification
    rationale, data tables, and reasoning.
 
 ### Programmatic interface
@@ -164,30 +164,34 @@ Every report has the same top-level structure:
 Every report embeds HTML comment markers so a downstream system can consume it
 without parsing prose:
 
-- `<!-- impact-begin ... -->` … `<!-- impact-end -->` wraps each priority item's
-  Impact line; `mid` is the canonical `impact_score` and the category is the
-  analyzer category (`gemm`, `sdpa_fwd`, `elementwise`, `norm_fwd`, and so on).
+- `<!-- impact-begin kind=p_item category=<cat> low=<x> mid=<y> high=<z> -->` …
+  `<!-- impact-end -->` wraps each priority item's Impact line; `mid` is the
+  canonical `impact_score` and `<cat>` is the analyzer category (`gemm`,
+  `sdpa_fwd`, `elementwise`, `norm_fwd`, and so on).
+- `<!-- impact-begin kind=top_ops -->` … `<!-- impact-end -->` wraps the Top
+  Operations table at the start of the Compute kernel optimizations section.
 - Per-item anchors (`#detailed-analysis-compute-pN`, `#detailed-analysis-fusion-PN`,
   `#detailed-analysis-system-pN`) link each summary card to its detailed reasoning
   section.
 
-## How the analysis works
+## Analysis workflow
 
 The workflow splits into three independently composable tiers:
 
-- *System-level optimizations* — issues that affect the GPU pipeline as a whole,
+- *System-level optimizations*: Issues that affect the GPU pipeline as a whole,
   such as idle time, memory-copy overhead, collective-communication blocking, and
   compute/communication overlap.
-- *Kernel fusion opportunities* (experimental) — multi-kernel modules that could be
+- *Kernel fusion opportunities* (experimental): Multi-kernel modules that could be
   fused, with estimated savings.
-- *Compute kernel optimizations* — per-category kernel analysis (GEMM, attention,
-  elementwise, and so on) focused on individual operation efficiency.
+- *Compute kernel optimizations*: Per-category kernel analysis (GEMM, attention,
+  elementwise, etc.) focused on individual operation efficiency.
 
-The *analysis orchestrator* skill coordinates the workflow: it queries user
+The analysis orchestrator skill coordinates the workflow: it queries user
 inputs, runs TraceLens to pre-compute trace data, invokes the system-level and
-compute-kernel sub-agents in parallel, then validates outputs, aggregates
-findings, and generates the prioritized report. The orchestrator and its
-sub-agents run on a capable reasoning model declared in each agent's front matter.
+compute-kernel sub-agents in parallel, aggregates and validates their findings,
+identifies the model, and generates the prioritized report. The orchestrator and
+its sub-agents run on a capable reasoning model declared in each agent's front
+matter.
 
 The high-level steps are:
 
@@ -197,19 +201,19 @@ The high-level steps are:
    scope).
 3. Prepare category data (GPU utilization, top operations, tree data, multi-kernel
    data, category filtering) and extract fusion candidates.
-4. Identify the model.
-5. Run system-level analysis (CPU/idle, multi-kernel, and kernel fusion) in
+4. Run system-level analysis (CPU/idle, multi-kernel, and kernel fusion) in
    parallel.
-6. Run the compute-kernel sub-agents in parallel.
+5. Run the compute-kernel sub-agents in parallel.
+6. Aggregate the per-category findings into a globally ranked list.
 7. Validate sub-agent outputs for time sanity, efficiency anomalies, and coverage.
-8. Aggregate results across all three tiers.
+8. Prepare report data and identify the model.
 9. Generate the final `analysis.md` report.
 
 ### Sub-agents
 
 System-level sub-agents cover CPU and idle analysis, memory-copy and
 collective-communication patterns, and kernel fusion. Compute-kernel sub-agents
-cover GEMM (`mm`, `bmm`, `addmm`), scaled dot-product attention, elementwise,
+cover GEMM, scaled dot-product attention, elementwise,
 reduction, Triton-compiled kernels, Mixture-of-Experts, normalization,
 convolution, and a generic analyzer for uncategorized operations.
 
@@ -225,5 +229,5 @@ node, or an SSH plus container-exec wrapper for a containerized node.
 - [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 - [Generate a PyTorch inference performance report](./generate-perf-report-pytorch-inference.md)
 - [Analyze traces with the TraceLens SDK](./sdk-analysis.md)
+- [Trace2Tree data model](../conceptual/trace2tree.md)
 - [GEMM analysis](../conceptual/gemm-analysis.md)
-- [The Trace2Tree data model](../conceptual/trace2tree.md)

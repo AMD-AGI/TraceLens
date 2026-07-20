@@ -60,8 +60,8 @@ pip install -e .
 
 The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json.gz`). Collection is workload-specific:
 
-- **Training and eager inference traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of training/inference steps, post-warmup) and dump the trace via `prof.export_chrome_trace(...)`. A single rank's trace is sufficient for per-rank analysis.
-- **vLLM / SGLang inference traces**: Trace collection has framework-, version-, and execution-mode-specific requirements (custom Docker images or framework patches to add roofline annotations, profiler-config flags for graph-capture profiling, steady-state window selection, optional trace splitting). Follow the canonical topic in [Generate a PyTorch inference performance report](../../../docs/how-to/generate-perf-report-pytorch-inference.md). For graph-mode workloads you will produce **two artifacts**: a graph-replay trace and a graph-capture folder; TraceLens (in inference mode with execution mode `graph replay + capture`) merges call-stack and shape information from the capture folder into the replay tree before analysis.
+- **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling walkthrough](../../../docs/tutorials/torch-profiling.ipynb) walks through this end to end.
+- **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](../../../docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](../Profiling/README.md) automates vLLM/SGLang benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces. For graph-mode workloads you produce two artifacts: a graph-replay trace and a graph-capture folder. In inference mode with execution mode `graph replay + capture`, TraceLens merges call-stack and shape information from the capture folder into the replay tree before analysis.
 
 ### 3. Establish a hardware performance baseline
 
@@ -267,16 +267,17 @@ flowchart TD
     Sdpa --> CatFindings
     Others --> CatFindings
 
-    SysFindings --> Step8["Step 8: Validate"]
-    CatFindings --> Step8
-    Step8 --> Step9["Step 9: Aggregate"]
-    Step9 --> Step11["Step 11: Final Report"]
+    SysFindings --> Agg["Step 7.5: Aggregate"]
+    CatFindings --> Agg
+    Agg --> Step8["Step 8: Validate"]
+    Step8 --> Step9["Step 9: Report Prep + Model ID"]
+    Step9 --> Step10["Step 10: Final Report"]
 ```
 
 ### Orchestrator
 
 The **Analysis Orchestrator** skill coordinates the entire analysis workflow.
-It queries user inputs, runs TraceLens to pre-compute trace data, and invokes system-level and compute kernel sub-agents in parallel. Finally, it validates outputs, aggregates findings, and generates a prioritized stakeholder report.
+It queries user inputs, runs TraceLens to pre-compute trace data, and invokes system-level and compute kernel sub-agents in parallel. Finally, it aggregates and validates findings, identifies the model, and generates a prioritized stakeholder report.
 
 ### Workflow Steps
 
@@ -284,12 +285,12 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 0.   Query User Inputs (Comparison scope, Trace path(s), Platform(s), Analysis Mode, Environment Setup)
 1.   Generate Performance Report (branches on analysis mode and comparison scope)
 2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json + kernel_fusion_metrics.json
-5.5. Model Identification (subagent) → metadata/model_info.json
 6.   System-Level Analysis (CPU/Idle + Multi-Kernel + Kernel Fusion, PARALLEL) → system_findings/
 7.   Compute Kernel Subagents (PARALLEL) → category_findings/
+7.5. Aggregate per-category Compute Kernel findings → priority_data.json (globally ranked)
 8.   Validate Subagent Outputs (time sanity, efficiency anomalies, coverage)
-9.   Aggregate Results: System-Level + Kernel Fusion + Compute Kernel Recommendations
-10.  Generate Final Report (analysis.md)
+9.   Prepare Report Data + Model Identification (subagent) → metadata/model_info.json
+10.  Generate Final Report (analysis.md): compose System-Level + Kernel Fusion + Compute Kernel sections
 ```
 
 ### Sub-Agents
