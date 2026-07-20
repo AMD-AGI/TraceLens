@@ -21,7 +21,7 @@ The TraceLens Agent is an agentic performance analysis tool that uses TraceLens 
 | | Standalone | Comparative |
 |---|---|---|
 | **Eager** | ✅ | ✅ |
-| **Graph + Capture** | ✅ | ❌ |
+| **Graph + Capture** | ✅ | ✅ |
 | **Graph** | ❌ | ❌ |
 
 ---
@@ -74,13 +74,21 @@ The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json
 ### To run via Cursor chat:
 
 1. **In a Cursor chat with Claude Opus 4.7 High, invoke one of:**
-   - Standalone (single trace):
+   - Standalone (single eager trace):
     ```
     "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json>"
     ```
-   - Comparative (two traces):
+   - Standalone (single graph replay trace with capture trace directory):
+    ```
+    "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json> with capture folder <path_to_capture.json>"
+    ```
+   - Comparative (two eager traces):
     ```
     "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace1.json> and <path_to_trace2.json>"
+    ```
+   - Comparative (two graph replay traces with capture trace directories):
+    ```
+    "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace1.json> with capture folder <path_to_capture1.json> and <path_to_trace2.json> with capture folder <path_to_capture2.json>"
     ```
     **NOTE**: Always pass **baseline** trace as trace1
 
@@ -284,7 +292,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 
 The orchestrator and all 13 sub-agents currently run on **`claude-opus-4-7-high`**, declared in each agent file's front matter under `.cursor/agents/`. The full set: `cpu-idle-analyzer`, `multi-kernel-analyzer`, `kernel-fusion-analyzer`, `model-identification-agent`, `gemm-analyzer`, `sdpa-analyzer`, `elementwise-analyzer`, `reduce-analyzer`, `triton-analyzer`, `moe-analyzer`, `norm-analyzer`, `convolution-analyzer`, `generic-op-analyzer`.
 
-### Supported Standalone Analysis Modes
+### Supported Analysis Modes
 
 The orchestrator supports two analysis modes, selected during Step 0:
 
