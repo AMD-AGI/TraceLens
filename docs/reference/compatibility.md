@@ -7,7 +7,7 @@ See LICENSE for license information.
 
 # TraceLens compatibility matrix
 ```{meta}
-:description: TraceLens compatibility matrix: supported Python versions, operating systems, trace formats, and validated GPU accelerators for roofline analysis.
+:description: TraceLens compatibility matrix: supported Python versions, operating systems, trace formats, and validated GPUs for roofline analysis.
 :keywords: TraceLens, compatibility, Python, ROCm, AMD Instinct, MI300X, PyTorch profiler, JAX, rocprofv3, pftrace, GPU, Linux
 ```
 
@@ -31,20 +31,20 @@ the GPU backend, and is well tested on both AMD ROCm and NVIDIA CUDA traces.
 ## Hardware requirements
 
 TraceLens runs on a CPU host. It parses trace files and never executes kernels or
-talks to a GPU, so no accelerator is required to install or run it — you can
+talks to a GPU, so no GPU is required to install or run it — you can
 analyze traces on a laptop or CI runner with no GPU present.
 
-### Target accelerators for roofline analysis
+### Target GPU for roofline analysis
 
-The GPU details below describe the *target accelerator whose traces you analyze*
+The GPU details below describe the *target GPU whose traces you analyze*
 (the tracing environment), not a requirement for the machine running TraceLens.
 Roofline classification needs a GPU architecture specification that provides the
-peak FLOPS and peak bandwidth for that target accelerator (for example,
+peak FLOPS and peak bandwidth for that target GPU (for example,
 `mi300.json`). Architecture specifications are bundled under
 `TraceLens/Agent/Analysis/utils/arch/`; supply your own JSON with
-`--gpu_arch_json_path` for accelerators not listed.
+`--gpu_arch_json_path` for GPUs not listed.
 
-| Target accelerator | Notes |
+| Target GPU         | Notes |
 |--------------------|-------|
 | AMD Instinct MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
 
