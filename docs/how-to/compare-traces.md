@@ -15,8 +15,8 @@ This topic shows how to quantify the impact of a change by comparing two
 TraceLens reports side by side — for example, a baseline against a candidate
 after a code, library, or hardware change.
 
-TraceLens offers two ways to compare traces, depending on how precise you need
-the matching to be:
+TraceLens offers three ways to compare traces, depending on how precise you need
+the matching to be and the level of analysis you need:
 
 - **[Perf-report comparison](#perf-report-comparison):** compares two finished
   reports by **op name**, matching each sheet's rows (per-op aggregates, kernels,
@@ -27,12 +27,17 @@ the matching to be:
   lowest common node. Use it when op names differ between traces (for example, across
   hardware, libraries, or framework versions) or when you need finer-grained,
   programmatic analysis.
+- **[TraceLens Agent (comparative mode)](#tracelens-agent-comparative-mode):** an
+  agentic workflow that compares two traces and produces a prioritized,
+  stakeholder-facing optimization report. Use it when you want
+  automated gap analysis with concrete optimization recommendations rather than
+  raw data tables.
 
 ## Before you begin
 
 - TraceLens installed (see [Install TraceLens](../install/install.md)).
-- Two generated reports (`.xlsx`), one per configuration. Generate them with
-  [TraceLens_generate_perf_report_pytorch](./generate-perf-report-pytorch.md).
+- For perf-report comparison: two generated reports (`.xlsx`), one
+  per configuration. Generate them with [TraceLens_generate_perf_report_pytorch](./generate-perf-report-pytorch.md).
 
 ## Perf-report comparison
 
@@ -186,9 +191,44 @@ See the
 [`trace_diff_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace_diff_example.ipynb)
 notebook for a worked example.
 
+## TraceLens Agent (comparative mode)
+
+The [TraceLens Agent](./agent.md) is an agentic workflow that analyzes traces 
+and outputs a prioritized, stakeholder-facing optimization report. The agent has two analysis modes: standlone and comparative. 
+In comparative mode the agent takes two traces, runs TraceDiff under the hood,
+and interprets the results to surface performance gaps with concrete actions.
+
+### Run a comparative analysis
+
+In a chat with a capable model, invoke:
+
+```text
+Follow the analysis orchestrator installed with TraceLens and run the full
+agentic analysis workflow on <path_to_trace1.json> and <path_to_trace2.json>
+```
+
+Or headless via the CLI:
+
+```bash
+agent --model <model> --print --force --trust \
+    "Follow the analysis orchestrator installed with the TraceLens pip package
+    (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package
+    installation directory) and run the full agentic analysis workflow on
+    <path_to_trace1.json> and <path_to_trace2.json> with platform <platform>,
+    analysis mode default, node <node>, container <container>,
+    output to <output_dir>"
+```
+
+The report identifies inefficiencies in the primary trace relative to the
+reference, ranks findings by impact score, and groups them into compute kernel
+optimizations, kernel fusion opportunities, and system-level optimizations. See
+[Generate optimization recommendations with the TraceLens Agent](./agent.md) for
+the full setup, prerequisites, and output format.
+
 ## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
 - [Install TraceLens](../install/install.md)
 - [Generate a report](generate-reports.md)
+- [Generate optimization recommendations with the TraceLens Agent](./agent.md)
 - [API reference](../reference/api-reference.md)
