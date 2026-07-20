@@ -76,6 +76,24 @@ the dispatch op lowers to runtime launches and kernels:
                 └── UID: 107848, Category: kernel, Name: Cijk_Ailk_Bljk_BBS_BH...
 ```
 
+Walking the other direction, `traverse_parents_and_print` traces an op back
+through the runtime and Python frames all the way to the model's `forward`, and
+with `cpu_op_fields` it annotates each level with argument metadata:
+
+```
+Node:
+  UID: 41, Category: cpu_op, Name: aten::convolution
+    Input Dims: [[1, 768, 24, 24], [768, 768, 3, 3], []]
+    Input type: [float, float, float]
+1-up:
+  UID: 40, Category: cpu_op, Name: aten::conv2d
+2-up:
+  UID: 40139, Category: python_function, Name: <built-in method conv2d ...>
+...
+5-up:
+  UID: 40136, Category: python_function, Name: torch/nn/modules/conv.py(558): forward
+```
+
 For a full interactive walkthrough of tree navigation, see
 [`trace2tree_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace2tree_example.ipynb).
 
@@ -99,6 +117,16 @@ Example output:
 | exposed_memcpy_time | 0.14 | 0.00 |
 | idle_time | 4.72 | 0.07 |
 | total_time | 6526.18 | 100.00 |
+
+The metrics are defined as:
+
+- **computation_time** — time in compute kernels (GEMMs, convolutions, and so on).
+- **communication_time** — time in collective/communication kernels (for example, NCCL/RCCL).
+- **memcpy_time** — time in host-device or device-device memory copies.
+- **exposed_communication_time** / **exposed_memcpy_time** — the portion of
+  communication or memcpy that does *not* overlap computation (the part that
+  actually costs wall-clock time).
+- **busy_time** / **idle_time** — time the GPU is doing anything vs. nothing.
 
 This breakdown is computed by `GPUEventAnalyser`, which works directly from a list
 of GPU events. It operates on **any GPU timeline** (PyTorch, JAX, and others) and
@@ -160,17 +188,18 @@ df_gemm = analyzer.build_df_perf_metrics(gemm_events, include_kernel_details=Tru
 analyzer.summarize_df_perf_metrics(df_gemm, ["mean"])   # group by M, N, K, bias
 ```
 
-Example GEMM summary (grouped by shape, mean across occurrences):
+Example `aten::mm` summary (top rows by induced GPU time, grouped by shape):
 
-| M | N | K | bias | Count | kernel_time_ms | TFLOPS/s | FLOPS/Byte |
-|------|------|------|-------|-------|----------------|----------|------------|
-| 4096 | 4096 | 4096 | False | 32 | 0.412 | 334.1 | 682.7 |
-| 8192 | 1024 | 8192 | False | 16 | 0.298 | 461.2 | 512.0 |
-| 2048 | 2048 | 2048 | True | 48 | 0.061 | 281.5 | 341.3 |
+| name | param: M | param: N | param: K | param: bias | FLOPS/Byte_first | TFLOPS/s_mean |
+|---------|----------|----------|----------|-------------|------------------|---------------|
+| aten::mm | 73728 | 28672 | 8192 | False | 5864.73 | 698.19 |
+| aten::mm | 73728 | 8192 | 28672 | False | 5864.73 | 719.59 |
+| aten::mm | 28672 | 8192 | 73728 | False | 5864.73 | 740.51 |
+| aten::mm | 73728 | 128256 | 8192 | False | 6972.01 | 628.10 |
 
 `FLOPS/Byte` is the operation's arithmetic intensity; comparing achieved
-`TFLOPS/s` against the device peak tells you whether each shape is compute- or
-memory-bound.
+`TFLOPS/s_mean` against the device peak tells you whether each shape is compute-
+or memory-bound.
 
 For how these metrics are defined and modeled, see
 [GEMM analysis](../conceptual/gemm-analysis.md) and the
@@ -212,21 +241,25 @@ children = tree.get_nn_module_children(event)   # list of module UIDs
 parent = tree.get_nn_module_parent(event)       # parent module UID
 ```
 
-Each node carries its aggregated `GPU Time`, so you can print a module-level
-breakdown (GPU µs and percent of parent) that mirrors your model architecture:
+Each node carries its aggregated `GPU Time`, so a recursive walk prints a
+module-level breakdown that mirrors your model architecture. Every line is
+annotated with the module's `GPU Time` (in µs) and its percentage of the parent,
+with a `Non-nn.Module GPU Time` entry for GPU ops that don't belong to a child
+module:
 
 ```
-└── nn.Module: DeepseekV2DecoderLayer_2 ..................... (10233.51)
-    ├── nn.Module: DeepseekV2AttentionMLA_2 ................. (6775.96)
-    │   ├── nn.Module: RadixAttention_2 ..................... (3204.62)
-    │   ├── nn.Module: RowParallelLinear_4 ................. (1446.40)
-    │   └── Non-nn.Module GPU Ops ........................... (399.22)
-    └── nn.Module: DeepseekV2MLP_2 .......................... (3154.66)
+nn.Module: DeepseekV2DecoderLayer_2   GPU Time: <µs>, Pct Parent: <%>
+├── nn.Module: DeepseekV2AttentionMLA_2   GPU Time: <µs>, Pct Parent: <%>
+│   ├── nn.Module: RadixAttention_2
+│   ├── nn.Module: RowParallelLinear_4
+│   └── Non-nn.Module GPU Time
+└── nn.Module: DeepseekV2MLP_2
 ```
 
-See
+Run
 [`nn_module_view.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/nn_module_view.ipynb)
-for the full traversal, including a recursive pretty-printer.
+against your own trace to produce the full tree with real per-module times; it
+includes the recursive pretty-printer used above.
 
 ## Related topics
 
