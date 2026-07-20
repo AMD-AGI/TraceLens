@@ -80,7 +80,11 @@ Roofline analysis compares each measured kernel against your GPU's max-achievabl
     ```
     "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json>"
     ```
-   - Comparative (two traces):
+   - Standalone (single graph replay trace with capture trace directory):
+    ```
+    "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json> with capture folder <path_to_capture_folder>"
+    ```
+   - Comparative (two eager traces):
     ```
     "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace1.json> and <path_to_trace2.json>"
     ```
@@ -321,7 +325,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 
 The orchestrator and all 13 sub-agents currently run on **`claude-opus-4-7-high`**, declared in each agent file's front matter under `.cursor/agents/`. The full set: `cpu-idle-analyzer`, `multi-kernel-analyzer`, `kernel-fusion-analyzer`, `model-identification-agent`, `gemm-analyzer`, `sdpa-analyzer`, `elementwise-analyzer`, `reduce-analyzer`, `triton-analyzer`, `moe-analyzer`, `norm-analyzer`, `convolution-analyzer`, `generic-op-analyzer`.
 
-### Supported Standalone Analysis Modes
+### Supported Analysis Modes
 
 The orchestrator supports two analysis modes, selected during Step 0:
 
