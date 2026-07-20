@@ -242,24 +242,36 @@ parent = tree.get_nn_module_parent(event)       # parent module UID
 ```
 
 Each node carries its aggregated `GPU Time`, so a recursive walk prints a
-module-level breakdown that mirrors your model architecture. Every line is
-annotated with the module's `GPU Time` (in µs) and its percentage of the parent,
-with a `Non-nn.Module GPU Time` entry for GPU ops that don't belong to a child
+module-level breakdown that mirrors your model architecture. The example below is
+a single DeepSeek-V2 decoder layer, with each module annotated by its GPU time
+(µs) and a `Non-nn.Module GPU Ops` entry for GPU work not owned by a child
 module:
 
 ```
-nn.Module: DeepseekV2DecoderLayer_2   GPU Time: <µs>, Pct Parent: <%>
-├── nn.Module: DeepseekV2AttentionMLA_2   GPU Time: <µs>, Pct Parent: <%>
-│   ├── nn.Module: RadixAttention_2
-│   ├── nn.Module: RowParallelLinear_4
-│   └── Non-nn.Module GPU Time
-└── nn.Module: DeepseekV2MLP_2
+                                                            (GPU Time μs)
+└── nn.Module: DeepseekV2DecoderLayer_2 ..................... (10233.51)
+    ├── nn.Module: RMSNorm_8 ................................ (148.46)
+    ├── nn.Module: DeepseekV2AttentionMLA_2 ................. (6775.96)
+    │   ├── nn.Module: ReplicatedLinear_4 ................... (817.78)
+    │   ├── nn.Module: RMSNorm_9 ............................ (19.67)
+    │   ├── nn.Module: ColumnParallelLinear_2 ............... (268.80)
+    │   ├── nn.Module: ReplicatedLinear_5 ................... (469.98)
+    │   ├── nn.Module: RMSNorm_10 ........................... (10.21)
+    │   ├── nn.Module: DeepseekScalingRotaryEmbedding_0 ..... (139.27)
+    │   ├── nn.Module: RadixAttention_2 ..................... (3204.62)
+    │   ├── nn.Module: RowParallelLinear_4 ................. (1446.40)
+    │   └── Non-nn.Module GPU Ops ........................... (399.22)
+    ├── nn.Module: RMSNorm_11 .............................. (154.43)
+    └── nn.Module: DeepseekV2MLP_2 ......................... (3154.66)
+        ├── nn.Module: MergedColumnParallelLinear_2 ........ (1592.94)
+        ├── nn.Module: SiluAndMul_2 ....................... (84.44)
+        └── nn.Module: RowParallelLinear_5 ................ (1477.28)
 ```
 
-Run
+See
 [`nn_module_view.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/nn_module_view.ipynb)
-against your own trace to produce the full tree with real per-module times; it
-includes the recursive pretty-printer used above.
+for the full traversal against your own trace, including the recursive
+pretty-printer.
 
 ## Related topics
 
