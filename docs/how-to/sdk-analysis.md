@@ -19,6 +19,12 @@ and derive metrics at the timeline, operation, roofline, and `nn.Module` levels.
 This topic is the narrated reference for the SDK. Each section links a runnable
 notebook you can execute against your own trace.
 
+If you just need the standard metrics in a spreadsheet, the
+[`generate_perf_report_pytorch.py`](https://github.com/AMD-AGI/TraceLens/blob/main/TraceLens/Reporting/generate_perf_report_pytorch.py)
+script packages everything covered here into a ready-made Excel report. Reach for
+the SDK when you need more than that report offers — custom filtering, ad-hoc
+aggregations, support for a new operation, or programmatic access to the tree.
+
 ## On this page
 
 - [Build and navigate the tree](#build-and-navigate-the-tree)
@@ -26,7 +32,6 @@ notebook you can execute against your own trace.
 - [Per-operation GPU time](#per-operation-gpu-time)
 - [Roofline metrics](#roofline-metrics)
 - [nn.Module attribution](#nnmodule-attribution)
-- [Add a new operation](#add-a-new-operation)
 
 ## Before you begin
 
@@ -155,6 +160,18 @@ df_gemm = analyzer.build_df_perf_metrics(gemm_events, include_kernel_details=Tru
 analyzer.summarize_df_perf_metrics(df_gemm, ["mean"])   # group by M, N, K, bias
 ```
 
+Example GEMM summary (grouped by shape, mean across occurrences):
+
+| M | N | K | bias | Count | kernel_time_ms | TFLOPS/s | FLOPS/Byte |
+|------|------|------|-------|-------|----------------|----------|------------|
+| 4096 | 4096 | 4096 | False | 32 | 0.412 | 334.1 | 682.7 |
+| 8192 | 1024 | 8192 | False | 16 | 0.298 | 461.2 | 512.0 |
+| 2048 | 2048 | 2048 | True | 48 | 0.061 | 281.5 | 341.3 |
+
+`FLOPS/Byte` is the operation's arithmetic intensity; comparing achieved
+`TFLOPS/s` against the device peak tells you whether each shape is compute- or
+memory-bound.
+
 For how these metrics are defined and modeled, see
 [GEMM analysis](../conceptual/gemm-analysis.md) and the
 [performance report columns](../reference/perf-report-columns.md) reference. To
@@ -162,6 +179,20 @@ compute the same metrics from shapes alone, without a trace, see
 [Model op performance without a trace](./perf-model-without-trace.md). The
 [`tree_perf_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/tree_perf_example.ipynb)
 notebook walks through roofline metrics for every modeled category.
+
+### Add a new operation
+
+Roofline metrics are only available for modeled op classes, but extending the
+perf model to a new op is straightforward, and contributions are welcome:
+
+- In [`perf_model.py`](https://github.com/AMD-AGI/TraceLens/blob/main/TraceLens/PerfModel/perf_model.py):
+  parse the operation's shapes from the trace and write (or reuse) a performance
+  model that returns FLOPs and bytes.
+- In [`torch_op_mapping.py`](https://github.com/AMD-AGI/TraceLens/blob/main/TraceLens/PerfModel/torch_op_mapping.py):
+  map the operation name to that perf model.
+
+Once mapped, the op is picked up automatically by `build_df_perf_metrics` and by
+the report generator.
 
 ## nn.Module attribution
 
@@ -196,21 +227,6 @@ breakdown (GPU µs and percent of parent) that mirrors your model architecture:
 See
 [`nn_module_view.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/nn_module_view.ipynb)
 for the full traversal, including a recursive pretty-printer.
-
-## Add a new operation
-
-Extending the perf model to a new op is straightforward, and contributions are
-welcome:
-
-- In [`perf_model.py`](https://github.com/AMD-AGI/TraceLens/blob/main/TraceLens/PerfModel/perf_model.py):
-  parse the operation's shapes from the trace and write (or reuse) a performance
-  model that returns FLOPs and bytes.
-- In [`torch_op_mapping.py`](https://github.com/AMD-AGI/TraceLens/blob/main/TraceLens/PerfModel/torch_op_mapping.py):
-  map the operation name to that perf model.
-
-Once you're comfortable with these workflows, the
-[`generate_perf_report_pytorch.py`](https://github.com/AMD-AGI/TraceLens/blob/main/TraceLens/Reporting/generate_perf_report_pytorch.py)
-script packages them into a ready-made Excel report.
 
 ## Related topics
 
