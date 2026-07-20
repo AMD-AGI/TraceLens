@@ -299,8 +299,9 @@ if [[ "$SKIP_SERVER" == "1" ]]; then
     echo "==> SKIP_SERVER=1 — skipping inference server startup"
 else
     echo "==> Starting inference server: ${SERVER_CMD}"
+    echo "==> Streaming server output below (also logged to $SERVER_LOG)..."
     # shellcheck disable=SC2086
-    eval "${SERVER_CMD}" >"$SERVER_LOG" 2>&1 &
+    eval "${SERVER_CMD}" > >(tee "$SERVER_LOG") 2>&1 &
     SERVER_PID=$!
 
     cleanup_inner() {
