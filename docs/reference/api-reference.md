@@ -207,6 +207,6 @@ autodoc/autosummary extension.
 ## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
-- [Install TraceLens](../install/installation.md)
+- [Install TraceLens](../install/install.md)
 - [Compatibility matrix](../reference/compatibility.md)
 - [Release notes](../about/release-notes.md)
