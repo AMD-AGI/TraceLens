@@ -76,7 +76,7 @@ TEST_IDS="${TEST_IDS:-}"
 SUITE_NAME="${SUITE_NAME:-eval}"
 SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 
-AGENT_MODEL="${claude-opus-4-8-thinking-medium}"
+AGENT_MODEL="${AGENT_MODEL:-claude-opus-4-8-thinking-medium}"
 PI_VENV_PREFIX="use venv_tracelens for all commands and tool calls. "
 
 # Paths (REPO_ROOT may differ from the shell cwd)
