@@ -98,6 +98,7 @@ def _align_capture_to_graph(capture_events, graph_events):
             return None
     return aligned
 
+
 def _align_graph_to_capture_by_group(capture_events, graph_events):
     """
     Align capture dispatch events to graph kernel events by grouping on kernel
@@ -135,6 +136,7 @@ def _align_graph_to_capture_by_group(capture_events, graph_events):
         group_idx[name] += 1
 
     return aligned
+
 
 def _stream_of(event):
     """Return the CUDA stream id a graph kernel executed on, or None."""
