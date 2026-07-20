@@ -172,7 +172,7 @@ print_scheduled_tests() {
         while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2; do
             [[ -z "$id" ]] && continue
             should_run_id "$id" && scheduled_ids+=("$id")
-        done < <(tail -n +2 "$TEST_TRACES_CSV")
+        done < <(tail -n +2 "$TEST_TRACES_CSV"; echo)
     else
         while IFS=, read -r id sub_category trace_path reference_dir platform; do
             [[ -z "$id" ]] && continue
