@@ -15,9 +15,9 @@ This topic shows how to analyze multi-GPU collective operations across ranks to
 diagnose scaling issues, separating true communication time from
 synchronization skew.
 
-## Prerequisites
+## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - Per-rank PyTorch profiler traces from a distributed run (one trace per rank).
 
 ## Step 1: Generate the report
@@ -111,11 +111,11 @@ The all2allv sheets instead report:
 
 To diagnose low throughput, check `size_imbalance`:
 
-- **`size_imbalance` ≈ 1.0** — all ranks are sending roughly equal amounts of
+- **`size_imbalance` ≈ 1.0:** all ranks are sending roughly equal amounts of
   data, so the slow throughput isn't caused by one rank doing more work than
   others. Look for software or driver overhead instead (launch latency, kernel
   scheduling).
-- **`size_imbalance` >> 1.0** — some ranks are sending more data than
+- **`size_imbalance` >> 1.0:** some ranks are sending more data than
   others. This is common in Mixture-of-Experts models where certain experts
   attract more tokens. The busiest rank takes the longest, and all other ranks
   wait for it to finish before the collective can complete.
@@ -143,6 +143,8 @@ compute or memory work delays the straggler before each collective.
 
 ## Command-line options
 
+The following table describes all available options.
+
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--trace_dir` / `--trace_pattern` / `--trace_glob` | — | Mutually exclusive ways to locate the per-rank traces (directory, `*`-pattern, or glob). Exactly one is required. |
@@ -168,7 +170,7 @@ TraceLens_generate_multi_rank_collective_report_pytorch \
     --use_multiprocessing
 ```
 
-## Next steps
+## Related topics
 
 - For SDK-level collective analysis, see the
   [`nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/nccl_analyser_example.ipynb)

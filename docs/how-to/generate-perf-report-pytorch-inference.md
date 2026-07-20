@@ -21,11 +21,11 @@ For training or single-run PyTorch traces, use
 [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 instead.
 
-## Prerequisites
+## Before you begin
 
 Before generating a report, confirm you have the following:
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - A graph-replay `torch.profiler` trace (`.json` or `.json.gz`).
 - (Optional) The folder of graph-capture traces from the same run, if you want to
   recover shapes and call stacks (see [Merge capture traces](#merge-capture-traces)).

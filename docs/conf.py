@@ -35,7 +35,7 @@ html_theme_options = {
     "header_link": False,
     "version_list_link": False,
     "nav_secondary_items": {
-        "Hyperloom": "https://advanced-micro-devices-demo--660.com.readthedocs.build/projects/hyperloom/en/660/",
+        "Hyperloom": "https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html",
         "GitHub": "https://github.com/AMD-AGI/TraceLens",
         "Community": False,
         "Blogs": "https://rocm.blogs.amd.com/",
@@ -47,5 +47,9 @@ html_theme_options = {
     "link_main_doc": False,
 }
 # fmt: on
+
+setting_all_article_info = True
+all_article_info_os = ["linux"]
+all_article_info_author = ""
 
 html_title = f"{project} {version} documentation"

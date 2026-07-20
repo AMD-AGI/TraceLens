@@ -18,19 +18,19 @@ after a code, library, or hardware change.
 TraceLens offers two ways to compare traces, depending on how precise you need
 the matching to be:
 
-- **[Perf-report comparison](#perf-report-comparison)** — compares two finished
+- **[Perf-report comparison](#perf-report-comparison):** compares two finished
   reports by **op name**, matching each sheet's rows (per-op aggregates, kernels,
   and modelled ops like GEMM/SDPA) across the two reports. CLI-driven, and
   produces a side-by-side Excel workbook.
-- **[TraceDiff comparison](#tracediff-comparison-morphological)** — an SDK that
+- **[TraceDiff comparison](#tracediff-comparison-morphological):** an SDK that
   compares traces by their *morphological tree structure*, matching ops at the
   lowest common node. Use it when op names differ between traces (for example, across
   hardware, libraries, or framework versions) or when you need finer-grained,
   programmatic analysis.
 
-## Prerequisites
+## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - Two generated reports (`.xlsx`), one per configuration. Generate them with
   [TraceLens_generate_perf_report_pytorch](./generate-perf-report-pytorch.md).
 
@@ -93,13 +93,13 @@ metric__<tag>_pct       # 100 * diff / baseline
 
 Things to know when reading the workbook:
 
-- **Outer merge, never inner** — if an op exists in only one report it still
+- **Outer merge, never inner:** if an op exists in only one report it still
   appears (in the `only_baseline` / `only_variant` sheets), so you can see ops
   that vanished or were newly introduced.
-- **Baseline is the first report you pass** — choose its order deliberately.
-- **Column prefixing** — every metric is written as `<tag>::metric`, so multiple
+- **Baseline is the first report you pass:** choose its order deliberately.
+- **Column prefixing:** every metric is written as `<tag>::metric`, so multiple
   reports can be compared safely.
-- **Noise is hidden, not deleted** — columns like `median`, `std`, `min`, `max`,
+- **Noise is hidden, not deleted:** columns like `median`, `std`, `min`, `max`,
   and `ex_UID` are hidden in Excel for readability; unhide them if you need them.
 
 Use these to find operations or categories that regressed or improved, shifts in
@@ -147,6 +147,8 @@ TraceDiff operates on PyTorch profiler JSON traces, which it builds into the
 
 ### Output files
 
+`print_tracediff_report_files()` writes the following files to disk.
+
 | File | Contents |
 |------|----------|
 | `merged_tree_output.txt` | Text visualization of the merged tree, showing matched and unmatched nodes. |
@@ -187,6 +189,6 @@ notebook for a worked example.
 ## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
-- [Install TraceLens](../install/installation.md)
+- [Install TraceLens](../install/install.md)
 - [Generate a report](generate-reports.md)
 - [API reference](../reference/api-reference.md)

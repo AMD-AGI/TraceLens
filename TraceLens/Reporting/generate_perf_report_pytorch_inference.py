@@ -619,6 +619,10 @@ def generate_perf_report_pytorch(
             "sglang_profiler::attention_paged_attention_ragged",
             "aiter::mha_batch_prefill",
             "aiter::pa_decode_gluon",
+            "aiter::v4_attention_with_output",
+            "pseudo_v4_paged_decode_swa",
+            "pseudo_v4_paged_decode_csa",
+            "pseudo_v4_paged_decode_hca",
         ]
     )
 
