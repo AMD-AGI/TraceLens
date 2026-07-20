@@ -16,7 +16,7 @@ subtrees:
 
 - caption: Install
   entries:
-  - file: install/installation
+  - file: install/install
     title: Install TraceLens
 
 - caption: How to
