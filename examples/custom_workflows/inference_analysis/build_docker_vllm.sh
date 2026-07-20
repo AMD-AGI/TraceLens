@@ -122,7 +122,8 @@ COPY . /tmp/TraceLens
 RUN VLLM_DIR=\$(python -c "import vllm, os; print(os.path.join(os.path.dirname(vllm.__file__), '..'))") && \\
     cd "\${VLLM_DIR}" && \\
     (git apply /tmp/TraceLens/${PATCH_PATH} || patch -p1 --fuzz=10 < /tmp/TraceLens/${PATCH_PATH}) && \\
-    pip install --no-deps /tmp/TraceLens && \\
+    python3 -m pip install --upgrade /tmp/TraceLens && \\
+    python3 -c "import TraceLens, orjson, matplotlib; import shutil; assert shutil.which('TraceLens_split_inference_trace'); assert shutil.which('TraceLens_generate_perf_report_pytorch_inference')" && \\
     rm -rf /tmp/TraceLens
 
 WORKDIR /workspace

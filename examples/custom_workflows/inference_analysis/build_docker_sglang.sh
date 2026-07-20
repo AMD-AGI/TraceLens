@@ -207,7 +207,8 @@ RUN SGLANG_DIR=\$(pip show sglang | grep "Editable project location" | cut -d' '
             { echo "Failed to apply \$patch"; exit 1; }; \\
         fi \\
     done && \\
-    pip install --no-deps /tmp/TraceLens && \\
+    python3 -m pip install --upgrade /tmp/TraceLens && \\
+    python3 -c "import TraceLens, orjson, matplotlib; import shutil; assert shutil.which('TraceLens_split_inference_trace'); assert shutil.which('TraceLens_generate_perf_report_pytorch_inference')" && \\
     rm -rf /tmp/TraceLens
 
 WORKDIR /workspace
