@@ -6,6 +6,30 @@
 
 import re
 
+import itanium_demangler
+
+
+def _demangle_ck(kernel_name):
+    """
+    Demangle a mangled CK kernel name using itanium_demangler.
+    Returns the normalized demangled string (with (int)/(bool)/enum qualifiers
+    stripped so bare integers remain), or None if parsing fails.
+    """
+    try:
+        ast = itanium_demangler.parse(kernel_name)
+        if ast is None:
+            return None
+        demangled = str(ast)
+        # Strip (int) and (bool) type qualifiers from integer/bool literals
+        demangled = re.sub(r"\(int\)\s*", "", demangled)
+        demangled = re.sub(r"\(bool\)\s*", "", demangled)
+        # Normalize enum casts: (ck::SomeEnum)7 -> SomeEnum)7
+        # This preserves the EnumName)value pattern that parse_ck_gemm uses as an anchor.
+        demangled = re.sub(r"\([^)]*::(\w+)\)", r"\1)", demangled)
+        return demangled
+    except Exception:
+        return None
+
 
 def gemm_name_parser(kernel_name):
     """
@@ -93,51 +117,142 @@ def is_ck_gemm(kernel_name):
     return False
 
 
+def _parse_gridwise_params(kernel_name, class_name):
+    """
+    Parse the top-level template parameters of a CK Gridwise class by name.
+    Returns a list of parameter strings, or [] if the class is not found.
+    """
+    idx = kernel_name.find(class_name + "<")
+    if idx < 0:
+        return []
+    start = idx + len(class_name) + 1
+    depth = 1
+    params = []
+    current = []
+    i = start
+    while i < len(kernel_name) and depth > 0:
+        c = kernel_name[i]
+        if c == "<":
+            depth += 1
+            current.append(c)
+        elif c == ">":
+            depth -= 1
+            if depth == 0:
+                params.append("".join(current).strip())
+            else:
+                current.append(c)
+        elif c == "," and depth == 1:
+            params.append("".join(current).strip())
+            current = []
+        else:
+            current.append(c)
+        i += 1
+    return params
+
+
 def parse_ck_gemm(kernel_name):
     """
-    Parse tile sizes from CK kernel names. Handles:
-    - Demangled: 3-branch dispatch on Gridwise class name
-    - Mangled: 3-anchor ELi integer extraction
+    Parse tile sizes from CK kernel names (demangled form).
+    For mangled names, demangle first via _demangle_ck then recurse.
+
+    Absolute template parameter positions are verified from CK source headers and
+    doxygen (docs-7.0.2, docs-7.1.0). All positions are 0-indexed top-level params
+    of the Gridwise class template.
     """
 
-    # ── Demangled CK kernels ──
-    if "GemmSpecialization)" in kernel_name:
-        # Extract all comma-separated integers after GemmSpecialization
-        m = re.search(r"GemmSpecialization\)\d+,\s*([\d,\s]+)", kernel_name)
-        if not m:
-            return None
-        ints = [int(x) for x in re.findall(r"\d+", m.group(1))]
+    # ── Mangled CK kernels: demangle first, then recurse ──
+    if kernel_name.startswith("_ZN2ck"):
+        demangled = _demangle_ck(kernel_name)
+        if demangled is not None:
+            return parse_ck_gemm(demangled)
+        return None
 
-        # MoeGemmMX_BPreshuffle: ScaleBlockSize, BlockSize,
-        #   MPerBlock, NPerBlock, KPerBlock, ...
-        # (checked first because kernel name contains "MulABScale..." which
-        #  would falsely match the ABScale branch below)
-        if "MoeGemmMX" in kernel_name:
-            if len(ints) < 5:
-                return None
-            mt_m, mt_n, mt_k = ints[2], ints[3], ints[4]
-        # ABScale / MoeGemmBlockScale: BlockSize, ScaleBlockM, ScaleBlockN,
-        #   ScaleBlockK, MPerBlock, NPerBlock, KPerBlock, ...
-        elif (
-            "GridwiseGemmMultiD_ABScale" in kernel_name
-            or "MoeGemmBlockScale" in kernel_name
-        ):
-            if len(ints) < 7:
-                return None
-            mt_m, mt_n, mt_k = ints[4], ints[5], ints[6]
-        # GemmMultiD_xdl (no ABScale), MoeGemm (non-BlockScale):
-        #   BlockSize, MPerBlock, NPerBlock, KPerBlock, ...
-        elif len(ints) >= 4:
-            mt_m, mt_n, mt_k = ints[1], ints[2], ints[3]
+    # ── Demangled CK kernels: dispatch on Gridwise class name ──
+
+    # Map of Gridwise class substring → (M_pos, N_pos, K_pos, trans_A_pos, trans_B_pos)
+    # Positions are absolute indices in the top-level template parameter list.
+    # trans positions are indices of the RowMajor/ColumnMajor layout type params
+    # (None = not extractable for this class).
+    #
+    # Verified sources:
+    #   GridwiseMoeGemmMX*:          docs-7.0.2/globals_defs_d.html
+    #   GridwiseGemmMultiD_ABScale:  gridwise_gemm_xdl_cshuffle_v3_multi_d_ab_scale.hpp
+    #   GridwiseGemmMultiD_blockscale: same family as ABScale
+    #   GridwiseMoeGemmBlockScale:   gridwise_moe_gemm_blockscale.hpp
+    #   GridwiseGemmMultiD_xdl:      gridwise_gemm_xdl_cshuffle_v3_multi_d.hpp
+    #   GridwiseMoeGemm (no scale):  gridwise_moe_gemm.hpp
+    #   GridwiseGemm_xdl_cshuffle_v3: observed in traces, layout consistent with above
+    #   GridwiseGemmMultipleD_xdl_cshuffle: observed in traces
+    #   GridwiseGemm_bk0mk1:         docs-7.1.0 struct reference
+    #
+    # Layout params (RowMajor/ColumnMajor) are the first two type params for
+    # classes that have them; None for classes where layout is not type-parameterized.
+
+    GRIDWISE_CONFIG = {
+        # class substring: (M_pos, N_pos, K_pos, has_layout)
+        # MoeGemmMX family: [0..15]=layouts/types/ops, [16]=ScaleBlockSize,
+        #   [17]=BlockSize, [18]=M, [19]=N, [20]=K
+        # Checked first — name contains "MulABScale" which would match ABScale below
+        "MoeGemmMX":                     (18, 19, 20, True),
+        # ABScale/blockscale/BlockScale: [0..1]=layouts, [14]=BlockSize,
+        #   [15]=ScaleBlockM, [16]=ScaleBlockN, [17]=ScaleBlockK, [18]=M, [19]=N, [20]=K
+        "GridwiseGemmMultiD_ABScale":    (18, 19, 20, True),
+        "GridwiseGemmMultiD_blockscale": (18, 19, 20, True),
+        "MoeGemmBlockScale":             (18, 19, 20, True),
+        # b_preshuffle variant: GemmSpec + BlockSize both explicit before M/N/K,
+        #   so [13]=GemmSpec, [14]=BlockSize, [15]=M, [16]=N, [17]=K
+        # Must come before "GemmMultiD_xdl" to avoid wrong 13/14/15 match.
+        "GridwiseGemmMultiD_xdl_cshuffle_v3_b_preshuffle": (15, 16, 17, True),
+        # No-scale families: [0..2]=layouts (or data types), [12]=BlockSize, [13]=M, [14]=N, [15]=K
+        "GemmMultiD_xdl":                (13, 14, 15, True),
+        "GridwiseMoeGemm":               (13, 14, 15, True),
+        "GridwiseGemm_xdl_cshuffle_v3":  (13, 14, 15, True),
+        # GridwiseGemmMultipleD_xdl_cshuffle: [10]=InMemoryDataOp, [11]=prefetch,
+        #   [12]=BlockSize, [13]=M, [14]=N, [15]=K; no layout type params (uses data types)
+        "GridwiseGemmMultipleD_xdl_cshuffle": (13, 14, 15, False),
+        # bwd_weight: [0]=BlockSize (int), [1-4]=data types, [5]=InMemoryDataOp,
+        #   [6-8]=TensorDescriptors, [9-11]=PassThrough x3, [12]=M, [13]=N, [14]=K
+        "GridwiseGemm_bk0mk1":           (12, 13, 14, False),
+    }
+
+    for class_substr, (m_pos, n_pos, k_pos, has_layout) in GRIDWISE_CONFIG.items():
+        if class_substr not in kernel_name:
+            continue
+
+        # Find the actual class name (longest match wins to avoid prefix collisions)
+        cls_match = re.search(r"(Gridwise\w*" + re.escape(class_substr.lstrip("Gridwise")) + r"\w*)<",
+                              kernel_name)
+        if not cls_match:
+            # Fallback: search directly for the substring followed by <
+            m = re.search(re.escape(class_substr) + r"(\w*)<", kernel_name)
+            if not m:
+                continue
+            actual_class = class_substr + m.group(1)
         else:
-            return None
+            actual_class = cls_match.group(0).rstrip("<")
 
-        # A and B layouts are the first two type parameters before GemmSpecialization.
+        params = _parse_gridwise_params(kernel_name, actual_class)
+        if len(params) <= max(m_pos, n_pos, k_pos):
+            continue
+
+        def to_int(p):
+            p = p.strip()
+            m = re.match(r"^-?\d+$", p)
+            return int(p) if m else None
+
+        mt_m = to_int(params[m_pos])
+        mt_n = to_int(params[n_pos])
+        mt_k = to_int(params[k_pos])
+        if mt_m is None or mt_n is None or mt_k is None:
+            continue
+
+        # A and B layouts: first two RowMajor/ColumnMajor type params in the name.
         # RowMajor = not transposed, ColumnMajor = transposed.
-        layouts = re.findall(r"(RowMajor|ColumnMajor)", kernel_name)
-        if len(layouts) >= 2:
-            trans_a = layouts[0] == "ColumnMajor"
-            trans_b = layouts[1] == "ColumnMajor"
+        # https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
+        if has_layout:
+            layouts = re.findall(r"(RowMajor|ColumnMajor)", kernel_name)
+            trans_a = layouts[0] == "ColumnMajor" if len(layouts) >= 2 else None
+            trans_b = layouts[1] == "ColumnMajor" if len(layouts) >= 2 else None
         else:
             trans_a, trans_b = None, None
 
@@ -147,48 +262,6 @@ def parse_ck_gemm(kernel_name):
             "mt_n": mt_n,
             "mt_k": mt_k,
         }
-
-    # ── Mangled CK kernels ──
-
-    # Anchor 1: GemmSpecializationE — conv fwd variants (GridwiseGemm_xdl_cshuffle_v3)
-    # Ints: BlockSize, MPerBlock, NPerBlock, KPerBlock, ...
-    m = re.search(r"GemmSpecializationE\d+E((?:Li\d+E)+)", kernel_name)
-    if m:
-        ints = [int(x) for x in re.findall(r"Li(\d+)E", m.group(1))]
-        if len(ints) >= 4:
-            return {
-                "transpose": (None, None),
-                "mt_m": ints[1],
-                "mt_n": ints[2],
-                "mt_k": ints[3],
-            }
-
-    # Anchor 2: InMemoryDataOperationEnumE — conv fwd_multiple_abd, bwd_data
-    #   (GridwiseGemmMultipleD_xdl_cshuffle)
-    # Ints: NumGemmKPrefetchStage, BlockSize, MPerBlock, NPerBlock, KPerBlock, ...
-    m = re.search(r"InMemoryDataOperationEnumE\d+E((?:Li\d+E)+)", kernel_name)
-    if m:
-        ints = [int(x) for x in re.findall(r"Li(\d+)E", m.group(1))]
-        if len(ints) >= 5:
-            return {
-                "transpose": (None, None),
-                "mt_m": ints[2],
-                "mt_n": ints[3],
-                "mt_k": ints[4],
-            }
-
-    # Anchor 3: PassThroughES{n}_S{n}_ — bwd_weight (no GemmSpecialization)
-    # Ints: MPerBlock, NPerBlock, K0PerBlock, ...
-    m = re.search(r"11PassThroughES\d+_S\d+_(Li\d+E(?:Li\d+E)+)", kernel_name)
-    if m:
-        ints = [int(x) for x in re.findall(r"Li(\d+)E", m.group(1))]
-        if len(ints) >= 3:
-            return {
-                "transpose": (None, None),
-                "mt_m": ints[0],
-                "mt_n": ints[1],
-                "mt_k": ints[2],
-            }
 
     return None
 
