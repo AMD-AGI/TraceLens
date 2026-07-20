@@ -450,19 +450,17 @@ command -v pi >/dev/null 2>&1 || die "pi not found on PATH after npm install"
 echo "==> Verifying pi installation..."
 pi --version
 
-if [[ "$SKIP_EVAL" != "1" || "$SKIP_SERVER" != "1" ]]; then
-    if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
-        echo "==> Creating Python venv at $VENV_DIR..."
-        python3 -m venv "$VENV_DIR"
-    fi
-
-    # shellcheck source=/dev/null
-    source "$VENV_DIR/bin/activate"
-
-    echo "==> Installing TraceLens editable from $CONTAINER_REPO..."
-    pip install -q --upgrade pip
-    pip install -q -e "$CONTAINER_REPO"
+if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
+    echo "==> Creating Python venv at $VENV_DIR..."
+    python3 -m venv "$VENV_DIR"
 fi
+
+# shellcheck source=/dev/null
+source "$VENV_DIR/bin/activate"
+
+echo "==> Installing TraceLens editable from $CONTAINER_REPO..."
+pip install -q --upgrade pip
+pip install -q -e "$CONTAINER_REPO"
 
 if [[ "$SKIP_EVAL" == "1" ]]; then
     echo "SKIP_EVAL=1 — setup complete, skipping eval harness."

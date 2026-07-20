@@ -76,7 +76,7 @@ TEST_IDS="${TEST_IDS:-}"
 SUITE_NAME="${SUITE_NAME:-eval}"
 SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 
-AGENT_MODEL="${claude-opus-4-8-thinking-medium}"
+AGENT_MODEL="${AGENT_MODEL:-claude-opus-4-8-thinking-medium}"
 PI_VENV_PREFIX="use venv_tracelens for all commands and tool calls. "
 
 # Paths (REPO_ROOT may differ from the shell cwd)
@@ -172,12 +172,12 @@ print_scheduled_tests() {
         while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2; do
             [[ -z "$id" ]] && continue
             should_run_id "$id" && scheduled_ids+=("$id")
-        done < <(tail -n +2 "$TEST_TRACES_CSV")
+        done < <(tail -n +2 "$TEST_TRACES_CSV"; echo)
     else
         while IFS=, read -r id sub_category trace_path reference_dir platform; do
             [[ -z "$id" ]] && continue
             should_run_id "$id" && scheduled_ids+=("$id")
-        done < <(tail -n +2 "$TEST_TRACES_CSV")
+        done < <(tail -n +2 "$TEST_TRACES_CSV"; echo)
     fi
 
     if [[ ${#scheduled_ids[@]} -eq 0 ]]; then
