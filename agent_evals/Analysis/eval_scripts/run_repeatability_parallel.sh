@@ -81,7 +81,7 @@ expand_archive() {
 # ---------------------------------------------------------------------------
 
 run_single_job() {
-    local id="$1" repeat="$2" trace1_path="$3" trace2_path="$4" reference_dir="$5" platform="$6" platform2="$7"
+    local id="$1" repeat="$2" trace1_path="$3" trace2_path="$4" reference_dir="$5" platform="$6" platform2="$7" capture_folder1="${8:-}" capture_folder2="${9:-}"
     local tag="[$id|run_$repeat]"
 
     local CASE_RESULTS="$RESULTS_ROOT/$id/run_${repeat}"
@@ -102,8 +102,13 @@ run_single_job() {
         (
             cd "$ANALYSIS_DIR" || exit
             if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
+                local capture_suffix=""
+                [[ -n "$capture_folder1" ]] && capture_suffix+=" capture folder for trace1 $REPO_ROOT/$capture_folder1"
+                [[ -n "$capture_folder2" ]] && capture_suffix+=" capture folder for trace2 $REPO_ROOT/$capture_folder2"
+                local analysis_mode="default"
+                [[ -n "$capture_folder1" || -n "$capture_folder2" ]] && analysis_mode="inference"
                 timeout 1800 agent --model claude-opus-4-8-thinking-medium --print --force --trust --output-format stream-json \
-                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (trace1) and $platform2 (trace2), analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
+                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path${capture_suffix} with platform $platform (trace1) and $platform2 (trace2), analysis mode $analysis_mode, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
             else
                 timeout 1800 agent --model claude-opus-4-8-thinking-medium --print --force --trust --output-format stream-json \
                     "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path with platform $platform, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
@@ -217,7 +222,7 @@ echo "========================================="
 echo ""
 
 _spawn_jobs() {
-    local id="$1" trace1_path="$2" trace2_path="$3" reference_dir="$4" platform="$5" platform2="$6"
+    local id="$1" trace1_path="$2" trace2_path="$3" reference_dir="$4" platform="$5" platform2="$6" capture_folder1="${7:-}" capture_folder2="${8:-}"
 
     if [[ -n "$TEST_IDS" ]]; then
         case " $TEST_IDS " in
@@ -229,7 +234,7 @@ _spawn_jobs() {
     for ((i = 0; i < NUM_REPEATS; i++)); do
         read -r -u4  # acquire semaphore slot
         (
-            run_single_job "$id" "$i" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2" || true
+            run_single_job "$id" "$i" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2" "${capture_folder1:-}" "${capture_folder2:-}" || true
             echo >&4  # release semaphore slot
             sleep 2  # stagger agent startup to avoid ~/.cursor/cli-config.json rename race
         ) &
@@ -240,10 +245,10 @@ _spawn_jobs() {
 setup_semaphore
 
 if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
-    # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform,platform2
-    while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2 <&3; do
+    # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform,platform2,capture_folder1,capture_folder2
+    while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2 capture_folder1 capture_folder2 <&3; do
         [[ -z "$id" ]] && continue
-        _spawn_jobs "$id" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2"
+        _spawn_jobs "$id" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2" "${capture_folder1:-}" "${capture_folder2:-}"
     done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
 else
     # standalone CSV: id,sub_category,trace_path,reference_dir,platform
