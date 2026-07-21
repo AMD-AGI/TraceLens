@@ -14,12 +14,18 @@ See LICENSE for license information.
 Turn a `torch.profiler` Chrome trace into a multi-sheet Excel (or CSV)
 performance report, then read the sheets to find what dominates GPU time.
 
-## Prerequisites
+## Before you begin
 
 Before generating a report, confirm you have the following:
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - A `torch.profiler` Chrome trace (`.json` or `.json.gz`).
+
+```{note}
+If you don't have a trace yet, see the
+[PyTorch profiling walkthrough](../tutorials/torch-profiling.ipynb)
+for instructions on capturing one with `torch.profiler`.
+```
 
 ## Generate the report
 
@@ -71,7 +77,7 @@ For the GPU timeline, a low computation percentage with significant idle time
 indicates poor compute/communication overlap; use `--micro_idle_thresh_us` to
 split very short idle gaps into their own category.
 
-See [Performance report column definitions](https://github.com/AMD-AGI/TraceLens/blob/main/docs_original/perf_report_columns.md)
+See [Performance report column reference](../reference/perf-report-columns.md)
 for what each column means.
 
 ## Roofline classification
@@ -82,12 +88,12 @@ default: `GFLOPS`, `Data Moved (MB)`, `FLOPS/Byte`, `TFLOPS/s`, and `TB/s`.
 To add the roofline *bound classification*, supply a GPU architecture spec.
 This adds:
 
-- `Compute Spec` — combined compute type and precision (for example, `matrix_bf16`,
+- `Compute Spec:` combined compute type and precision (for example, `matrix_bf16`,
   `vector_fp32`).
-- `Roofline Time (µs)` — theoretical minimum time from the GPU's peak
+- `Roofline Time (µs):` theoretical minimum time from the GPU's peak
   capabilities.
-- `Roofline Bound` — `COMPUTE_BOUND` or `MEMORY_BOUND`.
-- `Pct Roofline` — how close the measured kernel time runs to the roofline.
+- `Roofline Bound:` `COMPUTE_BOUND` or `MEMORY_BOUND`.
+- `Pct Roofline:` how close the measured kernel time runs to the roofline.
 
   ```bash
   TraceLens_generate_perf_report_pytorch \
@@ -173,6 +179,8 @@ See the example extension file for MegatronLM in the
 
 ## Optional arguments
 
+The following table describes all optional arguments.
+
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--output_xlsx_path PATH` | auto-inferred | Excel output path (see output behavior above). |
@@ -195,7 +203,7 @@ See the example extension file for MegatronLM in the
 | `--topk_short_kernels N` | `None` | Cap rows in the short-kernel table. |
 | `--topk_roofline_ops N` | `None` | Cap rows in the roofline sheets. |
 
-## Next steps
+## Related topics
 
 - Quantify the effect of a change by [comparing two traces](./compare-traces.md).
 - Analyze multi-GPU collectives with a

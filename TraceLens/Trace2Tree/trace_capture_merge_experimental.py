@@ -17,7 +17,7 @@ model suitable for performance analysis.
 
 import sys
 import time
-from collections import OrderedDict, deque
+from collections import OrderedDict, deque, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
@@ -96,6 +96,45 @@ def _align_capture_to_graph(capture_events, graph_events):
                 break
         if not matched:
             return None
+    return aligned
+
+
+def _align_graph_to_capture_by_group(capture_events, graph_events):
+    """
+    Align capture dispatch events to graph kernel events by grouping on kernel
+    name and matching positionally within each group.
+    Returns the graph_events reordered to match capture_events order, or None
+    if any kernel name has a count mismatch between capture and graph.
+    """
+    capture_groups = defaultdict(list)
+    for e in capture_events:
+        capture_groups[_capture_kernel_name(e)].append(e)
+
+    graph_groups = defaultdict(list)
+    for e in graph_events:
+        graph_groups[e["name"]].append(e)
+
+    # Verify per-name counts match
+    all_names = set(capture_groups) | set(graph_groups)
+    for name in all_names:
+        if len(capture_groups[name]) != len(graph_groups[name]):
+            print(
+                "Group alignment: count mismatch for kernel '{}': "
+                "capture={} graph={}".format(
+                    name, len(capture_groups[name]), len(graph_groups[name])
+                )
+            )
+            return None
+
+    # Reassemble graph events in capture order using per-group position
+    group_idx = defaultdict(int)
+    aligned = []
+    for c_event in capture_events:
+        name = _capture_kernel_name(c_event)
+        idx = group_idx[name]
+        aligned.append(graph_groups[name][idx])
+        group_idx[name] += 1
+
     return aligned
 
 
@@ -187,13 +226,17 @@ def verify_subtree_events(capture_events, graph_events):
     """
     Verify that capture dispatch events align 1-to-1 with graph kernel events.
 
-    If counts match, check names directly.  If counts differ, attempt greedy
-    alignment via _align_capture_to_graph: extra capture dispatches are
-    discarded and the aligned list is returned so the caller can proceed.
+    Alignment is attempted in three stages:
+      1. Direct positional match — succeeds when both sequences are already
+         in the same order (return code 1).
+      2. Greedy forward-scan by name — handles count mismatches by discarding
+         extra capture dispatches (return code 2).
+      3. Group-by-name positional match — handles cases graph replay events
+         and capture events are in different order (return code 3).
 
     Returns:
-        (success, aligned_capture_events) where success is 1 on full match,
-        2 on successful greedy alignment (with discards), and 0 on failure.
+        (success, aligned_capture_events, aligned_graph_events) where success
+        is 1, 2, or 3 on success and 0 on failure.
     """
     if len(capture_events) != len(graph_events):
         print(
@@ -211,8 +254,8 @@ def verify_subtree_events(capture_events, graph_events):
                     len(capture_events) - len(aligned),
                 )
             )
-            return 2, aligned
-        return 0, capture_events
+            return 2, aligned, graph_events
+        return 0, capture_events, graph_events
 
     for j, i in zip(capture_events, graph_events):
         if "kernel" not in j.get("args", {}).keys():
@@ -225,14 +268,16 @@ def verify_subtree_events(capture_events, graph_events):
             )
             continue
         if i["name"] != _capture_kernel_name(j):
-            print(
-                "Mismatch in kernel name: {} vs {}".format(
-                    i["name"], _capture_kernel_name(j)
-                )
+            # Counts match but order differs
+            aligned_graph = _align_graph_to_capture_by_group(
+                capture_events, graph_events
             )
-            return 0, capture_events
+            if aligned_graph is not None:
+                print("Group-by-name alignment succeeded.")
+                return 3, capture_events, aligned_graph
+            return 0, capture_events, graph_events
 
-    return 1, capture_events
+    return 1, capture_events, graph_events
 
 
 def update_subtree_uids_and_timestamps(
@@ -720,7 +765,11 @@ def merge_capture_trace_into_graph(
                     continue
                 capture_filtered_events = aligned
             else:
-                verify_success, capture_filtered_events = verify_subtree_events(
+                (
+                    verify_success,
+                    capture_filtered_events,
+                    graph_filtered_events,
+                ) = verify_subtree_events(
                     capture_filtered_events, graph_filtered_events
                 )
 

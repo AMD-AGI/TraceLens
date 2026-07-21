@@ -15,9 +15,9 @@ This topic shows how to merge per-rank PyTorch traces from a distributed run int
 a single file that can be visualized together in Perfetto, using the `TraceFuse`
 SDK.
 
-## Prerequisites
+## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - Per-rank PyTorch profiler traces (one trace per rank).
 
 ## Why fuse traces
@@ -125,7 +125,7 @@ them so they render correctly together:
   `External id`) and the `ac2g` flow `id`s per rank, so CPU→GPU launch arrows
   stay correct.
 
-## Next steps
+## Related topics
 
 - For quantitative collective analysis instead of visualization, see
   [Generate a collective-communication report](./collective-report.md).

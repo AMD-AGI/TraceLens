@@ -16,9 +16,9 @@ report* (operator and roofline analysis, like the PyTorch report) and a
 *GPU-event and GEMM analysis* focused on event-type breakdowns and GEMM
 performance.
 
-## Prerequisites
+## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - A JAX XPlane protobuf trace (`xplane.pb`). JAX parsing uses the `xprof`
   dependency, installed automatically with TraceLens.
 
@@ -85,16 +85,16 @@ This writes one file per table into `--output_path`, named
 
 Options:
 
-- `--profile_xplane_pb_path PATH` (required) — the JAX XPlane protobuf trace.
-- `--output_path DIR` (required) — output directory.
-- `--num_cus N` — GPU compute units for the GEMM model (default `304` for MI300X;
+- `--profile_xplane_pb_path PATH` (required): the JAX XPlane protobuf trace.
+- `--output_path DIR` (required): output directory.
+- `--num_cus N:` GPU compute units for the GEMM model (default `304` for MI300X;
   use `104` for MI210). `--name` sets the architecture label (default `mi300x`).
-- `--output_table_formats {.xlsx,.csv} ...` — one or both output formats (default
+- `--output_table_formats {.xlsx,.csv} ...:` one or both output formats (default
   both).
-- `--output_filename NAME` — base name for the output files (default
+- `--output_filename NAME:` base name for the output files (default
   `trace_analysis_results`).
 
-## Next steps
+## Related topics
 
 - Quantify the effect of a change by [comparing two traces](./compare-traces.md).
 - Analyze multi-GPU collectives with a
