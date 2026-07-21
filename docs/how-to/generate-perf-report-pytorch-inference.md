@@ -8,7 +8,7 @@ See LICENSE for license information.
 # Generate a PyTorch inference performance report
 ```{meta}
 :description: Learn how to collect, split, and analyze PyTorch LLM-serving (vLLM/SGLang) traces with TraceLens, including graph-capture merging for graph-mode inference.
-:keywords: TraceLens, PyTorch profiler, inference, vLLM, SGLang, HIP graph, CUDA  graph, graph capture, LLM serving, FusedMoE, roofline, trace splitting, steady state, ROCm
+:keywords: TraceLens, PyTorch profiler, inference, vLLM, SGLang, HIP graph, CUDA graph, graph capture, LLM serving, FusedMoE, roofline, trace splitting, steady state, ROCm
 ```
 
 `TraceLens_generate_perf_report_pytorch_inference` is the inference-oriented
