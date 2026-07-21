@@ -227,6 +227,9 @@ fi
 
 mkdir -p "$WORK_DIR/.pi/agent" "$WORK_DIR/venv_tracelens"
 
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+
 if [[ "$SKIP_SERVER" == "1" ]]; then
     DOCKER_ARGS=(--network host)
 else
@@ -239,6 +242,13 @@ if [[ -n "${DOCKER_RUN_ARGS:-}" ]]; then
 fi
 
 cleanup() {
+    if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+        echo "Fixing ownership of mounted directories (${HOST_UID}:${HOST_GID})..."
+        docker exec "$CONTAINER_NAME" chown -R "${HOST_UID}:${HOST_GID}" /workspace >/dev/null 2>&1 || true
+        if [[ -n "$HF_CACHE_DIR" ]]; then
+            docker exec "$CONTAINER_NAME" chown -R "${HOST_UID}:${HOST_GID}" "$CONTAINER_HF_HOME" >/dev/null 2>&1 || true
+        fi
+    fi
     if [[ -n "${CONTAINER_NAME:-}" ]]; then
         docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
     fi
@@ -257,6 +267,7 @@ echo "  Work dir:        $WORK_DIR -> /workspace"
 echo "  Container repo:  $CONTAINER_REPO"
 echo "  Docker image:    $DOCKER_IMAGE"
 echo "  Container:       $CONTAINER_NAME"
+echo "  Run as UID:GID:  ${HOST_UID}:${HOST_GID}"
 echo "  API port:        $PORT"
 if [[ -n "$HF_CACHE_DIR" ]]; then
     echo "  HF cache:        $HF_CACHE_DIR -> $CONTAINER_HF_HOME"
@@ -293,6 +304,8 @@ EXEC_ENV=(
     -e "SKIP_EVAL=$SKIP_EVAL"
     -e "SKIP_SERVER=$SKIP_SERVER"
     -e "SERVER_CMD=$SERVER_CMD_QUOTED"
+    -e "HOST_UID=$HOST_UID"
+    -e "HOST_GID=$HOST_GID"
 )
 if [[ -n "$HF_CACHE_DIR" ]]; then
     EXEC_ENV+=(
@@ -327,6 +340,25 @@ if [[ -n "${HF_HOME:-}" ]]; then
     echo "HF_HOME=$HF_HOME"
 fi
 
+fix_mount_ownership() {
+    if [[ -z "${HOST_UID:-}" || -z "${HOST_GID:-}" ]]; then
+        return 0
+    fi
+    echo "==> Fixing ownership of mounted directories (${HOST_UID}:${HOST_GID})..."
+    chown -R "${HOST_UID}:${HOST_GID}" /workspace || true
+    if [[ -n "${HF_HOME:-}" && -d "$HF_HOME" ]]; then
+        chown -R "${HOST_UID}:${HOST_GID}" "$HF_HOME" || true
+    fi
+}
+
+on_inner_exit() {
+    if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        kill "$SERVER_PID" 2>/dev/null || true
+    fi
+    fix_mount_ownership
+}
+trap on_inner_exit EXIT
+
 die() {
     echo "ERROR: $*" >&2
     exit 1
@@ -340,13 +372,6 @@ else
     # shellcheck disable=SC2086
     eval "${SERVER_CMD}" >"$SERVER_LOG" 2>&1 &
     SERVER_PID=$!
-
-    cleanup_inner() {
-        if kill -0 "$SERVER_PID" 2>/dev/null; then
-            kill "$SERVER_PID" 2>/dev/null || true
-        fi
-    }
-    trap cleanup_inner EXIT
 
     echo "==> Waiting for inference server at http://localhost:${PORT}/v1/models (timeout ${READY_TIMEOUT}s)..."
     models_json=""
@@ -501,9 +526,6 @@ pip install -q -e "$CONTAINER_REPO"
 
 if [[ "$SKIP_EVAL" == "1" ]]; then
     echo "SKIP_EVAL=1 — setup complete, skipping eval harness."
-    if [[ "$SKIP_SERVER" != "1" ]]; then
-        trap - EXIT
-    fi
     exit 0
 fi
 
@@ -513,7 +535,7 @@ HARNESS="$CONTAINER_REPO/agent_evals/Analysis/eval_scripts/run_repeatability_par
 export REPO_ROOT="$CONTAINER_REPO"
 
 echo "==> Running eval harness: $HARNESS --pi $COMPARISON_SCOPE"
-exec bash "$HARNESS" --pi "$COMPARISON_SCOPE"
+bash "$HARNESS" --pi "$COMPARISON_SCOPE"
 INNER
 
 echo ""
