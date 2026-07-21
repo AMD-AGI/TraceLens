@@ -34,7 +34,7 @@ This release includes the following report generators.
   a unique-argument table, roofline metrics, and an optional short-kernel study.
   Compressed traces (`.zip`, `.gz`) are supported.
 - **PyTorch inference reports:** `TraceLens_generate_perf_report_pytorch_inference`
-  adds analysis for LLM-serving traces (vLLM/SGLang). It merges CUDA-graph
+  adds analysis for LLM-serving traces (vLLM/SGLang). It merges HIP/CUDA-graph
   capture traces into graph-replay traces (`--capture_folder`) to recover
   call-stack and shape information lost in graph mode, and uses per-step request
   annotations (prefill/decode counts and token statistics) to drive
@@ -67,7 +67,7 @@ This release includes the following analysis features.
   dtypes, strides, and concrete inputs to isolate problematic input patterns.
 - **Roofline modeling:** Computes arithmetic intensity (FLOPs/byte) and
   classifies operations as compute- or memory-bound relative to a target
-  accelerator's roofline knee point. Optional Origami-based simulated GEMM/SDPA
+  GPU's roofline knee point. Optional Origami-based simulated GEMM/SDPA
   timings are available when a GPU architecture specification is provided.
 - **Activation-recompute detection** and **kernel-overlap** sheets for deeper
   PyTorch analysis.
