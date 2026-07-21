@@ -156,7 +156,7 @@ def parse_ck_gemm(kernel_name):
     For mangled names, demangle first via _demangle_ck then recurse.
 
     Absolute template parameter positions are verified from CK source headers and
-    doxygen (docs-7.0.2, docs-7.1.0). All positions are 0-indexed top-level params
+    doxygen (docs-7.1.0). All positions are 0-indexed top-level params
     of the Gridwise class template.
     """
 
@@ -190,28 +190,46 @@ def parse_ck_gemm(kernel_name):
 
     GRIDWISE_CONFIG = {
         # class substring: (M_pos, N_pos, K_pos, has_layout)
+        # Full parameter tables: docs/ck_kernel_tile_indices.md
+
         # MoeGemmMX family: [0..15]=layouts/types/ops, [16]=ScaleBlockSize,
         #   [17]=BlockSize, [18]=M, [19]=N, [20]=K
         # Checked first — name contains "MulABScale" which would match ABScale below
+        # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_moe_gemm_m_x.html
         "MoeGemmMX":                     (18, 19, 20, True),
-        # ABScale/blockscale/BlockScale: [0..1]=layouts, [14]=BlockSize,
-        #   [15]=ScaleBlockM, [16]=ScaleBlockN, [17]=ScaleBlockK, [18]=M, [19]=N, [20]=K
+
+        # ABScale/blockscale/BlockScale: [0..13]=layouts/types/ops/GemmSpec,
+        #   [14]=BlockSize, [15]=ScaleBlockM, [16]=ScaleBlockN, [17]=ScaleBlockK,
+        #   [18]=M, [19]=N, [20]=K
+        # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multi_d___a_b_scale__xdl__cshuffle__v3.html
         "GridwiseGemmMultiD_ABScale":    (18, 19, 20, True),
+        # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multi_d__blockscale__xdl__cshuffle__v3__b__preshuffle.html
         "GridwiseGemmMultiD_blockscale": (18, 19, 20, True),
+        # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_moe_gemm_block_scale.html
         "MoeGemmBlockScale":             (18, 19, 20, True),
+
         # b_preshuffle variant: GemmSpec + BlockSize both explicit before M/N/K,
         #   so [13]=GemmSpec, [14]=BlockSize, [15]=M, [16]=N, [17]=K
         # Must come before "GemmMultiD_xdl" to avoid wrong 13/14/15 match.
+        # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multi_d__xdl__cshuffle__v3__b__preshuffle.html
         "GridwiseGemmMultiD_xdl_cshuffle_v3_b_preshuffle": (15, 16, 17, True),
-        # No-scale families: [0..2]=layouts (or data types), [12]=BlockSize, [13]=M, [14]=N, [15]=K
-        "GemmMultiD_xdl":                (13, 14, 15, True),
-        "GridwiseMoeGemm":               (13, 14, 15, True),
+
+        # [0..12]=layouts/types/ops, [13]=GemmSpec, [14]=BlockSize, [15]=M, [16]=N, [17]=K
+        # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multi_d__xdl__cshuffle__v3.html
+        "GemmMultiD_xdl":                (15, 16, 17, True),
+        # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_moe_gemm.html
+        "GridwiseMoeGemm":               (15, 16, 17, True),
+        # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm__xdl__cshuffle__v3.html
         "GridwiseGemm_xdl_cshuffle_v3":  (13, 14, 15, True),
+
         # GridwiseGemmMultipleD_xdl_cshuffle: [10]=InMemoryDataOp, [11]=prefetch,
         #   [12]=BlockSize, [13]=M, [14]=N, [15]=K; no layout type params (uses data types)
+        # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multiple_d__xdl__cshuffle.html
         "GridwiseGemmMultipleD_xdl_cshuffle": (13, 14, 15, False),
+
         # bwd_weight: [0]=BlockSize (int), [1-4]=data types, [5]=InMemoryDataOp,
         #   [6-8]=TensorDescriptors, [9-11]=PassThrough x3, [12]=M, [13]=N, [14]=K
+        # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm__bk0mk1__bk0nk1__mn__xdlops__bwd__weight.html
         "GridwiseGemm_bk0mk1":           (12, 13, 14, False),
     }
 
@@ -333,6 +351,7 @@ def is_cutlass_gemm(kernel_name):
 
 
 def parse_cutlass_gemm(kernel_name):
+    # Format 1: {M}x{N}_{K}x{stages}  (e.g. 256x128_64x3)
     m = re.search(
         r"(?:gemm|fprop|dgrad|wgrad)\w*_(\d+)x(\d+)_(\d+)x(\d+)",
         kernel_name,
@@ -342,7 +361,17 @@ def parse_cutlass_gemm(kernel_name):
         mt_n = int(m.group(2))
         mt_k = int(m.group(3))
     else:
-        mt_m, mt_n, mt_k = None, None, None
+        # Format 2: {M}x{N}x{K}  (e.g. 128x128x64)
+        m = re.search(
+            r"(?:gemm|fprop|dgrad|wgrad)\w*_(\d+)x(\d+)x(\d+)",
+            kernel_name,
+        )
+        if m:
+            mt_m = int(m.group(1))
+            mt_n = int(m.group(2))
+            mt_k = int(m.group(3))
+        else:
+            mt_m, mt_n, mt_k = None, None, None
 
     trans_a, trans_b = None, None
     tr = re.search(r"_([tn]{2})_", kernel_name)
@@ -368,4 +397,14 @@ def is_nvjet_gemm(kernel_name):
 def parse_nvjet_gemm(kernel_name):
     transpose_chars = kernel_name.split("_")[-1]
     transpose = transpose_chars[0] == "T", transpose_chars[1] == "T"
-    return {"transpose": transpose}
+
+    # Tile format: nvjet_{dtype}_{MxN}_{KxStages}_...
+    # e.g. nvjet_tst_64x64_64x16_... → M=64, N=64, K=64
+    mt_m, mt_n, mt_k = None, None, None
+    mn = re.search(r"nvjet_\w+_(\d+)x(\d+)_(\d+)x\d+", kernel_name)
+    if mn:
+        mt_m = int(mn.group(1))
+        mt_n = int(mn.group(2))
+        mt_k = int(mn.group(3))
+
+    return {"transpose": transpose, "mt_m": mt_m, "mt_n": mt_n, "mt_k": mt_k}
