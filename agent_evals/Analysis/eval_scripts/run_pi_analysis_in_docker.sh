@@ -29,6 +29,7 @@ set -euo pipefail
 #   --docker-image IMAGE   Inference server image
 #   --container-name NAME  Docker container name (default: tracelens_pi_evals)
 #   --work-dir DIR         Host directory mounted at /workspace (default: <parent>)
+#   --hf-cache-dir DIR     Host HuggingFace cache mounted at /root/.cache/huggingface
 #   --port PORT            API port when not set in server args (default: 30000)
 #   -h, --help             Show help
 #
@@ -36,6 +37,7 @@ set -euo pipefail
 #   DOCKER_IMAGE             Same as --docker-image
 #   CONTAINER_NAME           Same as --container-name
 #   WORK_DIR                 Host dir mounted at /workspace (default: parent of tracelens_root)
+#   HF_CACHE_DIR             Host HuggingFace cache dir (same as --hf-cache-dir)
 #   PORT                     API port (default: 30000; overridden by server --port)
 #   READY_TIMEOUT            Seconds to wait for http://localhost:<port>/v1/models (default: 1800)
 #   DOCKER_RUN_ARGS          Extra whitespace-separated docker run arguments
@@ -47,6 +49,8 @@ set -euo pipefail
 
 DOCKER_IMAGE="${DOCKER_IMAGE:-vllm/vllm-openai-rocm:nightly}"
 CONTAINER_NAME="${CONTAINER_NAME:-tracelens_pi_evals}"
+HF_CACHE_DIR="${HF_CACHE_DIR:-}"
+CONTAINER_HF_HOME="/root/.cache/huggingface"
 PORT="${PORT:-30000}"
 READY_TIMEOUT="${READY_TIMEOUT:-1800}"
 SKIP_EVAL="${SKIP_EVAL:-0}"
@@ -76,6 +80,7 @@ Options:
   --docker-image IMAGE   Inference server Docker image (default: $DOCKER_IMAGE)
   --container-name NAME  Docker container name (default: tracelens_pi_evals)
   --work-dir DIR         Host directory mounted at /workspace (default: <parent>)
+  --hf-cache-dir DIR     Host HuggingFace cache mounted at /root/.cache/huggingface
   --port PORT            API port when not set in server args (default: 30000)
   --setup-only           Install npm, pi, and TraceLens only; skip server and evals
   -h, --help             Show this help
@@ -85,6 +90,7 @@ Options:
 
 Environment:
   PORT                     API port (default: 30000)
+  HF_CACHE_DIR             Host HuggingFace cache dir (same as --hf-cache-dir)
   READY_TIMEOUT            Seconds to wait for /v1/models (default: 1800)
   DOCKER_RUN_ARGS          Extra arguments appended to docker run
   PI_NPM_PACKAGE           npm package for pi (default: @earendil-works/pi-coding-agent)
@@ -125,6 +131,11 @@ while [[ $# -gt 0 ]]; do
         --work-dir)
             [[ $# -ge 2 ]] || die "--work-dir requires a value"
             WORK_DIR="$2"
+            shift 2
+            ;;
+        --hf-cache-dir)
+            [[ $# -ge 2 ]] || die "--hf-cache-dir requires a value"
+            HF_CACHE_DIR="$2"
             shift 2
             ;;
         --port)
@@ -188,6 +199,11 @@ if [[ "$TRACELENS_ROOT" != "$WORK_DIR/"* && "$TRACELENS_ROOT" != "$WORK_DIR" ]];
     die "tracelens_root must be inside WORK_DIR ($WORK_DIR)"
 fi
 
+if [[ -n "$HF_CACHE_DIR" ]]; then
+    mkdir -p "$HF_CACHE_DIR"
+    HF_CACHE_DIR="$(cd "$HF_CACHE_DIR" && pwd)"
+fi
+
 CONTAINER_REPO="/workspace/$REPO_BASENAME"
 HARNESS="$TRACELENS_ROOT/agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh"
 if [[ ! -f "$HARNESS" ]]; then
@@ -242,6 +258,9 @@ echo "  Container repo:  $CONTAINER_REPO"
 echo "  Docker image:    $DOCKER_IMAGE"
 echo "  Container:       $CONTAINER_NAME"
 echo "  API port:        $PORT"
+if [[ -n "$HF_CACHE_DIR" ]]; then
+    echo "  HF cache:        $HF_CACHE_DIR -> $CONTAINER_HF_HOME"
+fi
 if [[ "$SKIP_SERVER" == "1" ]]; then
     echo "  Mode:            setup-only (no inference server)"
 else
@@ -252,10 +271,14 @@ echo "========================================="
 echo ""
 
 echo "Starting Docker container..."
+DOCKER_VOLUMES=(-v "$WORK_DIR:/workspace:rw")
+if [[ -n "$HF_CACHE_DIR" ]]; then
+    DOCKER_VOLUMES+=(-v "$HF_CACHE_DIR:$CONTAINER_HF_HOME:rw")
+fi
 # shellcheck disable=SC2086
 docker run -d --name "$CONTAINER_NAME" \
     "${DOCKER_ARGS[@]}" \
-    -v "$WORK_DIR:/workspace:rw" \
+    "${DOCKER_VOLUMES[@]}" \
     --entrypoint bash \
     "$DOCKER_IMAGE" \
     -c 'sleep infinity' >/dev/null
@@ -271,6 +294,13 @@ EXEC_ENV=(
     -e "SKIP_SERVER=$SKIP_SERVER"
     -e "SERVER_CMD=$SERVER_CMD_QUOTED"
 )
+if [[ -n "$HF_CACHE_DIR" ]]; then
+    EXEC_ENV+=(
+        -e "HF_HOME=$CONTAINER_HF_HOME"
+        -e "HUGGINGFACE_HUB_CACHE=$CONTAINER_HF_HOME/hub"
+        -e "TRANSFORMERS_CACHE=$CONTAINER_HF_HOME/hub"
+    )
+fi
 for var in TEST_IDS NUM_REPEATS MAX_PARALLEL SLEEP_BETWEEN TEST_TRACES_CSV RESULTS_ROOT REPORT_DIR SUITE_NAME SKIP_POST_PROCESSING PI_NPM_PACKAGE; do
     if [[ -n "${!var:-}" ]]; then
         EXEC_ENV+=(-e "$var=${!var}")
@@ -289,6 +319,13 @@ SKIP_SERVER="${SKIP_SERVER:-0}"
 PI_AGENT_DIR="/workspace/.pi/agent"
 VENV_DIR="/workspace/venv_tracelens"
 SERVER_LOG="/workspace/inference_server.log"
+
+if [[ -n "${HF_HOME:-}" ]]; then
+    export HF_HOME
+    export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
+    export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HUGGINGFACE_HUB_CACHE}"
+    echo "HF_HOME=$HF_HOME"
+fi
 
 die() {
     echo "ERROR: $*" >&2
