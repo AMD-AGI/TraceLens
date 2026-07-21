@@ -191,46 +191,40 @@ def parse_ck_gemm(kernel_name):
     GRIDWISE_CONFIG = {
         # class substring: (M_pos, N_pos, K_pos, has_layout)
         # Full parameter tables: docs/ck_kernel_tile_indices.md
-
         # MoeGemmMX family: [0..15]=layouts/types/ops, [16]=ScaleBlockSize,
         #   [17]=BlockSize, [18]=M, [19]=N, [20]=K
         # Checked first — name contains "MulABScale" which would match ABScale below
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_moe_gemm_m_x.html
-        "MoeGemmMX":                     (18, 19, 20, True),
-
+        "MoeGemmMX": (18, 19, 20, True),
         # ABScale/blockscale/BlockScale: [0..13]=layouts/types/ops/GemmSpec,
         #   [14]=BlockSize, [15]=ScaleBlockM, [16]=ScaleBlockN, [17]=ScaleBlockK,
         #   [18]=M, [19]=N, [20]=K
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multi_d___a_b_scale__xdl__cshuffle__v3.html
-        "GridwiseGemmMultiD_ABScale":    (18, 19, 20, True),
+        "GridwiseGemmMultiD_ABScale": (18, 19, 20, True),
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multi_d__blockscale__xdl__cshuffle__v3__b__preshuffle.html
         "GridwiseGemmMultiD_blockscale": (18, 19, 20, True),
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_moe_gemm_block_scale.html
-        "MoeGemmBlockScale":             (18, 19, 20, True),
-
+        "MoeGemmBlockScale": (18, 19, 20, True),
         # b_preshuffle variant: GemmSpec + BlockSize both explicit before M/N/K,
         #   so [13]=GemmSpec, [14]=BlockSize, [15]=M, [16]=N, [17]=K
         # Must come before "GemmMultiD_xdl" to avoid wrong 13/14/15 match.
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multi_d__xdl__cshuffle__v3__b__preshuffle.html
         "GridwiseGemmMultiD_xdl_cshuffle_v3_b_preshuffle": (15, 16, 17, True),
-
         # [0..12]=layouts/types/ops, [13]=GemmSpec, [14]=BlockSize, [15]=M, [16]=N, [17]=K
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multi_d__xdl__cshuffle__v3.html
-        "GemmMultiD_xdl":                (15, 16, 17, True),
+        "GemmMultiD_xdl": (15, 16, 17, True),
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_moe_gemm.html
-        "GridwiseMoeGemm":               (15, 16, 17, True),
+        "GridwiseMoeGemm": (15, 16, 17, True),
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm__xdl__cshuffle__v3.html
-        "GridwiseGemm_xdl_cshuffle_v3":  (13, 14, 15, True),
-
+        "GridwiseGemm_xdl_cshuffle_v3": (13, 14, 15, True),
         # GridwiseGemmMultipleD_xdl_cshuffle: [10]=InMemoryDataOp, [11]=prefetch,
         #   [12]=BlockSize, [13]=M, [14]=N, [15]=K; no layout type params (uses data types)
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multiple_d__xdl__cshuffle.html
         "GridwiseGemmMultipleD_xdl_cshuffle": (13, 14, 15, False),
-
         # bwd_weight: [0]=BlockSize (int), [1-4]=data types, [5]=InMemoryDataOp,
         #   [6-8]=TensorDescriptors, [9-11]=PassThrough x3, [12]=M, [13]=N, [14]=K
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm__bk0mk1__bk0nk1__mn__xdlops__bwd__weight.html
-        "GridwiseGemm_bk0mk1":           (12, 13, 14, False),
+        "GridwiseGemm_bk0mk1": (12, 13, 14, False),
     }
 
     for class_substr, (m_pos, n_pos, k_pos, has_layout) in GRIDWISE_CONFIG.items():
@@ -238,8 +232,10 @@ def parse_ck_gemm(kernel_name):
             continue
 
         # Find the actual class name (longest match wins to avoid prefix collisions)
-        cls_match = re.search(r"(Gridwise\w*" + re.escape(class_substr.lstrip("Gridwise")) + r"\w*)<",
-                              kernel_name)
+        cls_match = re.search(
+            r"(Gridwise\w*" + re.escape(class_substr.lstrip("Gridwise")) + r"\w*)<",
+            kernel_name,
+        )
         if not cls_match:
             # Fallback: search directly for the substring followed by <
             m = re.search(re.escape(class_substr) + r"(\w*)<", kernel_name)
