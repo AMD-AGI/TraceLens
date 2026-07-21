@@ -16,8 +16,8 @@ supports both `rocprofv3` JSON results and Perfetto-style `.pftrace` files.
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
-- A `rocprofv3` trace — either a `*_results.json` file or a `.pftrace` file.
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
+- A `rocprofv3` trace: either a `*_results.json` file or a `.pftrace` file.
 
 ## rocprofv3 JSON
 
@@ -70,11 +70,11 @@ compare as follows:
 
 **Troubleshooting**:
 
-- `"Not a valid rocprofv3 file"` — ensure the input is a `*_results.json` file
+- `"Not a valid rocprofv3 file":` ensure the input is a `*_results.json` file
   from rocprofv3, not another format.
-- `"No kernel events found"` — the trace captured no GPU activity; check that the GPU
+- `"No kernel events found":` the trace captured no GPU activity; check that the GPU
   work ran during profiling and that rocprofv3 recorded kernel dispatches.
-- `openpyxl not installed` — install it for the Excel output (`pip install openpyxl`)
+- `openpyxl not installed:` install it for the Excel output (`pip install openpyxl`)
   or use `--output_csvs_dir` for CSV output instead.
 
 ## rocprofv3 pftrace
