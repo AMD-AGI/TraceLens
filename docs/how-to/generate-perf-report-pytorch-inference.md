@@ -42,13 +42,8 @@ supported for vLLM and SGLang (proposed patches required).
 
 ## Before you begin
 
-Before generating a report, confirm you have the following:
-
 - TraceLens installed (see [Install TraceLens](../install/install.md)).
-- A graph-replay `torch.profiler` trace (`.json` or `.json.gz`). If you don't
-  have one yet, [collect it](#collect-inference-traces) first.
-- (Optional) The folder of graph-capture traces from the same run, if you want to
-  recover shapes and call stacks (see [Merge capture traces](#merge-capture-traces)).
+- An LLM inference setup to profile (this guide uses vLLM or SGLang on MI300X).
 
 ## Collect inference traces
 
