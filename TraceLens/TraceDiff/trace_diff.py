@@ -85,21 +85,21 @@ def _disambiguate_same_name_candidates(
     ops, children1, children2, baseline_uid2node, variant_uid2node, max_depth=4
 ):
     """
-    Post-WF pass: when a match op pairs trace1[i] with trace2[j] (name N), but
-    there are also insert ops for other trace2 nodes also named N, WF chose
-    arbitrarily among equally-named candidates.  This function picks the best
-    candidate using BFS-level GPU-path child name comparison (up to max_depth
-    levels).  Symmetric: also handles multiple trace1 candidates vs one trace2.
+    Post-WF pass: for every normalized name that appears more than once on at
+    least one side, re-match using BFS-level GPU-path child name comparison
+    (up to *max_depth* levels).
 
-    Eviction rule: a candidate is evicted at depth d if the sorted tuple of its
-    GPU-path child names at BFS level d differs from that of the anchor node, OR
-    if the candidate has no GPU-path children at any level where the anchor has
-    some.
+    Candidates include ALL nodes with that name on each side — both matched and
+    unmatched — so swapped WF matches can be corrected (Issue 1).
 
-    After eviction:
-    - 1 survivor  → that survivor becomes the match; others become inserts/deletes.
-    - >1 survivors → pick the positionally-first survivor among the original
-                     children list; others become inserts/deletes.
+    The side with fewer nodes of a given name (the minority side) is guaranteed
+    to be fully matched; only majority-side leftovers become inserts/deletes
+    (Issue 2).
+
+    Matching uses a greedy algorithm: score every (i, j) pair by the number of
+    BFS levels that agree before the first divergence, then greedily assign
+    highest-scoring pairs first.  Ties are broken by preferring pairs that
+    already exist in the WF output, then by positional order.
 
     Does not mutate children1/children2.  Returns a new ops list.
     """
@@ -122,149 +122,115 @@ def _disambiguate_same_name_candidates(
             uid, uid2node, tree_num, max_depth, normalize, get_name
         )
 
-    # Index existing ops by type for easy lookup
-    match_ops = [(i, j) for op, i, j in ops if op == "match"]
-    delete_idxs = [i for op, i, _ in ops if op == "delete"]  # trace1 unmatched
-    insert_idxs = [j for op, _, j in ops if op == "insert"]  # trace2 unmatched
+    def match_depth(levels_a, levels_b):
+        """Number of BFS levels matching before first divergence."""
+        max_d = max(len(levels_a), len(levels_b))
+        for d in range(max_d):
+            a = levels_a[d] if d < len(levels_a) else ()
+            b = levels_b[d] if d < len(levels_b) else ()
+            if a != b:
+                return d
+        return max_d
 
-    # Build name → list-of-indices for unmatched nodes on each side
-    unmatched1_by_name = {}  # name -> [idx in children1]
-    for i in delete_idxs:
-        n = normalized_name(children1[i], 1)
-        unmatched1_by_name.setdefault(n, []).append(i)
+    # Index existing ops by type
+    orig_match_set = {(i, j) for op, i, j in ops if op == "match"}
 
-    unmatched2_by_name = {}  # name -> [idx in children2]
-    for j in insert_idxs:
-        n = normalized_name(children2[j], 2)
-        unmatched2_by_name.setdefault(n, []).append(j)
+    # Build name → ALL indices maps (matched + unmatched) for each side
+    all1_by_name = {}  # normalized_name -> [idx in children1]
+    all2_by_name = {}  # normalized_name -> [idx in children2]
+    matched_names = set()  # names that appear in at least one match op
 
-    # Collect reassignments: list of (anchor_i, anchor_j, winner_i, winner_j)
-    # anchor_* is the original WF match; winner_* is the chosen match after disambiguation.
-    reassignments = []  # (orig_i, orig_j, new_i, new_j)
-
-    for orig_i, orig_j in match_ops:
-        name1 = normalized_name(children1[orig_i], 1)
-        name2 = normalized_name(children2[orig_j], 2)
-
-        # Only act when there are extra same-named candidates on at least one side
-        extra1 = unmatched1_by_name.get(name1, [])  # other trace1 nodes named name1
-        extra2 = unmatched2_by_name.get(name2, [])  # other trace2 nodes named name2
-
-        if not extra1 and not extra2:
-            continue  # no ambiguity – leave this match alone
-
-        # --- Disambiguate trace2 candidates against the fixed trace1 anchor ---
-        if extra2:
-            anchor_levels = bfs_levels(children1[orig_i], baseline_uid2node, 1)
-            # candidates: the current WF match + all inserts with the same name
-            candidates2 = [orig_j] + extra2
-            survivors2 = []
-            for cj in candidates2:
-                cand_levels = bfs_levels(children2[cj], variant_uid2node, 2)
-                evicted = False
-                for d in range(max(len(anchor_levels), len(cand_levels))):
-                    al = anchor_levels[d] if d < len(anchor_levels) else ()
-                    cl = cand_levels[d] if d < len(cand_levels) else ()
-                    if al != cl:
-                        evicted = True
-                        break
-                if not evicted:
-                    survivors2.append(cj)
-
-            if not survivors2:
-                survivors2 = candidates2  # all evicted → fall back to all
-
-            # Only override WF when disambiguation produced a unique survivor.
-            # Multiple survivors means subtree structure can't break the tie, so
-            # WF's global alignment choice (orig_j) is the better tiebreaker.
-            if len(survivors2) == 1 and survivors2[0] != orig_j:
-                reassignments.append((orig_i, orig_j, orig_i, survivors2[0]))
-
-        # --- Disambiguate trace1 candidates against the fixed trace2 anchor ---
-        if extra1:
-            anchor_levels = bfs_levels(children2[orig_j], variant_uid2node, 2)
-            candidates1 = [orig_i] + extra1
-            survivors1 = []
-            for ci in candidates1:
-                cand_levels = bfs_levels(children1[ci], baseline_uid2node, 1)
-                evicted = False
-                for d in range(max(len(anchor_levels), len(cand_levels))):
-                    al = anchor_levels[d] if d < len(anchor_levels) else ()
-                    cl = cand_levels[d] if d < len(cand_levels) else ()
-                    if al != cl:
-                        evicted = True
-                        break
-                if not evicted:
-                    survivors1.append(ci)
-
-            if not survivors1:
-                survivors1 = candidates1
-
-            # Only override WF when disambiguation produced a unique survivor.
-            if len(survivors1) == 1 and survivors1[0] != orig_i:
-                effective_j = (
-                    reassignments[-1][3]
-                    if (extra2 and reassignments and reassignments[-1][0] == orig_i)
-                    else orig_j
-                )
-                reassignments.append((orig_i, orig_j, survivors1[0], effective_j))
-
-    if not reassignments:
-        return ops
-
-    # Apply reassignments: build a new ops list
-    # Track which indices are "consumed" by a new match so they don't appear
-    # as plain delete/insert in the final list.
-    new_match_pairs = {}  # (i, j) -> True for new matches
-    demoted1 = set()  # children1 indices that lose their WF match and become deletes
-    demoted2 = set()  # children2 indices that lose their WF match and become inserts
-    promoted1 = set()  # children1 inserts that become matches
-    promoted2 = set()  # children2 inserts that become matches
-
-    for orig_i, orig_j, new_i, new_j in reassignments:
-        new_match_pairs[(new_i, new_j)] = True
-        if new_i != orig_i:
-            demoted1.add(orig_i)
-            promoted1.add(new_i)
-        if new_j != orig_j:
-            demoted2.add(orig_j)
-            promoted2.add(new_j)
-
-    final_ops = []
-    # Re-emit all original ops, substituting changed matches and handling
-    # demotions/promotions.
-    emitted_matches = set()
     for op, i, j in ops:
         if op == "match":
-            i_demoted = i in demoted1
-            j_demoted = j in demoted2
-            if i_demoted and j_demoted:
-                final_ops.append(("delete", i, None))
-                final_ops.append(("insert", None, j))
-            elif i_demoted:
-                # Only trace1 side changed; j is still used in the new match
-                final_ops.append(("delete", i, None))
-            elif j_demoted:
-                # Only trace2 side changed; i is still used in the new match
-                final_ops.append(("insert", None, j))
-            else:
-                final_ops.append(("match", i, j))
-                emitted_matches.add((i, j))
+            n = normalized_name(children1[i], 1)
+            all1_by_name.setdefault(n, []).append(i)
+            matched_names.add(n)
+            n = normalized_name(children2[j], 2)
+            all2_by_name.setdefault(n, []).append(j)
+            matched_names.add(n)
         elif op == "delete":
-            if i in promoted1:
-                pass  # will be emitted as part of a new match below
-            else:
-                final_ops.append(("delete", i, None))
+            n = normalized_name(children1[i], 1)
+            all1_by_name.setdefault(n, []).append(i)
         elif op == "insert":
-            if j in promoted2:
-                pass  # will be emitted as part of a new match below
-            else:
-                final_ops.append(("insert", None, j))
+            n = normalized_name(children2[j], 2)
+            all2_by_name.setdefault(n, []).append(j)
 
-    # Emit new match ops for winner pairs not already in the list
-    for new_i, new_j in new_match_pairs:
-        if (new_i, new_j) not in emitted_matches:
-            final_ops.append(("match", new_i, new_j))
+    # Only disambiguate names that: appear on both sides, have >1 on at least
+    # one side, AND participate in at least one existing match op.
+    ambiguous_names = {
+        name
+        for name in set(all1_by_name) & set(all2_by_name) & matched_names
+        if len(all1_by_name[name]) > 1 or len(all2_by_name[name]) > 1
+    }
+
+    if not ambiguous_names:
+        return ops
+
+    # Collect all indices touched by disambiguation so we can filter original ops
+    handled1 = set()  # all trace1 indices in ambiguous name groups
+    handled2 = set()  # all trace2 indices in ambiguous name groups
+    for name in ambiguous_names:
+        handled1.update(all1_by_name[name])
+        handled2.update(all2_by_name[name])
+
+    # For each ambiguous name, greedily match by BFS subtree similarity
+    new_matches = set()
+    new_deletes = set()
+    new_inserts = set()
+
+    for name in ambiguous_names:
+        indices1 = sorted(all1_by_name[name])
+        indices2 = sorted(all2_by_name[name])
+        n_to_match = min(len(indices1), len(indices2))
+
+        # Precompute BFS levels for all nodes in this group
+        levels1 = {i: bfs_levels(children1[i], baseline_uid2node, 1) for i in indices1}
+        levels2 = {j: bfs_levels(children2[j], variant_uid2node, 2) for j in indices2}
+
+        # Score every (i, j) pair; tiebreak: prefer existing WF match, then positional
+        scored_pairs = sorted(
+            (
+                match_depth(levels1[i], levels2[j]),
+                (i, j) in orig_match_set,
+                i,
+                j,
+            )
+            for i in indices1
+            for j in indices2
+        )
+        scored_pairs.sort(key=lambda x: (-x[0], not x[1], x[2], x[3]))
+
+        # Greedy assignment
+        assigned1, assigned2 = set(), set()
+        for _, _, i, j in scored_pairs:
+            if i in assigned1 or j in assigned2:
+                continue
+            new_matches.add((i, j))
+            assigned1.add(i)
+            assigned2.add(j)
+            if len(assigned1) == n_to_match:
+                break
+
+        new_deletes.update(set(indices1) - assigned1)
+        new_inserts.update(set(indices2) - assigned2)
+
+    # If disambiguation produced the same matches as WF, nothing to do
+    if new_matches <= orig_match_set:
+        return ops
+
+    # Build final ops list: keep non-handled ops as-is, replace handled ones
+    final_ops = [
+        (op, i, j)
+        for op, i, j in ops
+        if not (
+            (op == "match" and (i in handled1 or j in handled2))
+            or (op == "delete" and i in handled1)
+            or (op == "insert" and j in handled2)
+        )
+    ]
+    final_ops.extend(("match", i, j) for i, j in new_matches)
+    final_ops.extend(("delete", i, None) for i in sorted(new_deletes))
+    final_ops.extend(("insert", None, j) for j in sorted(new_inserts))
 
     return final_ops
 
