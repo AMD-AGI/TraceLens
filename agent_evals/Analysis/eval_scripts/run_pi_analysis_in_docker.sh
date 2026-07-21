@@ -30,6 +30,7 @@ set -euo pipefail
 #   --container-name NAME  Docker container name (default: tracelens_pi_evals)
 #   --work-dir DIR         Host directory mounted at /workspace (default: <parent>)
 #   --hf-cache-dir DIR     Host HuggingFace cache mounted at /root/.cache/huggingface
+#   --hf-cache-chown       chown HF cache mount to caller UID/GID on exit (default: off)
 #   --port PORT            API port when not set in server args (default: 30000)
 #   -h, --help             Show help
 #
@@ -38,6 +39,7 @@ set -euo pipefail
 #   CONTAINER_NAME           Same as --container-name
 #   WORK_DIR                 Host dir mounted at /workspace (default: parent of tracelens_root)
 #   HF_CACHE_DIR             Host HuggingFace cache dir (same as --hf-cache-dir)
+#   HF_CACHE_CHOWN=1         chown HF cache mount to caller UID/GID on exit (default: off)
 #   PORT                     API port (default: 30000; overridden by server --port)
 #   READY_TIMEOUT            Seconds to wait for http://localhost:<port>/v1/models (default: 1800)
 #   DOCKER_RUN_ARGS          Extra whitespace-separated docker run arguments
@@ -50,6 +52,7 @@ set -euo pipefail
 DOCKER_IMAGE="${DOCKER_IMAGE:-vllm/vllm-openai-rocm:nightly}"
 CONTAINER_NAME="${CONTAINER_NAME:-tracelens_pi_evals}"
 HF_CACHE_DIR="${HF_CACHE_DIR:-}"
+HF_CACHE_CHOWN="${HF_CACHE_CHOWN:-0}"
 CONTAINER_HF_HOME="/root/.cache/huggingface"
 PORT="${PORT:-30000}"
 READY_TIMEOUT="${READY_TIMEOUT:-1800}"
@@ -81,6 +84,7 @@ Options:
   --container-name NAME  Docker container name (default: tracelens_pi_evals)
   --work-dir DIR         Host directory mounted at /workspace (default: <parent>)
   --hf-cache-dir DIR     Host HuggingFace cache mounted at /root/.cache/huggingface
+  --hf-cache-chown       chown HF cache mount to caller UID/GID on exit (default: off)
   --port PORT            API port when not set in server args (default: 30000)
   --setup-only           Install npm, pi, and TraceLens only; skip server and evals
   -h, --help             Show this help
@@ -91,6 +95,7 @@ Options:
 Environment:
   PORT                     API port (default: 30000)
   HF_CACHE_DIR             Host HuggingFace cache dir (same as --hf-cache-dir)
+  HF_CACHE_CHOWN=1         chown HF cache mount to caller UID/GID on exit (default: off)
   READY_TIMEOUT            Seconds to wait for /v1/models (default: 1800)
   DOCKER_RUN_ARGS          Extra arguments appended to docker run
   PI_NPM_PACKAGE           npm package for pi (default: @earendil-works/pi-coding-agent)
@@ -138,6 +143,10 @@ while [[ $# -gt 0 ]]; do
             HF_CACHE_DIR="$2"
             shift 2
             ;;
+        --hf-cache-chown)
+            HF_CACHE_CHOWN=1
+            shift
+            ;;
         --port)
             [[ $# -ge 2 ]] || die "--port requires a value"
             PORT="$2"
@@ -175,6 +184,12 @@ if [[ "${SKIP_SERVER:-}" == "1" || "${SKIP_SERVER:-}" == "true" ]]; then
     SKIP_SERVER=1
 else
     SKIP_SERVER=0
+fi
+
+if [[ "${HF_CACHE_CHOWN:-}" == "1" || "${HF_CACHE_CHOWN:-}" == "true" ]]; then
+    HF_CACHE_CHOWN=1
+else
+    HF_CACHE_CHOWN=0
 fi
 
 if [[ -z "$TRACELENS_ROOT" ]]; then
@@ -245,7 +260,7 @@ cleanup() {
     if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
         echo "Fixing ownership of mounted directories (${HOST_UID}:${HOST_GID})..."
         docker exec "$CONTAINER_NAME" chown -R "${HOST_UID}:${HOST_GID}" /workspace >/dev/null 2>&1 || true
-        if [[ -n "$HF_CACHE_DIR" ]]; then
+        if [[ -n "$HF_CACHE_DIR" && "$HF_CACHE_CHOWN" == "1" ]]; then
             docker exec "$CONTAINER_NAME" chown -R "${HOST_UID}:${HOST_GID}" "$CONTAINER_HF_HOME" >/dev/null 2>&1 || true
         fi
     fi
@@ -271,6 +286,7 @@ echo "  Run as UID:GID:  ${HOST_UID}:${HOST_GID}"
 echo "  API port:        $PORT"
 if [[ -n "$HF_CACHE_DIR" ]]; then
     echo "  HF cache:        $HF_CACHE_DIR -> $CONTAINER_HF_HOME"
+    echo "  HF cache chown:  $([[ "$HF_CACHE_CHOWN" == "1" ]] && echo yes || echo no)"
 fi
 if [[ "$SKIP_SERVER" == "1" ]]; then
     echo "  Mode:            setup-only (no inference server)"
@@ -306,6 +322,7 @@ EXEC_ENV=(
     -e "SERVER_CMD=$SERVER_CMD_QUOTED"
     -e "HOST_UID=$HOST_UID"
     -e "HOST_GID=$HOST_GID"
+    -e "HF_CACHE_CHOWN=$HF_CACHE_CHOWN"
 )
 if [[ -n "$HF_CACHE_DIR" ]]; then
     EXEC_ENV+=(
@@ -329,6 +346,7 @@ CONTAINER_REPO="${CONTAINER_REPO:?}"
 COMPARISON_SCOPE="${COMPARISON_SCOPE:-standalone}"
 SKIP_EVAL="${SKIP_EVAL:-0}"
 SKIP_SERVER="${SKIP_SERVER:-0}"
+HF_CACHE_CHOWN="${HF_CACHE_CHOWN:-0}"
 PI_AGENT_DIR="/workspace/.pi/agent"
 VENV_DIR="/workspace/venv_tracelens"
 SERVER_LOG="/workspace/inference_server.log"
@@ -346,7 +364,7 @@ fix_mount_ownership() {
     fi
     echo "==> Fixing ownership of mounted directories (${HOST_UID}:${HOST_GID})..."
     chown -R "${HOST_UID}:${HOST_GID}" /workspace || true
-    if [[ -n "${HF_HOME:-}" && -d "$HF_HOME" ]]; then
+    if [[ "$HF_CACHE_CHOWN" == "1" && -n "${HF_HOME:-}" && -d "$HF_HOME" ]]; then
         chown -R "${HOST_UID}:${HOST_GID}" "$HF_HOME" || true
     fi
 }
