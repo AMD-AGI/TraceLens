@@ -123,14 +123,21 @@ def _disambiguate_same_name_candidates(
         )
 
     def match_depth(levels_a, levels_b):
-        """Number of BFS levels matching before first divergence."""
+        """(full_levels_matched, partial_overlap_at_first_divergence).
+
+        full_levels_matched: number of BFS levels where the sorted child-name
+        tuples are identical before the first divergence.
+        partial_overlap_at_first_divergence: multiset intersection size at the
+        first diverging level (0 if all levels matched).
+        """
         max_d = max(len(levels_a), len(levels_b))
         for d in range(max_d):
             a = levels_a[d] if d < len(levels_a) else ()
             b = levels_b[d] if d < len(levels_b) else ()
             if a != b:
-                return d
-        return max_d
+                overlap = sum(min(a.count(x), b.count(x)) for x in set(a))
+                return (d, overlap)
+        return (max_d, 0)
 
     # Index existing ops by type
     orig_match_set = {(i, j) for op, i, j in ops if op == "match"}
@@ -198,7 +205,7 @@ def _disambiguate_same_name_candidates(
             for i in indices1
             for j in indices2
         )
-        scored_pairs.sort(key=lambda x: (-x[0], not x[1], x[2], x[3]))
+        scored_pairs.sort(key=lambda x: (-x[0][0], -x[0][1], not x[1], x[2], x[3]))
 
         # Greedy assignment
         assigned1, assigned2 = set(), set()
