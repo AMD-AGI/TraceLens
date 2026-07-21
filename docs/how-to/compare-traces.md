@@ -15,8 +15,8 @@ This topic shows how to quantify the impact of a change by comparing two
 TraceLens reports side by side — for example, a baseline against a candidate
 after a code, library, or hardware change.
 
-TraceLens offers three ways to compare traces, depending on how precise you need
-the matching to be and the level of analysis you need:
+TraceLens offers two ways to compare traces, depending on how precise you need
+the matching to be:
 
 - **[Perf-report comparison](#perf-report-comparison):** compares two finished
   reports by **op name**, matching each sheet's rows (per-op aggregates, kernels,
@@ -188,10 +188,10 @@ notebook for a worked example.
 
 ## TraceLens Agent (comparative mode)
 
-The Comparative TraceLens Agent is an agentic workflow that uses TraceDiff to analyze traces 
+The Comparative TraceLens Agent is an agentic workflow that uses TraceDiff to analyze traces
 and outputs a prioritized, stakeholder-facing optimization report. It's best used when you want
 automated gap analysis with concrete optimization recommendations rather than
-raw data tables. For more information, see here: [TraceLens Agent](./agent.md)
+raw data tables. For more information, see [TraceLens Agent](./agent.md).
 
 ## Related topics
 
