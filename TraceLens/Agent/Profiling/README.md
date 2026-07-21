@@ -6,8 +6,6 @@ See LICENSE for license information.
 
 # TraceLens Agent: Magpie Benchmark + Profiling
 
-> **⚠️ Experimental**: This feature is under active development and may change.
-
 The TraceLens Agentic Profiling module drives LLM inference benchmarking and PyTorch profiler trace collection using the [Magpie](https://github.com/AMD-AGI/Magpie) framework. A skill coordinates environment setup, Docker image patching, profiler-window tuning, benchmark execution, trace verification, and trace splitting — producing traces that are ready for the [TraceLens Analysis Orchestrator](../Analysis/README.md). Supports vLLM and SGLang, in eager or graph-replay + capture mode.
 
 ---
@@ -151,7 +149,7 @@ The skill parses the `case` blocks of these scripts at runtime to discover curre
 
 ## Trace Splitting and Handoff to Analysis
 
-Step 6 produces split traces in `torch_trace/trace_split/` via `TraceLens.TraceUtils.split_inference_trace_annotation`. The skill then prints (but does **not** run) a `generate_perf_report_pytorch_inference.py` command that the user can launch to feed the split traces into the [Analysis Orchestrator](../Analysis/README.md). See [Generate a PyTorch inference performance report](../../../docs/how-to/generate-perf-report-pytorch-inference.md) for splitting heuristics and prefill/decode mix selection.
+Step 6 produces split traces in `torch_trace/trace_split/` via `TraceLens.TraceUtils.split_inference_trace_annotation`. The skill then prints (but does **not** run) a `generate_perf_report_pytorch_inference.py` command that the user can launch to feed the split traces into the [TraceLens Agent](../Analysis/README.md). See [`docs_original/Inference_analysis.md`](../../../docs_original/Inference_analysis.md) for splitting heuristics and prefill/decode mix selection.
 
 ## Bug Reporting
 
