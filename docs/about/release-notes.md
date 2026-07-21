@@ -34,7 +34,7 @@ This release includes the following report generators.
   a unique-argument table, roofline metrics, and an optional short-kernel study.
   Compressed traces (`.zip`, `.gz`) are supported.
 - **PyTorch inference reports:** `TraceLens_generate_perf_report_pytorch_inference`
-  adds analysis for LLM-serving traces (vLLM/SGLang). It merges CUDA-graph
+  adds analysis for LLM-serving traces (vLLM/SGLang). It merges HIP/CUDA-graph
   capture traces into graph-replay traces (`--capture_folder`) to recover
   call-stack and shape information lost in graph mode, and uses per-step request
   annotations (prefill/decode counts and token statistics) to drive

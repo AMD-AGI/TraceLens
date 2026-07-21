@@ -8,7 +8,7 @@ See LICENSE for license information.
 # Generate a PyTorch inference performance report
 ```{meta}
 :description: Learn how to collect, split, and analyze PyTorch LLM-serving (vLLM/SGLang) traces with TraceLens, including graph-capture merging for graph-mode inference.
-:keywords: TraceLens, PyTorch profiler, inference, vLLM, SGLang, CUDA graph, HIP graph, graph capture, LLM serving, FusedMoE, roofline, trace splitting, steady state, ROCm
+:keywords: TraceLens, PyTorch profiler, inference, vLLM, SGLang, HIP graph, CUDA  graph, graph capture, LLM serving, FusedMoE, roofline, trace splitting, steady state, ROCm
 ```
 
 `TraceLens_generate_perf_report_pytorch_inference` is the inference-oriented
@@ -188,7 +188,7 @@ To apply them:
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--profiler-config.capture_torch_profiler_dir DIR` | `str` | `""` | Directory where a profiler trace of the CUDA-graph capture phase is saved (rank 0 only). Requires `--profiler-config.profiler torch`. Leave empty to disable graph-capture profiling. |
+| `--profiler-config.capture_torch_profiler_dir DIR` | `str` | `""` | Directory where a profiler trace of the HIP/CUDA-graph capture phase is saved (rank 0 only). Requires `--profiler-config.profiler torch`. Leave empty to disable graph-capture profiling. |
 | `--profiler-config.detailed_trace_annotation` | `bool` | `False` | When `True`, execution-step annotations include roofline metrics (`sk`, `sqsq`, `sqsk`) for context and generation requests. When `False`, annotations record only request and token counts. Enable for full roofline analysis. |
 
 Example - enable both flags alongside a steady-state window profile:
@@ -205,7 +205,7 @@ Example - enable both flags alongside a steady-state window profile:
 
 ```{note}
 `capture_torch_profiler_dir` is only available when `--profiler-config.profiler torch`
-is set. The capture trace is written once at server startup during CUDA-graph
+is set. The capture trace is written once at server startup during HIP/CUDA-graph
 construction; the steady-state replay trace is written to `torch_profiler_dir`
 during the benchmark. Pass both paths to the report generator via
 `--capture_folder` and `--profile_json_path` respectively.
