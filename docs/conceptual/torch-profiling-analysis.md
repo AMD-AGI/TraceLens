@@ -12,7 +12,7 @@ See LICENSE for license information.
 
 Once you've collected a PyTorch trace and opened it in [Perfetto](https://ui.perfetto.dev/), the next question is what the trace actually means and how you read insights from it. This topic unpacks that for a *single-GPU* trace. Multi-GPU profiling is covered separately.
 
-When you run a PyTorch model on a GPU, there's a hidden interplay between the CPU (host) and the GPU (accelerator). A PyTorch trace lets you observe this choreography, revealing how your code executes, where time is spent, and what might be slowing you down.
+When you run a PyTorch model on a GPU, there's a hidden interplay between the CPU (host) and the GPU (device). A PyTorch trace lets you observe this choreography, revealing how your code executes, where time is spent, and what might be slowing you down.
 
 ## The execution model: host, GPU, and asynchronous launches
 

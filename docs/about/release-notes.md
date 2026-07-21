@@ -67,7 +67,7 @@ This release includes the following analysis features.
   dtypes, strides, and concrete inputs to isolate problematic input patterns.
 - **Roofline modeling:** Computes arithmetic intensity (FLOPs/byte) and
   classifies operations as compute- or memory-bound relative to a target
-  accelerator's roofline knee point. Optional Origami-based simulated GEMM/SDPA
+  GPU's roofline knee point. Optional Origami-based simulated GEMM/SDPA
   timings are available when a GPU architecture specification is provided.
 - **Activation-recompute detection** and **kernel-overlap** sheets for deeper
   PyTorch analysis.
