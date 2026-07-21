@@ -122,7 +122,7 @@ COPY . /tmp/TraceLens
 RUN VLLM_DIR=\$(python -c "import vllm, os; print(os.path.join(os.path.dirname(vllm.__file__), '..'))") && \\
     cd "\${VLLM_DIR}" && \\
     (git apply /tmp/TraceLens/${PATCH_PATH} || patch -p1 --fuzz=10 < /tmp/TraceLens/${PATCH_PATH}) && \\
-    python3 -m pip install --upgrade /tmp/TraceLens && \\
+    pip install --upgrade /tmp/TraceLens && \\
     rm -rf /tmp/TraceLens
 
 WORKDIR /workspace

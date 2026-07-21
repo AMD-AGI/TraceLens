@@ -207,7 +207,7 @@ RUN SGLANG_DIR=\$(pip show sglang | grep "Editable project location" | cut -d' '
             { echo "Failed to apply \$patch"; exit 1; }; \\
         fi \\
     done && \\
-    python3 -m pip install --upgrade /tmp/TraceLens && \\
+    pip install --upgrade /tmp/TraceLens && \\
     rm -rf /tmp/TraceLens
 
 WORKDIR /workspace
