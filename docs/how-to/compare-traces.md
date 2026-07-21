@@ -26,12 +26,7 @@ the matching to be and the level of analysis you need:
   compares traces by their *morphological tree structure*, matching ops at the
   lowest common node. Use it when op names differ between traces (for example, across
   hardware, libraries, or framework versions) or when you need finer-grained,
-  programmatic analysis.
-- **[TraceLens Agent (comparative mode)](#tracelens-agent-comparative-mode):** an
-  agentic workflow that compares two traces and produces a prioritized,
-  stakeholder-facing optimization report. Use it when you want
-  automated gap analysis with concrete optimization recommendations rather than
-  raw data tables.
+  programmatic analysis. For an end-to-end analysis, the **[Comparative TraceLens Agent](#tracelens-agent-comparative-mode)** wraps TraceDiff in an agentic workflow that automates the comparison and provides optimization recommendations.
 
 ## Before you begin
 
@@ -193,37 +188,10 @@ notebook for a worked example.
 
 ## TraceLens Agent (comparative mode)
 
-The [TraceLens Agent](./agent.md) is an agentic workflow that analyzes traces 
-and outputs a prioritized, stakeholder-facing optimization report. The agent has two analysis modes: standlone and comparative. 
-In comparative mode the agent takes two traces, runs TraceDiff under the hood,
-and interprets the results to surface performance gaps with concrete actions.
-
-### Run a comparative analysis
-
-In a chat with a capable model, invoke:
-
-```text
-Follow the analysis orchestrator installed with TraceLens and run the full
-agentic analysis workflow on <path_to_trace1.json> and <path_to_trace2.json>
-```
-
-Or headless via the CLI:
-
-```bash
-agent --model <model> --print --force --trust \
-    "Follow the analysis orchestrator installed with the TraceLens pip package
-    (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package
-    installation directory) and run the full agentic analysis workflow on
-    <path_to_trace1.json> and <path_to_trace2.json> with platform <platform>,
-    analysis mode default, node <node>, container <container>,
-    output to <output_dir>"
-```
-
-The report identifies inefficiencies in the primary trace relative to the
-reference, ranks findings by impact score, and groups them into compute kernel
-optimizations, kernel fusion opportunities, and system-level optimizations. See
-[Generate optimization recommendations with the TraceLens Agent](./agent.md) for
-the full setup, prerequisites, and output format.
+The Comparative TraceLens Agent is an agentic workflow that uses TraceDiff to analyze traces 
+and outputs a prioritized, stakeholder-facing optimization report. It's best used when you want
+automated gap analysis with concrete optimization recommendations rather than
+raw data tables. For more information, see here: [TraceLens Agent](./agent.md)
 
 ## Related topics
 
