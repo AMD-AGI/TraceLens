@@ -25,11 +25,24 @@ _KERNEL_LAUNCH_EQUIVALENTS = {
 }
 
 
-def _sort_by_ts(uids, uid2node):
-    """Sort UIDs by their node timestamp."""
-    nodes = [(uid2node.get(u), u) for u in uids]
-    nodes.sort(key=lambda x: x[0].get("ts", 0) if x[0] else 0)
-    return [u for _, u in nodes]
+_UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
+
+
+def _sort_by_ts(nodes):
+    """Sort nodes by timestamp, return their UIDs."""
+    return [n[_UID] for n in sorted(nodes, key=lambda n: n.get("ts", 0))]
+
+
+def _get_name_node(node, strip_details=False):
+    """Get the normalized comparison name directly from a node dict."""
+    if node is None:
+        return None
+    name = (
+        node.get("name")
+        or node.get("Name")
+        or node.get(TraceLens.util.TraceEventUtils.TraceKeys.Name)
+    )
+    return _normalize_name_for_comparison(name, strip_details) if name else None
 
 
 def _list_to_tuple(obj):
@@ -580,81 +593,47 @@ class TraceDiff:
                 "nn_module_stack": nn_module_stack,
             }
 
-        def safe_children(uid2node, uid):
-            if uid is None:
-                return []
-            node = uid2node.get(uid)
-            if node is None or not isinstance(node, dict):
-                return []
-            return node.get("children", [])
-
         _GRAPH_LAUNCH_NAMES = {"hipGraphLaunch", "cudaGraphLaunch"}
 
-        def subtree_contains_cuda_runtime(uid, uid2node):
-            """Return True if this node is a cuda_runtime node. Graph launch events (hipGraphLaunch, cudaGraphLaunch) are exempt."""
-            node = uid2node.get(uid)
+        def subtree_contains_cuda_runtime(node):
+            """Return True if this node is a cuda_runtime node. Graph launch events are exempt."""
             if not node or not isinstance(node, dict):
                 return False
             if node.get("name") in _GRAPH_LAUNCH_NAMES:
                 return False
             cat = node.get("cat") or node.get("category")
-            if cat == "cuda_runtime" or cat == "cuda_driver":
-                return True
-            else:
-                return False
-
-        def get_name_uid(uid, tree_num):
-            name = self._get_op_name(uid, tree_num)
-            return _normalize_name_for_comparison(name) if name else None
+            return cat in ("cuda_runtime", "cuda_driver")
 
         def get_children_with_missing(uid1, uid2):
             """Get aligned children lists, adding missing-by-name from full child list."""
-            children1 = safe_children(baseline_uid2node, uid1)
-            children2 = safe_children(variant_uid2node, uid2)
-            all_nodes1 = [
-                baseline_uid2node[c] for c in children1 if baseline_uid2node.get(c)
-            ]
-            all_nodes2 = [
-                variant_uid2node[c] for c in children2 if variant_uid2node.get(c)
-            ]
-            gpu_children1 = [
-                n[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-                for n in all_nodes1
-                if self.is_gpu_path(n)
-            ]
-            gpu_children2 = [
-                n[TraceLens.util.TraceEventUtils.TraceKeys.UID]
-                for n in all_nodes2
-                if self.is_gpu_path(n)
-            ]
-            gpu_names1 = {get_name_uid(c, 1) for c in gpu_children1}
-            gpu_names2 = {get_name_uid(c, 2) for c in gpu_children2}
+            node1 = baseline_uid2node.get(uid1)
+            node2 = variant_uid2node.get(uid2)
+            all_children1 = tree1.get_children_events(node1) if node1 else []
+            all_children2 = tree2.get_children_events(node2) if node2 else []
 
-            all_names1 = {get_name_uid(c, 1): c for c in children1}
-            all_names2 = {get_name_uid(c, 2): c for c in children2}
+            gpu_nodes1 = [n for n in all_children1 if self.is_gpu_path(n)]
+            gpu_nodes2 = [n for n in all_children2 if self.is_gpu_path(n)]
+            gpu_names1 = {_get_name_node(n) for n in gpu_nodes1}
+            gpu_names2 = {_get_name_node(n) for n in gpu_nodes2}
 
-            names1_only = gpu_names1 - gpu_names2
-            names2_only = gpu_names2 - gpu_names1
+            all_by_name1 = {_get_name_node(n): n for n in all_children1}
+            all_by_name2 = {_get_name_node(n): n for n in all_children2}
 
-            for n in names1_only:
-                if n in all_names2:
-                    gpu_children2.append(all_names2[n])
-            for n in names2_only:
-                if n in all_names1:
-                    gpu_children1.append(all_names1[n])
+            for name in gpu_names1 - gpu_names2:
+                if name in all_by_name2:
+                    gpu_nodes2.append(all_by_name2[name])
+            for name in gpu_names2 - gpu_names1:
+                if name in all_by_name1:
+                    gpu_nodes1.append(all_by_name1[name])
 
-            return _sort_by_ts(gpu_children1, baseline_uid2node), _sort_by_ts(
-                gpu_children2, variant_uid2node
-            )
+            return _sort_by_ts(gpu_nodes1), _sort_by_ts(gpu_nodes2)
 
         def collapse_single_gpu_child(uid, uid2node, tree_obj):
             """
             Descend through single-GPU-path-child wrapper nodes until reaching
             a node with != 1 GPU-path child, a cpu_op with a cuda_runtime
             child, or a dead end.
-            Returns (uid, gpu_path_children) of the deepest reachable node.
-            gpu_path_children is the list of GPU-path children at that node
-            (empty if stopped at a cuda_runtime or missing node).
+            Returns (uid, gpu_path_children_uids) of the deepest reachable node.
             """
             current = uid
             gpu_kids = []
@@ -665,27 +644,21 @@ class TraceDiff:
                     and node.get("name") not in _GRAPH_LAUNCH_NAMES
                 ):
                     break
-                # Stop at cpu_ops that directly launch cuda_runtime/cuda_driver calls
+                child_nodes = tree_obj.get_children_events(node)
                 cat = tree_obj.event_to_category(node)
                 if cat == "cpu_op":
                     has_cr_child = any(
-                        tree_obj.event_to_category(uid2node[c])
-                        in ("cuda_runtime", "cuda_driver")
-                        and uid2node[c].get("name") not in _GRAPH_LAUNCH_NAMES
-                        for c in node.get("children", [])
-                        if uid2node.get(c)
+                        tree_obj.event_to_category(c) in ("cuda_runtime", "cuda_driver")
+                        and c.get("name") not in _GRAPH_LAUNCH_NAMES
+                        for c in child_nodes
                     )
                     if has_cr_child:
                         break
-                kids = [
-                    c
-                    for c in node.get("children", [])
-                    if uid2node.get(c) and self.is_gpu_path(uid2node[c])
-                ]
-                if len(kids) != 1:
-                    gpu_kids = kids
+                gpu_child_nodes = [c for c in child_nodes if self.is_gpu_path(c)]
+                if len(gpu_child_nodes) != 1:
+                    gpu_kids = [c[_UID] for c in gpu_child_nodes]
                     break
-                current = kids[0]
+                current = gpu_child_nodes[0][_UID]
             return current, gpu_kids
 
         def reconcile_unmatched(ops, children1, children2):
@@ -709,8 +682,8 @@ class TraceDiff:
             if not delete_indices or not insert_indices:
                 return False, children1, children2
 
-            sub1 = {}  # index in children1 -> replacement UIDs
-            sub2 = {}  # index in children2 -> replacement UIDs
+            sub1 = {}  # index in children1 -> replacement child nodes
+            sub2 = {}  # index in children2 -> replacement child nodes
             skip_cats = ("kernel", "cuda_runtime", "cuda_driver")
 
             for di in delete_indices:
@@ -736,25 +709,21 @@ class TraceDiff:
                         and node_i.get("name") not in _GRAPH_LAUNCH_NAMES
                     ):
                         continue
-                    name_d = get_name_uid(uid_d, 1)
-                    name_i = get_name_uid(uid_i, 2)
+                    name_d = _get_name_node(node_d)
+                    name_i = _get_name_node(node_i)
                     imm_d = [
-                        c
-                        for c in safe_children(baseline_uid2node, uid_d)
-                        if baseline_uid2node.get(c)
-                        and self.is_gpu_path(baseline_uid2node[c])
-                    ]
+                        c for c in tree1.get_children_events(node_d)
+                        if self.is_gpu_path(c)
+                    ] if node_d else []
                     imm_i = [
-                        c
-                        for c in safe_children(variant_uid2node, uid_i)
-                        if variant_uid2node.get(c)
-                        and self.is_gpu_path(variant_uid2node[c])
-                    ]
-                    names_imm_d = [get_name_uid(c, 1) for c in imm_d]
-                    names_imm_i = [get_name_uid(c, 2) for c in imm_i]
-                    if name_d and any(get_name_uid(c, 2) == name_d for c in imm_i):
+                        c for c in tree2.get_children_events(node_i)
+                        if self.is_gpu_path(c)
+                    ] if node_i else []
+                    names_imm_d = [_get_name_node(c) for c in imm_d]
+                    names_imm_i = [_get_name_node(c) for c in imm_i]
+                    if name_d and any(_get_name_node(c) == name_d for c in imm_i):
                         sub2[ii] = imm_i
-                    if name_i and any(get_name_uid(c, 1) == name_i for c in imm_d):
+                    if name_i and any(_get_name_node(c) == name_i for c in imm_d):
                         sub1[di] = imm_d
                     if imm_d and imm_i and names_imm_d == names_imm_i:
                         sub1[di] = imm_d
@@ -763,25 +732,23 @@ class TraceDiff:
             if not sub1 and not sub2:
                 return False, children1, children2
 
-            # Apply substitutions (expand wrapper UIDs to their children)
-            new_children1 = []
+            # Apply substitutions: sub values are node lists, non-substituted
+            # entries are UIDs that need resolving to nodes for _sort_by_ts.
+            new_nodes1 = []
             for idx, c in enumerate(children1):
                 if idx in sub1:
-                    new_children1.extend(sub1[idx])
+                    new_nodes1.extend(sub1[idx])
                 else:
-                    new_children1.append(c)
+                    new_nodes1.append(baseline_uid2node[c])
 
-            new_children2 = []
+            new_nodes2 = []
             for idx, c in enumerate(children2):
                 if idx in sub2:
-                    new_children2.extend(sub2[idx])
+                    new_nodes2.extend(sub2[idx])
                 else:
-                    new_children2.append(c)
+                    new_nodes2.append(variant_uid2node[c])
 
-            new_children1 = _sort_by_ts(new_children1, baseline_uid2node)
-            new_children2 = _sort_by_ts(new_children2, variant_uid2node)
-
-            return True, new_children1, new_children2
+            return True, _sort_by_ts(new_nodes1), _sort_by_ts(new_nodes2)
 
         def traverse_and_merge(uid1, uid2):
             key = (uid1, uid2)
@@ -796,8 +763,8 @@ class TraceDiff:
                 if uid1 in self.pod1 or uid2 in self.pod2:
                     pass  # Skip boundary logic, still need merge structure
                 else:
-                    name1 = get_name_uid(uid1, 1)
-                    name2 = get_name_uid(uid2, 2)
+                    name1 = _get_name_node(node1)
+                    name2 = _get_name_node(node2)
                     if name1 != name2:
                         self.db1.append(node1)
                         self.db2.append(node2)
@@ -850,9 +817,9 @@ class TraceDiff:
 
             # --- Phase 2: Alignment on original children ---
             any_cr = any(
-                subtree_contains_cuda_runtime(c, baseline_uid2node) for c in children1
+                subtree_contains_cuda_runtime(baseline_uid2node.get(c)) for c in children1
             ) or any(
-                subtree_contains_cuda_runtime(c, variant_uid2node) for c in children2
+                subtree_contains_cuda_runtime(variant_uid2node.get(c)) for c in children2
             )
             if len(children1) == len(children2) and not any_cr:
                 ops = [("match", i, i) for i in range(len(children1))]
@@ -897,10 +864,10 @@ class TraceDiff:
                         free_items1 = [recon1[i] for i in free1]
                         free_items2 = [recon2[j] for j in free2]
                         any_cr = any(
-                            subtree_contains_cuda_runtime(c, baseline_uid2node)
+                            subtree_contains_cuda_runtime(baseline_uid2node.get(c))
                             for c in free_items1
                         ) or any(
-                            subtree_contains_cuda_runtime(c, variant_uid2node)
+                            subtree_contains_cuda_runtime(variant_uid2node.get(c))
                             for c in free_items2
                         )
                         if len(free_items1) == len(free_items2) and not any_cr:
