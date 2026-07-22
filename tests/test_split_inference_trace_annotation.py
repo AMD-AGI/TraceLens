@@ -148,7 +148,7 @@ def test_1211_prioritized_over_1219():
     roots = split.find_iteration_roots(trace["traceEvents"])
     assert roots is not None
     assert len(roots) == 16  # only the 1211 roots
-    primary = split.ANNOTATION_PATTERN[0]
+    primary = split.ITERATION_PATTERNS[0]
     for r in roots:
         assert primary.match(r["name"])
         assert not r["name"].startswith("step[")

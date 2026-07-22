@@ -43,7 +43,6 @@ Usage
 import argparse
 import json
 import os
-import re
 import sys
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -51,21 +50,17 @@ from typing import List, Optional, Tuple
 import pandas as pd
 
 from TraceLens.util import DataLoader
+from TraceLens.TraceUtils.annotation_utils import (
+    ITERATION_PATTERNS,
+    ITERATION_BACKUP_PATTERNS,
+    IterationAnnotation,
+)
 from TraceLens.TraceUtils.split_inference_trace_annotation import (
     extract_and_save,
     find_phase_from_window,
     get_filename,
     preprocess_trace,
 )
-
-ANNOTATION_PATTERN = [
-    re.compile(
-        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
-    ),
-    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
-    re.compile(r"execute_new_\d+_cached_\d+"),
-    re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"),
-]
 
 PHASE_DECODE_ONLY = "decode_only"
 PHASE_PREFILLDECODE = "prefilldecode"
@@ -95,78 +90,16 @@ def _find_events_by_pattern_quiet(events, patterns, name, cat=None):
     return matches
 
 
-# ---------------------------------------------------------------------------
-# Per-iteration name parser (extended to expose c_sq/c_sk/g_sq/g_sk)
-# ---------------------------------------------------------------------------
-def _safe_int(v) -> int:
-    try:
-        return int(v)
-    except (ValueError, TypeError):
-        return 0
+def _find_roots_by_priority(events, pattern_tiers, name, cat=None):
+    """Return roots from the first tier that matches any events.
 
-
-def parse_iter_details(name: str) -> dict:
-    """Extract per-step details including c_sq/c_sk/g_sq/g_sk where available.
-
-    For naming patterns that don't carry sq/sk (e.g. ``execute_new_N_cached_M``
-    or ``execute_context_N(M)_generation_K(L)``), the corresponding sq/sk
-    fields default to 0 and ``has_sqsk`` is set to False.
+    ``pattern_tiers`` is an ordered list of pattern groups
     """
-    raw = name
-    name2 = name.replace("(", "_").replace(")", "_")
-    parts = re.sub(r"[sqk]+", "_", name2).split("_")
-
-    has_sqsk = False
-    c_req = c_sq = c_sk = c_sqsq = c_sqsk = 0
-    g_req = g_sq = g_sk = g_sqsq = g_sqsk = 0
-
-    if len(parts) < 10:
-        # Support for vLLM v0.13 and lower annotation format
-        # execute_context_N(M)_generation_K(L)
-        c_req = _safe_int(parts[2]) if len(parts) > 2 else 0
-        c_sum_proxy = _safe_int(parts[3]) if len(parts) > 3 else 0
-        g_req = _safe_int(parts[6]) if len(parts) > 6 else 0
-        g_sum_proxy = _safe_int(parts[7]) if len(parts) > 7 else 0
-        c_sq = c_sum_proxy
-        g_sq = g_sum_proxy
-    elif len(parts) < 12:
-        # Support for vLLM v0.14 and higher annotation format
-        # execute_X_context_R(sqAskBsqsqCsqskD)_generation_R'(...)
-        c_req = _safe_int(parts[2])
-        c_sq = _safe_int(parts[3])
-        g_req = _safe_int(parts[7])
-        g_sq = _safe_int(parts[8])
-    else:
-        # Support for TraceLens vLLM annotation format
-        # Full pattern: execute_X_context_R(sqAskBsqsqCsqskD)_generation_R'(...)
-        c_req = _safe_int(parts[3])
-        c_sq = _safe_int(parts[5])
-        c_sk = _safe_int(parts[6])
-        c_sqsq = _safe_int(parts[7])
-        c_sqsk = _safe_int(parts[8])
-        g_req = _safe_int(parts[11])
-        g_sq = _safe_int(parts[13])
-        g_sk = _safe_int(parts[14])
-        g_sqsq = _safe_int(parts[15])
-        g_sqsk = _safe_int(parts[16])
-        has_sqsk = True
-
-    return {
-        "name": raw,
-        "context_requests": c_req,
-        "generation_requests": g_req,
-        "c_sq": c_sq,
-        "c_sk": c_sk,
-        "c_sqsq": c_sqsq,
-        "c_sqsk": c_sqsk,
-        "g_sq": g_sq,
-        "g_sk": g_sk,
-        "g_sqsq": g_sqsq,
-        "g_sqsk": g_sqsk,
-        "num_requests": c_req + g_req,
-        "batch_size": c_sq + g_sq,
-        "has_sqsk": has_sqsk,
-    }
+    for patterns in pattern_tiers:
+        roots = _find_events_by_pattern_quiet(events, patterns, name, cat=cat)
+        if roots:
+            return roots
+    return []
 
 
 def classify_phase(detail: dict) -> Optional[str]:
@@ -273,7 +206,7 @@ def find_blocks(iteration_roots: List[dict]) -> List[Block]:
     if not iteration_roots:
         return []
 
-    details = [parse_iter_details(r.get("name", "")) for r in iteration_roots]
+    details = [IterationAnnotation(r.get("name", "")).full_details() for r in iteration_roots]
     phases = [classify_phase(d) for d in details]
 
     blocks: List[Block] = []
@@ -594,14 +527,13 @@ def load_trace(path: str):
     events = trace_json.get("traceEvents", [])
     gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
     print(f"Loaded {len(events)} events from {path}")
-    iteration_roots = (
-        _find_events_by_pattern_quiet(
-            events,
-            ANNOTATION_PATTERN,
-            f"execution steps (iteration) [{os.path.basename(path)}]",
-            cat="user_annotation",
-        )
-        or []
+    # Detailed patterns take priority over the native patterns.
+    label = f"execution steps (iteration) [{os.path.basename(path)}]"
+    iteration_roots = _find_roots_by_priority(
+        events,
+        [ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS],
+        label,
+        cat="user_annotation",
     )
     return {
         "trace_json": trace_json,

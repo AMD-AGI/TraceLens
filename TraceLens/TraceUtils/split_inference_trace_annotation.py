@@ -180,6 +180,11 @@ import csv
 from statistics import mean
 from TraceLens.util import DataLoader
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TraceUtils.annotation_utils import (
+    ITERATION_PATTERNS,
+    ITERATION_BACKUP_PATTERNS,
+    IterationAnnotation,
+)
 import pandas as pd
 
 # Try to use faster JSON parser (orjson is 2-10x faster than json)
@@ -222,25 +227,6 @@ def find_events_by_pattern(
     return matches
 
 
-# Iteration marker patterns. The primary pattern is preferred; the backup
-# patterns are only consulted when the primary matches nothing (see
-# find_iteration_roots). The execute_new_<n>_cached_<n> shape is intentionally
-# excluded because get_iter_details_from_name cannot parse it.
-ANNOTATION_PATTERN = [
-    re.compile(
-        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
-    ),
-]
-ANNOTATION_PATTERN_BACKUP = [
-    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
-    re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"),
-    # SGLang profiler per-step annotations, e.g.
-    #   "step[EXTEND bs=1 toks=862]"  (prefill / extend batch)
-    #   "step[DECODE bs=25]"          (decode batch)
-    re.compile(r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]"),
-]
-
-
 def find_iteration_roots(events: List[dict]) -> Optional[List[dict]]:
     """Return iteration-root events.
 
@@ -248,13 +234,13 @@ def find_iteration_roots(events: List[dict]) -> Optional[List[dict]]:
     falls back to generic call-tree traversal via Trace2Tree.
     """
     roots = find_events_by_pattern(
-        events, ANNOTATION_PATTERN, "execution steps (iteration)", cat="user_annotation"
+        events, ITERATION_PATTERNS, "execution steps (iteration)", cat="user_annotation"
     )
     if roots is None:
         print("No primary annotations found; falling back to backup patterns...")
         roots = find_events_by_pattern(
             events,
-            ANNOTATION_PATTERN_BACKUP,
+            ITERATION_BACKUP_PATTERNS,
             "execution steps (iteration, backup)",
             cat="user_annotation",
         )
@@ -548,76 +534,8 @@ def parse_range(range_str: str, max_len: int) -> Tuple[int, int]:
     return start, min(end, max_len)
 
 
-def get_iter_details_from_name(name: str, prefix: str = "annotation_iteration") -> dict:
-
-    # SGLang profiler step annotations, e.g. "step[EXTEND bs=1 toks=862]" (prefill)
-    # or "step[DECODE bs=25]" (decode). Map to the context/generation request and
-    # token counts that the steady-state logic downstream expects.
-    sglang_step = re.match(r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]", name)
-    if sglang_step:
-        kind, bs = sglang_step.group(1), int(sglang_step.group(2))
-        toks = int(sglang_step.group(3) or 0)
-        if kind == "DECODE":
-            ctx_req, ctx_sum, gen_req, gen_sum, batch_size = 0, 0, bs, bs, bs
-        else:  # EXTEND / MIXED treated as prefill; toks = total prompt tokens.
-            ctx_req, ctx_sum, gen_req, gen_sum, batch_size = (
-                bs,
-                toks,
-                0,
-                0,
-                (toks or bs),
-            )
-        return {
-            "batch_size": batch_size,
-            "num_requests": ctx_req + gen_req,
-            "context_requests": ctx_req,
-            "context_sum": ctx_sum,
-            "generation_requests": gen_req,
-            "generation_sum": gen_sum,
-        }
-
-    if "annotation_iteration" not in prefix:
-        # Generic workload (e.g. diffusion): treat every iteration as one
-        # decode-equivalent step so steady-state detection sees a flat line.
-        return {
-            "batch_size": 1,
-            "num_requests": 1,
-            "context_requests": 0,
-            "context_sum": 0,
-            "generation_requests": 1,
-            "generation_sum": 1,
-        }
-
-    # vLLM execute_..._context_..._generation_... annotations: strip parens and the
-    # sq/sk shape letters to a flat token list, then pick counts by index.
-    try:
-        parts = re.sub(r"[sqk]+", "_", name.replace("(", "_").replace(")", "_")).split(
-            "_"
-        )
-        if len(parts) < 10:
-            idx = (2, 3, 6, 7)
-        elif len(parts) < 12:
-            idx = (2, 3, 7, 8)
-        else:
-            idx = (3, 5, 11, 13)
-        ctx_req, ctx_sum, gen_req, gen_sum = (int(parts[i]) for i in idx)
-        return {
-            "batch_size": ctx_sum + gen_sum,
-            "num_requests": ctx_req + gen_req,
-            "context_requests": ctx_req,
-            "context_sum": ctx_sum,
-            "generation_requests": gen_req,
-            "generation_sum": gen_sum,
-        }
-    except (ValueError, IndexError):
-        return {
-            "batch_size": 1,
-            "num_requests": 1,
-            "context_requests": 0,
-            "context_sum": 0,
-            "generation_requests": 1,
-            "generation_sum": 1,
-        }
+def get_iter_details_from_name(name: str) -> dict:
+    return IterationAnnotation(name).iter_details()
 
 
 def find_phase_from_window(iter_details: List[dict]) -> dict:
@@ -691,7 +609,7 @@ def extract_and_save(
         print(f"No {prefix} events found in the specified range, skipping extraction")
         return extraction_summary
     for idx, root in zip(indices, selected):
-        iter_details = [get_iter_details_from_name(r["name"], prefix) for r in root]
+        iter_details = [get_iter_details_from_name(r["name"]) for r in root]
         iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = extract_iteration(
             root, events, trace_json, gpu_corr_map, flow_corr_map, meta_events
         )
@@ -720,7 +638,7 @@ def extract_and_save(
             root_name = root[0]["name"]
             is_known_annotation = any(
                 pat.match(root_name)
-                for pat in ANNOTATION_PATTERN + ANNOTATION_PATTERN_BACKUP
+                for pat in ITERATION_PATTERNS + ITERATION_BACKUP_PATTERNS
             )
             if is_known_annotation:
                 name_append = (
@@ -788,7 +706,7 @@ def extract_phases_and_save(
         print("phase extraction only supported for annotation iterations, skipping")
         return extraction_summary
     for root in roots:
-        iter_details = [get_iter_details_from_name(r["name"], prefix) for r in root]
+        iter_details = [get_iter_details_from_name(r["name"]) for r in root]
         phase_details = find_phase_from_window(iter_details)
         prefilldecode_steps = [
             r for r, i in zip(root, iter_details) if i.get("context_requests", 0) > 0
@@ -801,7 +719,7 @@ def extract_phases_and_save(
 
         if len(prefilldecode_steps) > 0:
             iter_details = [
-                get_iter_details_from_name(r["name"], prefix)
+                get_iter_details_from_name(r["name"])
                 for r in prefilldecode_steps
             ]
             phase_details = find_phase_from_window(iter_details)
@@ -837,7 +755,7 @@ def extract_phases_and_save(
             )
         if len(decode_steps) > 0:
             iter_details = [
-                get_iter_details_from_name(r["name"], prefix) for r in decode_steps
+                get_iter_details_from_name(r["name"]) for r in decode_steps
             ]
             phase_details = find_phase_from_window(iter_details)
             iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = (
