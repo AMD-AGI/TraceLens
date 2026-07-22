@@ -28,7 +28,6 @@ _KERNEL_LAUNCH_EQUIVALENTS = {
 _TraceKeys = TraceLens.util.TraceEventUtils.TraceKeys
 _UID = _TraceKeys.UID
 _NAME = _TraceKeys.Name
-_DURATION = _TraceKeys.Duration
 _CATEGORY = _TraceKeys.Category
 
 
@@ -63,17 +62,6 @@ def _get_node_arg(node, key):
         return _list_to_tuple(val)
     return ""
 
-
-def _get_duration(node):
-    """Get duration from a node, trying multiple key formats."""
-    dur = node.get("dur")
-    if dur is not None:
-        return dur
-    try:
-        dur = node.get(_DURATION)
-    except Exception:
-        pass
-    return dur
 
 
 def _normalize_name_for_comparison(name, strip_details=False):
@@ -394,35 +382,6 @@ class TraceDiff:
             )
             return None
         return self.diff_stats_summary_df
-
-    def add_to_pod(self, node: Dict[str, Any], pod: set, tree: TraceToTree) -> None:
-        """
-        Iteratively adds the subtree rooted at the given node to the set of points of differences (PODs).
-        Uses an iterative approach instead of recursion for better performance on deep trees.
-
-        Args:
-            node (Dict[str, Any]): The current node in the trace tree.
-            pod (set): The set to which PODs will be added.
-            tree (TraceToTree): The trace tree containing the events.
-        """
-        if not isinstance(node, dict):
-            return
-
-        # Iterative approach using a stack instead of recursion
-        stack = [node]
-        while stack:
-            current = stack.pop()
-            if not isinstance(current, dict):
-                continue
-
-            # Add current node's UID to pod
-            uid = current.get(_UID)
-            if uid is not None:
-                pod.add(uid)
-
-            # Add children to stack
-            children = tree.get_children_events(current)
-            stack.extend(children)
 
     def _get_top_level_root(self, tree: TraceToTree, start_uid: int) -> int:
         """
@@ -989,11 +948,6 @@ class TraceDiff:
         self.merged_tree = (merged_events, merged_root_ids)
         return self.merged_tree
 
-    def get_corresponding_uid(self, tree_num, uid):
-        """
-        Given a tree number (1 or 2) and a UID, return the corresponding UID from the other tree if combined, else -1.
-        """
-        return self.merged_uid_map.get((tree_num, uid), -1)
 
     def _format_merged_subtree(self, merged_id, merged_id_to_event, prefix="", is_last=True):
         """Yield formatted lines for a merged subtree. Shared by print_merged_subtree and print_merged_tree."""
