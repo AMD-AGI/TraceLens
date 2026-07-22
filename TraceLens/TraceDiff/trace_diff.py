@@ -4,16 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import json
+import os
 import re
 from typing import Any, Callable, cast, Dict, Optional
 
 import pandas as pd
-import json
-import os
-import re
-import json
-import os
-import re
 
 import TraceLens.util
 from TraceLens import TraceToTree
@@ -27,6 +23,40 @@ _KERNEL_LAUNCH_EQUIVALENTS = {
     "hipModuleLaunchKernel": "__kernel_launch__",
     "cuLaunchKernel": "__kernel_launch__",
 }
+
+
+def _sort_by_ts(uids, uid2node):
+    """Sort UIDs by their node timestamp."""
+    nodes = [(uid2node.get(u), u) for u in uids]
+    nodes.sort(key=lambda x: x[0].get("ts", 0) if x[0] else 0)
+    return [u for _, u in nodes]
+
+
+def _list_to_tuple(obj):
+    """Recursively convert lists to tuples for hashability."""
+    if isinstance(obj, list):
+        return tuple(_list_to_tuple(item) for item in obj)
+    return obj
+
+
+def _get_node_arg(node, key):
+    """Get an arg value from a node, converting lists to tuples. Returns '' if missing."""
+    val = node.get("args", {}).get(key)
+    if val is not None:
+        return _list_to_tuple(val)
+    return ""
+
+
+def _get_duration(node):
+    """Get duration from a node, trying multiple key formats."""
+    dur = node.get("dur")
+    if dur is not None:
+        return dur
+    try:
+        dur = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Duration)
+    except Exception:
+        pass
+    return dur
 
 
 def _normalize_name_for_comparison(name, strip_details=False):
@@ -613,12 +643,7 @@ class TraceDiff:
                 if n in all_names1:
                     gpu_children1.append(all_names1[n])
 
-            def sort_by_ts(uids, uid2node):
-                nodes = [(uid2node.get(u), u) for u in uids]
-                nodes.sort(key=lambda x: x[0].get("ts", 0))
-                return [u for _, u in nodes]
-
-            return sort_by_ts(gpu_children1, baseline_uid2node), sort_by_ts(
+            return _sort_by_ts(gpu_children1, baseline_uid2node), _sort_by_ts(
                 gpu_children2, variant_uid2node
             )
 
@@ -753,14 +778,8 @@ class TraceDiff:
                 else:
                     new_children2.append(c)
 
-            # Sort by timestamp to match get_children_with_missing behavior
-            def sort_by_ts(uids, uid2node):
-                nodes = [(uid2node.get(u), u) for u in uids]
-                nodes.sort(key=lambda x: x[0].get("ts", 0) if x[0] else 0)
-                return [u for _, u in nodes]
-
-            new_children1 = sort_by_ts(new_children1, baseline_uid2node)
-            new_children2 = sort_by_ts(new_children2, variant_uid2node)
+            new_children1 = _sort_by_ts(new_children1, baseline_uid2node)
+            new_children2 = _sort_by_ts(new_children2, variant_uid2node)
 
             return True, new_children1, new_children2
 
@@ -1033,6 +1052,38 @@ class TraceDiff:
         """
         return self.merged_uid_map.get((tree_num, uid), -1)
 
+    def _format_merged_subtree(self, merged_id, merged_id_to_event, prefix="", is_last=True):
+        """Yield formatted lines for a merged subtree. Shared by print_merged_subtree and print_merged_tree."""
+        node = merged_id_to_event[merged_id]
+        merge_type = node["merged_type"]
+        name1 = self._get_op_name(node["uid1"], 1) if node["uid1"] is not None else None
+        name2 = self._get_op_name(node["uid2"], 2) if node["uid2"] is not None else None
+        connector = "└── " if is_last else "├── "
+        if merge_type == "combined":
+            if name1 == name2 and name1 is not None:
+                yield f"{prefix}{connector}{name1}"
+            else:
+                yield f"{prefix}{connector}{merge_type}: {name1} | {name2}"
+        elif merge_type == "trace1":
+            yield f"{prefix}{connector}>> {merge_type}: {name1}"
+        elif merge_type == "trace2":
+            yield f"{prefix}{connector}<< {merge_type}: {name2}"
+        else:
+            yield f"{prefix}{connector}{merge_type}: {name1} | {name2}"
+        # Sort children by merge_type order: combined, trace1, trace2
+        children = [merged_id_to_event[cid] for cid in node["children"]]
+        sorted_children = (
+            [c["merged_id"] for c in children if c["merged_type"] == "combined"]
+            + [c["merged_id"] for c in children if c["merged_type"] == "trace1"]
+            + [c["merged_id"] for c in children if c["merged_type"] == "trace2"]
+        )
+        child_count = len(sorted_children)
+        for i, cid in enumerate(sorted_children):
+            new_prefix = prefix + ("    " if is_last else "│   ")
+            yield from self._format_merged_subtree(
+                cid, merged_id_to_event, new_prefix, is_last=(i == child_count - 1)
+            )
+
     def print_merged_subtree(self, uid_tree1=None, uid_tree2=None):
         if uid_tree1 is None and uid_tree2 is None:
             raise ValueError("At least one of uid_tree1 or uid_tree2 must be provided.")
@@ -1040,14 +1091,9 @@ class TraceDiff:
             raise ValueError(
                 "merged_tree is not initialized. Call merge_trees() first."
             )
-        merged_events, merged_root_ids = self.merged_tree
-        merged_id_to_event = {event["merged_id"]: event for event in merged_events}
-
-        # Find merged_id corresponding to the given uid
         merged_id_to_event = self._get_merged_id_to_event()
         uid1_to_merged_id, uid2_to_merged_id = self._get_uid_to_merged_id_maps()
 
-        # Efficiently find merged_id using O(1) lookup instead of linear search
         merged_id = None
         if uid_tree1 is not None:
             merged_id = uid1_to_merged_id.get(uid_tree1)
@@ -1057,115 +1103,37 @@ class TraceDiff:
         if merged_id is None:
             raise ValueError("Could not find merged node for the given UID.")
 
-        # Print merged subtree to console
-        def print_merged_tree_to_console(merged_id, prefix="", is_last=True):
-            node = merged_id_to_event[merged_id]
-            merge_type = node["merged_type"]
-            name1 = (
-                self._get_op_name(node["uid1"], 1) if node["uid1"] is not None else None
-            )
-            name2 = (
-                self._get_op_name(node["uid2"], 2) if node["uid2"] is not None else None
-            )
-            connector = "└── " if is_last else "├── "
-            if merge_type == "combined":
-                if name1 == name2 and name1 is not None:
-                    line = f"{prefix}{connector}{name1}"
-                else:
-                    line = f"{prefix}{connector}{merge_type}: {name1} | {name2}"
-            elif merge_type == "trace1":
-                line = f"{prefix}{connector}>> {merge_type}: {name1}"
-            elif merge_type == "trace2":
-                line = f"{prefix}{connector}<< {merge_type}: {name2}"
-            else:
-                line = f"{prefix}{connector}{merge_type}: {name1} | {name2}"
-            # Sort children by merge_type order: combined, trace1, trace2
-            children = [merged_id_to_event[cid] for cid in node["children"]]
-            combined = [
-                c["merged_id"] for c in children if c["merged_type"] == "combined"
-            ]
-            trace1 = [c["merged_id"] for c in children if c["merged_type"] == "trace1"]
-            trace2 = [c["merged_id"] for c in children if c["merged_type"] == "trace2"]
-            sorted_children = combined + trace1 + trace2
-            child_count = len(sorted_children)
-            for i, cid in enumerate(sorted_children):
-                new_prefix = prefix + ("    " if is_last else "│   ")
-                print_merged_tree_to_console(
-                    cid, new_prefix, is_last=(i == child_count - 1)
-                )
-
-        print_merged_tree_to_console(merged_id, prefix="", is_last=True)
+        for line in self._format_merged_subtree(merged_id, merged_id_to_event):
+            print(line)
 
     def print_merged_tree(self, output_file, prune_non_gpu=False):
         if self.merged_tree is None:
             raise ValueError(
                 "merged_tree is not initialized. Call merge_trees() first."
             )
-        merged_events, merged_root_ids = self.merged_tree
-        output_lines = []
+        _, merged_root_ids = self.merged_tree
         merged_id_to_event = self._get_merged_id_to_event()
 
         def subtree_has_gpu(merged_id: int) -> bool:
-            # Depending on the merge type, get the corresponsonding UIDs in both trees
             node = merged_id_to_event[merged_id]
             uid1 = node["uid1"]
             uid2 = node["uid2"]
-
-            # Check in baseline tree
             node1 = self.baseline.get_UID2event(uid1) if uid1 is not None else None
             node2 = self.variant.get_UID2event(uid2) if uid2 is not None else None
-
             if node1 and not node1.get("non_gpu_path", False):
                 return True
             if node2 and not node2.get("non_gpu_path", False):
                 return True
-
             return False
 
-        def print_merged_tree_to_lines(merged_id, prefix="", is_last=True):
-            node = merged_id_to_event[merged_id]
-            merge_type = node["merged_type"]
-            name1 = (
-                self._get_op_name(node["uid1"], 1) if node["uid1"] is not None else None
-            )
-            name2 = (
-                self._get_op_name(node["uid2"], 2) if node["uid2"] is not None else None
-            )
-            connector = "└── " if is_last else "├── "
-            if merge_type == "combined":
-                if name1 == name2 and name1 is not None:
-                    line = f"{prefix}{connector}{name1}"
-                else:
-                    line = f"{prefix}{connector}{merge_type}: {name1} | {name2}"
-            elif merge_type == "trace1":
-                line = f"{prefix}{connector}>> {merge_type}: {name1}"
-            elif merge_type == "trace2":
-                line = f"{prefix}{connector}<< {merge_type}: {name2}"
-            else:
-                line = f"{prefix}{connector}{merge_type}: {name1} | {name2}"
-            output_lines.append(line)
-            # Sort children by merge_type order: combined, trace1, trace2
-            children = [merged_id_to_event[cid] for cid in node["children"]]
-            combined = [
-                c["merged_id"] for c in children if c["merged_type"] == "combined"
-            ]
-            trace1 = [c["merged_id"] for c in children if c["merged_type"] == "trace1"]
-            trace2 = [c["merged_id"] for c in children if c["merged_type"] == "trace2"]
-            sorted_children = combined + trace1 + trace2
-            child_count = len(sorted_children)
-            for i, cid in enumerate(sorted_children):
-                new_prefix = prefix + ("    " if is_last else "│   ")
-                print_merged_tree_to_lines(
-                    cid, new_prefix, is_last=(i == child_count - 1)
-                )
-
+        output_lines = []
         for i, root_id in enumerate(merged_root_ids):
             if prune_non_gpu and not subtree_has_gpu(root_id):
                 continue
-
-            print_merged_tree_to_lines(
-                root_id, prefix="", is_last=(i == len(merged_root_ids) - 1)
-            )
+            output_lines.extend(self._format_merged_subtree(
+                root_id, merged_id_to_event,
+                prefix="", is_last=(i == len(merged_root_ids) - 1),
+            ))
 
         with open(output_file, "w") as f:
             for line in output_lines:
@@ -1185,49 +1153,6 @@ class TraceDiff:
         merged_id_to_event = self._get_merged_id_to_event()
         baseline_uid2node = self._get_baseline_uid2node()
         variant_uid2node = self._get_variant_uid2node()
-
-        def list_to_tuple(obj):
-            if isinstance(obj, list):
-                return tuple(list_to_tuple(item) for item in obj)
-            return obj
-
-        def get_input_shape(node):
-            args = node.get("args", {})
-            shape = args.get("Input Dims")
-            if shape is not None:
-                return list_to_tuple(shape)
-            return ""
-
-        def get_concrete_inputs(node):
-            args = node.get("args", {})
-            val = args.get("Concrete Inputs")
-            if val is not None:
-                return list_to_tuple(val)
-            return ""
-
-        def get_input_strides(node):
-            args = node.get("args", {})
-            val = args.get("Input Strides")
-            if val is not None:
-                return list_to_tuple(val)
-            return ""
-
-        def get_input_type(node):
-            args = node.get("args", {})
-            val = args.get("Input type")
-            if val is not None:
-                return list_to_tuple(val)
-            return ""
-
-        def get_duration(node):
-            dur = node.get("dur")
-            if dur is not None:
-                return dur
-            try:
-                dur = node.get(TraceLens.util.TraceEventUtils.TraceKeys.Duration)
-            except Exception:
-                pass
-            return dur
 
         def find_last_cpu_op_on_gpu_path(
             merged_child, tree_obj, tree_uid2node, uid_key, all_kernels=None
@@ -1345,14 +1270,6 @@ class TraceDiff:
             # Otherwise return whatever children found (they're deeper)
             return cpu_ops
 
-        def get_kernel_info_subtree(root_uid, tree_uid2node):
-            node = tree_uid2node.get(root_uid)
-            gpu_event_uids = node["gpu_events"]
-            gpu_events = [tree_uid2node.get(uid) for uid in gpu_event_uids]
-            kernel_names = [gpu_event["name"] for gpu_event in gpu_events]
-            kernel_time = GPUEventAnalyser(gpu_events).compute_metrics()["busy_time"]
-            return kernel_names, kernel_time
-
         def get_callstack(gpu_event, uid2node):
             """Walk from gpu_event up to root, collecting op names root-first."""
             stack = []
@@ -1381,6 +1298,84 @@ class TraceDiff:
                 if cn and self.is_gpu_path(cn):
                     names.append(self._get_op_name(cuid, tree_num) or "")
             return "; ".join(names)
+
+        def _compute_lca_busy_time(gpu_event_uids, uid2node):
+            gpu_events = [
+                uid2node.get(uid)
+                for uid in gpu_event_uids
+                if uid2node.get(uid) is not None
+            ]
+            if not gpu_events:
+                return 0.0
+            return GPUEventAnalyser(gpu_events).compute_metrics()["busy_time"]
+
+        def _collect_gpu_rows(
+            gpu_event_uids, tree_obj, uid2node, tree_num, source,
+            lca_name, lca_id, lca_busy_time,
+            lca_children_t1, lca_children_t2, root_index,
+        ):
+            """Build row dicts for each GPU event. Used by combined, trace1, and trace2 branches."""
+            result = []
+            for gpu_uid in gpu_event_uids:
+                gpu_event = uid2node.get(gpu_uid)
+                if gpu_event is None:
+                    continue
+                parent_uid = gpu_event.get("parent")
+                parent_node = uid2node.get(parent_uid)
+                while parent_node is not None:
+                    if tree_obj.event_to_category(parent_node) == "cpu_op":
+                        break
+                    parent_uid = parent_node.get("parent")
+                    parent_node = uid2node.get(parent_uid)
+                if parent_node is None:
+                    continue
+                row = {
+                    "name": gpu_event["name"],
+                    "cpu_op_name": self._get_op_name(parent_uid, tree_num),
+                    "cpu_op_uid": parent_uid,
+                    "source": source,
+                    "Input Dims": _get_node_arg(parent_node, "Input Dims"),
+                    "Input Strides": _get_node_arg(parent_node, "Input Strides"),
+                    "Input type": _get_node_arg(parent_node, "Input type"),
+                    "Concrete Inputs": _get_node_arg(parent_node, "Concrete Inputs"),
+                    "kernel_time": gpu_event.get("dur", 0),
+                    "busy_time": lca_busy_time,
+                    "lowest_common_ancestor_name": lca_name,
+                    "lowest_common_ancestor_id": lca_id,
+                    "gpu_op_uid": gpu_uid,
+                    "nn_module_stack": ";".join(
+                        str(x) for x in parent_node.get("nn_module_stack", [])
+                    ),
+                    "nn_module_parent": (
+                        parent_node.get("nn_module_stack") or [""]
+                    )[-1],
+                }
+                if _TRACELENS_DEBUG:
+                    row["lca_children_t1"] = lca_children_t1
+                    row["lca_children_t2"] = lca_children_t2
+                    row["root_index"] = root_index
+                    row["callstack"] = get_callstack(gpu_event, uid2node)
+                result.append(row)
+            return result
+
+        def _resolve_lca_from_parent(combined_parent_node, uid_key, tree_num):
+            """Resolve LCA info from a combined parent node for trace-only branches."""
+            if combined_parent_node is not None:
+                lca_id = combined_parent_node.get("merged_id")
+                lca = merged_id_to_event[lca_id]
+                lca_name = re.sub(r"\(\d+\)", "", self._get_op_name(lca[uid_key], tree_num))
+                lca_children_t1 = get_gpu_path_child_names(
+                    lca["uid1"], baseline_uid2node, 1
+                )
+                lca_children_t2 = get_gpu_path_child_names(
+                    lca["uid2"], variant_uid2node, 2
+                )
+            else:
+                lca_name = None
+                lca_id = None
+                lca_children_t1 = ""
+                lca_children_t2 = ""
+            return lca_name, lca_id, lca_children_t1, lca_children_t2
 
         rows = []
         visited_stats_nodes = set()
@@ -1448,18 +1443,6 @@ class TraceDiff:
                         if self.is_kernel(event2):
                             gpu_event_uids2.append(event2["UID"])
 
-                        def _compute_lca_busy_time(gpu_event_uids, uid2node):
-                            gpu_events = [
-                                uid2node.get(uid)
-                                for uid in gpu_event_uids
-                                if uid2node.get(uid) is not None
-                            ]
-                            if not gpu_events:
-                                return 0.0
-                            return GPUEventAnalyser(gpu_events).compute_metrics()[
-                                "busy_time"
-                            ]
-
                         busy_time1 = _compute_lca_busy_time(
                             gpu_event_uids1, baseline_uid2node
                         )
@@ -1474,106 +1457,16 @@ class TraceDiff:
                             node["uid2"], variant_uid2node, 2
                         )
 
-                        def add_rows(
-                            gpu_event_uids,
-                            tree_obj,
-                            uid2node,
-                            source,
-                            lca_busy_time,
-                            lca_children_t1,
-                            lca_children_t2,
-                        ):
-                            tree_num = 1 if source == "trace1" else 2
-                            for gpu_uid in gpu_event_uids:
-                                gpu_event = uid2node.get(gpu_uid)
-                                if gpu_event is None:
-                                    continue
-                                parent_uid = gpu_event.get("parent")
-                                parent_node = uid2node.get(parent_uid)
-                                while parent_node is not None:
-                                    if (
-                                        tree_obj.event_to_category(parent_node)
-                                        == "cpu_op"
-                                    ):
-                                        break
-                                    parent_uid = parent_node.get("parent")
-                                    parent_node = uid2node.get(parent_uid)
-
-                                if parent_node is None:
-                                    continue
-
-                                rows.append(
-                                    {
-                                        "name": gpu_event["name"],
-                                        "cpu_op_name": self._get_op_name(
-                                            parent_uid, tree_num
-                                        ),
-                                        "cpu_op_uid": parent_uid,
-                                        "source": source,
-                                        "Input Dims": get_input_shape(parent_node),
-                                        "Input Strides": get_input_strides(parent_node),
-                                        "Input type": get_input_type(parent_node),
-                                        "Concrete Inputs": get_concrete_inputs(
-                                            parent_node
-                                        ),
-                                        "kernel_time": gpu_event.get("dur", 0),
-                                        "busy_time": lca_busy_time,
-                                        "lowest_common_ancestor_name": lca_name,
-                                        "lowest_common_ancestor_id": node["merged_id"],
-                                        **(
-                                            {
-                                                "lca_children_t1": lca_children_t1,
-                                                "lca_children_t2": lca_children_t2,
-                                            }
-                                            if _TRACELENS_DEBUG
-                                            else {}
-                                        ),
-                                        **(
-                                            {"root_index": root_index}
-                                            if _TRACELENS_DEBUG
-                                            else {}
-                                        ),
-                                        "gpu_op_uid": gpu_uid,
-                                        "nn_module_stack": ";".join(
-                                            str(x)
-                                            for x in parent_node.get(
-                                                "nn_module_stack", []
-                                            )
-                                        ),
-                                        "nn_module_parent": (
-                                            parent_node.get("nn_module_stack") or [""]
-                                        )[-1],
-                                        **(
-                                            {
-                                                "callstack": get_callstack(
-                                                    gpu_event, uid2node
-                                                ),
-                                            }
-                                            if _TRACELENS_DEBUG
-                                            else {}
-                                        ),
-                                    }
-                                )
-
-                        add_rows(
-                            gpu_event_uids1,
-                            self.baseline,
-                            baseline_uid2node,
-                            "trace1",
-                            busy_time1,
-                            lca_children_t1,
-                            lca_children_t2,
-                        )
-
-                        add_rows(
-                            gpu_event_uids2,
-                            self.variant,
-                            variant_uid2node,
-                            "trace2",
-                            busy_time2,
-                            lca_children_t1,
-                            lca_children_t2,
-                        )
+                        rows.extend(_collect_gpu_rows(
+                            gpu_event_uids1, self.baseline, baseline_uid2node,
+                            1, "trace1", lca_name, node["merged_id"],
+                            busy_time1, lca_children_t1, lca_children_t2, root_index,
+                        ))
+                        rows.extend(_collect_gpu_rows(
+                            gpu_event_uids2, self.variant, variant_uid2node,
+                            2, "trace2", lca_name, node["merged_id"],
+                            busy_time2, lca_children_t1, lca_children_t2, root_index,
+                        ))
 
                         visited_stats_nodes.add(merged_id)
                         visited_stats_nodes.update(
@@ -1587,207 +1480,29 @@ class TraceDiff:
             elif mt == "trace1":
                 event1 = baseline_uid2node.get(node["uid1"])
                 if event1 and self.is_gpu_path(event1):
-                    # This branch should only be executed if root is not combined and is on GPU path
-                    if combined_parent_node is not None:
-                        lca_id = combined_parent_node.get("merged_id")
-                        lca = merged_id_to_event[lca_id]
-                        lca_name = self._get_op_name(lca["uid1"], 1)
-                        lca_name = re.sub(r"\(\d+\)", "", lca_name)
-                        lca_children_t1 = get_gpu_path_child_names(
-                            lca["uid1"], baseline_uid2node, 1
-                        )
-                        lca_children_t2 = get_gpu_path_child_names(
-                            lca["uid2"], variant_uid2node, 2
-                        )
-                    else:
-                        lca_name = None  # Root node has no LCA
-                        lca_id = None
-                        lca_children_t1 = ""
-                        lca_children_t2 = ""
-
-                    # Get all GPU kernels from trace1's branch
+                    lca_name, lca_id, lca_children_t1, lca_children_t2 = \
+                        _resolve_lca_from_parent(combined_parent_node, "uid1", 1)
                     gpu_event_uids = event1.get("gpu_events", [])
-                    gpu_events_for_busy = [
-                        baseline_uid2node.get(uid)
-                        for uid in gpu_event_uids
-                        if baseline_uid2node.get(uid) is not None
-                    ]
-                    lca_busy = (
-                        GPUEventAnalyser(gpu_events_for_busy).compute_metrics()[
-                            "busy_time"
-                        ]
-                        if gpu_events_for_busy
-                        else 0.0
-                    )
-                    for gpu_uid in gpu_event_uids:
-                        gpu_event = baseline_uid2node.get(gpu_uid)
-
-                        # Find parent CPU operation for this GPU event
-                        parent_uid = gpu_event.get("parent")
-                        parent_node = baseline_uid2node.get(parent_uid)
-
-                        # Traverse up to find the first CPU op
-                        while parent_node is not None:
-                            if self.baseline.event_to_category(parent_node) == "cpu_op":
-                                break
-                            parent_uid = parent_node.get("parent")
-                            parent_node = baseline_uid2node.get(parent_uid)
-
-                        if parent_node is None:
-                            continue
-
-                        child_name = self._get_op_name(parent_uid, 1)
-
-                        rows.append(
-                            {
-                                "name": gpu_event["name"],
-                                "cpu_op_name": child_name,
-                                "cpu_op_uid": parent_uid,
-                                "source": "trace1",
-                                "Input Dims": get_input_shape(parent_node),
-                                "Input Strides": get_input_strides(parent_node),
-                                "Input type": get_input_type(parent_node),
-                                "Concrete Inputs": get_concrete_inputs(parent_node),
-                                "kernel_time": gpu_event.get("dur", 0),
-                                "busy_time": lca_busy,
-                                "lowest_common_ancestor_name": lca_name,
-                                "lowest_common_ancestor_id": lca_id,
-                                **(
-                                    {
-                                        "lca_children_t1": lca_children_t1,
-                                        "lca_children_t2": lca_children_t2,
-                                    }
-                                    if _TRACELENS_DEBUG
-                                    else {}
-                                ),
-                                **(
-                                    {"root_index": root_index}
-                                    if _TRACELENS_DEBUG
-                                    else {}
-                                ),
-                                "gpu_op_uid": gpu_uid,
-                                "nn_module_stack": ";".join(
-                                    str(x)
-                                    for x in parent_node.get("nn_module_stack", [])
-                                ),
-                                "nn_module_parent": (
-                                    parent_node.get("nn_module_stack") or [""]
-                                )[-1],
-                                **(
-                                    {
-                                        "callstack": get_callstack(
-                                            gpu_event, baseline_uid2node
-                                        ),
-                                    }
-                                    if _TRACELENS_DEBUG
-                                    else {}
-                                ),
-                            }
-                        )
-
+                    lca_busy = _compute_lca_busy_time(gpu_event_uids, baseline_uid2node)
+                    rows.extend(_collect_gpu_rows(
+                        gpu_event_uids, self.baseline, baseline_uid2node,
+                        1, "trace1", lca_name, lca_id,
+                        lca_busy, lca_children_t1, lca_children_t2, root_index,
+                    ))
                 visited_stats_nodes.add(merged_id)
                 return
             elif mt == "trace2":
                 event2 = variant_uid2node.get(node["uid2"])
                 if event2 and self.is_gpu_path(event2):
-                    # This branch should only be executed if root is not combined and is on GPU path
-                    if combined_parent_node is not None:
-                        lca_id = combined_parent_node.get("merged_id")
-                        lca = merged_id_to_event[lca_id]
-                        lca_name = self._get_op_name(lca["uid2"], 2)
-                        lca_name = re.sub(r"\(\d+\)", "", lca_name)
-                        lca_children_t1 = get_gpu_path_child_names(
-                            lca["uid1"], baseline_uid2node, 1
-                        )
-                        lca_children_t2 = get_gpu_path_child_names(
-                            lca["uid2"], variant_uid2node, 2
-                        )
-                    else:
-                        lca_name = None  # Root node has no LCA
-                        lca_id = None
-                        lca_children_t1 = ""
-                        lca_children_t2 = ""
-
-                    # Get all GPU kernels from trace2's branch
+                    lca_name, lca_id, lca_children_t1, lca_children_t2 = \
+                        _resolve_lca_from_parent(combined_parent_node, "uid2", 2)
                     gpu_event_uids = event2.get("gpu_events", [])
-                    gpu_events_for_busy = [
-                        variant_uid2node.get(uid)
-                        for uid in gpu_event_uids
-                        if variant_uid2node.get(uid) is not None
-                    ]
-                    lca_busy = (
-                        GPUEventAnalyser(gpu_events_for_busy).compute_metrics()[
-                            "busy_time"
-                        ]
-                        if gpu_events_for_busy
-                        else 0.0
-                    )
-                    for gpu_uid in gpu_event_uids:
-                        gpu_event = variant_uid2node.get(gpu_uid)
-
-                        # Find parent CPU operation for this GPU event
-                        parent_uid = gpu_event.get("parent")
-                        parent_node = variant_uid2node.get(parent_uid)
-
-                        # Traverse up to find the first CPU op
-                        while parent_node is not None:
-                            if self.variant.event_to_category(parent_node) == "cpu_op":
-                                break
-                            parent_uid = parent_node.get("parent")
-                            parent_node = variant_uid2node.get(parent_uid)
-
-                        if parent_node is None:
-                            continue
-
-                        child_name = self._get_op_name(parent_uid, 2)
-
-                        rows.append(
-                            {
-                                "name": gpu_event["name"],
-                                "cpu_op_name": child_name,
-                                "cpu_op_uid": parent_uid,
-                                "source": "trace2",
-                                "Input Dims": get_input_shape(parent_node),
-                                "Input Strides": get_input_strides(parent_node),
-                                "Input type": get_input_type(parent_node),
-                                "Concrete Inputs": get_concrete_inputs(parent_node),
-                                "kernel_time": gpu_event.get("dur", 0),
-                                "busy_time": lca_busy,
-                                "lowest_common_ancestor_name": lca_name,
-                                "lowest_common_ancestor_id": lca_id,
-                                **(
-                                    {
-                                        "lca_children_t1": lca_children_t1,
-                                        "lca_children_t2": lca_children_t2,
-                                    }
-                                    if _TRACELENS_DEBUG
-                                    else {}
-                                ),
-                                **(
-                                    {"root_index": root_index}
-                                    if _TRACELENS_DEBUG
-                                    else {}
-                                ),
-                                "gpu_op_uid": gpu_uid,
-                                "nn_module_stack": ";".join(
-                                    str(x)
-                                    for x in parent_node.get("nn_module_stack", [])
-                                ),
-                                "nn_module_parent": (
-                                    parent_node.get("nn_module_stack") or [""]
-                                )[-1],
-                                **(
-                                    {
-                                        "callstack": get_callstack(
-                                            gpu_event, variant_uid2node
-                                        ),
-                                    }
-                                    if _TRACELENS_DEBUG
-                                    else {}
-                                ),
-                            }
-                        )
-
+                    lca_busy = _compute_lca_busy_time(gpu_event_uids, variant_uid2node)
+                    rows.extend(_collect_gpu_rows(
+                        gpu_event_uids, self.variant, variant_uid2node,
+                        2, "trace2", lca_name, lca_id,
+                        lca_busy, lca_children_t1, lca_children_t2, root_index,
+                    ))
                 visited_stats_nodes.add(merged_id)
                 return
 
