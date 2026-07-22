@@ -658,9 +658,9 @@ Interpreting performance numbers: understanding what "good" performance looks li
 
 | GPU | Peak compute (BF16) | Peak memory BW | Example utilization |
 |-----|---------------------|----------------|---------------------|
-| AMD Instinct MI325X | ~1.3 PFLOPS | ~6 TB/s | 500-800 TFLOPS/s = 38-62% of peak (typical for medium GEMMs) |
+| AMD Instinct™ MI325X | ~1.3 PFLOPS | ~6 TB/s | 500-800 TFLOPS/s = 38-62% of peak (typical for medium GEMMs) |
 | H100 | ~1.0 PFLOPS | ~3.35 TB/s | 400-700 TFLOPS/s = 40-70% of peak |
-| AMD Instinct MI300X | ~1.3 PFLOPS | ~5.3 TB/s | Similar to AMD Instinct MI325X |
+| AMD Instinct™ MI300X | ~1.3 PFLOPS | ~5.3 TB/s | Similar to AMD Instinct™ MI325X |
 
 Understanding theoretical vs. real-world performance: TraceLens uses idealized assumptions that represent upper bounds on performance. The actual roofline model has two key differences from the theoretical one:
 
