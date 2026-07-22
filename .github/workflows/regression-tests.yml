@@ -57,7 +57,7 @@ jobs:
       - name: Run tracediff regression tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_tracediff_regression.py
+          pytest tests/test_tracediff_regression.py tests/test_tracediff.py
 
       - name: Run pytest on inference perf report tests
         run: |
