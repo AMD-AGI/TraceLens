@@ -50,7 +50,7 @@ peak FLOPS and peak bandwidth for that target GPU (for example,
 
 ## Software requirements
 
-TraceLens requires the following software.
+TraceLens requires the following software:
 
 | Component | Requirement | Notes |
 |-----------|-------------|-------|
@@ -84,7 +84,7 @@ TraceLens supports the following trace formats.
 |--------|----------------|
 | PyTorch Chrome trace (`.json`, `.json.gz`, `.zip`) | `torch.profiler` |
 | JAX XPlane protobuf (`.pb`) | JAX profiler / `xprof` | 
-| rocprofv3 JSON (`*_results.json`) | AMD ROCm rocprofiler-sdk | 
+| rocprofv3 JSON (`*_results.json`) | AMD ROCm ROCprofiler-SDK | 
 | rocprofv3 pftrace / Perfetto-style | `rocprofv3 --output-format pftrace` | 
 
 

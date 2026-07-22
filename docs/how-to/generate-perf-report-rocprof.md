@@ -7,11 +7,11 @@ See LICENSE for license information.
 
 # Generate a rocprof performance report
 ```{meta}
-:description: Learn how to build a performance report from AMD ROCm rocprofiler-sdk traces (rocprofv3 JSON and Perfetto pftrace) using TraceLens.
-:keywords: TraceLens, rocprofv3, rocprofiler-sdk, ROCm, pftrace, Perfetto, GPU trace, kernel summary, performance report, AMD Instinct, HIP
+:description: Learn how to build a performance report from AMD ROCm ROCprofiler-SDK traces (rocprofv3 JSON and Perfetto pftrace) using TraceLens.
+:keywords: TraceLens, rocprofv3, ROCprofiler-SDK, ROCm, pftrace, Perfetto, GPU trace, kernel summary, performance report, AMD Instinct, HIP
 ```
 
-Build a performance report from AMD ROCm rocprofiler-sdk traces. TraceLens
+Build a performance report from AMD ROCm ROCprofiler-SDK traces. TraceLens
 supports both `rocprofv3` JSON results and Perfetto-style `.pftrace` files.
 
 ## Before you begin
@@ -22,7 +22,7 @@ supports both `rocprofv3` JSON results and Perfetto-style `.pftrace` files.
 ## rocprofv3 JSON
 
 Generate a report from a rocprofv3 `*_results.json` trace captured with the AMD
-ROCm rocprofiler-sdk:
+ROCm ROCprofiler-SDK:
 
 ```bash
 TraceLens_generate_perf_report_rocprof \
@@ -61,7 +61,7 @@ compare as follows:
 
 | Feature | rocprofv3 | PyTorch profiler |
 |---------|-----------|------------------|
-| Format | rocprofiler-sdk JSON | Chrome Trace Event |
+| Format | ROCprofiler-SDK JSON | Chrome Trace Event |
 | Kernel names | Direct from ROCm | Via PyTorch ops |
 | Grid/block dims | Available | Available |
 | CPU operations | Limited | Full trace |
