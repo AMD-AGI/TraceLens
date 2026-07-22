@@ -29,22 +29,20 @@ _TraceKeys = TraceLens.util.TraceEventUtils.TraceKeys
 _UID = _TraceKeys.UID
 _NAME = _TraceKeys.Name
 _CATEGORY = _TraceKeys.Category
+_TS = _TraceKeys.TimeStamp
+_DUR = _TraceKeys.Duration
 
 
 def _sort_by_ts(nodes):
     """Sort nodes by timestamp, return their UIDs."""
-    return [n[_UID] for n in sorted(nodes, key=lambda n: n.get("ts", 0))]
+    return [n[_UID] for n in sorted(nodes, key=lambda n: n.get(_TS, 0))]
 
 
 def _get_name_node(node, strip_details=False):
     """Get the normalized comparison name directly from a node dict."""
     if node is None:
         return None
-    name = (
-        node.get("name")
-        or node.get("Name")
-        or node.get(_NAME)
-    )
+    name = node.get(_NAME)
     return _normalize_name_for_comparison(name, strip_details) if name else None
 
 
@@ -313,7 +311,7 @@ class TraceDiff:
         return not node.get("non_gpu_path", False)
 
     def is_kernel(self, node):
-        cat = node.get("cat") or node.get("category")
+        cat = node.get(_CATEGORY)
         if cat is None:
             try:
                 cat = node.get(_CATEGORY)
@@ -346,14 +344,7 @@ class TraceDiff:
         if node is None:
             return None
 
-        # Try to get name from various possible keys
-        name = node.get("name") if "name" in node else node.get("Name")
-        if name is None:
-            try:
-                name = node.get(_NAME)
-            except Exception:
-                pass
-
+        name = node.get(_NAME)
         return name if name else str(uid)
 
     def get_diff_stats_df(self):
@@ -405,10 +396,10 @@ class TraceDiff:
                     children = current.get("children", [])
                     if len(children) == 1:
                         child = tree.get_UID2event(children[0])
-                        child_cat = child.get("cat") or child.get("category")
+                        child_cat = child.get(_CATEGORY)
                         if (
                             child_cat in ("cpu_op", "cuda_runtime", "cuda_driver")
-                            and child.get("name") not in _GRAPH_LAUNCH_NAMES
+                            and child.get(_NAME) not in _GRAPH_LAUNCH_NAMES
                         ):
                             break
                         current = child
@@ -534,9 +525,9 @@ class TraceDiff:
             """Return True if this node is a cuda_runtime node. Graph launch events are exempt."""
             if not node or not isinstance(node, dict):
                 return False
-            if node.get("name") in _GRAPH_LAUNCH_NAMES:
+            if node.get(_NAME) in _GRAPH_LAUNCH_NAMES:
                 return False
-            cat = node.get("cat") or node.get("category")
+            cat = node.get(_CATEGORY)
             return cat in ("cuda_runtime", "cuda_driver")
 
         def get_children_with_missing(uid1, uid2):
@@ -576,7 +567,7 @@ class TraceDiff:
                 node = uid2node.get(current)
                 if not node or (
                     tree_obj.event_to_category(node) in ("cuda_runtime", "cuda_driver")
-                    and node.get("name") not in _GRAPH_LAUNCH_NAMES
+                    and node.get(_NAME) not in _GRAPH_LAUNCH_NAMES
                 ):
                     break
                 child_nodes = tree_obj.get_children_events(node)
@@ -584,7 +575,7 @@ class TraceDiff:
                 if cat == "cpu_op":
                     has_cr_child = any(
                         tree_obj.event_to_category(c) in ("cuda_runtime", "cuda_driver")
-                        and c.get("name") not in _GRAPH_LAUNCH_NAMES
+                        and c.get(_NAME) not in _GRAPH_LAUNCH_NAMES
                         for c in child_nodes
                     )
                     if has_cr_child:
@@ -627,21 +618,21 @@ class TraceDiff:
                     node_d = baseline_uid2node.get(uid_d)
                     node_i = variant_uid2node.get(uid_i)
                     cat_d = (
-                        (node_d.get("cat") or node_d.get("category"))
+                        node_d.get(_CATEGORY)
                         if node_d
                         else None
                     )
                     cat_i = (
-                        (node_i.get("cat") or node_i.get("category"))
+                        node_i.get(_CATEGORY)
                         if node_i
                         else None
                     )
                     if (
                         cat_d in skip_cats
-                        and node_d.get("name") not in _GRAPH_LAUNCH_NAMES
+                        and node_d.get(_NAME) not in _GRAPH_LAUNCH_NAMES
                     ) or (
                         cat_i in skip_cats
-                        and node_i.get("name") not in _GRAPH_LAUNCH_NAMES
+                        and node_i.get(_NAME) not in _GRAPH_LAUNCH_NAMES
                     ):
                         continue
                     name_d = _get_name_node(node_d)
@@ -1111,7 +1102,7 @@ class TraceDiff:
                 if parent_node is None:
                     continue
                 row = {
-                    "name": gpu_event["name"],
+                    "name": gpu_event[_NAME],
                     "cpu_op_name": self._get_op_name(parent_uid, tree_num),
                     "cpu_op_uid": parent_uid,
                     "source": source,
@@ -1119,7 +1110,7 @@ class TraceDiff:
                     "Input Strides": _get_node_arg(parent_node, "Input Strides"),
                     "Input type": _get_node_arg(parent_node, "Input type"),
                     "Concrete Inputs": _get_node_arg(parent_node, "Concrete Inputs"),
-                    "kernel_time": gpu_event.get("dur", 0),
+                    "kernel_time": gpu_event.get(_DUR, 0),
                     "busy_time": lca_busy_time,
                     "lowest_common_ancestor_name": lca_name,
                     "lowest_common_ancestor_id": lca_id,
@@ -1211,18 +1202,18 @@ class TraceDiff:
                             child_node = baseline_uid2node.get(child.get("uid1"))
                             gpu_event_uids1.extend(child_node.get("gpu_events", []))
                             if self.is_kernel(child_node):
-                                gpu_event_uids1.append(child_node["UID"])
+                                gpu_event_uids1.append(child_node[_UID])
                         if self.is_kernel(event1):
-                            gpu_event_uids1.append(event1["UID"])
+                            gpu_event_uids1.append(event1[_UID])
 
                         gpu_event_uids2 = []
                         for child in non_combined_children_trace2_gpu_paths:
                             child_node = variant_uid2node.get(child.get("uid2"))
                             gpu_event_uids2.extend(child_node.get("gpu_events", []))
                             if self.is_kernel(child_node):
-                                gpu_event_uids2.append(child_node["UID"])
+                                gpu_event_uids2.append(child_node[_UID])
                         if self.is_kernel(event2):
-                            gpu_event_uids2.append(event2["UID"])
+                            gpu_event_uids2.append(event2[_UID])
 
                         busy_time1 = _compute_lca_busy_time(
                             gpu_event_uids1, baseline_uid2node
