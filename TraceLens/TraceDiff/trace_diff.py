@@ -90,20 +90,14 @@ def _normalize_name_for_comparison(name, strip_details=False):
     return _KERNEL_LAUNCH_EQUIVALENTS.get(normalized, normalized)
 
 
-def _gpu_path_child_names_at_bfs_levels(
-    uid, uid2node, tree_num, max_depth, normalize_fn, get_name_fn
-):
+def _gpu_path_child_names_at_bfs_levels(uid, uid2node, max_depth):
     """
-    Return a list of frozensets, one per BFS level (1..max_depth), each containing
-    the multiset (as a sorted tuple) of normalized GPU-path child names at that depth
+    Return a list of tuples, one per BFS level (1..max_depth), each containing
+    the sorted multiset of normalized GPU-path child names at that depth
     relative to `uid`.
 
     A node is on the GPU path when it does not have non_gpu_path=True.
     """
-
-    def is_gpu_path(node):
-        return node is not None and not node.get("non_gpu_path", False)
-
     levels = []
     current_frontier = [uid]
     for _ in range(max_depth):
@@ -115,12 +109,9 @@ def _gpu_path_child_names_at_bfs_levels(
                 continue
             for child_uid in node.get("children", []):
                 child_node = uid2node.get(child_uid)
-                if child_node and is_gpu_path(child_node):
+                if child_node and not child_node.get("non_gpu_path", False):
                     next_frontier.append(child_uid)
-                    raw_name = get_name_fn(child_uid, tree_num)
-                    names_this_level.append(
-                        normalize_fn(raw_name) if raw_name else None
-                    )
+                    names_this_level.append(_get_name_node(child_node))
         levels.append(tuple(sorted(names_this_level)))
         current_frontier = next_frontier
         if not current_frontier:
@@ -150,25 +141,6 @@ def _disambiguate_same_name_candidates(
 
     Does not mutate children1/children2.  Returns a new ops list.
     """
-    normalize = _normalize_name_for_comparison
-
-    def get_name(uid, tree_num):
-        uid2node = baseline_uid2node if tree_num == 1 else variant_uid2node
-        node = uid2node.get(uid)
-        if not node:
-            return None
-        name = node.get("name") or node.get("Name")
-        return name
-
-    def normalized_name(uid, tree_num):
-        raw = get_name(uid, tree_num)
-        return normalize(raw) if raw else None
-
-    def bfs_levels(uid, uid2node, tree_num):
-        return _gpu_path_child_names_at_bfs_levels(
-            uid, uid2node, tree_num, max_depth, normalize, get_name
-        )
-
     def match_depth(levels_a, levels_b):
         """(full_levels_matched, partial_overlap_at_first_divergence).
 
@@ -196,17 +168,17 @@ def _disambiguate_same_name_candidates(
 
     for op, i, j in ops:
         if op == "match":
-            n = normalized_name(children1[i], 1)
+            n = _get_name_node(baseline_uid2node.get(children1[i]))
             all1_by_name.setdefault(n, []).append(i)
             matched_names.add(n)
-            n = normalized_name(children2[j], 2)
+            n = _get_name_node(variant_uid2node.get(children2[j]))
             all2_by_name.setdefault(n, []).append(j)
             matched_names.add(n)
         elif op == "delete":
-            n = normalized_name(children1[i], 1)
+            n = _get_name_node(baseline_uid2node.get(children1[i]))
             all1_by_name.setdefault(n, []).append(i)
         elif op == "insert":
-            n = normalized_name(children2[j], 2)
+            n = _get_name_node(variant_uid2node.get(children2[j]))
             all2_by_name.setdefault(n, []).append(j)
 
     # Only disambiguate names that: appear on both sides, have >1 on at least
@@ -238,8 +210,8 @@ def _disambiguate_same_name_candidates(
         n_to_match = min(len(indices1), len(indices2))
 
         # Precompute BFS levels for all nodes in this group
-        levels1 = {i: bfs_levels(children1[i], baseline_uid2node, 1) for i in indices1}
-        levels2 = {j: bfs_levels(children2[j], variant_uid2node, 2) for j in indices2}
+        levels1 = {i: _gpu_path_child_names_at_bfs_levels(children1[i], baseline_uid2node, max_depth) for i in indices1}
+        levels2 = {j: _gpu_path_child_names_at_bfs_levels(children2[j], variant_uid2node, max_depth) for j in indices2}
 
         # Score every (i, j) pair; tiebreak: prefer existing WF match, then positional
         scored_pairs = sorted(
@@ -1124,122 +1096,6 @@ class TraceDiff:
         merged_id_to_event = self._get_merged_id_to_event()
         baseline_uid2node = self._get_baseline_uid2node()
         variant_uid2node = self._get_variant_uid2node()
-
-        def find_last_cpu_op_on_gpu_path(
-            merged_child, tree_obj, tree_uid2node, uid_key, all_kernels=None
-        ):
-            """
-            Traverse down from a merged child node to find the lowest (deepest) CPU operation
-            that contains ALL the kernels in the branch.
-
-            Args:
-                merged_child: The merged tree child node to start from
-                tree_obj: The tree object (baseline or variant) to use for event_to_category
-                tree_uid2node: The uid2node dictionary (baseline_uid2node or variant_uid2node)
-                uid_key: Either "uid1" or "uid2" depending on which trace we're looking at
-                all_kernels: Set of all kernel UIDs that should be present (computed on first call)
-
-            Returns:
-                The UID of the lowest CPU operation that contains all kernels, or None if not found
-            """
-            uid = merged_child.get(uid_key)
-            if uid is None:
-                return None
-
-            # Check current node
-            node = tree_uid2node.get(uid)
-            if node is None:
-                return None
-
-            # If not on GPU path, return None
-            if not self.is_gpu_path(node):
-                return None
-
-            # On first call, get all kernels from this starting node
-            if all_kernels is None:
-                all_kernels = set(node.get("gpu_events", []))
-                if not all_kernels:
-                    return None  # No kernels to find
-
-            # Get kernels in current node's subtree
-            current_kernels = set(node.get("gpu_events", []))
-
-            # If this node doesn't contain all kernels, it can't be the answer
-            if not all_kernels.issubset(current_kernels):
-                return None
-
-            is_cpu_op = tree_obj.event_to_category(node) == "cpu_op"
-
-            # Try to find a deeper CPU op that also contains all kernels
-            for child_merged_id in merged_child.get("children", []):
-                child_merged = merged_id_to_event.get(child_merged_id)
-                if child_merged is None:
-                    continue
-
-                # Recursively search this child
-                result = find_last_cpu_op_on_gpu_path(
-                    child_merged, tree_obj, tree_uid2node, uid_key, all_kernels
-                )
-                if result is not None:
-                    return result  # Return the deeper CPU op that contains all kernels
-
-            # If this node is a CPU op and contains all kernels, and no children do, return this one
-            if is_cpu_op and all_kernels.issubset(current_kernels):
-                return uid
-
-            return None
-
-        def find_all_last_cpu_ops_on_gpu_path(
-            merged_node, tree_obj, tree_uid2node, uid_key
-        ):
-            """
-            Traverse down from a merged node to find ALL lowest (deepest) CPU operations
-            that are on GPU paths - the CPU ops closest to actual kernel execution.
-
-            Args:
-                merged_node: The merged tree node to start from
-                tree_obj: The tree object (baseline or variant) to use for event_to_category
-                tree_uid2node: The uid2node dictionary (baseline_uid2node or variant_uid2node)
-                uid_key: Either "uid1" or "uid2" depending on which trace we're looking at
-
-            Returns:
-                List of UIDs of lowest CPU operations on GPU paths (closest to kernels)
-            """
-            uid = merged_node.get(uid_key)
-            if uid is None:
-                return []
-
-            # Check current node
-            node = tree_uid2node.get(uid)
-            if node is None:
-                return []
-
-            # If not on GPU path, return empty
-            if not self.is_gpu_path(node):
-                return []
-
-            is_cpu_op = tree_obj.event_to_category(node) == "cpu_op"
-
-            # Traverse all children and collect CPU ops from each branch
-            cpu_ops = []
-            for child_merged_id in merged_node.get("children", []):
-                child_merged = merged_id_to_event.get(child_merged_id)
-                if child_merged is None:
-                    continue
-
-                # Recursively search this child and collect results
-                child_cpu_ops = find_all_last_cpu_ops_on_gpu_path(
-                    child_merged, tree_obj, tree_uid2node, uid_key
-                )
-                cpu_ops.extend(child_cpu_ops)
-
-            # If this node is a CPU op and no children returned CPU ops, return this one
-            # (it's the lowest/deepest CPU op on this path)
-            if is_cpu_op and not cpu_ops:
-                return [uid]
-
-            # Otherwise return whatever children found (they're deeper)
-            return cpu_ops
 
         def get_callstack(gpu_event, uid2node):
             """Walk from gpu_event up to root, collecting op names root-first."""
