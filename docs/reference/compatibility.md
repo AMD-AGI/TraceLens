@@ -78,7 +78,7 @@ These are installed automatically with the package:
 
 ## Supported trace formats
 
-TraceLens supports the following trace formats.
+TraceLens supports the following trace formats:
 
 | Format | Producing tool |
 |--------|----------------|
