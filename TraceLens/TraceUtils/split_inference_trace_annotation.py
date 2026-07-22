@@ -719,8 +719,7 @@ def extract_phases_and_save(
 
         if len(prefilldecode_steps) > 0:
             iter_details = [
-                get_iter_details_from_name(r["name"])
-                for r in prefilldecode_steps
+                get_iter_details_from_name(r["name"]) for r in prefilldecode_steps
             ]
             phase_details = find_phase_from_window(iter_details)
 
@@ -754,9 +753,7 @@ def extract_phases_and_save(
                 }
             )
         if len(decode_steps) > 0:
-            iter_details = [
-                get_iter_details_from_name(r["name"]) for r in decode_steps
-            ]
+            iter_details = [get_iter_details_from_name(r["name"]) for r in decode_steps]
             phase_details = find_phase_from_window(iter_details)
             iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = (
                 extract_iteration(

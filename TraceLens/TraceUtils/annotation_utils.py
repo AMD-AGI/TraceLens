@@ -21,7 +21,9 @@ VLLM_DETAILED_PATTERN = re.compile(
 )
 VLLM_NATIVE_PATTERN = re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)")
 
-SGLANG_DETAILED_PATTERN = re.compile(r"step\[(?:EXTEND|DECODE|MIXED)\b[^\]]*sqsq=\d+[^\]]*\]")
+SGLANG_DETAILED_PATTERN = re.compile(
+    r"step\[(?:EXTEND|DECODE|MIXED)\b[^\]]*sqsq=\d+[^\]]*\]"
+)
 SGLANG_NATIVE_PATTERN = re.compile(r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]")
 
 ATOM_NATIVE_PATTERN = re.compile(r"^(prefill|decode)\[(.*)\]")
@@ -30,9 +32,17 @@ ATOM_DETAILED_PATTERN = re.compile(r"^(prefill|decode)\[.*sqsq=\d+.*\]")
 CAPTURE_PATTERN = re.compile(r"capture_(\d+)_(.*)")
 
 # Root-discovery priority: PRIMARY (detailed) patterns are tried first and
-# BACKUP (native) patterns are used only when no primary root is found. 
-ITERATION_PATTERNS = [VLLM_DETAILED_PATTERN, ATOM_DETAILED_PATTERN, SGLANG_DETAILED_PATTERN]
-ITERATION_BACKUP_PATTERNS = [VLLM_NATIVE_PATTERN, SGLANG_NATIVE_PATTERN, ATOM_NATIVE_PATTERN]
+# BACKUP (native) patterns are used only when no primary root is found.
+ITERATION_PATTERNS = [
+    VLLM_DETAILED_PATTERN,
+    ATOM_DETAILED_PATTERN,
+    SGLANG_DETAILED_PATTERN,
+]
+ITERATION_BACKUP_PATTERNS = [
+    VLLM_NATIVE_PATTERN,
+    SGLANG_NATIVE_PATTERN,
+    ATOM_NATIVE_PATTERN,
+]
 
 
 def _safe_int(v) -> int:
@@ -100,9 +110,13 @@ def _fill_sglang_detailed(ann, name):
     kv = dict(re.findall(r"(\w+)=(\d+)", body))
     bs, toks = _safe_int(kv.get("bs", 0)), _safe_int(kv.get("toks", 0))
     ann.c_sq, ann.c_sk = _safe_int(kv.get("c_sq", 0)), _safe_int(kv.get("c_sk", 0))
-    ann.c_sqsq, ann.c_sqsk = _safe_int(kv.get("c_sqsq", 0)), _safe_int(kv.get("c_sqsk", 0))
+    ann.c_sqsq, ann.c_sqsk = _safe_int(kv.get("c_sqsq", 0)), _safe_int(
+        kv.get("c_sqsk", 0)
+    )
     ann.g_sq, ann.g_sk = _safe_int(kv.get("g_sq", 0)), _safe_int(kv.get("g_sk", 0))
-    ann.g_sqsq, ann.g_sqsk = _safe_int(kv.get("g_sqsq", 0)), _safe_int(kv.get("g_sqsk", 0))
+    ann.g_sqsq, ann.g_sqsk = _safe_int(kv.get("g_sqsq", 0)), _safe_int(
+        kv.get("g_sqsk", 0)
+    )
     if mode == "DECODE":
         ann.generation_requests, ann.generation_sum = bs, ann.g_sq
         ann.meta["batch_size"] = bs
@@ -132,7 +146,11 @@ def _fill_atom(ann, name):
     kv = dict(re.findall(r"(\w+)=(\[[^\]]*\](?:\.\.\.\+\d+)?|\S+)", body))
     bs = _first_int(kv.get("bs", 0))  # real batch; ignore CUDAGraph pad
     tokens = _safe_int(kv.get("tok", 0))
-    sk, sqsq, sqsk = _safe_int(kv.get("sk", 0)), _safe_int(kv.get("sqsq", 0)), _safe_int(kv.get("sqsk", 0))
+    sk, sqsq, sqsk = (
+        _safe_int(kv.get("sk", 0)),
+        _safe_int(kv.get("sqsq", 0)),
+        _safe_int(kv.get("sqsk", 0)),
+    )
     detailed = "sqsq" in kv and "sqsk" in kv
 
     if phase == "prefill":
@@ -321,9 +339,7 @@ def annotation_str_from_event(event: dict) -> str:
     return event.get("annotation") or event.get("name", "")
 
 
-def find_annotation_roots(
-    events: List[dict], pattern: "re.Pattern"
-) -> List[dict]:
+def find_annotation_roots(events: List[dict], pattern: "re.Pattern") -> List[dict]:
     roots = [
         e
         for e in events

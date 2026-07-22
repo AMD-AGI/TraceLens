@@ -206,7 +206,9 @@ def find_blocks(iteration_roots: List[dict]) -> List[Block]:
     if not iteration_roots:
         return []
 
-    details = [IterationAnnotation(r.get("name", "")).full_details() for r in iteration_roots]
+    details = [
+        IterationAnnotation(r.get("name", "")).full_details() for r in iteration_roots
+    ]
     phases = [classify_phase(d) for d in details]
 
     blocks: List[Block] = []
