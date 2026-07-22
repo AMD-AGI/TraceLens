@@ -15,7 +15,7 @@ In GPU application performance analysis, understanding the relationship between 
 `Trace2Tree` is the underlying tree-structure component that TraceLens uses to parse trace files and build hierarchical dependency relationships, from host CPU operations down to GPU kernels.
 
 ```{note}
-It's recommended that you access this functionality through the `TreePerfAnalyzer` interface rather than using `Trace2Tree` directly.
+Access this functionality through the `TreePerfAnalyzer` interface rather than using `Trace2Tree` directly.
 ```
 
 ## Why kernel names aren't enough
@@ -24,7 +24,7 @@ Directly inspecting GPU kernel names has two fundamental limitations:
 
 * *Ambiguous semantics (and weak reproducibility)*: a single kernel name can map to many different computations depending on shape, dtype, strides or layout, and so on. Shape strongly affects performance — one shape might select a fast tiled path while another shape of the same op type falls onto a slower algorithm. Because the name omits this argument context, you can't reliably understand, compare, or reproduce the workload from the kernel string alone. Many kernel names are also cryptic and unreadable, for example `Cijk_Ailk_Bljk_*` or `void cutlass_*`.
 
-* *Platform-dependent, unstable naming (and weak cross-platform comparison)*: the same high-level operation appears under different kernel names across platforms. For example, a single GEMM shows up as `nvjet_*` or `cutlass_*` on NVIDIA H100, and as a Tensile kernel `Cijk_Ailk_Bljk_*` on AMD MI300. These names also shift across software versions, so raw kernel strings aren't a stable abstraction for comparison.
+* *Platform-dependent, unstable naming (and weak cross-platform comparison)*: the same high-level operation appears under different kernel names across platforms. For example, a single GEMM shows up as `nvjet_*` or `cutlass_*` on NVIDIA H100, and as a Tensile kernel `Cijk_Ailk_Bljk_*` on AMD Instinct™ MI300. These names also shift across software versions, so raw kernel strings aren't a stable abstraction for comparison.
 
 ## What Trace2Tree does
 

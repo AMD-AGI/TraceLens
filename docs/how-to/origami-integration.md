@@ -31,10 +31,10 @@ Install the published package (PyPI name `rocm-origami`):
 pip install rocm-origami
 ```
 
-Note that installing Origami currently (as of April 2026) requires that ROCm is
+Note that installing Origami requires that ROCm is
 installed on the system, because Origami can use the HIP library to detect the
 GPU currently installed in the system and use it as an architectural model.
-TraceLens doesn't currently use this functionality, but it currently can't be
+TraceLens doesn't currently use this functionality, but it can't be
 removed from Origami.
 
 ### System environment

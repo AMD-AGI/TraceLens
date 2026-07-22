@@ -26,7 +26,7 @@ TraceLens 0.1.0 introduces report generators for PyTorch, JAX, and rocprofv3 tra
 
 #### Report generation
 
-This release includes the following report generators.
+This release includes the following report generators:
 
 - **PyTorch profiler reports:** `TraceLens_generate_perf_report_pytorch`
   builds a multi-sheet Excel report from a `torch.profiler` Chrome trace,
@@ -45,7 +45,7 @@ This release includes the following report generators.
   reports from rocprofv3 `*_results.json` traces, with kernel summaries,
   automatic categorization (GEMM, attention, elementwise, and others),
   short-kernel analysis, and optional grid/block detail.
-- **rocprofv3 pftrace reports:** for Perfetto-style traces produced with
+- **rocprofv3 pftrace reports:** For Perfetto-style traces produced with
   `rocprofv3 --output-format pftrace`:
   - `TraceLens_generate_perf_report_pftrace_hip_activity:` per-GPU category
     summary plus kernel/HIP/XLA summaries (NSYS-style), with optional Markdown.
@@ -56,7 +56,7 @@ This release includes the following report generators.
 
 #### Analysis features
 
-This release includes the following analysis features.
+This release includes the following analysis features:
 
 - **Hierarchical GPU-timeline breakdown:** Splits GPU time into computation,
   communication, memory copy, and idle time, with optional micro-idle
@@ -74,7 +74,7 @@ This release includes the following analysis features.
 
 #### Multi-GPU and comparison
 
-This release includes the following multi-GPU and comparison tools.
+This release includes the following multi-GPU and comparison tools:
 
 - **Collective communication analysis:** `TraceLens_generate_multi_rank_collective_report_pytorch` reports time spent
   in collectives across ranks, including aggregation metrics, intra- and inter-node
@@ -88,7 +88,7 @@ This release includes the following multi-GPU and comparison tools.
 
 #### SDK modules
 
-This release ships the following Python SDK modules.
+This release ships the following Python SDK modules:
 
 - **Trace2Tree:** Build and navigate the hierarchical event tree.
 - **TreePerf:** GPU-timeline breakdown, per-op performance, and roofline

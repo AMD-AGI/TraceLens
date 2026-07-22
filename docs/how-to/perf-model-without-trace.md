@@ -10,13 +10,13 @@ See LICENSE for license information.
 :keywords: TraceLens, perf model, roofline, FLOPS, arithmetic intensity, GEMM, SDPA, analytical model, sizing study, ceiling, no trace, ROCm, MI300X
 ```
 
-In normal use, TraceLens fuses two sources per kernel: the **perf model** supplies
-analytical FLOPs and bytes from an op's shapes and dtypes, and the **trace**
+In normal use, TraceLens fuses two sources per kernel: the *perf model* supplies
+analytical FLOPs and bytes from an op's shapes and dtypes, and the *trace*
 supplies the measured wall-clock time. Dividing one by the other gives the
 achieved `TFLOPS/s` and `TB/s` in every report.
 
 The perf model is just a Python library — you can call the analytical half on its
-own, with **no trace and no kernel launch**. Hand it shapes, get back FLOPs and
+own, with *no trace and no kernel launch*. Hand it shapes, get back FLOPs and
 bytes; arithmetic intensity and roofline-bounded time follow. This is useful for
 sizing studies, end-to-end ceilings, and regression bounds before you run
 anything.
@@ -95,7 +95,7 @@ The
 notebook works a full example end to end: every linear in a Llama-3-70B decoder
 layer plotted as arithmetic intensity, SDPA forward and backward across sequence
 length, and a per-token roofline rollup (predicted ms per token for prefill and
-decode, bf16, MI300X) — all without a single trace.
+decode, bf16, AMD Instinct™ MI300X) — all without a single trace.
 
 ## Related topics
 

@@ -595,7 +595,7 @@ Each operation type (GEMM, Conv, SDPA, and so on) has its own `get_param_details
 
 Once parameters are extracted, two pieces of information are computed in parallel.
 
-Static operation metrics (via the compute model): the performance model calculates the theoretical work based on the operation type:
+Static operation metrics (through the compute model): the performance model calculates the theoretical work based on the operation type:
 
 ```python
 # GEMM compute model
@@ -658,9 +658,9 @@ Interpreting performance numbers: understanding what "good" performance looks li
 
 | GPU | Peak compute (BF16) | Peak memory BW | Example utilization |
 |-----|---------------------|----------------|---------------------|
-| MI325X | ~1.3 PFLOPS | ~6 TB/s | 500-800 TFLOPS/s = 38-62% of peak (typical for medium GEMMs) |
+| AMD Instinct™ MI325X | ~1.3 PFLOPS | ~6 TB/s | 500-800 TFLOPS/s = 38-62% of peak (typical for medium GEMMs) |
 | H100 | ~1.0 PFLOPS | ~3.35 TB/s | 400-700 TFLOPS/s = 40-70% of peak |
-| MI300X | ~1.3 PFLOPS | ~5.3 TB/s | Similar to MI325X |
+| AMD Instinct™ MI300X | ~1.3 PFLOPS | ~5.3 TB/s | Similar to AMD Instinct™ MI325X |
 
 Understanding theoretical vs. real-world performance: TraceLens uses idealized assumptions that represent upper bounds on performance. The actual roofline model has two key differences from the theoretical one:
 
@@ -797,7 +797,7 @@ Extending with custom operations: performance metrics sheets are only generated 
 
 1. Creating a performance model class for your operation (inherit from `GEMM`, `CONV`, `SDPA`, and so on).
 2. Implementing `get_param_details()`, `flops()`, and `bytes()` methods.
-3. Passing an extension file via `--extension_file` when generating the report.
+3. Passing an extension file using `--extension_file` when generating the report.
 
 See [`examples/example_megatron_extension.py`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/example_megatron_extension.py) for a complete example of extending TraceLens with custom Megatron operations.
 

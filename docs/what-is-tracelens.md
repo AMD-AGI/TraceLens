@@ -77,13 +77,13 @@ TraceLens supports the following trace formats:
 | PyTorch | `torch.profiler` | `TraceLens_generate_perf_report_pytorch` |
 | PyTorch (inference) | `torch.profiler` | `TraceLens_generate_perf_report_pytorch_inference` |
 | JAX | XPlane protobuf | `TraceLens_generate_perf_report_jax` |
-| rocprofv3 JSON | AMD ROCm rocprofiler-sdk | `TraceLens_generate_perf_report_rocprof` |
+| rocprofv3 JSON | AMD ROCm ROCprofiler-SDK | `TraceLens_generate_perf_report_rocprof` |
 | rocprofv3 pftrace (Perfetto-style) | `rocprofv3 --output-format pftrace` | `TraceLens_generate_perf_report_pftrace_hip_activity`, `..._pftrace_hip_api`, `..._pftrace_memory_copy` |
 
 ```{note}
 TraceLens analyzes trace files and does not execute GPU kernels, so report
 generation runs on any host with a supported Python version — no GPU or ROCm
-installation required. The PyTorch report is well tested on traces from both
+installation is required. The PyTorch report is well tested on traces from both
 AMD ROCm and NVIDIA CUDA workloads. GPU hardware is only needed by the
 profiling tools that *capture* the traces. Roofline bound classification
 additionally requires an architecture specification; bundled specs cover AMD

@@ -87,6 +87,8 @@ This difference in `L` directly impacts the `M` parameter of the GEMM `(M, N, K)
 
 #### GEMM shape summary
 
+The following table summarizes GEMM shapes for each inference phase.
+
 | Mode     | Input shape (conceptual) | Flattened input shape | GEMM shape `(M, N, K)` | Notes                                |
 |----------|--------------------------|-----------------------|------------------------|--------------------------------------|
 | Prefill  | `[B, L, d_model]`        | `[B·L, d_model]`      | `(B·L, d_ff, d_model)` | `L` is the prompt length             |
@@ -167,7 +169,7 @@ Each of these operations appears once per layer in the network. Given that GPT-3
 
 ## How PyTorch calls BLAS
 
-To fully grasp how PyTorch leverages BLAS for operations like GEMM, first understand the fundamental concept of *memory layout* for tensors and how BLAS libraries interpret the data buffers they receive.
+To fully understand how PyTorch uses BLAS for operations like GEMM, first understand the fundamental concept of *memory layout* for tensors and how BLAS libraries interpret the data buffers they receive.
 
 ### Memory layout and stride
 
@@ -191,7 +193,7 @@ A matrix $M$ stored in row-major memory has the exact same element ordering as t
 
 Mathematically, the operation $C = A @ B$ (where $A, B, C$ are desired in row-major) is equivalent to computing $C^T = (A @ B)^T = B^T @ A^T$. PyTorch therefore configures the BLAS call to compute $B^T @ A^T$ using the row-major data of $B$ and $A$.
 
-Here's how the `transA` and `transB` flags work in this context when passing *row-major data* to BLAS via a wrapper like PyTorch's:
+Here's how the `transA` and `transB` flags work in this context when passing *row-major data* to BLAS through a wrapper like PyTorch's:
 
 - Passing row-major data for matrix $M$ with `trans = 'T'` tells BLAS to mathematically treat this data as $M$. (BLAS expects row-major data for `'T'` if it wants to use the matrix directly.)
 - Passing row-major data for matrix $M$ with `trans = 'N'` tells BLAS to mathematically treat this data as $M^T$. (BLAS expects column-major data for `'N'`; giving it row-major data makes it see the transpose.)
@@ -250,7 +252,7 @@ Interpret the trace entries based on the understanding that PyTorch uses row-maj
 2. First `aten::mm` (backward dX): Corresponds to `dX = dY @ W`. Trace flags: `(False, False)`. This matches the `(N, N)` needed for BLAS to compute $W^T @ dY^T$.
 3. Second `aten::mm` (backward dW): Corresponds to `dW = dYᵀ @ X`. Trace flags: `(False, True)`. This matches the `(N, T)` needed for BLAS to compute $X^T @ dY$.
 
-This confirms how the trace flags correspond to the BLAS transpose configurations used with row-major input data to achieve row-major output via the $C^T = B^T A^T$ trick.
+This confirms how the trace flags correspond to the BLAS transpose configurations used with row-major input data to achieve row-major output using the $C^T = B^T A^T$ trick.
 
 The following pseudo code summarizes the transpose flag logic.
 
@@ -418,9 +420,9 @@ Step by step:
 
 ### Calculation examples
 
-Assuming `num_cus = 304` (for example, MI300X).
+Assuming `num_cus = 304` (for example, AMD Instinct™ MI300X).
 
-#### Example 1: Perfect tiling, suboptimal wave quantization
+#### Example 1: perfect tiling, suboptimal wave quantization
 
 - Input: M = 10240, N = 2048, K = 2048
 - Kernel tile: `mt_m = 256`, `mt_n = 64`
@@ -437,7 +439,7 @@ wq_eff = 0.842
 dim_eff = 0.842
 ```
 
-#### Example 2: Slight padding, good wave quantization
+#### Example 2: slight padding, good wave quantization
 
 - Input: M = 2048, N = 10240, K = 2048
 - Kernel tile: `mt_m = 256`, `mt_n = 144`
