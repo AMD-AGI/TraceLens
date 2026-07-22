@@ -20,7 +20,7 @@ The performance model is implemented in
 ## How Triton kernel naming works
 
 When you run `torch.compile(model)`,
-[TorchDynamo](https://docs.pytorch.org/docs/stable/torch.compiler_deepdive.html)
+[TorchDynamo](https://docs.pytorch.org/docs/2.13/user_guide/torch_compiler/torch.compiler_fine_grain_apis.html)
 captures the model's operations as an FX graph, and the
 [Inductor](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_inductor_profiling.html)
 backend fuses groups of ATen ops into Triton kernels. Each kernel's name

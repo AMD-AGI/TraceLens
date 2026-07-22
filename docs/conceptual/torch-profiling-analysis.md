@@ -49,7 +49,7 @@ y = nn.Conv2d(3, 64, kernel_size=3)(x)
 At the Python level, this looks like a single operation. In the trace, however, it expands into several layers:
 
 - *Python frontend*: `nn.Conv2d` in `torch.nn`.
-- *ATen*: the call lowers into PyTorch's tensor library, [ATen](https://pytorch.org/cppdocs/notes/aten.html), and shows up as `aten::conv2d` in the trace.
+- *ATen*: the call lowers into PyTorch's tensor library, [ATen](https://docs.pytorch.org/cppdocs/#aten), and shows up as `aten::conv2d` in the trace.
 - *Backend wrapper*: ATen provides wrappers that call into vendor libraries. On AMD GPUs, you'll see `aten::miopen_convolution`, which wraps [MIOpen](https://rocm.docs.amd.com/projects/MIOpen/en/latest/) commands. On NVIDIA GPUs, the equivalent is `aten::cudnn_convolution`, which wraps [cuDNN](https://developer.nvidia.com/cudnn) calls.
 - *GPU kernels*: the backend library enqueues device kernels such as `igemm_fwd_gtcx2_nhwc` that perform the actual convolution on the GPU.
 
