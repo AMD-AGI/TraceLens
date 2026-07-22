@@ -48,10 +48,10 @@ y = nn.Conv2d(3, 64, kernel_size=3)(x)
 
 At the Python level, this looks like a single operation. In the trace, however, it expands into several layers:
 
-- *Python frontend*: `nn.Conv2d` in `torch.nn`.
-- *ATen*: the call lowers into PyTorch's tensor library, [ATen](https://docs.pytorch.org/cppdocs/#aten), and shows up as `aten::conv2d` in the trace.
-- *Backend wrapper*: ATen provides wrappers that call into vendor libraries. On AMD GPUs, you'll see `aten::miopen_convolution`, which wraps [MIOpen](https://rocm.docs.amd.com/projects/MIOpen/en/latest/) commands. On NVIDIA GPUs, the equivalent is `aten::cudnn_convolution`, which wraps [cuDNN](https://developer.nvidia.com/cudnn) calls.
-- *GPU kernels*: the backend library enqueues device kernels such as `igemm_fwd_gtcx2_nhwc` that perform the actual convolution on the GPU.
+- **Python frontend**: `nn.Conv2d` in `torch.nn`.
+- **ATen**: the call lowers into PyTorch's tensor library, [ATen](https://docs.pytorch.org/cppdocs/#aten), and shows up as `aten::conv2d` in the trace.
+- **Backend wrapper**: ATen provides wrappers that call into vendor libraries. On AMD GPUs, you'll see `aten::miopen_convolution`, which wraps [MIOpen](https://rocm.docs.amd.com/projects/MIOpen/en/latest/) commands. On NVIDIA GPUs, the equivalent is `aten::cudnn_convolution`, which wraps [cuDNN](https://developer.nvidia.com/cudnn) calls.
+- **GPU kernels**: the backend library enqueues device kernels such as `igemm_fwd_gtcx2_nhwc` that perform the actual convolution on the GPU.
 
 This gives a clear understanding of how high-level code is translated into GPU execution.
 
@@ -77,8 +77,8 @@ The appendix below covers UI shortcuts, how memory copies show up, and the struc
 
 Perfetto is a powerful trace viewer, but it takes some practice to navigate effectively. A few basics:
 
-- *Zoom and pan* with `Ctrl + scroll` to zoom in and out; click and drag to pan.
-- *Event details*: click any event to open the *Current Selection* panel below. This shows start time, duration, and arguments. With `record_shapes=True`, backend ops (in the `cpu_op` category) also show tensor shapes, dtypes, and strides.
+- **Zoom and pan** with `Ctrl + scroll` to zoom in and out; click and drag to pan.
+- **Event details**: click any event to open the *Current Selection* panel below. This shows start time, duration, and arguments. With `record_shapes=True`, backend ops (in the `cpu_op` category) also show tensor shapes, dtypes, and strides.
 
 Perfetto also links host launches and GPU execution with arrows called *flows*. These are crucial for connecting what you see on the CPU timeline with what actually runs on the GPU.
 
@@ -103,9 +103,9 @@ These flows are the bridge between the Python-level trace and the GPU execution 
 
 Not all GPU activity is compute. Profiling traces also show memory transfers:
 
-- *H2D (host to device)*: copies data from CPU to GPU, usually synchronous and PCIe bandwidth-limited.
-- *D2H (device to host)*: copies results back to CPU, also synchronous and PCIe bandwidth-limited.
-- *D2D (device to device)*: moves data between GPU buffers, asynchronous and limited by HBM bandwidth.
+- **H2D (host to device)**: copies data from CPU to GPU, usually synchronous and PCIe bandwidth-limited.
+- **D2H (device to host)**: copies results back to CPU, also synchronous and PCIe bandwidth-limited.
+- **D2D (device to device)**: moves data between GPU buffers, asynchronous and limited by HBM bandwidth.
 
 Recent versions even record measured bandwidth for these events in the trace arguments. Importantly, memory copy events use the GPU's DMA engines, not compute cores, so they don't directly compete with kernel execution.
 
@@ -113,10 +113,10 @@ Recent versions even record measured bandwidth for these events in the trace arg
 
 Behind the Perfetto UI, the PyTorch profiler saves traces as JSON. Each entry is an event dictionary with:
 
-- *Timestamps*: `ts` (start) and `dur` (duration).
-- *Process and thread IDs*: `pid` and `tid`. CPU events use real PIDs and TIDs; GPU events use pseudo-PIDs for devices and TIDs for streams.
-- *Category*: for example, `python_function`, `cpu_op`, `cuda_runtime`, `kernel`, or `gpu_memcpy`.
-- *Args*: extra information such as shapes, dtypes, strides, or bandwidth.
+- **Timestamps**: `ts` (start) and `dur` (duration).
+- **Process and thread IDs**: `pid` and `tid`. CPU events use real PIDs and TIDs; GPU events use pseudo-PIDs for devices and TIDs for streams.
+- **Category**: for example, `python_function`, `cpu_op`, `cuda_runtime`, `kernel`, or `gpu_memcpy`.
+- **Args**: extra information such as shapes, dtypes, strides, or bandwidth.
 
 The JSON format makes traces scriptable: you can parse them to build custom reports or run automated analysis outside Perfetto. This is exactly what TraceLens does.
 

@@ -95,11 +95,11 @@ metric__<tag>_pct       # 100 * diff / baseline
 
 ## Design decisions to know
 
-- *Outer merge, never inner* — if an op vanished, you'll see it.
-- *Baseline is the first report* — choose its order deliberately.
-- *Column prefixing* — every metric becomes `<tag>::metric`, so you can safely concatenate arbitrary reports.
-- *Sheet-specific pruning* — the script aggressively hides noise (for example `median`, `UID`) to keep the output readable. You can always unhide these in Excel if you need them.
-- *Excel 31-char rule* — sheet names are truncated to fit; no data loss, just shorter labels.
+- **Outer merge, never inner**: if an op vanished, you'll see it.
+- **Baseline is the first report**: choose its order deliberately.
+- **Column prefixing**: every metric becomes `<tag>::metric`, so you can safely concatenate arbitrary reports.
+- **Sheet-specific pruning**: the script aggressively hides noise (for example `median`, `UID`) to keep the output readable. You can always unhide these in Excel if you need them.
+- **Excel 31-char rule**: sheet names are truncated to fit; no data loss, just shorter labels.
 
 ```{note}
 A planned enhancement is morphology-aware diffing: understanding the call-stack

@@ -66,9 +66,9 @@ For total FLOPS and bytes moved in inference paged attention, *sum over the
 compute requirement of every request individually* (B = 1 per request). Requests
 fall into two categories:
 
-- *Context (prefill) requests* process input tokens; attention is causal within
+- **Context (prefill) requests** process input tokens; attention is causal within
   the current chunk.
-- *Generation (decode) requests* generate new tokens; attention is non-causal
+- **Generation (decode) requests** generate new tokens; attention is non-causal
   (queries attend to all past KV tokens). Typically N_Q = 1, but approaches like
   speculative decoding may produce multiple query tokens per request.
 
@@ -207,8 +207,8 @@ Inference-serving execution consists of three phases:
 
 Once steady state is reached, execution consists of:
 
-- *Decode-only steps*.
-- *Prefill-decode steps*, typically containing one prefill request packed with
+- **Decode-only steps**.
+- **Prefill-decode steps**, typically containing one prefill request packed with
   ~CONC−1 decode requests.
 
 For performance analysis, only the steady-state steps are of interest,
@@ -217,12 +217,12 @@ specifically prefill-decode steps and decode-only steps with large context sizes
 
 ### Parameters relevant to inference serving
 
-- *NUM_PROMPTS*: typically `10 * CONC`.
-- *CONC*: number of concurrent requests that can be batched together.
-- *R*: random-range ratio used for sampling input and output sequence lengths.
-- *OSL*: maximum output sequence length. The per-request output length is sampled
+- **NUM_PROMPTS**: typically `10 * CONC`.
+- **CONC**: number of concurrent requests that can be batched together.
+- **R**: random-range ratio used for sampling input and output sequence lengths.
+- **OSL**: maximum output sequence length. The per-request output length is sampled
   uniformly in `[R * OSL, OSL]`.
-- *ISL*: assumed to be lower than the chunk size.
+- **ISL**: assumed to be lower than the chunk size.
 
 Assuming the benchmark schedules requests at an effectively infinite rate, the
 first CONC steps are conservatively treated as the ramp-up phase. The execution
