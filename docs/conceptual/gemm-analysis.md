@@ -80,8 +80,8 @@ As established earlier, to process this with a single GEMM the batch and sequenc
 
 The key difference between prefill and decode lies in the value of `L`:
 
-- *Prefill phase*: `L` is the actual input sequence length (which can be large).
-- *Decode phase*: `L` is always `1`, as the model processes one token at a time to generate the next.
+- **Prefill phase**: `L` is the actual input sequence length (which can be large).
+- **Decode phase**: `L` is always `1`, as the model processes one token at a time to generate the next.
 
 This difference in `L` directly impacts the `M` parameter of the GEMM `(M, N, K)`.
 
@@ -175,8 +175,8 @@ To fully understand how PyTorch uses BLAS for operations like GEMM, first unders
 
 Despite tensors often being represented as multi-dimensional arrays, their elements are stored in linear memory. For a 2D matrix, the two primary storage conventions are:
 
-- *Row-major*: Elements of the same row are stored consecutively in memory. PyTorch adopts this as its default layout.
-- *Column-major*: Elements of the same column are stored consecutively in memory. Many traditional BLAS libraries primarily optimize for this layout.
+- **Row-major**: Elements of the same row are stored consecutively in memory. PyTorch adopts this as its default layout.
+- **Column-major**: Elements of the same column are stored consecutively in memory. Many traditional BLAS libraries primarily optimize for this layout.
 
 PyTorch's `.stride()` method provides insight into a tensor's memory arrangement. It returns a tuple where each value indicates the byte (or element, depending on datatype size) distance in linear memory to move to the next element along that dimension.
 

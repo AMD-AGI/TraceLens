@@ -28,9 +28,9 @@ Additional sheets can include operation-specific analysis (GEMM, SDPA_fwd, CONV_
 
 ### Unit conventions
 
-- *Time*: all times from the trace are in microseconds (µs) unless explicitly stated otherwise (for example, `time ms` in `gpu_timeline` is in milliseconds).
-- *Compute*: GFLOPS (billions of FLOPs), TFLOPS/s (trillions of FLOPs per second).
-- *Memory*: MB (megabytes), GB/s (gigabytes per second), TB/s (terabytes per second).
+- **Time**: all times from the trace are in microseconds (µs) unless explicitly stated otherwise (for example, `time ms` in `gpu_timeline` is in milliseconds).
+- **Compute**: GFLOPS (billions of FLOPs), TFLOPS/s (trillions of FLOPs per second).
+- **Memory**: MB (megabytes), GB/s (gigabytes per second), TB/s (terabytes per second).
 
 ## The gpu_timeline sheet
 

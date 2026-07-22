@@ -20,7 +20,7 @@ The performance model is implemented in
 ## How Triton kernel naming works
 
 When you run `torch.compile(model)`,
-[TorchDynamo](https://docs.pytorch.org/docs/stable/torch.compiler_deepdive.html)
+[TorchDynamo](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_fine_grain_apis.html)
 captures the model's operations as an FX graph, and the
 [Inductor](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_inductor_profiling.html)
 backend fuses groups of ATen ops into Triton kernels. Each kernel's name
@@ -270,7 +270,7 @@ These 6 categories have been stable from PyTorch 2.3 through 2.11+
 |--------|----------|-------------|
 | `triton_poi_` | `pointwise` | Element-wise ops (add, mul, relu, silu, and so on). One loop dimension: `xnumel`. Fused ops stay in registers — no intermediate global memory writes. |
 | `triton_red_` | `reduction` | Reduction ops (sum, mean, batch norm, and so on) using a looped strategy. Two dimensions: `xnumel` (outer), `rnumel` (reduction axis). Used when the reduction axis is too large for persistent strategy. |
-| `triton_per_` | `persistent_reduction` | Same reduction ops, but keeps the entire reduction axis in registers/SRAM. Used when `rnumel` is small enough (~1024 elements). Inductor's [`should_use_persistent_reduction()`](https://karthick.ai/blog/2025/Learn-By-Doing-Torchinductor-Reduction/) heuristic decides. |
+| `triton_per_` | `persistent_reduction` | Same reduction ops, but keeps the entire reduction axis in registers/SRAM. Used when `rnumel` is small enough (~1024 elements). Inductor's [`should_use_persistent_reduction()`](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/codegen/triton.py) heuristic decides. |
 | `triton_tem_` | `template` | Complex ops like matrix multiplication (mm, addmm, _scaled_mm) using pre-defined Triton templates with optional fused epilogues. |
 | `triton_for_` | `foreach` | Fused operations across lists of tensors (for example, optimizer step updates applied to all parameters at once). |
 | `triton_spl_` | `split_scan` | Split scan operations (for example, cumulative sums with decoupled lookback). |
@@ -545,7 +545,7 @@ seq_len=4096, dtype=bf16. Traced with PyTorch 2.11+rocm7.2 on AMD Instinct™ MI
 - [PyTorch Blog: Why Is PyTorch Compile So Fast — Kernel Fusion](https://pytorch.org/blog/why-is-pytorch-compile-so-fast-kernel-fusion/)
 - [TorchInductor GPU Profiling — PyTorch docs](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_inductor_profiling.html)
 - [Profiling torch.compile — PyTorch docs](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_profiling_torch_compile.html)
-- [Learn by Doing: TorchInductor Reduction Kernels](https://karthick.ai/blog/2025/Learn-By-Doing-Torchinductor-Reduction/)
+- [PyTorch Inductor codegen/triton.py — reduction heuristics](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/codegen/triton.py)
 - [TorchInductor — DeepWiki](https://deepwiki.com/pytorch/pytorch/2.2-torchinductor)
 - [PyTorch Inductor config.py](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/config.py)
 - [PyTorch Inductor codegen/triton.py](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/codegen/triton.py)

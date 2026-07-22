@@ -120,9 +120,9 @@ Example output:
 
 The metrics are defined as:
 
-- **computation_time** — time in compute kernels (GEMMs, convolutions, and so on).
-- **communication_time** — time in collective/communication kernels (for example, NCCL/RCCL).
-- **memcpy_time** — time in host-device or device-device memory copies.
+- **computation_time**: time in compute kernels (GEMMs, convolutions, and so on).
+- **communication_time**: time in collective/communication kernels (for example, NCCL/RCCL).
+- **memcpy_time**: time in host-device or device-device memory copies.
 - **exposed_communication_time** / **exposed_memcpy_time** — the portion of
   communication or memcpy that does *not* overlap computation (the part that
   actually costs wall-clock time).
