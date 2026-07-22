@@ -26,7 +26,7 @@ In profiler traces, look for events with:
 | Operation type | Example | Why it works |
 |---|---|---|
 | Native ATen ops | `aten::mm`, `aten::linear` | Built into the PyTorch dispatcher |
-| Registered custom ops | `torch.ops.mylib.my_op` | Registered via `torch.library` |
+| Registered custom ops | `torch.ops.mylib.my_op` | Registered through `torch.library` |
 | TorchScript ops | JIT-compiled functions | Goes through the dispatcher |
 | Custom `autograd.Function` | User-defined forward | Forward call is dispatched |
 | Distributed collectives | `record_param_comms` | Instrumented by PyTorch |
@@ -113,10 +113,10 @@ register_op("triton_matmul", triton_matmul_impl)
 | SGLang (CUDA) | Has shapes | Uses `torch.ops.sgl_kernel.*` |
 | SGLang (Triton) | Missing | Needs registration |
 
-## Summary
+## Key takeaways
 
 - Shapes are tied to dispatcher registration. If it's a `cpu_op`, it has shapes.
-- The fix is straightforward: register operations via `torch.library`.
+- The fix is straightforward: register operations through `torch.library`.
 - Start simple with `@torch.library.custom_op`.
 - Optimize if needed by switching to `Library.define()` for lower overhead.
 - FlashInfer disabled shape recording on purpose — a performance versus observability trade-off that can be re-enabled.

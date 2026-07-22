@@ -44,6 +44,8 @@ Support depends on the execution mode of the traced workload:
 
 ## Before you begin
 
+Complete the following setup steps before running the agent.
+
 ### Install TraceLens
 
 Install locally, or into your container or virtual environment (see
@@ -68,7 +70,7 @@ The orchestrator runs against a single `torch.profiler` trace (`.json` or
   requirements. Follow
   [Generate a PyTorch inference performance report](./generate-perf-report-pytorch-inference.md).
   The Profiling Skill automates
-  vLLM/SGLang benchmarking and PyTorch profiler trace collection via
+  vLLM/SGLang benchmarking and PyTorch profiler trace collection using
   Magpie, producing analysis-ready traces. For
   graph-mode workloads you produce two artifacts: a graph-replay trace and a
   graph-capture folder. In inference mode with execution mode

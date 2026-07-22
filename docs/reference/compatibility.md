@@ -46,7 +46,7 @@ peak FLOPS and peak bandwidth for that target GPU (for example,
 
 | Target GPU         | Notes |
 |--------------------|-------|
-| AMD Instinct MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
+| AMD Instinct™ MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
 
 ## Software requirements
 

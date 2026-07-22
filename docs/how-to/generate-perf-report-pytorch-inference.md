@@ -43,7 +43,7 @@ supported for vLLM and SGLang (proposed patches required).
 ## Before you begin
 
 - TraceLens installed (see [Install TraceLens](../install/install.md)).
-- An LLM inference setup to profile (this guide uses vLLM or SGLang on MI300X).
+- An LLM inference setup to profile (this guide uses vLLM or SGLang on AMD Instinct™ MI300X).
 
 ## Collect inference traces
 
@@ -202,7 +202,7 @@ Example - enable both flags alongside a steady-state window profile:
 `capture_torch_profiler_dir` is only available when `--profiler-config.profiler torch`
 is set. The capture trace is written once at server startup during HIP/CUDA-graph
 construction; the steady-state replay trace is written to `torch_profiler_dir`
-during the benchmark. Pass both paths to the report generator via
+during the benchmark. Pass both paths to the report generator using
 `--capture_folder` and `--profile_json_path` respectively.
 ```
 
