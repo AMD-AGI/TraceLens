@@ -7,11 +7,9 @@
 import json
 import os
 import re
-from typing import Any, Callable, cast, Dict, Optional
 
 import pandas as pd
 
-import TraceLens.util
 from TraceLens import TraceToTree
 from ..TreePerf import GPUEventAnalyser
 
@@ -1438,12 +1436,12 @@ class TraceDiff:
                                 if n1 != n2:
                                     common_name = find_common_name(n1, n2, module_map)
                                     if common_name is not None:
-                                        print(f"Renaming: {n1}, {n2} to {common_name}")
+                                        print(f"[TraceDiff] Renaming: {n1}, {n2} to {common_name}")
                                         rename_map[n2] = common_name
                                         rename_map[n1] = common_name
                                     else:
                                         print(
-                                            f"No common name found for {n1} and {n2} under the same LCA, keeping original names."
+                                            f"[TraceDiff] No common name found for {n1} and {n2} under the same LCA, keeping original names."
                                         )
                         else:
                             n1_list = mapping["trace1"]["name"]
@@ -1461,7 +1459,7 @@ class TraceDiff:
                                 for n2 in n2_list:
                                     common_name = find_common_name(n1, n2, module_map)
                                     if common_name is not None:
-                                        print(f"Renaming: {n1}, {n2} to {common_name}")
+                                        print(f"[TraceDiff] Renaming: {n1}, {n2} to {common_name}")
                                         rename_map[n1] = common_name
                                         rename_map[n2] = common_name
                                         n2_list.remove(n2)
@@ -1469,7 +1467,7 @@ class TraceDiff:
                                         break
                             if len(n1_list) > 0 or len(n2_list) > 0:
                                 print(
-                                    f"Unmatched for LCA {lcaid}: {n1_list} vs {n2_list}"
+                                    f"[TraceDiff] Unmatched for LCA {lcaid}: {n1_list} vs {n2_list}"
                                 )
                 return rename_map
 
@@ -1511,16 +1509,18 @@ class TraceDiff:
                 }
                 for kernel_name in df_agg["name"].unique()
             }
-            print("Kernel to CPU op mapping (showing entries with 1:n mapping):")
+            print("[TraceDiff] Kernel to CPU op mapping (showing entries with 1:n mapping):")
             for name, mapping in result.items():
                 if len(mapping.get("trace1", {}).get("cpu_op_name", [])) > 1:
                     print(
+                        " ",
                         name[0:30],
                         "\t",
                         mapping.get("trace1", {}).get("cpu_op_name", []),
                     )
                 if len(mapping.get("trace2", {}).get("cpu_op_name", [])) > 1:
                     print(
+                        " ",
                         name[0:30],
                         "\t",
                         mapping.get("trace2", {}).get("cpu_op_name", []),
