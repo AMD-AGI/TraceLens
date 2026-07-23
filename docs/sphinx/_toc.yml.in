@@ -83,7 +83,9 @@ subtrees:
     title: API reference
   - file: reference/perf-report-columns
     title: Performance report columns
-
+  - url: https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html
+    title: Hyperloom docs
+      
 - caption: About
   entries:
   - file: about/license
