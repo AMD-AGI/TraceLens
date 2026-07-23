@@ -84,7 +84,7 @@ subtrees:
   - file: reference/perf-report-columns
     title: Performance report columns
   - url: https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html
-    title: Hyperloom docs
+    title: Hyperloom
       
 - caption: About
   entries:
