@@ -767,7 +767,7 @@ def _check_issue_template(output_dir, comparison_scope="standalone"):
     if not rows:
         all_sections = (compute_section or "") + (system_section or "")
         intentionally_empty = (
-            "No compute kernel optimization opportunities identified" in all_sections
+            "No compute kernel optimization opportunities" in all_sections
             or "No system-level bottlenecks detected" in all_sections
         )
         rows.append(
@@ -994,14 +994,17 @@ def _check_marker_p_items(output_dir, comparison_scope=None):
 
     p_items = _extract_p_items(compute_section)
     if not p_items:
+        intentionally_empty = (
+            "No compute kernel optimization opportunities" in compute_section
+        )
         return [
             _make_marker_row(
                 "marker_eval_2",
                 "P-item markers (kind=p_item)",
-                "FAIL",
-                "No P-items found in Compute Kernel Optimizations",
-                "template",
-                "Ensure report contains P-items",
+                "PASS" if intentionally_empty else "FAIL",
+                "" if intentionally_empty else "No P-items found in Compute Kernel Optimizations",
+                "" if intentionally_empty else "template",
+                "" if intentionally_empty else "Add compute P-items or clearly state that no optimization opportunities were identified",
             )
         ]
 
@@ -1088,14 +1091,17 @@ def _check_marker_detail_estimates(output_dir, comparison_scope=None):
         matches = list(_DETAIL_P_HEADER_FALLBACK_RE.finditer(compute_subsection))
 
     if not matches:
+        intentionally_empty = (
+            "No compute kernel optimization opportunities" in compute_subsection
+        )
         return [
             _make_marker_row(
                 "marker_eval_3",
                 "Detail estimate markers (kind=detail_estimate)",
-                "FAIL",
-                "No P-item headers found in Detailed Analysis",
-                "template",
-                "Ensure Detailed Analysis contains P-item sections",
+                "PASS" if intentionally_empty else "FAIL",
+                "" if intentionally_empty else "No P-item headers found in Detailed Analysis",
+                "" if intentionally_empty else "template",
+                "" if intentionally_empty else "Add compute P-items to Detailed Analysis or clearly state that no optimization opportunities were identified",
             )
         ]
 
