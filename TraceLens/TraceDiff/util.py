@@ -13,6 +13,7 @@ import TraceLens.util
 
 _TRACELENS_DEBUG = os.environ.get("TRACELENS_DEBUG", "0") == "1"
 _GRAPH_LAUNCH_NAMES = ["hipGraphLaunch", "cudaGraphLaunch"]
+_KERNEL_DISPATCH_CATEGORIES = ("cuda_runtime", "cuda_driver")
 
 _KERNEL_LAUNCH_EQUIVALENTS = {
     "hipModuleLaunchKernel": "__kernel_launch__",

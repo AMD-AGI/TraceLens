@@ -19,6 +19,7 @@ from .util import (
     _CATEGORY,
     _DUR,
     _GRAPH_LAUNCH_NAMES,
+    _KERNEL_DISPATCH_CATEGORIES,
     _NAME,
     _TRACELENS_DEBUG,
     _TS,
@@ -344,7 +345,7 @@ class TraceDiff:
                         child = tree.get_UID2event(children[0])
                         child_cat = child.get(_CATEGORY)
                         if (
-                            child_cat in ("cpu_op", "cuda_runtime", "cuda_driver")
+                            child_cat in ("cpu_op", *_KERNEL_DISPATCH_CATEGORIES)
                             and child.get(_NAME) not in _GRAPH_LAUNCH_NAMES
                         ):
                             break
@@ -465,8 +466,6 @@ class TraceDiff:
                 "nn_module_stack": nn_module_stack,
             }
 
-        _GRAPH_LAUNCH_NAMES = {"hipGraphLaunch", "cudaGraphLaunch"}
-
         def subtree_contains_cuda_runtime(node):
             """Return True if this node is a cuda_runtime node. Graph launch events are exempt."""
             if not node:
@@ -474,7 +473,7 @@ class TraceDiff:
             if node.get(_NAME) in _GRAPH_LAUNCH_NAMES:
                 return False
             cat = node.get(_CATEGORY)
-            return cat in ("cuda_runtime", "cuda_driver")
+            return cat in _KERNEL_DISPATCH_CATEGORIES
 
         def get_children_with_missing(uid1, uid2):
             """Get aligned children lists, adding missing-by-name from full child list."""
@@ -512,7 +511,7 @@ class TraceDiff:
             while True:
                 node = uid2node.get(current)
                 if not node or (
-                    tree_obj.event_to_category(node) in ("cuda_runtime", "cuda_driver")
+                    tree_obj.event_to_category(node) in _KERNEL_DISPATCH_CATEGORIES
                     and node.get(_NAME) not in _GRAPH_LAUNCH_NAMES
                 ):
                     break
@@ -520,7 +519,7 @@ class TraceDiff:
                 cat = tree_obj.event_to_category(node)
                 if cat == "cpu_op":
                     has_cr_child = any(
-                        tree_obj.event_to_category(c) in ("cuda_runtime", "cuda_driver")
+                        tree_obj.event_to_category(c) in _KERNEL_DISPATCH_CATEGORIES
                         and c.get(_NAME) not in _GRAPH_LAUNCH_NAMES
                         for c in child_nodes
                     )
@@ -556,7 +555,7 @@ class TraceDiff:
 
             sub1 = {}  # index in children1 -> replacement child nodes
             sub2 = {}  # index in children2 -> replacement child nodes
-            skip_cats = ("kernel", "cuda_runtime", "cuda_driver")
+            skip_cats = ("kernel", *_KERNEL_DISPATCH_CATEGORIES)
 
             for di in delete_indices:
                 for ii in insert_indices:
