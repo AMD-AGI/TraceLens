@@ -265,6 +265,8 @@ class TraceDiff:
         self.cpu_op_map = None
         # Cache for merged tree mapping only (baseline/variant dicts are already in tree objects)
         self._merged_id_to_event = None
+        self._uid1_to_merged_id = None
+        self._uid2_to_merged_id = None
 
         # Automatically merge trees and initialize UID map
         self.merge_trees()
@@ -288,7 +290,7 @@ class TraceDiff:
 
     def _get_uid_to_merged_id_maps(self):
         """Build reverse mappings from UIDs to merged_ids for efficient lookup."""
-        if not hasattr(self, "_uid1_to_merged_id"):
+        if self._uid1_to_merged_id is None:
             self._uid1_to_merged_id = {}
             self._uid2_to_merged_id = {}
             merged_id_to_event = self._get_merged_id_to_event()
@@ -304,6 +306,8 @@ class TraceDiff:
     def _invalidate_merged_cache(self):
         """Invalidate merged tree cache when tree is rebuilt."""
         self._merged_id_to_event = None
+        self._uid1_to_merged_id = None
+        self._uid2_to_merged_id = None
 
     def is_gpu_path(self, node):
         if node is None:
@@ -311,13 +315,7 @@ class TraceDiff:
         return not node.get("non_gpu_path", False)
 
     def is_kernel(self, node):
-        cat = node.get(_CATEGORY)
-        if cat is None:
-            try:
-                cat = node.get(_CATEGORY)
-            except Exception:
-                pass
-        return cat in ("kernel", "gpu_memcpy")
+        return node.get(_CATEGORY) in ("kernel", "gpu_memcpy")
 
     def _get_op_name(self, uid, tree_num):
         """
@@ -523,7 +521,7 @@ class TraceDiff:
 
         def subtree_contains_cuda_runtime(node):
             """Return True if this node is a cuda_runtime node. Graph launch events are exempt."""
-            if not node or not isinstance(node, dict):
+            if not node:
                 return False
             if node.get(_NAME) in _GRAPH_LAUNCH_NAMES:
                 return False
@@ -1050,7 +1048,7 @@ class TraceDiff:
                 n = uid2node.get(uid)
                 if n is None:
                     break
-                name = n.get("name", "")
+                name = n.get(_NAME, "")
                 if name:
                     stack.append(name)
                 uid = n.get("parent")
