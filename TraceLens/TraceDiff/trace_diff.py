@@ -15,65 +15,21 @@ import TraceLens.util
 from TraceLens import TraceToTree
 from ..TreePerf import GPUEventAnalyser
 
-_TRACELENS_DEBUG = os.environ.get("TRACELENS_DEBUG", "0") == "1"
-_GRAPH_LAUNCH_NAMES = ["hipGraphLaunch", "cudaGraphLaunch"]
-
-
-_KERNEL_LAUNCH_EQUIVALENTS = {
-    "hipModuleLaunchKernel": "__kernel_launch__",
-    "cuLaunchKernel": "__kernel_launch__",
-}
-
-
-_TraceKeys = TraceLens.util.TraceEventUtils.TraceKeys
-_UID = _TraceKeys.UID
-_NAME = _TraceKeys.Name
-_CATEGORY = _TraceKeys.Category
-_TS = _TraceKeys.TimeStamp
-_DUR = _TraceKeys.Duration
-
-
-def _sort_by_ts(nodes):
-    """Sort nodes by timestamp, return their UIDs."""
-    return [n[_UID] for n in sorted(nodes, key=lambda n: n.get(_TS, 0))]
-
-
-def _get_name_node(node, strip_details=False):
-    """Get the normalized comparison name directly from a node dict."""
-    if node is None:
-        return None
-    name = node.get(_NAME)
-    return _normalize_name_for_comparison(name, strip_details) if name else None
-
-
-def _list_to_tuple(obj):
-    """Recursively convert lists to tuples for hashability."""
-    if isinstance(obj, list):
-        return tuple(_list_to_tuple(item) for item in obj)
-    return obj
-
-
-def _get_node_arg(node, key):
-    """Get an arg value from a node, converting lists to tuples. Returns '' if missing."""
-    val = node.get("args", {}).get(key)
-    if val is not None:
-        return _list_to_tuple(val)
-    return ""
-
-
-
-def _normalize_name_for_comparison(name, strip_details=False):
-    if name is None:
-        return name
-    normalized = re.sub(r"0x[0-9a-fA-F]+", "0xXXXX", name)
-    normalized = re.sub(r"\.py\(\d+\):", ".py:", normalized)
-    if strip_details:
-        # Strip function name and directory path from python_function-style event names.
-        # After line-number stripping, names look like "/path/to/file.py: func_name".
-        # Remove everything from ": " onward, then strip leading directory components.
-        normalized = re.sub(r":\s+\S+$", "", normalized)
-        normalized = re.sub(r"^.*/([^/]+\.py)$", r"\1", normalized)
-    return _KERNEL_LAUNCH_EQUIVALENTS.get(normalized, normalized)
+from .util import (
+    _CATEGORY,
+    _DUR,
+    _GRAPH_LAUNCH_NAMES,
+    _NAME,
+    _TRACELENS_DEBUG,
+    _TS,
+    _UID,
+    _get_name_node,
+    _get_node_arg,
+    _is_gpu_path,
+    _is_kernel,
+    _normalize_name_for_comparison,
+    _sort_by_ts,
+)
 
 
 def _gpu_path_child_names_at_bfs_levels(uid, uid2node, max_depth):
@@ -309,14 +265,6 @@ class TraceDiff:
         self._uid1_to_merged_id = None
         self._uid2_to_merged_id = None
 
-    def is_gpu_path(self, node):
-        if node is None:
-            return False
-        return not node.get("non_gpu_path", False)
-
-    def is_kernel(self, node):
-        return node.get(_CATEGORY) in ("kernel", "gpu_memcpy")
-
     def _get_op_name(self, uid, tree_num):
         """
         Unified method to get operation name from UID.
@@ -535,8 +483,8 @@ class TraceDiff:
             all_children1 = tree1.get_children_events(node1) if node1 else []
             all_children2 = tree2.get_children_events(node2) if node2 else []
 
-            gpu_nodes1 = [n for n in all_children1 if self.is_gpu_path(n)]
-            gpu_nodes2 = [n for n in all_children2 if self.is_gpu_path(n)]
+            gpu_nodes1 = [n for n in all_children1 if _is_gpu_path(n)]
+            gpu_nodes2 = [n for n in all_children2 if _is_gpu_path(n)]
             gpu_names1 = {_get_name_node(n) for n in gpu_nodes1}
             gpu_names2 = {_get_name_node(n) for n in gpu_nodes2}
 
@@ -578,7 +526,7 @@ class TraceDiff:
                     )
                     if has_cr_child:
                         break
-                gpu_child_nodes = [c for c in child_nodes if self.is_gpu_path(c)]
+                gpu_child_nodes = [c for c in child_nodes if _is_gpu_path(c)]
                 if len(gpu_child_nodes) != 1:
                     gpu_kids = [c[_UID] for c in gpu_child_nodes]
                     break
@@ -637,11 +585,11 @@ class TraceDiff:
                     name_i = _get_name_node(node_i)
                     imm_d = [
                         c for c in tree1.get_children_events(node_d)
-                        if self.is_gpu_path(c)
+                        if _is_gpu_path(c)
                     ] if node_d else []
                     imm_i = [
                         c for c in tree2.get_children_events(node_i)
-                        if self.is_gpu_path(c)
+                        if _is_gpu_path(c)
                     ] if node_i else []
                     names_imm_d = [_get_name_node(c) for c in imm_d]
                     names_imm_i = [_get_name_node(c) for c in imm_i]
@@ -1065,7 +1013,7 @@ class TraceDiff:
             names = []
             for cuid in node.get("children", []):
                 cn = uid2node.get(cuid)
-                if cn and self.is_gpu_path(cn):
+                if cn and _is_gpu_path(cn):
                     names.append(self._get_op_name(cuid, tree_num) or "")
             return "; ".join(names)
 
@@ -1161,8 +1109,8 @@ class TraceDiff:
                 if (
                     event1
                     and event2
-                    and self.is_gpu_path(event1)
-                    and self.is_gpu_path(event2)
+                    and _is_gpu_path(event1)
+                    and _is_gpu_path(event2)
                 ):
                     children = [merged_id_to_event[cid] for cid in node["children"]]
                     non_combined_children = [
@@ -1171,17 +1119,17 @@ class TraceDiff:
                     non_combined_children_trace1_gpu_paths = [
                         child
                         for child in non_combined_children
-                        if self.is_gpu_path(baseline_uid2node.get(child.get("uid1")))
+                        if _is_gpu_path(baseline_uid2node.get(child.get("uid1")))
                     ]
                     non_combined_children_trace2_gpu_paths = [
                         child
                         for child in non_combined_children
-                        if self.is_gpu_path(variant_uid2node.get(child.get("uid2")))
+                        if _is_gpu_path(variant_uid2node.get(child.get("uid2")))
                     ]
                     if (
                         non_combined_children_trace1_gpu_paths
                         or non_combined_children_trace2_gpu_paths
-                    ) or (self.is_kernel(event1) and self.is_kernel(event2)):
+                    ) or (_is_kernel(event1) and _is_kernel(event2)):
 
                         # Store the LCA name from this combined node
                         lca_name_trace1 = re.sub(
@@ -1199,18 +1147,18 @@ class TraceDiff:
                         for child in non_combined_children_trace1_gpu_paths:
                             child_node = baseline_uid2node.get(child.get("uid1"))
                             gpu_event_uids1.extend(child_node.get("gpu_events", []))
-                            if self.is_kernel(child_node):
+                            if _is_kernel(child_node):
                                 gpu_event_uids1.append(child_node[_UID])
-                        if self.is_kernel(event1):
+                        if _is_kernel(event1):
                             gpu_event_uids1.append(event1[_UID])
 
                         gpu_event_uids2 = []
                         for child in non_combined_children_trace2_gpu_paths:
                             child_node = variant_uid2node.get(child.get("uid2"))
                             gpu_event_uids2.extend(child_node.get("gpu_events", []))
-                            if self.is_kernel(child_node):
+                            if _is_kernel(child_node):
                                 gpu_event_uids2.append(child_node[_UID])
-                        if self.is_kernel(event2):
+                        if _is_kernel(event2):
                             gpu_event_uids2.append(event2[_UID])
 
                         busy_time1 = _compute_lca_busy_time(
@@ -1249,7 +1197,7 @@ class TraceDiff:
 
             elif mt == "trace1":
                 event1 = baseline_uid2node.get(node["uid1"])
-                if event1 and self.is_gpu_path(event1):
+                if event1 and _is_gpu_path(event1):
                     lca_name, lca_id, lca_children_t1, lca_children_t2 = \
                         _resolve_lca_from_parent(combined_parent_node, "uid1", 1)
                     gpu_event_uids = event1.get("gpu_events", [])
@@ -1263,7 +1211,7 @@ class TraceDiff:
                 return
             elif mt == "trace2":
                 event2 = variant_uid2node.get(node["uid2"])
-                if event2 and self.is_gpu_path(event2):
+                if event2 and _is_gpu_path(event2):
                     lca_name, lca_id, lca_children_t1, lca_children_t2 = \
                         _resolve_lca_from_parent(combined_parent_node, "uid2", 2)
                     gpu_event_uids = event2.get("gpu_events", [])
@@ -1278,7 +1226,7 @@ class TraceDiff:
 
             # Only traverse children if either trace is on a GPU path
             should_traverse_children = False
-            if self.is_gpu_path(event1) or self.is_gpu_path(event2):
+            if _is_gpu_path(event1) or _is_gpu_path(event2):
                 should_traverse_children = True
 
             if should_traverse_children:
