@@ -162,6 +162,7 @@ class TreePerfAnalyzer:
     def from_file(
         profile_filepath,
         capture_trace_filepath=None,
+        diffusion_shape_trace_filepath=None,
         jax: bool = False,
         enable_pseudo_ops: bool = False,
         tree_postprocess_extension=None,
@@ -240,6 +241,7 @@ class TreePerfAnalyzer:
             event_to_category=categorizer,
             enable_pseudo_ops=enable_pseudo_ops,
             tree_postprocess_extension=tree_postprocess_extension,
+            diffusion_shape_trace_filepath=diffusion_shape_trace_filepath,
             *args,
             **kwargs,
         )
@@ -259,6 +261,7 @@ class TreePerfAnalyzer:
         detect_recompute=False,
         enable_origami=False,
         inductor_cache_dir=None,
+        diffusion_shape_trace_filepath=None,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
@@ -280,6 +283,17 @@ class TreePerfAnalyzer:
         self.gpu_only = self.check_gpu_only()
         if rebuild_tree:
             self.tree.build_tree(add_python_func=add_python_func)
+
+        # Optionally merge diffusion shape trace (must be after build_tree
+        # so GPU events have parent/children links from hipGraphLaunch)
+        if diffusion_shape_trace_filepath is not None:
+            from ..Trace2Tree.trace_capture_merge_diffusion import (
+                merge_diffusion_shape_trace,
+            )
+            self.tree = merge_diffusion_shape_trace(
+                shape_trace_path=diffusion_shape_trace_filepath,
+                graph_tree=self.tree,
+            )
 
         # Apply pseudo-op extensions
         if enable_pseudo_ops:

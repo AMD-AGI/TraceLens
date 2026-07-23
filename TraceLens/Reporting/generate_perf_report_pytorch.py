@@ -437,6 +437,7 @@ def generate_perf_report_pytorch(
     # activation recompute detection
     detect_recompute: bool = False,
     include_call_stack: bool = False,
+    diffusion_shape_trace: Optional[str] = None,
 ) -> Dict[str, pd.DataFrame]:
     gpu_arch_json = resolve_gpu_arch(
         gpu_arch_json_path=gpu_arch_json_path,
@@ -454,6 +455,7 @@ def generate_perf_report_pytorch(
         detect_recompute=detect_recompute,
         enable_origami=enable_origami,
         inductor_cache_dir=inductor_cache_dir,
+        diffusion_shape_trace_filepath=diffusion_shape_trace,
     )
 
     ## Apply annotation for vLLM eager and replay phase
@@ -1208,6 +1210,14 @@ def main():
         default=False,
         help="Add call_stack_trimmed and call_stack_full columns to unified_perf_summary.",
     )
+    parser.add_argument(
+        "--diffusion_shape_trace",
+        type=str,
+        default=None,
+        help="Path to a diffusion shape trace (.json.gz) collected with "
+        "max-autotune-no-cudagraphs. Shape metadata from this trace is "
+        "merged into the timing trace's graph-replay kernels.",
+    )
 
     args = parser.parse_args()
     generate_perf_report_pytorch(
@@ -1237,6 +1247,7 @@ def main():
         detect_recompute=args.detect_recompute,
         inductor_cache_dir=args.inductor_cache_dir,
         include_call_stack=args.include_call_stack,
+        diffusion_shape_trace=args.diffusion_shape_trace,
     )
 
 
