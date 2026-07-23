@@ -18,21 +18,21 @@ after a code, library, or hardware change.
 TraceLens offers two ways to compare traces, depending on how precise you need
 the matching to be:
 
-- **[Perf-report comparison](#perf-report-comparison)** — compares two finished
+- **[Perf-report comparison](#perf-report-comparison):** compares two finished
   reports by **op name**, matching each sheet's rows (per-op aggregates, kernels,
   and modelled ops like GEMM/SDPA) across the two reports. CLI-driven, and
   produces a side-by-side Excel workbook.
-- **[TraceDiff comparison](#tracediff-comparison-morphological)** — an SDK that
+- **[TraceDiff comparison](#tracediff-comparison-morphological):** an SDK that
   compares traces by their *morphological tree structure*, matching ops at the
   lowest common node. Use it when op names differ between traces (for example, across
   hardware, libraries, or framework versions) or when you need finer-grained,
-  programmatic analysis.
+  programmatic analysis. For an end-to-end analysis, the **[Comparative TraceLens Agent](#tracelens-agent-comparative-mode)** wraps TraceDiff in an agentic workflow that automates the comparison and provides optimization recommendations.
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
-- Two generated reports (`.xlsx`), one per configuration. Generate them with
-  [TraceLens_generate_perf_report_pytorch](./generate-perf-report-pytorch.md).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
+- For perf-report comparison: two generated reports (`.xlsx`), one
+  per configuration. Generate them with [TraceLens_generate_perf_report_pytorch](./generate-perf-report-pytorch.md).
 
 ## Perf-report comparison
 
@@ -93,13 +93,13 @@ metric__<tag>_pct       # 100 * diff / baseline
 
 Things to know when reading the workbook:
 
-- **Outer merge, never inner** — if an op exists in only one report it still
+- **Outer merge, never inner:** if an op exists in only one report it still
   appears (in the `only_baseline` / `only_variant` sheets), so you can see ops
   that vanished or were newly introduced.
-- **Baseline is the first report you pass** — choose its order deliberately.
-- **Column prefixing** — every metric is written as `<tag>::metric`, so multiple
+- **Baseline is the first report you pass:** choose its order deliberately.
+- **Column prefixing:** every metric is written as `<tag>::metric`, so multiple
   reports can be compared safely.
-- **Noise is hidden, not deleted** — columns like `median`, `std`, `min`, `max`,
+- **Noise is hidden, not deleted:** columns like `median`, `std`, `min`, `max`,
   and `ex_UID` are hidden in Excel for readability; unhide them if you need them.
 
 Use these to find operations or categories that regressed or improved, shifts in
@@ -186,9 +186,17 @@ See the
 [`trace_diff_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace_diff_example.ipynb)
 notebook for a worked example.
 
+## TraceLens Agent (comparative mode)
+
+The Comparative TraceLens Agent is an agentic workflow that uses TraceDiff to analyze traces
+and outputs a prioritized, stakeholder-facing optimization report. It's best used when you want
+automated gap analysis with concrete optimization recommendations rather than
+raw data tables. For more information, see [TraceLens Agent](./agent.md).
+
 ## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
-- [Install TraceLens](../install/installation.md)
+- [Install TraceLens](../install/install.md)
 - [Generate a report](generate-reports.md)
+- [Generate optimization recommendations with the TraceLens Agent](./agent.md)
 - [API reference](../reference/api-reference.md)
