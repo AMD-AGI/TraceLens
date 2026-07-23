@@ -35,7 +35,7 @@ nb_execution_mode = "off"
 html_theme = "rocm_docs_theme"
 # fmt: off
 html_theme_options = {
-    "flavor": "generic",
+    "flavor": "hyperloom",
     "header_title": f"TraceLens {version}",
     "header_link": False,
     "version_list_link": False,
