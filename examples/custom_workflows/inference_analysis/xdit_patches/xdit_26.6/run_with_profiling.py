@@ -6,19 +6,25 @@
 """
 TraceLens profiling wrapper for xDiT + FLUX.1 (or other DiT models).
 
-Two-pass profiling analogous to vLLM/SGLang graph-capture patches:
+Single-compilation, two-pass profiling analogous to vLLM/SGLang patches:
 
-  Pass 1 (shape):  torch.compile with max-autotune-no-cudagraphs.
-      Each compiled kernel dispatches individually, so the profiler
-      captures per-kernel Concrete Inputs, Input Dims, Input type.
+  torch.compile(mode="max-autotune") captures HIP/CUDA graphs internally.
+  The FIRST forward pass after compilation is the graph capture phase —
+  kernels dispatch individually via hipLaunchKernel while the graph is
+  being recorded.  Subsequent forward passes replay the graph via
+  hipGraphLaunch.
 
-  Pass 2 (timing): torch.compile with max-autotune (with cudagraphs).
-      Kernels replay via hipGraphLaunch — representative timing.
+  Pass 1 (shape):  Profile the graph CAPTURE pass (first forward after
+      compile).  Individual kernel dispatches → per-kernel Concrete Inputs,
+      Input Dims, Input type.
+
+  Pass 2 (timing): Profile a graph REPLAY pass (subsequent forward).
+      hipGraphLaunch → representative timing.
 
   Merge:  Handled at the tree level by
-      TraceLens.Trace2Tree.trace_capture_merge_diffusion, which
-      re-parents GPU kernel nodes under synthetic cpu_op events
-      carrying shape metadata from the shape trace.
+      TraceLens.Trace2Tree.trace_capture_merge_diffusion.
+
+  Same compilation for both passes → identical kernel names → 100% match.
 
 Usage (single GPU):
     python run_with_profiling.py \\
@@ -26,22 +32,9 @@ Usage (single GPU):
         --trace-dir /path/to/traces \\
         [--height 1024] [--width 1024] [--steps 20]
 
-Usage (multi-GPU via torchrun):
-    torchrun --nproc-per-node=8 run_with_profiling.py \\
-        --model /path/to/FLUX.1-dev \\
-        --trace-dir /path/to/traces \\
-        --ulysses-degree 8
-
 Output:
-    <trace-dir>/flux_<H>x<W>_rank<R>_timing.json.gz   (graph-replay trace)
-    <trace-dir>/flux_<H>x<W>_rank<R>_shapes.json.gz   (shape trace)
-
-    When generating a perf report, pass both traces:
-        from TraceLens.Trace2Tree.trace_capture_merge_diffusion import (
-            merge_diffusion_shape_trace,
-        )
-        # Build tree from timing trace, then merge shapes:
-        augmented_tree = merge_diffusion_shape_trace(shape_path, timing_tree)
+    <trace-dir>/flux_<H>x<W>_rank<R>_shapes.json.gz   (capture-phase trace)
+    <trace-dir>/flux_<H>x<W>_rank<R>_timing.json.gz   (replay-phase trace)
 """
 
 import argparse
@@ -61,14 +54,19 @@ def parse_args():
     p.add_argument("--width", type=int, default=1024)
     p.add_argument("--steps", type=int, default=20)
     p.add_argument("--prompt", default="a photo of a cat")
+    p.add_argument("--guidance-scale", type=float, default=3.5)
     p.add_argument("--ulysses-degree", type=int, default=1,
                    help="Ulysses sequence parallel degree (1 = no SP)")
     p.add_argument("--no-compile", action="store_true",
                    help="Skip torch.compile (eager mode)")
-    p.add_argument("--warmup-steps", type=int, default=1,
-                   help="Number of untraced warmup runs before profiling")
     p.add_argument("--shapes-only", action="store_true",
-                   help="Single-pass: shapes only (no cudagraphs, no timing pass)")
+                   help="Single-pass: capture phase only (shapes, no timing pass)")
+    p.add_argument("--warmup-steps", type=int, default=5,
+                   help="Number of untraced warmup calls before profiling")
+    p.add_argument("--precision", choices=["bf16", "fp8"], default="bf16",
+                   help="Model precision (bf16 or fp8)")
+    p.add_argument("--attention-backend", default=None,
+                   help="Attention backend (e.g. aiter). Sets XDIT_ATTENTION_BACKEND env var.")
     return p.parse_args()
 
 
@@ -81,8 +79,16 @@ def setup_distributed():
     return rank, dist.get_world_size()
 
 
-def build_pipeline(args, rank, world_size, compile_mode):
-    """Load the xDiT FLUX pipeline."""
+def build_pipeline(args, rank, world_size):
+    """Load the xDiT FLUX pipeline with torch.compile(max-autotune)."""
+    # Set attention backend env var if specified
+    if args.attention_backend:
+        os.environ["XDIT_ATTENTION_BACKEND"] = args.attention_backend
+
+    model_dtype = torch.bfloat16
+
+    # xfuser requires torchrun (RANK/WORLD_SIZE env vars).
+    # For single-GPU without torchrun, fall back to plain diffusers.
     use_xfuser = world_size > 1
     if use_xfuser:
         try:
@@ -94,12 +100,13 @@ def build_pipeline(args, rank, world_size, compile_mode):
         from diffusers import FluxPipeline
         pipe = FluxPipeline.from_pretrained(
             args.model,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=model_dtype,
         ).to("cuda")
         if not args.no_compile:
             pipe.transformer = torch.compile(
                 pipe.transformer,
-                mode=compile_mode,
+                mode="max-autotune",
+                fullgraph=True,
             )
         return pipe, None
 
@@ -115,7 +122,7 @@ def build_pipeline(args, rank, world_size, compile_mode):
     pipe = xFuserFluxPipeline.from_pretrained(
         pretrained_model_name_or_path=args.model,
         engine_config=engine_config,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=model_dtype,
     )
     pipe.prepare_run(input_config)
     return pipe, input_config
@@ -128,6 +135,7 @@ def run_pipeline(pipe, input_config, args):
         height=args.height,
         width=args.width,
         num_inference_steps=args.steps,
+        guidance_scale=args.guidance_scale,
         output_type="latent",
     )
     pipe(**kwargs)
@@ -165,90 +173,60 @@ def main():
 
     os.makedirs(args.trace_dir, exist_ok=True)
 
-    # ── Enable kernel shape profiler BEFORE torch.compile ──
-    _ksp_available = False
-    try:
-        from kernel_shape_profiler import enable as ksp_enable
-        from kernel_shape_profiler import disable as ksp_disable
-        ksp_enable()
-        _ksp_available = True
-        print(f"[rank {rank}] kernel_shape_profiler enabled")
-    except ImportError:
-        print(f"[rank {rank}] kernel_shape_profiler not found — AITER shapes will be missing")
+    # Note: kernel_shape_profiler is NOT used here.  AITER attention
+    # kernels already get Input Dims via their aten::_flash_attention_forward
+    # parent in the timing trace.  Avoiding the profiler wrappers lets us
+    # keep fullgraph=True → one monolithic compiled graph per denoise step,
+    # matching production execution structure.
 
-    if args.no_compile or args.shapes_only:
-        # ── Single-pass mode ──
-        compile_mode = "max-autotune-no-cudagraphs"
-        pipe, input_config = build_pipeline(args, rank, world_size, compile_mode)
+    # ── Compile once with max-autotune ──
+    print(f"[rank {rank}] Loading pipeline and compiling (max-autotune)...")
+    pipe, input_config = build_pipeline(args, rank, world_size)
 
-        print(f"[rank {rank}] Warmup ({args.warmup_steps} step(s))...")
-        for _ in range(args.warmup_steps):
-            with torch.no_grad():
-                run_pipeline(pipe, input_config, args)
-        if world_size > 1:
-            dist.barrier()
+    # ── Pass 1: Profile the graph CAPTURE phase (first forward) ──
+    # The first forward pass after torch.compile(mode="max-autotune")
+    # triggers Inductor compilation + autotune + HIP graph capture.
+    # During capture, each kernel dispatches individually via
+    # hipLaunchKernel — the profiler records per-kernel cpu_op events
+    # with Input Dims, Concrete Inputs, Input type.
+    shape_worker = f"flux_{args.height}x{args.width}_rank{rank}_shapes"
+    print(f"[rank {rank}] Pass 1: profiling graph capture phase (shapes)...")
+    shape_trace = profile_one_pass(pipe, input_config, args, args.trace_dir, shape_worker)
+    print(f"[rank {rank}] Shape trace: {shape_trace}")
 
-        worker_name = f"flux_{args.height}x{args.width}_rank{rank}_shapes"
-        print(f"[rank {rank}] Profiling (shapes only)...")
-        trace_path = profile_one_pass(pipe, input_config, args, args.trace_dir, worker_name)
+    if world_size > 1:
+        dist.barrier()
 
-        if _ksp_available:
-            ksp_disable()
-
-        if rank == 0 and trace_path:
-            print(f"\nShape trace saved to: {trace_path}")
+    if args.shapes_only:
+        if rank == 0:
+            print(f"\nShape trace saved to: {shape_trace}")
     else:
-        # ── Two-pass mode ──
+        # ── Warmup: run additional forward passes to stabilize graph replay ──
+        if args.warmup_steps > 0:
+            print(f"[rank {rank}] Warmup ({args.warmup_steps} step(s))...")
+            for _ in range(args.warmup_steps):
+                with torch.no_grad():
+                    run_pipeline(pipe, input_config, args)
+            if world_size > 1:
+                dist.barrier()
 
-        # Pass 1: shapes (no cudagraphs)
-        print(f"[rank {rank}] Pass 1: compiling (max-autotune-no-cudagraphs) for shapes...")
-        pipe, input_config = build_pipeline(
-            args, rank, world_size,
-            compile_mode="max-autotune-no-cudagraphs",
-        )
-
-        print(f"[rank {rank}] Warmup ({args.warmup_steps} step(s))...")
-        for _ in range(args.warmup_steps):
-            with torch.no_grad():
-                run_pipeline(pipe, input_config, args)
-        if world_size > 1:
-            dist.barrier()
-
-        shape_worker = f"flux_{args.height}x{args.width}_rank{rank}_shapes"
-        print(f"[rank {rank}] Profiling shapes...")
-        shape_trace = profile_one_pass(pipe, input_config, args, args.trace_dir, shape_worker)
-        print(f"[rank {rank}] Shape trace: {shape_trace}")
-
-        # Pass 2: timing (with cudagraphs)
-        torch._dynamo.reset()
-        print(f"[rank {rank}] Pass 2: recompiling (max-autotune) for timing...")
-        pipe, input_config = build_pipeline(
-            args, rank, world_size,
-            compile_mode="max-autotune",
-        )
-
-        print(f"[rank {rank}] Warmup ({args.warmup_steps} step(s)) — triggers graph capture...")
-        for _ in range(args.warmup_steps):
-            with torch.no_grad():
-                run_pipeline(pipe, input_config, args)
-        if world_size > 1:
-            dist.barrier()
-
+        # ── Pass 2: Profile graph REPLAY (subsequent forward) ──
+        # The graph is now captured and warmed up. This forward pass
+        # replays via hipGraphLaunch — representative production timing.
         timing_worker = f"flux_{args.height}x{args.width}_rank{rank}_timing"
-        print(f"[rank {rank}] Profiling timing (graph replay)...")
+        print(f"[rank {rank}] Pass 2: profiling graph replay (timing)...")
         timing_trace = profile_one_pass(pipe, input_config, args, args.trace_dir, timing_worker)
         print(f"[rank {rank}] Timing trace: {timing_trace}")
-
-        if _ksp_available:
-            ksp_disable()
 
         if rank == 0:
             print(f"\nTraces saved to: {args.trace_dir}/")
             print(f"  Shape trace:  {shape_trace}")
             print(f"  Timing trace: {timing_trace}")
-            print(f"\nTo generate a perf report with merged shapes:")
-            print(f"  from TraceLens.Trace2Tree.trace_capture_merge_diffusion import merge_diffusion_shape_trace")
-            print(f"  # Pass shape_trace_path and the built timing tree to merge_diffusion_shape_trace()")
+            print(f"\nGenerate perf report with merged shapes:")
+            print(f"  python TraceLens/Reporting/generate_perf_report_pytorch.py \\")
+            print(f"    --profile_json_path {timing_trace} \\")
+            print(f"    --diffusion_shape_trace {shape_trace} \\")
+            print(f"    --output_csvs_dir report/")
 
     if world_size > 1:
         dist.barrier()
