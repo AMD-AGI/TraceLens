@@ -1,0 +1,145 @@
+diff --git a/python/sglang/srt/model_executor/cuda_graph_runner.py b/python/sglang/srt/model_executor/cuda_graph_runner.py
+index ebbfc2b288..91c2a350e3 100644
+--- a/python/sglang/srt/model_executor/cuda_graph_runner.py
++++ b/python/sglang/srt/model_executor/cuda_graph_runner.py
+@@ -81,6 +81,15 @@ from sglang.srt.utils import (
+     require_mlp_sync,
+     require_mlp_tp_gather,
+ )
++from sglang.srt.utils.kernel_shape_profiler import (
++    disable as disable_kernel_shape_profiler,
++)
++from sglang.srt.utils.kernel_shape_profiler import (
++    enable as enable_kernel_shape_profiler,
++)
++from sglang.srt.utils.kernel_shape_profiler import (
++    is_enabled as is_kernel_shape_profiler_enabled,
++)
+ from sglang.srt.utils.patch_torch import monkey_patch_torch_compile
+ from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
+ 
+@@ -472,6 +481,9 @@ class CudaGraphRunner:
+         self.enable_profile_cuda_graph = (
+             model_runner.server_args.enable_profile_cuda_graph
+         )
++        self.enable_shape_discovery_for_cuda_graph_profile = (
++            model_runner.server_args.enable_shape_discovery_for_cuda_graph_profile
++        )
+         self.tp_size = model_runner.server_args.tp_size
+         self.dp_size = model_runner.server_args.dp_size
+         self.pp_size = model_runner.server_args.pp_size
+@@ -710,9 +722,41 @@ class CudaGraphRunner:
+         )
+ 
+     def _init_profile_context_and_memory_record(self):
++        rank = get_tensor_model_parallel_rank()
++
++        # Per-bs capture traces are opt-in via SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE.
++        # When it is unset the profiler still runs (for the summary tables and the
++        # memory snapshot in _post_process_after_profile), but no per-bs chrome
++        # trace is written to disk and on_trace_ready stays None.
++        on_trace_ready = None
++        if envs.SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE.get():
++            trace_dir = os.path.join(
++                os.environ.get("SGLANG_TORCH_PROFILER_DIR", "traces"), "capture_traces"
++            )
++            os.makedirs(trace_dir, exist_ok=True)
++
++            # Track which BS is currently being captured for trace file naming.
++            # Capture iterates large -> small, so the bs list is reversed.
++            self._profile_bs_list = list(reversed(self.capture_bs))
++            self._profile_bs_idx = 0
++
++            def on_trace_ready(prof):
++                bs = self._profile_bs_list[self._profile_bs_idx]
++                trace_file = os.path.join(trace_dir, f"bs_{bs}_rank{rank}.json.gz")
++                prof.export_chrome_trace(trace_file)
++                logger.info(f"Saved trace for bs={bs} to {trace_file}")
++                self._profile_bs_idx += 1
++
++        # Schedule: wait=2 (skip 2 dummy runs), warmup=0, active=1 (capture run)
++        # repeat=0 means repeat indefinitely for each batch size
+         profile_context = profile(
+             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
++            schedule=torch.profiler.schedule(wait=2, warmup=0, active=1, repeat=0),
+             record_shapes=True,
++            with_stack=True,
++            with_flops=True,
++            profile_memory=True,
++            on_trace_ready=on_trace_ready,
+         )
+         torch.cuda.memory._record_memory_history()
+         return profile_context
+@@ -732,11 +776,17 @@ class CudaGraphRunner:
+             + "\n\nMemory Usage is saved to cuda_graph_runner_memory_usage.pickle\n"
+         )
+         logger.info(log_message)
++        if self.enable_shape_discovery_for_cuda_graph_profile:
++            disable_kernel_shape_profiler()
+ 
+     def capture(self) -> None:
+         profile_context = empty_context()
++        # Holds the active torch profiler during capture so capture_one_batch_size
++        # can advance its schedule; None when profiling is disabled.
++        self._profiler = None
+         if self.enable_profile_cuda_graph:
+             profile_context = self._init_profile_context_and_memory_record()
++            self._profiler = profile_context
+ 
+         def _capture_one_stream(stream_idx: Optional[int] = None):
+             avail_mem = get_available_gpu_memory(
+@@ -796,6 +846,7 @@ class CudaGraphRunner:
+ 
+         if self.enable_profile_cuda_graph:
+             self._post_process_after_profile(prof)
++        self._profiler = None
+ 
+     def _capture_graph(self, graph, pool, stream, run_once_fn):
+         if self.model_runner.server_args.debug_cuda_graph:
+@@ -1033,12 +1084,36 @@ class CudaGraphRunner:
+                 if (c := self.model_runner.canary_manager) is not None
+                 else contextlib.nullcontext()
+             )
++            # When --enable-profile-cuda-graph is set, capture() created a torch
++            # profiler (schedule wait=2, active=1) and exposed it as _profiler.
++            # We step() past the two warmup runs so only the capture run is
++            # recorded, so each batch size produces its own trace via the
++            # profiler's on_trace_ready.
++            profiler = (
++                getattr(self, "_profiler", None)
++                if getattr(self, "enable_profile_cuda_graph", False)
++                else None
++            )
++
+             with canary_ctx:
+                 for _ in range(2):
+                     self.device_module.synchronize()
+                     self.model_runner.tp_group.barrier()
+                     run_once()
+                     attn_backend.on_after_cuda_graph_warmup()
++                    if profiler is not None:
++                        profiler.step()
++
++                # Activate the kernel shape profiler AFTER warmup runs so that
++                # lazily-imported modules (e.g. tilelang_kernel) are already in
++                # sys.modules and auto-discovery can find them. The capture run
++                # below then records shapes for the previously shape-less kernels.
++                if (
++                    self.enable_profile_cuda_graph
++                    and self.enable_shape_discovery_for_cuda_graph_profile
++                    and not is_kernel_shape_profiler_enabled()
++                ):
++                    enable_kernel_shape_profiler()
+ 
+                 if get_global_graph_memory_pool() is None:
+                     set_global_graph_memory_pool(self.device_module.graph_pool_handle())
+@@ -1049,6 +1124,9 @@ class CudaGraphRunner:
+                     graph, get_global_graph_memory_pool(), stream, run_once
+                 )
+ 
++                if profiler is not None:
++                    profiler.step()
++
+         return graph, out
+ 
+     def recapture_if_needed(self, forward_batch: ForwardBatch):
