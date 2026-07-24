@@ -522,8 +522,9 @@ class TreePerfAnalyzer:
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
 
-        for key, value in perf_model.impl_param.items():
-            dict_metrics[f"impl_param: {key}"] = value
+        if hasattr(perf_model, "impl_param"):
+            for key, value in perf_model.impl_param.items():
+                dict_metrics[f"impl_param: {key}"] = value
 
         return dict_metrics
 
@@ -3638,8 +3639,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
 
-        for key, value in perf_model.impl_param.items():
-            dict_metrics[f"impl_param: {key}"] = value
+        if hasattr(perf_model, "impl_param"):
+            for key, value in perf_model.impl_param.items():
+                dict_metrics[f"impl_param: {key}"] = value
 
         return dict_metrics
 
