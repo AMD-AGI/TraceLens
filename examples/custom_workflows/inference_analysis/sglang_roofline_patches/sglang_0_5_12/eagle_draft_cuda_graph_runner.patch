@@ -1,16 +1,16 @@
 diff --git a/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py b/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
-index a5fc8523b..106cbd3e7 100644
+index 1dd4bb039..c2153d6fd 100644
 --- a/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
 +++ b/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py
-@@ -27,6 +27,7 @@ from sglang.srt.model_executor.forward_batch_info import (
- from sglang.srt.model_executor.input_buffers import ForwardInputBuffers
- from sglang.srt.speculative.eagle_info import EagleDraftInput
- from sglang.srt.speculative.spec_utils import maybe_detect_nan, maybe_detect_oob
+@@ -30,6 +30,7 @@ from sglang.srt.speculative.spec_utils import (
+     maybe_detect_nan,
+     maybe_detect_oob,
+ )
 +from sglang.srt.utils.kernel_shape_profiler import enable, is_enabled
  from sglang.srt.utils import (
      require_attn_tp_gather,
      require_gathered_buffer,
-@@ -90,6 +91,9 @@ class EAGLEDraftCudaGraphRunner:
+@@ -93,6 +94,9 @@ class EAGLEDraftCudaGraphRunner:
          self.enable_profile_cuda_graph = (
              model_runner.server_args.enable_profile_cuda_graph
          )
@@ -20,10 +20,10 @@ index a5fc8523b..106cbd3e7 100644
          self.enable_pdmux = False
          self.deepep_adapter = DeepEPCudaGraphRunnerAdapter()
  
-@@ -211,6 +215,16 @@ class EAGLEDraftCudaGraphRunner:
-             torch.cuda.synchronize()
-             self.model_runner.tp_group.barrier()
-             run_once_fn()
+@@ -226,6 +230,16 @@ class EAGLEDraftCudaGraphRunner:
+             )
+             if hook is not None:
+                 hook()
 +            if self.enable_profile_cuda_graph:
 +                # Activate kernel shape profiler AFTER warmup runs so that all
 +                # lazily-imported modules (e.g. tilelang_kernel) are in sys.modules
@@ -37,7 +37,7 @@ index a5fc8523b..106cbd3e7 100644
  
      def _capture_graph(self, graph, pool, stream, run_once_fn):
          with torch.cuda.graph(graph, pool=pool, stream=stream):
-@@ -229,6 +243,11 @@ class EAGLEDraftCudaGraphRunner:
+@@ -244,6 +258,11 @@ class EAGLEDraftCudaGraphRunner:
      def capture(self):
          CudaGraphRunner.capture(self)
  
@@ -49,7 +49,7 @@ index a5fc8523b..106cbd3e7 100644
      def capture_one_batch_size(
          self, num_seqs: int, forward: Callable, stream_idx: int = 0
      ):
-@@ -358,6 +377,9 @@ class EAGLEDraftCudaGraphRunner:
+@@ -383,6 +402,9 @@ class EAGLEDraftCudaGraphRunner:
              graph, get_global_graph_memory_pool(), stream, run_once
          )
  
