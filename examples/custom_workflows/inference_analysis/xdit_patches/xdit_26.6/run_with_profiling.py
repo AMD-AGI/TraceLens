@@ -22,7 +22,7 @@ Single-compilation, two-pass profiling analogous to vLLM/SGLang patches:
       hipGraphLaunch → representative timing.
 
   Merge:  Handled at the tree level by
-      TraceLens.Trace2Tree.trace_capture_merge_diffusion.
+      TraceLens.Trace2Tree.trace_capture_merge_experimental.
 
   Same compilation for both passes → identical kernel names → 100% match.
 
@@ -158,7 +158,7 @@ def profile_one_pass(pipe, input_config, args, trace_dir, worker_name):
         ),
     ) as prof:
         with torch.profiler.record_function(
-            f"dit_forward_{args.height}x{args.width}_steps{args.steps}"
+            f"execute_diffusion_{args.height}x{args.width}_{args.precision}"
         ):
             with torch.no_grad():
                 run_pipeline(pipe, input_config, args)
@@ -225,7 +225,7 @@ def main():
             print(f"\nGenerate perf report with merged shapes:")
             print(f"  python TraceLens/Reporting/generate_perf_report_pytorch.py \\")
             print(f"    --profile_json_path {timing_trace} \\")
-            print(f"    --diffusion_shape_trace {shape_trace} \\")
+            print(f"    --capture_trace {shape_trace} \\")
             print(f"    --output_csvs_dir report/")
 
     if world_size > 1:

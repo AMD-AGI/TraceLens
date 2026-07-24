@@ -40,7 +40,9 @@ new = '''    def _compile_model(self, input_args: dict) -> None:
             record_shapes=True,
             with_stack=False,
         ) as capture_prof:
-            with record_function("graph_capture"):
+            _h = input_args.get("height", 0)
+            _w = input_args.get("width", 0)
+            with record_function(f"execute_diffusion_{_h}x{_w}_bf16"):
                 self._run_timed_pipe(input_args)
         capture_dir = _os.path.join(self.config.output_directory, "capture_traces")
         _os.makedirs(capture_dir, exist_ok=True)

@@ -27,7 +27,7 @@ Usage:
     # Then merge into customer's timing trace:
     python TraceLens/Reporting/generate_perf_report_pytorch.py \
         --profile_json_path customer_rank_0.trace.json.gz \
-        --diffusion_shape_trace output/shape_trace_rank_0.json.gz \
+        --capture_trace output/shape_trace_rank_0.json.gz \
         --output_csvs_dir report/
 
 How it works:
@@ -98,7 +98,7 @@ def main():
     log("To merge into a timing trace:")
     log(f"  python TraceLens/Reporting/generate_perf_report_pytorch.py \\")
     log(f"    --profile_json_path <timing_trace>.json.gz \\")
-    log(f"    --diffusion_shape_trace {shape_trace_path} \\")
+    log(f"    --capture_trace {shape_trace_path} \\")
     log(f"    --output_csvs_dir report/")
 
     runner.cleanup()

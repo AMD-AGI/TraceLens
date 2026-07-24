@@ -33,6 +33,7 @@ EXECUTE_CONTEXT_PATTERNS = (
         r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
     ),
     re.compile(r"execute_context_\d+\([\d_]+\)_generation_\d+\([\d_]+\)"),
+    re.compile(r"execute_diffusion_(\d+)x(\d+)_(\w+)"),
 )
 
 
@@ -642,7 +643,16 @@ def find_closest_batch_size(
 
 
 def find_execution_details(execution_root):
+    """Extract variant key from an execution root annotation name.
+
+    For vLLM: returns batch_size string (sum of parenthesized values).
+    For diffusion: returns ``"<H>x<W>_<precision>"`` variant key.
+    """
     name = execution_root["name"]
+    # Diffusion pattern: execute_diffusion_1024x1024_bf16
+    diffusion_match = re.match(r"execute_diffusion_(\d+x\d+_\w+)", name)
+    if diffusion_match:
+        return diffusion_match.group(1)
     if name.startswith("execute_context_"):
         paren_values = re.findall(r"\((\d+)\)", name)
         return str(sum(int(v) for v in paren_values))
@@ -650,40 +660,90 @@ def find_execution_details(execution_root):
 
 
 def merge_capture_trace_into_graph(
-    capture_folder: str,
-    metadata_json_path: str,
-    graph_tree_filepath: str,
+    capture_folder: str = None,
+    metadata_json_path: str = None,
+    graph_tree_filepath: str = None,
+    capture_trace_filepath: str = None,
 ) -> "TraceToTree":
-    """
-    Merge capture trace information into a graph replay trace.
+    """Merge capture trace information into a graph replay trace.
 
-    Extracts matching subtrees from capture and graph trees, validates alignment,
-    remaps UIDs/timestamps, and integrates capture events into the graph tree.
-    The result is a single augmented TraceToTree that combines both traces,
-    suitable for standard performance analysis APIs.
+    Supports two input modes:
 
-    Args:
-        capture_tree: TraceToTree from actual/capture execution
-        graph_tree: TraceToTree from graph/replay execution
-        add_python_func: If True, include python function events in tree structure (default: False)
+    1. **Folder mode** (vLLM/SGLang): ``capture_folder`` + ``metadata_json_path``
+       point to a directory of per-variant capture traces with a metadata JSON
+       index.  Variants are matched by batch size extracted from
+       ``execute_context_*`` execution root annotations in the graph tree.
+
+    2. **Single-file mode** (diffusion / general): ``capture_trace_filepath``
+       is a single capture trace file.  The capture trace is loaded and its
+       capture roots are paired with graph roots under each execution root.
+       When no execution root annotations are present, all capture roots are
+       paired to all graph roots directly.
 
     Returns:
-        Augmented graph_tree with capture information merged in
+        Augmented graph_tree with capture information merged in, or ``None``
+        if the merge failed.
     """
-    # Lazy import to avoid circular dependency
     from ..TreePerf.tree_perf import TreePerfAnalyzer
 
     graph_perf_analyzer = TreePerfAnalyzer.from_file(
         graph_tree_filepath, add_python_func=True
     )
-
     graph_tree = graph_perf_analyzer.tree
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
-    ##Use cuda graph APIs to find the root node for capture subtrees
+
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
-    capture_map, capture_batch_sizes = load_capture_folder(
-        capture_folder, metadata_json_path
-    )
+
+    # ── Single-file mode: load the capture trace as if it were a folder
+    #    with one entry, then fall through to the same per-execution-root
+    #    merge loop. ──
+    if capture_trace_filepath is not None:
+        key = ("single", os.path.abspath(capture_trace_filepath))
+        capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
+            key, capture_trace_filepath, TreePerfAnalyzer,
+        )
+        # Filter out empty capture roots (e.g. warm-up captures with no
+        # dispatch events).
+        non_empty = [
+            (cr, cd)
+            for cr, cd in zip(capture_roots, capture_root_data)
+            if cd[1]  # filtered_uids is non-empty
+        ]
+        if non_empty:
+            capture_roots = [x[0] for x in non_empty]
+            capture_root_data = [x[1] for x in non_empty]
+
+        if not execution_graph_root_map:
+            # No execution root annotations — collect all graphlaunch events
+            # and treat them as a single group.
+            all_graph_roots = [
+                e
+                for e in graph_tree.events
+                if "graphlaunch" in e.get("name", "").lower()
+            ]
+            all_graph_roots.sort(key=lambda x: x.get("ts", 0))
+            if all_graph_roots:
+                execution_graph_root_map = [
+                    ({"name": "fallback"}, all_graph_roots)
+                ]
+
+        # Build a synthetic capture_map so the per-execution-root loop below
+        # can look up capture data by variant key, same as folder mode.
+        # For single-file: all capture roots map to the same file/tree.
+        capture_map = {}
+        capture_batch_sizes = []
+        # Use the single capture tree for every variant lookup.
+        single_file_capture = (capture_tree, capture_roots, capture_root_data)
+    else:
+        single_file_capture = None
+
+    # ── Load capture data (folder mode) ──
+    if capture_trace_filepath is None:
+        capture_map, capture_batch_sizes = load_capture_folder(
+            capture_folder, metadata_json_path
+        )
+
+    # ── Per-execution-root merge loop (same for both modes) ──
     merge_failed = False
     for execution_root, graph_roots in execution_graph_root_map:
         print("Processing execution root: {}".format(execution_root["name"]))
@@ -694,28 +754,44 @@ def merge_capture_trace_into_graph(
                 )
             )
             continue
-        batch_size = find_execution_details(execution_root)
-        closest_batch_size = find_closest_batch_size(
-            int(batch_size), capture_batch_sizes
-        )
-        if closest_batch_size is None:
-            print(
-                "Warning: no capture batch size found for batch size {}".format(
-                    batch_size
-                )
-            )
-            continue
-        num_graph_roots = len(graph_roots)
-        if num_graph_roots != 1:
-            mode = "PIECEWISE"
+
+        # ── Resolve capture tree + roots for this execution root ──
+        if single_file_capture is not None:
+            # Single-file mode: reuse the same capture tree for all roots.
+            # All graph launches replay the same captured graph, so repeat
+            # capture roots to match the number of graph roots.
+            capture_tree, capture_roots, capture_root_data = single_file_capture
         else:
-            mode = "FULL"
-        str_key = "{}_{}".format(closest_batch_size, mode)
-        filepath = capture_map[str_key]
-        key = (str_key, os.path.abspath(filepath))
-        capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
-            key, filepath, TreePerfAnalyzer
-        )
+            # Folder mode: look up by batch size.
+            batch_size = find_execution_details(execution_root)
+            closest_batch_size = find_closest_batch_size(
+                int(batch_size), capture_batch_sizes
+            )
+            if closest_batch_size is None:
+                print(
+                    "Warning: no capture batch size found for batch size {}".format(
+                        batch_size
+                    )
+                )
+                continue
+            num_graph_roots = len(graph_roots)
+            if num_graph_roots != 1:
+                mode = "PIECEWISE"
+            else:
+                mode = "FULL"
+            str_key = "{}_{}".format(closest_batch_size, mode)
+            filepath = capture_map[str_key]
+            key = (str_key, os.path.abspath(filepath))
+            capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
+                key, filepath, TreePerfAnalyzer
+            )
+
+        # Repeat capture roots cyclically if fewer than graph roots
+        # (diffusion: all graph launches replay the same captured graph).
+        if len(capture_roots) < len(graph_roots):
+            n = len(graph_roots)
+            capture_roots = (capture_roots * (n // len(capture_roots) + 1))[:n]
+            capture_root_data = (capture_root_data * (n // len(capture_root_data) + 1))[:n]
 
         print(
             "Found {} capture roots and {} graph roots".format(
