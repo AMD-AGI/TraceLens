@@ -740,6 +740,11 @@ class TreePerfAnalyzer:
         if group_by_num_kernels and "num_kernels" in df_perf_metrics.columns:
             param_cols.append("num_kernels")
         groupby_cols = ["name"] + param_cols
+
+        # impl_param columns are not part of the group key — carry through as first
+        for col in df_perf_metrics.columns:
+            if col.startswith("impl_param: "):
+                dict_agg[col] = "first"
         # Convert parameter columns to strings to avoid type comparison issues
         df_perf_metrics = df_perf_metrics.copy()
         if (
@@ -769,6 +774,9 @@ class TreePerfAnalyzer:
 
         if "Compute Spec_first" in df_perf_metrics_summary.columns:
             rename_map["Compute Spec_first"] = "Compute Spec"
+        for col in df_perf_metrics_summary.columns:
+            if col.startswith("impl_param: ") and col.endswith("_first"):
+                rename_map[col] = col[: -len("_first")]
         if rename_map:
             df_perf_metrics_summary.rename(columns=rename_map, inplace=True)
 
@@ -784,14 +792,19 @@ class TreePerfAnalyzer:
             priority_cols.append("process_label")
         if "thread_name" in df_perf_metrics_summary.columns:
             priority_cols.append("thread_name")
+        impl_param_cols = [
+            col
+            for col in df_perf_metrics_summary.columns
+            if col.startswith("impl_param: ")
+        ]
         other_cols = [
             col
             for col in df_perf_metrics_summary.columns
-            if col not in priority_cols and col not in param_cols
+            if col not in priority_cols and col not in param_cols and col not in impl_param_cols
         ]
 
         df_perf_metrics_summary = df_perf_metrics_summary[
-            priority_cols + param_cols + other_cols
+            priority_cols + param_cols + impl_param_cols + other_cols
         ]
 
         if "Kernel Time (µs)_sum" in df_perf_metrics_summary.columns:
