@@ -1,0 +1,52 @@
+--- a/xfuser/model_executor/models/runner_models/base_model.py
++++ b/xfuser/model_executor/models/runner_models/base_model.py
+@@ -14,6 +14,7 @@
+ from xfuser.envs import (
+     environment_variables,
+ )
++import os
+ from xfuser.core.distributed import (
+     get_world_group,
+     get_runtime_state,
+@@ -427,11 +428,34 @@ class xFuserModel(abc.ABC):
+     def _run_warmup_calls(self, input_args: dict) -> None:
+         """ Run initial warmup calls if specified """
+         if self.config.warmup_calls:
++            capture_trace = None
+             log(f"Warming up model with {self.config.warmup_calls} calls...")
+             for iteration in range(self.config.warmup_calls):
+                 log(f"Warmup iteration {iteration + 1}/{self.config.warmup_calls}")
+-                self._run_timed_pipe(input_args)
++                if iteration == 0 and self.config.profile:
++                    # Profile the first warmup call — this is the graph capture
++                    # phase where torch.compile(mode="max-autotune") triggers
++                    # compilation + autotune + HIP graph recording.  During
++                    # capture, each kernel dispatches individually, so the
++                    # profiler records per-kernel cpu_op events with Input Dims,
++                    # Concrete Inputs, Input type.  This capture trace is saved
++                    # alongside the serving trace for TraceLens shape merging.
++                    log("Profiling graph capture phase for shape trace...")
++                    _h = input_args.get("height", 0)
++                    _w = input_args.get("width", 0)
++                    _dtype = {torch.bfloat16: "bf16", torch.float16: "fp16"}.get(
++                        self.pipe.transformer.dtype, "unknown")
++                    with profile(
++                        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
++                        record_shapes=True,
++                        with_stack=False,
++                    ) as capture_trace:
++                        with record_function(f"execute_diffusion_{_h}x{_w}_{_dtype}"):
++                            self._run_timed_pipe(input_args)
++                else:
++                    self._run_timed_pipe(input_args)
+             log(f"Warmup complete.")
++            if capture_trace is not None:
++                capture_dir = os.path.join(self.config.output_directory, "capture_traces")
++                os.makedirs(capture_dir, exist_ok=True)
++                rank = get_world_group().rank
++                capture_path = os.path.join(capture_dir, f"capture_rank_{rank}.json.gz")
++                capture_trace.export_chrome_trace(capture_path)
++                log(f"Capture trace saved to {capture_path}", log_from_all_processes=True)
+
+     def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:
+         """ Profile the model execution """
