@@ -52,11 +52,14 @@ class GEMM:
             self.param_details["B"] = 1
 
         if self.parsed_kernel_info is not None:
-            for key in ("transpose", "mt_m", "mt_n", "mt_k"):
-                self.param_details[key] = self.parsed_kernel_info.get(key) or "Unknown"
+            self.param_details["transpose"] = self.parsed_kernel_info.get("transpose") or "Unknown"
+            self.impl_param = {
+                key: self.parsed_kernel_info.get(key) or "Unknown"
+                for key in ("mt_m", "mt_n", "mt_k")
+            }
         else:
-            for key in ("transpose", "mt_m", "mt_n", "mt_k"):
-                self.param_details[key] = "Unknown"
+            self.param_details["transpose"] = "Unknown"
+            self.impl_param = {key: "Unknown" for key in ("mt_m", "mt_n", "mt_k")}
 
         self.B, self.M, self.N, self.K = (
             self.param_details["B"],

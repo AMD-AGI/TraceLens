@@ -522,6 +522,9 @@ class TreePerfAnalyzer:
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
 
+        for key, value in perf_model.impl_param.items():
+            dict_metrics[f"impl_param: {key}"] = value
+
         return dict_metrics
 
     def compute_fwd_perf_metrics(self, event, non_data_mov=False):
@@ -3634,6 +3637,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value
+
+        for key, value in perf_model.impl_param.items():
+            dict_metrics[f"impl_param: {key}"] = value
 
         return dict_metrics
 
