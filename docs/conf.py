@@ -27,6 +27,11 @@ extensions = ["rocm_docs"]
 
 external_toc_path = "./sphinx/_toc.yml"
 
+# rocm-docs-core (>=1.x) renders Jupyter notebooks through myst-nb. The tutorial
+# notebooks ship with their captured outputs and need traces or GPUs to run, so
+# don't re-execute them at build time.
+nb_execution_mode = "off"
+
 html_theme = "rocm_docs_theme"
 # fmt: off
 html_theme_options = {
@@ -35,21 +40,21 @@ html_theme_options = {
     "header_link": False,
     "version_list_link": False,
     "nav_secondary_items": {
-        "Hyperloom": "https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html",
+        "Support": "https://github.com/AMD-AGI/TraceLens/issues/new/choose",
         "GitHub": "https://github.com/AMD-AGI/TraceLens",
         "Community": False,
         "Blogs": "https://rocm.blogs.amd.com/",
         "ROCm Developer Hub": "https://www.amd.com/en/developer/resources/rocm-hub.html",
         "Instinct™ Docs": "https://instinct.docs.amd.com/",
         "Infinity Hub": "https://www.amd.com/en/developer/resources/infinity-hub.html",
-        "Support": "https://github.com/AMD-AGI/TraceLens/issues/new/choose",
+        "Hyperloom": "https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html",
     },
     "link_main_doc": False,
 }
 # fmt: on
 
 setting_all_article_info = True
-all_article_info_os = ["linux"]
+all_article_info_os = []
 all_article_info_author = ""
 
 html_title = f"{project} {version} documentation"
