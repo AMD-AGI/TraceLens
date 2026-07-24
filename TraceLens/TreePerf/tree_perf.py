@@ -800,7 +800,9 @@ class TreePerfAnalyzer:
         other_cols = [
             col
             for col in df_perf_metrics_summary.columns
-            if col not in priority_cols and col not in param_cols and col not in impl_param_cols
+            if col not in priority_cols
+            and col not in param_cols
+            and col not in impl_param_cols
         ]
 
         df_perf_metrics_summary = df_perf_metrics_summary[

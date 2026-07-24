@@ -179,31 +179,22 @@ def parse_ck_gemm(kernel_name):
     GRIDWISE_CONFIG = {
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_moe_gemm_m_x.html
         "MoeGemmMX": (18, 19, 20, True),
-
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multi_d___a_b_scale__xdl__cshuffle__v3.html
         "GridwiseGemmMultiD_ABScale": (18, 19, 20, True),
-
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multi_d__blockscale__xdl__cshuffle__v3__b__preshuffle.html
         "GridwiseGemmMultiD_blockscale": (18, 19, 20, True),
-
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_moe_gemm_block_scale.html
         "MoeGemmBlockScale": (18, 19, 20, True),
-
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multi_d__xdl__cshuffle__v3__b__preshuffle.html
         "GridwiseGemmMultiD_xdl_cshuffle_v3_b_preshuffle": (15, 16, 17, True),
-
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multi_d__xdl__cshuffle__v3.html
         "GemmMultiD_xdl": (15, 16, 17, True),
-
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_moe_gemm.html
         "GridwiseMoeGemm": (15, 16, 17, True),
-
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm__xdl__cshuffle__v3.html
         "GridwiseGemm_xdl_cshuffle_v3": (13, 14, 15, True),
-
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm_multiple_d__xdl__cshuffle.html
         "GridwiseGemmMultipleD_xdl_cshuffle": (13, 14, 15, False),
-
         # https://rocm.docs.amd.com/projects/composable_kernel/en/docs-7.1.0/doxygen/html/structck_1_1_gridwise_gemm__bk0mk1__bk0nk1__mn__xdlops__bwd__weight.html
         "GridwiseGemm_bk0mk1": (12, 13, 14, False),
     }
