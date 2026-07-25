@@ -741,7 +741,6 @@ class TreePerfAnalyzer:
         if group_by_num_kernels and "num_kernels" in df_perf_metrics.columns:
             groupby_cols.append("num_kernels")
 
-        # impl_param columns are not part of the group key — carry through as first
         for col in df_perf_metrics.columns:
             if col.startswith("impl_param: "):
                 dict_agg[col] = "first"
