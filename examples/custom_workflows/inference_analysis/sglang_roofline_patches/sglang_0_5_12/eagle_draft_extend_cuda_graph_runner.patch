@@ -1,10 +1,10 @@
 diff --git a/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py b/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py
-index a5ae5b5b3..add252bba 100644
+index 0f41562fa..88bb77b28 100644
 --- a/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py
 +++ b/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py
 @@ -28,6 +28,7 @@ from sglang.srt.model_executor.forward_batch_info import (
  from sglang.srt.model_executor.input_buffers import ForwardInputBuffers
- from sglang.srt.speculative.eagle_info import EagleDraftInput
+ from sglang.srt.speculative.eagle_info import EagleDraftExtendInput
  from sglang.srt.speculative.spec_utils import fast_topk
 +from sglang.srt.utils.kernel_shape_profiler import enable, is_enabled
  from sglang.srt.utils import (
@@ -20,7 +20,7 @@ index a5ae5b5b3..add252bba 100644
          self.enable_pdmux = False
          self.deepep_adapter = DeepEPCudaGraphRunnerAdapter()
  
-@@ -276,6 +280,16 @@ class EAGLEDraftExtendCudaGraphRunner:
+@@ -258,6 +262,16 @@ class EAGLEDraftExtendCudaGraphRunner:
              torch.cuda.synchronize()
              self.model_runner.tp_group.barrier()
              run_once_fn()
@@ -37,7 +37,7 @@ index a5ae5b5b3..add252bba 100644
  
      def _capture_graph(self, graph, pool, stream, run_once_fn):
          with torch.cuda.graph(graph, pool=pool, stream=stream):
-@@ -296,6 +310,11 @@ class EAGLEDraftExtendCudaGraphRunner:
+@@ -278,6 +292,11 @@ class EAGLEDraftExtendCudaGraphRunner:
      def capture(self):
          CudaGraphRunner.capture(self)
  
@@ -49,7 +49,7 @@ index a5ae5b5b3..add252bba 100644
      def capture_one_batch_size(self, bs: int, forward: Callable, stream_idx: int = 0):
          buffers = self.buffers
          graph = self._create_graph()
-@@ -441,6 +460,9 @@ class EAGLEDraftExtendCudaGraphRunner:
+@@ -426,6 +445,9 @@ class EAGLEDraftExtendCudaGraphRunner:
              graph, get_global_graph_memory_pool(), stream, run_once
          )
  

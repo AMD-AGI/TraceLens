@@ -43,7 +43,7 @@ supported for vLLM and SGLang (proposed patches required).
 ## Before you begin
 
 - TraceLens installed (see [Install TraceLens](../install/install.md)).
-- An LLM inference setup to profile (this guide uses vLLM or SGLang on MI300X).
+- An LLM inference setup to profile (this guide uses vLLM or SGLang on AMD Instinct™ MI300X).
 
 ## Collect inference traces
 
@@ -162,7 +162,7 @@ To apply them:
 
 #### Collection parameters
 
-- *Steady-state window*: Inference traces are large. Most serving benchmarks use
+- **Steady-state window**: Inference traces are large. Most serving benchmarks use
   `NUM_PROMPTS = 10 * CONC` with OSL sampling ratio R. Trace
   `((R+1)/2) * 5 * OSL ± (16 * OSL / CONC)` execution steps to capture peak
   concurrency with a prefill-decode mix. See
@@ -170,9 +170,9 @@ To apply them:
   for the derivation. You may need to raise the trace-store timeout in some
   frameworks to allow writing the trace mid-execution (for example
   `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200` for vLLM).
-- *Graph-capture mode*: The recommended patch traces the graph-capture phase and
+- **Graph-capture mode**: The recommended patch traces the graph-capture phase and
   stores the corresponding trace files.
-- *Profiler setup*: Enable CPU-side call-stack and shape capture (for example,
+- **Profiler setup**: Enable CPU-side call-stack and shape capture (for example,
   vLLM's `profiler-config.torch_profiler_record_shapes` and
   `profiler-config.torch_profiler_with_stack`).
 
@@ -202,7 +202,7 @@ Example - enable both flags alongside a steady-state window profile:
 `capture_torch_profiler_dir` is only available when `--profiler-config.profiler torch`
 is set. The capture trace is written once at server startup during HIP/CUDA-graph
 construction; the steady-state replay trace is written to `torch_profiler_dir`
-during the benchmark. Pass both paths to the report generator via
+during the benchmark. Pass both paths to the report generator using
 `--capture_folder` and `--profile_json_path` respectively.
 ```
 

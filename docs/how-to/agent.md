@@ -25,9 +25,9 @@ analysis for repeatable, reliable results.
 
 The agent runs in one of two modes:
 
-- *Standalone*: Single-trace roofline analysis. Use this when you have one trace
+- **Standalone**: Single-trace roofline analysis. Use this when you have one trace
   and want to find where performance falls short of hardware limits, find system bottlenecks or fusion opportunities. This is the recommended default.
-- *Comparative*: Two-trace gap analysis. The agent compares a primary trace
+- **Comparative**: Two-trace gap analysis. The agent compares a primary trace
   against a reference trace, for example a different platform or a tuned config,
   and identifies inefficiencies in the primary trace relative to the reference.
   Comparative analysis works best when both traces come from the same framework.
@@ -44,6 +44,8 @@ Support depends on the execution mode of the traced workload:
 
 ## Before you begin
 
+Complete the following setup steps before running the agent.
+
 ### Install TraceLens
 
 Install locally, or into your container or virtual environment (see
@@ -58,17 +60,17 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 The orchestrator runs against a single `torch.profiler` trace (`.json` or
 `.json.gz`). Collection is workload-specific:
 
-- *Generic Eager Traces*: Instrument your loop with
+- **Generic Eager Traces**: Instrument your loop with
   `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture
   (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state
   window of a handful of post-warmup steps, then log the trace with
   `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank
   analysis.
-- *Inference Traces with Graph Capture*: Collection has framework-specific
+- **Inference Traces with Graph Capture**: Collection has framework-specific
   requirements. Follow
   [Generate a PyTorch inference performance report](./generate-perf-report-pytorch-inference.md).
   The Profiling Skill automates
-  vLLM/SGLang benchmarking and PyTorch profiler trace collection via
+  vLLM/SGLang benchmarking and PyTorch profiler trace collection using
   Magpie, producing analysis-ready traces. For
   graph-mode workloads you produce two artifacts: a graph-replay trace and a
   graph-capture folder. In inference mode with execution mode
@@ -178,12 +180,12 @@ without parsing prose:
 
 The workflow splits into three independently composable tiers:
 
-- *System-level optimizations*: Issues that affect the GPU pipeline as a whole,
+- **System-level optimizations**: Issues that affect the GPU pipeline as a whole,
   such as idle time, memory-copy overhead, collective-communication blocking, and
   compute/communication overlap.
-- *Kernel fusion opportunities* (experimental): Multi-kernel modules that could be
+- **Kernel fusion opportunities** (experimental): Multi-kernel modules that could be
   fused, with estimated savings.
-- *Compute kernel optimizations*: Per-category kernel analysis (GEMM, attention,
+- **Compute kernel optimizations**: Per-category kernel analysis (GEMM, attention,
   elementwise, etc.) focused on individual operation efficiency.
 
 The analysis orchestrator skill coordinates the workflow: it queries user
