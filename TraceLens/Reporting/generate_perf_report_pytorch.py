@@ -447,7 +447,7 @@ def generate_perf_report_pytorch(
     add_python_func = True if include_call_stack else False
     perf_analyzer = TreePerfAnalyzer.from_file(
         profile_filepath=profile_json_path,
-        capture_trace_filepath=capture_trace,
+        capture_folder=capture_trace,
         arch=gpu_arch_json,
         python_path=python_path,
         include_unlinked_kernels=include_unlinked_kernels,
