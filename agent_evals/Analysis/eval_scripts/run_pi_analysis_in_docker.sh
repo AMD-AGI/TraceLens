@@ -415,7 +415,7 @@ PY
             echo "==> Inference server ready (after $((SECONDS - wait_started))s)"
             break
         fi
-        if ! kill -0 "$SERVER_PID" 2>/dev/null && ! pgrep -f "[v]llm serve" >/dev/null; then
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
             echo "Inference server exited early. Last log lines:" >&2
             tail -n 40 "$SERVER_LOG" >&2 || true
             die "Inference server died before /v1/models became available"
