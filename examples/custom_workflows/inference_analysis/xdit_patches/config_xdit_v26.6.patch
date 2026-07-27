@@ -1,5 +1,5 @@
 --- a/xfuser/model_executor/models/runner_models/base_model.py	2026-07-24 15:12:48.913361106 -0400
-+++ b/xfuser/model_executor/models/runner_models/base_model.py	2026-07-27 15:05:35.879921872 -0400
++++ b/xfuser/model_executor/models/runner_models/base_model.py	2026-07-27 17:04:30.923086733 -0400
 @@ -3,6 +3,7 @@
  import copy
  import argparse
@@ -55,3 +55,12 @@
  
      def _enable_options(self) -> None:
          """ Enable model options based on config"""
+@@ -451,7 +490,7 @@
+             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+             schedule=schedule,
+             record_shapes=True,
+-            with_stack=False,
++            with_stack=True,
+         ) as profile_object:
+             for iteration in range(num_repetitions):
+                 log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
