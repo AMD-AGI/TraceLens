@@ -558,8 +558,13 @@ def find_graph_roots_under_execution(execution_root, graphlaunch_events):
     return graph_roots
 
 
-def build_execution_graph_root_map(graph_tree):
-    """Build a list of ``(execution_root, [graph_roots])`` for the graph tree."""
+def build_execution_graph_root_map(graph_tree, single_capture_trace=False):
+    """Build a list of ``(execution_root, [graph_roots])`` for the graph tree.
+
+    When *single_capture_trace* is True and no execution root annotations
+    are found, falls back to grouping all ``hipGraphLaunch`` events under
+    a single synthetic entry.
+    """
     execution_roots = find_execution_roots(graph_tree)
     print("Found {} execution roots in graph tree".format(len(execution_roots)))
 
@@ -567,6 +572,12 @@ def build_execution_graph_root_map(graph_tree):
     graphlaunch_events = [
         e for e in graph_tree.events if "graphlaunch" in e.get("name", "").lower()
     ]
+
+    if not execution_roots and single_capture_trace:
+        graphlaunch_events.sort(key=lambda x: x.get("ts", 0))
+        if graphlaunch_events:
+            return [({"name": "fallback"}, graphlaunch_events)]
+        return []
 
     result = []
     for exec_root in execution_roots:
@@ -682,7 +693,9 @@ def merge_capture_trace_into_graph(
     graph_tree = graph_perf_analyzer.tree
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
 
-    execution_graph_root_map = build_execution_graph_root_map(graph_tree)
+    execution_graph_root_map = build_execution_graph_root_map(
+        graph_tree, single_capture_trace=single_capture_trace
+    )
 
     # ── Load capture data ──
     if single_capture_trace:
@@ -698,18 +711,6 @@ def merge_capture_trace_into_graph(
         capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
             key, filepath, TreePerfAnalyzer,
         )
-
-        if not execution_graph_root_map:
-            all_graph_roots = [
-                e
-                for e in graph_tree.events
-                if "graphlaunch" in e.get("name", "").lower()
-            ]
-            all_graph_roots.sort(key=lambda x: x.get("ts", 0))
-            if all_graph_roots:
-                execution_graph_root_map = [
-                    ({"name": "fallback"}, all_graph_roots)
-                ]
     else:
         capture_map, capture_batch_sizes = load_capture_folder(
             capture_folder, metadata_json_path
