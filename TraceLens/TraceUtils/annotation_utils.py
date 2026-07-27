@@ -16,19 +16,49 @@ import re
 from typing import Callable, List
 
 # --- patterns --------------------------------------------------------------
+# Each block lists matching annotations, prefill/decode/mixed where the format
+# has all three. The detailed variants carry the sq/sk roofline aggregates and
+# are supersets of their native counterparts; examples too long for one line
+# continue on an indented line.
+
+# execute_14721_context_2(sq14721sk14721sqsq108745533sqsk108745533)
+#     _generation_0(sq0sk0sqsq0sqsk0)
+# execute_64_context_0(sq0sk0sqsq0sqsk0)_generation_64(sq64sk131072sqsq64sqsk131072)
+# execute_6147_context_2(sq6144sk7144sqsq20971520sqsk23019520)
+#     _generation_3(sq3sk6144sqsq3sqsk6144)
 VLLM_DETAILED_PATTERN = re.compile(
     r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
 )
+# execute_context_2(14721)_generation_0(0)
+# execute_context_0(0)_generation_64(64)
+# execute_context_2(6144)_generation_3(3)
 VLLM_NATIVE_PATTERN = re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)")
 
+# step[EXTEND bs=2 toks=14721 c_sq=14721 c_sqsq=108745533 c_sqsk=108745533 c_sk=14721]
+# step[DECODE bs=64 g_sq=128 g_sqsq=256 g_sqsk=262144 g_sk=131072]  <- MTP: g_sq > bs
+# step[MIXED bs=2 c=1 g=1 c_sq=5 c_sk=8 c_sqsq=25 c_sqsk=40
+#     g_sq=1 g_sk=12 g_sqsq=1 g_sqsk=12]
 SGLANG_DETAILED_PATTERN = re.compile(
     r"step\[(?:EXTEND|DECODE|MIXED)\b[^\]]*sqsq=\d+[^\]]*\]"
 )
+# step[EXTEND bs=2 toks=14721]
+# step[DECODE bs=64]
+# step[MIXED bs=2]  <- neither toks nor sq/sk, so bs is the only count
 SGLANG_NATIVE_PATTERN = re.compile(r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]")
 
+# prefill[bs=2 tok=14721 ctx=[7803, 6918]]
+# prefill[bs=6 tok=17408 ctx=[4096, 4096, 4096]...+3]  <- ctx truncated past 5
+# decode[bs=64 tok=64 d=64]
+# decode[bs=117/128 tok=117 d=117]  <- CUDAGraph padding, real batch is 117
 ATOM_NATIVE_PATTERN = re.compile(r"^(prefill|decode)\[(.*)\]")
+# prefill[bs=2 tok=14721 ctx=[7803, 6918] sqsq=108745533 sqsk=108745533 sk=14721]
+# decode[bs=32 tok=128 d=32 spec=3 sqsq=512 sqsk=262144 sk=65536]
+# decode[bs=128 tok=384 p=2 d=126 sqsq=132612 sqsk=1114112 sk=258048 tbo=1]
 ATOM_DETAILED_PATTERN = re.compile(r"^(prefill|decode)\[.*sqsq=\d+.*\]")
 
+# capture_128_decode
+# capture_1_prefill
+# capture_256_mixed_prefill
 CAPTURE_PATTERN = re.compile(r"capture_(\d+)_(.*)")
 
 # Root-discovery priority: PRIMARY (detailed) patterns are tried first and
@@ -74,6 +104,7 @@ def _fill_vllm_detailed(ann, name):
     ann.g_sq, ann.g_sk = _safe_int(p[13]), _safe_int(p[14])
     ann.g_sqsq, ann.g_sqsk = _safe_int(p[15]), _safe_int(p[16])
     ann.context_sum, ann.generation_sum = ann.c_sq, ann.g_sq
+    ann.batch_size = ann.c_sq + ann.g_sq
     ann.has_sqsk = True
 
 
@@ -82,6 +113,7 @@ def _fill_vllm_native(ann, name):
     ann.context_requests, ann.generation_requests = _safe_int(p[2]), _safe_int(p[6])
     ann.context_sum, ann.generation_sum = _safe_int(p[3]), _safe_int(p[7])
     ann.c_sq, ann.g_sq = ann.context_sum, ann.generation_sum
+    ann.batch_size = ann.c_sq + ann.g_sq
 
 
 def _fill_sglang_native(ann, name):
@@ -93,11 +125,10 @@ def _fill_sglang_native(ann, name):
     toks = int(m.group(3) or 0)
     if kind_word == "DECODE":
         ann.generation_requests = ann.generation_sum = ann.g_sq = bs
-        ann.meta["batch_size"] = bs
     else:  # EXTEND / MIXED treated as prefill; toks = total prompt tokens.
         ann.context_requests = bs
         ann.context_sum = ann.c_sq = toks
-        ann.meta["batch_size"] = toks or bs
+    ann.batch_size = ann.c_sq + ann.g_sq or bs
 
 
 def _fill_sglang_detailed(ann, name):
@@ -119,15 +150,13 @@ def _fill_sglang_detailed(ann, name):
     )
     if mode == "DECODE":
         ann.generation_requests, ann.generation_sum = bs, ann.g_sq
-        ann.meta["batch_size"] = bs
     elif mode == "EXTEND":
         ann.context_requests, ann.context_sum = bs, ann.c_sq
-        ann.meta["batch_size"] = toks or bs
     else:  # MIXED: c=/g= are per-group request counts.
         ann.context_requests = _safe_int(kv.get("c", 0))
         ann.generation_requests = _safe_int(kv.get("g", 0))
         ann.context_sum, ann.generation_sum = ann.c_sq, ann.g_sq
-        ann.meta["batch_size"] = bs
+    ann.batch_size = ann.c_sq + ann.g_sq or toks or bs
     ann.has_sqsk = True
 
 
@@ -141,8 +170,6 @@ def _fill_atom(ann, name):
     if not m:
         return False
     phase, body = m.group(1), m.group(2)
-    # Values may be bracketed lists with internal spaces (e.g. ctx=[a, b]...+N),
-    # so match key=value pairs rather than splitting on whitespace.
     kv = dict(re.findall(r"(\w+)=(\[[^\]]*\](?:\.\.\.\+\d+)?|\S+)", body))
     bs = _first_int(kv.get("bs", 0))  # real batch; ignore CUDAGraph pad
     tokens = _safe_int(kv.get("tok", 0))
@@ -166,6 +193,7 @@ def _fill_atom(ann, name):
                 ann.meta[k] = _safe_int(kv[k])
     if "tbo" in kv:
         ann.meta["tbo"] = True
+    ann.batch_size = tokens  # tok= is already the whole batch dimension
     ann.has_sqsk = detailed
 
 
@@ -173,20 +201,7 @@ class IterationAnnotation:
     """Iteration/execution annotation.
 
     Formats are matched by **priority**: ``FORMATS`` is tried top-to-bottom and
-    the first entry whose pattern matches *and* whose parser does not return
-    ``False`` wins (``kind`` is set and matching stops). Order is therefore
-    significant, because some patterns are supersets of others:
-
-    - ``SGLANG_NATIVE_PATTERN`` / ``ATOM_NATIVE_PATTERN`` (the base labels) also
-      match their own *detailed* labels, so each ``*_detailed`` entry MUST be
-      listed **before** its ``*_native`` counterpart. Otherwise a detailed label
-      would be misclassified as native and its sqsq/sqsk/sk fields dropped.
-    - vLLM detailed vs native are mutually exclusive under ``re.match`` (native
-      anchors ``execute_context_``, detailed has ``execute_<n>_context_``), but
-      detailed is still listed first for consistency.
-
-    ``register_format`` appends to the end (lowest priority); insert into
-    ``FORMATS`` manually if a custom format must take precedence.
+    the first entry whose pattern matches. Order is therefore significant.
     """
 
     # (kind, pattern, parser); tried in priority order at construction time.
@@ -207,6 +222,7 @@ class IterationAnnotation:
         self.generation_requests = 0
         self.context_sum = 0
         self.generation_sum = 0
+        self.batch_size = 1
         self.c_sq = self.c_sk = self.c_sqsq = self.c_sqsk = 0
         self.g_sq = self.g_sk = self.g_sqsq = self.g_sqsk = 0
         self.has_sqsk = False
@@ -229,10 +245,6 @@ class IterationAnnotation:
     @property
     def num_requests(self) -> int:
         return self.context_requests + self.generation_requests
-
-    @property
-    def batch_size(self) -> int:
-        return self.meta.get("batch_size", self.c_sq + self.g_sq)
 
     def _details(self) -> dict:
         return {
@@ -278,7 +290,7 @@ class IterationAnnotation:
             "g_sqsq": self.g_sqsq,
             "g_sqsk": self.g_sqsk,
             "num_requests": self.num_requests,
-            "batch_size": self.c_sq + self.g_sq,
+            "batch_size": self.batch_size,
             "has_sqsk": self.has_sqsk,
         }
 
@@ -334,7 +346,6 @@ class CaptureAnnotation:
         return self.kind is not None
 
 
-# --- event helpers ---------------------------------------------------------
 def annotation_str_from_event(event: dict) -> str:
     return event.get("annotation") or event.get("name", "")
 
