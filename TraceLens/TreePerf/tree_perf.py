@@ -161,7 +161,7 @@ class TreePerfAnalyzer:
     @staticmethod
     def from_file(
         profile_filepath,
-        capture_folder=None,
+        capture_trace_filepath=None,
         jax: bool = False,
         enable_pseudo_ops: bool = False,
         tree_postprocess_extension=None,
@@ -227,15 +227,12 @@ class TreePerfAnalyzer:
             trace_metadata=trace_metadata,
         )
 
-        # Optionally merge capture trace into graph tree.
-        # The merge function builds the tree internally, so skip rebuild.
-        merged = False
-        if capture_folder is not None:
+        # Optionally merge capture trace into graph tree
+        if capture_trace_filepath is not None:
             tree = merge_capture_trace_into_graph(
-                capture_folder=capture_folder,
+                capture_tree_filepath=capture_trace_filepath,
                 graph_tree_filepath=profile_filepath,
             )
-            merged = True
 
         return TreePerfAnalyzer(
             tree,
@@ -243,7 +240,6 @@ class TreePerfAnalyzer:
             event_to_category=categorizer,
             enable_pseudo_ops=enable_pseudo_ops,
             tree_postprocess_extension=tree_postprocess_extension,
-            rebuild_tree=not merged,
             *args,
             **kwargs,
         )

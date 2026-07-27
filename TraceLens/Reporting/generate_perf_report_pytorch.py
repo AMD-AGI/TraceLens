@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
@@ -445,18 +446,35 @@ def generate_perf_report_pytorch(
         gpu_arch=gpu_arch,
     )
     add_python_func = True if include_call_stack else False
-    perf_analyzer = TreePerfAnalyzer.from_file(
-        profile_filepath=profile_json_path,
-        capture_folder=capture_trace,
-        arch=gpu_arch_json,
-        python_path=python_path,
-        include_unlinked_kernels=include_unlinked_kernels,
-        enable_pseudo_ops=enable_pseudo_ops,
-        add_python_func=add_python_func,
-        detect_recompute=detect_recompute,
-        enable_origami=enable_origami,
-        inductor_cache_dir=inductor_cache_dir,
-    )
+    if capture_trace is not None:
+        augmented_tree = merge_capture_trace_into_graph(
+            capture_folder=capture_trace,
+            graph_tree_filepath=profile_json_path,
+        )
+        perf_analyzer = TreePerfAnalyzer(
+            tree=augmented_tree,
+            arch=gpu_arch_json,
+            python_path=python_path,
+            include_unlinked_kernels=include_unlinked_kernels,
+            enable_pseudo_ops=enable_pseudo_ops,
+            add_python_func=add_python_func,
+            detect_recompute=detect_recompute,
+            enable_origami=enable_origami,
+            inductor_cache_dir=inductor_cache_dir,
+            rebuild_tree=False,
+        )
+    else:
+        perf_analyzer = TreePerfAnalyzer.from_file(
+            profile_filepath=profile_json_path,
+            arch=gpu_arch_json,
+            python_path=python_path,
+            include_unlinked_kernels=include_unlinked_kernels,
+            enable_pseudo_ops=enable_pseudo_ops,
+            add_python_func=add_python_func,
+            detect_recompute=detect_recompute,
+            enable_origami=enable_origami,
+            inductor_cache_dir=inductor_cache_dir,
+        )
 
     ## Apply annotation for vLLM eager and replay phase
     perf_analyzer.tree.apply_annotation(
