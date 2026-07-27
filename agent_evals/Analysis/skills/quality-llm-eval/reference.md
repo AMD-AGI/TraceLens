@@ -4,20 +4,11 @@ Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
----
-name: Quality LLM Eval
-description: Run LLM-based quality evals comparing analysis output against a reference and produce a results CSV.
-triggers:
-  - quality LLM eval
-  - run quality LLM eval
-tools:
-  - file_read
-  - file_write
----
+# Quality LLM eval — reference
 
-# Quality LLM Eval
+Detailed rubrics and CSV output format for **quality-llm-eval** ([SKILL.md](SKILL.md)) — evals 2 and 3.
 
-Evaluate the analysis output for semantic quality by comparing against a reference report.
+---
 
 ## Inputs
 

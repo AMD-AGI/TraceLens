@@ -4,26 +4,13 @@ Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
----
-name: Analysis Orchestrator
-description: Analyze a PyTorch trace end-to-end and produce a prioritized performance report with system-level and compute-kernel optimization recommendations.
-triggers:
-  - follow the analysis orchestrator
-  - agentic analysis workflow
-  - analyze trace
-tools:
-  - terminal
-  - file_read
-  - file_write
----
+# Analysis orchestrator — reference
 
-# Analysis Orchestrator
+This document is the detailed specification for the TraceLens **analysis-orchestrator** skill ([SKILL.md](SKILL.md)). Read it when executing the workflow: step-by-step user prompts, CLI commands, subagent contracts, validation, report assembly, and trace diagnostics.
 
-Orchestrate modular PyTorch trace analysis using a **two-tier architecture**:
-- **System-Level Analysis** (Step 6): CPU/idle time + Kernel Fusion + Multi-kernel issues (memcpy, communication blocking, overlap)
-- **Compute Kernel Analysis** (Step 7): Per-category kernel efficiency (GEMM, SDPA, elementwise, etc.)
+## Workflow overview
 
-**Role**: Load trace once (primary trace), pre-compute tree data, filter by category, invoke system-level and compute kernel subagents in parallel, and aggregate results into independently composable report sections. For **standalone** mode this will be a single trace, roofline analysis. For **comparative** mode this will be a baseline vs target trace comparative analysis.
+The orchestrator runs a staged pipeline (Steps 0–11): collect inputs and environment prefix, generate perf reports, prepare category data via `orchestrator_prepare.py`, run system-level and compute-kernel subagents in parallel, aggregate and validate findings, identify the model, render plots when no extension is present, and write `analysis.md` via remote `tee` heredocs. Only Steps 6, 7, and 9 delegate to Task subagents; all other steps run in the main agent.
 
 ---
 
@@ -305,7 +292,7 @@ Launch system-level sub-agents simultaneously using the Task tool. Do NOT wait b
 
 **System-Level Agent File Map:**
 
-**Base path:** `TraceLens/Agent/Analysis/.cursor/agents/`
+**Base path:** `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/`
 
 | Category | Agent file |
 |----------|-----------|
@@ -324,7 +311,7 @@ The subagent reads its own agent file — the orchestrator does NOT read or past
 
 ```
 Read and follow the FULL instructions in:
-  TraceLens/Agent/Analysis/.cursor/agents/<agent-file>.md
+  TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/<agent-file>.md
 
 **Execution Context:**
 - Comparison scope: `<comparison_scope>`
@@ -374,7 +361,7 @@ Use `compute_categories` from the `load_manifest_categories()` call in Step 6.1.
 
 ### 7.2 Launch Compute Kernel Subagents in PARALLEL
 
-For each entry in `compute_categories` (loaded in Step 6.1), resolve `{agent_file}` as `{entry.skill}.md` and launch a subagent with agent file `TraceLens/Agent/Analysis/.cursor/agents/{agent_file}`. Fall back to `generic-op-analyzer.md` if the file is absent.
+For each entry in `compute_categories` (loaded in Step 6.1), resolve `{agent_file}` as `{entry.skill}.md` and launch a subagent with agent file `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/{agent_file}`. Fall back to `generic-op-analyzer.md` if the file is absent.
 
 Launch all subagents simultaneously in a single parallel batch.
 
@@ -421,7 +408,7 @@ You are analyzing {category} operations for a PyTorch trace on {platform}.
 <Shared Compute Kernel Preamble>
 
 Read and follow the FULL instructions in:
-  TraceLens/Agent/Analysis/.cursor/agents/{agent_file}
+  TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/{agent_file}
 
 - Category: {category}
 - Input files: category_data/{category}_ops.csv, metadata/{category}_metadata.json,
@@ -494,7 +481,7 @@ load_findings(sys.argv[1])
 
 ### 9.1 Model Identification (Subagent, retry once on failure)
 
-Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/Agent/Analysis/.cursor/agents/model-identification-agent.md` with context: <output_dir>. Wait for completion.
+Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/model-identification-agent.md` with context: <output_dir>. Wait for completion.
 
 **On failure (subagent error, timeout, or `model_info.json` not written):**
 1. **Retry exactly once** by re-launching the same subagent with the same prompt.
@@ -531,7 +518,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
 
 **CRITICAL: Do NOT delegate Step 11 to a Task subagent.** The orchestrator must write the report directly.
 
-1. **Read** the report template: `TraceLens/Agent/Analysis/utils/templates/analysis_template.md`
+1. **Read** the report template: `TraceLens/Agent/Analysis/skills/analysis-orchestrator/templates/analysis_template.md`
 2. **Write the report in sections** to `<output_dir>/analysis.md` using **only** `<prefix> tee` / `<prefix> tee -a` with single-quoted heredoc delimiters (see write order below). You MUST NOT use the IDE Write tool, Edit tool, StrReplace tool, `cat >`, `echo >`, `>>` redirect, or any other write method for `analysis.md` unless tee fails.
 3. **Fill in** each section by substituting placeholders with actual data. Never retain template placeholders (`<Brief Title>`, `X ms`, `Y%`, `<platform>`, `<model>`) — every field must contain actual data.
 

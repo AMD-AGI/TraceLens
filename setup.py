@@ -37,8 +37,7 @@ setup(
     package_data={
         "TraceLens": [
             "**/*.md",
-            "Agent/**/.cursor/skills/*",
-            "Agent/**/.cursor/agents/*",
+            "Agent/**/skills/**/*",
             "Agent/Analysis/utils/arch/*.json",
         ],
     },
