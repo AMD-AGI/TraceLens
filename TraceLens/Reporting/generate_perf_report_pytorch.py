@@ -450,6 +450,7 @@ def generate_perf_report_pytorch(
         augmented_tree = merge_capture_trace_into_graph(
             capture_folder=capture_trace,
             graph_tree_filepath=profile_json_path,
+            single_capture_trace=True,
         )
         perf_analyzer = TreePerfAnalyzer(
             tree=augmented_tree,
