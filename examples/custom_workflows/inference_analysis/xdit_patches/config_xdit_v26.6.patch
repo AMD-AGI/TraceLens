@@ -1,5 +1,5 @@
 --- a/xfuser/model_executor/models/runner_models/base_model.py	2026-07-24 15:12:48.913361106 -0400
-+++ b/xfuser/model_executor/models/runner_models/base_model.py	2026-07-27 17:45:53.941059612 -0400
++++ b/xfuser/model_executor/models/runner_models/base_model.py	2026-07-27 19:29:18.390644946 -0400
 @@ -3,6 +3,7 @@
  import copy
  import argparse
@@ -8,12 +8,13 @@
  import functools
  from PIL.Image import Image
  from typing import Callable, List, Optional, Tuple, Generator
-@@ -245,7 +246,40 @@
+@@ -245,7 +246,41 @@
              compile_input_args = self._split_prompts_for_dp(compile_input_args)
              if self.config.batch_size and isinstance(compile_input_args.get("prompt"), list):
                  compile_input_args["prompt"] = compile_input_args["prompt"][: self.config.batch_size]
 -            self._compile_model(compile_input_args)
-+            if self.config.profile:
++            enable_capture_profiler = self.config.profile_capture_phase and get_world_group().rank == 0
++            if enable_capture_profiler:
 +                # Step 1: compile + autotune with only 1 denoise step
 +                # (warmup only, no graph capture yet).  Temporarily
 +                # override _run_timed_pipe to force 1 step so
@@ -50,7 +51,7 @@
  
      def _enable_options(self) -> None:
          """ Enable model options based on config"""
-@@ -451,7 +485,7 @@
+@@ -451,7 +486,7 @@
              activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
              schedule=schedule,
              record_shapes=True,
@@ -59,3 +60,25 @@
          ) as profile_object:
              for iteration in range(num_repetitions):
                  log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
+--- a/xfuser/config/args.py	2026-07-27 19:27:39.339852323 -0400
++++ b/xfuser/config/args.py	2026-07-27 19:28:28.935748483 -0400
+@@ -129,6 +129,7 @@
+     # Model runner specific
+     num_iterations: int = 1
+     profile: bool = False
++    profile_capture_phase: bool = False
+     profile_wait: int = 2
+     profile_warmup: int = 2
+     profile_active: int = 1
+@@ -622,6 +623,11 @@
+             help="active argument for torch.profiler.schedule. Only used with --profile.",
+         )
+         parser.add_argument(
++            "--profile_capture_phase",
++            action="store_true",
++            help="Profile the graph capture phase and save the capture trace.",
++        )
++        parser.add_argument(
+             "--warmup_calls",
+             help="The number of full pipe calls to warmup the model.",
+             default=0,
