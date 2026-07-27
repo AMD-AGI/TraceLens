@@ -44,8 +44,8 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 ### 2. Collect Traces
 
 TraceLens analyses profiler traces from PyTorch, JAX, and AMD rocprofv3; see [Supported Profile Formats](#supported-profile-formats) for the full list. The instructions below cover collecting a PyTorch trace:
-- **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling guide](docs_original/conceptual/torch_profiling_guide.ipynb) walks through this end to end.
-- **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Inference Analysis](docs_original/Inference_analysis.md). The [Profiling skill](TraceLens/Agent/Profiling/README.md) automates vLLM/SGLang benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces.
+- **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling walkthrough](docs/tutorials/torch-profiling.ipynb) walks through this end to end.
+- **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](TraceLens/Agent/Profiling/README.md) automates vLLM/SGLang benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces.
 
 To try out TraceLens without collecting your own trace, use the [demo traces](tests/traces) bundled in the repository.
 
@@ -59,9 +59,9 @@ Generate a performance analysis report from an eager execution PyTorch trace wit
 TraceLens_generate_perf_report_pytorch --profile_json_path path/to/your/trace.json
 ```
 
-This produces an Excel workbook with GPU timeline breakdown, ops summary, roofline metrics and more. For additional details, see [Performance Report Generation](docs_original/generate_perf_report.md) and [Performance Report Column Definitions](docs_original/perf_report_columns.md). For other input formats, see [Supported Profile Formats](#supported-profile-formats).
+This produces an Excel workbook with GPU timeline breakdown, ops summary, roofline metrics and more. For additional details, see [Generate a PyTorch performance report](docs/how-to/generate-perf-report-pytorch.md) and [Performance report column reference](docs/reference/perf-report-columns.md). For other input formats, see [Supported Profile Formats](#supported-profile-formats).
 
-Compare two reports to quantify the impact of a change (see [compare_perf_reports_pytorch.md](docs_original/compare_perf_reports_pytorch.md)):
+Compare two reports to quantify the impact of a change (see [Compare performance reports](docs/how-to/compare-perf-reports.md)):
 
 ```bash
 TraceLens_compare_perf_reports_pytorch \
@@ -71,7 +71,7 @@ TraceLens_compare_perf_reports_pytorch \
     -o comparison.xlsx
 ```
 
-For multi-rank runs, generate a collective-communication report across ranks (see [generate_multi_rank_collective_report_pytorch.md](docs_original/generate_multi_rank_collective_report_pytorch.md)):
+For multi-rank runs, generate a collective-communication report across ranks (see [Generate a collective-communication report](docs/how-to/collective-report.md)):
 
 ```bash
 TraceLens_generate_multi_rank_collective_report_pytorch \
@@ -105,10 +105,10 @@ Analyze a workload autonomously using an agentic system that automates performan
 
 | Format                | Tool                     | Documentation                                                                                                  |
 | --------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| **PyTorch**           | `torch.profiler`         | [docs_original/generate_perf_report.md](docs_original/generate_perf_report.md)                                 |
-| **JAX**               | XPlane protobuf          | [docs_original/jax_analyses.md](docs_original/jax_analyses.md)                                                 |
-| **rocprofv3 JSON**    | AMD ROCm rocprofiler-sdk | [docs_original/generate_perf_report_rocprof.md](docs_original/generate_perf_report_rocprof.md)                 |
-| **rocprofv3 pftrace** | Perfetto-style           | [docs_original/generate_perf_report_rocprof_pftrace.md](docs_original/generate_perf_report_rocprof_pftrace.md) |
+| **PyTorch**           | `torch.profiler`         | [docs/how-to/generate-perf-report-pytorch.md](docs/how-to/generate-perf-report-pytorch.md)                     |
+| **JAX**               | XPlane protobuf          | [docs/how-to/generate-perf-report-jax.md](docs/how-to/generate-perf-report-jax.md)                             |
+| **rocprofv3 JSON**    | AMD ROCm rocprofiler-sdk | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md)                     |
+| **rocprofv3 pftrace** | Perfetto-style           | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md)                     |
 
 Each format's linked doc covers its full CLI reference. For PyTorch report comparison and multi-rank collective analysis, see the corresponding docs in the [Documentation](#documentation) table.
 
@@ -118,18 +118,19 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 
 | Module                       | Doc                                                                                                                              |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Trace2Tree                   | [docs_original/Trace2Tree.md](docs_original/Trace2Tree.md)                                                                       |
-| TreePerf                     | [docs_original/TreePerf.md](docs_original/TreePerf.md)                                                                           |
-| NCCL Analyser                | [docs_original/NcclAnalyser.md](docs_original/NcclAnalyser.md)                                                                   |
-| TraceDiff                    | [docs_original/TraceDiff.md](docs_original/TraceDiff.md)                                                                         |
-| Event Replay                 | [docs_original/EventReplay.md](docs_original/EventReplay.md)                                                                     |
-| TraceFusion                  | [docs_original/TraceFusion.md](docs_original/TraceFusion.md)                                                                     |
-| GPU Event Analyser           | [docs_original/gpu_event_analyser.md](docs_original/gpu_event_analyser.md)                                                       |
-| JAX Analyses                 | [docs_original/jax_analyses.md](docs_original/jax_analyses.md)                                                                   |
-| pftrace Reports              | [docs_original/generate_perf_report_rocprof_pftrace.md](docs_original/generate_perf_report_rocprof_pftrace.md)                   |
-| Compare PyTorch Reports      | [docs_original/compare_perf_reports_pytorch.md](docs_original/compare_perf_reports_pytorch.md)                                   |
-| Multi-Rank Collective Report | [docs_original/generate_multi_rank_collective_report_pytorch.md](docs_original/generate_multi_rank_collective_report_pytorch.md) |
-| Performance Report Columns   | [docs_original/perf_report_columns.md](docs_original/perf_report_columns.md)                                                     |
+| Trace2Tree                   | [docs/conceptual/trace2tree.md](docs/conceptual/trace2tree.md)                                                                   |
+| TreePerf                     | [docs/how-to/tree-perf-analysis.md](docs/how-to/tree-perf-analysis.md)                                                           |
+| NCCL Analyser                | [docs/how-to/nccl-analysis.md](docs/how-to/nccl-analysis.md)                                                                     |
+| TraceDiff                    | [docs/how-to/compare-traces.md](docs/how-to/compare-traces.md)                                                                   |
+| Event Replay                 | [docs/how-to/event-replay.md](docs/how-to/event-replay.md)                                                                       |
+| TraceFusion                  | [docs/how-to/trace-fusion.md](docs/how-to/trace-fusion.md)                                                                       |
+| GPU Event Analyser           | [docs/how-to/gpu-event-analysis.md](docs/how-to/gpu-event-analysis.md)                                                           |
+| JAX Analyses                 | [docs/how-to/generate-perf-report-jax.md](docs/how-to/generate-perf-report-jax.md)                                               |
+| pftrace Reports              | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md)                                       |
+| Compare PyTorch Reports      | [docs/how-to/compare-perf-reports.md](docs/how-to/compare-perf-reports.md)                                                       |
+| Multi-Rank Collective Report | [docs/how-to/collective-report.md](docs/how-to/collective-report.md)                                                             |
+| Performance Report Columns   | [docs/reference/perf-report-columns.md](docs/reference/perf-report-columns.md)                                                   |
+| TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
 
 ---
 
@@ -153,9 +154,6 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on branching, commi
 
 ## Additional Resources
 
-- [PyTorch Conference 2025 Poster](docs_original/TraceLens%20-%20Democratizing%20AI%20Performance%20Analysis%20-%20Adeem%20Jassani%2C%20AMD.pdf)
-- [GEMMs in AI Models: Conceptual Tutorial](docs_original/conceptual/aimodels_gemms.md)
-- [Trace2Tree Motivation](docs_original/conceptual/trace2tree_motivation.md)
-- [PyTorch Profiling Guide](docs_original/conceptual/torch_profiling_guide.ipynb)
-
-For more background and conceptual tutorials, browse `[docs_original/conceptual/](docs_original/conceptual/)`.
+- [GEMM analysis in TraceLens](docs/conceptual/gemm-analysis.md)
+- [The Trace2Tree data model](docs/conceptual/trace2tree.md)
+- [PyTorch profiling walkthrough](docs/tutorials/torch-profiling.ipynb)

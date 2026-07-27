@@ -23,7 +23,7 @@ Before generating a report, confirm you have the following:
 
 ```{note}
 If you don't have a trace yet, see the
-[PyTorch profiling guide](https://github.com/AMD-AGI/TraceLens/blob/main/docs_original/conceptual/torch_profiling_guide.ipynb)
+[PyTorch profiling walkthrough](../tutorials/torch-profiling.ipynb)
 for instructions on capturing one with `torch.profiler`.
 ```
 
@@ -77,7 +77,7 @@ For the GPU timeline, a low computation percentage with significant idle time
 indicates poor compute/communication overlap; use `--micro_idle_thresh_us` to
 split very short idle gaps into their own category.
 
-See [Performance report column definitions](https://github.com/AMD-AGI/TraceLens/blob/main/docs_original/perf_report_columns.md)
+See [Performance report column reference](../reference/perf-report-columns.md)
 for what each column means.
 
 ## Roofline classification
