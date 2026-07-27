@@ -19,7 +19,7 @@ The TraceLens Agent is an agentic performance analysis tool that generates actio
 | | Standalone | Comparative |
 |---|---|---|
 | **Eager** | ✅ | ✅ |
-| **Graph + Capture** | ✅ | ❌ |
+| **Graph + Capture** | ✅ | ✅ |
 | **Graph** | ❌ | ❌ |
 
 ---
@@ -78,7 +78,7 @@ Roofline analysis compares each measured kernel against your GPU's max-achievabl
 ### To run via Cursor chat:
 
 1. **In a Cursor chat with Claude Opus 4.7 High, invoke one of:**
-   - Standalone (single trace):
+   - Standalone (single eager trace):
     ```
     "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json>"
     ```
@@ -89,6 +89,10 @@ Roofline analysis compares each measured kernel against your GPU's max-achievabl
    - Comparative (two eager traces):
     ```
     "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace1.json> and <path_to_trace2.json>"
+    ```
+   - Comparative (two graph replay traces with capture trace directories):
+    ```
+    "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace1.json> with capture folder <path_to_capture1.json> and <path_to_trace2.json> with capture folder <path_to_capture2.json>"
     ```
     **NOTE**: Always pass **baseline** trace as trace1
 
