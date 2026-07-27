@@ -394,14 +394,35 @@ else
     echo "==> Waiting for inference server at http://localhost:${PORT}/v1/models (timeout ${READY_TIMEOUT}s)..."
     models_json=""
     deadline=$((SECONDS + READY_TIMEOUT))
+    wait_started=$SECONDS
+    last_progress=$SECONDS
     while (( SECONDS < deadline )); do
-        if models_json="$(curl -sf "http://localhost:${PORT}/v1/models" 2>/dev/null)"; then
+        if models_json="$(python3 - "$PORT" <<'PY' 2>/dev/null
+import sys
+import urllib.request
+
+port = sys.argv[1]
+url = f"http://localhost:{port}/v1/models"
+with urllib.request.urlopen(url, timeout=5) as resp:
+    if resp.status != 200:
+        raise SystemExit(1)
+    body = resp.read().decode()
+    if not body.strip():
+        raise SystemExit(1)
+    print(body, end="")
+PY
+)"; then
+            echo "==> Inference server ready (after $((SECONDS - wait_started))s)"
             break
         fi
-        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        if ! kill -0 "$SERVER_PID" 2>/dev/null && ! pgrep -f "[v]llm serve" >/dev/null; then
             echo "Inference server exited early. Last log lines:" >&2
             tail -n 40 "$SERVER_LOG" >&2 || true
             die "Inference server died before /v1/models became available"
+        fi
+        if (( SECONDS - last_progress >= 60 )); then
+            echo "==> Still waiting for /v1/models ($((SECONDS - wait_started))s elapsed)..."
+            last_progress=$SECONDS
         fi
         sleep 5
     done
