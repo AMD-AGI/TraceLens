@@ -8,7 +8,9 @@
  import functools
  from PIL.Image import Image
  from typing import Callable, List, Optional, Tuple, Generator
-@@ -245,7 +246,41 @@
+@@ -274,6 +274,32 @@
+             log("Torch.compile enabled. Warming up torch compiler ...")
+             compile_input_args = copy.deepcopy(input_args)
              compile_input_args = self._split_prompts_for_dp(compile_input_args)
              if self.config.batch_size and isinstance(compile_input_args.get("prompt"), list):
                  compile_input_args["prompt"] = compile_input_args["prompt"][: self.config.batch_size]
@@ -16,21 +18,10 @@
 +            enable_capture_profiler = self.config.profile_capture_phase and get_world_group().rank == 0
 +            if enable_capture_profiler:
 +                # Step 1: compile + autotune with only 1 denoise step
-+                # (warmup only, no graph capture yet).  Temporarily
-+                # override _run_timed_pipe to force 1 step so
-+                # _compile_model's hardcoded num_inference_steps=2 is
-+                # reduced, deferring graph capture to step 2.
-+                _orig_run = self._run_timed_pipe
-+                def _one_step_run(args):
-+                    args["num_inference_steps"] = 1
-+                    return _orig_run(args)
-+                self._run_timed_pipe = _one_step_run
++                # (warmup only, no graph capture).
++                compile_input_args["num_inference_steps"] = 1
 +                self._compile_model(compile_input_args)
-+                self._run_timed_pipe = _orig_run
-+                # Step 2: profile graph capture only (1 step).  The
-+                # CUDAGraphTreeManager's warmed_up_functions set now
-+                # contains this function, so the next call triggers
-+                # record_function() → hipStreamBeginCapture.
++                # Step 2: profile graph capture.
 +                log("Profiling graph capture phase for shape trace...")
 +                capture_input_args = copy.deepcopy(compile_input_args)
 +                capture_input_args["num_inference_steps"] = 1
@@ -48,10 +39,14 @@
 +                log(f"Capture trace saved to {capture_path}")
 +            else:
 +                self._compile_model(compile_input_args)
- 
-     def _enable_options(self) -> None:
-         """ Enable model options based on config"""
-@@ -451,7 +486,7 @@
++
+@@ -453,4 +479,5 @@
+     def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
+-        return 2  # None = skip step reduction, run full warmup cycle
++        if "num_inference_steps" in input_args:
++            return input_args["num_inference_steps"]
++        return 2  # None = skip step reduction, run full warmup cycle
+@@ -484,7 +513,7 @@
              activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
              schedule=schedule,
              record_shapes=True,
