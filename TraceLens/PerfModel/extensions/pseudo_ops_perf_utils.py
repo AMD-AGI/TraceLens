@@ -90,6 +90,10 @@ def get_pseudo_op_mappings():
         "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant": perf_model_extensions.batched_gemm_a8w8,
         ## Quantization ops
         "vllm::triton_per_token_group_quant_fp8": perf_model_extensions.vllm_triton_per_token_group_quant_fp8,
+        # Per-token-group FP8 quant (compiled C++ op variant). Args layout
+        # [x, x_q, scales, group_size, ...]; per_group_quant sums all operand
+        # buffers (read x + write x_q + write scales), which is the correct total.
+        "_C::per_token_group_fp8_quant": perf_model_extensions.per_group_quant,
         "sglang_profiler::fused_mxfp4_quant_fused_flatten_mxfp4_quant": perf_model_extensions.fused_flatten_mxfp4_quant,
         "aiter::dynamic_per_tensor_quant": perf_model_extensions.per_group_quant,
         ## RoPE ops
@@ -113,9 +117,15 @@ def get_pseudo_op_mappings():
         "vllm::rocm_aiter_triton_add_rmsnorm_pad": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
         "sglang_profiler::fused_mxfp4_quant_fused_rms_mxfp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
         "aiter::_fuse_rmsnorm_fp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
+        # Fused RMSNorm applied to q and k projections (MLA attention).
+        "aiter::_fused_qk_rmsnorm_kernel": rmsnorm_perf_model_extensions.aiter_fused_qk_rmsnorm,
         ## Collective ops
         "aiter::fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm,
         "aiter::fused_allreduce_rmsnorm_": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
+        # vLLM wrapper for the fused all-reduce + residual-add + RMSNorm kernel.
+        # Same Python-wrapper arg layout as aiter::fused_allreduce_rmsnorm_
+        # (inp@0, residual@1, weight@2, eps@3).
+        "vllm::rocm_aiter_fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
         "_C_custom_ar::all_reduce": custom_collectives_perf_model_extensions.custom_ar_all_reduce,
         "aiter::reduce_scatter": custom_collectives_perf_model_extensions.aiter_reduce_scatter,
         "aiter::all_gather_reg": custom_collectives_perf_model_extensions.aiter_all_gather_reg,
@@ -129,6 +139,10 @@ def get_pseudo_op_mappings():
         ## KV cache ops
         "sglang::store_cache": perf_model_extensions.sglang_store_cache,
         "aiter::fused_qk_rope_cat_and_cache_mla": perf_model_extensions.aiter_fused_qk_rope_cat_and_cache_mla,
+        # MLA latent-KV cache write (concat kv_c || k_pe, scatter into paged cache).
+        "_C_cache_ops::concat_and_cache_mla": perf_model_extensions.concat_and_cache_mla,
+        # MLA query concat (nope || pe) into a single per-head tensor.
+        "_C_cache_ops::concat_mla_q": perf_model_extensions.concat_mla_q,
         "sglang_profiler::fused_moe_triton_kernels_fused_append_shared_experts": moe_perf_model_extensions.sglang_fused_append_shared_experts,
         "sglang_profiler::quant_dynamic_mxfp4_quant": perf_model_extensions.sglang_quant_dynamic_mxfp4_quant,
         "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": perf_model_extensions.aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,
@@ -158,4 +172,9 @@ def get_pseudo_op_category_only_mappings():
         "aiter::unified_attention_with_output_base->_fused_qk_rope_reshape_and_cache_kernel (Synthetic Op)": "FusedRoPE",
         "hipModuleLaunchKernel->kv_indices_generate_kernel (Synthetic Op)": "InferenceAttention",
         "aiter::get_mla_metadata_v1": "InferenceAttention",
+        # DeepSeek-V4 sparse-attention indexer (vLLM ROCm wrapper). Its bytes/FLOPs
+        # depend on the per-forward KV context length, which is not recoverable
+        # from the trace Input Dims (only the paged-cache buffer size is present),
+        # so classify only (no roofline).
+        "vllm::rocm_aiter_sparse_attn_indexer": "InferenceAttention",
     }

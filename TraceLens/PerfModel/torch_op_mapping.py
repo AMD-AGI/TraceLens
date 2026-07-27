@@ -54,7 +54,9 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     "aiter::moe_fused_gate": "MoE_aux",
     # InferenceAttention extras (KV-cache writes).
     "_C_cache_ops::reshape_and_cache_flash": "InferenceAttention",
-    "_C_cache_ops::concat_and_cache_mla": "InferenceAttention",
+    # NOTE: _C_cache_ops::concat_and_cache_mla now has a full perf model
+    # (perf_model_extensions.concat_and_cache_mla), so it is no longer
+    # category-only.
 }
 
 

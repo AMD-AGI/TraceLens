@@ -1094,6 +1094,147 @@ class sglang_store_cache:
         return torch_dtype_map(dtype) if dtype else None
 
 
+class concat_and_cache_mla:
+    """
+    Performance model for _C_cache_ops::concat_and_cache_mla.
+
+    Writes the MLA latent KV (compressed kv_c || rope k_pe) for each token into
+    the paged KV cache at the slot given by slot_mapping. Pure memory move
+    (concat + scatter-write), no math.
+
+    Reference implementation:
+        vllm/csrc/cache_kernels.cu (concat_and_cache_mla_kernel)
+
+    Expected Input Dims from trace:
+        [0] kv_c         = (T, D_ckv)      e.g. (2101, 512)
+        [1] k_pe         = (T, D_pe)       e.g. (2101, 64)
+        [2] kv_cache     = (num_blocks, block_size, D_ckv + D_pe)  (paged buffer)
+        [3] slot_mapping = (T,)            int64 slot indices
+    Expected Input type from trace:
+        [dtype_kv_c, dtype_k_pe, dtype_cache, 'long int', ...]
+
+    Reads kv_c + k_pe (T rows), writes T rows of (D_ckv + D_pe) into the cache,
+    and reads the slot_mapping index vector:
+        flops = 0
+        bytes = read(kv_c) + read(k_pe) + write(T * (D_ckv + D_pe)) + read(slot_mapping)
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        kv_c_shape = tuple(dims[0])
+        k_pe_shape = tuple(dims[1])
+        T = kv_c_shape[0] if kv_c_shape else 0
+        d_ckv = kv_c_shape[1] if len(kv_c_shape) > 1 else 0
+        d_pe = k_pe_shape[1] if len(k_pe_shape) > 1 else 0
+        return {
+            "T": T,
+            "d_ckv": d_ckv,
+            "d_pe": d_pe,
+            "dtype_kv_c": types[0] if types else None,
+            "dtype_k_pe": types[1] if len(types) > 1 else None,
+            "dtype_cache": types[2] if len(types) > 2 else None,
+        }
+
+    def flops(self):
+        return 0
+
+    def bytes(self):
+        p = self.param_details
+        bpe_kv_c = name2bpe(p["dtype_kv_c"])
+        bpe_k_pe = name2bpe(p["dtype_k_pe"])
+        bpe_cache = name2bpe(p["dtype_cache"])
+        if bpe_kv_c is None or bpe_k_pe is None or bpe_cache is None:
+            return None
+        T, d_ckv, d_pe = p["T"], p["d_ckv"], p["d_pe"]
+        read_inputs = T * d_ckv * bpe_kv_c + T * d_pe * bpe_k_pe
+        write_cache = T * (d_ckv + d_pe) * bpe_cache
+        read_slot_mapping = T * 8  # int64 slot indices
+        return read_inputs + write_cache + read_slot_mapping
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_kv_c")
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class concat_mla_q:
+    """
+    Performance model for _C_cache_ops::concat_mla_q.
+
+    Concatenates the nope and rope parts of the MLA query into a single
+    per-head tensor. Pure memory move (concat), no math.
+
+    Expected Input Dims from trace:
+        [0] q_nope = (T, H, D_nope)   e.g. (2101, 8, 512)
+        [1] q_pe   = (T, H, D_pe)     e.g. (2101, 8, 64)
+        [2] q_out  = (T, H, D_nope + D_pe)  e.g. (2101, 8, 576)
+    Expected Input type from trace:
+        [dtype_q_nope, dtype_q_pe, dtype_q_out]
+
+    Reads q_nope + q_pe and writes q_out:
+        flops = 0
+        bytes = read(q_nope) + read(q_pe) + write(q_out)
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        return {
+            "shape_nope": tuple(dims[0]),
+            "shape_pe": tuple(dims[1]),
+            "shape_out": tuple(dims[2]) if len(dims) > 2 else tuple(dims[0]),
+            "dtype_nope": types[0] if types else None,
+            "dtype_pe": types[1] if len(types) > 1 else None,
+            "dtype_out": types[2] if len(types) > 2 else (types[0] if types else None),
+        }
+
+    def flops(self):
+        return 0
+
+    def bytes(self):
+        p = self.param_details
+        bpe_nope = name2bpe(p["dtype_nope"])
+        bpe_pe = name2bpe(p["dtype_pe"])
+        bpe_out = name2bpe(p["dtype_out"])
+        if bpe_nope is None or bpe_pe is None or bpe_out is None:
+            return None
+        return (
+            prod(p["shape_nope"]) * bpe_nope
+            + prod(p["shape_pe"]) * bpe_pe
+            + prod(p["shape_out"]) * bpe_out
+        )
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_nope")
+        return torch_dtype_map(dtype) if dtype else None
+
+
 class mixed_sample_outer_exponential:
     """
     Performance model for ``aiter::mixed_sample_outer_exponential`` (ATOM

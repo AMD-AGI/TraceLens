@@ -8,6 +8,8 @@
 Performance models for RMSNorm pseudo-op extensions.
 """
 
+from math import prod
+
 from TraceLens.PerfModel.perf_model import RMSNorm as CoreRMSNorm
 from TraceLens.PerfModel.perf_model import (
     SUBOP_GROUP_QUANT,
@@ -15,6 +17,7 @@ from TraceLens.PerfModel.perf_model import (
     SUBOP_RMSNORM,
     reduced_elementwise_flops,
 )
+from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
 
 
 class RMSNorm(CoreRMSNorm):
@@ -23,6 +26,88 @@ class RMSNorm(CoreRMSNorm):
     category = "RMSNorm"
     bwd_category = None
     sheet_category = "RMSNorm"
+
+
+class aiter_fused_qk_rmsnorm(RMSNorm):
+    """
+    Performance model for aiter::_fused_qk_rmsnorm_kernel.
+
+    Applies RMSNorm independently to the query and key projections in a single
+    fused kernel (used by MLA-style attention: separate q and k head layouts).
+
+    Signature (per the traced kernel):
+        _fused_qk_rmsnorm(q, q_weight, q_eps, k, k_weight, k_eps, ...)
+        q        — shape [T, D_q], dtype BFloat16
+        q_weight — shape [D_q],    dtype BFloat16 (affine scale)
+        q_eps    — float scalar
+        k        — shape [T, D_k], dtype BFloat16
+        k_weight — shape [D_k],    dtype BFloat16 (affine scale)
+        k_eps    — float scalar
+
+    Expected Input Dims from trace:
+        [q_shape, q_weight_shape, q_eps, k_shape, k_weight_shape, k_eps, ...]
+        e.g. [(2101, 2048), (2048,), (), (2101, 512), (512,), (), (), ()]
+    Expected Input type from trace:
+        [dtype_q, dtype_q_w, 'Scalar', dtype_k, dtype_k_w, 'Scalar', ...]
+
+    This normalizes two tensors, so unlike the single-tensor RMSNorm family it
+    does not fit the Normalization base's single-op_shape model; flops and bytes
+    are computed directly by summing the q and k contributions (read + write each
+    tensor, read each affine weight vector).
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        return {
+            "q_shape": tuple(dims[0]),
+            "q_channels": dims[1][0] if len(dims) > 1 and dims[1] else 0,
+            "k_shape": tuple(dims[3]) if len(dims) > 3 else (),
+            "k_channels": dims[4][0] if len(dims) > 4 and dims[4] else 0,
+            "dtype_q": types[0] if types else None,
+            "dtype_k": types[3] if len(types) > 3 else (types[0] if types else None),
+        }
+
+    def _rms_flops(self, shape, channels):
+        n = prod(shape)
+        if n == 0 or channels == 0:
+            return 0
+        non_norm_elems = n // channels
+        # rsqrt over each row + apply affine weight (same shape as RMSNorm.flops)
+        return non_norm_elems * (2 * channels + 2) + n * 2
+
+    def flops(self):
+        p = self.param_details
+        return self._rms_flops(p["q_shape"], p["q_channels"]) + self._rms_flops(
+            p["k_shape"], p["k_channels"]
+        )
+
+    def bytes(self):
+        p = self.param_details
+        bpe_q = name2bpe(p["dtype_q"])
+        bpe_k = name2bpe(p["dtype_k"])
+        if bpe_q is None or bpe_k is None:
+            return None
+        q_elems = prod(p["q_shape"])
+        k_elems = prod(p["k_shape"])
+        # read + write each activation tensor, plus read each affine weight vector
+        q_bytes = 2 * q_elems * bpe_q + p["q_channels"] * bpe_q
+        k_bytes = 2 * k_elems * bpe_k + p["k_channels"] * bpe_k
+        return q_bytes + k_bytes
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_q")
+        return torch_dtype_map(dtype) if dtype else None
 
 
 class aiter_rms_norm(RMSNorm):
