@@ -548,6 +548,7 @@ def generate_perf_report_pytorch(
     topk_ops: Optional[int] = None,
     topk_roofline_ops: Optional[int] = None,
     comparison_json_path: Optional[str] = None,
+    comparison_augmented_tree: Optional[TraceToTree] = None,
     extension_file: Optional[str] = None,
     # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
     python_path: Optional[str] = None,
@@ -565,7 +566,14 @@ def generate_perf_report_pytorch(
         gpu_arch=gpu_arch,
     )
     add_python_func = (
-        True if (group_by_parent_module or include_call_stack is True) else False
+        True
+        if (
+            group_by_parent_module
+            or include_call_stack is True
+            or augmented_tree is not None
+            or comparison_augmented_tree is not None
+        )
+        else False
     )
     if augmented_tree is not None:
         perf_analyzer = TreePerfAnalyzer(
@@ -610,6 +618,11 @@ def generate_perf_report_pytorch(
             "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
             "sglang_profiler::attention_paged_attention_ragged",
             "aiter::mha_batch_prefill",
+            "aiter::pa_decode_gluon",
+            "aiter::v4_attention_with_output",
+            "pseudo_v4_paged_decode_swa",
+            "pseudo_v4_paged_decode_csa",
+            "pseudo_v4_paged_decode_hca",
         ]
     )
 
@@ -922,13 +935,24 @@ def generate_perf_report_pytorch(
         # Run TraceDiff when a comparison trace is provided. diff_stats_df is generated
         _tracediff_diff_stats: Optional[pd.DataFrame] = None
         if comparison_json_path and not df_unified_perf.empty:
-            perf_analyzer2 = TreePerfAnalyzer.from_file(
-                profile_filepath=comparison_json_path,
-                python_path=perf_analyzer.python_path,
-                include_unlinked_kernels=perf_analyzer.include_unlinked_kernels,
-                enable_pseudo_ops=enable_pseudo_ops,
-                add_python_func=perf_analyzer.add_python_func,
-            )
+            if comparison_augmented_tree is not None:
+                perf_analyzer2 = TreePerfAnalyzer(
+                    tree=comparison_augmented_tree,
+                    arch=gpu_arch_json,
+                    python_path=python_path,
+                    include_unlinked_kernels=include_unlinked_kernels,
+                    add_python_func=add_python_func,
+                    enable_pseudo_ops=enable_pseudo_ops,
+                    rebuild_tree=False,
+                )
+            else:
+                perf_analyzer2 = TreePerfAnalyzer.from_file(
+                    profile_filepath=comparison_json_path,
+                    python_path=perf_analyzer.python_path,
+                    include_unlinked_kernels=perf_analyzer.include_unlinked_kernels,
+                    enable_pseudo_ops=enable_pseudo_ops,
+                    add_python_func=perf_analyzer.add_python_func,
+                )
             perf_analyzer2.tree.apply_annotation(
                 name_filters=["vllm::unified_attention_with_output"]
             )
@@ -953,14 +977,33 @@ def generate_perf_report_pytorch(
                 )
                 if "call_stack_full" in df_unified_perf_summary.columns:
                     cs_col = df_unified_perf_summary.columns.get_loc("call_stack_full")
+                    ep_results = df_unified_perf_summary.apply(
+                        lambda row: _find_entry_point(
+                            row["call_stack_full"], row["name"]
+                        ),
+                        axis=1,
+                    )
                     df_unified_perf_summary.insert(
                         cs_col,
                         "entry_point",
-                        df_unified_perf_summary.apply(
-                            lambda row: _find_entry_point(row["call_stack_full"], row["name"]),
-                            axis=1,
-                        ),
+                        ep_results.apply(lambda x: x["entry_point"]),
                     )
+                    if os.environ.get("TRACELENS_DEBUG"):
+                        df_unified_perf_summary.insert(
+                            cs_col + 1,
+                            "num_wrappers",
+                            ep_results.apply(lambda x: x["num_wrappers"]),
+                        )
+                        df_unified_perf_summary.insert(
+                            cs_col + 2,
+                            "traversal",
+                            ep_results.apply(lambda x: x["traversal"]),
+                        )
+                        df_unified_perf_summary.insert(
+                            cs_col + 3,
+                            "wrappers",
+                            ep_results.apply(lambda x: x["wrappers"]),
+                        )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
 
             if _tracediff_diff_stats is not None and not _tracediff_diff_stats.empty:
@@ -1138,15 +1181,14 @@ def generate_perf_report_pytorch(
 
     # Write CSVs and/or Excel (independent options)
     if output_csvs_dir:
-        # Ensure the output directory exists
         os.makedirs(output_csvs_dir, exist_ok=True)
         for sheet_name, df in dict_name2df.items():
             csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
             df.to_csv(csv_path, index=False)
             print(f"DataFrame '{sheet_name}' written to {csv_path}")
-    else:
+
+    if output_xlsx_path is not None or output_csvs_dir is None:
         if output_xlsx_path is None:
-            # split input path at 'json' and take the first part and append '.xlsx'
             base_path = profile_json_path.rsplit(".json", 1)[0]
             output_xlsx_path = base_path + "_perf_report.xlsx"
         try:
@@ -1303,6 +1345,12 @@ def main():
         help="Path to the capture trace folder",
     )
     parser.add_argument(
+        "--comparison_capture_folder",
+        type=str,
+        required=False,
+        help="Path to the capture trace folder for the comparison trace",
+    )
+    parser.add_argument(
         "--group_by_num_kernels",
         action="store_true",
         default=False,
@@ -1324,11 +1372,8 @@ def main():
     )
 
     args = parser.parse_args()
-    if args.capture_folder and args.comparison_json_path:
-        parser.error(
-            "--capture_folder and --comparison_json_path cannot be used together. "
-            "The TraceDiff comparison extension does not support graph capture traces."
-        )
+    if args.comparison_capture_folder and not args.comparison_json_path:
+        parser.error("--comparison_capture_folder requires --comparison_json_path.")
     if args.capture_folder:
         classify_graph_capture_trace(args.capture_folder)
         metadata_json_path = os.path.join(args.capture_folder, "execution_details.json")
@@ -1337,6 +1382,15 @@ def main():
         )
     else:
         graph_tree = None
+    comparison_graph_tree = None
+    if args.comparison_capture_folder:
+        classify_graph_capture_trace(args.comparison_capture_folder)
+        comp_metadata = os.path.join(
+            args.comparison_capture_folder, "execution_details.json"
+        )
+        comparison_graph_tree = merge_capture_trace_into_graph(
+            args.comparison_capture_folder, comp_metadata, args.comparison_json_path
+        )
     generate_perf_report_pytorch(
         profile_json_path=args.profile_json_path,
         augmented_tree=graph_tree,
@@ -1355,6 +1409,7 @@ def main():
         topk_ops=args.topk_ops,
         topk_roofline_ops=args.topk_roofline_ops,
         comparison_json_path=args.comparison_json_path,
+        comparison_augmented_tree=comparison_graph_tree,
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,

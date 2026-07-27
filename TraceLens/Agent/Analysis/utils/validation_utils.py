@@ -42,7 +42,8 @@ _NOT_QUANTIFIABLE_SENTINEL = re.compile(
     r"not quantifiable from trace data", re.IGNORECASE
 )
 # Header matcher for the report-wide Args verbatim check (Level 3).
-_TABLE_HEADER_RE = re.compile(r"^\|.*\|\s*Args\s*\|.*\|\s*$", re.MULTILINE)
+# Matches both standalone ("Args") and comparative ("Args (T1)") column headers.
+_TABLE_HEADER_RE = re.compile(r"^\|.*\|\s*Args(?: \(T1\))?\s*\|.*\|\s*$", re.MULTILINE)
 # Mandatory columns of the compute-tier **Data:** Operations Table, in spec
 # order (sub_agent_spec.md § Operations Table Schema). Agents may append
 # extra columns at the end but must not drop or reorder these.
@@ -63,6 +64,8 @@ _COMPUTE_DATA_REQUIRED_COLS_STANDALONE = (
 _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE = (
     "Operation",
     "Args (T1)",
+    "Kernel Path",
+    "Kernel Name",
     "Trace 1 Time (ms)",
     "Trace 2 Time (ms)",
     "Count (T1/T2)",
@@ -253,9 +256,11 @@ def _scan_args_cells(content):
         if not _TABLE_HEADER_RE.match(header_line):
             continue
         cols = [c.strip() for c in header_line.strip("|").split("|")]
-        try:
+        if "Args (T1)" in cols:
+            args_col = cols.index("Args (T1)")
+        elif "Args" in cols:
             args_col = cols.index("Args")
-        except ValueError:
+        else:
             continue
         # Skip the separator row (|---|...|).
         for row_idx in range(header_idx + 2, len(lines)):
@@ -285,12 +290,12 @@ def _load_valid_args(*metrics_paths):
 
 
 def _load_compute_data_metrics(metrics_path):
-    """Return (args_set, launcher_paths_set) from one metrics JSON; empty on read failure."""
+    """Return (args_set, launcher_paths_set, kernel_names_set) from one metrics JSON; empty on read failure."""
     try:
         with open(metrics_path) as f:
             d = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return set(), set()
+        return set(), set(), set()
     ops = d.get("operations", [])
     args = {op["args"] for op in ops if isinstance(op.get("args"), str)}
     paths = {
@@ -298,7 +303,12 @@ def _load_compute_data_metrics(metrics_path):
         for op in ops
         if isinstance(op.get("launcher_path"), str) and op["launcher_path"]
     }
-    return args, paths
+    kernel_names = {
+        op["kernel_name_trunc"]
+        for op in ops
+        if isinstance(op.get("kernel_name_trunc"), str) and op["kernel_name_trunc"]
+    }
+    return args, paths, kernel_names
 
 
 def _iter_compute_candidate_blocks(content):
@@ -353,8 +363,9 @@ def _find_data_table(lines, start, end):
 def _validate_compute_data_tables(content, findings_path, comparison_scope=None):
     """For each <!-- reasoning-candidate tier=compute --> block: shape check
     (Args column required for standalone; comparative schema for comparative),
-    Args cells verbatim vs operations[].args, and Kernel Path cells verbatim
-    vs operations[].launcher_path when present.
+    Args cells verbatim vs operations[].args, Kernel Path cells verbatim
+    vs operations[].launcher_path, and Kernel Name cells verbatim vs
+    operations[].kernel_name_trunc when present.
     Skips silently when the metrics JSON is absent.
     """
     metrics_path = _metrics_json_for_findings(findings_path)
@@ -365,7 +376,9 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
         if is_comparative
         else _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
     )
-    valid_args, valid_paths = _load_compute_data_metrics(metrics_path)
+    valid_args, valid_paths, valid_kernel_names = _load_compute_data_metrics(
+        metrics_path
+    )
     lines = content.splitlines()
     errors = []
     for start, end in _iter_compute_candidate_blocks(content):
@@ -385,11 +398,16 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
                 f"(sub_agent_spec.md § Operations Table Schema)"
             )
             continue
-        args_idx = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE.index("Args")
-        kp_idx = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE.index("Kernel Path")
+        active_cols = (
+            _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE
+            if is_comparative
+            else _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
+        )
+        args_col = "Args (T1)" if is_comparative else "Args"
+        args_idx = active_cols.index(args_col)
+        kp_idx = active_cols.index("Kernel Path")
+        kn_idx = active_cols.index("Kernel Name")
         for row_line, cells in row_iter:
-            if is_comparative:
-                continue
             if valid_args and args_idx < len(cells) and cells[args_idx]:
                 if cells[args_idx] not in valid_args:
                     errors.append(
@@ -403,6 +421,18 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
                         f"Kernel Path cell on line {row_line} does not match "
                         f"operations[].launcher_path in {cat_metrics_basename} "
                         f"(paste verbatim): {cells[kp_idx]}"
+                    )
+            if (
+                valid_kernel_names
+                and kn_idx < len(cells)
+                and cells[kn_idx]
+                and cells[kn_idx] != "—"
+            ):
+                if cells[kn_idx] not in valid_kernel_names:
+                    errors.append(
+                        f"Kernel Name cell on line {row_line} does not match "
+                        f"operations[].kernel_name_trunc in {cat_metrics_basename} "
+                        f"(paste verbatim): {cells[kn_idx]}"
                     )
     return errors
 

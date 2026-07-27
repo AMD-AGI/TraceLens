@@ -1811,7 +1811,10 @@ class TreePerfAnalyzer:
                 name = event.get("name", "")
                 if call_stack is None:
                     call_stack = []
-                if any(f in name for f in ["nn.Module", "::", "/"]) or self.event_to_category(event) == "cpu_op":
+                if (
+                    any(f in name for f in ["nn.Module", "::", "/"])
+                    or self.event_to_category(event) == "cpu_op"
+                ):
                     call_stack = call_stack + [re.sub(r"_\d+", "", name)]
 
             # Skip non-cpu_op events
@@ -1844,7 +1847,10 @@ class TreePerfAnalyzer:
                     event["_call_stack"] = call_stack
                 collected.append(event)
                 return
-
+            if self._has_descendant_cpu_op_with_own_perf_model(event):
+                for child_uid in event.get("children", []):
+                    traverse(child_uid, call_stack)
+                return
             # Exit condition 3: Leaf cpu_op (direct kernel launcher) with GPU kernels
             if self._is_leaf_cpu_op(event):
                 # Before collecting, check if any cpu_op children have perf models
@@ -2095,7 +2101,10 @@ class TreePerfAnalyzer:
                             cur = self.tree.get_parent_event(gpu_event)
                             while cur is not None and cur.get("UID") != event_uid:
                                 cname = cur.get("name", "")
-                                if any(f in cname for f in ["nn.Module", "::", "/"]) or self.event_to_category(cur) == "cpu_op":
+                                if (
+                                    any(f in cname for f in ["nn.Module", "::", "/"])
+                                    or self.event_to_category(cur) == "cpu_op"
+                                ):
                                     suffix.append(re.sub(r"_\d+", "", cname))
                                 cur = self.tree.get_parent_event(cur)
                             suffix.reverse()
@@ -2448,7 +2457,9 @@ class TreePerfAnalyzer:
 
                     per_kernel = []
                     for k in kd:
-                        chain = list(k.get("call_stack", [])) + [k.get("name", "Unknown")]
+                        chain = list(k.get("call_stack", [])) + [
+                            k.get("name", "Unknown")
+                        ]
                         per_kernel.append(chain)
 
                     if len(per_kernel) == 1:
@@ -2483,12 +2494,14 @@ class TreePerfAnalyzer:
 
             # Drop call_stack and gpu_op_uid from kernel_details_summary
             if "kernel_details_summary" in df_summary.columns:
+
                 def _drop_internal_fields(kd):
                     if isinstance(kd, list):
                         for k in kd:
                             k.pop("call_stack", None)
                             k.pop("gpu_op_uid", None)
                     return kd
+
                 df_summary["kernel_details_summary"] = df_summary[
                     "kernel_details_summary"
                 ].apply(_drop_internal_fields)
@@ -3434,9 +3447,15 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
             for operand in operands:
                 dtype, shape, layout = parse_dtype_shape_layout(operand)
                 if shape and dtype:
-                    total_input_bytes = (
-                        total_input_bytes + np.prod(shape) * dtype_to_bytes[dtype]
+                    nbytes = dtype_to_bytes.get(
+                        dtype, 1 if dtype.startswith(("f8", "s8")) else None
                     )
+                    if nbytes is None:
+                        logger.warning(
+                            "Unknown dtype '%s' in operand, skipping byte count", dtype
+                        )
+                        continue
+                    total_input_bytes = total_input_bytes + np.prod(shape) * nbytes
 
             total_input_bytes_list.append(total_input_bytes)
 
