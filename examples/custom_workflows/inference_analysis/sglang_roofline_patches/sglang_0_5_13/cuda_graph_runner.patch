@@ -117,19 +117,19 @@ index ebbfc2b288..91c2a350e3 100644
                      self.model_runner.tp_group.barrier()
                      run_once()
                      attn_backend.on_after_cuda_graph_warmup()
++                    # Activate the kernel shape profiler AFTER the first warmup
++                    # run (so lazily-imported modules like tilelang_kernel are in
++                    # sys.modules for auto-discovery) but BEFORE the step() that
++                    # flips the profiler schedule into its active window, so the
++                    # enable() call itself is not recorded -- only the capture run.
++                    if (
++                        self.enable_profile_cuda_graph
++                        and self.enable_shape_discovery_for_cuda_graph_profile
++                        and not is_kernel_shape_profiler_enabled()
++                    ):
++                        enable_kernel_shape_profiler()
 +                    if profiler is not None:
 +                        profiler.step()
-+
-+                # Activate the kernel shape profiler AFTER warmup runs so that
-+                # lazily-imported modules (e.g. tilelang_kernel) are already in
-+                # sys.modules and auto-discovery can find them. The capture run
-+                # below then records shapes for the previously shape-less kernels.
-+                if (
-+                    self.enable_profile_cuda_graph
-+                    and self.enable_shape_discovery_for_cuda_graph_profile
-+                    and not is_kernel_shape_profiler_enabled()
-+                ):
-+                    enable_kernel_shape_profiler()
  
                  if get_global_graph_memory_pool() is None:
                      set_global_graph_memory_pool(self.device_module.graph_pool_handle())
