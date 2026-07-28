@@ -55,8 +55,8 @@ docker run --rm \
 |------|---------|
 | `PROFILE=1` | Enable xDiT profiler |
 | `XDIT_SUPPORTS_PROFILER=1` | Gate for profiling flags in xdit_bench_common.sh |
-| `--profile_wait 1` | Fix for ROCTracer empty trace bug with `wait=0` ([ROCm #6102](https://github.com/ROCm/ROCm/issues/6102)) |
-| `--profile_capture_phase` | Enable capture trace for TraceLens shape merging (rank 0 only) |
+| `--profile_wait 1` | Fix for ROCTracer empty trace bug with `wait=0` |
+| `--profile_capture_phase` | Enable capture trace profiling |
 
 ### Output
 
@@ -75,32 +75,7 @@ python TraceLens/Reporting/generate_perf_report_pytorch.py \
     --output_csvs_dir <report_dir> \
     --output_xlsx_path <report_dir>/perf_report.xlsx \
     --include_call_stack \
-    --enable_pseudo_ops \
-    --gpu_arch_json_path TraceLens/Agent/Analysis/utils/arch/MI300X.json
+    --enable_pseudo_ops
 ```
 
-### Expected output (FLUX.1-dev 1024x1024)
-
-| Category | % of kernel time |
-|----------|-----------------|
-| GEMM | ~63% |
-| SDPA_fwd | ~18% |
-| Triton | ~10% |
-| CONV_fwd | ~5% |
-
-## How It Works
-
-The patch splits torch.compile's compilation from graph capture:
-
-1. **Step 1 (no profiler)**: `_compile_model()` runs with 1 denoise step
-   (compilation + autotuning). Graph capture is deferred.
-2. **Step 2 (with profiler)**: One more `_run_timed_pipe()` triggers graph
-   capture (`hipStreamBeginCapture`). The profiler records per-kernel `cpu_op`
-   events with `Input Dims` and `Concrete Inputs`.
-3. **Replay profiling**: xDiT's `profile()` method records graph replay
-   timing via `hipGraphLaunch`.
-4. **Merge**: TraceLens grafts the capture subtree (shapes) into the replay
-   tree (timing), enabling roofline analysis.
-
-See [docs/xdit_e2e_workflow.md](../../../docs/xdit_e2e_workflow.md) for full
-technical details.
+The performance report should have call stack information as well as input arguments for most operations.
