@@ -8,7 +8,7 @@
  import functools
  from PIL.Image import Image
  from typing import Callable, List, Optional, Tuple, Generator
-@@ -274,6 +274,32 @@
+@@ -274,6 +274,30 @@
              log("Torch.compile enabled. Warming up torch compiler ...")
              compile_input_args = copy.deepcopy(input_args)
              compile_input_args = self._split_prompts_for_dp(compile_input_args)
@@ -23,14 +23,12 @@
 +                self._compile_model(compile_input_args)
 +                # Step 2: profile graph capture.
 +                log("Profiling graph capture phase for shape trace...")
-+                capture_input_args = copy.deepcopy(compile_input_args)
-+                capture_input_args["num_inference_steps"] = 1
 +                with profile(
 +                    activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
 +                    record_shapes=True,
 +                    with_stack=True,
 +                ) as capture_prof:
-+                    self._run_timed_pipe(capture_input_args)
++                    self._run_timed_pipe(compile_input_args)
 +                capture_dir = os.path.join(self.config.output_directory, "capture_traces")
 +                os.makedirs(capture_dir, exist_ok=True)
 +                rank = get_world_group().rank
@@ -51,7 +49,7 @@
              schedule=schedule,
              record_shapes=True,
 -            with_stack=False,
-+            with_stack=True,
++            with_stack=self.config.profile_capture_phase,
          ) as profile_object:
              for iteration in range(num_repetitions):
                  log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
