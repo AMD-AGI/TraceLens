@@ -438,7 +438,7 @@ def generate_perf_report_pytorch(
     # activation recompute detection
     detect_recompute: bool = False,
     include_call_stack: bool = False,
-    capture_trace: Optional[str] = None,
+    capture_folder: Optional[str] = None,
 ) -> Dict[str, pd.DataFrame]:
     gpu_arch_json = resolve_gpu_arch(
         gpu_arch_json_path=gpu_arch_json_path,
@@ -446,9 +446,9 @@ def generate_perf_report_pytorch(
         gpu_arch=gpu_arch,
     )
     add_python_func = True if include_call_stack else False
-    if capture_trace is not None:
+    if capture_folder is not None:
         augmented_tree = merge_capture_trace_into_graph(
-            capture_folder=capture_trace,
+            capture_folder=capture_folder,
             graph_tree_filepath=profile_json_path,
             single_capture_trace=True,
         )
@@ -1230,10 +1230,10 @@ def main():
         help="Add call_stack_trimmed and call_stack_full columns to unified_perf_summary.",
     )
     parser.add_argument(
-        "--capture_trace",
+        "--capture_folder",
         type=str,
         default=None,
-        help="Path to a capture trace (.json.gz) for graph-replay shape "
+        help="Path to a capture trace folder for graph-replay shape "
         "merging. Works with both diffusion (torch.compile) and "
         "vLLM/SGLang CUDA graph capture traces.",
     )
@@ -1266,7 +1266,7 @@ def main():
         detect_recompute=args.detect_recompute,
         inductor_cache_dir=args.inductor_cache_dir,
         include_call_stack=args.include_call_stack,
-        capture_trace=args.capture_trace,
+        capture_folder=args.capture_folder,
     )
 
 
