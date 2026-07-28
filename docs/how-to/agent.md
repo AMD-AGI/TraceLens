@@ -39,7 +39,7 @@ Support depends on the execution mode of the traced workload:
 | Execution mode | Standalone | Comparative |
 |---|---|---|
 | Eager | Supported | Supported |
-| Graph + capture | Supported | Not supported |
+| Graph + capture | Supported | Supported |
 | Graph | Not supported | Not supported |
 
 ## Before you begin
@@ -96,19 +96,38 @@ and also work with other agentic runners that support skill-file discovery.
 
 In a chat with a capable model, invoke one of:
 
-- Standalone (single trace):
+- Standalone (single eager trace):
 
   ```text
   Follow the analysis orchestrator installed with TraceLens and run the full
   agentic analysis workflow on <path_to_trace.json>
   ```
 
-- Comparative (two traces)
+- Standalone (single graph replay trace with capture trace directory):
+
+  ```text
+  Follow the analysis orchestrator installed with TraceLens and run the full
+  agentic analysis workflow on <path_to_trace.json> with capture folder
+  <path_to_capture_folder>
+  ```
+
+- Comparative (two eager traces):
 
   ```text
   Follow the analysis orchestrator installed with TraceLens and run the full
   agentic analysis workflow on <path_to_trace1.json> and <path_to_trace2.json>
   ```
+
+- Comparative (two graph replay traces with capture trace directories):
+
+  ```text
+  Follow the analysis orchestrator installed with TraceLens and run the full
+  agentic analysis workflow on <path_to_trace1.json> with capture folder
+  <path_to_capture1.json> and <path_to_trace2.json> with capture folder
+  <path_to_capture2.json>
+  ```
+
+  Always pass the baseline trace as trace1.
 
 If prompted, provide the trace file path, the platform of the first trace, the
 analysis mode (`default` for training and non-vLLM/SGLang eager inference, or
@@ -131,7 +150,7 @@ standalone run on a remote node with a container:
 ```bash
 agent --model <model> --print --force --trust \
     "Follow the analysis orchestrator installed with the TraceLens pip package
-    (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package
+    (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package
     installation directory) and run the full agentic analysis workflow on
     <path_to_trace.json> with platform <platform>, analysis mode default,
     node <node>, container <container>, output to <output_dir>"
