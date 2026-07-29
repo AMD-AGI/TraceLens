@@ -17,7 +17,7 @@ synchronization skew.
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - Per-rank PyTorch profiler traces from a distributed run (one trace per rank).
 
 ## Step 1: Generate the report
@@ -58,6 +58,11 @@ ranks, with aggregation metrics (`mean`, `median`, `min`, `max` by default). If
 neither `--output_xlsx_path` nor `--output_csvs_dir` is given, the workbook is
 written to `--trace_dir` (or the lowest common directory of the resolved
 traces).
+
+```{note}
+Excel output requires `openpyxl`; TraceLens installs it automatically if it's
+missing. Use `--output_csvs_dir` to write CSV files instead.
+```
 
 ## Step 2: Read the report sheets
 
@@ -107,15 +112,16 @@ The all2allv sheets instead report:
 | `throughput (GB/s)` | Total data moved / wall-clock time. Compare against link bandwidth to gauge efficiency. |
 | `wall_time` | End-to-end time from the first rank entering to the last finishing. |
 | `size_imbalance` | Max rank's data ÷ mean. `1.0` = balanced; `>> 1.0` = some ranks carry disproportionate load (common when some MoE experts are hotter than others). |
+| `max_rank_dur / min_rank_dur` | Spread in per-rank kernel time. A large spread together with high `size_imbalance` points to rebalancing expert routing or dropping tokens. |
 | `skew in start time` | How far apart ranks enter the collective — large skew means some ranks are blocked by upstream compute. |
 
 To diagnose low throughput, check `size_imbalance`:
 
-- **`size_imbalance` ≈ 1.0** — all ranks are sending roughly equal amounts of
+- **`size_imbalance` ≈ 1.0:** all ranks are sending roughly equal amounts of
   data, so the slow throughput isn't caused by one rank doing more work than
   others. Look for software or driver overhead instead (launch latency, kernel
   scheduling).
-- **`size_imbalance` >> 1.0** — some ranks are sending more data than
+- **`size_imbalance` >> 1.0:** some ranks are sending more data than
   others. This is common in Mixture-of-Experts models where certain experts
   attract more tokens. The busiest rank takes the longest, and all other ranks
   wait for it to finish before the collective can complete.
@@ -129,6 +135,19 @@ A straggler is the rank that consistently arrives last at collectives, forcing
 the others to wait in implicit synchronization. Open the `straggler_summary`
 sheet: it's sorted so the *straggler is the first row* (lowest total wait
 time — it arrives last, so it rarely waits itself).
+
+Example from an 8-rank Llama 70B FSDP run (`straggler_summary`, truncated):
+
+| rank | total_wait_time_us | mean_wait_time_us | times_arrived_last | times_arrived_first | pct_arrived_last | num_collectives | total_nccl_dur_us |
+|------|-------------------|-------------------|--------------------|---------------------|------------------|-----------------|-------------------|
+| 4 | 27,195 | 55.7 | 420 | 6 | 86.1% | 488 | 3,910,753 |
+| 5 | 4,660,353 | 9,549.9 | 39 | 10 | 8.0% | 488 | 8,463,896 |
+| ... | ... | ... | ... | ... | ... | ... | ... |
+| 0 | 13,358,753 | 27,374.5 | 3 | 320 | 0.6% | 488 | 17,203,432 |
+
+Rank 4 is the straggler: the lowest total wait time, last to arrive 86% of the
+time, and the lowest NCCL kernel duration (other ranks' durations are inflated
+by the time they spend waiting for it).
 
 | Column | What it tells you |
 |--------|-------------------|

@@ -16,7 +16,7 @@ subtrees:
 
 - caption: Install
   entries:
-  - file: install/installation
+  - file: install/install
     title: Install TraceLens
 
 - caption: How to
@@ -25,26 +25,64 @@ subtrees:
     title: Generate reports
     entries:
     - file: how-to/generate-perf-report-pytorch
-      title: PyTorch performance report 
+      title: PyTorch performance report
     - file: how-to/generate-perf-report-pytorch-inference
-      title: PyTorch inference performance report 
+      title: PyTorch inference performance report
     - file: how-to/generate-perf-report-jax
-      title: JAX performance report 
+      title: JAX performance report
     - file: how-to/generate-perf-report-rocprof
-      title: rocprof performance report 
+      title: rocprof performance report
     - file: how-to/collective-report
-      title: Collective-communication report 
+      title: Collective-communication report
+    - file: how-to/compare-perf-reports
+      title: Compare performance reports
   - file: how-to/compare-traces
     title: Compare two traces
   - file: how-to/event-replay
     title: Replay a single operation
   - file: how-to/trace-fusion
     title: Fuse multi-rank traces
+  - file: how-to/sdk-analysis
+    title: Analyze traces with the SDK
+  - file: how-to/perf-model-without-trace
+    title: Model op performance without a trace
+  - file: how-to/nccl-analysis
+    title: Analyze collective communication
+  - file: how-to/origami-integration
+    title: Estimate kernel times with Origami
+  - file: how-to/agent
+    title: Agentic performance analysis with the TraceLens Agent
+
+- caption: Concepts
+  entries:
+  - file: conceptual/trace2tree
+    title: The Trace2Tree data model
+  - file: conceptual/torch-profiling-analysis
+    title: Understanding PyTorch traces
+  - file: conceptual/shape-metadata
+    title: Tensor shape metadata
+  - file: conceptual/gemm-analysis
+    title: GEMM analysis
+  - file: conceptual/inference-analysis
+    title: Inference performance analysis
+  - file: conceptual/triton-perf-model-walkthrough
+    title: Triton kernel performance model
+
+- caption: Tutorials
+  entries:
+  - file: tutorials/torch-profiling
+    title: PyTorch profiling walkthrough
+  - file: tutorials/distributed-profiling
+    title: Distributed profiling walkthrough
+  - file: tutorials/anomaly-detection
+    title: Anomaly detection walkthrough
 
 - caption: Reference
   entries:
   - file: reference/api-reference
     title: API reference
+  - file: reference/perf-report-columns
+    title: Performance report columns
 
 - caption: About
   entries:
