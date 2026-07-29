@@ -245,6 +245,10 @@ run_single_job() {
     fi
     reference_dir="$(repo_abs_path "$reference_dir")"
 
+    # Capture folders are not currently plumbed into the repeatability CSVs, so
+    # this stays empty; kept for parity with generate_ref.sh's prompt string.
+    local capture_suffix=""
+
     local CASE_RESULTS="$RESULTS_ROOT/$id/run_${repeat}"
     local OUTPUT_DIR="$CASE_RESULTS/analysis_output"
     "${DEXEC[@]}" rm -rf "$CASE_RESULTS" 2>/dev/null || true
@@ -264,11 +268,11 @@ run_single_job() {
             cd "$ANALYSIS_DIR" || exit
             if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
                 run_llm_agent \
-"Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path with platform $platform (trace1) and $platform2 (trace2), analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
+"Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path${capture_suffix} with platform $platform (trace1) and $platform2 (trace2), analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
                     1
             else
                 run_llm_agent \
-                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path with platform $platform, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
+                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path with platform $platform, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
                     1
             fi
         ) < /dev/null > "$CASE_RESULTS/analysis_stream.ndjson" 2>&1
