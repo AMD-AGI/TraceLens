@@ -38,9 +38,7 @@ def mx_available() -> bool:
     Covers the Triton ``tl.dot_scaled`` MXFP4/MXFP6 path as well as aiter's
     gfx950 CK ``gemm_a4w4`` MXFP4 path
     """
-    if triton_available() and (_MXFP4_SUPPORTED or bool(_MXFP6_DTYPE)):
-        return True
-    return _aiter_mxfp4_ready()
+    return  (triton_available() and (_MXFP4_SUPPORTED or bool(_MXFP6_DTYPE))) or _aiter_mxfp4_ready()
 
 
 def triton_available() -> bool:
