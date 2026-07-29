@@ -11,10 +11,23 @@ set -uo pipefail
 # Usage: bash run_repeatability_parallel.sh [standalone|comparative] [--pi]
 #    or: bash run_repeatability_parallel.sh --pi [standalone|comparative]
 #
-# COMPARISON_SCOPE can also be set via the COMPARISON_SCOPE environment variable.
-# Defaults to standalone.
+# With NO scope argument the script runs the full pipeline sequentially:
+#   1. Generate golden references for standalone  (via generate_ref.sh)
+#   2. Generate golden references for comparative  (via generate_ref.sh)
+#   3. Repeatability eval for standalone
+#   4. Repeatability eval for comparative
+#   5. A single combined pr_report.md + fix_ticket_report.md
 #
-# --pi  Use `pi` instead of the Cursor `agent` CLI. Also settable via USE_PI=1.
+# Passing 'standalone' or 'comparative' (or the COMPARISON_SCOPE env var)
+# restricts the run to that one scope only (gen-ref + repeatability + report
+# over just that scope). Golden references are always regenerated from scratch
+# as local directories under agent_evals/Analysis/analysis_tests/ before the
+# repeatability stage, so the repeatability evals compare against the freshly
+# generated references.
+#
+# --pi  Use `pi` instead of the Cursor `agent` CLI for the repeatability and
+#       post-processing stages. Also settable via USE_PI=1. NOTE: golden-ref
+#       generation always uses the `agent` CLI, matching generate_ref.sh.
 #
 # CONTAINER is optional. If set, python/setup commands run via
 # docker exec -w $REPO_ROOT $CONTAINER ... ; if unset, they run on the host.
@@ -24,13 +37,21 @@ usage() {
     cat <<'EOF'
 Usage: bash run_repeatability_parallel.sh [standalone|comparative] [--pi]
 
-  standalone|comparative   Comparison scope (default: standalone or COMPARISON_SCOPE)
+  standalone|comparative   Restrict to a single scope (default: run both scopes)
   --pi                     Use pi instead of the Cursor agent CLI (or USE_PI=1)
+
+With no scope argument the script runs, sequentially:
+  1. generate golden references (standalone)  via generate_ref.sh
+  2. generate golden references (comparative)  via generate_ref.sh
+  3. repeatability eval (standalone)
+  4. repeatability eval (comparative)
+  5. a single combined pr_report.md + fix_ticket_report.md
 EOF
 }
 
 USE_PI="${USE_PI:-false}"
-COMPARISON_SCOPE="${COMPARISON_SCOPE:-standalone}"
+# Optional single-scope filter. Defaults to COMPARISON_SCOPE if set, else both.
+SCOPE_FILTER="${COMPARISON_SCOPE:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -39,7 +60,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         standalone|comparative)
-            COMPARISON_SCOPE="$1"
+            SCOPE_FILTER="$1"
             shift
             ;;
         -h|--help)
@@ -60,13 +81,19 @@ else
     USE_PI=false
 fi
 
-if [[ "$COMPARISON_SCOPE" != "standalone" && "$COMPARISON_SCOPE" != "comparative" ]]; then
-    echo "ERROR: Unknown comparison scope '$COMPARISON_SCOPE'. Use 'standalone' or 'comparative'." >&2
+if [[ -n "$SCOPE_FILTER" && "$SCOPE_FILTER" != "standalone" && "$SCOPE_FILTER" != "comparative" ]]; then
+    echo "Comparison scope not specified:'$SCOPE_FILTER'. Use 'standalone' or 'comparative'." >&2
     exit 1
 fi
 
+if [[ -n "$SCOPE_FILTER" ]]; then
+    SCOPES=("$SCOPE_FILTER")
+else
+    SCOPES=(standalone comparative)
+fi
+
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration (scope-independent)
 # ---------------------------------------------------------------------------
 MAX_PARALLEL="${MAX_PARALLEL:-5}"
 NUM_REPEATS="${NUM_REPEATS:-3}"
@@ -83,10 +110,18 @@ PI_VENV_PREFIX="use venv_tracelens for all commands and tool calls. "
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ANALYSIS_DIR="$REPO_ROOT/TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/agent_evals/Analysis"
-RESULTS_ROOT="${RESULTS_ROOT:-$EVALS_DIR/repeatability_results_${COMPARISON_SCOPE}}"
-TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
 
-REPORT_DIR="${REPORT_DIR:-$RESULTS_ROOT/../reports_${COMPARISON_SCOPE}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GENERATE_REF_SCRIPT="$SCRIPT_DIR/generate_ref.sh"
+
+# Single combined report + intermediate combined results tree for post-processing.
+REPORT_DIR="${REPORT_DIR:-$EVALS_DIR/reports}"
+COMBINED_RESULTS_ROOT="${COMBINED_RESULTS_ROOT:-$EVALS_DIR/repeatability_results_combined}"
+
+# Scope-specific globals, (re)set per scope by run_repeatability_for_scope().
+COMPARISON_SCOPE=""
+RESULTS_ROOT=""
+TEST_TRACES_CSV=""
 
 if [[ -n "$CONTAINER" ]]; then
     DEXEC=(docker exec -w "$REPO_ROOT" "$CONTAINER")
@@ -199,7 +234,7 @@ print_scheduled_tests() {
 # ---------------------------------------------------------------------------
 
 run_single_job() {
-    local id="$1" repeat="$2" trace1_path="$3" trace2_path="$4" reference_dir="$5" platform="$6" platform2="$7" capture_folder1="${8:-}" capture_folder2="${9:-}"
+    local id="$1" repeat="$2" trace1_path="$3" trace2_path="$4" reference_dir="$5" platform="$6" platform2="$7"
     local tag="[$id|run_$repeat]"
 
     log_status "  $tag [$(ts)] Running"
@@ -209,6 +244,10 @@ run_single_job() {
         trace2_path="$(repo_abs_path "$trace2_path")"
     fi
     reference_dir="$(repo_abs_path "$reference_dir")"
+
+    # Capture folders are not currently plumbed into the repeatability CSVs, so
+    # this stays empty; kept for parity with generate_ref.sh's prompt string.
+    local capture_suffix=""
 
     local CASE_RESULTS="$RESULTS_ROOT/$id/run_${repeat}"
     local OUTPUT_DIR="$CASE_RESULTS/analysis_output"
@@ -228,13 +267,8 @@ run_single_job() {
         (
             cd "$ANALYSIS_DIR" || exit
             if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
-                local capture_suffix=""
-                [[ -n "$capture_folder1" ]] && capture_suffix+=" capture folder for trace1 $REPO_ROOT/$capture_folder1"
-                [[ -n "$capture_folder2" ]] && capture_suffix+=" capture folder for trace2 $REPO_ROOT/$capture_folder2"
-                local analysis_mode="default"
-                [[ -n "$capture_folder1" || -n "$capture_folder2" ]] && analysis_mode="inference"
                 run_llm_agent \
-                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path${capture_suffix} with platform $platform (trace1) and $platform2 (trace2), analysis mode $analysis_mode, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
+"Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path${capture_suffix} with platform $platform (trace1) and $platform2 (trace2), analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
                     1
             else
                 run_llm_agent \
@@ -309,12 +343,13 @@ run_single_job() {
 # FIFO semaphore for concurrency control
 # ---------------------------------------------------------------------------
 
-FIFO="$RESULTS_ROOT/.job_fifo"
+FIFO=""
 cleanup() {
-    rm -f "$FIFO"
+    [[ -n "$FIFO" ]] && rm -f "$FIFO"
 }
 
 setup_semaphore() {
+    FIFO="$RESULTS_ROOT/.job_fifo"
     rm -f "$FIFO"
     mkfifo "$FIFO"
     exec 4<>"$FIFO"
@@ -322,39 +357,8 @@ setup_semaphore() {
     trap cleanup EXIT
 }
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-mkdir -p "$RESULTS_ROOT"
-"${DEXEC[@]}" bash -c "mkdir -p $RESULTS_ROOT && chmod -R 777 $RESULTS_ROOT"
-if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
-    expand_archive unit_tests_comparative
-    expand_archive e2e_tests_comparative
-else
-    expand_archive unit_tests_standalone
-    expand_archive e2e_tests_standalone
-fi
-
-echo "========================================="
-echo "  Analysis Repeatability Test"
-echo "  Mode:         $COMPARISON_SCOPE"
-echo "  Agent:        $AGENT_BACKEND"
-echo "  Node:         $NODE_LABEL"
-echo "  Runtime:      $RUNTIME_LABEL"
-echo "  Repeats:      $NUM_REPEATS"
-echo "  Max parallel: $MAX_PARALLEL"
-echo "  CSV:          $TEST_TRACES_CSV"
-if [[ -n "$TEST_IDS" ]]; then
-    echo "  Test filter:  $TEST_IDS"
-fi
-echo "========================================="
-echo ""
-
-print_scheduled_tests
-
 _spawn_jobs() {
-    local id="$1" trace1_path="$2" trace2_path="$3" reference_dir="$4" platform="$5" platform2="$6" capture_folder1="${7:-}" capture_folder2="${8:-}"
+    local id="$1" trace1_path="$2" trace2_path="$3" reference_dir="$4" platform="$5" platform2="$6"
 
     should_run_id "$id" || return
     JOBS_SPAWNED=$((JOBS_SPAWNED + 1))
@@ -362,7 +366,7 @@ _spawn_jobs() {
     for ((i = 0; i < NUM_REPEATS; i++)); do
         read -r -u4  # acquire semaphore slot
         (
-            run_single_job "$id" "$i" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2" "${capture_folder1:-}" "${capture_folder2:-}" || true
+            run_single_job "$id" "$i" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2" || true
             echo >&4  # release semaphore slot
             sleep 2  # stagger agent startup to avoid ~/.cursor/cli-config.json rename race
         ) &
@@ -370,64 +374,240 @@ _spawn_jobs() {
     done
 }
 
-setup_semaphore
-
-JOBS_SPAWNED=0
-
-if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
-    # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform,platform2,capture_folder1,capture_folder2
-    while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2 capture_folder1 capture_folder2 <&3; do
-        [[ -z "$id" ]] && continue
-        _spawn_jobs "$id" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2" "${capture_folder1:-}" "${capture_folder2:-}"
-    done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
-else
-    # standalone CSV: id,sub_category,trace_path,reference_dir,platform
-    while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
-        [[ -z "$id" ]] && continue
-        _spawn_jobs "$id" "$trace_path" "" "$reference_dir" "$platform" ""
-    done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
-fi
-
-wait
-
-if [[ -n "$TEST_IDS" && "$JOBS_SPAWNED" -eq 0 ]]; then
-    echo ""
-    echo "WARNING: TEST_IDS='$TEST_IDS' matched no trace ids in $TEST_TRACES_CSV." >&2
-    echo "  Use exact ids or underscore-delimited prefixes (e.g. gemm_01 -> gemm_01_compute_few_tiles)." >&2
-    echo "  No eval jobs were started; reports will be empty." >&2
-fi
-
-echo ""
-echo "========================================="
-echo "  Repeatability test finished."
-echo "  Results in: $RESULTS_ROOT"
-echo "========================================="
-
 # ---------------------------------------------------------------------------
-# Post-processing: aggregate results and generate reports via LLM agent
+# Stage 1: golden reference generation for one scope (from scratch)
+#
+# Delegates to generate_ref.sh so the golden references are produced with the
+# exact same flow, written as local analysis_output_ref/ directories under
+# agent_evals/Analysis/analysis_tests/. generate_ref.sh already removes each
+# case's existing reference before regenerating it.
 # ---------------------------------------------------------------------------
 
-if [[ "$SKIP_POST_PROCESSING" == "1" ]]; then
+generate_refs_for_scope() {
+    local scope="$1"
+
+    echo "========================================="
+    echo "  Stage 1: Golden Reference Generation"
+    echo "  Scope:        $scope"
+    echo "  Node:         $NODE_LABEL"
+    echo "  Runtime:      $RUNTIME_LABEL"
+    echo "========================================="
     echo ""
-    echo "  Post-processing skipped -- SKIP_POST_PROCESSING=1."
-    if [[ "$USE_PI" == true ]]; then
-        echo "  To run later: pi --mode json '${PI_VENV_PREFIX}Run eval post processing on results_root=$RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$TEST_TRACES_CSV report_dir=$REPORT_DIR container=${CONTAINER:-} $NODE_LABEL $RUNTIME_LABEL'"
-    else
-        echo "  To run later: agent 'Run eval post processing on results_root=$RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$TEST_TRACES_CSV report_dir=$REPORT_DIR container=${CONTAINER:-} $NODE_LABEL $RUNTIME_LABEL'"
+
+    if [[ ! -f "$GENERATE_REF_SCRIPT" ]]; then
+        echo "ERROR: generate_ref.sh not found at $GENERATE_REF_SCRIPT" >&2
+        return 1
     fi
-else
+
+    REPO_ROOT="$REPO_ROOT" \
+    CONTAINER="$CONTAINER" \
+    MAX_PARALLEL="$MAX_PARALLEL" \
+    SLEEP_BETWEEN="$SLEEP_BETWEEN" \
+    TEST_IDS="$TEST_IDS" \
+        bash "$GENERATE_REF_SCRIPT" "$scope"
+}
+
+# ---------------------------------------------------------------------------
+# Stage 2: repeatability evals for one scope
+# ---------------------------------------------------------------------------
+
+run_repeatability_for_scope() {
+    COMPARISON_SCOPE="$1"
+    RESULTS_ROOT="$EVALS_DIR/repeatability_results_${COMPARISON_SCOPE}"
+    TEST_TRACES_CSV="$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv"
+
+    if [[ ! -f "$TEST_TRACES_CSV" ]]; then
+        echo "ERROR: trace CSV not found: $TEST_TRACES_CSV" >&2
+        return 1
+    fi
+
+    mkdir -p "$RESULTS_ROOT"
+    "${DEXEC[@]}" bash -c "mkdir -p $RESULTS_ROOT && chmod -R 777 $RESULTS_ROOT"
+
+    if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
+        expand_archive unit_tests_comparative
+        expand_archive e2e_tests_comparative
+    else
+        expand_archive unit_tests_standalone
+        expand_archive e2e_tests_standalone
+    fi
+
+    echo "========================================="
+    echo "  Stage 2: Analysis Repeatability Test"
+    echo "  Mode:         $COMPARISON_SCOPE"
+    echo "  Agent:        $AGENT_BACKEND"
+    echo "  Node:         $NODE_LABEL"
+    echo "  Runtime:      $RUNTIME_LABEL"
+    echo "  Repeats:      $NUM_REPEATS"
+    echo "  Max parallel: $MAX_PARALLEL"
+    echo "  CSV:          $TEST_TRACES_CSV"
+    if [[ -n "$TEST_IDS" ]]; then
+        echo "  Test filter:  $TEST_IDS"
+    fi
+    echo "========================================="
+    echo ""
+
+    print_scheduled_tests
+
+    setup_semaphore
+
+    JOBS_SPAWNED=0
+
+    if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
+        # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform,platform2
+        while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2 <&3; do
+            [[ -z "$id" ]] && continue
+            _spawn_jobs "$id" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2"
+        done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
+    else
+        # standalone CSV: id,sub_category,trace_path,reference_dir,platform
+        while IFS=, read -r id sub_category trace_path reference_dir platform <&3; do
+            [[ -z "$id" ]] && continue
+            _spawn_jobs "$id" "$trace_path" "" "$reference_dir" "$platform" ""
+        done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
+    fi
+
+    wait
+    rm -f "$FIFO"
+
+    if [[ -n "$TEST_IDS" && "$JOBS_SPAWNED" -eq 0 ]]; then
+        echo ""
+        echo "WARNING: TEST_IDS='$TEST_IDS' matched no trace ids in $TEST_TRACES_CSV." >&2
+        echo "  Use exact ids or underscore-delimited prefixes (e.g. gemm_01 -> gemm_01_compute_few_tiles)." >&2
+    fi
+
+    echo ""
+    echo "  Repeatability ($COMPARISON_SCOPE) finished. Results in: $RESULTS_ROOT"
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Build a single unified trace CSV covering every scope that ran, using the
+# standalone 5-column schema (id,sub_category,trace_path,reference_dir,platform)
+# so the post-processing skill can consume both scopes in one pass. Comparative
+# rows are down-projected: trace1_path -> trace_path, platform (trace1) kept.
+# ---------------------------------------------------------------------------
+
+build_combined_csv() {
+    local out="$1"
+    local scope csv id sub t1 t2 ref plat plat2
+
+    echo "id,sub_category,trace_path,reference_dir,platform" > "$out"
+
+    for scope in "${SCOPES[@]}"; do
+        csv="$EVALS_DIR/analysis_tests/combined_traces_${scope}.csv"
+        [[ -f "$csv" ]] || continue
+        if [[ "$scope" == "comparative" ]]; then
+            while IFS=, read -r id sub t1 t2 ref plat plat2; do
+                [[ -z "$id" ]] && continue
+                echo "$id,$sub,$t1,$ref,$plat" >> "$out"
+            done < <(tail -n +2 "$csv"; echo)
+        else
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                echo "$line" >> "$out"
+            done < <(tail -n +2 "$csv"; echo)
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Stage 3: single combined post-processing across all scopes that ran.
+# Merges the per-scope results trees (via symlinks) and CSVs into one, then
+# invokes the post-processing skill once to emit a single pr_report.md and a
+# single fix_ticket_report.md in $REPORT_DIR.
+# ---------------------------------------------------------------------------
+
+run_post_processing() {
+    if [[ "$SKIP_POST_PROCESSING" == "1" ]]; then
+        echo ""
+        echo "  Post-processing skipped -- SKIP_POST_PROCESSING=1."
+        echo "  To run later, first rebuild the combined results tree + CSV, then:"
+        if [[ "$USE_PI" == true ]]; then
+            echo "    pi --mode json '${PI_VENV_PREFIX}Run eval post processing on results_root=$COMBINED_RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$REPORT_DIR/combined_traces.csv report_dir=$REPORT_DIR container=${CONTAINER:-} $NODE_LABEL $RUNTIME_LABEL'"
+        else
+            echo "    agent 'Run eval post processing on results_root=$COMBINED_RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$REPORT_DIR/combined_traces.csv report_dir=$REPORT_DIR container=${CONTAINER:-} $NODE_LABEL $RUNTIME_LABEL'"
+        fi
+        return 0
+    fi
+
     mkdir -p "$REPORT_DIR"
+
+    # Merge per-scope results trees into one combined tree via symlinks so a
+    # single aggregate/report pass sees every trace. Trace ids are unique
+    # across scopes, so there are no name collisions.
+    rm -rf "$COMBINED_RESULTS_ROOT"
+    mkdir -p "$COMBINED_RESULTS_ROOT"
+
+    local scope rr child name src
+    for scope in "${SCOPES[@]}"; do
+        rr="$EVALS_DIR/repeatability_results_${scope}"
+        [[ -d "$rr" ]] || continue
+        for child in "$rr"/*/; do
+            [[ -d "$child" ]] || continue
+            src="${child%/}"
+            name="$(basename "$src")"
+            ln -sfn "$src" "$COMBINED_RESULTS_ROOT/$name"
+        done
+    done
+
+    local combined_csv="$REPORT_DIR/combined_traces.csv"
+    build_combined_csv "$combined_csv"
 
     echo ""
     echo "========================================="
-    echo "  Running eval post-processing..."
+    echo "  Stage 3: Combined eval post-processing"
+    echo "  Scopes:       ${SCOPES[*]}"
+    echo "  Results tree: $COMBINED_RESULTS_ROOT"
+    echo "  CSV:          $combined_csv"
+    echo "  Report dir:   $REPORT_DIR"
     echo "========================================="
 
     (
         cd "$EVALS_DIR" || exit
         run_llm_agent \
-            "Run eval post processing on results_root=$RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$TEST_TRACES_CSV report_dir=$REPORT_DIR container=${CONTAINER:-} $NODE_LABEL $RUNTIME_LABEL"
+            "Run eval post processing on results_root=$COMBINED_RESULTS_ROOT suite=$SUITE_NAME test_traces_csv=$combined_csv report_dir=$REPORT_DIR container=${CONTAINER:-} $NODE_LABEL $RUNTIME_LABEL"
     ) < /dev/null > "$REPORT_DIR/post_processing.ndjson" 2>&1
 
-    echo "  Post-processing complete. Reports in: $REPORT_DIR"
+    echo "  Post-processing complete."
+    echo "  PR report:         $REPORT_DIR/pr_report.md"
+    echo "  Fix-ticket report: $REPORT_DIR/fix_ticket_report.md"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+echo "========================================="
+echo "  Analysis Eval Pipeline"
+echo "  Scopes:       ${SCOPES[*]}"
+echo "  Agent:        $AGENT_BACKEND"
+echo "  Node:         $NODE_LABEL"
+echo "  Runtime:      $RUNTIME_LABEL"
+echo "  Repeats:      $NUM_REPEATS"
+echo "  Max parallel: $MAX_PARALLEL"
+if [[ -n "$TEST_IDS" ]]; then
+    echo "  Test filter:  $TEST_IDS"
 fi
+echo "  Report dir:   $REPORT_DIR"
+echo "========================================="
+echo ""
+
+# Stage 1: regenerate golden references from scratch for each scope.
+for scope in "${SCOPES[@]}"; do
+    generate_refs_for_scope "$scope"
+done
+
+# Stage 2: run repeatability evals for each scope against the fresh references.
+for scope in "${SCOPES[@]}"; do
+    run_repeatability_for_scope "$scope"
+done
+
+# Stage 3: one combined post-processing pass -> single reports.
+run_post_processing
+
+echo ""
+echo "========================================="
+echo "  Pipeline finished."
+echo "  Reports in: $REPORT_DIR"
+echo "========================================="
