@@ -51,19 +51,20 @@ import pandas as pd
 
 from TraceLens.util import DataLoader
 from TraceLens.TraceUtils.annotation_utils import (
-    ITERATION_PATTERNS,
-    ITERATION_BACKUP_PATTERNS,
-    IterationAnnotation,
+    PHASE_DECODE_ONLY,
+    PHASE_PREFILLDECODE,
+    PHASE_PREFILL_ONLY,
+    average_detail,
+    classify_phase,
+    find_iteration_roots_by_priority,
+    find_phase_from_window,
+    iteration_details,
 )
 from TraceLens.TraceUtils.split_inference_trace_annotation import (
     extract_and_save,
-    find_phase_from_window,
     get_filename,
     preprocess_trace,
 )
-
-PHASE_DECODE_ONLY = "decode_only"
-PHASE_PREFILLDECODE = "prefilldecode"
 
 PER_STEP_KEYS = (
     "context_requests",
@@ -73,44 +74,6 @@ PER_STEP_KEYS = (
     "g_sq",
     "g_sk",
 )
-
-
-def _find_events_by_pattern_quiet(events, patterns, name, cat=None):
-    """Same shape as the splitter helper but without per-event spam."""
-    matches = []
-    for pattern in patterns:
-        cur = [e for e in events if pattern.match(e.get("name", ""))]
-        if cat is not None:
-            cur = [e for e in cur if e.get("cat") == cat]
-        matches.extend(cur)
-    matches.sort(key=lambda x: x.get("ts", 0))
-    print(f"Found {len(matches)} {name} events")
-    if not matches:
-        return None
-    return matches
-
-
-def _find_roots_by_priority(events, pattern_tiers, name, cat=None):
-    """Return roots from the first tier that matches any events.
-
-    ``pattern_tiers`` is an ordered list of pattern groups
-    """
-    for patterns in pattern_tiers:
-        roots = _find_events_by_pattern_quiet(events, patterns, name, cat=cat)
-        if roots:
-            return roots
-    return []
-
-
-def classify_phase(detail: dict) -> Optional[str]:
-    """Return ``decode_only``, ``prefilldecode`` or ``None`` for a step."""
-    c = detail.get("context_requests", 0)
-    g = detail.get("generation_requests", 0)
-    if c > 0:
-        return PHASE_PREFILLDECODE
-    if g > 0:
-        return PHASE_DECODE_ONLY
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -142,9 +105,7 @@ class Block:
         return all(d.get("has_sqsk", False) for d in self.details)
 
     def avg(self, key: str) -> float:
-        if not self.details:
-            return 0.0
-        return sum(d.get(key, 0) for d in self.details) / len(self.details)
+        return average_detail(self.details, key)
 
 
 def window_blocks(blocks: List["Block"], max_steps: int) -> List["Block"]:
@@ -206,9 +167,7 @@ def find_blocks(iteration_roots: List[dict]) -> List[Block]:
     if not iteration_roots:
         return []
 
-    details = [
-        IterationAnnotation(r.get("name", "")).full_details() for r in iteration_roots
-    ]
+    details = iteration_details(iteration_roots, full=True)
     phases = [classify_phase(d) for d in details]
 
     blocks: List[Block] = []
@@ -222,7 +181,9 @@ def find_blocks(iteration_roots: List[dict]) -> List[Block]:
             return
         if cur_phase == PHASE_DECODE_ONLY and len(cur_roots) < 2:
             return
-        if cur_phase == PHASE_PREFILLDECODE and len(cur_roots) < 1:
+        if (
+            cur_phase == PHASE_PREFILL_ONLY or cur_phase == PHASE_PREFILLDECODE
+        ) and len(cur_roots) < 1:
             return
         blocks.append(
             Block(
@@ -272,7 +233,7 @@ def _avg_block_distance(a: Block, b: Block) -> Optional[Tuple[float, ...]]:
         d_g_sk = sum(abs(da[i]["g_sk"] - db[i]["g_sk"]) for i in range(n)) / n
         return (d_g_sq, d_g_sk)
 
-    if a.phase == PHASE_PREFILLDECODE:
+    if a.phase == PHASE_PREFILLDECODE or a.phase == PHASE_PREFILL_ONLY:
         d_c_req = (
             sum(
                 abs(da[i]["context_requests"] - db[i]["context_requests"])
@@ -531,12 +492,7 @@ def load_trace(path: str):
     print(f"Loaded {len(events)} events from {path}")
     # Detailed patterns take priority over the native patterns.
     label = f"execution steps (iteration) [{os.path.basename(path)}]"
-    iteration_roots = _find_roots_by_priority(
-        events,
-        [ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS],
-        label,
-        cat="user_annotation",
-    )
+    iteration_roots = find_iteration_roots_by_priority(events, label=label)
     return {
         "trace_json": trace_json,
         "events": events,
@@ -584,7 +540,7 @@ def main():
     args = parser.parse_args()
 
     phases = [p.strip() for p in args.phases.split(",") if p.strip()]
-    valid = {PHASE_DECODE_ONLY, PHASE_PREFILLDECODE}
+    valid = {PHASE_DECODE_ONLY, PHASE_PREFILLDECODE, PHASE_PREFILL_ONLY}
     bad = [p for p in phases if p not in valid]
     if bad:
         print(f"Unknown phase(s): {bad}. Valid: {sorted(valid)}", file=sys.stderr)

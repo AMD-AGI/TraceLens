@@ -13,7 +13,7 @@ and populates its fields from whichever registered pattern matches:
 """
 
 import re
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 # --- patterns --------------------------------------------------------------
 # Each block lists matching annotations, prefill/decode/mixed where the format
@@ -73,6 +73,11 @@ ITERATION_BACKUP_PATTERNS = [
     SGLANG_NATIVE_PATTERN,
     ATOM_NATIVE_PATTERN,
 ]
+
+ANNOTATION_CAT = "user_annotation"
+PHASE_DECODE_ONLY = "decode_only"
+PHASE_PREFILLDECODE = "prefilldecode"
+PHASE_PREFILL_ONLY = "prefill_only"
 
 
 def _safe_int(v) -> int:
@@ -346,15 +351,108 @@ class CaptureAnnotation:
         return self.kind is not None
 
 
-def annotation_str_from_event(event: dict) -> str:
-    return event.get("annotation") or event.get("name", "")
-
-
-def find_annotation_roots(events: List[dict], pattern: "re.Pattern") -> List[dict]:
-    roots = [
+def find_events_by_patterns(
+    events: List[dict],
+    patterns: List["re.Pattern"],
+    cat: Optional[str] = ANNOTATION_CAT,
+    label: Optional[str] = None,
+    verbose: bool = False,
+) -> List[dict]:
+    """Events whose name matches any of patterns, sorted by timestamp."""
+    matches = [
         e
         for e in events
-        if e.get("cat") == "user_annotation" and pattern.match(e.get("name", ""))
+        if (cat is None or e.get("cat") == cat)
+        and any(p.match(e.get("name", "")) for p in patterns)
     ]
-    roots.sort(key=lambda x: x.get("ts", 0))
-    return roots
+    matches.sort(key=lambda x: x.get("ts", 0))
+    if label is not None:
+        print(f"Found {len(matches)} {label} events")
+    if verbose:
+        for m in matches:
+            print(m.get("name", ""))
+    return matches
+
+
+def find_iteration_roots_by_priority(
+    events: List[dict],
+    pattern_tiers: Optional[List[List["re.Pattern"]]] = None,
+    label: Optional[str] = None,
+    cat: Optional[str] = ANNOTATION_CAT,
+    verbose: bool = False,
+) -> List[dict]:
+    """Roots from the first pattern tier that matches anything.
+    Defaults to the detailed tier followed by the native tier
+    """
+    if pattern_tiers is None:
+        pattern_tiers = (ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS)
+    for patterns in pattern_tiers:
+        roots = find_events_by_patterns(
+            events, patterns, cat=cat, label=label, verbose=verbose
+        )
+        if len(roots) > 0:
+            return roots
+    return []
+
+
+def has_context(detail: dict) -> bool:
+    """Step runs at least one prefill (context) request."""
+    return detail.get("context_requests", 0) > 0
+
+
+def has_generation(detail: dict) -> bool:
+    """Step runs at least one decode (generation) request."""
+    return detail.get("generation_requests", 0) > 0
+
+
+def is_prefill_only(detail: dict) -> bool:
+    return has_context(detail) and not has_generation(detail)
+
+
+def is_mixed(detail: dict) -> bool:
+    """Both prefill and decode requests in the same step."""
+    return has_context(detail) and has_generation(detail)
+
+
+def is_decode_only(detail: dict) -> bool:
+    return has_generation(detail) and not has_context(detail)
+
+
+def classify_phase(detail: dict) -> Optional[str]:
+    """``prefilldecode``, ``decode_only``, or ``None`` for an idle step."""
+    if has_context(detail) and has_generation(detail):
+        return PHASE_PREFILLDECODE
+    if has_context(detail):
+        return PHASE_PREFILL_ONLY
+    if has_generation(detail):
+        return PHASE_DECODE_ONLY
+    return None
+
+
+# --- per-window aggregation -------------------------------------------------
+def iteration_details(roots: List[dict], full: bool = False) -> List[dict]:
+    """Parse iteration-root events into one detail dict per step."""
+    annotations = (IterationAnnotation(r.get("name", "")) for r in roots)
+    if full:
+        return [a.full_details() for a in annotations]
+    return [a.iter_details() for a in annotations]
+
+
+def average_detail(details: List[dict], key: str) -> float:
+    if not details:
+        return 0.0
+    return sum(d.get(key, 0) for d in details) / len(details)
+
+
+def find_phase_from_window(details: List[dict]) -> dict:
+    """Phase composition and averages over a window of iteration details.
+
+    Accepts either the ``iter_details()`` or the ``full_details()`` shape.
+    """
+    return {
+        "num_prefill": sum(1 for d in details if is_prefill_only(d)),
+        "num_prefilldecode": sum(1 for d in details if is_mixed(d)),
+        "num_decode": sum(1 for d in details if is_decode_only(d)),
+        "avg_bs": int(average_detail(details, "batch_size")),
+        "avg_conc": int(average_detail(details, "num_requests")),
+    }

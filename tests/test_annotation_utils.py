@@ -22,8 +22,24 @@ both are consumed by key elsewhere and must agree on ``batch_size``.
 import pytest
 
 from TraceLens.TraceUtils.annotation_utils import (
+    ITERATION_BACKUP_PATTERNS,
+    ITERATION_PATTERNS,
+    PHASE_DECODE_ONLY,
+    PHASE_PREFILL_ONLY,
+    PHASE_PREFILLDECODE,
     CaptureAnnotation,
     IterationAnnotation,
+    average_detail,
+    classify_phase,
+    find_events_by_patterns,
+    find_iteration_roots_by_priority,
+    find_phase_from_window,
+    has_context,
+    has_generation,
+    is_decode_only,
+    is_mixed,
+    is_prefill_only,
+    iteration_details,
 )
 
 # Case tables: (name, kind, expected_fields, expected_meta)
@@ -802,3 +818,199 @@ def test_capture_non_matching(name):
     ann = CaptureAnnotation(name)
     assert not ann.matched
     assert ann.batch_size is None
+
+
+# --------------------------------------------------------------------------- #
+# Event / root discovery
+# --------------------------------------------------------------------------- #
+
+DETAILED_DECODE = (
+    "execute_64_context_0(sq0sk0sqsq0sqsk0)_generation_64(sq64sk131072sqsq64sqsk131072)"
+)
+DETAILED_MIXED = (
+    "execute_6147_context_2(sq6144sk7144sqsq20971520sqsk23019520)"
+    "_generation_3(sq3sk6144sqsq3sqsk6144)"
+)
+NATIVE_DECODE = "execute_context_0(0)_generation_64(64)"
+
+
+def _event(name, ts=0, cat="user_annotation"):
+    return {"name": name, "ts": ts, "cat": cat}
+
+
+def test_find_events_by_patterns_filters_by_category_and_sorts_by_ts():
+    events = [
+        _event(NATIVE_DECODE, ts=30),
+        _event(NATIVE_DECODE, ts=10),
+        _event(NATIVE_DECODE, ts=20, cat="cpu_op"),
+        _event("unrelated_op", ts=5),
+    ]
+    found = find_events_by_patterns(events, ITERATION_BACKUP_PATTERNS)
+    assert [e["ts"] for e in found] == [10, 30]
+
+    # cat=None keeps the cpu_op copy as well.
+    found = find_events_by_patterns(events, ITERATION_BACKUP_PATTERNS, cat=None)
+    assert [e["ts"] for e in found] == [10, 20, 30]
+
+
+def test_find_events_by_patterns_returns_each_event_once():
+    """A name matching two patterns in the same tier is not duplicated."""
+    events = [_event(DETAILED_DECODE)]
+    both = [ITERATION_PATTERNS[0], ITERATION_PATTERNS[0]]
+    assert len(find_events_by_patterns(events, both)) == 1
+
+
+def test_find_events_by_patterns_on_no_match():
+    assert find_events_by_patterns([_event("unrelated")], ITERATION_PATTERNS) == []
+
+
+def test_find_events_by_patterns_logging(capsys):
+    events = [_event(NATIVE_DECODE), _event("unrelated")]
+    find_events_by_patterns(events, ITERATION_BACKUP_PATTERNS)
+    assert capsys.readouterr().out == ""
+
+    find_events_by_patterns(events, ITERATION_BACKUP_PATTERNS, label="iteration")
+    assert capsys.readouterr().out == "Found 1 iteration events\n"
+
+    find_events_by_patterns(
+        events, ITERATION_BACKUP_PATTERNS, label="iteration", verbose=True
+    )
+    assert capsys.readouterr().out == f"Found 1 iteration events\n{NATIVE_DECODE}\n"
+
+
+def test_find_events_by_patterns_with_a_single_pattern():
+    events = [
+        _event(DETAILED_MIXED, ts=20),
+        _event(DETAILED_DECODE, ts=10),
+        _event(NATIVE_DECODE, ts=5),
+        _event(DETAILED_DECODE, ts=1, cat="cpu_op"),
+    ]
+    roots = find_events_by_patterns(events, [ITERATION_PATTERNS[0]])
+    assert [e["ts"] for e in roots] == [10, 20]
+
+
+def test_find_iteration_roots_by_priority_prefers_the_detailed_tier():
+    events = [
+        _event(DETAILED_DECODE, ts=10),
+        _event(NATIVE_DECODE, ts=20),
+        _event("step[DECODE bs=64]", ts=30),
+    ]
+    roots = find_iteration_roots_by_priority(events)
+    assert [e["name"] for e in roots] == [DETAILED_DECODE]
+
+
+def test_find_iteration_roots_by_priority_falls_back_to_the_native_tier():
+    events = [_event(NATIVE_DECODE, ts=20), _event("step[DECODE bs=64]", ts=10)]
+    roots = find_iteration_roots_by_priority(events)
+    assert [e["ts"] for e in roots] == [10, 20]
+
+
+def test_find_iteration_roots_by_priority_on_no_match():
+    assert find_iteration_roots_by_priority([_event("unrelated")]) == []
+    # Detailed annotations are ignored when they carry the wrong category.
+    wrong_cat = [_event(DETAILED_DECODE, cat="cpu_op")]
+    assert find_iteration_roots_by_priority(wrong_cat) == []
+
+
+def test_find_iteration_roots_by_priority_accepts_custom_tiers():
+    events = [_event(DETAILED_DECODE, ts=10), _event(NATIVE_DECODE, ts=20)]
+    roots = find_iteration_roots_by_priority(
+        events, pattern_tiers=[ITERATION_BACKUP_PATTERNS]
+    )
+    assert [e["name"] for e in roots] == [NATIVE_DECODE]
+
+
+# --------------------------------------------------------------------------- #
+# Phase classification
+# --------------------------------------------------------------------------- #
+
+PREFILL_ONLY = {"context_requests": 2, "generation_requests": 0}
+MIXED = {"context_requests": 2, "generation_requests": 8}
+DECODE_ONLY = {"context_requests": 0, "generation_requests": 8}
+IDLE = {"context_requests": 0, "generation_requests": 0}
+
+
+@pytest.mark.parametrize(
+    "detail,context,generation,prefill_only,mixed,decode_only,phase",
+    [
+        (PREFILL_ONLY, True, False, True, False, False, PHASE_PREFILL_ONLY),
+        (MIXED, True, True, False, True, False, PHASE_PREFILLDECODE),
+        (DECODE_ONLY, False, True, False, False, True, PHASE_DECODE_ONLY),
+        (IDLE, False, False, False, False, False, None),
+        ({}, False, False, False, False, False, None),
+    ],
+)
+def test_phase_predicates(
+    detail, context, generation, prefill_only, mixed, decode_only, phase
+):
+    assert has_context(detail) is context
+    assert has_generation(detail) is generation
+    assert is_prefill_only(detail) is prefill_only
+    assert is_mixed(detail) is mixed
+    assert is_decode_only(detail) is decode_only
+    assert classify_phase(detail) == phase
+
+
+# --------------------------------------------------------------------------- #
+# Per-window aggregation
+# --------------------------------------------------------------------------- #
+
+
+def test_iteration_details_parses_both_shapes():
+    roots = [{"name": DETAILED_MIXED}, {"name": DETAILED_DECODE}]
+
+    brief = iteration_details(roots)
+    assert [d["batch_size"] for d in brief] == [6147, 64]
+    assert "c_sq" not in brief[0]
+
+    full = iteration_details(roots, full=True)
+    assert [d["batch_size"] for d in full] == [6147, 64]
+    assert full[0]["c_sq"] == 6144
+    assert full[0]["has_sqsk"] is True
+
+
+def test_iteration_details_on_empty_input():
+    assert iteration_details([]) == []
+
+
+def test_average_detail():
+    details = [{"batch_size": 10}, {"batch_size": 20}, {"batch_size": 30}]
+    assert average_detail(details, "batch_size") == 20.0
+    # Missing keys count as zero, and an empty window averages to zero.
+    assert average_detail(details, "num_requests") == 0.0
+    assert average_detail([], "batch_size") == 0.0
+
+
+def test_find_phase_from_window_counts_each_phase_separately():
+    """A mixed step counts as prefilldecode, never as prefill or decode."""
+    details = [
+        {**PREFILL_ONLY, "batch_size": 100, "num_requests": 2},
+        {**MIXED, "batch_size": 200, "num_requests": 10},
+        {**MIXED, "batch_size": 300, "num_requests": 10},
+        {**DECODE_ONLY, "batch_size": 400, "num_requests": 8},
+        {**IDLE, "batch_size": 0, "num_requests": 0},
+    ]
+    assert find_phase_from_window(details) == {
+        "num_prefill": 1,
+        "num_prefilldecode": 2,
+        "num_decode": 1,
+        "avg_bs": 200,  # int(1000 / 5)
+        "avg_conc": 6,  # int(30 / 5)
+    }
+
+
+def test_find_phase_from_window_accepts_full_details():
+    roots = [{"name": DETAILED_MIXED}, {"name": DETAILED_DECODE}]
+    assert find_phase_from_window(iteration_details(roots, full=True)) == (
+        find_phase_from_window(iteration_details(roots))
+    )
+
+
+def test_find_phase_from_window_on_empty_input():
+    assert find_phase_from_window([]) == {
+        "num_prefill": 0,
+        "num_prefilldecode": 0,
+        "num_decode": 0,
+        "avg_bs": 0,
+        "avg_conc": 0,
+    }

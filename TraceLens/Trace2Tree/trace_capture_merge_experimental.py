@@ -27,9 +27,8 @@ import TraceLens
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
 from ..TraceUtils.annotation_utils import (
-    ITERATION_PATTERNS,
-    ITERATION_BACKUP_PATTERNS,
     IterationAnnotation,
+    find_iteration_roots_by_priority,
 )
 
 
@@ -524,25 +523,12 @@ def find_capture_roots(capture_tree):
     return capture_roots
 
 
-def _match_annotation_roots(graph_tree, patterns):
-    return [
-        event
-        for event in graph_tree.events
-        if event.get("cat") == "user_annotation"
-        and any(p.match(event.get("name", "")) for p in patterns)
-    ]
-
-
 def find_execution_roots(graph_tree):
     """Find iteration-annotation root events (vLLM / SGLang / ATOM) in the graph tree.
 
     Primary (detailed) patterns are tried first, and native (backup) patterns are used only when no primary root is found.
     """
-    roots = _match_annotation_roots(graph_tree, ITERATION_PATTERNS)
-    if not roots:
-        roots = _match_annotation_roots(graph_tree, ITERATION_BACKUP_PATTERNS)
-    roots.sort(key=lambda x: x.get("ts", 0))
-    return roots
+    return find_iteration_roots_by_priority(graph_tree.events)
 
 
 def find_graph_roots_under_execution(execution_root, graphlaunch_events):
