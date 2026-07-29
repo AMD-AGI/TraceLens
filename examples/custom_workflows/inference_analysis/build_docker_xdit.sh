@@ -30,6 +30,7 @@ case "${XDIT_VERSION}" in
     v26.6)
         BASE_IMAGE="rocm/pytorch-xdit:v26.6"
         PATCH_FILE="config_xdit_v26.6.patch"
+        XDIT_COMMIT="175e0bfec974d0b44a0be9fa511df2f9f5ead080"
         ;;
     *)
         echo "Error: unsupported xDiT version '${XDIT_VERSION}'"
@@ -80,6 +81,9 @@ COPY . /tmp/TraceLens
 
 RUN XDIT_DIR=\$(python -c "import xfuser, os; print(os.path.join(os.path.dirname(xfuser.__file__), '..'))") && \
     cd "\${XDIT_DIR}" && \
+    git checkout -- . && \
+    git fetch origin && \
+    git checkout ${XDIT_COMMIT} && \
     (git apply /tmp/TraceLens/${PATCH_PATH} || patch -p1 --fuzz=10 < /tmp/TraceLens/${PATCH_PATH}) && \
     pip install --upgrade /tmp/TraceLens && \
     rm -rf /tmp/TraceLens
