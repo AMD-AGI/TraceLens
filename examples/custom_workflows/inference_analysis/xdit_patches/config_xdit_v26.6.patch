@@ -1,5 +1,5 @@
---- a/xfuser/model_executor/models/runner_models/base_model.py	2026-07-24 15:12:48.913361106 -0400
-+++ b/xfuser/model_executor/models/runner_models/base_model.py	2026-07-27 19:29:18.390644946 -0400
+--- a/xfuser/model_executor/models/runner_models/base_model.py
++++ b/xfuser/model_executor/models/runner_models/base_model.py
 @@ -3,6 +3,7 @@
  import copy
  import argparse
@@ -8,9 +8,7 @@
  import functools
  from PIL.Image import Image
  from typing import Callable, List, Optional, Tuple, Generator
-@@ -274,6 +274,30 @@
-             log("Torch.compile enabled. Warming up torch compiler ...")
-             compile_input_args = copy.deepcopy(input_args)
+@@ -273,7 +274,28 @@
              compile_input_args = self._split_prompts_for_dp(compile_input_args)
              if self.config.batch_size and isinstance(compile_input_args.get("prompt"), list):
                  compile_input_args["prompt"] = compile_input_args["prompt"][: self.config.batch_size]
@@ -37,14 +35,19 @@
 +                log(f"Capture trace saved to {capture_path}")
 +            else:
 +                self._compile_model(compile_input_args)
-+
-@@ -453,4 +479,5 @@
+ 
+     def _enable_options(self) -> None:
+         """ Enable model options based on config"""
+@@ -408,6 +430,8 @@
+         return ["transformer"]
+ 
      def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
--        return 2  # None = skip step reduction, run full warmup cycle
 +        if "num_inference_steps" in input_args:
 +            return input_args["num_inference_steps"]
-+        return 2  # None = skip step reduction, run full warmup cycle
-@@ -484,7 +513,7 @@
+         return 2  # None = skip step reduction, run full warmup cycle
+ 
+     def _enable_compute_comm_overlap(self) -> None:
+@@ -552,7 +576,7 @@
              activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
              schedule=schedule,
              record_shapes=True,
@@ -53,9 +56,9 @@
          ) as profile_object:
              for iteration in range(num_repetitions):
                  log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
---- a/xfuser/config/args.py	2026-07-27 19:27:39.339852323 -0400
-+++ b/xfuser/config/args.py	2026-07-27 19:28:28.935748483 -0400
-@@ -129,6 +129,7 @@
+--- a/xfuser/config/args.py
++++ b/xfuser/config/args.py
+@@ -144,6 +144,7 @@
      # Model runner specific
      num_iterations: int = 1
      profile: bool = False
@@ -63,7 +66,7 @@
      profile_wait: int = 2
      profile_warmup: int = 2
      profile_active: int = 1
-@@ -622,6 +623,11 @@
+@@ -672,6 +673,11 @@
              help="active argument for torch.profiler.schedule. Only used with --profile.",
          )
          parser.add_argument(
