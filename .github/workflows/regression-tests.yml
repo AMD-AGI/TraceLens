@@ -59,6 +59,16 @@ jobs:
           . .venv/bin/activate
           pytest tests/test_inference_perf_report.py
 
+      - name: Run inference annotation parsing tests
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_annotation_utils.py
+
+      - name: Run inference trace splitting tests
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_split_inference_trace_annotation.py
+
       - name: Run collective analysis tests
         run: |
           . .venv/bin/activate
