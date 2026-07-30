@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # xDiT Diffusion Profiling Instructions
 
 ## Step 1: Build the Patched Docker Image
@@ -69,7 +75,7 @@ docker run --rm \
 ## Step 3: Generate Performance Report
 
 ```bash
-python TraceLens/Reporting/generate_perf_report_pytorch.py \
+python TraceLens/Reporting/generate_perf_report_pytorch_inference.py \
     --profile_json_path <output>/xdit_run.<id>/profile_trace_rank_0.json.gz \
     --capture_trace <output>/xdit_run.<id>/capture_traces \
     --output_csvs_dir <report_dir> \
