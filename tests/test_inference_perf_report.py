@@ -425,9 +425,7 @@ def test_xdit_capture_merge():
     df_unified = pd.read_csv(os.path.join(ref_csvs_dir, "unified_perf_summary.csv"))
     mm_rows = df_unified[df_unified["name"] == "aten::mm"]
     has_expected_stack = mm_rows["call_stack_full"].apply(
-        lambda x: isinstance(x, str)
-        and "_run_timed_pipe" in x
-        and "aten::mm" in x
+        lambda x: isinstance(x, str) and "_run_timed_pipe" in x and "aten::mm" in x
     )
     assert has_expected_stack.all(), (
         f"{has_expected_stack.sum()}/{len(mm_rows)} aten::mm rows "
