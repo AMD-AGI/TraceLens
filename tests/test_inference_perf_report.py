@@ -252,6 +252,7 @@ def test_inference_perf_report(
         group_by_parent_module=True,
         group_by_num_kernels=True,
         collective_analysis=False,
+        include_call_stack=True,
     )
 
     # result is a dict[str, pd.DataFrame]
