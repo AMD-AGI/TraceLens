@@ -406,6 +406,7 @@ generate_refs_for_scope() {
     MAX_PARALLEL="$MAX_PARALLEL" \
     SLEEP_BETWEEN="$SLEEP_BETWEEN" \
     TEST_IDS="$TEST_IDS" \
+    NUM_REPEATS="$NUM_REPEATS" \
     USE_PI="$USE_PI" \
     AGENT_MODEL="$AGENT_MODEL" \
         bash "$GENERATE_REF_SCRIPT" "$scope"

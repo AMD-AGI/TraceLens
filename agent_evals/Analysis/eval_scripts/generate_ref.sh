@@ -9,6 +9,9 @@ set -uo pipefail
 #
 # USE_PI=1 (or --pi on run_repeatability_parallel.sh) uses `pi` instead of the
 # Cursor `agent` CLI, matching the repeatability harness agent backend.
+#
+# NUM_REPEATS retries each failed reference generation (default: 3). When invoked
+# from run_repeatability_parallel.sh, NUM_REPEATS is passed through from the harness.
 # ---------------------------------------------------------------------------
 COMPARISON_SCOPE="${1:-${COMPARISON_SCOPE:-standalone}}"
 
@@ -25,6 +28,7 @@ MAX_PARALLEL="${MAX_PARALLEL:-5}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 LAUNCH_STAGGER="${LAUNCH_STAGGER:-8}"
 TEST_IDS="${TEST_IDS:-}"
+NUM_REPEATS="${NUM_REPEATS:-3}"
 USE_PI="${USE_PI:-false}"
 AGENT_MODEL="${AGENT_MODEL:-claude-opus-4-8-thinking-medium}"
 PI_VENV_PREFIX="use venv_tracelens for all commands and tool calls. "
@@ -139,86 +143,99 @@ generate_single_ref() {
         return 1
     fi
 
-    log_status "  $tag [$(ts)] Generating golden reference..."
-    "${DEXEC[@]}" bash -c "mkdir -p $OUTPUT_DIR && chmod -R 777 $OUTPUT_DIR"
+    local ref_attempt=0
+    while (( ref_attempt < NUM_REPEATS )); do
+        ref_attempt=$((ref_attempt + 1))
+        if (( ref_attempt > 1 )); then
+            log_status "  $tag [$(ts)] Retry $ref_attempt/$NUM_REPEATS..."
+            "${DEXEC[@]}" rm -rf "$OUTPUT_DIR" 2>/dev/null || rm -rf "$OUTPUT_DIR"
+            rm -f "$CASE_DIR/analysis_stream.ndjson"
+            sleep "$SLEEP_BETWEEN"
+        else
+            log_status "  $tag [$(ts)] Generating golden reference..."
+        fi
+        "${DEXEC[@]}" bash -c "mkdir -p $OUTPUT_DIR && chmod -R 777 $OUTPUT_DIR"
 
-    # Run analysis with retry + backoff
-    local agent_success=false
-    local agent_attempts=0
-    while [ "$agent_success" = false ] && [ "$agent_attempts" -lt 3 ]; do
-        agent_attempts=$((agent_attempts + 1))
-        (
-            cd "$ANALYSIS_DIR" || exit
-            if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
-                local capture_suffix=""
-                [[ -n "$capture_folder1" ]] && capture_suffix+=" capture folder for trace1 $capture_folder1"
-                [[ -n "$capture_folder2" ]] && capture_suffix+=" capture folder for trace2 $capture_folder2"
-                local analysis_mode="default"
-                [[ -n "$capture_folder1" || -n "$capture_folder2" ]] && analysis_mode="inference"
-                run_llm_agent \
-                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path${capture_suffix} with platform $platform (trace1) and $platform2 (trace2), analysis mode $analysis_mode, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
-                    1
-            else
-                run_llm_agent \
-                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path with platform $platform, analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
-                    1
-            fi
-        ) < /dev/null > "$CASE_DIR/analysis_stream.ndjson" 2>&1
+        # Run analysis with retry + backoff on transient agent errors
+        local agent_success=false
+        local agent_attempts=0
+        while [ "$agent_success" = false ] && [ "$agent_attempts" -lt 3 ]; do
+            agent_attempts=$((agent_attempts + 1))
+            (
+                cd "$ANALYSIS_DIR" || exit
+                if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
+                    local capture_suffix=""
+                    [[ -n "$capture_folder1" ]] && capture_suffix+=" capture folder for trace1 $capture_folder1"
+                    [[ -n "$capture_folder2" ]] && capture_suffix+=" capture folder for trace2 $capture_folder2"
+                    local analysis_mode="default"
+                    [[ -n "$capture_folder1" || -n "$capture_folder2" ]] && analysis_mode="inference"
+                    run_llm_agent \
+                        "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path${capture_suffix} with platform $platform (trace1) and $platform2 (trace2), analysis mode $analysis_mode, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
+                        1
+                else
+                    run_llm_agent \
+                        "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path with platform $platform, analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
+                        1
+                fi
+            ) < /dev/null > "$CASE_DIR/analysis_stream.ndjson" 2>&1
 
-        if [[ "$USE_PI" == true ]]; then
-            if head -c 2048 "$CASE_DIR/analysis_stream.ndjson" | grep -qiE 'Error:.*unavailable|Service Unavailable'; then
-                log_status "  $tag Attempt $agent_attempts/3 failed (agent unavailable). Backing off 30s..."
+            if [[ "$USE_PI" == true ]]; then
+                if head -c 2048 "$CASE_DIR/analysis_stream.ndjson" | grep -qiE 'Error:.*unavailable|Service Unavailable'; then
+                    log_status "  $tag Agent attempt $agent_attempts/3 failed (agent unavailable). Backing off 30s..."
+                    sleep 30
+                else
+                    agent_success=true
+                fi
+            elif grep -qiE 'Error:.*unavailable|Service Unavailable|usage limit|out of usage|You'\''ve reached your' "$CASE_DIR/analysis_stream.ndjson" 2>/dev/null; then
+                log_status "  $tag Agent attempt $agent_attempts/3 failed (agent unavailable or usage limit). Backing off 30s..."
                 sleep 30
             else
                 agent_success=true
             fi
-        elif grep -qiE 'Error:.*unavailable|Service Unavailable|usage limit|out of usage|You'\''ve reached your' "$CASE_DIR/analysis_stream.ndjson" 2>/dev/null; then
-            log_status "  $tag Attempt $agent_attempts/3 failed (agent unavailable or usage limit). Backing off 30s..."
-            sleep 30
-        else
-            agent_success=true
+        done
+
+        if [ "$agent_success" = false ]; then
+            log_status "  $tag Reference attempt $ref_attempt/$NUM_REPEATS failed (agent unavailable or usage limit)."
+            "${DEXEC[@]}" rm -rf "$OUTPUT_DIR" 2>/dev/null || rm -rf "$OUTPUT_DIR"
+            rm -f "$CASE_DIR/analysis_stream.ndjson"
+            continue
         fi
+
+        if [ ! -f "$OUTPUT_DIR/analysis.md" ]; then
+            log_status "  $tag Reference attempt $ref_attempt/$NUM_REPEATS failed (analysis.md not found)."
+            "${DEXEC[@]}" rm -rf "$OUTPUT_DIR" 2>/dev/null || rm -rf "$OUTPUT_DIR"
+            rm -f "$CASE_DIR/analysis_stream.ndjson"
+            continue
+        fi
+
+        # Copy output as reference (remove old ref first, then copy contents directly)
+        rm -rf "$REF_DIR"
+        cp -r "$OUTPUT_DIR" "$REF_DIR"
+
+        # Remove unwanted files from reference dir (keep only analysis.md + perf_report_csvs/)
+        rm -rf "$REF_DIR/category_data" \
+               "$REF_DIR/category_findings" \
+               "$REF_DIR/system_findings" \
+               "$REF_DIR/metadata" \
+               "$REF_DIR/cache" \
+               "$REF_DIR/perf_improvement.png" \
+               "$REF_DIR/perf_improvement_base64.txt" \
+               "$REF_DIR/plot_data.json" \
+               "$REF_DIR/perf_report.xlsx" \
+               "$REF_DIR/priority_data.json"
+
+        # Remove intermediate analysis output (docker-owned files need container cleanup)
+        "${DEXEC[@]}" rm -rf "$OUTPUT_DIR"
+        rm -f "$CASE_DIR/analysis_stream.ndjson"
+
+        log_status "  $tag [$(ts)] Reference saved to $reference_dir (cleaned)"
+        flock "$STATUS_FILE" bash -c "echo 'generated' >> '$STATUS_FILE'"
+        return 0
     done
 
-    if [ "$agent_success" = false ]; then
-        log_status "  $tag FAILED after 3 attempts (agent unavailable or usage limit)."
-        "${DEXEC[@]}" rm -rf "$OUTPUT_DIR" 2>/dev/null || rm -rf "$OUTPUT_DIR"
-        rm -f "$CASE_DIR/analysis_stream.ndjson"
-        flock "$STATUS_FILE" bash -c "echo 'failed' >> '$STATUS_FILE'"
-        return 1
-    fi
-
-    # Verify output was generated
-    if [ ! -f "$OUTPUT_DIR/analysis.md" ]; then
-        log_status "  $tag WARNING: analysis.md not found in output (agent may have exited without running analysis)."
-        "${DEXEC[@]}" rm -rf "$OUTPUT_DIR" 2>/dev/null || rm -rf "$OUTPUT_DIR"
-        rm -f "$CASE_DIR/analysis_stream.ndjson"
-        flock "$STATUS_FILE" bash -c "echo 'failed' >> '$STATUS_FILE'"
-        return 1
-    fi
-
-    # Copy output as reference (remove old ref first, then copy contents directly)
-    rm -rf "$REF_DIR"
-    cp -r "$OUTPUT_DIR" "$REF_DIR"
-
-    # Remove unwanted files from reference dir (keep only analysis.md + perf_report_csvs/)
-    rm -rf "$REF_DIR/category_data" \
-           "$REF_DIR/category_findings" \
-           "$REF_DIR/system_findings" \
-           "$REF_DIR/metadata" \
-           "$REF_DIR/cache" \
-           "$REF_DIR/perf_improvement.png" \
-           "$REF_DIR/perf_improvement_base64.txt" \
-           "$REF_DIR/plot_data.json" \
-           "$REF_DIR/perf_report.xlsx" \
-           "$REF_DIR/priority_data.json"
-
-    # Remove intermediate analysis output (docker-owned files need container cleanup)
-    "${DEXEC[@]}" rm -rf "$OUTPUT_DIR"
-    rm -f "$CASE_DIR/analysis_stream.ndjson"
-
-    log_status "  $tag [$(ts)] Reference saved to $reference_dir (cleaned)"
-    flock "$STATUS_FILE" bash -c "echo 'generated' >> '$STATUS_FILE'"
+    log_status "  $tag FAILED after $NUM_REPEATS reference generation attempt(s)."
+    flock "$STATUS_FILE" bash -c "echo 'failed' >> '$STATUS_FILE'"
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -248,6 +265,7 @@ echo "  Agent:        $AGENT_BACKEND"
 echo "  Node:         $NODE_LABEL"
 echo "  Runtime:      $RUNTIME_LABEL"
 echo "  Max parallel: $MAX_PARALLEL"
+echo "  Retries:      $NUM_REPEATS"
 echo "  CSV:          $TEST_TRACES_CSV"
 if [[ -n "$TEST_IDS" ]]; then
     echo "  Test filter:  $TEST_IDS"
