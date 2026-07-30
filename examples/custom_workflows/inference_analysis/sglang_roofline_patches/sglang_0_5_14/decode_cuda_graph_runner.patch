@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-index 19eded792d..62b7e30de7 100644
+index 19eded792d..062c5565c2 100644
 --- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
 +++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
 @@ -28,6 +28,7 @@ from __future__ import annotations
@@ -20,17 +20,22 @@ index 19eded792d..62b7e30de7 100644
  
  try:
      from kt_kernel import KTMoEWrapper
-@@ -197,6 +199,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -197,6 +199,14 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
          self.enable_profile_cuda_graph = (
              model_runner.server_args.enable_profile_cuda_graph
          )
 +        self.enable_shape_discovery_for_cuda_graph_profile = (
 +            model_runner.server_args.enable_shape_discovery_for_cuda_graph_profile
 +        )
++        # Speculative (MTP) target-verify graph is replayed in the overlap decode;
++        # capturing it with kernel-shape wrapping poisons the decode on 0.5.13/0.5.14.
++        if self.speculative_algorithm is not None:
++            self.enable_profile_cuda_graph = False
++            self.enable_shape_discovery_for_cuda_graph_profile = False
          self.enable_pdmux = model_runner.server_args.enable_pdmux
  
          self.attn_tp_size = get_attention_tp_size()
-@@ -467,9 +472,40 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -467,9 +477,40 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
          )
  
      def _init_profile_context_and_memory_record(self):
@@ -71,7 +76,7 @@ index 19eded792d..62b7e30de7 100644
          )
          torch.cuda.memory._record_memory_history()
          return profile_context
-@@ -489,16 +525,8 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -489,16 +530,8 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
              + "\n\nMemory Usage is saved to cuda_graph_runner_memory_usage.pickle\n"
          )
          logger.info(log_message)
@@ -90,7 +95,7 @@ index 19eded792d..62b7e30de7 100644
  
      def capture_prepare(
          self,
-@@ -667,8 +695,12 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -667,8 +700,12 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
                  self.model_runner, self.num_tokens_per_bs
              )
          profile_context = empty_context()
@@ -103,7 +108,7 @@ index 19eded792d..62b7e30de7 100644
  
          # share_buffers() coalesces seq_lens / seq_lens_cpu through the process-
          # wide pool, so they may alias a buffer seeded by an earlier runner (the
-@@ -701,6 +733,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -701,6 +738,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
  
          if self.enable_profile_cuda_graph:
              self._post_process_after_profile(prof)
@@ -111,7 +116,7 @@ index 19eded792d..62b7e30de7 100644
  
      def _capture_one_stream(self, stream_idx: Optional[int] = None) -> None:
          avail_mem = get_available_gpu_memory(
-@@ -817,15 +850,30 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -817,15 +855,30 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
              )
              with canary_ctx:
                  shape_key = self._make_graph_key(bs, stream_idx, variant_label)

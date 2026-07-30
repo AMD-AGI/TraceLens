@@ -1,54 +1,17 @@
 diff --git a/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py b/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
-index 07f873b009..cd1c74784e 100644
+index 07f873b009..5013bf2e4c 100644
 --- a/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
 +++ b/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
-@@ -65,6 +65,7 @@ from sglang.srt.utils import (
-     require_mlp_sync,
-     require_mlp_tp_gather,
- )
-+from sglang.srt.utils.kernel_shape_profiler import enable, is_enabled
- 
- if TYPE_CHECKING:
-     from sglang.srt.speculative.multi_layer_eagle_worker_v2 import (
-@@ -136,6 +137,9 @@ class MultiLayerEagleDraftExtendCudaGraphRunner(DecodeCudaGraphRunner):
-         self.enable_profile_cuda_graph = (
-             model_runner.server_args.enable_profile_cuda_graph
+@@ -133,9 +133,9 @@ class MultiLayerEagleDraftExtendCudaGraphRunner(DecodeCudaGraphRunner):
+             model_runner.server_args.speculative_num_draft_tokens
          )
-+        self.enable_shape_discovery_for_cuda_graph_profile = (
-+            model_runner.server_args.enable_shape_discovery_for_cuda_graph_profile
-+        )
+         self.topk = model_runner.server_args.speculative_eagle_topk
+-        self.enable_profile_cuda_graph = (
+-            model_runner.server_args.enable_profile_cuda_graph
+-        )
++        # Shape/graph-capture profiling disabled for EAGLE modes: on 0.5.13/0.5.14
++        # the kernel-shape wrapping in the speculative overlap decode faults the GPU.
++        self.enable_profile_cuda_graph = False
          self.attn_backend = self.eagle_worker.draft_extend_attn_backend_list[self.step]
  
          # Disable parent paths that don't apply.
-@@ -492,13 +496,28 @@ class MultiLayerEagleDraftExtendCudaGraphRunner(DecodeCudaGraphRunner):
-             attn_backend.init_forward_metadata_out_graph(forward_batch, in_capture=True)
-             self.deepep_adapter.capture(is_extend_in_batch=True)
-             shape_key = self._make_graph_key(bs)
-+            base_post_warmup_hook = getattr(
-+                self.attn_backend, "on_after_cuda_graph_warmup", None
-+            )
-+
-+            def post_warmup_hook():
-+                if base_post_warmup_hook is not None:
-+                    base_post_warmup_hook()
-+                # Activate the kernel shape profiler AFTER warmup runs so
-+                # that lazily-imported modules (e.g. tilelang_kernel) are
-+                # already in sys.modules and auto-discovery can find them.
-+                if (
-+                    self.enable_profile_cuda_graph
-+                    and self.enable_shape_discovery_for_cuda_graph_profile
-+                    and not is_enabled()
-+                ):
-+                    enable()
-+
-             self.backend.capture_one(
-                 shape_key,
-                 run_once,
-                 dummies=None,
--                post_warmup_hook=getattr(
--                    self.attn_backend, "on_after_cuda_graph_warmup", None
--                ),
-+                post_warmup_hook=post_warmup_hook,
-             )
- 
-     def init_replay_state(
