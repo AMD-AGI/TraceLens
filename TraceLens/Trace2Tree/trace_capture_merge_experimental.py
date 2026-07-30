@@ -85,7 +85,8 @@ def _align_capture_to_graph(capture_events, graph_events):
             c_name = _capture_kernel_name(c_event)
             # Memcpy/Memset events carry no kernel arg — match when both sides agree
             if ("Memcpy" in c_event["name"] and "Memcpy" in g_name) or (
-                "Memset" in c_event["name"] and ("Memset" in g_name or "fillBuffer" in g_name)
+                "Memset" in c_event["name"]
+                and ("Memset" in g_name or "fillBuffer" in g_name)
             ):
                 aligned.append(c_event)
                 matched = True
