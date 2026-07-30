@@ -78,3 +78,86 @@
              "--warmup_calls",
              help="The number of full pipe calls to warmup the model.",
              default=0,
+--- a/xfuser/core/distributed/attention_backend.py
++++ b/xfuser/core/distributed/attention_backend.py
+@@ -940,34 +940,58 @@
+     block_lse = block_lse.squeeze(-1)
+     return block_out, block_lse
+ 
++@torch.library.custom_op("xfuser::aiter_sage_attn", mutates_args=())
++def _aiter_sage_attn_op(
++    query: torch.Tensor,
++    key: torch.Tensor,
++    value: torch.Tensor,
++    dropout_p: float,
++    is_causal: bool,
++) -> torch.Tensor:
++    attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd", return_lse=False)
++    output = attn_fn(query, key, value)
++    return output
++
++
++@_aiter_sage_attn_op.register_fake
++def _aiter_sage_attn_op_fake(query, key, value, dropout_p, is_causal):
++    b, h, s, _d = query.shape
++    d_v = value.shape[-1]
++    output = torch.empty(b, h, s, d_v, dtype=torch.bfloat16, device=query.device)
++    return output
++
++
+ @register_attention_function(AttentionBackendType.AITER_SAGE)
+ def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+-    # Pass layout="bhsd" to avoid permutation
+-    if AITER_SAGE_SUPPORTS_RING and get_ring_parallel_world_size() > 1:
+-        attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd", return_lse=True, smooth_k=True)
+-        output, softmax_lse = attn_fn(query, key, value)
+-    else:
+-        attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd")
+-        output = attn_fn(query, key, value)
+-        softmax_lse = None
+-    return output, softmax_lse
++    output = _aiter_sage_attn_op(query, key, value, dropout_p, is_causal)
++    return output, None
+ 
+-@register_attention_function(AttentionBackendType.AITER_SAGE_V2)
+-def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+-    # Contiguous is needed for Sage v2 in older AITER versions. 
+-    # This has been fixed in newer version of AITER, meaning the
+-    # contiguous calls can be removed in the future.
++@torch.library.custom_op("xfuser::aiter_sage_v2_attn", mutates_args=())
++def _aiter_sage_v2_attn_op(
++    query: torch.Tensor,
++    key: torch.Tensor,
++    value: torch.Tensor,
++    dropout_p: float,
++    is_causal: bool,
++) -> torch.Tensor:
+     query = query.contiguous()
+     key = key.contiguous()
+     value = value.contiguous()
+-    if AITER_SAGE_V2_SUPPORTS_RING and get_ring_parallel_world_size() > 1:
+-        attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=HADAMARD_MATRIX[query.device], return_lse=True)
+-        output, softmax_lse = attn_fn(query, key, value, causal=is_causal)
+-    else:
+-        attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=HADAMARD_MATRIX[query.device])
+-        output = attn_fn(query, key, value, causal=is_causal)
+-        softmax_lse = None
+-    return output, softmax_lse
++    attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=HADAMARD_MATRIX[query.device])
++    return attn_fn(query, key, value, causal=is_causal)
++
++
++@_aiter_sage_v2_attn_op.register_fake
++def _aiter_sage_v2_attn_op_fake(query, key, value, dropout_p, is_causal):
++    b, h, s, _d = query.shape
++    d_v = value.shape[-1]
++    return torch.empty(b, h, s, d_v, dtype=torch.bfloat16, device=query.device)
++
++
++@register_attention_function(AttentionBackendType.AITER_SAGE_V2)
++def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
++    output = _aiter_sage_v2_attn_op(query, key, value, dropout_p, is_causal)
++    return output, None
+ 
+ 
+ @register_attention_function(AttentionBackendType.SAGE)
