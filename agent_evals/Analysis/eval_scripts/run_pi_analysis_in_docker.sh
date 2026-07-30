@@ -12,7 +12,7 @@ set -euo pipefail
 # configure pi from /v1/models, and run Analysis evals with --pi.
 #
 # Usage:
-#   bash run_pi_analysis_in_docker.sh <tracelens_root> [standalone|comparative] [options] -- <server-cmd...>
+#   bash run_pi_analysis_in_docker.sh <tracelens_root> [both|standalone|comparative] [options] -- <server-cmd...>
 #
 # Arguments after -- are the full command used to start the inference server
 # (executable plus flags). They are passed to the shell unchanged.
@@ -74,10 +74,10 @@ DEFAULT_DOCKER_RUN_ARGS=(
 
 usage() {
     cat <<EOF
-Usage: bash run_pi_analysis_in_docker.sh <tracelens_root> [standalone|comparative] [options] -- <server-cmd...>
+Usage: bash run_pi_analysis_in_docker.sh <tracelens_root> [both|standalone|comparative] [options] -- <server-cmd...>
 
   tracelens_root         TraceLens repo on the host (correct branch already checked out)
-  standalone|comparative Harness comparison scope (default: standalone)
+  both|standalone|comparative   Harness comparison scope (default: both)
 
 Options:
   --docker-image IMAGE   Inference server Docker image (default: $DOCKER_IMAGE)
@@ -114,7 +114,7 @@ die() {
 }
 
 TRACELENS_ROOT=""
-COMPARISON_SCOPE="${COMPARISON_SCOPE:-standalone}"
+COMPARISON_SCOPE="${COMPARISON_SCOPE:-both}"
 SERVER_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -157,7 +157,7 @@ while [[ $# -gt 0 ]]; do
             SKIP_EVAL=1
             shift
             ;;
-        standalone|comparative)
+        both|standalone|comparative)
             COMPARISON_SCOPE="$1"
             shift
             ;;
@@ -203,6 +203,10 @@ fi
 
 if [[ ! -d "$TRACELENS_ROOT" ]]; then
     die "TraceLens root not found: $TRACELENS_ROOT"
+fi
+
+if [[ "$COMPARISON_SCOPE" != "both" && "$COMPARISON_SCOPE" != "standalone" && "$COMPARISON_SCOPE" != "comparative" ]]; then
+    die "Unknown comparison scope '$COMPARISON_SCOPE'. Use 'both', 'standalone', or 'comparative'."
 fi
 
 TRACELENS_ROOT="$(cd "$TRACELENS_ROOT" && pwd)"
@@ -343,7 +347,7 @@ set -euo pipefail
 PORT="${PORT:-30000}"
 READY_TIMEOUT="${READY_TIMEOUT:-1800}"
 CONTAINER_REPO="${CONTAINER_REPO:?}"
-COMPARISON_SCOPE="${COMPARISON_SCOPE:-standalone}"
+COMPARISON_SCOPE="${COMPARISON_SCOPE:-both}"
 SKIP_EVAL="${SKIP_EVAL:-0}"
 SKIP_SERVER="${SKIP_SERVER:-0}"
 HF_CACHE_CHOWN="${HF_CACHE_CHOWN:-0}"
