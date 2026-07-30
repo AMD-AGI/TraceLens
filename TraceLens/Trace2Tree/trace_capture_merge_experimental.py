@@ -85,7 +85,8 @@ def _align_capture_to_graph(capture_events, graph_events):
             c_name = _capture_kernel_name(c_event)
             # Memcpy/Memset events carry no kernel arg — match when both sides agree
             if ("Memcpy" in c_event["name"] and "Memcpy" in g_name) or (
-                "Memset" in c_event["name"] and ("Memset" in g_name or "fillBuffer" in g_name)
+                "Memset" in c_event["name"]
+                and ("Memset" in g_name or "fillBuffer" in g_name)
             ):
                 aligned.append(c_event)
                 matched = True
@@ -709,7 +710,9 @@ def merge_capture_trace_into_graph(
         filepath = capture_files[0]
         key = ("single", os.path.abspath(filepath))
         capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
-            key, filepath, TreePerfAnalyzer,
+            key,
+            filepath,
+            TreePerfAnalyzer,
         )
     else:
         capture_map, capture_batch_sizes = load_capture_folder(

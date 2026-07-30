@@ -245,11 +245,15 @@ def test_inference_perf_report(
     if capture_folder:
         metadata_json_path = os.path.join(capture_folder, "execution_details.json")
         capture_files = glob.glob(os.path.join(capture_folder, "*.json.gz"))
-        single_capture_trace = not os.path.exists(metadata_json_path) and len(capture_files) == 1
+        single_capture_trace = (
+            not os.path.exists(metadata_json_path) and len(capture_files) == 1
+        )
         if not single_capture_trace:
             classify_graph_capture_trace(capture_folder)
         graph_tree = merge_capture_trace_into_graph(
-            capture_folder, metadata_json_path, profile_path,
+            capture_folder,
+            metadata_json_path,
+            profile_path,
             single_capture_trace=single_capture_trace,
         )
 
@@ -340,7 +344,9 @@ def test_xdit_capture_merge():
     # --- 1. Load capture trace: find target GEMMs ---
     key = ("single", os.path.abspath(capture_path))
     cap_tree, cap_roots, cap_root_data = _get_cached_capture_tree(
-        key, capture_path, TreePerfAnalyzer,
+        key,
+        capture_path,
+        TreePerfAnalyzer,
     )
     cached_events, filtered_uids = cap_root_data[0]
     UID = _merge_mod.UID
@@ -348,7 +354,8 @@ def test_xdit_capture_merge():
 
     target_dims = [list(d) for d in TARGET_GEMM_DIMS]
     cap_mm_ops = [
-        e for e in cap_tree.events
+        e
+        for e in cap_tree.events
         if e.get("name") == "aten::mm"
         and e.get("cat") == "cpu_op"
         and e.get("args", {}).get("Input Dims") == target_dims
@@ -362,9 +369,9 @@ def test_xdit_capture_merge():
         & (df_gemm["param: K"].astype(int) == K)
         & (df_gemm["param: N"].astype(int) == N)
     ]
-    assert len(match) == 1, (
-        f"Expected 1 GEMM row for M={M} K={K} N={N}, got {len(match)}"
-    )
+    assert (
+        len(match) == 1
+    ), f"Expected 1 GEMM row for M={M} K={K} N={N}, got {len(match)}"
     row = match.iloc[0]
     report_time_us = float(row["Kernel Time (µs)_sum"])
     report_count = int(row["name_count"])
@@ -392,7 +399,8 @@ def test_xdit_capture_merge():
     replay_count = 0
     for gl_root in graph_roots:
         _, gf = get_subtree_events(
-            graph_perf.tree, gl_root,
+            graph_perf.tree,
+            gl_root,
             cat_filter=["kernel", "gpu_memset", "gpu_memcpy"],
         )
         for idx in target_kernel_indices:
@@ -405,9 +413,9 @@ def test_xdit_capture_merge():
             replay_time_us += gf[idx].get("dur", 0)
             replay_count += 1
 
-    assert replay_count == report_count, (
-        f"Kernel count mismatch: replay={replay_count} vs report={report_count}"
-    )
+    assert (
+        replay_count == report_count
+    ), f"Kernel count mismatch: replay={replay_count} vs report={report_count}"
     assert abs(report_time_us - replay_time_us) / replay_time_us < 0.001, (
         f"Kernel time mismatch: report={report_time_us:.1f}µs "
         f"vs replay={replay_time_us:.1f}µs"
