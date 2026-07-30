@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: workflow-llm-eval
 description: >-
@@ -6,12 +12,6 @@ description: >-
   Use when the user asks for a workflow LLM eval, eval 12, or Appendix hardware
   reference scoring. Scripted evals 9–11, 13–14 live in workflow_scripted_evals.py.
 ---
-
-<!--
-Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
 
 # Workflow LLM eval
 

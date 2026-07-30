@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: quality-llm-eval
 description: >-
@@ -6,12 +12,6 @@ description: >-
   Use when the user asks for a quality LLM eval or to compare generated vs reference
   analysis.md and category_findings. Skips system-level P-items for content alignment.
 ---
-
-<!--
-Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
 
 # Quality LLM eval
 
