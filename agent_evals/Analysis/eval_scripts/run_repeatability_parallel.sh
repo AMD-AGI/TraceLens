@@ -26,9 +26,9 @@ set -uo pipefail
 # repeatability stage, so the repeatability evals compare against the freshly
 # generated references.
 #
-# --pi  Use `pi` instead of the Cursor `agent` CLI for the repeatability and
-#       post-processing stages. Also settable via USE_PI=1. NOTE: golden-ref
-#       generation always uses the `agent` CLI, matching generate_ref.sh.
+# --pi  Use `pi` instead of the Cursor `agent` CLI. Also settable via USE_PI=1.
+#       Applies to golden-reference generation (via generate_ref.sh), repeatability
+#       evals, and post-processing.
 #
 # CONTAINER is optional. If set, python/setup commands run via
 # docker exec -w $REPO_ROOT $CONTAINER ... ; if unset, they run on the host.
@@ -390,6 +390,7 @@ generate_refs_for_scope() {
     echo "========================================="
     echo "  Stage 1: Golden Reference Generation"
     echo "  Scope:        $scope"
+    echo "  Agent:        $AGENT_BACKEND"
     echo "  Node:         $NODE_LABEL"
     echo "  Runtime:      $RUNTIME_LABEL"
     echo "========================================="
@@ -405,6 +406,8 @@ generate_refs_for_scope() {
     MAX_PARALLEL="$MAX_PARALLEL" \
     SLEEP_BETWEEN="$SLEEP_BETWEEN" \
     TEST_IDS="$TEST_IDS" \
+    USE_PI="$USE_PI" \
+    AGENT_MODEL="$AGENT_MODEL" \
         bash "$GENERATE_REF_SCRIPT" "$scope"
 }
 

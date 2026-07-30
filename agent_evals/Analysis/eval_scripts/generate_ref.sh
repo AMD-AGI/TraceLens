@@ -6,6 +6,9 @@ set -uo pipefail
 #
 # COMPARISON_SCOPE can also be set via the COMPARISON_SCOPE environment variable.
 # Defaults to standalone.
+#
+# USE_PI=1 (or --pi on run_repeatability_parallel.sh) uses `pi` instead of the
+# Cursor `agent` CLI, matching the repeatability harness agent backend.
 # ---------------------------------------------------------------------------
 COMPARISON_SCOPE="${1:-${COMPARISON_SCOPE:-standalone}}"
 
@@ -22,9 +25,12 @@ MAX_PARALLEL="${MAX_PARALLEL:-5}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 LAUNCH_STAGGER="${LAUNCH_STAGGER:-8}"
 TEST_IDS="${TEST_IDS:-}"
+USE_PI="${USE_PI:-false}"
+AGENT_MODEL="${AGENT_MODEL:-claude-opus-4-8-thinking-medium}"
+PI_VENV_PREFIX="use venv_tracelens for all commands and tool calls. "
 
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-ANALYSIS_DIR="TraceLens/Agent/Analysis"
+ANALYSIS_DIR="$REPO_ROOT/TraceLens/Agent/Analysis"
 EVALS_DIR="$REPO_ROOT/agent_evals/Analysis"
 TEST_TRACES_CSV="${TEST_TRACES_CSV:-$EVALS_DIR/analysis_tests/combined_traces_${COMPARISON_SCOPE}.csv}"
 STATUS_FILE="$(mktemp)"
@@ -37,6 +43,14 @@ else
     DEXEC=()
     RUNTIME_LABEL="host (no container)"
     NODE_LABEL="local"
+fi
+
+if [[ "$USE_PI" == true || "$USE_PI" == 1 || "$USE_PI" == "1" ]]; then
+    USE_PI=true
+    AGENT_BACKEND="pi"
+else
+    USE_PI=false
+    AGENT_BACKEND="cursor agent"
 fi
 
 # ---------------------------------------------------------------------------
@@ -61,6 +75,31 @@ log_status() {
     flock 1 echo "$@"
 }
 
+repo_abs_path() {
+    local p="$1"
+    if [[ "$p" = /* ]]; then
+        echo "$p"
+    else
+        echo "$REPO_ROOT/$p"
+    fi
+}
+
+# Run an LLM agent step. Optional second arg: non-empty enables a 1800s timeout (cursor only).
+run_llm_agent() {
+    local prompt="$1"
+    local with_timeout="${2:-}"
+
+    if [[ "$USE_PI" == true ]]; then
+        pi --mode json "${PI_VENV_PREFIX}${prompt}"
+    elif [[ -n "$with_timeout" ]]; then
+        timeout 1800 agent --model "$AGENT_MODEL" --print --force --trust --output-format stream-json \
+            "$prompt"
+    else
+        agent --model "$AGENT_MODEL" --print --force --trust --output-format stream-json \
+            "$prompt"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Single job: generate one golden reference
 #
@@ -77,13 +116,24 @@ generate_single_ref() {
     CASE_DIR="$(dirname "$REF_DIR")"
     local OUTPUT_DIR="$CASE_DIR/analysis_output"
 
+    trace1_path="$(repo_abs_path "$trace1_path")"
+    if [[ -n "$trace2_path" ]]; then
+        trace2_path="$(repo_abs_path "$trace2_path")"
+    fi
+    if [[ -n "$capture_folder1" ]]; then
+        capture_folder1="$(repo_abs_path "$capture_folder1")"
+    fi
+    if [[ -n "$capture_folder2" ]]; then
+        capture_folder2="$(repo_abs_path "$capture_folder2")"
+    fi
+
     # Verify trace file(s) exist
-    if [ ! -f "$REPO_ROOT/$trace1_path" ]; then
+    if [ ! -f "$trace1_path" ]; then
         log_status "  $tag ERROR: Trace file not found: $trace1_path — skipping."
         flock "$STATUS_FILE" bash -c "echo 'failed' >> '$STATUS_FILE'"
         return 1
     fi
-    if [[ "$COMPARISON_SCOPE" == "comparative" ]] && [ ! -f "$REPO_ROOT/$trace2_path" ]; then
+    if [[ "$COMPARISON_SCOPE" == "comparative" ]] && [ ! -f "$trace2_path" ]; then
         log_status "  $tag ERROR: Trace2 file not found: $trace2_path — skipping."
         flock "$STATUS_FILE" bash -c "echo 'failed' >> '$STATUS_FILE'"
         return 1
@@ -101,19 +151,28 @@ generate_single_ref() {
             cd "$ANALYSIS_DIR" || exit
             if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
                 local capture_suffix=""
-                [[ -n "$capture_folder1" ]] && capture_suffix+=" capture folder for trace1 $REPO_ROOT/$capture_folder1"
-                [[ -n "$capture_folder2" ]] && capture_suffix+=" capture folder for trace2 $REPO_ROOT/$capture_folder2"
+                [[ -n "$capture_folder1" ]] && capture_suffix+=" capture folder for trace1 $capture_folder1"
+                [[ -n "$capture_folder2" ]] && capture_suffix+=" capture folder for trace2 $capture_folder2"
                 local analysis_mode="default"
                 [[ -n "$capture_folder1" || -n "$capture_folder2" ]] && analysis_mode="inference"
-                agent --model claude-opus-4-8-thinking-medium --print --force --trust --output-format stream-json \
-                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path${capture_suffix} with platform $platform (trace1) and $platform2 (trace2), analysis mode $analysis_mode, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
+                run_llm_agent \
+                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path${capture_suffix} with platform $platform (trace1) and $platform2 (trace2), analysis mode $analysis_mode, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
+                    1
             else
-                agent --model claude-opus-4-8-thinking-medium --print --force --trust --output-format stream-json \
-                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path with platform $platform, analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR"
+                run_llm_agent \
+                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path with platform $platform, analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
+                    1
             fi
         ) < /dev/null > "$CASE_DIR/analysis_stream.ndjson" 2>&1
 
-        if grep -qiE 'Error:.*unavailable|Service Unavailable|usage limit|out of usage|You'\''ve reached your' "$CASE_DIR/analysis_stream.ndjson" 2>/dev/null; then
+        if [[ "$USE_PI" == true ]]; then
+            if head -c 2048 "$CASE_DIR/analysis_stream.ndjson" | grep -qiE 'Error:.*unavailable|Service Unavailable'; then
+                log_status "  $tag Attempt $agent_attempts/3 failed (agent unavailable). Backing off 30s..."
+                sleep 30
+            else
+                agent_success=true
+            fi
+        elif grep -qiE 'Error:.*unavailable|Service Unavailable|usage limit|out of usage|You'\''ve reached your' "$CASE_DIR/analysis_stream.ndjson" 2>/dev/null; then
             log_status "  $tag Attempt $agent_attempts/3 failed (agent unavailable or usage limit). Backing off 30s..."
             sleep 30
         else
@@ -185,6 +244,7 @@ setup_semaphore() {
 echo "========================================="
 echo "  Golden Reference Generation"
 echo "  Mode:         $COMPARISON_SCOPE"
+echo "  Agent:        $AGENT_BACKEND"
 echo "  Node:         $NODE_LABEL"
 echo "  Runtime:      $RUNTIME_LABEL"
 echo "  Max parallel: $MAX_PARALLEL"
