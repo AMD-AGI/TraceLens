@@ -421,15 +421,17 @@ def test_xdit_capture_merge():
         f"vs replay={replay_time_us:.1f}µs"
     )
 
-    # --- 5. Verify call stacks contain _run_timed_pipe ---
+    # --- 5. Verify call stacks contain _run_timed_pipe and aten::mm ---
     df_unified = pd.read_csv(os.path.join(ref_csvs_dir, "unified_perf_summary.csv"))
     mm_rows = df_unified[df_unified["name"] == "aten::mm"]
-    has_run_timed_pipe = mm_rows["call_stack_full"].apply(
-        lambda x: isinstance(x, str) and "_run_timed_pipe" in x
+    has_expected_stack = mm_rows["call_stack_full"].apply(
+        lambda x: isinstance(x, str)
+        and "_run_timed_pipe" in x
+        and "aten::mm" in x
     )
-    assert has_run_timed_pipe.all(), (
-        f"{has_run_timed_pipe.sum()}/{len(mm_rows)} aten::mm rows "
-        f"have _run_timed_pipe in call stack"
+    assert has_expected_stack.all(), (
+        f"{has_expected_stack.sum()}/{len(mm_rows)} aten::mm rows "
+        f"have _run_timed_pipe and aten::mm in call stack"
     )
 
     _merge_mod._capture_tree_cache.clear()
