@@ -122,7 +122,7 @@ def _fill_vllm_native(ann, name):
 
 
 def _fill_sglang_native(ann, name):
-    """Base SGLang label with no roofline suffix (see SGLANG_annotation.md)."""
+    """Base SGLang label with no roofline suffix"""
     m = re.match(r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]", name)
     if not m:
         return False
@@ -137,7 +137,7 @@ def _fill_sglang_native(ann, name):
 
 
 def _fill_sglang_detailed(ann, name):
-    """SGLang label with roofline suffix (c_*/g_* aggregates; see SGLANG_annotation.md)."""
+    """SGLang label with roofline suffix (c_*/g_* aggregates)."""
     m = SGLANG_DETAILED_PATTERN.match(name)
     if not m:
         return False
@@ -166,7 +166,7 @@ def _fill_sglang_detailed(ann, name):
 
 
 def _fill_atom(ann, name):
-    """ATOM prefill[...]/decode[...] labels (see ATOM_annotation.md).
+    """ATOM prefill[...]/decode[...] labels.
 
     Shared by the native and detailed kinds; the sqsq/sqsk/sk fields are present
     only with ``ATOM_ENABLE_DETAILED_ANNOTATION=1``, and ``has_sqsk`` reflects that.
