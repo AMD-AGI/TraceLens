@@ -45,8 +45,6 @@ setup(
     install_requires=[
         "pandas",
         "tqdm",
-        'backports.strenum;python_version<"3.11"',
-        'StrEnum;python_version<"3.11"',
         "openpyxl",
         "office365-rest-python-client",
         "msal",
@@ -71,10 +69,11 @@ setup(
     url="https://github.com/AMD-AGI/TraceLens",
     classifiers=[
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.11",
         # 'License :: OSI Approved :: MIT License',
         "Operating System :: OS Independent",
     ],
-    python_requires=">=3.6",
+    python_requires=">=3.11",
     entry_points={
         "console_scripts": [
             "TraceLens_generate_perf_report_jax = TraceLens.Reporting.generate_perf_report_jax:main",
