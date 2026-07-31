@@ -11,7 +11,6 @@ import csv
 import json
 import os
 import re
-import sys
 from collections import defaultdict
 
 RESULTS_ROOT = os.environ.get(

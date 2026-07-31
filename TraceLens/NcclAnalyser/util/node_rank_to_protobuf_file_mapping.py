@@ -6,7 +6,6 @@
 
 from pathlib import Path
 import re
-from collections import defaultdict
 
 
 def get_node_rank_protobuf_mapping(traces_folder, pattern="*.xplane.pb"):

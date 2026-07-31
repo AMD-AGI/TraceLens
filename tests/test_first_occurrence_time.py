@@ -7,10 +7,7 @@
 """Tests for the first_occurrence_time column in ops_unique_args."""
 
 import pandas as pd
-import pytest
-from copy import deepcopy
 
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 

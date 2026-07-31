@@ -172,18 +172,14 @@ import json
 import math
 import os
 import re
-import sys
 import zipfile
 from typing import List, Set, Tuple, Optional
-from dataclasses import dataclass, field
-import csv
 from statistics import mean
 from TraceLens.util import DataLoader
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 import pandas as pd
 
 # Try to use faster JSON parser (orjson is 2-10x faster than json)
-import orjson
 from tqdm import tqdm
 
 GPU_EVENT_CATEGORIES = ["kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation"]

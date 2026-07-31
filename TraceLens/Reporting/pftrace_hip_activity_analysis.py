@@ -15,7 +15,6 @@ per-GPU event lists and NSYS-style summaries.
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..util import TraceEventUtils

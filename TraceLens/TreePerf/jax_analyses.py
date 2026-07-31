@@ -10,7 +10,6 @@ import re
 import string
 from itertools import chain
 
-from enum import StrEnum
 
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from ..PerfModel import perf_model

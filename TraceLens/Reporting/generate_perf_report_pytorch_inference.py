@@ -8,12 +8,10 @@ import argparse
 import importlib.util
 import json
 import os
-import subprocess
 import sys
 import warnings
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
-from tqdm import tqdm
 
 import numpy as np
 import pandas as pd
@@ -35,7 +33,6 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
 
-import TraceLens
 
 
 def perf_report_sanity_check(
@@ -1191,10 +1188,8 @@ def generate_perf_report_pytorch(
         if output_xlsx_path is None:
             base_path = profile_json_path.rsplit(".json", 1)[0]
             output_xlsx_path = base_path + "_perf_report.xlsx"
-        try:
-            import openpyxl
-        except (ImportError, ModuleNotFoundError) as e:
-            print(f"Error importing openpyxl: {e}")
+        if importlib.util.find_spec("openpyxl") is None:
+            print("Error importing openpyxl")
             request_install("openpyxl")
 
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:

@@ -18,7 +18,6 @@ import re
 import sys
 import traceback
 from collections import defaultdict
-from typing import Any
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -8,7 +8,6 @@
 Utils. for perf. model.
 """
 
-import os
 
 
 def add_simulation_time_columns(

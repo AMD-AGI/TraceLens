@@ -14,7 +14,6 @@ from TraceLens.PerfModel.torch_op_mapping import (
     OP_CATEGORY_REGISTRY,
     build_sheet_category_to_op_names,
     categorize_torch_op,
-    get_perf_model_category,
     op_to_perf_model_class_map,
     register_op_categories,
 )

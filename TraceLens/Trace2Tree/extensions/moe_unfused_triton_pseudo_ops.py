@@ -5,7 +5,6 @@
 ###############################################################################
 
 import logging
-from weakref import finalize
 from .pseudo_ops_utils import inject_pseudo_op
 
 logger = logging.getLogger(__name__)

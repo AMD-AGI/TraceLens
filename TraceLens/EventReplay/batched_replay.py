@@ -7,7 +7,6 @@
 # run_repro.py
 import json
 import argparse
-import warnings
 import torch
 from utils import TensorCfg, build_tensor, benchmark_func
 
