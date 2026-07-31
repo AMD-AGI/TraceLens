@@ -53,17 +53,21 @@ class BaseTraceToTree(ABC):
         self.name2event_uids = defaultdict(list)
 
     @abstractmethod
-    def default_categorizer(self) -> None:
+    def default_categorizer(self, event: dict = None) -> Callable[[dict], str]:
         """
-        Sets the default categorizer for the class.
-
-        This abstract method should be implemented by subclasses to define
-        how the default categorizer is set.
+        Return the default event categorizer for this trace format.
         """
         pass
 
     @abstractmethod
-    def build_tree(self) -> None:
+    def build_tree(
+        self,
+        add_python_func=False,
+        link_fwd_bwd=True,
+        metadata_events=None,
+        pb_file_name=None,
+        **kwargs,
+    ) -> None:
         """
         Constructs a tree structure from the provided trace data.
 
@@ -336,7 +340,7 @@ class JaxTraceToTree(BaseTraceToTree):
         self._warned_missing_hlo_ops = set()
         self.metadata = dict
 
-    def default_categorizer(self):
+    def default_categorizer(self, event=None):
         """
         Returns the category of the given event dictionary using the TraceEventUtils.prepare_event_categorizer method.
 
@@ -399,9 +403,11 @@ class JaxTraceToTree(BaseTraceToTree):
 
     def build_tree(
         self,
-        metadata_events: Dict[str, Dict[str, str]],
-        pb_file_name: str,
         add_python_func=False,
+        link_fwd_bwd=True,
+        metadata_events: Dict[str, Dict[str, str]] = None,
+        pb_file_name: str = None,
+        **kwargs,
     ) -> None:
         """
         Builds a hierarchical tree structure from trace metadata and protobuf file.
@@ -419,6 +425,10 @@ class JaxTraceToTree(BaseTraceToTree):
         Returns:
             None
         """
+        if metadata_events is None:
+            metadata_events = kwargs.pop("metadata_events", {})
+        if pb_file_name is None:
+            pb_file_name = kwargs.pop("pb_file_name", None)
         self._set_metadata(metadata_events)
         self._set_hlo_ops(pb_file_name)
         self._create_linking_key_to_uid_map()
@@ -785,7 +795,14 @@ class TraceToTree(BaseTraceToTree):
                     parent.setdefault("gpu_events", []).append(gpu_evt_uid)
                     parent_uid = parent.get("parent")
 
-    def build_tree(self, add_python_func=False, link_fwd_bwd=True) -> None:
+    def build_tree(
+        self,
+        add_python_func=False,
+        link_fwd_bwd=True,
+        metadata_events=None,
+        pb_file_name=None,
+        **kwargs,
+    ) -> None:
         print(f"Building tree with add_python_func={add_python_func}")
         self.build_host_call_stack_tree(add_python_func)
         self.add_gpu_ops_to_tree()

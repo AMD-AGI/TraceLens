@@ -105,7 +105,7 @@ class gemm_a8w8_blockscale(GEMM):
         details["output_dtype"] = "c10::bfloat16"
         return details
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
@@ -157,7 +157,7 @@ class vllm_rocm_unquantized_gemm(GEMM):
             ),
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         bias = self.param_details["bias"]
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
@@ -232,7 +232,7 @@ class batched_gemm_a16wfp4(GEMM):
     def flops(self):
         return self.B * super().flops()
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = 0.5  # FP4: 4 bits = 0.5 bytes per element
@@ -316,7 +316,7 @@ class batched_gemm_a8w8(GEMM):
     def flops(self):
         return self.B * super().flops()
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
@@ -385,7 +385,7 @@ class gemm_a16w16_atomic_(GEMM):
             ),
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
@@ -475,20 +475,8 @@ class GroupQuant(BinaryElementwise):
     category = "GroupQuant"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.param_details = self.get_param_details(event)
-        self.nelems_in1 = prod(self.param_details["shape_in1"])
-        self.nelems_in2 = prod(self.param_details["shape_in2"])
-        self.nelems_out = prod(self.param_details["shape_out"])
-        self.dtype_in1_in2_out = self.param_details["dtype_in1_in2_out"]
-        self.stride_input1 = self.param_details["stride_input1"]
-        self.stride_input2 = self.param_details["stride_input2"]
-        self.stride_output = self.param_details["stride_output"]
-        self.bpe_in1 = name2bpe(self.dtype_in1_in2_out[0])
-        self.bpe_in2 = name2bpe(self.dtype_in1_in2_out[1])
-        self.bpe_out = name2bpe(self.dtype_in1_in2_out[2])
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        super().__init__(event, arch, python_path, **kwargs)
 
 
 class per_group_quant(GroupQuant):
@@ -529,7 +517,7 @@ class per_group_quant(GroupQuant):
             "stride_output": stride_output,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         bytes = prod(self.param_details["shape_out"]) * name2bpe(
             self.param_details["dtype_in1_in2_out"][2]
         )
@@ -576,10 +564,8 @@ class vllm_triton_per_token_group_quant_fp8(GroupQuant):
         Concrete Inputs: often ('', '<group_size>') e.g. ('', '128')
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.param_details = self.get_param_details(event)
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        super().__init__(event, arch, python_path, **kwargs)
 
     @staticmethod
     def get_param_details(event):
@@ -620,7 +606,7 @@ class vllm_triton_per_token_group_quant_fp8(GroupQuant):
         N = self.param_details["N"]
         return 6 * M * N
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         M = self.param_details["M"]
         N = self.param_details["N"]
         ng = self.param_details["num_groups"]
@@ -810,7 +796,7 @@ class gemm_afp4wfp4(GEMM):
             ),
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         self.bpe_mat1 = 0.5  # FP4 packed
         self.bpe_mat2 = 0.5  # FP4 packed
@@ -1169,10 +1155,7 @@ class aiter_fused_qk_rope_cat_and_cache_mla(FusedRoPE):
     sheet_category = "FusedRoPE"
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
-        self.event = event
-        self.arch = arch
-        self.python_path = python_path
-        self.param_details = self.get_param_details(event)
+        super().__init__(event, arch, python_path, **kwargs)
         self.bpe_in = name2bpe(self.param_details["dtype_in"])
         self.bpe_kv = name2bpe(self.param_details["dtype_kv"])
 
