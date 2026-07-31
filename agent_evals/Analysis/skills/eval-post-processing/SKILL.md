@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 ---
 name: eval-post-processing
 description: >-
@@ -7,12 +13,6 @@ description: >-
   repeatability results after the harness, or asks for automated eval reports from
   results_root / report_dir parameters.
 ---
-
-<!--
-Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
 
 # Eval post processing
 
