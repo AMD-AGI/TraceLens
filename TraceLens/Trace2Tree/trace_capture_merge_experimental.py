@@ -25,7 +25,6 @@ import warnings
 from ..util import TraceEventUtils
 
 UID = TraceEventUtils.TraceKeys.UID
-from .trace_to_tree import TraceToTree
 
 EXECUTE_CONTEXT_PATTERNS = (
     re.compile(
