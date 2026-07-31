@@ -1107,6 +1107,7 @@ class TreePerfAnalyzer:
     ):
         if args_cols is None:
             args_cols = ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]
+
         def list_to_tuple(obj):
             if isinstance(obj, list):
                 return tuple(list_to_tuple(item) for item in obj)
@@ -3733,7 +3734,10 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                 try:
                     bwd_flag = bwd or perf_model_name.endswith("_bwd")
                     perf_model_class = None
-                    if dict_name_to_perf_model and event["name"] in dict_name_to_perf_model:
+                    if (
+                        dict_name_to_perf_model
+                        and event["name"] in dict_name_to_perf_model
+                    ):
                         perf_model_class = dict_name_to_perf_model[event["name"]]
                     dict_perf_metrics = self.compute_perf_metrics(
                         event,

@@ -261,4 +261,3 @@ def inject_pseudo_op_above_event(
     target_evt["parent"] = pseudo_evt["UID"]
 
     return pseudo_evt
-

@@ -434,9 +434,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
             return return_dict
         return return_dict.get(gpu_pid, {})
 
-    def compute_metrics(
-        self, micro_idle_thresh_us=None, gpu_pid=1, event_filter=None
-    ):
+    def compute_metrics(self, micro_idle_thresh_us=None, gpu_pid=1, event_filter=None):
         # Default: use GPU0 (PID 1) for Jax
         dict_gpu_event_lists = self.get_gpu_event_lists(
             gpu_pid=gpu_pid, event_filter=event_filter

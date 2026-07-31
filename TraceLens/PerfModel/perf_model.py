@@ -3847,7 +3847,9 @@ class primus_turbo_grouped_gemm(GroupedGemm):
         )
 
     def bytes_bwd(self):
-        raise NotImplementedError("Backward pass for primus_turbo::grouped_gemm is not defined.")
+        raise NotImplementedError(
+            "Backward pass for primus_turbo::grouped_gemm is not defined."
+        )
 
 
 class primus_turbo_grouped_gemm_variable_k(GroupedGemm):
