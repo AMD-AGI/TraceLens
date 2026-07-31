@@ -165,9 +165,7 @@ def generate_perf_report_pftrace_memory_copy(
             output_xlsx_path = str(base) + "_pftrace_memory_copy_report.xlsx"
         logger.info("Writing Excel file to: %s", output_xlsx_path)
         if importlib.util.find_spec("openpyxl") is None:
-            logger.error(
-                "openpyxl required for Excel output. pip install openpyxl"
-            )
+            logger.error("openpyxl required for Excel output. pip install openpyxl")
             raise ImportError("openpyxl is required for Excel output")
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
             for sheet_name, df in dfs.items():

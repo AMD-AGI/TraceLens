@@ -9,7 +9,6 @@ Utils. for perf. model.
 """
 
 
-
 def add_simulation_time_columns(
     dict_metrics,
     simulated_time,

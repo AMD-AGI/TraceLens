@@ -34,7 +34,6 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
 )
 
 
-
 def perf_report_sanity_check(
     events,
     df_gpu_timeline,
