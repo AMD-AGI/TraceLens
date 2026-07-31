@@ -320,9 +320,17 @@ When `--capture_folder` is set, TraceLens first classifies the capture traces
 then merges the matching subtrees into the graph tree before running the standard
 analysis.
 
-```{note}
-`--capture_folder` and `--comparison_json_path` can't be used together: the
-TraceDiff comparison doesn't support graph-capture traces.
+To compare two graph-capture workloads, pass the reference replay trace with
+`--comparison_json_path` and its capture folder with `--comparison_capture_folder`
+(the latter requires the former). TraceLens merges each capture folder into its
+respective replay trace before running the comparison:
+
+```bash
+TraceLens_generate_perf_report_pytorch_inference \
+    --profile_json_path trace1.json.gz \
+    --capture_folder capture_folder1 \
+    --comparison_json_path trace2.json.gz \
+    --comparison_capture_folder capture_folder2
 ```
 
 ## Inference-oriented options
@@ -334,7 +342,8 @@ relevant to serving traces:
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--profile_json_path` | required | Path to the graph-replay `torch.profiler` trace (`.json` or `.json.gz`). |
-| `--capture_folder PATH` | `None` | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). Mutually exclusive with `--comparison_json_path`. |
+| `--capture_folder PATH` | `None` | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). |
+| `--comparison_capture_folder PATH` | `None` | Folder of graph-capture traces for the comparison trace, merged into the `--comparison_json_path` replay trace. Requires `--comparison_json_path`. |
 | `--group_by_parent_module` | `False` | Group kernel-launcher summaries by parent `nn.Module` in addition to operation name. |
 | `--group_by_num_kernels` | `False` | Group summary rows by the number of kernels. |
 | `--include_call_stack` | `False` | Add the CPU call stack to the report. |
