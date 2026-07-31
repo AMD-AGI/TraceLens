@@ -15,14 +15,7 @@ import sys
 import tempfile
 from collections import defaultdict
 
-try:
-    from enum import StrEnum
-except ImportError:
-    try:
-        from backports.strenum import StrEnum
-    # fallback for Python 3.10
-    except ImportError:
-        from strenum import StrEnum
+from enum import StrEnum
 from typing import List, Dict, Callable, Iterable, Tuple, Optional
 
 logger = logging.getLogger(__name__)

@@ -1,9 +1,9 @@
 diff --git a/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py b/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
-index 295c1009b..3460bce13 100644
+index 732bc3e62..9928e3650 100644
 --- a/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
 +++ b/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
 @@ -44,6 +44,7 @@ from sglang.srt.model_executor.input_buffers import ForwardInputBuffers
- from sglang.srt.speculative.eagle_info import EagleDraftInput
+ from sglang.srt.speculative.eagle_info import EagleDraftExtendInput
  from sglang.srt.speculative.multi_layer_eagle_utils import assign_new_state_triton
  from sglang.srt.speculative.spec_utils import fast_topk
 +from sglang.srt.utils.kernel_shape_profiler import enable, is_enabled
@@ -20,7 +20,7 @@ index 295c1009b..3460bce13 100644
          self.capture_bs, self.compile_bs = get_batch_sizes_to_capture(model_runner)
          self.padded_static_len = -1
          self.deepep_adapter = DeepEPCudaGraphRunnerAdapter()
-@@ -280,6 +284,16 @@ class MultiLayerEagleDraftExtendCudaGraphRunner:
+@@ -283,6 +287,16 @@ class MultiLayerEagleDraftExtendCudaGraphRunner:
              torch.cuda.synchronize()
              self.model_runner.tp_group.barrier()
              run_once_fn()
@@ -37,7 +37,7 @@ index 295c1009b..3460bce13 100644
  
      def _capture_graph(self, graph, pool, stream, run_once_fn):
          with torch.cuda.graph(graph, pool=pool, stream=stream):
-@@ -292,6 +306,11 @@ class MultiLayerEagleDraftExtendCudaGraphRunner:
+@@ -295,6 +309,11 @@ class MultiLayerEagleDraftExtendCudaGraphRunner:
      def capture(self):
          CudaGraphRunner.capture(self)
  
@@ -49,7 +49,7 @@ index 295c1009b..3460bce13 100644
      def get_forward_batch(self, bs: int) -> ForwardBatch:
          buffers = self.buffers
          num_tokens = bs * self.num_tokens_per_bs
-@@ -501,6 +520,9 @@ class MultiLayerEagleDraftExtendCudaGraphRunner:
+@@ -510,6 +529,9 @@ class MultiLayerEagleDraftExtendCudaGraphRunner:
              graph, get_global_graph_memory_pool(), stream, run_once
          )
  

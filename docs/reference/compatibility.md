@@ -46,11 +46,11 @@ peak FLOPS and peak bandwidth for that target GPU (for example,
 
 | Target GPU         | Notes |
 |--------------------|-------|
-| AMD Instinct MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
+| AMD Instinct™ MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
 
 ## Software requirements
 
-TraceLens requires the following software.
+TraceLens requires the following software:
 
 | Component | Requirement | Notes |
 |-----------|-------------|-------|
@@ -78,13 +78,13 @@ These are installed automatically with the package:
 
 ## Supported trace formats
 
-TraceLens supports the following trace formats.
+TraceLens supports the following trace formats:
 
 | Format | Producing tool |
 |--------|----------------|
 | PyTorch Chrome trace (`.json`, `.json.gz`, `.zip`) | `torch.profiler` |
 | JAX XPlane protobuf (`.pb`) | JAX profiler / `xprof` | 
-| rocprofv3 JSON (`*_results.json`) | AMD ROCm rocprofiler-sdk | 
+| rocprofv3 JSON (`*_results.json`) | AMD ROCm ROCprofiler-SDK | 
 | rocprofv3 pftrace / Perfetto-style | `rocprofv3 --output-format pftrace` | 
 
 
