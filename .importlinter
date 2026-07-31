@@ -1,0 +1,10 @@
+[importlinter]
+root_packages =
+    TraceLens
+
+[importlinter:contract:acyclic-tracelens]
+name = No circular dependencies in TraceLens
+type = acyclic_siblings
+ancestors =
+    TraceLens
+depth = 10

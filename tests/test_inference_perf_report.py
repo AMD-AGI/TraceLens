@@ -24,10 +24,8 @@ from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch,
     classify_graph_capture_trace,
 )
-import TraceLens.Trace2Tree.trace_capture_merge_experimental as _merge_mod
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
+import TraceLens.TreePerf.tree_perf as _merge_mod
+from TraceLens.TreePerf.tree_perf import merge_capture_trace_into_graph
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Input list of events is empty.*:UserWarning",

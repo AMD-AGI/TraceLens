@@ -29,9 +29,7 @@ from TraceLens.Reporting.reporting_utils import (
     resolve_gpu_arch,
 )
 from TraceLens.util import TraceEventUtils
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
+from TraceLens.TreePerf.tree_perf import merge_capture_trace_into_graph
 
 
 def perf_report_sanity_check(
