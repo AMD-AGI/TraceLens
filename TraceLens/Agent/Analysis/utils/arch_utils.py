@@ -9,7 +9,7 @@
 Each JSON file in utils/arch/ follows the TraceLens arch dict schema
 (see examples/gpu_arch_example.md) with an additional ``memory_gb`` field.
 
-Resolution order (matches analysis-orchestrator.md Step 1):
+Resolution order (matches skills/analysis-orchestrator/reference.md Step 1):
   1. Check ``Agent/Analysis/utils/arch/`` inside each ``$TL_EXTENSION`` package
   2. Fall back to the bundled ``utils/arch/`` directory next to this file
 """

@@ -22,11 +22,11 @@ root-cause categories, and where the implementation lives.
 | workflow\_eval\_9 | Scripted (per-header) | 7 sub-indices | `workflow_scripted_evals.py` |
 | workflow\_eval\_10 | Scripted (per-row + CSV cross-check) | 5 sub-indices | `workflow_scripted_evals.py` |
 | workflow\_eval\_11 | Scripted (per-P-item) | Dynamic | `workflow_scripted_evals.py` |
-| workflow\_eval\_12 | LLM (multi-dimensional scoring) | 1 | `workflow-llm-eval.md` |
+| workflow\_eval\_12 | LLM (multi-dimensional scoring) | 1 | `skills/workflow-llm-eval/` |
 | workflow\_eval\_13 | Scripted (per-category) | Dynamic | `workflow_scripted_evals.py` |
 | quality\_eval\_1 | Scripted (CSV alignment) | 1 (standalone) / 2 (comparative) | `quality_scripted_evals.py` |
-| quality\_eval\_2 | LLM (multi-dimensional scoring) | 1 | `quality-llm-eval.md` |
-| quality\_eval\_3 | LLM (multi-dimensional scoring) | 1 | `quality-llm-eval.md` |
+| quality\_eval\_2 | LLM (multi-dimensional scoring) | 1 | `skills/quality-llm-eval/` |
+| quality\_eval\_3 | LLM (multi-dimensional scoring) | 1 | `skills/quality-llm-eval/` |
 | marker\_eval\_1 | Scripted (structural) | 1 | `workflow_scripted_evals.py` |
 | marker\_eval\_2 | Scripted (per-P-item) | Dynamic | `workflow_scripted_evals.py` |
 | marker\_eval\_3 | Scripted (per-P-item) | Dynamic | `workflow_scripted_evals.py` |
@@ -137,7 +137,7 @@ Finds every priority item (`### ...P{N}:` headers) and checks for required bold 
 
 **Type:** LLM, multi-dimensional weighted scoring. **Root cause on fail:** `template`.
 
-**Implementation:** `agent_evals/Analysis/.cursor/skills/workflow-llm-eval.md`
+**Implementation:** `agent_evals/Analysis/skills/workflow-llm-eval/SKILL.md` (see `reference.md` for rubric detail)
 
 Checks the `## Appendix` section for hardware reference values (only for trace1 if in comparative mode):
 - Platform name (e.g., MI300X)
@@ -209,7 +209,7 @@ Compares CSVs against the reference directory.
 
 **Type:** LLM, multi-dimensional weighted scoring. **Root cause on fail:** `data`.
 
-**Implementation:** `agent_evals/Analysis/.cursor/skills/quality-llm-eval.md`
+**Implementation:** `agent_evals/Analysis/skills/quality-llm-eval/SKILL.md` (see `reference.md` for rubric detail)
 
 Compares P-item titles in the generated report against the reference report.
 This is a **semantic** comparison — not a string match.
@@ -240,7 +240,7 @@ overall_score = correctness × 0.40 + completeness × 0.30 + precision × 0.30
 
 **Type:** LLM, multi-dimensional weighted scoring. **Root cause on fail:** `data`.
 
-**Implementation:** `agent_evals/Analysis/.cursor/skills/quality-llm-eval.md`
+**Implementation:** `agent_evals/Analysis/skills/quality-llm-eval/SKILL.md` (see `reference.md` for rubric detail)
 
 For each matched compute P-item pair (from eval 2), compares content values.
 **Only compares Compute Kernel P-items** — System-Level P-items are skipped entirely.
