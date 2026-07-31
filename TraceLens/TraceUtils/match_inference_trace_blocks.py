@@ -43,7 +43,6 @@ Usage
 import argparse
 import json
 import os
-import re
 import sys
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -51,24 +50,21 @@ from typing import List, Optional, Tuple
 import pandas as pd
 
 from TraceLens.util import DataLoader
+from TraceLens.TraceUtils.annotation_utils import (
+    PHASE_DECODE_ONLY,
+    PHASE_PREFILLDECODE,
+    PHASE_PREFILL_ONLY,
+    average_detail,
+    classify_phase,
+    find_iteration_roots_by_priority,
+    find_phase_from_window,
+    iteration_details,
+)
 from TraceLens.TraceUtils.split_inference_trace_annotation import (
     extract_and_save,
-    find_phase_from_window,
     get_filename,
     preprocess_trace,
 )
-
-ANNOTATION_PATTERN = [
-    re.compile(
-        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
-    ),
-    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
-    re.compile(r"execute_new_\d+_cached_\d+"),
-    re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"),
-]
-
-PHASE_DECODE_ONLY = "decode_only"
-PHASE_PREFILLDECODE = "prefilldecode"
 
 PER_STEP_KEYS = (
     "context_requests",
@@ -78,106 +74,6 @@ PER_STEP_KEYS = (
     "g_sq",
     "g_sk",
 )
-
-
-def _find_events_by_pattern_quiet(events, patterns, name, cat=None):
-    """Same shape as the splitter helper but without per-event spam."""
-    matches = []
-    for pattern in patterns:
-        cur = [e for e in events if pattern.match(e.get("name", ""))]
-        if cat is not None:
-            cur = [e for e in cur if e.get("cat") == cat]
-        matches.extend(cur)
-    matches.sort(key=lambda x: x.get("ts", 0))
-    print(f"Found {len(matches)} {name} events")
-    if not matches:
-        return None
-    return matches
-
-
-# ---------------------------------------------------------------------------
-# Per-iteration name parser (extended to expose c_sq/c_sk/g_sq/g_sk)
-# ---------------------------------------------------------------------------
-def _safe_int(v) -> int:
-    try:
-        return int(v)
-    except (ValueError, TypeError):
-        return 0
-
-
-def parse_iter_details(name: str) -> dict:
-    """Extract per-step details including c_sq/c_sk/g_sq/g_sk where available.
-
-    For naming patterns that don't carry sq/sk (e.g. ``execute_new_N_cached_M``
-    or ``execute_context_N(M)_generation_K(L)``), the corresponding sq/sk
-    fields default to 0 and ``has_sqsk`` is set to False.
-    """
-    raw = name
-    name2 = name.replace("(", "_").replace(")", "_")
-    parts = re.sub(r"[sqk]+", "_", name2).split("_")
-
-    has_sqsk = False
-    c_req = c_sq = c_sk = c_sqsq = c_sqsk = 0
-    g_req = g_sq = g_sk = g_sqsq = g_sqsk = 0
-
-    if len(parts) < 10:
-        # Support for vLLM v0.13 and lower annotation format
-        # execute_context_N(M)_generation_K(L)
-        c_req = _safe_int(parts[2]) if len(parts) > 2 else 0
-        c_sum_proxy = _safe_int(parts[3]) if len(parts) > 3 else 0
-        g_req = _safe_int(parts[6]) if len(parts) > 6 else 0
-        g_sum_proxy = _safe_int(parts[7]) if len(parts) > 7 else 0
-        c_sq = c_sum_proxy
-        g_sq = g_sum_proxy
-    elif len(parts) < 12:
-        # Support for vLLM v0.14 and higher annotation format
-        # execute_X_context_R(sqAskBsqsqCsqskD)_generation_R'(...)
-        c_req = _safe_int(parts[2])
-        c_sq = _safe_int(parts[3])
-        g_req = _safe_int(parts[7])
-        g_sq = _safe_int(parts[8])
-    else:
-        # Support for TraceLens vLLM annotation format
-        # Full pattern: execute_X_context_R(sqAskBsqsqCsqskD)_generation_R'(...)
-        c_req = _safe_int(parts[3])
-        c_sq = _safe_int(parts[5])
-        c_sk = _safe_int(parts[6])
-        c_sqsq = _safe_int(parts[7])
-        c_sqsk = _safe_int(parts[8])
-        g_req = _safe_int(parts[11])
-        g_sq = _safe_int(parts[13])
-        g_sk = _safe_int(parts[14])
-        g_sqsq = _safe_int(parts[15])
-        g_sqsk = _safe_int(parts[16])
-        has_sqsk = True
-
-    return {
-        "name": raw,
-        "context_requests": c_req,
-        "generation_requests": g_req,
-        "c_sq": c_sq,
-        "c_sk": c_sk,
-        "c_sqsq": c_sqsq,
-        "c_sqsk": c_sqsk,
-        "g_sq": g_sq,
-        "g_sk": g_sk,
-        "g_sqsq": g_sqsq,
-        "g_sqsk": g_sqsk,
-        "num_requests": c_req + g_req,
-        "batch_size": c_sq + g_sq,
-        "has_sqsk": has_sqsk,
-    }
-
-
-def classify_phase(detail: dict) -> Optional[str]:
-    """Return ``decode_only``, ``prefilldecode`` or ``None`` for a step."""
-    c = detail.get("context_requests", 0)
-    g = detail.get("generation_requests", 0)
-    if c > 0:
-        return PHASE_PREFILLDECODE
-    if g > 0:
-        return PHASE_DECODE_ONLY
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -209,9 +105,7 @@ class Block:
         return all(d.get("has_sqsk", False) for d in self.details)
 
     def avg(self, key: str) -> float:
-        if not self.details:
-            return 0.0
-        return sum(d.get(key, 0) for d in self.details) / len(self.details)
+        return average_detail(self.details, key)
 
 
 def window_blocks(blocks: List["Block"], max_steps: int) -> List["Block"]:
@@ -273,7 +167,7 @@ def find_blocks(iteration_roots: List[dict]) -> List[Block]:
     if not iteration_roots:
         return []
 
-    details = [parse_iter_details(r.get("name", "")) for r in iteration_roots]
+    details = iteration_details(iteration_roots, full=True)
     phases = [classify_phase(d) for d in details]
 
     blocks: List[Block] = []
@@ -287,7 +181,9 @@ def find_blocks(iteration_roots: List[dict]) -> List[Block]:
             return
         if cur_phase == PHASE_DECODE_ONLY and len(cur_roots) < 2:
             return
-        if cur_phase == PHASE_PREFILLDECODE and len(cur_roots) < 1:
+        if (
+            cur_phase == PHASE_PREFILL_ONLY or cur_phase == PHASE_PREFILLDECODE
+        ) and len(cur_roots) < 1:
             return
         blocks.append(
             Block(
@@ -337,7 +233,7 @@ def _avg_block_distance(a: Block, b: Block) -> Optional[Tuple[float, ...]]:
         d_g_sk = sum(abs(da[i]["g_sk"] - db[i]["g_sk"]) for i in range(n)) / n
         return (d_g_sq, d_g_sk)
 
-    if a.phase == PHASE_PREFILLDECODE:
+    if a.phase == PHASE_PREFILLDECODE or a.phase == PHASE_PREFILL_ONLY:
         d_c_req = (
             sum(
                 abs(da[i]["context_requests"] - db[i]["context_requests"])
@@ -594,15 +490,9 @@ def load_trace(path: str):
     events = trace_json.get("traceEvents", [])
     gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
     print(f"Loaded {len(events)} events from {path}")
-    iteration_roots = (
-        _find_events_by_pattern_quiet(
-            events,
-            ANNOTATION_PATTERN,
-            f"execution steps (iteration) [{os.path.basename(path)}]",
-            cat="user_annotation",
-        )
-        or []
-    )
+    # Detailed patterns take priority over the native patterns.
+    label = f"execution steps (iteration) [{os.path.basename(path)}]"
+    iteration_roots = find_iteration_roots_by_priority(events, label=label)
     return {
         "trace_json": trace_json,
         "events": events,
@@ -650,7 +540,7 @@ def main():
     args = parser.parse_args()
 
     phases = [p.strip() for p in args.phases.split(",") if p.strip()]
-    valid = {PHASE_DECODE_ONLY, PHASE_PREFILLDECODE}
+    valid = {PHASE_DECODE_ONLY, PHASE_PREFILLDECODE, PHASE_PREFILL_ONLY}
     bad = [p for p in phases if p not in valid]
     if bad:
         print(f"Unknown phase(s): {bad}. Valid: {sorted(valid)}", file=sys.stderr)

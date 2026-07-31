@@ -163,6 +163,54 @@ def build_stability_summary(rows):
     return stability_rows, ["trace_id"] + all_evals, dict(class_totals)
 
 
+def _extract_tool_stdout(result):
+    """Pull stdout text from pi-style tool_execution_end result payloads."""
+    if not result:
+        return ""
+    parts = []
+    for item in result.get("content") or []:
+        if isinstance(item, dict) and item.get("type") == "text":
+            parts.append(item.get("text", ""))
+    return "".join(parts)
+
+
+def _accumulate_usage(usage, totals):
+    """Sum token usage fields across pi turn records."""
+    if not usage:
+        return
+    totals["input"] += (
+        usage.get("inputTokens") or usage.get("input_tokens") or usage.get("input") or 0
+    )
+    totals["output"] += (
+        usage.get("outputTokens")
+        or usage.get("output_tokens")
+        or usage.get("output")
+        or 0
+    )
+    totals["cache_read"] += (
+        usage.get("cacheReadTokens")
+        or usage.get("cache_read_input_tokens")
+        or usage.get("cacheRead")
+        or usage.get("cache_read")
+        or 0
+    )
+
+
+def _detect_steps_from_shell(cmd, stdout, steps):
+    if "generate_perf_report" in cmd:
+        steps.add("step1_perf_report")
+    if "orchestrator_prepare" in cmd:
+        steps.add("step2_5_prepare")
+    if "category_manifest" in stdout or "category_manifest" in cmd:
+        steps.add("step2_5_prepare")
+    if "_findings.md" in cmd or "_findings.md" in stdout:
+        steps.add("step7_subagent_findings")
+    if "multi_kernel_findings" in stdout or "cpu_idle" in cmd:
+        steps.add("step6_system_analysis")
+    if "analysis.md" in cmd:
+        steps.add("step11_report")
+
+
 def parse_ndjson_stream(ndjson_path):
     diag = {
         "outcome": "unknown",
@@ -197,6 +245,13 @@ def parse_ndjson_stream(ndjson_path):
         set(),
         None,
     )
+    agent_end_record = None
+    pi_turn_count = 0
+    pi_tool_calls = 0
+    first_ts = None
+    last_ts = None
+    token_totals = {"input": 0, "output": 0, "cache_read": 0}
+
     with open(ndjson_path) as f:
         for line in f:
             line = line.strip()
@@ -215,6 +270,42 @@ def parse_ndjson_stream(ndjson_path):
             rec_type = rec.get("type", "")
             if rec_type == "result":
                 result_record = rec
+            elif rec_type == "agent_end":
+                agent_end_record = rec
+            elif rec_type == "turn_end":
+                pi_turn_count += 1
+                msg = rec.get("message") or {}
+                ts = msg.get("timestamp")
+                if ts is not None:
+                    if first_ts is None:
+                        first_ts = ts
+                    last_ts = ts
+                _accumulate_usage(msg.get("usage") or {}, token_totals)
+            elif rec_type == "tool_execution_start":
+                pi_tool_calls += 1
+                cmd = (rec.get("args") or {}).get("command", "")
+                if cmd:
+                    _detect_steps_from_shell(cmd, "", steps_reached)
+                    c = _detect_report_write_from_command(
+                        {"shellToolCall": {"args": {"command": cmd}}}
+                    )
+                    if c is not None:
+                        report_content = c
+            elif rec_type == "tool_execution_end":
+                args = rec.get("args") or {}
+                cmd = args.get("command", "")
+                stdout = _extract_tool_stdout(rec.get("result"))
+                if cmd or stdout:
+                    _detect_steps_from_shell(cmd, stdout, steps_reached)
+                    tc = {
+                        "shellToolCall": {
+                            "args": {"command": cmd},
+                            "result": {"success": {"stdout": stdout}},
+                        }
+                    }
+                    c = _detect_report_write(tc)
+                    if c is not None:
+                        report_content = c
             elif rec_type == "tool_call":
                 mcid = rec.get("model_call_id", "")
                 if mcid:
@@ -246,17 +337,50 @@ def parse_ndjson_stream(ndjson_path):
                         except ValueError:
                             pass
 
-    diag["turns"] = len(turn_ids)
-    diag["tool_calls"] = tool_call_count
-    if result_record:
-        diag["outcome"] = "error" if result_record.get("is_error") else "success"
-        diag["duration_ms"] = result_record.get("duration_ms", "")
-        usage = result_record.get("usage", {})
-        diag["input_tokens"] = usage.get("inputTokens", "")
-        diag["output_tokens"] = usage.get("outputTokens", "")
-        diag["cache_read_tokens"] = usage.get("cacheReadTokens", "")
+    diag["turns"] = pi_turn_count if pi_turn_count else len(turn_ids)
+    diag["tool_calls"] = pi_tool_calls if pi_tool_calls else tool_call_count
+
+    completion = result_record or agent_end_record
+    if completion:
+        diag["outcome"] = "error" if completion.get("is_error") else "success"
+        duration_ms = completion.get("duration_ms")
+        if duration_ms:
+            diag["duration_ms"] = duration_ms
+        usage = completion.get("usage") or {}
+        if usage:
+            diag["input_tokens"] = (
+                usage.get("inputTokens")
+                or usage.get("input_tokens")
+                or usage.get("input")
+                or ""
+            )
+            diag["output_tokens"] = (
+                usage.get("outputTokens")
+                or usage.get("output_tokens")
+                or usage.get("output")
+                or ""
+            )
+            diag["cache_read_tokens"] = (
+                usage.get("cacheReadTokens")
+                or usage.get("cacheReadInputTokens")
+                or usage.get("cache_read_input_tokens")
+                or usage.get("cacheRead")
+                or usage.get("cache_read")
+                or ""
+            )
     elif diag["outcome"] == "unknown":
         diag["outcome"] = "no_result_record"
+
+    if not diag["duration_ms"] and first_ts is not None and last_ts is not None:
+        diag["duration_ms"] = last_ts - first_ts
+
+    if not diag["input_tokens"] and token_totals["input"]:
+        diag["input_tokens"] = token_totals["input"]
+    if not diag["output_tokens"] and token_totals["output"]:
+        diag["output_tokens"] = token_totals["output"]
+    if not diag["cache_read_tokens"] and token_totals["cache_read"]:
+        diag["cache_read_tokens"] = token_totals["cache_read"]
+
     if report_content is not None:
         diag["report_written"] = True
         headers = re.findall(r"^##\s+(.+)$", report_content, re.MULTILINE)
@@ -270,18 +394,7 @@ def _detect_steps(tc, steps):
     cmd = shell.get("args", {}).get("command", "")
     res = shell.get("result", {}).get("success", {})
     stdout = res.get("stdout", "")
-    if "generate_perf_report" in cmd:
-        steps.add("step1_perf_report")
-    if "orchestrator_prepare" in cmd:
-        steps.add("step2_5_prepare")
-    if "category_manifest" in stdout or "category_manifest" in cmd:
-        steps.add("step2_5_prepare")
-    if "_findings.md" in cmd or "_findings.md" in stdout:
-        steps.add("step7_subagent_findings")
-    if "multi_kernel_findings" in stdout or "cpu_idle" in cmd:
-        steps.add("step6_system_analysis")
-    if "analysis.md" in cmd:
-        steps.add("step11_report")
+    _detect_steps_from_shell(cmd, stdout, steps)
     rp = tc.get("readToolCall", {}).get("args", {}).get("path", "")
     if "_metrics.json" in rp:
         steps.add("step7_subagent_findings")
