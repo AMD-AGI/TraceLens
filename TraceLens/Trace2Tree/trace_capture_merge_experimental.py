@@ -600,4 +600,3 @@ def find_execution_details(execution_root):
         paren_values = re.findall(r"\((\d+)\)", name)
         return str(sum(int(v) for v in paren_values))
     return name.split("_")[1]
-
