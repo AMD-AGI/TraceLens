@@ -103,7 +103,11 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 ### Build and Cache Command Prefix
 
-After collecting inputs, build a command template and save it to `<output_dir>/cache/cmd_prefix.txt`. Create the directory with `mkdir -p <output_dir>/cache`.
+After collecting inputs, check to see if the TraceLens Python package is available by using "pip list."
+If not, ask the user if TraceLens should be installed into a new python venv.
+  - If so create a new python venv and install TraceLens into it.
+  - Then use this venv for all TraceLens invocations.
+Build a command template and save it to `<output_dir>/cache/cmd_prefix.txt`. Create the directory with `mkdir -p <output_dir>/cache`.
 
 The template uses `{CMD}` as a placeholder for the actual command.
 
