@@ -8,26 +8,27 @@
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
-# Usage: bash run_repeatability_parallel.sh [standalone|comparative] [--pi]
-#    or: bash run_repeatability_parallel.sh --pi [standalone|comparative]
+# Usage: bash run_repeatability_parallel.sh [both|standalone|comparative] [--pi]
+#    or: bash run_repeatability_parallel.sh --pi [both|standalone|comparative]
 #
-# With NO scope argument the script runs the full pipeline sequentially:
+# Default scope is 'both'. With 'both' (or no scope argument) the script runs
+# the full pipeline sequentially:
 #   1. Generate golden references for standalone  (via generate_ref.sh)
 #   2. Generate golden references for comparative  (via generate_ref.sh)
 #   3. Repeatability eval for standalone
 #   4. Repeatability eval for comparative
 #   5. A single combined pr_report.md + fix_ticket_report.md
 #
-# Passing 'standalone' or 'comparative' (or the COMPARISON_SCOPE env var)
+# Passing 'standalone' or 'comparative' (or COMPARISON_SCOPE=standalone|comparative)
 # restricts the run to that one scope only (gen-ref + repeatability + report
 # over just that scope). Golden references are always regenerated from scratch
 # as local directories under agent_evals/Analysis/analysis_tests/ before the
 # repeatability stage, so the repeatability evals compare against the freshly
 # generated references.
 #
-# --pi  Use `pi` instead of the Cursor `agent` CLI for the repeatability and
-#       post-processing stages. Also settable via USE_PI=1. NOTE: golden-ref
-#       generation always uses the `agent` CLI, matching generate_ref.sh.
+# --pi  Use `pi` instead of the Cursor `agent` CLI. Also settable via USE_PI=1.
+#       Applies to golden-reference generation (via generate_ref.sh), repeatability
+#       evals, and post-processing.
 #
 # CONTAINER is optional. If set, python/setup commands run via
 # docker exec -w $REPO_ROOT $CONTAINER ... ; if unset, they run on the host.
@@ -35,12 +36,12 @@ set -uo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: bash run_repeatability_parallel.sh [standalone|comparative] [--pi]
+Usage: bash run_repeatability_parallel.sh [both|standalone|comparative] [--pi]
 
-  standalone|comparative   Restrict to a single scope (default: run both scopes)
-  --pi                     Use pi instead of the Cursor agent CLI (or USE_PI=1)
+  both|standalone|comparative   Comparison scope (default: both)
+  --pi                          Use pi instead of the Cursor agent CLI (or USE_PI=1)
 
-With no scope argument the script runs, sequentially:
+With 'both' (or no scope argument) the script runs, sequentially:
   1. generate golden references (standalone)  via generate_ref.sh
   2. generate golden references (comparative)  via generate_ref.sh
   3. repeatability eval (standalone)
@@ -50,8 +51,8 @@ EOF
 }
 
 USE_PI="${USE_PI:-false}"
-# Optional single-scope filter. Defaults to COMPARISON_SCOPE if set, else both.
-SCOPE_FILTER="${COMPARISON_SCOPE:-}"
+# Comparison scope: both (default), standalone, or comparative.
+SCOPE_FILTER="${COMPARISON_SCOPE:-both}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -59,7 +60,7 @@ while [[ $# -gt 0 ]]; do
             USE_PI=true
             shift
             ;;
-        standalone|comparative)
+        both|standalone|comparative)
             SCOPE_FILTER="$1"
             shift
             ;;
@@ -81,15 +82,15 @@ else
     USE_PI=false
 fi
 
-if [[ -n "$SCOPE_FILTER" && "$SCOPE_FILTER" != "standalone" && "$SCOPE_FILTER" != "comparative" ]]; then
-    echo "Comparison scope not specified:'$SCOPE_FILTER'. Use 'standalone' or 'comparative'." >&2
+if [[ "$SCOPE_FILTER" != "both" && "$SCOPE_FILTER" != "standalone" && "$SCOPE_FILTER" != "comparative" ]]; then
+    echo "ERROR: Unknown comparison scope '$SCOPE_FILTER'. Use 'both', 'standalone', or 'comparative'." >&2
     exit 1
 fi
 
-if [[ -n "$SCOPE_FILTER" ]]; then
-    SCOPES=("$SCOPE_FILTER")
-else
+if [[ "$SCOPE_FILTER" == "both" ]]; then
     SCOPES=(standalone comparative)
+else
+    SCOPES=("$SCOPE_FILTER")
 fi
 
 # ---------------------------------------------------------------------------
@@ -389,6 +390,7 @@ generate_refs_for_scope() {
     echo "========================================="
     echo "  Stage 1: Golden Reference Generation"
     echo "  Scope:        $scope"
+    echo "  Agent:        $AGENT_BACKEND"
     echo "  Node:         $NODE_LABEL"
     echo "  Runtime:      $RUNTIME_LABEL"
     echo "========================================="
@@ -404,6 +406,9 @@ generate_refs_for_scope() {
     MAX_PARALLEL="$MAX_PARALLEL" \
     SLEEP_BETWEEN="$SLEEP_BETWEEN" \
     TEST_IDS="$TEST_IDS" \
+    NUM_REPEATS="$NUM_REPEATS" \
+    USE_PI="$USE_PI" \
+    AGENT_MODEL="$AGENT_MODEL" \
         bash "$GENERATE_REF_SCRIPT" "$scope"
 }
 
