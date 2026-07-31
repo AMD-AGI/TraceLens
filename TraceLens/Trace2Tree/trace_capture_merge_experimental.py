@@ -21,18 +21,14 @@ from collections import OrderedDict, deque, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
-import re
 import warnings
 import TraceLens
 
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
-
-EXECUTE_CONTEXT_PATTERNS = (
-    re.compile(
-        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
-    ),
-    re.compile(r"execute_context_\d+\([\d_]+\)_generation_\d+\([\d_]+\)"),
+from ..TraceUtils.annotation_utils import (
+    IterationAnnotation,
+    find_iteration_roots_by_priority,
 )
 
 
@@ -529,15 +525,11 @@ def find_capture_roots(capture_tree):
 
 
 def find_execution_roots(graph_tree):
-    """Find execution root events matching ``execute_context_*`` in the graph tree."""
-    roots = [
-        event
-        for event in graph_tree.events
-        if any(p.match(event.get("name", "")) for p in EXECUTE_CONTEXT_PATTERNS)
-        and event.get("cat") == "user_annotation"
-    ]
-    roots.sort(key=lambda x: x.get("ts", 0))
-    return roots
+    """Find iteration-annotation root events (vLLM / SGLang / ATOM) in the graph tree.
+
+    Primary (detailed) patterns are tried first, and native (backup) patterns are used only when no primary root is found.
+    """
+    return find_iteration_roots_by_priority(graph_tree.events)
 
 
 def find_graph_roots_under_execution(execution_root, graphlaunch_events):
@@ -642,12 +634,19 @@ def find_closest_batch_size(
     return min(candidates)
 
 
-def find_execution_details(execution_root):
+def find_execution_details(execution_root) -> Optional[str]:
+    """Effective batch size for the iteration annotation root.
+
+    Returns ``None`` when no integer batch size can be determined.
+    """
     name = execution_root["name"]
-    if name.startswith("execute_context_"):
-        paren_values = re.findall(r"\((\d+)\)", name)
-        return str(sum(int(v) for v in paren_values))
-    return name.split("_")[1]
+    ann = IterationAnnotation(name)
+    if ann.matched and ann.batch_size is not None:
+        return str(ann.batch_size)
+    parts = name.split("_")
+    if len(parts) > 1 and parts[1].lstrip("-").isdigit():
+        return parts[1]
+    return None
 
 
 def merge_capture_trace_into_graph(
@@ -696,6 +695,13 @@ def merge_capture_trace_into_graph(
             )
             continue
         batch_size = find_execution_details(execution_root)
+        if batch_size is None:
+            print(
+                "Warning: could not determine batch size for execution root {}".format(
+                    execution_root["name"]
+                )
+            )
+            continue
         closest_batch_size = find_closest_batch_size(
             int(batch_size), capture_batch_sizes
         )
