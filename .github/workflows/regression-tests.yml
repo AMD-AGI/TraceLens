@@ -53,6 +53,11 @@ jobs:
         run: |
           . .venv/bin/activate
           pytest tests/test_compare_perf_reports.py
+      
+      - name: Run tracediff regression tests
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_tracediff_regression.py tests/test_tracediff.py
 
       - name: Run pytest on inference perf report tests
         run: |

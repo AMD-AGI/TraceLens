@@ -1,0 +1,140 @@
+diff --git a/python/sglang/srt/managers/scheduler_components/profiler_manager.py b/python/sglang/srt/managers/scheduler_components/profiler_manager.py
+index 90945b82d6..7466ae29f7 100644
+--- a/python/sglang/srt/managers/scheduler_components/profiler_manager.py
++++ b/python/sglang/srt/managers/scheduler_components/profiler_manager.py
+@@ -15,6 +15,7 @@ from typing import (
+ 
+ import torch
+ 
++import sglang.srt.utils.kernel_shape_profiler as kernel_shape_profiler
+ from sglang.srt.environ import envs
+ from sglang.srt.managers.io_struct import ProfileReq, ProfileReqOutput, ProfileReqType
+ from sglang.srt.model_executor.forward_batch_info import ForwardMode
+@@ -51,6 +52,10 @@ class SchedulerProfilerManager:
+     ps: Any
+     dp_tp_cpu_group: Any
+     get_forward_ct: Callable[[], int]
++    # Toggles model_runner.roofline_annotations so the step span folds in the
++    # per-phase sq/sqsq/sqsk/sk aggregates (context ``c_`` / generation ``g_``)
++    # while a roofline-annotated profile is active.
++    set_roofline_annotations: Optional[Callable[[bool], None]] = None
+ 
+     def __post_init__(self) -> None:
+         if envs.SGLANG_PROFILE_V2.get():
+@@ -76,6 +81,8 @@ class SchedulerProfilerManager:
+         self.profile_by_stage: bool = False
+         self.profile_in_progress: bool = False
+         self.merge_profiles = False
++        self.roofline_annotations: bool = False
++        self.shape_discovery: bool = False
+ 
+         # For ROCM
+         self.rpd_profiler = None
+@@ -92,9 +99,13 @@ class SchedulerProfilerManager:
+         profile_id: str,
+         merge_profiles: bool = False,
+         profile_prefix: str = "",
++        roofline_annotations: bool = False,
++        shape_discovery: bool = False,
+         profile_stages: Optional[List[str]] = None,
+     ) -> ProfileReqOutput:
+         if envs.SGLANG_PROFILE_V2.get():
++            self.roofline_annotations = roofline_annotations
++            self.shape_discovery = shape_discovery
+             return self._profile_manager.configure(
+                 output_dir=output_dir,
+                 start_step=start_step,
+@@ -107,6 +118,8 @@ class SchedulerProfilerManager:
+                 merge_profiles=merge_profiles,
+                 profile_prefix=profile_prefix,
+                 profile_stages=profile_stages,
++                roofline_annotations=roofline_annotations,
++                shape_discovery=shape_discovery,
+             )
+ 
+         if self.profile_in_progress:
+@@ -129,6 +142,8 @@ class SchedulerProfilerManager:
+         self.profiler_activities = activities
+         self.profile_id = profile_id
+         self.profile_prefix = profile_prefix
++        self.roofline_annotations = roofline_annotations
++        self.shape_discovery = shape_discovery
+ 
+         if start_step:
+             self.profiler_start_forward_ct = max(start_step, self.get_forward_ct() + 1)
+@@ -151,10 +166,15 @@ class SchedulerProfilerManager:
+ 
+         return ProfileReqOutput(success=True, message="Succeeded")
+ 
++    def _apply_roofline_annotations(self, enabled: bool) -> None:
++        if self.set_roofline_annotations is not None:
++            self.set_roofline_annotations(enabled)
++
+     def _start_profile(
+         self, stage: Optional[ForwardMode] = None
+     ) -> ProfileReqOutput | None:
+         if envs.SGLANG_PROFILE_V2.get():
++            self._apply_roofline_annotations(self.roofline_annotations)
+             return self._profile_manager.manual_start()
+ 
+         stage_str = f" for {stage.name}" if stage else ""
+@@ -233,9 +253,14 @@ class SchedulerProfilerManager:
+                     )
+                 ),
+             )
++            if record_shapes and self.shape_discovery:
++                kernel_shape_profiler.enable()
++
+             try:
+                 self.torch_profiler.start()
+             except RuntimeError as e:
++                if record_shapes and self.shape_discovery:
++                    kernel_shape_profiler.disable()
+                 self.torch_profiler = None
+                 return ProfileReqOutput(success=False, message=str(e))
+             self.profile_in_progress = True
+@@ -249,6 +274,7 @@ class SchedulerProfilerManager:
+                 torch.cuda.cudart().cudaProfilerStart()
+             self.profile_in_progress = True
+ 
++        self._apply_roofline_annotations(self.roofline_annotations)
+         return ProfileReqOutput(success=True, message="Succeeded")
+ 
+     def _merge_profile_traces(self) -> str:
+@@ -287,6 +313,7 @@ class SchedulerProfilerManager:
+         self, stage: Optional[ForwardMode] = None
+     ) -> ProfileReqOutput | None:
+         if envs.SGLANG_PROFILE_V2.get():
++            self._apply_roofline_annotations(False)
+             return self._profile_manager.manual_stop()
+ 
+         if not self.profile_in_progress:
+@@ -369,6 +396,10 @@ class SchedulerProfilerManager:
+         self.profile_in_progress = False
+         self.profiler_start_forward_ct = None
+ 
++        if self.torch_profiler_record_shapes and self.shape_discovery:
++            kernel_shape_profiler.disable()
++
++        self._apply_roofline_annotations(False)
+         return ProfileReqOutput(success=True, message=f"Succeeded.{merge_message}")
+ 
+     def _profile_batch_predicate(self, batch: ScheduleBatch):
+@@ -425,6 +456,8 @@ class SchedulerProfilerManager:
+                     recv_req.profile_id,
+                     recv_req.merge_profiles,
+                     recv_req.profile_prefix,
++                    recv_req.roofline_annotations,
++                    recv_req.shape_discovery,
+                     recv_req.profile_stages,
+                 )
+             else:
+@@ -439,6 +472,8 @@ class SchedulerProfilerManager:
+                     recv_req.profile_id,
+                     recv_req.merge_profiles,
+                     recv_req.profile_prefix,
++                    recv_req.roofline_annotations,
++                    recv_req.shape_discovery,
+                 )
+                 return self._start_profile()
+         else:
