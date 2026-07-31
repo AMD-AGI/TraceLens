@@ -28,8 +28,12 @@ from conftest import (
 
 _TRACES_DIR = os.path.join(os.path.dirname(__file__), "traces")
 _REF_DIR = os.path.join(_TRACES_DIR, "tracediff_test")
-_TRACE1 = os.path.join(_TRACES_DIR, "mi300", "facebook_timesformer-base-finetuned-k400__1016002.json.gz")
-_TRACE2 = os.path.join(_TRACES_DIR, "h100", "facebook_timesformer-base-finetuned-k400__1016002.json.gz")
+_TRACE1 = os.path.join(
+    _TRACES_DIR, "mi300", "facebook_timesformer-base-finetuned-k400__1016002.json.gz"
+)
+_TRACE2 = os.path.join(
+    _TRACES_DIR, "h100", "facebook_timesformer-base-finetuned-k400__1016002.json.gz"
+)
 
 
 def _compare_csv(ref_path, test_path, tol=1e-3):
@@ -44,7 +48,6 @@ def _compare_csv(ref_path, test_path, tol=1e-3):
 
     cols = [c for c in df_ref.columns if c in df_test.columns]
     return compare_cols(df_test, df_ref, cols, tol=tol)
-
 
 
 def test_tracediff_regression(tmp_path, update_references):
@@ -73,7 +76,9 @@ def test_tracediff_regression(tmp_path, update_references):
             errors.append(f"{csv_file}:{format_diff_details(diff)}")
 
     for filename in [
-        "cpu_op_map.json", "cpu_op_map_trace1.json", "cpu_op_map_trace2.json",
+        "cpu_op_map.json",
+        "cpu_op_map_trace1.json",
+        "cpu_op_map_trace2.json",
         "merged_tree_output.txt",
     ]:
         ref_file = os.path.join(_REF_DIR, filename)
@@ -85,12 +90,15 @@ def test_tracediff_regression(tmp_path, update_references):
         with open(test_file) as f:
             test_lines = f.readlines()
         if ref_lines != test_lines:
-            diff = list(difflib.unified_diff(
-                ref_lines, test_lines,
-                fromfile=f"reference/{filename}",
-                tofile=f"test/{filename}",
-                n=3,
-            ))
+            diff = list(
+                difflib.unified_diff(
+                    ref_lines,
+                    test_lines,
+                    fromfile=f"reference/{filename}",
+                    tofile=f"test/{filename}",
+                    n=3,
+                )
+            )
             # Truncate to first 30 diff lines to keep output readable
             preview = "".join(diff[:30])
             if len(diff) > 30:

@@ -82,6 +82,7 @@ def _disambiguate_same_name_candidates(
 
     Does not mutate children1/children2.  Returns a new ops list.
     """
+
     def match_depth(levels_a, levels_b):
         """(full_levels_matched, partial_overlap_at_first_divergence).
 
@@ -151,8 +152,18 @@ def _disambiguate_same_name_candidates(
         n_to_match = min(len(indices1), len(indices2))
 
         # Precompute BFS levels for all nodes in this group
-        levels1 = {i: _gpu_path_child_names_at_bfs_levels(children1[i], baseline_uid2node, max_depth) for i in indices1}
-        levels2 = {j: _gpu_path_child_names_at_bfs_levels(children2[j], variant_uid2node, max_depth) for j in indices2}
+        levels1 = {
+            i: _gpu_path_child_names_at_bfs_levels(
+                children1[i], baseline_uid2node, max_depth
+            )
+            for i in indices1
+        }
+        levels2 = {
+            j: _gpu_path_child_names_at_bfs_levels(
+                children2[j], variant_uid2node, max_depth
+            )
+            for j in indices2
+        }
 
         # Score every (i, j) pair; tiebreak: prefer existing WF match, then positional
         scored_pairs = sorted(
@@ -560,16 +571,8 @@ class TraceDiff:
                     uid_d, uid_i = children1[di], children2[ii]
                     node_d = baseline_uid2node.get(uid_d)
                     node_i = variant_uid2node.get(uid_i)
-                    cat_d = (
-                        node_d.get(_CATEGORY)
-                        if node_d
-                        else None
-                    )
-                    cat_i = (
-                        node_i.get(_CATEGORY)
-                        if node_i
-                        else None
-                    )
+                    cat_d = node_d.get(_CATEGORY) if node_d else None
+                    cat_i = node_i.get(_CATEGORY) if node_i else None
                     if (
                         cat_d in skip_cats
                         and node_d.get(_NAME) not in _GRAPH_LAUNCH_NAMES
@@ -580,14 +583,24 @@ class TraceDiff:
                         continue
                     name_d = _get_name_node(node_d)
                     name_i = _get_name_node(node_i)
-                    imm_d = [
-                        c for c in tree1.get_children_events(node_d)
-                        if _is_gpu_path(c)
-                    ] if node_d else []
-                    imm_i = [
-                        c for c in tree2.get_children_events(node_i)
-                        if _is_gpu_path(c)
-                    ] if node_i else []
+                    imm_d = (
+                        [
+                            c
+                            for c in tree1.get_children_events(node_d)
+                            if _is_gpu_path(c)
+                        ]
+                        if node_d
+                        else []
+                    )
+                    imm_i = (
+                        [
+                            c
+                            for c in tree2.get_children_events(node_i)
+                            if _is_gpu_path(c)
+                        ]
+                        if node_i
+                        else []
+                    )
                     names_imm_d = [_get_name_node(c) for c in imm_d]
                     names_imm_i = [_get_name_node(c) for c in imm_i]
                     if name_d and any(_get_name_node(c) == name_d for c in imm_i):
@@ -686,9 +699,11 @@ class TraceDiff:
 
             # --- Phase 2: Alignment on original children ---
             any_cr = any(
-                subtree_contains_cuda_runtime(baseline_uid2node.get(c)) for c in children1
+                subtree_contains_cuda_runtime(baseline_uid2node.get(c))
+                for c in children1
             ) or any(
-                subtree_contains_cuda_runtime(variant_uid2node.get(c)) for c in children2
+                subtree_contains_cuda_runtime(variant_uid2node.get(c))
+                for c in children2
             )
             if len(children1) == len(children2) and not any_cr:
                 ops = [("match", i, i) for i in range(len(children1))]
@@ -882,8 +897,9 @@ class TraceDiff:
         self.merged_tree = (merged_events, merged_root_ids)
         return self.merged_tree
 
-
-    def _format_merged_subtree(self, merged_id, merged_id_to_event, prefix="", is_last=True):
+    def _format_merged_subtree(
+        self, merged_id, merged_id_to_event, prefix="", is_last=True
+    ):
         """Yield formatted lines for a merged subtree. Shared by print_merged_subtree and print_merged_tree."""
         node = merged_id_to_event[merged_id]
         merge_type = node["merged_type"]
@@ -961,10 +977,14 @@ class TraceDiff:
         for i, root_id in enumerate(merged_root_ids):
             if prune_non_gpu and not subtree_has_gpu(root_id):
                 continue
-            output_lines.extend(self._format_merged_subtree(
-                root_id, merged_id_to_event,
-                prefix="", is_last=(i == len(merged_root_ids) - 1),
-            ))
+            output_lines.extend(
+                self._format_merged_subtree(
+                    root_id,
+                    merged_id_to_event,
+                    prefix="",
+                    is_last=(i == len(merged_root_ids) - 1),
+                )
+            )
 
         with open(output_file, "w") as f:
             for line in output_lines:
@@ -1025,9 +1045,17 @@ class TraceDiff:
             return GPUEventAnalyser(gpu_events).compute_metrics()["busy_time"]
 
         def _collect_gpu_rows(
-            gpu_event_uids, tree_obj, uid2node, tree_num, source,
-            lca_name, lca_id, lca_busy_time,
-            lca_children_t1, lca_children_t2, root_index,
+            gpu_event_uids,
+            tree_obj,
+            uid2node,
+            tree_num,
+            source,
+            lca_name,
+            lca_id,
+            lca_busy_time,
+            lca_children_t1,
+            lca_children_t2,
+            root_index,
         ):
             """Build row dicts for each GPU event. Used by combined, trace1, and trace2 branches."""
             result = []
@@ -1061,9 +1089,9 @@ class TraceDiff:
                     "nn_module_stack": ";".join(
                         str(x) for x in parent_node.get("nn_module_stack", [])
                     ),
-                    "nn_module_parent": (
-                        parent_node.get("nn_module_stack") or [""]
-                    )[-1],
+                    "nn_module_parent": (parent_node.get("nn_module_stack") or [""])[
+                        -1
+                    ],
                 }
                 if _TRACELENS_DEBUG:
                     row["lca_children_t1"] = lca_children_t1
@@ -1078,7 +1106,9 @@ class TraceDiff:
             if combined_parent_node is not None:
                 lca_id = combined_parent_node.get("merged_id")
                 lca = merged_id_to_event[lca_id]
-                lca_name = re.sub(r"\(\d+\)", "", self._get_op_name(lca[uid_key], tree_num))
+                lca_name = re.sub(
+                    r"\(\d+\)", "", self._get_op_name(lca[uid_key], tree_num)
+                )
                 lca_children_t1 = get_gpu_path_child_names(
                     lca["uid1"], baseline_uid2node, 1
                 )
@@ -1103,12 +1133,7 @@ class TraceDiff:
             if mt == "combined":
                 event1 = baseline_uid2node.get(node["uid1"])
                 event2 = variant_uid2node.get(node["uid2"])
-                if (
-                    event1
-                    and event2
-                    and _is_gpu_path(event1)
-                    and _is_gpu_path(event2)
-                ):
+                if event1 and event2 and _is_gpu_path(event1) and _is_gpu_path(event2):
                     children = [merged_id_to_event[cid] for cid in node["children"]]
                     non_combined_children = [
                         c for c in children if c["merged_type"] != "combined"
@@ -1172,16 +1197,36 @@ class TraceDiff:
                             node["uid2"], variant_uid2node, 2
                         )
 
-                        rows.extend(_collect_gpu_rows(
-                            gpu_event_uids1, self.baseline, baseline_uid2node,
-                            1, "trace1", lca_name, node["merged_id"],
-                            busy_time1, lca_children_t1, lca_children_t2, root_index,
-                        ))
-                        rows.extend(_collect_gpu_rows(
-                            gpu_event_uids2, self.variant, variant_uid2node,
-                            2, "trace2", lca_name, node["merged_id"],
-                            busy_time2, lca_children_t1, lca_children_t2, root_index,
-                        ))
+                        rows.extend(
+                            _collect_gpu_rows(
+                                gpu_event_uids1,
+                                self.baseline,
+                                baseline_uid2node,
+                                1,
+                                "trace1",
+                                lca_name,
+                                node["merged_id"],
+                                busy_time1,
+                                lca_children_t1,
+                                lca_children_t2,
+                                root_index,
+                            )
+                        )
+                        rows.extend(
+                            _collect_gpu_rows(
+                                gpu_event_uids2,
+                                self.variant,
+                                variant_uid2node,
+                                2,
+                                "trace2",
+                                lca_name,
+                                node["merged_id"],
+                                busy_time2,
+                                lca_children_t1,
+                                lca_children_t2,
+                                root_index,
+                            )
+                        )
 
                         visited_stats_nodes.add(merged_id)
                         visited_stats_nodes.update(
@@ -1195,29 +1240,51 @@ class TraceDiff:
             elif mt == "trace1":
                 event1 = baseline_uid2node.get(node["uid1"])
                 if event1 and _is_gpu_path(event1):
-                    lca_name, lca_id, lca_children_t1, lca_children_t2 = \
+                    lca_name, lca_id, lca_children_t1, lca_children_t2 = (
                         _resolve_lca_from_parent(combined_parent_node, "uid1", 1)
+                    )
                     gpu_event_uids = event1.get("gpu_events", [])
                     lca_busy = _compute_lca_busy_time(gpu_event_uids, baseline_uid2node)
-                    rows.extend(_collect_gpu_rows(
-                        gpu_event_uids, self.baseline, baseline_uid2node,
-                        1, "trace1", lca_name, lca_id,
-                        lca_busy, lca_children_t1, lca_children_t2, root_index,
-                    ))
+                    rows.extend(
+                        _collect_gpu_rows(
+                            gpu_event_uids,
+                            self.baseline,
+                            baseline_uid2node,
+                            1,
+                            "trace1",
+                            lca_name,
+                            lca_id,
+                            lca_busy,
+                            lca_children_t1,
+                            lca_children_t2,
+                            root_index,
+                        )
+                    )
                 visited_stats_nodes.add(merged_id)
                 return
             elif mt == "trace2":
                 event2 = variant_uid2node.get(node["uid2"])
                 if event2 and _is_gpu_path(event2):
-                    lca_name, lca_id, lca_children_t1, lca_children_t2 = \
+                    lca_name, lca_id, lca_children_t1, lca_children_t2 = (
                         _resolve_lca_from_parent(combined_parent_node, "uid2", 2)
+                    )
                     gpu_event_uids = event2.get("gpu_events", [])
                     lca_busy = _compute_lca_busy_time(gpu_event_uids, variant_uid2node)
-                    rows.extend(_collect_gpu_rows(
-                        gpu_event_uids, self.variant, variant_uid2node,
-                        2, "trace2", lca_name, lca_id,
-                        lca_busy, lca_children_t1, lca_children_t2, root_index,
-                    ))
+                    rows.extend(
+                        _collect_gpu_rows(
+                            gpu_event_uids,
+                            self.variant,
+                            variant_uid2node,
+                            2,
+                            "trace2",
+                            lca_name,
+                            lca_id,
+                            lca_busy,
+                            lca_children_t1,
+                            lca_children_t2,
+                            root_index,
+                        )
+                    )
                 visited_stats_nodes.add(merged_id)
                 return
 
@@ -1436,7 +1503,9 @@ class TraceDiff:
                                 if n1 != n2:
                                     common_name = find_common_name(n1, n2, module_map)
                                     if common_name is not None:
-                                        print(f"[TraceDiff] Renaming: {n1}, {n2} to {common_name}")
+                                        print(
+                                            f"[TraceDiff] Renaming: {n1}, {n2} to {common_name}"
+                                        )
                                         rename_map[n2] = common_name
                                         rename_map[n1] = common_name
                                     else:
@@ -1459,7 +1528,9 @@ class TraceDiff:
                                 for n2 in n2_list:
                                     common_name = find_common_name(n1, n2, module_map)
                                     if common_name is not None:
-                                        print(f"[TraceDiff] Renaming: {n1}, {n2} to {common_name}")
+                                        print(
+                                            f"[TraceDiff] Renaming: {n1}, {n2} to {common_name}"
+                                        )
                                         rename_map[n1] = common_name
                                         rename_map[n2] = common_name
                                         n2_list.remove(n2)
@@ -1509,7 +1580,9 @@ class TraceDiff:
                 }
                 for kernel_name in df_agg["name"].unique()
             }
-            print("[TraceDiff] Kernel to CPU op mapping (showing entries with 1:n mapping):")
+            print(
+                "[TraceDiff] Kernel to CPU op mapping (showing entries with 1:n mapping):"
+            )
             for name, mapping in result.items():
                 if len(mapping.get("trace1", {}).get("cpu_op_name", [])) > 1:
                     print(
