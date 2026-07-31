@@ -28,9 +28,13 @@ from aggregate_repeatability import find_runs, parse_ndjson_stream
 
 REPO_ROOT = "/workspace/TraceLens"
 ANALYSIS_DIR = os.path.join(REPO_ROOT, "agent_evals", "Analysis")
-RESULTS_ROOT = "/workspace/TraceLens/agent_evals/Analysis/repeatability_results_combined"
+RESULTS_ROOT = (
+    "/workspace/TraceLens/agent_evals/Analysis/repeatability_results_combined"
+)
 REPORT_DIR = "/workspace/TraceLens/agent_evals/Analysis/reports"
-TEST_TRACES_CSV = "/workspace/TraceLens/agent_evals/Analysis/reports/combined_traces.csv"
+TEST_TRACES_CSV = (
+    "/workspace/TraceLens/agent_evals/Analysis/reports/combined_traces.csv"
+)
 SUITE = "eval"
 CONTAINER = ""  # local host, no container
 
@@ -104,17 +108,19 @@ def reaggregate_from_sources(results_root):
                         if not any(row):
                             continue
                         norm = normalize_row(row)
-                        rows.append({
-                            "trace_id": trace_id,
-                            "run_id": run_id,
-                            "eval_index": norm["index"],
-                            "eval_category": norm["category"],
-                            "issue_summary": norm["issue_summary"],
-                            "result": norm["result"],
-                            "details": norm["details"],
-                            "root_cause": norm["root_cause"],
-                            "recommended_fix": norm["recommended_fix"],
-                        })
+                        rows.append(
+                            {
+                                "trace_id": trace_id,
+                                "run_id": run_id,
+                                "eval_index": norm["index"],
+                                "eval_category": norm["category"],
+                                "issue_summary": norm["issue_summary"],
+                                "result": norm["result"],
+                                "details": norm["details"],
+                                "root_cause": norm["root_cause"],
+                                "recommended_fix": norm["recommended_fix"],
+                            }
+                        )
     return rows
 
 
@@ -165,7 +171,9 @@ def build_pass_rate_summary(agg_rows, trace_ids):
             fail_sum += counts["FAIL"]
             total_sum += c_total
         row["overall_pass_rate"] = (
-            f"{pass_sum}/{total_sum} ({round(100*pass_sum/total_sum, 1)}%)" if total_sum else "N/A"
+            f"{pass_sum}/{total_sum} ({round(100*pass_sum/total_sum, 1)}%)"
+            if total_sum
+            else "N/A"
         )
         rows.append(row)
     return rows
@@ -206,14 +214,16 @@ def build_run_level_summary(agg_rows):
     for (trace_id, run_id), counts in sorted(by_run.items()):
         total = counts["PASS"] + counts["FAIL"]
         is_cat = total > 0 and (counts["FAIL"] / total) > 0.5
-        rows.append({
-            "trace_id": trace_id,
-            "run_id": run_id,
-            "pass": counts["PASS"],
-            "fail": counts["FAIL"],
-            "total": total,
-            "is_catastrophic": str(is_cat),
-        })
+        rows.append(
+            {
+                "trace_id": trace_id,
+                "run_id": run_id,
+                "pass": counts["PASS"],
+                "fail": counts["FAIL"],
+                "total": total,
+                "is_catastrophic": str(is_cat),
+            }
+        )
     return rows
 
 
@@ -306,15 +316,23 @@ def classify_row(row, rules):
     base_section = "Others"
     for r in rules["base_section_rules"]:
         if "eval_index_regex" in r and re.search(r["eval_index_regex"], eval_index):
-            base_section = r["section"]; break
-        if "issue_summary_regex" in r and re.search(r["issue_summary_regex"], issue_summary):
-            base_section = r["section"]; break
+            base_section = r["section"]
+            break
+        if "issue_summary_regex" in r and re.search(
+            r["issue_summary_regex"], issue_summary
+        ):
+            base_section = r["section"]
+            break
     standalone_section = "Detailed Analysis"
     for r in rules["standalone_section_rules"]:
         if "eval_index_regex" in r and re.search(r["eval_index_regex"], eval_index):
-            standalone_section = r["section"]; break
-        if "issue_summary_regex" in r and re.search(r["issue_summary_regex"], issue_summary):
-            standalone_section = r["section"]; break
+            standalone_section = r["section"]
+            break
+        if "issue_summary_regex" in r and re.search(
+            r["issue_summary_regex"], issue_summary
+        ):
+            standalone_section = r["section"]
+            break
     haystack = f"{eval_index} {issue_summary} {details}"
     likely_cause = rules["defaults"]["likely_cause"]
     suggested_fix = rules["defaults"]["suggested_fix"]
@@ -345,7 +363,9 @@ def build_trace_meta(csv_path):
 
 
 def split_unit_e2e(trace_meta):
-    unit = {tid: m for tid, m in trace_meta.items() if m["sub_category"] != "full_model"}
+    unit = {
+        tid: m for tid, m in trace_meta.items() if m["sub_category"] != "full_model"
+    }
     e2e = {tid: m for tid, m in trace_meta.items() if m["sub_category"] == "full_model"}
     return unit, e2e
 
@@ -376,31 +396,44 @@ def compute_per_split(trace_ids, agg_rows, run_level_rows, stream_rows, trace_me
         meta = trace_meta.get(tid, {"sub_category": "unknown", "platform": "unknown"})
         s_rows = [s for s in stream_rows if s["trace_id"] == tid]
         successful_runs = sum(
-            1 for s in s_rows
+            1
+            for s in s_rows
             if str(s.get("outcome", "")).lower() not in ("", "no_result_record")
         )
         total_runs = len(s_rows)
         durations = [
-            int(s["duration_ms"]) for s in s_rows
-            if str(s.get("duration_ms", "")).strip() not in ("",) and int(s["duration_ms"] or 0) > 0
+            int(s["duration_ms"])
+            for s in s_rows
+            if str(s.get("duration_ms", "")).strip() not in ("",)
+            and int(s["duration_ms"] or 0) > 0
         ]
-        avg_dur_s = round(sum(durations) / len(durations) / 1000.0, 1) if durations else 0.0
-        per_case.append({
-            "trace_id": tid,
-            "sub_category": meta["sub_category"],
-            "platform": meta["platform"],
-            "pass": ps, "fail": fs, "missing": ms,
-            "pass_rate": fmt_pass_rate(ps, case_total),
-            "runs": f"{successful_runs}/{total_runs}",
-            "avg_dur": avg_dur_s,
-        })
+        avg_dur_s = (
+            round(sum(durations) / len(durations) / 1000.0, 1) if durations else 0.0
+        )
+        per_case.append(
+            {
+                "trace_id": tid,
+                "sub_category": meta["sub_category"],
+                "platform": meta["platform"],
+                "pass": ps,
+                "fail": fs,
+                "missing": ms,
+                "pass_rate": fmt_pass_rate(ps, case_total),
+                "runs": f"{successful_runs}/{total_runs}",
+                "avg_dur": avg_dur_s,
+            }
+        )
     per_case.sort(key=lambda x: -x["fail"])
     per_trace_fail_count = sorted(
         [(tid, per_trace_fail.get(tid, 0)) for tid in trace_ids],
         key=lambda x: -x[1],
     )
     return {
-        "pass": p, "fail": f, "missing": m, "total": total, "rate": rate,
+        "pass": p,
+        "fail": f,
+        "missing": m,
+        "total": total,
+        "rate": rate,
         "top_issues": issue_counter.most_common(10),
         "per_case": per_case,
         "per_trace_fail_count": per_trace_fail_count,
@@ -421,6 +454,7 @@ def top_failure_modes(classified_failures, trace_ids, n=8):
 
 
 # ----------------- Report builders -----------------
+
 
 def metrics_table(overall, unit, e2e):
     return (
@@ -490,7 +524,9 @@ def failure_modes_table(modes, label):
     return "".join(rows)
 
 
-def top_reproducers_table(per_trace_fail_count, trace_meta, test_traces_csv_rel, container, n=5):
+def top_reproducers_table(
+    per_trace_fail_count, trace_meta, test_traces_csv_rel, container, n=5
+):
     rows = [
         f"### Top Reproducers\n\n",
         "| Trace/Case | Failures | Platform | Reproducer command |\n|---|---|---|---|\n",
@@ -504,7 +540,7 @@ def top_reproducers_table(per_trace_fail_count, trace_meta, test_traces_csv_rel,
         container_kv = f'CONTAINER="{container}"' if container else 'CONTAINER=""'
         cmd = (
             f'{container_kv} TEST_IDS="{tid}" TEST_TRACES_CSV="{test_traces_csv_rel}" '
-            f'bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh'
+            f"bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh"
         )
         rows.append(f"| {tid} | {fcount} | {platform} | `{cmd}` |\n")
     return "".join(rows)
@@ -513,8 +549,10 @@ def top_reproducers_table(per_trace_fail_count, trace_meta, test_traces_csv_rel,
 def catastrophic_table(catastrophic_runs):
     if not catastrophic_runs:
         return "### Catastrophic Runs\n\nNo catastrophic runs detected.\n"
-    rows = ["### Catastrophic Runs\n\n",
-            "| Case | Run | Pass | Fail | Total |\n|---|---|---|---|---|\n"]
+    rows = [
+        "### Catastrophic Runs\n\n",
+        "| Case | Run | Pass | Fail | Total |\n|---|---|---|---|---|\n",
+    ]
     for r in catastrophic_runs:
         rows.append(
             f"| {r['trace_id']} | run_{r['run_id']} | {r['pass']} | {r['fail']} | {r['total']} |\n"
@@ -524,22 +562,32 @@ def catastrophic_table(catastrophic_runs):
 
 def per_case_pattern_table(per_case_pattern, num_runs=5):
     header_cells = [f"run_{i}" for i in range(num_runs)]
-    rows = ["### Per-Case Run Pattern\n\n",
-            "| Case | " + " | ".join(header_cells) + " | Total Fails | Pattern |\n|"
-            + "|".join(["---"] * (num_runs + 2)) + "|\n"]
+    rows = [
+        "### Per-Case Run Pattern\n\n",
+        "| Case | "
+        + " | ".join(header_cells)
+        + " | Total Fails | Pattern |\n|"
+        + "|".join(["---"] * (num_runs + 2))
+        + "|\n",
+    ]
     for entry in per_case_pattern:
         runs = entry["runs"]
         cells = []
         for run_idx in range(num_runs):
             run_row = next((r for r in runs if int(r["run_id"]) == run_idx), None)
             if run_row:
-                label = " (**crash**)" if str(run_row.get("is_catastrophic", "")).lower() == "true" else ""
+                label = (
+                    " (**crash**)"
+                    if str(run_row.get("is_catastrophic", "")).lower() == "true"
+                    else ""
+                )
                 cells.append(f"{run_row['fail']}/{run_row['total']}{label}")
             else:
                 cells.append("-")
         rows.append(
-            f"| {entry['trace_id']} | " + " | ".join(cells) +
-            f" | {entry['total_fails']} | {entry['label']} |\n"
+            f"| {entry['trace_id']} | "
+            + " | ".join(cells)
+            + f" | {entry['total_fails']} | {entry['label']} |\n"
         )
     return "".join(rows)
 
@@ -558,10 +606,14 @@ def main():
     pass_rows = [r for r in agg_rows if r["result"] == "PASS"]
     fail_rows = [r for r in agg_rows if r["result"] == "FAIL"]
     miss_rows = [r for r in agg_rows if r["result"] not in ("PASS", "FAIL")]
-    print(f"  PASS={len(pass_rows)}, FAIL={len(fail_rows)}, MISSING={len(miss_rows)}, total={len(agg_rows)}")
+    print(
+        f"  PASS={len(pass_rows)}, FAIL={len(fail_rows)}, MISSING={len(miss_rows)}, total={len(agg_rows)}"
+    )
 
     # Write aggregated_results.csv
-    write_csv(os.path.join(AGG_DIR, "aggregated_results.csv"), agg_rows, EVAL_OUTPUT_COLS)
+    write_csv(
+        os.path.join(AGG_DIR, "aggregated_results.csv"), agg_rows, EVAL_OUTPUT_COLS
+    )
     print(f"  Wrote: {AGG_DIR}/aggregated_results.csv")
 
     # Pass rate summary
@@ -578,37 +630,66 @@ def main():
 
     # Run-level summary
     rl_rows = build_run_level_summary(agg_rows)
-    write_csv(os.path.join(AGG_DIR, "run_level_summary.csv"), rl_rows,
-              ["trace_id", "run_id", "pass", "fail", "total", "is_catastrophic"])
+    write_csv(
+        os.path.join(AGG_DIR, "run_level_summary.csv"),
+        rl_rows,
+        ["trace_id", "run_id", "pass", "fail", "total", "is_catastrophic"],
+    )
     print(f"  Wrote: {AGG_DIR}/run_level_summary.csv")
 
     # Failure nature summary
     fn = build_failure_nature(rl_rows, st_rows, fail_rows)
-    fn_rows = [{
-        "catastrophic_pipeline": fn["catastrophic_pipeline"],
-        "stable": fn["stable"],
-        "flaky": fn["flaky"],
-        "total": fn["total"],
-    }]
-    write_csv(os.path.join(AGG_DIR, "failure_nature_summary.csv"), fn_rows,
-              ["catastrophic_pipeline", "stable", "flaky", "total"])
+    fn_rows = [
+        {
+            "catastrophic_pipeline": fn["catastrophic_pipeline"],
+            "stable": fn["stable"],
+            "flaky": fn["flaky"],
+            "total": fn["total"],
+        }
+    ]
+    write_csv(
+        os.path.join(AGG_DIR, "failure_nature_summary.csv"),
+        fn_rows,
+        ["catastrophic_pipeline", "stable", "flaky", "total"],
+    )
     print(f"  Wrote: {AGG_DIR}/failure_nature_summary.csv")
     print(f"  Failure nature: {fn}")
 
     # Stream diagnostics
     sd_rows = parse_stream_diagnostics(RESULTS_ROOT)
-    write_csv(os.path.join(AGG_DIR, "stream_diagnostics.csv"), sd_rows,
-              ["trace_id", "run_id", "outcome", "duration_ms", "input_tokens",
-               "output_tokens", "cache_read_tokens", "turns", "tool_calls",
-               "report_written", "report_headers", "last_step_reached"])
+    write_csv(
+        os.path.join(AGG_DIR, "stream_diagnostics.csv"),
+        sd_rows,
+        [
+            "trace_id",
+            "run_id",
+            "outcome",
+            "duration_ms",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "turns",
+            "tool_calls",
+            "report_written",
+            "report_headers",
+            "last_step_reached",
+        ],
+    )
     print(f"  Wrote: {AGG_DIR}/stream_diagnostics.csv")
 
     # ---------- Step 5: classify ----------
     classified_failures = []
     for row in fail_rows:
         bs, ss, lc, sf = classify_row(row, rules)
-        classified_failures.append({**row, "base_section": bs, "standalone_section": ss,
-                                    "likely_cause": lc, "suggested_fix": sf})
+        classified_failures.append(
+            {
+                **row,
+                "base_section": bs,
+                "standalone_section": ss,
+                "likely_cause": lc,
+                "suggested_fix": sf,
+            }
+        )
 
     classified_path = os.path.join(AGG_DIR, "classified_failures.csv")
     if classified_failures:
@@ -619,9 +700,15 @@ def main():
     section_counter = Counter(f["base_section"] for f in classified_failures)
 
     # Compute metrics
-    overall = compute_per_split(set(trace_meta.keys()), agg_rows, rl_rows, sd_rows, trace_meta)
-    unit_metrics = compute_per_split(set(unit_ids.keys()), agg_rows, rl_rows, sd_rows, trace_meta)
-    e2e_metrics = compute_per_split(set(e2e_ids.keys()), agg_rows, rl_rows, sd_rows, trace_meta)
+    overall = compute_per_split(
+        set(trace_meta.keys()), agg_rows, rl_rows, sd_rows, trace_meta
+    )
+    unit_metrics = compute_per_split(
+        set(unit_ids.keys()), agg_rows, rl_rows, sd_rows, trace_meta
+    )
+    e2e_metrics = compute_per_split(
+        set(e2e_ids.keys()), agg_rows, rl_rows, sd_rows, trace_meta
+    )
 
     unit_modes = top_failure_modes(classified_failures, set(unit_ids.keys()), n=8)
     e2e_modes = top_failure_modes(classified_failures, set(e2e_ids.keys()), n=8)
@@ -639,11 +726,14 @@ def main():
         totals = [int(r["total"]) for r in runs]
         total_fails = sum(fc)
         label = pattern_label(fc, totals)
-        per_case_pattern.append({"trace_id": tid, "runs": runs,
-                                 "total_fails": total_fails, "label": label})
+        per_case_pattern.append(
+            {"trace_id": tid, "runs": runs, "total_fails": total_fails, "label": label}
+        )
     per_case_pattern.sort(key=lambda x: -x["total_fails"])
 
-    catastrophic_runs = [r for r in rl_rows if str(r.get("is_catastrophic", "")).lower() == "true"]
+    catastrophic_runs = [
+        r for r in rl_rows if str(r.get("is_catastrophic", "")).lower() == "true"
+    ]
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     test_traces_csv_rel = os.path.relpath(TEST_TRACES_CSV, REPO_ROOT)
 
@@ -654,18 +744,26 @@ def main():
     pr.append(metrics_table(overall, unit_metrics, e2e_metrics))
     pr.append("\n## Failure Nature Summary\n\n")
     pr.append(failure_nature_table(fn))
-    pr.append(f"\nCatastrophic runs: {fn['catastrophic_pipeline']}\n\n" if fn["catastrophic_pipeline"] else "\nCatastrophic runs: None\n\n")
+    pr.append(
+        f"\nCatastrophic runs: {fn['catastrophic_pipeline']}\n\n"
+        if fn["catastrophic_pipeline"]
+        else "\nCatastrophic runs: None\n\n"
+    )
     pr.append("## Failure Sections\n\n")
     pr.append(failure_sections_table(section_counter))
     pr.append("\n")
     pr.append(top_issues_table(overall["top_issues"], "Overall"))
     pr.append("\n---\n\n")
-    pr.append(f"## Unit Test Cases ({len(unit_ids)} cases, {unit_metrics['rate']}% pass rate)\n\n")
+    pr.append(
+        f"## Unit Test Cases ({len(unit_ids)} cases, {unit_metrics['rate']}% pass rate)\n\n"
+    )
     pr.append(per_case_table(unit_metrics["per_case"], "Unit"))
     pr.append("\n")
     pr.append(top_issues_table(unit_metrics["top_issues"], "Unit Tests"))
     pr.append("\n---\n\n")
-    pr.append(f"## E2E Test Cases ({len(e2e_ids)} cases, {e2e_metrics['rate']}% pass rate)\n\n")
+    pr.append(
+        f"## E2E Test Cases ({len(e2e_ids)} cases, {e2e_metrics['rate']}% pass rate)\n\n"
+    )
     pr.append(per_case_table(e2e_metrics["per_case"], "E2E"))
     pr.append("\n")
     pr.append(top_issues_table(e2e_metrics["top_issues"], "E2E Tests"))
@@ -686,36 +784,60 @@ def main():
         "`failure_nature_summary.csv`:\n\n"
     )
     fx.append("| Nature | Count | % of Failures | Description |\n|---|---|---|---|\n")
-    fx.append(f"| Catastrophic pipeline | {fn['catastrophic_pipeline']} | {pct(fn['catastrophic_pipeline'], fn['total'])}% | "
-              "Agent crashed / no analysis.md — entire run fails (>50% of checks) |\n")
-    fx.append(f"| Stable | {fn['stable']} | {pct(fn['stable'], fn['total'])}% | "
-              "Eval fails consistently in every run for a given trace — real bug |\n")
-    fx.append(f"| Flaky | {fn['flaky']} | {pct(fn['flaky'], fn['total'])}% | "
-              "Eval fails in some runs but not others — agent non-determinism |\n")
+    fx.append(
+        f"| Catastrophic pipeline | {fn['catastrophic_pipeline']} | {pct(fn['catastrophic_pipeline'], fn['total'])}% | "
+        "Agent crashed / no analysis.md — entire run fails (>50% of checks) |\n"
+    )
+    fx.append(
+        f"| Stable | {fn['stable']} | {pct(fn['stable'], fn['total'])}% | "
+        "Eval fails consistently in every run for a given trace — real bug |\n"
+    )
+    fx.append(
+        f"| Flaky | {fn['flaky']} | {pct(fn['flaky'], fn['total'])}% | "
+        "Eval fails in some runs but not others — agent non-determinism |\n"
+    )
     fx.append("\n")
     fx.append(catastrophic_table(catastrophic_runs))
     fx.append("\n")
     fx.append(per_case_pattern_table(per_case_pattern, num_runs=5))
     fx.append("\n---\n\n")
-    fx.append(f"## Unit Test Cases ({len(unit_ids)} cases, {unit_metrics['rate']}% pass rate)\n\n")
+    fx.append(
+        f"## Unit Test Cases ({len(unit_ids)} cases, {unit_metrics['rate']}% pass rate)\n\n"
+    )
     fx.append(per_case_table(unit_metrics["per_case"], "Unit"))
     fx.append("\n")
     fx.append(top_issues_table(unit_metrics["top_issues"], "Unit Tests", limit=999))
     fx.append("\n")
     fx.append(failure_modes_table(unit_modes, "Unit Tests"))
     fx.append("\n")
-    fx.append(top_reproducers_table(unit_metrics["per_trace_fail_count"], trace_meta,
-                                    test_traces_csv_rel, CONTAINER, n=5))
+    fx.append(
+        top_reproducers_table(
+            unit_metrics["per_trace_fail_count"],
+            trace_meta,
+            test_traces_csv_rel,
+            CONTAINER,
+            n=5,
+        )
+    )
     fx.append("\n---\n\n")
-    fx.append(f"## E2E Test Cases ({len(e2e_ids)} cases, {e2e_metrics['rate']}% pass rate)\n\n")
+    fx.append(
+        f"## E2E Test Cases ({len(e2e_ids)} cases, {e2e_metrics['rate']}% pass rate)\n\n"
+    )
     fx.append(per_case_table(e2e_metrics["per_case"], "E2E"))
     fx.append("\n")
     fx.append(top_issues_table(e2e_metrics["top_issues"], "E2E Tests", limit=999))
     fx.append("\n")
     fx.append(failure_modes_table(e2e_modes, "E2E Tests"))
     fx.append("\n")
-    fx.append(top_reproducers_table(e2e_metrics["per_trace_fail_count"], trace_meta,
-                                    test_traces_csv_rel, CONTAINER, n=5))
+    fx.append(
+        top_reproducers_table(
+            e2e_metrics["per_trace_fail_count"],
+            trace_meta,
+            test_traces_csv_rel,
+            CONTAINER,
+            n=5,
+        )
+    )
 
     fx_path = os.path.join(REPORT_DIR, "fix_ticket_report.md")
     with open(fx_path, "w") as f:
@@ -756,11 +878,17 @@ def main():
         readme = [f"# Reproducer: {issue}\n\n"]
         readme.append(f"**Total failures across all runs:** {len(failures)}\n\n")
         readme.append("## Affected traces\n\n")
-        readme.append("| Trace | Run | Platform | Details snippet |\n|---|---|---|---|\n")
+        readme.append(
+            "| Trace | Run | Platform | Details snippet |\n|---|---|---|---|\n"
+        )
         for f in failures[:30]:
             platform = trace_meta.get(f["trace_id"], {}).get("platform", "unknown")
-            details = (f.get("details") or "")[:200].replace("|", "\\|").replace("\n", " ")
-            readme.append(f"| {f['trace_id']} | run_{f['run_id']} | {platform} | {details} |\n")
+            details = (
+                (f.get("details") or "")[:200].replace("|", "\\|").replace("\n", " ")
+            )
+            readme.append(
+                f"| {f['trace_id']} | run_{f['run_id']} | {platform} | {details} |\n"
+            )
 
         worst_trace = max(
             (f["trace_id"] for f in failures),
@@ -770,7 +898,7 @@ def main():
         container_kv = f'CONTAINER="{CONTAINER}"' if CONTAINER else 'CONTAINER=""'
         repro_cmd = (
             f'{container_kv} TEST_IDS="{worst_trace}" TEST_TRACES_CSV="{test_traces_csv_rel}" '
-            f'bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh'
+            f"bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh"
         )
         readme.append("\n## Reproducer command (worst-affected trace)\n\n```bash\n")
         readme.append(repro_cmd + "\n```\n\n")
@@ -783,8 +911,10 @@ def main():
             f.write("".join(readme))
 
         repo_abs = REPO_ROOT
-        for (tid, rid) in unique_pairs:
-            stream_src = os.path.join(RESULTS_ROOT, tid, f"run_{rid}", "analysis_stream.ndjson")
+        for tid, rid in unique_pairs:
+            stream_src = os.path.join(
+                RESULTS_ROOT, tid, f"run_{rid}", "analysis_stream.ndjson"
+            )
             stream_dst = os.path.join(folder, f"{tid}_run_{rid}.ndjson")
             if os.path.isfile(stream_src):
                 try:
@@ -817,8 +947,10 @@ def main():
     print(f"Suite: {SUITE}")
     print(f"Test traces CSV: {TEST_TRACES_CSV}")
     print(f"Results root: {RESULTS_ROOT}")
-    print(f"Overall pass rate: {overall['rate']}% "
-          f"(PASS={overall['pass']}, FAIL={overall['fail']}, MISSING={overall['missing']})")
+    print(
+        f"Overall pass rate: {overall['rate']}% "
+        f"(PASS={overall['pass']}, FAIL={overall['fail']}, MISSING={overall['missing']})"
+    )
     print(f"  Unit:  {unit_metrics['rate']}% ({len(unit_ids)} cases)")
     print(f"  E2E:   {e2e_metrics['rate']}% ({len(e2e_ids)} cases)")
     print()

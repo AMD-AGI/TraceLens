@@ -179,10 +179,7 @@ def _accumulate_usage(usage, totals):
     if not usage:
         return
     totals["input"] += (
-        usage.get("inputTokens")
-        or usage.get("input_tokens")
-        or usage.get("input")
-        or 0
+        usage.get("inputTokens") or usage.get("input_tokens") or usage.get("input") or 0
     )
     totals["output"] += (
         usage.get("outputTokens")
