@@ -175,8 +175,8 @@ import re
 import zipfile
 from typing import List, Set, Tuple, Optional
 from statistics import mean
-from TraceLens.util import DataLoader
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from ..util import DataLoader
+from ..Trace2Tree.trace_to_tree import TraceToTree
 import pandas as pd
 
 # Try to use faster JSON parser (orjson is 2-10x faster than json)

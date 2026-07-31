@@ -21,9 +21,10 @@ import json
 import os
 import re
 import warnings
-import TraceLens
 
-UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
+from ..util import TraceEventUtils
+
+UID = TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
 
 EXECUTE_CONTEXT_PATTERNS = (
@@ -341,9 +342,9 @@ def append_subtree_to_event(tree, subtree_events, parent_event, cpu_root_nodes):
         if event[UID] in tree.events_by_uid:
             print("Warning: UID {} already exists in events_by_uid".format(event[UID]))
         tree.events_by_uid[event[UID]] = event
-        tree.name2event_uids[
-            event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
-        ].append(event[TraceLens.util.TraceEventUtils.TraceKeys.UID])
+        tree.name2event_uids[event[TraceEventUtils.TraceKeys.Name]].append(
+            event[TraceEventUtils.TraceKeys.UID]
+        )
     tree.cpu_root_nodes.extend(cpu_root_nodes)
     return tree
 
