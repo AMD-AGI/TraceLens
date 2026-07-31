@@ -110,7 +110,7 @@ def main() -> None:
             value=False,
             disabled=not prepare_for_tuning_chk,
         )
-        iterations = st.selectbox(
+        st.selectbox(
             "Number of iterations",
             options=[100, 200, "All using '--algo_method index'"],
             index=1,

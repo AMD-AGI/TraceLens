@@ -815,7 +815,6 @@ class PftraceHipActivityAnalyzer:
     def get_df_xla_top(self, top_n: int = 30) -> pd.DataFrame:
         rows = []
         xla_top = self.get_xla_top(top_n=top_n)
-        xla_total_ns = sum(ns for ns, _ in self._xla_agg.values()) or 1
         for name, tot_ns, cnt, frac in xla_top:
             rows.append(
                 {

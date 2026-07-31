@@ -3550,9 +3550,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
     ## OP metrics
     #############
     def compute_perf_metrics(self, event, bwd=False):
-        list_warn_non_zero_flops_and_zero_time = []
-        list_warn_perf_metrics_failed = []
-        list_no_bwd_events = []
         # Select the appropriate dictionary for FLOPS and memory functions
         perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)
         perf_model_class = self.jax_op_to_perf_model_class_map.get(

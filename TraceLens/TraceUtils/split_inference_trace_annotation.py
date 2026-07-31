@@ -477,7 +477,6 @@ def extract_iteration(
 
     # For each iteration root, filter CPU events and collect correlation ids
     for iteration_root in tqdm(iteration_roots):
-        batch = 0
         start_time = []
         end_time = []
         iter_tid = iteration_root.get("tid")

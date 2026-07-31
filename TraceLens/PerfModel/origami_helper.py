@@ -186,7 +186,6 @@ class OrigamiHelper:
 
         if tiles >= cu_count:
             last_wave_remainder = tiles % cu_count
-            last_wave_occupancy = last_wave_remainder / cu_count
 
             # Really bad last wave, which would have originally been compensated for
             # by changing tile size, but triton tile sizes are limited
