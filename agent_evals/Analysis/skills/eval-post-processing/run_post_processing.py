@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Eval post-processing driver: aggregate + classify + reports + reproducers + save.
 
 Reads source per-run *_results.csv files directly (which preserves correct
