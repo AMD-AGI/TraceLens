@@ -44,7 +44,9 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 ## Step 0: Query User Inputs
 
-**When this skill is invoked, immediately ask the user for:**
+**Prefilled manifest:** If `tracelens_env.json` exists in the workspace, read it and skip the prompts below. Map its fields directly: `<trace_path>`, `<platform>`, `<output_dir>`, `<venv_path>`, `<tracelens_dir>`, `<analysis_mode>`, and treat `<comparison_scope>` as `standalone` unless the manifest says otherwise. Set environment to **local**, leave `<extension_file>` empty, then build the command prefix (below) from `<venv_path>` and `<tracelens_dir>` and continue to Step 1 once prefix validation passes.
+
+**When this skill is invoked without that manifest, immediately ask the user for:**
 
 ### Required Information:
 
@@ -107,6 +109,8 @@ After collecting inputs, build a command template. Create the directory with `mk
 
 The template uses `{CMD}` as a placeholder for the actual command.
 
+**Local:** When `<venv_path>` is set, use `source <venv_path>/bin/activate && cd <tracelens_dir> && {CMD}`. When `<venv_path>` is empty, use `cd <tracelens_dir> && {CMD}` if `<tracelens_dir>` is known; otherwise run `{CMD}` directly.
+
 **Cluster:** Before building the prefix, locate the TraceLens project root on the remote environment.
 
 Run the following command (adjust for container if applicable):
@@ -148,7 +152,7 @@ If this fails, the cause is either a bad prefix or a missing package:
   # Install into the python venv:
   <prefix> <venv_path>/bin/pip install TraceLens
   ```
-Rebuld the prefix and re-validate after installing.
+Rebuild the prefix and re-validate after installing.
 
 Do NOT proceed to Step 1 until validation passes.
 
