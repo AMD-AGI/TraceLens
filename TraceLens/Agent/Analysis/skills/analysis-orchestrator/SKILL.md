@@ -1,9 +1,3 @@
-<!--
-Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
-
 ---
 name: tracelens-analysis-orchestrator
 description: >-
@@ -13,7 +7,14 @@ description: >-
   Use when the user asks to follow the analysis orchestrator, run the agentic analysis
   workflow, analyze a trace, compare two traces, or mentions standalone or comparative
   TraceLens analysis.
+license: MIT
 ---
+
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
 
 # Analysis orchestrator
 
