@@ -44,9 +44,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 ## Step 0: Query User Inputs
 
-**Prefilled manifest:** If `tracelens_env.json` exists in the workspace, read it and skip the prompts below. Map its fields directly: `<trace_path>`, `<platform>`, `<output_dir>`, `<venv_path>`, `<tracelens_dir>`, `<analysis_mode>`, and treat `<comparison_scope>` as `standalone` unless the manifest says otherwise. Set environment to **local**, leave `<extension_file>` empty, then build the command prefix (below) from `<venv_path>` and `<tracelens_dir>` and continue to Step 1 once prefix validation passes.
-
-**When this skill is invoked without that manifest, immediately ask the user for:**
+**When this skill is invoked, immediately ask the user for:**
 
 ### Required Information:
 
