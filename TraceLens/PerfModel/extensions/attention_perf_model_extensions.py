@@ -9,8 +9,8 @@ Performance models for pseudo-op extensions.
 """
 
 from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
+from TraceLens.TraceUtils.annotation_utils import IterationAnnotation
 import math
-import re
 
 
 class InferenceAttention:
@@ -93,54 +93,8 @@ class InferenceAttention:
 
     @staticmethod
     def _parse_chunk_stats(annotation):
-        """Parse the sglang/vLLM annotation string into context/generation aggregates.
-
-        Returns a dict with ``c_sq``, ``c_sk``, ``c_sqsq``, ``c_sqsk``,
-        ``g_sq``, ``g_sk``, ``g_sqsq``, ``g_sqsk``. Raises ``NotImplementedError``
-        if the annotation is missing or cannot be parsed.
-        """
-        if annotation == "NA":
-            raise NotImplementedError(
-                "VLLM attention without annotation is not supported"
-            )
-
-        if "sq" not in annotation:
-            requests = annotation.replace("(", "_").replace(")", "_").split("_")
-            if len(requests) < 8:
-                raise NotImplementedError(
-                    "VLLM attention without annotation is not supported"
-                )
-            c_sq = int(requests[3])
-            c_sk = int(requests[3])
-            c_sqsq = int(requests[4])
-            c_sqsk = int(requests[4])
-            g_sq, g_sk, g_sqsq, g_sqsk = 0, 0, 0, 0
-        else:
-            name = annotation.replace("(", "_").replace(")", "_")
-            requests = re.sub(r"[sqk]+", "_", name).split("_")
-            if len(requests) < 16:
-                raise NotImplementedError(
-                    "VLLM attention without annotation is not supported"
-                )
-            c_sq = int(requests[5])
-            c_sk = int(requests[6])
-            c_sqsq = int(requests[7])
-            c_sqsk = int(requests[8])
-            g_sq = int(requests[13])
-            g_sk = int(requests[14])
-            g_sqsq = int(requests[15])
-            g_sqsk = int(requests[16])
-
-        return {
-            "c_sq": c_sq,
-            "c_sk": c_sk,
-            "c_sqsq": c_sqsq,
-            "c_sqsk": c_sqsk,
-            "g_sq": g_sq,
-            "g_sk": g_sk,
-            "g_sqsq": g_sqsq,
-            "g_sqsk": g_sqsk,
-        }
+        """context/generation sq-sk aggregates; raises if not a full sq/sk annotation."""
+        return IterationAnnotation(annotation).chunk_stats()
 
     @staticmethod
     def get_param_details(event):
@@ -831,29 +785,9 @@ class gdn_attention_core(InferenceAttention):
 
     @staticmethod
     def get_param_details(event):
-        annotation = str(event.get("annotation"))
-        if annotation == "NA":
-            raise NotImplementedError(
-                "GDN attention without annotation is not supported"
-            )
-
-        if "sq" not in annotation:
-            requests = annotation.replace("(", "_").replace(")", "_").split("_")
-            if len(requests) < 8:
-                raise NotImplementedError(
-                    "GDN attention without annotation is not supported"
-                )
-            c_sq = int(requests[3])
-            g_sq = 0
-        else:
-            name = annotation.replace("(", "_").replace(")", "_")
-            requests = re.sub(r"[sqk]+", "_", name).split("_")
-            if len(requests) < 16:
-                raise NotImplementedError(
-                    "GDN attention without annotation is not supported"
-                )
-            c_sq = int(requests[5])
-            g_sq = int(requests[13])
+        stats = IterationAnnotation(str(event.get("annotation"))).chunk_stats()
+        c_sq = stats["c_sq"]
+        g_sq = stats["g_sq"]
 
         input_dims = event["args"]["Input Dims"]
         D = input_dims[0][1]  # 2*H_K*d_k + H_V*d_v
