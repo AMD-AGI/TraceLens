@@ -135,9 +135,8 @@ Write the resolved template to `<output_dir>/cache/cmd_prefix.txt`. Then validat
 <prefix> python3 -c "import TraceLens; print('PREFIX_OK')"
 ```
 
-If this fails, inform the user with `[DIAG:pipeline:PREFIX_FAIL]`. The cause is either a bad prefix or a missing package:
-
-- Verify `<tracelens_dir>` is the parent of TraceLens (not the repo root itself) and that the container/venv is accessible; if wrong, rebuild prefix and retry once.
+If this fails, the cause is either a bad prefix or a missing package:
+- Verify `<tracelens_dir>` is the parent of TraceLens (not the repo root itself) and that the container/venv is accessible; if wrong, rebuild prefix and retry once. If it still fails, inform the user with `[DIAG:pipeline:PREFIX_FAIL]`.
 - If the environment is reachable but TraceLens is not installed, ask the user where to install it and if they require a new venv <venv_path>.
   ```bash
   # Install into the container / bare metal directly (no prefix rebuild needed):
