@@ -1,11 +1,5 @@
-<!--
-Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
-
 ---
-name: analysis-orchestrator
+name: tracelens-analysis-orchestrator
 description: >-
   Orchestrates modular PyTorch profiler trace analysis with TraceLens: generates perf
   reports, prepares category data, runs system-level and compute-kernel subagents in
@@ -13,6 +7,7 @@ description: >-
   Use when the user asks to follow the analysis orchestrator, run the agentic analysis
   workflow, analyze a trace, compare two traces, or mentions standalone or comparative
   TraceLens analysis.
+license: MIT
 ---
 
 <!--
