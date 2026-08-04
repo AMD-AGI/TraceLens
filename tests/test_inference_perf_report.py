@@ -11,21 +11,23 @@
 #   - Optionally capture_traces/ (graph capture mode)
 #   - Optionally gpu_arch.json
 
-import ast
 import os
-import re
 
 import numpy as np
 import pandas as pd
 import pytest
+import ast
+import re
 from pandas.api.types import is_float_dtype
 
-import TraceLens.TreePerf.tree_perf as _merge_mod
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    classify_graph_capture_trace,
     generate_perf_report_pytorch,
+    classify_graph_capture_trace,
 )
-from TraceLens.TreePerf.tree_perf import merge_capture_trace_into_graph
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+    _capture_tree_cache,
+)
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Input list of events is empty.*:UserWarning",
@@ -210,9 +212,9 @@ def find_inference_test_cases():
 def _clear_capture_tree_cache():
     # Reproduce per-process isolation: the capture-tree cache is keyed by
     # {batch_size}_{mode}, which collides across fixtures sharing a key.
-    _merge_mod._capture_tree_cache.clear()
+    _capture_tree_cache.clear()
     yield
-    _merge_mod._capture_tree_cache.clear()
+    _capture_tree_cache.clear()
 
 
 @pytest.mark.parametrize(

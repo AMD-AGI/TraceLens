@@ -8,10 +8,9 @@
 Performance models for pseudo-op extensions.
 """
 
+from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
+from TraceLens.TraceUtils.annotation_utils import IterationAnnotation
 import math
-
-from TraceLens.annotation_utils import IterationAnnotation
-from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
 
 
 class InferenceAttention:

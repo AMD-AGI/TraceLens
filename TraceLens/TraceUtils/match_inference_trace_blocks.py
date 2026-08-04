@@ -49,10 +49,11 @@ from typing import List, Optional, Tuple
 
 import pandas as pd
 
-from TraceLens.annotation_utils import (
+from TraceLens.util import DataLoader
+from .annotation_utils import (
     PHASE_DECODE_ONLY,
-    PHASE_PREFILL_ONLY,
     PHASE_PREFILLDECODE,
+    PHASE_PREFILL_ONLY,
     average_detail,
     classify_phase,
     find_iteration_roots_by_priority,
@@ -64,7 +65,6 @@ from TraceLens.TraceUtils.split_inference_trace_annotation import (
     get_filename,
     preprocess_trace,
 )
-from TraceLens.util import DataLoader
 
 PER_STEP_KEYS = (
     "context_requests",
