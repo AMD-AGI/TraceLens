@@ -16,11 +16,11 @@ from .TreePerf.gpu_event_analyser import (
 from .TreePerf.jax_analyses import JaxAnalyses
 from .TreePerf.tree_perf import TreePerfAnalyzer, JaxTreePerfAnalyzer
 from .util import DataLoader, TraceEventUtils, JaxProfileProcessor
-from . import EventReplay, PerfModel, Reporting
 from .PerfModel import *
 from .EventReplay.event_replay import EventReplayer
 from .TraceDiff.trace_diff import TraceDiff
 from .Reporting import *
+from . import EventReplay, PerfModel, Reporting
 
 __all__ = [
     "TreePerfAnalyzer",
