@@ -10,8 +10,8 @@ Performance models for pseudo-op extensions.
 
 from math import prod
 
-from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
 from TraceLens.PerfModel.perf_model import BinaryElementwise
+from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
 
 DTYPE_TO_BYTES = {
     "Float8_e4m3fn": 1,

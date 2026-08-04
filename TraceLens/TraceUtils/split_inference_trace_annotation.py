@@ -173,13 +173,17 @@ import math
 import os
 import re
 import zipfile
-from typing import List, Set, Tuple, Optional
 from statistics import mean
-from ..util import DataLoader
-from ..Trace2Tree.trace_to_tree import TraceToTree
+from typing import List, Optional, Set, Tuple
+
+import pandas as pd
+
+# Try to use faster JSON parser (orjson is 2-10x faster than json)
+from tqdm import tqdm
+
 from ..annotation_utils import (
-    ITERATION_PATTERNS,
     ITERATION_BACKUP_PATTERNS,
+    ITERATION_PATTERNS,
     find_events_by_patterns,
     find_phase_from_window,
     has_context,
@@ -188,10 +192,8 @@ from ..annotation_utils import (
     is_mixed,
     iteration_details,
 )
-import pandas as pd
-
-# Try to use faster JSON parser (orjson is 2-10x faster than json)
-from tqdm import tqdm
+from ..Trace2Tree.trace_to_tree import TraceToTree
+from ..util import DataLoader
 
 GPU_EVENT_CATEGORIES = ["kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation"]
 

@@ -12,7 +12,6 @@ import pandas as pd
 
 from ..Trace2Tree.trace_to_tree import TraceToTree
 from ..TreePerf.gpu_event_analyser import GPUEventAnalyser
-
 from .util import (
     _CATEGORY,
     _DUR,

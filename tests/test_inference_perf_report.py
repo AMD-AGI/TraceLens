@@ -11,20 +11,20 @@
 #   - Optionally capture_traces/ (graph capture mode)
 #   - Optionally gpu_arch.json
 
+import ast
 import os
+import re
 
 import numpy as np
 import pandas as pd
 import pytest
-import ast
-import re
 from pandas.api.types import is_float_dtype
 
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch,
-    classify_graph_capture_trace,
-)
 import TraceLens.TreePerf.tree_perf as _merge_mod
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    classify_graph_capture_trace,
+    generate_perf_report_pytorch,
+)
 from TraceLens.TreePerf.tree_perf import merge_capture_trace_into_graph
 
 pytestmark = pytest.mark.filterwarnings(

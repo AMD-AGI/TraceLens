@@ -4,14 +4,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from collections import defaultdict
-from typing import Dict, Any, Callable, Optional
-
-from ..util import TraceEventUtils, JaxProfileProcessor
-import re
-
-from abc import ABC, abstractmethod
 import logging
+import re
+from abc import ABC, abstractmethod
+from collections import defaultdict
+from typing import Any, Callable, Dict, Optional
+
+from ..util import JaxProfileProcessor, TraceEventUtils
 
 logger = logging.getLogger(__name__)
 

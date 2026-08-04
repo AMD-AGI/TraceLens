@@ -14,9 +14,9 @@ Supports both Flash Attention and Paged Attention (vLLM) analysis.
 import argparse
 import ast
 import logging
+import os
 import re
 import sys
-import os
 
 import pandas as pd
 

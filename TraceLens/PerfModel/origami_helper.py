@@ -9,9 +9,10 @@
 # an exhaustive list can also be pulled from hipblaslt https://github.com/ROCm/rocm-libraries/tree/develop/projects/hipblaslt/library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full/gfx950/Origami
 
 import itertools
-import origami
-from math import ceil, gcd
 import warnings
+from math import ceil, gcd
+
+import origami
 
 
 class OrigamiHelper:

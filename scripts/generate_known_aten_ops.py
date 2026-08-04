@@ -19,8 +19,8 @@ Usage:
     python scripts/generate_known_aten_ops.py
 """
 
-import os
 import logging
+import os
 import textwrap
 
 import torch

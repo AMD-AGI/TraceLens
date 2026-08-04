@@ -5,22 +5,26 @@
 ###############################################################################
 
 import argparse
+import collections
+import gzip
 import importlib.util
 import json
 import os
+import re
 import sys
 import warnings
+import zipfile
 from typing import Dict, Optional
-
 
 import numpy as np
 import pandas as pd
-import collections
-import gzip
-import re
-import zipfile
 
-from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
+from TraceLens import NcclAnalyser, TraceDiff, TraceToTree, TreePerfAnalyzer
+from TraceLens.annotation_utils import (
+    CAPTURE_PATTERN,
+    CaptureAnnotation,
+    find_events_by_patterns,
+)
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.generate_perf_report_pytorch import _find_entry_point
 from TraceLens.Reporting.reporting_utils import (
@@ -28,13 +32,8 @@ from TraceLens.Reporting.reporting_utils import (
     request_install,
     resolve_gpu_arch,
 )
-from TraceLens.util import TraceEventUtils
-from TraceLens.annotation_utils import (
-    CAPTURE_PATTERN,
-    CaptureAnnotation,
-    find_events_by_patterns,
-)
 from TraceLens.TreePerf.tree_perf import merge_capture_trace_into_graph
+from TraceLens.util import TraceEventUtils
 
 
 def perf_report_sanity_check(

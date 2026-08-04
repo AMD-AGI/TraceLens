@@ -10,14 +10,13 @@ exported as pftrace / traceEvents JSON). Builds summary tables of API launch
 calls and linked kernel executions (T = API + Queue + Kernel time).
 """
 
+import logging
 import re
 import statistics as stats
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Pattern, Tuple
 
 import pandas as pd
-
-import logging
 
 logger = logging.getLogger(__name__)
 

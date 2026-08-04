@@ -17,8 +17,8 @@ Covers:
 No trace files are written; everything operates on in-memory dicts.
 """
 
-from TraceLens.TraceUtils import split_inference_trace_annotation as split
 from TraceLens.annotation_utils import IterationAnnotation
+from TraceLens.TraceUtils import split_inference_trace_annotation as split
 
 # --------------------------------------------------------------------------- #
 # Dummy-trace builder

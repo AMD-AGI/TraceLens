@@ -7,14 +7,15 @@
 import json
 import os
 import tempfile
+
 import pandas as pd
 
 from TraceLens.Reporting.generate_perf_report_pftrace_memory_copy import (
-    extract_memory_copy_rows,
-    build_memory_copy_count_df,
-    generate_perf_report_pftrace_memory_copy,
-    _get_copy_bytes,
     _format_direction,
+    _get_copy_bytes,
+    build_memory_copy_count_df,
+    extract_memory_copy_rows,
+    generate_perf_report_pftrace_memory_copy,
 )
 
 

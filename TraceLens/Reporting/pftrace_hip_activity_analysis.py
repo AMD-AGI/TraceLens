@@ -12,16 +12,16 @@ with pftrace_hip_api_analysis (API↔kernel correlation) by focusing on
 per-GPU event lists and NSYS-style summaries.
 """
 
+import logging
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from ..util import TraceEventUtils
 import numpy as np
 import pandas as pd
 
-import logging
+from ..util import TraceEventUtils
 
 logger = logging.getLogger(__name__)
 

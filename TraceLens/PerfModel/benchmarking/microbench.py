@@ -395,8 +395,10 @@ def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
     results["matrix_fp4_ck"] = ck_mxfp4
     try:
         from .fp4fp6_helpers import (
-            _MXFP6_KIND as _mxfp6_kind,
             _MXFP6_DTYPE as _mxfp6_dt,
+        )
+        from .fp4fp6_helpers import (
+            _MXFP6_KIND as _mxfp6_kind,
         )
     except Exception:
         _mxfp6_kind, _mxfp6_dt = "", ""

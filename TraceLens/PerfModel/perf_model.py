@@ -5,16 +5,15 @@
 ###############################################################################
 
 import ast
-from math import prod
 import math
-import sys
 import os
 import re
 import subprocess
+import sys
 import warnings
+from math import prod
 
 from .kernel_name_parser import gemm_name_parser
-
 from .utils import name2bpe, parse_bool, torch_dtype_map
 
 
@@ -267,6 +266,7 @@ class GEMM:
                 # assumes this PR has completed
                 # https://github.com/ROCm/rocm-libraries/pull/3903
                 import origami
+
                 from .origami_helper import OrigamiHelper
 
                 # origami simulation requires an architecture file including GPU name and clock speed

@@ -9,8 +9,8 @@ import inspect
 import json
 import logging
 import os
-import re
 import pprint
+import re
 
 # TODO: warning should show the stack as well
 import warnings
@@ -30,9 +30,12 @@ from ..PerfModel.torch_op_mapping import (
     op_to_perf_model_class_map,
     resolve_perf_model_class,
 )
+from ..PerfModel.utils import add_simulation_time_columns
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import (
     UID as _CAPTURE_MERGE_UID,
+)
+from ..Trace2Tree.trace_capture_merge_experimental import (
     align_streams,
     append_subtree_to_event,
     build_execution_graph_root_map,
@@ -52,7 +55,6 @@ from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
-from ..PerfModel.utils import add_simulation_time_columns
 
 
 def normalize_dtype_to_precision(dtype_str):

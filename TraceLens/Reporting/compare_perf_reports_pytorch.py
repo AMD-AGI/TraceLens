@@ -7,8 +7,9 @@
 #!/usr/bin/env python3
 import argparse
 import os
-from typing import List, Sequence, Dict, Optional
 import re
+from typing import Dict, List, Optional, Sequence
+
 import pandas as pd
 from openpyxl.utils import get_column_letter
 

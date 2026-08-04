@@ -5,15 +5,14 @@
 ###############################################################################
 
 import ast
-import os
 import logging
+import os
 import warnings
-
-import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from ..util import DataLoader
-from ..util import TraceEventUtils
+import pandas as pd
+
+from ..util import DataLoader, TraceEventUtils
 
 
 def list_to_tuple(obj):

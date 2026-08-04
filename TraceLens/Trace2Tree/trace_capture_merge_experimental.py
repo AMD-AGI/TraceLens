@@ -15,17 +15,17 @@ information (optimized execution paths), producing a complete execution
 model suitable for performance analysis.
 """
 
-from collections import OrderedDict, deque, defaultdict
-from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
 import warnings
+from collections import OrderedDict, defaultdict, deque
+from typing import Any, Dict, List, Optional, Tuple
 
-from ..util import TraceEventUtils
 from ..annotation_utils import (
     IterationAnnotation,
     find_iteration_roots_by_priority,
 )
+from ..util import TraceEventUtils
 
 UID = TraceEventUtils.TraceKeys.UID
 

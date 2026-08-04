@@ -8,14 +8,15 @@
 Performance models for pseudo-op extensions.
 """
 
-from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
+from math import prod
+
 from TraceLens.PerfModel.perf_model import (
     GEMM,
     BinaryElementwise,
-    UnaryElementwise,
     FusedRoPE,
+    UnaryElementwise,
 )
-from math import prod
+from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
 
 
 def _optional_int(value, default=None):
