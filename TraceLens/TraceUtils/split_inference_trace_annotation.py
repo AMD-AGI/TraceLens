@@ -180,7 +180,6 @@ from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TraceUtils.annotation_utils import (
     ITERATION_PATTERNS,
     ITERATION_BACKUP_PATTERNS,
-    IterationAnnotation,
     find_events_by_patterns,
     find_phase_from_window,
     has_context,
