@@ -14,7 +14,7 @@ import pprint
 
 # TODO: warning should show the stack as well
 import warnings
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from functools import partial
 from typing import Any, Callable, Dict
 
@@ -31,23 +31,7 @@ from ..PerfModel.torch_op_mapping import (
     resolve_perf_model_class,
 )
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
-from ..Trace2Tree.trace_capture_merge_experimental import (
-    UID as _CAPTURE_MERGE_UID,
-    align_streams,
-    append_subtree_to_event,
-    build_execution_graph_root_map,
-    capture_has_kernel_names,
-    finalize_non_gpu_paths,
-    find_capture_roots,
-    find_closest_batch_size,
-    find_execution_details,
-    get_subtree_events,
-    is_multistream,
-    load_capture_folder,
-    make_connections,
-    update_subtree_uids_and_timestamps,
-    verify_subtree_events,
-)
+from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
@@ -244,9 +228,13 @@ class TreePerfAnalyzer:
 
         # Optionally merge capture trace into graph tree
         if capture_trace_filepath is not None:
+            metadata_json_path = os.path.join(
+                capture_trace_filepath, "execution_details.json"
+            )
             tree = merge_capture_trace_into_graph(
-                capture_tree_filepath=capture_trace_filepath,
-                graph_tree_filepath=profile_filepath,
+                capture_trace_filepath,
+                metadata_json_path,
+                profile_filepath,
             )
 
         return TreePerfAnalyzer(
@@ -3795,183 +3783,3 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         df_perf_metrics = pd.DataFrame(rows)
 
         return df_perf_metrics
-
-
-_CAPTURE_TREE_CACHE_MAX_SIZE = 8
-_capture_tree_cache: OrderedDict = OrderedDict()
-
-
-def _get_cached_capture_tree(key, filepath):
-    """Load a capture tree, returning a cached copy when *key* has been seen."""
-    if key in _capture_tree_cache:
-        _capture_tree_cache.move_to_end(key)
-        print("Cache hit for capture tree (key={})".format(key[0]))
-        return _capture_tree_cache[key]
-
-    print("Loading capture trace: {} (key={})".format(filepath, key[0]))
-    capture_perf_analyzer = TreePerfAnalyzer.from_file(filepath, add_python_func=True)
-    capture_tree = capture_perf_analyzer.tree
-    capture_roots = find_capture_roots(capture_tree)
-
-    capture_root_data = []
-    for c_root in capture_roots:
-        capture_events, capture_filtered_events = get_subtree_events(
-            capture_tree,
-            c_root,
-            cat_filter=["cuda_runtime", "cuda_driver"],
-            name_filter=["Launch", "Memcpy", "Memset"],
-        )
-        filtered_uids = {e[_CAPTURE_MERGE_UID] for e in capture_filtered_events}
-        capture_root_data.append((capture_events, filtered_uids))
-
-    _capture_tree_cache[key] = (capture_tree, capture_roots, capture_root_data)
-    if len(_capture_tree_cache) > _CAPTURE_TREE_CACHE_MAX_SIZE:
-        evicted_key, _ = _capture_tree_cache.popitem(last=False)
-        print("Evicted capture tree cache entry (key={})".format(evicted_key[0]))
-
-    return capture_tree, capture_roots, capture_root_data
-
-
-def merge_capture_trace_into_graph(
-    capture_folder: str,
-    metadata_json_path: str,
-    graph_tree_filepath: str,
-) -> TraceToTree:
-    """Merge capture trace information into a graph replay trace."""
-    graph_perf_analyzer = TreePerfAnalyzer.from_file(
-        graph_tree_filepath, add_python_func=True
-    )
-
-    graph_tree = graph_perf_analyzer.tree
-    print("Loaded graph tree with {} events".format(len(graph_tree.events)))
-    execution_graph_root_map = build_execution_graph_root_map(graph_tree)
-    capture_map, capture_batch_sizes = load_capture_folder(
-        capture_folder, metadata_json_path
-    )
-    merge_failed = False
-    for execution_root, graph_roots in execution_graph_root_map:
-        print("Processing execution root: {}".format(execution_root["name"]))
-        if len(graph_roots) == 0:
-            print(
-                "No graph roots found for execution root {}".format(
-                    execution_root["name"]
-                )
-            )
-            continue
-        batch_size = find_execution_details(execution_root)
-        if batch_size is None:
-            print(
-                "Warning: could not determine batch size for execution root {}".format(
-                    execution_root["name"]
-                )
-            )
-            continue
-        closest_batch_size = find_closest_batch_size(
-            int(batch_size), capture_batch_sizes
-        )
-        if closest_batch_size is None:
-            print(
-                "Warning: no capture batch size found for batch size {}".format(
-                    batch_size
-                )
-            )
-            continue
-        num_graph_roots = len(graph_roots)
-        if num_graph_roots != 1:
-            mode = "PIECEWISE"
-        else:
-            mode = "FULL"
-        str_key = "{}_{}".format(closest_batch_size, mode)
-        filepath = capture_map[str_key]
-        key = (str_key, os.path.abspath(filepath))
-        capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
-            key, filepath
-        )
-
-        print(
-            "Found {} capture roots and {} graph roots".format(
-                len(capture_roots), len(graph_roots)
-            )
-        )
-        for (c_root, g_root), (cached_events, filtered_uids) in zip(
-            zip(capture_roots, graph_roots), capture_root_data
-        ):
-            capture_events = [{**e} for e in cached_events]
-
-            capture_filtered_events = [
-                e for e in capture_events if e[_CAPTURE_MERGE_UID] in filtered_uids
-            ]
-
-            graph_events, graph_filtered_events = get_subtree_events(
-                graph_tree, g_root, cat_filter=["kernel", "gpu_memset", "gpu_memcpy"]
-            )
-
-            if len(graph_filtered_events) == 0:
-                print(
-                    "Warning: no kernel events in graph root {}; skipping merge".format(
-                        g_root["name"]
-                    )
-                )
-                continue
-
-            if is_multistream(graph_filtered_events):
-                if not capture_has_kernel_names(capture_filtered_events):
-                    print(
-                        "Graph capture merge failed: multistream graph root {} but "
-                        "capture kernel names are absent".format(g_root["name"])
-                    )
-                    merge_failed = True
-                    continue
-                aligned = align_streams(graph_filtered_events, capture_filtered_events)
-                if aligned is None:
-                    print(
-                        "Warning: multistream alignment failed for capture root {} and graph root {}".format(
-                            c_root["name"], g_root["name"]
-                        )
-                    )
-                    continue
-                capture_filtered_events = aligned
-            else:
-                (
-                    verify_success,
-                    capture_filtered_events,
-                    graph_filtered_events,
-                ) = verify_subtree_events(
-                    capture_filtered_events, graph_filtered_events
-                )
-
-                if verify_success == 0:
-                    print(
-                        "Warning: subtree events verification failed for capture root {} and graph root {}".format(
-                            c_root["name"], g_root["name"]
-                        )
-                    )
-                    continue
-
-            start_uid = graph_tree.events[-1][_CAPTURE_MERGE_UID] + 1
-            capture_events, _, cpu_root_nodes = update_subtree_uids_and_timestamps(
-                capture_tree,
-                capture_events,
-                capture_filtered_events,
-                start_uid,
-                g_root["ts"],
-                c_root,
-                g_root["dur"],
-            )
-
-            capture_events[0]["parent"] = g_root[_CAPTURE_MERGE_UID]
-            g_root["children"].append(capture_events[0][_CAPTURE_MERGE_UID])
-            graph_tree = append_subtree_to_event(
-                graph_tree, capture_events, g_root, cpu_root_nodes
-            )
-
-            graph_tree = make_connections(
-                graph_tree, graph_filtered_events, capture_filtered_events
-            )
-    if merge_failed:
-        print(
-            "Graph capture merge failed; returning None (report will be unaugmented)."
-        )
-        return None
-    finalize_non_gpu_paths(graph_tree)
-    return graph_tree

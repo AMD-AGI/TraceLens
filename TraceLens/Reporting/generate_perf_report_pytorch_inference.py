@@ -29,12 +29,14 @@ from TraceLens.Reporting.reporting_utils import (
     resolve_gpu_arch,
 )
 from TraceLens.util import TraceEventUtils
-from TraceLens.annotation_utils import (
+from TraceLens.TraceUtils.annotation_utils import (
     CAPTURE_PATTERN,
     CaptureAnnotation,
     find_events_by_patterns,
 )
-from TraceLens.TreePerf.tree_perf import merge_capture_trace_into_graph
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
 
 
 def perf_report_sanity_check(
