@@ -1770,6 +1770,7 @@ class SDPA:
         # Head dimension alias for roofline / simulation helpers (see get_simulation_time).
         self.d_h = self.d_h_qk
 
+    @staticmethod
     def get_param_details(event):
         # to be implemented in the child class
         raise NotImplementedError
