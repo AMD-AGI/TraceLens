@@ -6,9 +6,9 @@
 
 import ast
 import collections
+import logging
 import math
 import re
-import logging
 
 
 def _link_checkpoint_fwd_bwd(trace_tree):
@@ -477,7 +477,7 @@ class tev2_pseudo_gemm(GEMM):
             "dtype_A_B": dtype_A_B,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
             raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
@@ -496,11 +496,11 @@ class tev2_pseudo_gemm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for tev2_pseudo_gemm is not defined.")
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for tev2_pseudo_gemm is not defined.")
 
 
-from TraceLens.PerfModel import SDPA, GroupedGemm, extract_sdpa_cfg, Normalization
+from TraceLens.PerfModel import SDPA, GroupedGemm, Normalization, extract_sdpa_cfg
 
 
 class transformer_engine_attention(SDPA):
@@ -600,7 +600,7 @@ class te_layer_norm_fwd(Normalization):
     def flops_bwd(self):
         raise NotImplementedError("Use te_layer_norm_bwd for backward pass.")
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self):
         raise NotImplementedError("Use te_layer_norm_bwd for backward pass.")
 
 

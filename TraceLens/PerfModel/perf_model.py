@@ -5,16 +5,15 @@
 ###############################################################################
 
 import ast
-from math import prod
 import math
-import sys
 import os
 import re
 import subprocess
+import sys
 import warnings
+from math import prod
 
 from .kernel_name_parser import gemm_name_parser
-
 from .utils import name2bpe, parse_bool, torch_dtype_map
 
 
@@ -267,6 +266,7 @@ class GEMM:
                 # assumes this PR has completed
                 # https://github.com/ROCm/rocm-libraries/pull/3903
                 import origami
+
                 from .origami_helper import OrigamiHelper
 
                 # origami simulation requires an architecture file including GPU name and clock speed
@@ -369,7 +369,7 @@ class aten_mm(GEMM):
             "dtype_A_B": dtype_A_B,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
             # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
@@ -387,7 +387,7 @@ class aten_mm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::mm is not defined.")
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for aten::mm is not defined.")
 
 
@@ -421,7 +421,7 @@ class aten_addmm(GEMM):
             "dtype_A_B": dtype_A_B,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
             # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
@@ -439,7 +439,7 @@ class aten_addmm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
 
 
@@ -475,7 +475,7 @@ class aten_scaled_mm(GEMM):
             "dtype_A_B": dtype_A_B,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         bpeA = name2bpe(dtype_A_B[0])
         bpeB = name2bpe(dtype_A_B[1])
@@ -507,7 +507,7 @@ class aten_scaled_mm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
 
 
@@ -550,7 +550,7 @@ class aten_bmm(GEMM):
         """Total FLOPs for the entire batch."""
         return self.param_details["B"] * super().flops()
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         """Total DRAM traffic for the entire batch (read+write)."""
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
@@ -572,7 +572,7 @@ class aten_bmm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::bmm is not defined.")
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for aten::bmm is not defined.")
 
 
@@ -615,7 +615,7 @@ class aten_baddbmm(GEMM):
         """Total FLOPs for the entire batch."""
         return self.param_details["B"] * super().flops()
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         """Total DRAM traffic for the entire batch (read+write)."""
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
@@ -637,7 +637,7 @@ class aten_baddbmm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
 
 
@@ -699,7 +699,7 @@ class vllm_gemm_with_dynamic_quant(GEMM):
             "dtype_A_B": dtype_A_B,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
             warnings.warn(
@@ -780,7 +780,7 @@ class tex_ts_te_gemm_ts(GEMM):
             "dtype_A_B": dtype_A_B,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
@@ -799,7 +799,7 @@ class tex_ts_te_gemm_ts(GEMM):
             "Backward pass for tex_ts::te_gemm_ts is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError(
             "Backward pass for tex_ts::te_gemm_ts is not defined."
         )
@@ -832,7 +832,7 @@ class tev2_pseudo_gemm(GEMM):
             "dtype_A_B": dtype_A_B,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
             raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
@@ -850,7 +850,7 @@ class tev2_pseudo_gemm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for tev2_pseudo_gemm is not defined.")
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for tev2_pseudo_gemm is not defined.")
 
 
@@ -1129,7 +1129,7 @@ class aten_conv(CONV):
             "groups": groups,
         }
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1138,7 +1138,7 @@ class aten_conv(CONV):
         self.bpe = name2bpe(dtype_input_weight[0])
         return super().bytes(self.bpe)
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1242,7 +1242,7 @@ class aten_conv_bwd(CONV):
     def flops(self):
         return super().flops_bwd()
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1251,7 +1251,7 @@ class aten_conv_bwd(CONV):
         bpe = name2bpe(dtype_input_weight[0])
         return super().bytes_bwd(bpe)
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1350,7 +1350,7 @@ class ConvBias_(CONV):
             "groups": groups,
         }
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1359,7 +1359,7 @@ class ConvBias_(CONV):
         self.bpe = name2bpe(dtype_input_weight[0])
         return super().bytes(self.bpe)
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1445,7 +1445,7 @@ class ConvBias_Backward(CONV):
             return None
         return super().flops_bwd()
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=None):
         # Use backward bytes calculation from CONV base class
         if self.param_details["input_shape"] is None:
             return None
@@ -1457,9 +1457,9 @@ class ConvBias_Backward(CONV):
                 f"Data types of input and weight are different: {dtype_input_weight}"
             )
         bpe = name2bpe(dtype_input_weight[0])
-        return super().bytes_bwd(bpe)
+        return super().bytes(bpe)
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=None):
         if self.param_details["input_shape"] is None:
             return None
         dtype_input_weight = self.param_details["dtype_input_weight"]
@@ -1560,7 +1560,7 @@ class ConvBiasReLU_(CONV):
             "groups": groups,
         }
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1569,7 +1569,7 @@ class ConvBiasReLU_(CONV):
         self.bpe = name2bpe(dtype_input_weight[0])
         return super().bytes(self.bpe)
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1652,7 +1652,7 @@ class ConvBiasReLU_Backward(CONV):
             return None
         return super().flops_bwd()
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=None):
         # Use backward bytes calculation from CONV base class
         # ReLU backward requires reading the forward output mask
         if self.param_details["input_shape"] is None:
@@ -1665,9 +1665,9 @@ class ConvBiasReLU_Backward(CONV):
                 f"Data types of input and weight are different: {dtype_input_weight}"
             )
         bpe = name2bpe(dtype_input_weight[0])
-        return super().bytes_bwd(bpe)
+        return super().bytes(bpe)
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=None):
         if self.param_details["input_shape"] is None:
             return None
         dtype_input_weight = self.param_details["dtype_input_weight"]
@@ -2063,7 +2063,6 @@ class SDPA:
             block_N_Q = min(N_Q, N_Q)
             block_N_KV = min(128, N_KV)
 
-        math.ceil(N_Q / block_N_Q)
         num_blocks_N_KV = math.ceil(N_KV / block_N_KV)
         # Partition happens on ∇K and ∇V and not ∇Q
         total_num_blocks = num_blocks_N_KV * B * H_Q
@@ -3068,7 +3067,6 @@ class vllm_unified_attention_with_output(SDPA):
             )
         input_dims = event["args"]["Input Dims"]
 
-        event["args"]["Concrete Inputs"]
         q_shape, k_shape, _v_shape = input_dims[0], input_dims[1], input_dims[3]
         B = 1
         N_Q, H_Q, d_h_qk = q_shape
@@ -4033,7 +4031,7 @@ class jax_gemm(GEMM):
         """Total FLOPs for the entire batch."""
         return self.param_details["B"] * super().flops()
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         """Total DRAM traffic for the entire batch (read+write)."""
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
@@ -4052,7 +4050,7 @@ class jax_gemm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for JaxGemm is not defined.")
 
-    def bytes_bwd(self, _):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for JaxGemm is not defined.")
 
 
@@ -4106,10 +4104,10 @@ class jax_te_fused_attn(SDPA):
         """Total FLOPs for the entire batch."""
         return super().flops()
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=2):
         return super().bytes(bytes_per_element=self.param_details["bytes_per_element"])
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=2):
         return super().bytes_bwd(
             bytes_per_element=self.param_details["bytes_per_element"]
         )
@@ -4486,7 +4484,7 @@ class BatchNorm(Normalization):
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self):
         raise NotImplementedError(
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
@@ -4596,7 +4594,7 @@ class LayerNorm(Normalization):
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self):
         raise NotImplementedError(
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
@@ -4672,7 +4670,6 @@ class GroupNorm(Normalization):
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
         # concrete_inputs[1] = num_groups
-        event["args"]["Concrete Inputs"]
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
@@ -4696,7 +4693,7 @@ class GroupNorm(Normalization):
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self):
         raise NotImplementedError(
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
@@ -4789,7 +4786,7 @@ class InstanceNorm(Normalization):
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self):
         raise NotImplementedError(
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
@@ -4863,7 +4860,7 @@ class RMSNorm(Normalization):
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self):
         raise NotImplementedError(
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
@@ -5456,7 +5453,7 @@ class hipblaslt_gemm_fp8(GEMM):
             "dtype_scaleB": dtype_scaleB,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         bpeA = name2bpe(dtype_A_B[0])
         bpeB = name2bpe(dtype_A_B[1])
@@ -5478,7 +5475,7 @@ class hipblaslt_gemm_fp8(GEMM):
             "Backward pass for hipblaslt_gemm_fp8 is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError(
             "Backward pass for hipblaslt_gemm_fp8 is not defined."
         )
@@ -5722,7 +5719,7 @@ class hipblaslt_gemm_fp4(GEMM):
             "dtype_scaleB": dtype_scaleB,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         bpeA = name2bpe(dtype_A_B[0])
         bpeB = name2bpe(dtype_A_B[1])
@@ -5752,7 +5749,7 @@ class hipblaslt_gemm_fp4(GEMM):
             "Backward pass for hipblaslt_gemm_fp4 is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError(
             "Backward pass for hipblaslt_gemm_fp4 is not defined."
         )
@@ -5911,7 +5908,7 @@ class aiter_gemm_a4w4(GEMM):
     # bytes formula and is reused from hipblaslt_gemm_fp4.
     MXFP4_BLOCK_SIZE = hipblaslt_gemm_fp4.MXFP4_BLOCK_SIZE
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         # Same workload, same byte count — aiter's bpreshuffle layout changes
         # the in-memory arrangement of A/B/scales but not the bytes touched.
         # Delegate to hipblaslt_gemm_fp4.bytes which only reads M/N/K and

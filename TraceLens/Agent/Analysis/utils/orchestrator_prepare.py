@@ -18,16 +18,18 @@ import re
 import sys
 import traceback
 from collections import defaultdict
+
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from category_analyses.analysis_utils import parse_first_shape, shape_aware_lookup
 from utils.arch_utils import list_platforms, load_arch
-from TraceLens.TreePerf import TreePerfAnalyzer
-from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
+
 from TraceLens.Agent.Analysis.utils.classify_kernels import (
     classify_kernel,
 )
+from TraceLens.TreePerf import TreePerfAnalyzer
+from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
 
 CATEGORY_SKILL_MAP = {
     "cpu_idle": "cpu-idle-analyzer",

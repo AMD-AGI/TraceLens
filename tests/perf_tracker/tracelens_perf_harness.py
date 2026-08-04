@@ -44,6 +44,7 @@ import cProfile
 import importlib
 import importlib.metadata
 import json
+import logging
 import os
 import platform
 import pstats
@@ -56,6 +57,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 # Add project root to path so TraceLens can be imported
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -168,7 +171,7 @@ def get_commit_sha():
             if local.startswith("g"):
                 return local[1:]  # strip the leading 'g'
     except Exception:
-        pass
+        logger.debug("Failed to parse commit SHA from package version", exc_info=True)
 
     print(
         "Warning: could not determine commit SHA from installed TraceLens version. "
