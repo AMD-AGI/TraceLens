@@ -15,7 +15,6 @@ reproducer packages, and copies the report tree to eval_reports/latest/.
 
 import csv
 import glob
-import json
 import os
 import re
 import shutil
@@ -236,7 +235,6 @@ def build_run_level_summary(agg_rows):
 def build_failure_nature(run_level_rows, stability_rows, all_fail_rows):
     """Count failures by nature: catastrophic_pipeline, stable, flaky."""
     # Per-trace-per-eval stability: STABLE_FAIL = stable, FLAKY_FAIL = flaky
-    by_eval = defaultdict(lambda: {"PASS": 0, "FAIL": 0})
     for r in all_fail_rows:
         # all_fail_rows is the aggregated results with results PASS/FAIL only
         pass  # not used; we'll classify via stability
@@ -599,8 +597,6 @@ def per_case_pattern_table(per_case_pattern, num_runs=5):
 
 
 def main():
-    import json  # local import
-
     rules = load_yaml_rules()
     trace_meta = build_trace_meta(TEST_TRACES_CSV)
     unit_ids, e2e_ids = split_unit_e2e(trace_meta)

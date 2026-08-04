@@ -156,9 +156,7 @@ class moe_aiter_fused_1stage(FusedMoE):
     """
 
     def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.python_path = python_path
+        super().__init__(event, arch, python_path)
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -272,9 +270,7 @@ class moe_aiter_fused_blockscale(FusedMoE):
     """
 
     def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.python_path = python_path
+        super().__init__(event, arch, python_path)
         self.param_details = self.get_param_details(event)
 
     @staticmethod

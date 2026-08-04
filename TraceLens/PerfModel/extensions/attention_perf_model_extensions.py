@@ -775,10 +775,7 @@ class gdn_attention_core(InferenceAttention):
     """
 
     def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.python_path = python_path
-        self.param_details = self.get_param_details(event)
+        super().__init__(event, arch, python_path)
         self.H_V = self.param_details["H_V"]
         self.d_k = self.param_details["d_h_qk"]
         self.d_v = self.param_details["d_h_v"]
@@ -801,17 +798,28 @@ class gdn_attention_core(InferenceAttention):
         dtype_Q = event["args"]["Input type"][0]
 
         return {
+            "B": 1,
+            "N_Q": c_sq + g_sq,
+            "H_Q": H_K,
+            "N_KV": 0,
+            "H_KV": H_K,
             "H_V": H_V,
             "H_K": H_K,
             "d_h_qk": d_k,
             "d_h_v": d_v,
             "c_sq": c_sq,
+            "c_sk": c_sq,
+            "c_sqsq": 0,
+            "c_sqsk": 0,
             "g_sq": g_sq,
+            "g_sk": g_sq,
+            "g_sqsq": 0,
+            "g_sqsk": 0,
             "dtype_Q": dtype_Q,
         }
 
     @staticmethod
-    def flops_func(H_V, d_k, d_v, total_tokens):
+    def _gdn_flops_func(H_V, d_k, d_v, total_tokens):
         """GDN recurrent delta rule FLOPs.
 
         Per token per v-head: 7 * d_v * d_k
@@ -820,7 +828,7 @@ class gdn_attention_core(InferenceAttention):
         return total_tokens * H_V * 7 * d_v * d_k
 
     @staticmethod
-    def bytes_func(H_V, d_k, d_v, total_tokens, bytes_per_element):
+    def _gdn_bytes_func(H_V, d_k, d_v, total_tokens, bytes_per_element):
         """GDN HBM traffic.  State S stays in registers during recurrence.
 
         Per token read:  q(d_k) + k(d_k) shared across 2 v-heads → H_V*d_k
@@ -837,11 +845,11 @@ class gdn_attention_core(InferenceAttention):
             raise NotImplementedError(
                 "GDN perf model requires annotation with non-zero c_sq or g_sq"
             )
-        return self.flops_func(self.H_V, self.d_k, self.d_v, total_tokens)
+        return self._gdn_flops_func(self.H_V, self.d_k, self.d_v, total_tokens)
 
     def bytes(self, bytes_per_element=2):
         total_tokens = self.param_details["c_sq"] + self.param_details["g_sq"]
-        return self.bytes_func(
+        return self._gdn_bytes_func(
             self.H_V, self.d_k, self.d_v, total_tokens, bytes_per_element
         )
 

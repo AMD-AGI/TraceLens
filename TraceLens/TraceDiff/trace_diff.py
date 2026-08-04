@@ -1433,13 +1433,11 @@ class TraceDiff:
         self.diff_stats_unique_args_summary_df = df_agg
         return df_agg
 
-    def get_cpu_op_to_kernels_json(self) -> tuple[dict, dict]:
+    def get_cpu_op_to_kernels_json(self) -> None:
         """
-        Create a JSON-serializable dict mapping CPU ops to the kernels they call,
-        for both traces. Uses 'name' (kernel) and 'cpu_op_name' from diff_stats_unique_args_summary_df.
-
-        Returns:
-            Dict with keys "trace1" and "trace2", each mapping cpu_op_name -> list of kernel names.
+        Build CPU-op-to-kernel mappings for both traces and store them on this
+        object. Uses 'name' (kernel) and 'cpu_op_name' from
+        diff_stats_unique_args_summary_df.
         """
 
         if (
@@ -1450,7 +1448,7 @@ class TraceDiff:
                 "[TraceDiff] diff_stats_unique_args_summary_df is empty. "
                 "Run generate_tracediff_report() first."
             )
-            return {"trace1": {}, "trace2": {}}
+            return
 
         def get_cpu_op_map(df_agg, df):
             def find_common_name(name1, name2, module_map):
