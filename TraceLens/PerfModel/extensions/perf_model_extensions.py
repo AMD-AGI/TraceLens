@@ -482,7 +482,20 @@ class GroupQuant(BinaryElementwise):
     bwd_category = None
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
-        super().__init__(event, arch, python_path, **kwargs)
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+        self.nelems_in1 = prod(self.param_details["shape_in1"])
+        self.nelems_in2 = prod(self.param_details["shape_in2"])
+        self.nelems_out = prod(self.param_details["shape_out"])
+        self.dtype_in1_in2_out = self.param_details["dtype_in1_in2_out"]
+        self.stride_input1 = self.param_details["stride_input1"]
+        self.stride_input2 = self.param_details["stride_input2"]
+        self.stride_output = self.param_details["stride_output"]
+        self.bpe_in1 = name2bpe(self.dtype_in1_in2_out[0])
+        self.bpe_in2 = name2bpe(self.dtype_in1_in2_out[1])
+        self.bpe_out = name2bpe(self.dtype_in1_in2_out[2])
 
 
 class per_group_quant(GroupQuant):
@@ -571,7 +584,12 @@ class vllm_triton_per_token_group_quant_fp8(GroupQuant):
     """
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
-        super().__init__(event, arch, python_path, **kwargs)
+        # Scales/group_size metadata is not a broadcast operand; keep M/N/group_size
+        # param_details and avoid BinaryElementwise shape inference.
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
 
     @staticmethod
     def get_param_details(event):
