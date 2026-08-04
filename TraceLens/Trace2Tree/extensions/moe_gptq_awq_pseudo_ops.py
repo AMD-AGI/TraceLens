@@ -10,6 +10,13 @@ from .pseudo_ops_utils import inject_pseudo_op
 logger = logging.getLogger(__name__)
 
 
+def _optional_int(value, default=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def create_pseudo_ops_moe_gptq_awq(trace_tree):
     """
     Create pseudo ops for vllm::outplace_fused_experts GPTQ/AWQ operations.
@@ -71,9 +78,15 @@ def _extract_topk_from_outplace(moe_op_event: dict) -> int:
     try:
         topk_ids_shape = moe_op_event["args"]["Input Dims"][4]
         if len(topk_ids_shape) >= 2:
-            return int(topk_ids_shape[1])
-    except (KeyError, IndexError, TypeError, ValueError):
-        pass
+            topk = _optional_int(topk_ids_shape[1])
+            if topk is not None:
+                return topk
+    except (KeyError, IndexError, TypeError):
+        logger.debug(
+            "Could not read topk shape from outplace_fused_experts (UID=%s)",
+            moe_op_event.get("UID"),
+            exc_info=True,
+        )
 
     logger.warning(
         f"Could not extract topk from outplace_fused_experts (UID={moe_op_event['UID']}), using default 8"

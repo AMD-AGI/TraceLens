@@ -40,10 +40,10 @@ def _parse_split_sizes(value):
         if value.startswith("["):
             try:
                 parsed = ast.literal_eval(value)
-                if isinstance(parsed, (list, tuple)):
-                    return [int(x) for x in parsed]
             except (ValueError, SyntaxError):
-                pass
+                parsed = None
+            if isinstance(parsed, (list, tuple)):
+                return [int(x) for x in parsed]
     return None
 
 
