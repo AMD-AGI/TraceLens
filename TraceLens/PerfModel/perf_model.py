@@ -5,16 +5,15 @@
 ###############################################################################
 
 import ast
-from math import prod
 import math
-import sys
 import os
 import re
 import subprocess
+import sys
 import warnings
+from math import prod
 
 from .kernel_name_parser import gemm_name_parser
-
 from .utils import name2bpe, parse_bool, torch_dtype_map
 
 
@@ -267,6 +266,7 @@ class GEMM:
                 # assumes this PR has completed
                 # https://github.com/ROCm/rocm-libraries/pull/3903
                 import origami
+
                 from .origami_helper import OrigamiHelper
 
                 # origami simulation requires an architecture file including GPU name and clock speed
@@ -369,7 +369,7 @@ class aten_mm(GEMM):
             "dtype_A_B": dtype_A_B,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
             # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
@@ -387,7 +387,7 @@ class aten_mm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::mm is not defined.")
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for aten::mm is not defined.")
 
 
@@ -399,7 +399,7 @@ class aten_addmm(GEMM):
     @staticmethod
     def get_param_details(event):
         input_dims = event["args"]["Input Dims"]
-        C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
+        _C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
         M = A_shape[0]
         N = B_shape[1]
         K = A_shape[1]
@@ -421,7 +421,7 @@ class aten_addmm(GEMM):
             "dtype_A_B": dtype_A_B,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
             # raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
@@ -439,7 +439,7 @@ class aten_addmm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
 
 
@@ -475,7 +475,7 @@ class aten_scaled_mm(GEMM):
             "dtype_A_B": dtype_A_B,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         bpeA = name2bpe(dtype_A_B[0])
         bpeB = name2bpe(dtype_A_B[1])
@@ -507,7 +507,7 @@ class aten_scaled_mm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for aten::addmm is not defined.")
 
 
@@ -550,7 +550,7 @@ class aten_bmm(GEMM):
         """Total FLOPs for the entire batch."""
         return self.param_details["B"] * super().flops()
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         """Total DRAM traffic for the entire batch (read+write)."""
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
@@ -572,7 +572,7 @@ class aten_bmm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::bmm is not defined.")
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for aten::bmm is not defined.")
 
 
@@ -587,7 +587,7 @@ class aten_baddbmm(GEMM):
     def get_param_details(event):
         """Extract B, M, N, K and metadata from the profiler event."""
         input_dims = event["args"]["Input Dims"]
-        C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
+        _C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
 
         B_dim, M, K = A_shape  # (B, M, K)
         _, _, N = B_shape  # (B, K, N)
@@ -615,7 +615,7 @@ class aten_baddbmm(GEMM):
         """Total FLOPs for the entire batch."""
         return self.param_details["B"] * super().flops()
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         """Total DRAM traffic for the entire batch (read+write)."""
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
@@ -637,7 +637,7 @@ class aten_baddbmm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for aten::baddbmm is not defined.")
 
 
@@ -649,24 +649,18 @@ class vllm_gemm_with_dynamic_quant(GEMM):
         A_shape = None
         B_shape = None
         for shape in input_dims:
-            try:
-                if isinstance(shape, (list, tuple)) and len(shape) == 2:
-                    if A_shape is None:
-                        A_shape = tuple(shape)
-                    elif B_shape is None:
-                        B_shape = tuple(shape)
-                        break
-            except Exception:
-                continue
+            if isinstance(shape, (list, tuple)) and len(shape) == 2:
+                if A_shape is None:
+                    A_shape = tuple(shape)
+                elif B_shape is None:
+                    B_shape = tuple(shape)
+                    break
         # Fallback: try first two entries if not caught above
         if (A_shape is None or B_shape is None) and len(input_dims) >= 2:
-            try:
-                if A_shape is None and isinstance(input_dims[0], (list, tuple)):
-                    A_shape = tuple(input_dims[0])
-                if B_shape is None and isinstance(input_dims[1], (list, tuple)):
-                    B_shape = tuple(input_dims[1])
-            except Exception:
-                pass
+            if A_shape is None and isinstance(input_dims[0], (list, tuple)):
+                A_shape = tuple(input_dims[0])
+            if B_shape is None and isinstance(input_dims[1], (list, tuple)):
+                B_shape = tuple(input_dims[1])
 
         if not A_shape or not B_shape or len(A_shape) != 2 or len(B_shape) != 2:
             raise ValueError(
@@ -705,7 +699,7 @@ class vllm_gemm_with_dynamic_quant(GEMM):
             "dtype_A_B": dtype_A_B,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
             warnings.warn(
@@ -735,7 +729,7 @@ class tex_ts_te_gemm_ts(GEMM):
     def get_param_details(self, event):
         input_dims = event["args"]["Input Dims"]
 
-        C_shape, A_shape, B_shape = input_dims[10], input_dims[0], input_dims[5]
+        _C_shape, A_shape, B_shape = input_dims[10], input_dims[0], input_dims[5]
 
         # index 4 and 9 are transa and transb respectively
         # https://github.com/ROCm/TransformerEngine/blob/e9772d4d18b2980e8e0643c94591a94cad9bb8b7/transformer_engine/pytorch/cpp_extensions/gemm.py#L248
@@ -786,7 +780,7 @@ class tex_ts_te_gemm_ts(GEMM):
             "dtype_A_B": dtype_A_B,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
@@ -805,7 +799,7 @@ class tex_ts_te_gemm_ts(GEMM):
             "Backward pass for tex_ts::te_gemm_ts is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError(
             "Backward pass for tex_ts::te_gemm_ts is not defined."
         )
@@ -838,7 +832,7 @@ class tev2_pseudo_gemm(GEMM):
             "dtype_A_B": dtype_A_B,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
             raise ValueError(f"Data types of A and B are different: {dtype_A_B}")
@@ -856,7 +850,7 @@ class tev2_pseudo_gemm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for tev2_pseudo_gemm is not defined.")
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for tev2_pseudo_gemm is not defined.")
 
 
@@ -1135,7 +1129,7 @@ class aten_conv(CONV):
             "groups": groups,
         }
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1144,7 +1138,7 @@ class aten_conv(CONV):
         self.bpe = name2bpe(dtype_input_weight[0])
         return super().bytes(self.bpe)
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1248,7 +1242,7 @@ class aten_conv_bwd(CONV):
     def flops(self):
         return super().flops_bwd()
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1257,7 +1251,7 @@ class aten_conv_bwd(CONV):
         bpe = name2bpe(dtype_input_weight[0])
         return super().bytes_bwd(bpe)
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1356,7 +1350,7 @@ class ConvBias_(CONV):
             "groups": groups,
         }
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1365,7 +1359,7 @@ class ConvBias_(CONV):
         self.bpe = name2bpe(dtype_input_weight[0])
         return super().bytes(self.bpe)
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1451,7 +1445,7 @@ class ConvBias_Backward(CONV):
             return None
         return super().flops_bwd()
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=None):
         # Use backward bytes calculation from CONV base class
         if self.param_details["input_shape"] is None:
             return None
@@ -1463,9 +1457,9 @@ class ConvBias_Backward(CONV):
                 f"Data types of input and weight are different: {dtype_input_weight}"
             )
         bpe = name2bpe(dtype_input_weight[0])
-        return super().bytes_bwd(bpe)
+        return super().bytes(bpe)
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=None):
         if self.param_details["input_shape"] is None:
             return None
         dtype_input_weight = self.param_details["dtype_input_weight"]
@@ -1566,7 +1560,7 @@ class ConvBiasReLU_(CONV):
             "groups": groups,
         }
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1575,7 +1569,7 @@ class ConvBiasReLU_(CONV):
         self.bpe = name2bpe(dtype_input_weight[0])
         return super().bytes(self.bpe)
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=None):
         dtype_input_weight = self.param_details["dtype_input_weight"]
         if dtype_input_weight[0] != dtype_input_weight[1]:
             raise ValueError(
@@ -1658,7 +1652,7 @@ class ConvBiasReLU_Backward(CONV):
             return None
         return super().flops_bwd()
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=None):
         # Use backward bytes calculation from CONV base class
         # ReLU backward requires reading the forward output mask
         if self.param_details["input_shape"] is None:
@@ -1671,9 +1665,9 @@ class ConvBiasReLU_Backward(CONV):
                 f"Data types of input and weight are different: {dtype_input_weight}"
             )
         bpe = name2bpe(dtype_input_weight[0])
-        return super().bytes_bwd(bpe)
+        return super().bytes(bpe)
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=None):
         if self.param_details["input_shape"] is None:
             return None
         dtype_input_weight = self.param_details["dtype_input_weight"]
@@ -2069,7 +2063,6 @@ class SDPA:
             block_N_Q = min(N_Q, N_Q)
             block_N_KV = min(128, N_KV)
 
-        num_blocks_N_Q = math.ceil(N_Q / block_N_Q)
         num_blocks_N_KV = math.ceil(N_KV / block_N_KV)
         # Partition happens on ∇K and ∇V and not ∇Q
         total_num_blocks = num_blocks_N_KV * B * H_Q
@@ -2222,6 +2215,16 @@ class SDPA:
             except Exception:
                 simulated_time = None
         return simulated_time
+
+
+def _optional_float(value, default=0.0):
+    """Parse a trace concrete-input value as float, returning *default* on failure."""
+    if value in ("", "None", None):
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
 
 
 def extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx):
@@ -2619,12 +2622,7 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
 
-        dropout_p = 0.0
-        if concrete_inputs[5] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[5])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[5])
 
         is_causal = (
             concrete_inputs[6].lower() == "true"
@@ -2673,12 +2671,7 @@ class aten__scaled_dot_product_efficient_attention(SDPA):
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
 
-        dropout_p = 0.0
-        if concrete_inputs[5] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[5])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[5])
 
         is_causal = (
             concrete_inputs[6].lower() == "true"
@@ -2726,12 +2719,7 @@ class aten__scaled_dot_product_flash_attention(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = 0.0
-        if concrete_inputs[3] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[3])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[3])
         is_causal = (
             concrete_inputs[4].lower() == "true"
             if concrete_inputs[4] not in ("", "None")
@@ -2782,12 +2770,7 @@ class aiter__flash_attn_forward(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = 0.0
-        if concrete_inputs[3] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[3])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[3])
         is_causal = (
             concrete_inputs[5].lower() == "true"
             if concrete_inputs[5] not in ("", "None")
@@ -2835,12 +2818,7 @@ class aiter__flash_attn_backward(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = 0.0
-        if concrete_inputs[10] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[10])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[10])
         is_causal = (
             concrete_inputs[12].lower() == "true"
             if concrete_inputs[12] not in ("", "None")
@@ -2914,12 +2892,7 @@ class aiter__fmha_v3_forward(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = 0.0
-        if concrete_inputs[4] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[4])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[4])
         is_causal = (
             concrete_inputs[6].lower() == "true"
             if concrete_inputs[6] not in ("", "None")
@@ -2954,12 +2927,7 @@ class aiter__fmha_v3_backward(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = 0.0
-        if concrete_inputs[7] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[7])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[7])
         is_causal = (
             concrete_inputs[9].lower() == "true"
             if concrete_inputs[9] not in ("", "None")
@@ -3002,12 +2970,7 @@ def _parse_aiter_mha_fwd_args(event):
     B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
         sdpa_cfg[key] for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
     )
-    dropout_p = 0.0
-    if concrete_inputs[3] not in ("", "None"):
-        try:
-            dropout_p = float(concrete_inputs[3])
-        except (ValueError, TypeError):
-            pass
+    dropout_p = _optional_float(concrete_inputs[3])
     is_causal = (
         concrete_inputs[5].lower() == "true"
         if concrete_inputs[5] not in ("", "None")
@@ -3062,12 +3025,7 @@ class aiter__mha_bwd(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = 0.0
-        if concrete_inputs[6] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[6])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[6])
         is_causal = (
             concrete_inputs[8].lower() == "true"
             if concrete_inputs[8] not in ("", "None")
@@ -3109,9 +3067,7 @@ class vllm_unified_attention_with_output(SDPA):
             )
         input_dims = event["args"]["Input Dims"]
 
-        concrete_inputs = event["args"]["Concrete Inputs"]
-        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[3]
-        bhnd_idx = 0, 2, 1, 3
+        q_shape, k_shape, _v_shape = input_dims[0], input_dims[1], input_dims[3]
         B = 1
         N_Q, H_Q, d_h_qk = q_shape
         N_KV, H_KV, d_h_v = k_shape
@@ -4075,7 +4031,7 @@ class jax_gemm(GEMM):
         """Total FLOPs for the entire batch."""
         return self.param_details["B"] * super().flops()
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         """Total DRAM traffic for the entire batch (read+write)."""
         dtype_A_B = self.param_details["dtype_A_B"]
         if dtype_A_B[0] != dtype_A_B[1]:
@@ -4094,7 +4050,7 @@ class jax_gemm(GEMM):
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for JaxGemm is not defined.")
 
-    def bytes_bwd(self, _):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError("Backward pass for JaxGemm is not defined.")
 
 
@@ -4148,10 +4104,10 @@ class jax_te_fused_attn(SDPA):
         """Total FLOPs for the entire batch."""
         return super().flops()
 
-    def bytes(self):
+    def bytes(self, bytes_per_element=2):
         return super().bytes(bytes_per_element=self.param_details["bytes_per_element"])
 
-    def bytes_bwd(self):
+    def bytes_bwd(self, bytes_per_element=2):
         return super().bytes_bwd(
             bytes_per_element=self.param_details["bytes_per_element"]
         )
@@ -4528,7 +4484,7 @@ class BatchNorm(Normalization):
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self):
         raise NotImplementedError(
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
@@ -4638,7 +4594,7 @@ class LayerNorm(Normalization):
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self):
         raise NotImplementedError(
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
@@ -4714,7 +4670,6 @@ class GroupNorm(Normalization):
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
         # concrete_inputs[1] = num_groups
-        concrete_inputs = event["args"]["Concrete Inputs"]
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
@@ -4738,7 +4693,7 @@ class GroupNorm(Normalization):
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self):
         raise NotImplementedError(
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
@@ -4831,7 +4786,7 @@ class InstanceNorm(Normalization):
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self):
         raise NotImplementedError(
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
@@ -4905,7 +4860,7 @@ class RMSNorm(Normalization):
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self):
         raise NotImplementedError(
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
@@ -5498,7 +5453,7 @@ class hipblaslt_gemm_fp8(GEMM):
             "dtype_scaleB": dtype_scaleB,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         bpeA = name2bpe(dtype_A_B[0])
         bpeB = name2bpe(dtype_A_B[1])
@@ -5520,7 +5475,7 @@ class hipblaslt_gemm_fp8(GEMM):
             "Backward pass for hipblaslt_gemm_fp8 is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError(
             "Backward pass for hipblaslt_gemm_fp8 is not defined."
         )
@@ -5583,7 +5538,7 @@ class FusedLnModulate(Normalization):
         except (KeyError, IndexError):
             stride_input = None
 
-        T, B, H = x_shape[0], x_shape[1], x_shape[2]
+        _T, _B, H = x_shape[0], x_shape[1], x_shape[2]
         return {
             "op_shape": x_shape,
             "dtype_in_out": (dtype_in, None),
@@ -5642,7 +5597,7 @@ class FusedLnModulateBackward(Normalization):
         except (KeyError, IndexError):
             stride_input = None
 
-        T, B, H = grad_shape[0], grad_shape[1], grad_shape[2]
+        _T, _B, H = grad_shape[0], grad_shape[1], grad_shape[2]
         return {
             "op_shape": grad_shape,
             "dtype_in_out": (dtype_in, None),
@@ -5764,7 +5719,7 @@ class hipblaslt_gemm_fp4(GEMM):
             "dtype_scaleB": dtype_scaleB,
         }
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
         bpeA = name2bpe(dtype_A_B[0])
         bpeB = name2bpe(dtype_A_B[1])
@@ -5794,7 +5749,7 @@ class hipblaslt_gemm_fp4(GEMM):
             "Backward pass for hipblaslt_gemm_fp4 is not defined."
         )
 
-    def bytes_bwd(self, bytes_per_element):
+    def bytes_bwd(self, bytes_per_element=None):
         raise NotImplementedError(
             "Backward pass for hipblaslt_gemm_fp4 is not defined."
         )
@@ -5953,7 +5908,7 @@ class aiter_gemm_a4w4(GEMM):
     # bytes formula and is reused from hipblaslt_gemm_fp4.
     MXFP4_BLOCK_SIZE = hipblaslt_gemm_fp4.MXFP4_BLOCK_SIZE
 
-    def bytes(self):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         # Same workload, same byte count — aiter's bpreshuffle layout changes
         # the in-memory arrangement of A/B/scales but not the bytes touched.
         # Delegate to hipblaslt_gemm_fp4.bytes which only reads M/N/K and

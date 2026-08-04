@@ -10,9 +10,8 @@ import re
 
 import pandas as pd
 
-from TraceLens import TraceToTree
-from ..TreePerf import GPUEventAnalyser
-
+from ..Trace2Tree.trace_to_tree import TraceToTree
+from ..TreePerf.gpu_event_analyser import GPUEventAnalyser
 from .util import (
     _CATEGORY,
     _DUR,
@@ -1530,7 +1529,6 @@ class TraceDiff:
                             n1_list_copy = n1_list.copy()
                             n2_list = mapping["trace2"]["name"]
                             for n1 in n1_list:
-                                found = 0
                                 for n2 in n2_list:
                                     if n1 == n2:
                                         n1_list_copy.remove(n1)
