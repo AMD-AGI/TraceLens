@@ -311,33 +311,35 @@ class TestNaNLCADropped:
 # ---------------------------------------------------------------------------
 class TestBuildUidToRowIdx:
     def test_empty_frame(self):
-        assert _build_uid_to_row_idx(pd.DataFrame()) == {}
+        assert _build_uid_to_row_idx(pd.DataFrame(), pd.DataFrame()) == {}
 
     def test_no_kernel_details_column(self):
         df = pd.DataFrame({"name": ["aten::mm"]})
-        assert _build_uid_to_row_idx(df) == {}
+        assert _build_uid_to_row_idx(df, pd.DataFrame()) == {}
 
     def test_maps_every_uid_to_row_index(self):
         df = pd.DataFrame(
             {
                 "name": ["aten::mm"],
-                "kernel_details_summary": [_kds_str((5001, 100), (5002, 50))],
+                "kernel_details": [_kd_list((5001, 100), (5002, 50))],
             }
         )
-        idx = _build_uid_to_row_idx(df)
+        summary = pd.DataFrame({"name": ["aten::mm"]})
+        idx = _build_uid_to_row_idx(df, summary)
         assert idx == {5001: 0, 5002: 0}
 
     def test_multiple_rows_map_to_distinct_indices(self):
         df = pd.DataFrame(
             {
                 "name": ["aten::mm", "aten::relu"],
-                "kernel_details_summary": [
-                    _kds_str((200, 100), (100, 50)),
-                    _kds_str((400, 10), (300, 5)),
+                "kernel_details": [
+                    _kd_list((200, 100), (100, 50)),
+                    _kd_list((400, 10), (300, 5)),
                 ],
             }
         )
-        idx = _build_uid_to_row_idx(df)
+        summary = pd.DataFrame({"name": ["aten::mm", "aten::relu"]})
+        idx = _build_uid_to_row_idx(df, summary)
         assert idx[100] == 0
         assert idx[200] == 0
         assert idx[300] == 1
