@@ -5,11 +5,10 @@
 ###############################################################################
 
 import copy
-import gzip
 import inspect
 import json
 import logging
-import os, re, sys
+import re
 import pprint
 
 # TODO: warning should show the stack as well

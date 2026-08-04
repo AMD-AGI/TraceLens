@@ -20,7 +20,6 @@ from .util import (
     _KERNEL_DISPATCH_CATEGORIES,
     _NAME,
     _TRACELENS_DEBUG,
-    _TS,
     _UID,
     _get_name_node,
     _get_node_arg,

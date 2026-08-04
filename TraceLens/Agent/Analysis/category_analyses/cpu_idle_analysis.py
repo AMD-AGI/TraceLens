@@ -15,7 +15,6 @@ Outputs cpu_idle_metrics.json with analysis results.
 """
 
 import argparse
-import json
 import os
 import sys
 import pandas as pd

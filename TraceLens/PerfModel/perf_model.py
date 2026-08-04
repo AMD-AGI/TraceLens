@@ -15,7 +15,7 @@ import warnings
 
 from .kernel_name_parser import gemm_name_parser
 
-from .utils import name2bpe, parse_bool, simulation_dtype_map, torch_dtype_map
+from .utils import name2bpe, parse_bool, torch_dtype_map
 
 
 # 1. GEMM

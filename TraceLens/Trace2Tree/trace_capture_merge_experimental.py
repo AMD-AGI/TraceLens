@@ -15,8 +15,6 @@ information (optimized execution paths), producing a complete execution
 model suitable for performance analysis.
 """
 
-import sys
-import time
 from collections import OrderedDict, deque, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 import json
@@ -588,7 +586,6 @@ def load_capture_folder(
         Dictionary keyed by ``"{batch_size}_{mode}"`` whose values are lists of
         ``(capture_tree, capture_roots)`` tuples.
     """
-    from ..TreePerf.tree_perf import TreePerfAnalyzer
 
     with open(metadata_json_path, "r") as f:
         metadata_list = json.load(f)

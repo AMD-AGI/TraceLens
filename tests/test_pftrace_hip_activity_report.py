@@ -12,7 +12,6 @@ import pytest
 import tempfile
 import pandas as pd
 
-from TraceLens.util import PftraceParser
 from TraceLens.Reporting.pftrace_hip_activity_analysis import (
     PftraceHipActivityAnalyzer,
     extract_time_ns,

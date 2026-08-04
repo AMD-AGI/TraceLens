@@ -4,7 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import pytest
 from TraceLens.TraceDiff.trace_diff import (
     _disambiguate_same_name_candidates,
 )

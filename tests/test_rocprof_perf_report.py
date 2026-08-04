@@ -8,7 +8,6 @@ import pytest
 import os
 import pandas as pd
 import tempfile
-from pathlib import Path
 from TraceLens.util import RocprofParser
 from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
 from TraceLens.Reporting.generate_perf_report_rocprof import (

@@ -153,8 +153,6 @@ class TestJaxNcclAnalyserAnalyzeAllCollectivesFromDf(unittest.TestCase):
     @patch("builtins.print")  # Suppress print output during testing
     def test_analyze_all_collectives_from_df_basic(self, mock_print):
         """Test basic functionality of analyze_all_collectives_from_df."""
-        import pandas as pd
-        import numpy as np
 
         # Create mock dataframe
         mock_df = self.create_mock_dataframe()

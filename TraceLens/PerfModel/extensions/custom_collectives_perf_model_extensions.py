@@ -10,7 +10,6 @@ Performance models for custom collective operation extensions.
 
 from math import prod
 from TraceLens.PerfModel.utils import name2bpe
-from TraceLens.PerfModel.perf_model import RMSNorm
 
 
 class CustomCollective:

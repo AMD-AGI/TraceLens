@@ -22,7 +22,7 @@ Matching uses ``gpu_op_uid`` values from ``df_unified_perf``.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
 import pandas as pd

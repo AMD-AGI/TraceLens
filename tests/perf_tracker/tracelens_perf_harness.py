@@ -197,7 +197,7 @@ def serve_prometheus_metrics(timing_json_path, port=9100):
     """
     import time
 
-    from prometheus_client import REGISTRY, MetricsHandler, start_http_server
+    from prometheus_client import REGISTRY, start_http_server
     from prometheus_client.core import GaugeMetricFamily
 
     timing_path = Path(timing_json_path).resolve()

@@ -5,9 +5,7 @@
 ###############################################################################
 
 import ast
-import gzip
 import os
-import json
 import logging
 import warnings
 
@@ -15,7 +13,6 @@ import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from ..util import DataLoader
-from ..util import DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
 from ..util import TraceEventUtils
 
 

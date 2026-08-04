@@ -9,7 +9,6 @@ Performance models for pseudo-op extensions.
 """
 
 from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
-import re
 from TraceLens.PerfModel.perf_model import (
     GEMM,
     BinaryElementwise,

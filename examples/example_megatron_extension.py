@@ -4,10 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import argparse
 import ast
 import collections
-import json
 import math
 import re
 import logging
