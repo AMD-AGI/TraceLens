@@ -19,7 +19,9 @@ from typing import Dict, Optional
 
 import pandas as pd
 
-from TraceLens.Reporting.generate_perf_report_rocprof import generate_perf_report_rocprof
+from TraceLens.Reporting.generate_perf_report_rocprof import (
+    generate_perf_report_rocprof,
+)
 from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
     generate_perf_report_pftrace_hip_activity,
 )
@@ -67,11 +69,15 @@ def write_excel(path: Path, sections: Dict[str, Dict[str, pd.DataFrame]]) -> Non
                     continue
                 # rocprof sheets use short names (no prefix); pftrace keeps prefix for clarity
                 sheet_label = sheet if prefix == "rocprof" else f"{prefix}_{sheet}"
-                df.to_excel(writer, sheet_name=_safe_sheet(sheet_label, used), index=False)
+                df.to_excel(
+                    writer, sheet_name=_safe_sheet(sheet_label, used), index=False
+                )
     logger.info("Wrote %s", path)
 
 
-def _rocprof_sheets_for_excel(rocprof: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+def _rocprof_sheets_for_excel(
+    rocprof: Dict[str, pd.DataFrame],
+) -> Dict[str, pd.DataFrame]:
     """Keep only canonical rocprof sheets (no full-process timeline duplicate)."""
     keep = (
         "gpu_timeline",
@@ -81,7 +87,9 @@ def _rocprof_sheets_for_excel(rocprof: Dict[str, pd.DataFrame]) -> Dict[str, pd.
         "short_kernel_histogram",
         "kernel_details",
     )
-    return {k: v for k, v in rocprof.items() if k in keep and v is not None and not v.empty}
+    return {
+        k: v for k, v in rocprof.items() if k in keep and v is not None and not v.empty
+    }
 
 
 def _cleanup_work_dir(work_dir: Path) -> None:
@@ -124,7 +132,9 @@ def write_genesis_summary_md(
             "",
         ]
         for _, row in tl.iterrows():
-            lines.append(f"- **{row['type']}**: {row['time ms']:.2f} ms ({row['percent']:.1f}%)")
+            lines.append(
+                f"- **{row['type']}**: {row['time ms']:.2f} ms ({row['percent']:.1f}%)"
+            )
         lines.append("")
 
     by_cat = reports.get("rocprof", {}).get("kernel_summary_by_category")
@@ -139,7 +149,10 @@ def write_genesis_summary_md(
     ks = reports.get("rocprof", {}).get("kernel_summary")
     if ks is not None:
         lines += ["## Top 10 Kernels", ""]
-        lines += ["| Kernel | Count | Total (ms) | % | Category |", "|--------|-------|------------|---|----------|"]
+        lines += [
+            "| Kernel | Count | Total (ms) | % | Category |",
+            "|--------|-------|------------|---|----------|",
+        ]
 
         for _, row in ks.head(10).iterrows():
             name = row["name"] if len(row["name"]) <= 52 else row["name"][:49] + "..."
@@ -163,7 +176,9 @@ def write_genesis_summary_md(
     logger.info("Wrote %s", path)
 
 
-def _resolve_steady_state_fallback_s(capture: dict, cli_value: Optional[float]) -> float:
+def _resolve_steady_state_fallback_s(
+    capture: dict, cli_value: Optional[float]
+) -> float:
     if cli_value is not None:
         return cli_value
     inferred = infer_benchmark_window_s(capture["capture_dir"])
@@ -228,7 +243,9 @@ def generate_perf_report_genesis(
     trace_csv = rocprof_dir / "kernel_kernel_trace.csv"
 
     if trace_csv.exists():
-        logger.info("Genesis steady-state GPU timeline (fallback window %.2fs)", fallback_s)
+        logger.info(
+            "Genesis steady-state GPU timeline (fallback window %.2fs)", fallback_s
+        )
         ss_tl, steady_meta = compute_steady_state_timeline(
             str(trace_csv),
             gap_threshold_ns=int(steady_state_gap_ms * 1e6),
@@ -290,24 +307,34 @@ Examples:
         """,
     )
     parser.add_argument(
-        "--capture-dir", "--combined-run-dir", dest="capture_dir", required=True,
+        "--capture-dir",
+        "--combined-run-dir",
+        dest="capture_dir",
+        required=True,
         help="profile_output/<timestamp>/ from run_combined_trace.sh or run_profile.sh",
     )
     parser.add_argument("--output-dir", default="analysis_output")
     parser.add_argument("--include-api", action="store_true")
     parser.add_argument("--kernel-details", action="store_true", default=False)
-    parser.add_argument("--no-short-kernel-study", action="store_false", dest="short_kernel_study")
+    parser.add_argument(
+        "--no-short-kernel-study", action="store_false", dest="short_kernel_study"
+    )
     parser.add_argument("--traceconv", default=None)
     parser.add_argument(
-        "--steady-state-gap-ms", type=float, default=1000.0,
+        "--steady-state-gap-ms",
+        type=float,
+        default=1000.0,
         help="Min gap (ms) to split JIT/build from simulation burst",
     )
     parser.add_argument(
-        "--steady-state-fallback-s", type=float, default=None,
+        "--steady-state-fallback-s",
+        type=float,
+        default=None,
         help="Timed benchmark window in seconds (default: auto from run.log wall_time, else 5s)",
     )
     parser.add_argument(
-        "--keep-work", action="store_true",
+        "--keep-work",
+        action="store_true",
         help="Keep .work/ intermediates (kernel_results.json, pftrace_events.json) for debugging",
     )
     args = parser.parse_args()

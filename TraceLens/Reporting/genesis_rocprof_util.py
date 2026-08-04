@@ -28,7 +28,9 @@ def _find_file(roots: List[Path], pattern: str) -> Optional[Path]:
     return None
 
 
-def convert_rocprof_csv_to_json(trace_dir: str, output_path: str, include_api: bool = False) -> str:
+def convert_rocprof_csv_to_json(
+    trace_dir: str, output_path: str, include_api: bool = False
+) -> str:
     """Convert rocprofv3 CSV kernel trace to rocprofiler-sdk JSON for TraceLens."""
     trace_dir_p = Path(trace_dir)
     kernel_csv = trace_dir_p / "kernel_kernel_trace.csv"
@@ -55,33 +57,35 @@ def convert_rocprof_csv_to_json(trace_dir: str, output_path: str, include_api: b
 
     dispatches = []
     for row in kernel_rows:
-        dispatches.append({
-            "start_timestamp": int(row["Start_Timestamp"]),
-            "end_timestamp": int(row["End_Timestamp"]),
-            "dispatch_info": {
-                "dispatch_id": int(row["Dispatch_Id"]),
-                "kernel_id": int(row["Kernel_Id"]),
-                "agent_id": {"handle": 0},
-                "grid_size": {
-                    "x": int(row["Grid_Size_X"]),
-                    "y": int(row["Grid_Size_Y"]),
-                    "z": int(row["Grid_Size_Z"]),
+        dispatches.append(
+            {
+                "start_timestamp": int(row["Start_Timestamp"]),
+                "end_timestamp": int(row["End_Timestamp"]),
+                "dispatch_info": {
+                    "dispatch_id": int(row["Dispatch_Id"]),
+                    "kernel_id": int(row["Kernel_Id"]),
+                    "agent_id": {"handle": 0},
+                    "grid_size": {
+                        "x": int(row["Grid_Size_X"]),
+                        "y": int(row["Grid_Size_Y"]),
+                        "z": int(row["Grid_Size_Z"]),
+                    },
+                    "workgroup_size": {
+                        "x": int(row["Workgroup_Size_X"]),
+                        "y": int(row["Workgroup_Size_Y"]),
+                        "z": int(row["Workgroup_Size_Z"]),
+                    },
+                    "lds_block_size_v": int(row.get("LDS_Block_Size", 0)),
+                    "scratch_size": int(row.get("Scratch_Size", 0)),
+                    "arch_vgpr_count": int(row.get("VGPR_Count", 0)),
+                    "accum_vgpr_count": int(row.get("Accum_VGPR_Count", 0)),
+                    "sgpr_count": int(row.get("SGPR_Count", 0)),
                 },
-                "workgroup_size": {
-                    "x": int(row["Workgroup_Size_X"]),
-                    "y": int(row["Workgroup_Size_Y"]),
-                    "z": int(row["Workgroup_Size_Z"]),
-                },
-                "lds_block_size_v": int(row.get("LDS_Block_Size", 0)),
-                "scratch_size": int(row.get("Scratch_Size", 0)),
-                "arch_vgpr_count": int(row.get("VGPR_Count", 0)),
-                "accum_vgpr_count": int(row.get("Accum_VGPR_Count", 0)),
-                "sgpr_count": int(row.get("SGPR_Count", 0)),
-            },
-            "correlation_id": {"internal": int(row["Correlation_Id"])},
-            "thread_id": int(row["Thread_Id"]),
-            "stream_id": {"handle": int(row.get("Stream_Id", 0))},
-        })
+                "correlation_id": {"internal": int(row["Correlation_Id"])},
+                "thread_id": int(row["Thread_Id"]),
+                "stream_id": {"handle": int(row.get("Stream_Id", 0))},
+            }
+        )
 
     timestamps = [int(r["Start_Timestamp"]) for r in kernel_rows]
     end_timestamps = [int(r["End_Timestamp"]) for r in kernel_rows]
@@ -90,13 +94,15 @@ def convert_rocprof_csv_to_json(trace_dir: str, output_path: str, include_api: b
     agents: List[dict] = []
     if agent_csv.exists():
         for row in _read_csv(str(agent_csv)):
-            agents.append({
-                "node_id": int(row.get("Node_Id", 0)),
-                "type": row.get("Agent_Type", "UNKNOWN"),
-                "name": row.get("Name", ""),
-                "product_name": row.get("Product_Name", ""),
-                "vendor_name": row.get("Vendor_Name", ""),
-            })
+            agents.append(
+                {
+                    "node_id": int(row.get("Node_Id", 0)),
+                    "type": row.get("Agent_Type", "UNKNOWN"),
+                    "name": row.get("Name", ""),
+                    "product_name": row.get("Product_Name", ""),
+                    "vendor_name": row.get("Vendor_Name", ""),
+                }
+            )
 
     def _api_events(path: Path) -> List[dict]:
         if not path.exists():
@@ -116,23 +122,25 @@ def convert_rocprof_csv_to_json(trace_dir: str, output_path: str, include_api: b
     hsa_events = _api_events(hsa_csv) if include_api else []
 
     result: Dict[str, Any] = {
-        "rocprofiler-sdk-tool": [{
-            "metadata": {
-                "pid": pid,
-                "init_time": min(timestamps) if timestamps else 0,
-                "fini_time": max(end_timestamps) if end_timestamps else 0,
-                "node": {"hostname": "genesis-benchmark"},
-                "command": [],
-            },
-            "agents": agents,
-            "kernel_symbols": list(symbols.values()),
-            "buffer_records": {
-                "kernel_dispatch": dispatches,
-                "memory_copy": [],
-                "hip_api": hip_events,
-                "hsa_api": hsa_events,
-            },
-        }],
+        "rocprofiler-sdk-tool": [
+            {
+                "metadata": {
+                    "pid": pid,
+                    "init_time": min(timestamps) if timestamps else 0,
+                    "fini_time": max(end_timestamps) if end_timestamps else 0,
+                    "node": {"hostname": "genesis-benchmark"},
+                    "command": [],
+                },
+                "agents": agents,
+                "kernel_symbols": list(symbols.values()),
+                "buffer_records": {
+                    "kernel_dispatch": dispatches,
+                    "memory_copy": [],
+                    "hip_api": hip_events,
+                    "hsa_api": hsa_events,
+                },
+            }
+        ],
     }
 
     with open(output_path, "w") as f:
@@ -195,7 +203,9 @@ def resolve_profile_json(capture: dict, output_dir: Path, include_api: bool) -> 
     out = output_dir / "kernel_results.json"
     if capture["has_kernel_csv"]:
         if not out.exists() or out.stat().st_size == 0:
-            convert_rocprof_csv_to_json(str(capture["kernel_csv_dir"]), str(out), include_api)
+            convert_rocprof_csv_to_json(
+                str(capture["kernel_csv_dir"]), str(out), include_api
+            )
         return out
     if capture["profile_json"] and capture["profile_json"].exists():
         return capture["profile_json"]

@@ -47,7 +47,6 @@ from TraceLens.Reporting.generate_perf_report_genesis import (
     write_genesis_summary_md,
 )
 
-
 ###############################################################################
 # Shared fixtures — realistic CSV content from actual MI300X genesis traces
 ###############################################################################
@@ -106,63 +105,76 @@ class TestCategorizeKernel:
     """Validate Genesis physics kernel categorization."""
 
     def test_rigid_body_solver(self):
-        assert categorize_kernel(
-            "_kernel_solve_body_tiled_wc_amdgpu_c530_0_kernel_0_range_for"
-        ) == "Rigid Body Solver"
+        assert (
+            categorize_kernel(
+                "_kernel_solve_body_tiled_wc_amdgpu_c530_0_kernel_0_range_for"
+            )
+            == "Rigid Body Solver"
+        )
 
     def test_rigid_body_solver_init(self):
-        assert categorize_kernel(
-            "func_solve_init_c478_0_kernel_8_range_for"
-        ) == "Rigid Body Solver"
+        assert (
+            categorize_kernel("func_solve_init_c478_0_kernel_8_range_for")
+            == "Rigid Body Solver"
+        )
 
     def test_broadphase_collision(self):
-        assert categorize_kernel(
-            "func_broad_phase_c402_0_kernel_3_range_for"
-        ) == "Broadphase Collision"
+        assert (
+            categorize_kernel("func_broad_phase_c402_0_kernel_3_range_for")
+            == "Broadphase Collision"
+        )
 
     def test_narrowphase_collision(self):
-        assert categorize_kernel(
-            "_func_narrowphase_contact0_c422_0_kernel_1_range_for"
-        ) == "Narrowphase Collision"
+        assert (
+            categorize_kernel("_func_narrowphase_contact0_c422_0_kernel_1_range_for")
+            == "Narrowphase Collision"
+        )
 
     def test_narrowphase_multicontact(self):
-        assert categorize_kernel(
-            "_func_narrowphase_multicontact_mixed_c416_0_kernel_0_range_for"
-        ) == "Narrowphase Collision"
+        assert (
+            categorize_kernel(
+                "_func_narrowphase_multicontact_mixed_c416_0_kernel_0_range_for"
+            )
+            == "Narrowphase Collision"
+        )
 
     def test_contact_management(self):
-        assert categorize_kernel(
-            "func_sort_contacts_c412_0_kernel_1_range_for"
-        ) == "Contact Management"
+        assert (
+            categorize_kernel("func_sort_contacts_c412_0_kernel_1_range_for")
+            == "Contact Management"
+        )
 
     def test_time_integration_step1(self):
-        assert categorize_kernel(
-            "kernel_step_1_c532_0_kernel_6_range_for"
-        ) == "Time Integration"
+        assert (
+            categorize_kernel("kernel_step_1_c532_0_kernel_6_range_for")
+            == "Time Integration"
+        )
 
     def test_time_integration_step2(self):
-        assert categorize_kernel(
-            "kernel_step_2_c534_0_kernel_16_range_for"
-        ) == "Time Integration"
+        assert (
+            categorize_kernel("kernel_step_2_c534_0_kernel_16_range_for")
+            == "Time Integration"
+        )
 
     def test_constraints(self):
-        assert categorize_kernel(
-            "add_inequality_constraints_c472_0_kernel_3_range_for"
-        ) == "Constraints"
+        assert (
+            categorize_kernel("add_inequality_constraints_c472_0_kernel_3_range_for")
+            == "Constraints"
+        )
 
     def test_memory_ops_copy(self):
         assert categorize_kernel("__amd_rocclr_copyBuffer") == "Memory Ops (ROCm)"
 
     def test_memory_ops_fill(self):
-        assert categorize_kernel(
-            "__amd_rocclr_fillBufferAligned"
-        ) == "Memory Ops (ROCm)"
+        assert (
+            categorize_kernel("__amd_rocclr_fillBufferAligned") == "Memory Ops (ROCm)"
+        )
 
     def test_runtime_init(self):
         assert categorize_kernel("runtime_initialize") == "Runtime Init"
-        assert categorize_kernel(
-            "runtime_initialize_rand_states_cuda"
-        ) == "Runtime Init"
+        assert (
+            categorize_kernel("runtime_initialize_rand_states_cuda") == "Runtime Init"
+        )
 
     def test_pytorch_runtime(self):
         name = (
@@ -172,9 +184,10 @@ class TestCategorizeKernel:
         assert categorize_kernel(name) == "PyTorch Runtime"
 
     def test_geometry_aabb(self):
-        assert categorize_kernel(
-            "kernel_bit_reduction_into_c260_0_kernel_1_range_for"
-        ) == "Geometry / AABB"
+        assert (
+            categorize_kernel("kernel_bit_reduction_into_c260_0_kernel_1_range_for")
+            == "Geometry / AABB"
+        )
 
     def test_unknown_kernel(self):
         assert categorize_kernel("some_completely_unknown_kernel") == "Other"
@@ -228,12 +241,16 @@ class TestGpuTimelineFromIntervals:
 
     def test_full_busy(self):
         tl = _gpu_timeline_from_intervals(0, 1_000_000, [(0, 1_000_000)])
-        assert tl.loc[tl["type"] == "busy_time", "percent"].iloc[0] == pytest.approx(100.0)
+        assert tl.loc[tl["type"] == "busy_time", "percent"].iloc[0] == pytest.approx(
+            100.0
+        )
         assert tl.loc[tl["type"] == "idle", "percent"].iloc[0] == pytest.approx(0.0)
 
     def test_half_busy(self):
         tl = _gpu_timeline_from_intervals(0, 1_000_000, [(0, 500_000)])
-        assert tl.loc[tl["type"] == "busy_time", "percent"].iloc[0] == pytest.approx(50.0)
+        assert tl.loc[tl["type"] == "busy_time", "percent"].iloc[0] == pytest.approx(
+            50.0
+        )
         assert tl.loc[tl["type"] == "idle", "percent"].iloc[0] == pytest.approx(50.0)
 
     def test_total_time_ms(self):
@@ -338,13 +355,19 @@ class TestComputeSteadyStateTimeline:
             jit_rows = [(1000, 2000, "__amd_rocclr_copyBuffer")]
             sim_base = 3_000_000_000
             sim_rows = [
-                (sim_base + i * 10000, sim_base + i * 10000 + 5000, "kernel_step_1_c532_0_kernel_6_range_for")
+                (
+                    sim_base + i * 10000,
+                    sim_base + i * 10000 + 5000,
+                    "kernel_step_1_c532_0_kernel_6_range_for",
+                )
                 for i in range(100)
             ]
             csv_path = self._write_trace_csv(tmp_dir, jit_rows + sim_rows)
 
             timeline, meta = compute_steady_state_timeline(
-                str(csv_path), gap_threshold_ns=1_000_000_000, fallback_window_ns=500_000_000
+                str(csv_path),
+                gap_threshold_ns=1_000_000_000,
+                fallback_window_ns=500_000_000,
             )
 
             assert meta["dispatch_count"] == 100
@@ -355,7 +378,11 @@ class TestComputeSteadyStateTimeline:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             rows = [
-                (1_000_000_000 + i * 1000, 1_000_000_000 + i * 1000 + 500, "kernel_step_1")
+                (
+                    1_000_000_000 + i * 1000,
+                    1_000_000_000 + i * 1000 + 500,
+                    "kernel_step_1",
+                )
                 for i in range(50)
             ]
             csv_path = self._write_trace_csv(tmp_dir, rows)
@@ -376,23 +403,27 @@ class TestFixRocprofKernelSummaryUnits:
     """TraceLens reports ns as ms — this function divides by 1000."""
 
     def test_divides_total_and_mean(self):
-        df = pd.DataFrame({
-            "name": ["kernel_a", "kernel_b"],
-            "Total Kernel Time (ms)": [5000.0, 3000.0],
-            "Mean Kernel Time (µs)": [500.0, 300.0],
-            "Count": [10, 10],
-        })
+        df = pd.DataFrame(
+            {
+                "name": ["kernel_a", "kernel_b"],
+                "Total Kernel Time (ms)": [5000.0, 3000.0],
+                "Mean Kernel Time (µs)": [500.0, 300.0],
+                "Count": [10, 10],
+            }
+        )
         fixed = fix_rocprof_kernel_summary_units(df)
         assert fixed["Total Kernel Time (ms)"].iloc[0] == pytest.approx(5.0)
         assert fixed["Total Kernel Time (ms)"].iloc[1] == pytest.approx(3.0)
         assert fixed["Mean Kernel Time (µs)"].iloc[0] == pytest.approx(0.5)
 
     def test_does_not_modify_original(self):
-        df = pd.DataFrame({
-            "name": ["k"],
-            "Total Kernel Time (ms)": [1000.0],
-            "Mean Kernel Time (µs)": [100.0],
-        })
+        df = pd.DataFrame(
+            {
+                "name": ["k"],
+                "Total Kernel Time (ms)": [1000.0],
+                "Mean Kernel Time (µs)": [100.0],
+            }
+        )
         fix_rocprof_kernel_summary_units(df)
         assert df["Total Kernel Time (ms)"].iloc[0] == 1000.0
 
@@ -411,17 +442,19 @@ class TestApplyGenesisCategories:
     """Validate in-place category assignment to rocprof reports dict."""
 
     def _sample_kernel_summary(self) -> pd.DataFrame:
-        return pd.DataFrame({
-            "name": [
-                "_kernel_solve_body_tiled_wc_amdgpu_c530_0_kernel_0_range_for",
-                "func_broad_phase_c402_0_kernel_3_range_for",
-                "kernel_step_1_c532_0_kernel_6_range_for",
-                "__amd_rocclr_copyBuffer",
-            ],
-            "Count": [471, 511, 511, 11723],
-            "Total Kernel Time (ms)": [2021.9, 159.1, 159.4, 64.2],
-            "Percentage (%)": [50.3, 3.96, 3.97, 1.6],
-        })
+        return pd.DataFrame(
+            {
+                "name": [
+                    "_kernel_solve_body_tiled_wc_amdgpu_c530_0_kernel_0_range_for",
+                    "func_broad_phase_c402_0_kernel_3_range_for",
+                    "kernel_step_1_c532_0_kernel_6_range_for",
+                    "__amd_rocclr_copyBuffer",
+                ],
+                "Count": [471, 511, 511, 11723],
+                "Total Kernel Time (ms)": [2021.9, 159.1, 159.4, 64.2],
+                "Percentage (%)": [50.3, 3.96, 3.97, 1.6],
+            }
+        )
 
     def test_adds_category_column(self):
         reports = {"kernel_summary": self._sample_kernel_summary()}
@@ -465,11 +498,17 @@ class TestRebuildKernelSummaryByCategory:
     """Validate category grouping aggregation."""
 
     def test_groups_kernels(self):
-        df = pd.DataFrame({
-            "name": ["_kernel_solve_body_tiled", "func_solve_init_c478", "func_broad_phase_c402"],
-            "Count": [100, 200, 150],
-            "Total Kernel Time (ms)": [500.0, 300.0, 200.0],
-        })
+        df = pd.DataFrame(
+            {
+                "name": [
+                    "_kernel_solve_body_tiled",
+                    "func_solve_init_c478",
+                    "func_broad_phase_c402",
+                ],
+                "Count": [100, 200, 150],
+                "Total Kernel Time (ms)": [500.0, 300.0, 200.0],
+            }
+        )
         df["Category"] = df["name"].apply(categorize_kernel)
         result = rebuild_kernel_summary_by_category(df)
 
@@ -479,12 +518,14 @@ class TestRebuildKernelSummaryByCategory:
         assert rbs["Count"].iloc[0] == 300
 
     def test_percentages_sum_to_100(self):
-        df = pd.DataFrame({
-            "name": ["kernel_step_1", "func_broad_phase"],
-            "Count": [10, 20],
-            "Total Kernel Time (ms)": [60.0, 40.0],
-            "Category": ["Time Integration", "Broadphase Collision"],
-        })
+        df = pd.DataFrame(
+            {
+                "name": ["kernel_step_1", "func_broad_phase"],
+                "Count": [10, 20],
+                "Total Kernel Time (ms)": [60.0, 40.0],
+                "Category": ["Time Integration", "Broadphase Collision"],
+            }
+        )
         result = rebuild_kernel_summary_by_category(df)
         assert result["Percentage (%)"].sum() == pytest.approx(100.0)
 
@@ -555,18 +596,24 @@ class TestConvertRocprofCsvToJson:
         """Convert with include_api=True."""
         capture = _create_capture_dir(tmp_path)
         out_path = tmp_path / "result.json"
-        convert_rocprof_csv_to_json(str(capture / "kernel_trace"), str(out_path), include_api=True)
+        convert_rocprof_csv_to_json(
+            str(capture / "kernel_trace"), str(out_path), include_api=True
+        )
         return json.loads(out_path.read_text())
 
     def test_produces_valid_json(self, converted_json: dict):
         assert "rocprofiler-sdk-tool" in converted_json
 
     def test_has_kernel_dispatches(self, converted_json: dict):
-        dispatches = converted_json["rocprofiler-sdk-tool"][0]["buffer_records"]["kernel_dispatch"]
+        dispatches = converted_json["rocprofiler-sdk-tool"][0]["buffer_records"][
+            "kernel_dispatch"
+        ]
         assert len(dispatches) == 5
 
     def test_dispatch_has_required_fields(self, converted_json: dict):
-        dispatch = converted_json["rocprofiler-sdk-tool"][0]["buffer_records"]["kernel_dispatch"][0]
+        dispatch = converted_json["rocprofiler-sdk-tool"][0]["buffer_records"][
+            "kernel_dispatch"
+        ][0]
         assert "start_timestamp" in dispatch
         assert "end_timestamp" in dispatch
         assert "dispatch_info" in dispatch
@@ -579,15 +626,21 @@ class TestConvertRocprofCsvToJson:
         assert "__amd_rocclr_fillBufferAligned" in names
 
     def test_include_api_false_no_hip_events(self, converted_json: dict):
-        assert converted_json["rocprofiler-sdk-tool"][0]["buffer_records"]["hip_api"] == []
+        assert (
+            converted_json["rocprofiler-sdk-tool"][0]["buffer_records"]["hip_api"] == []
+        )
 
     def test_include_api_true_has_hip_events(self, converted_json_with_api: dict):
-        hip_events = converted_json_with_api["rocprofiler-sdk-tool"][0]["buffer_records"]["hip_api"]
+        hip_events = converted_json_with_api["rocprofiler-sdk-tool"][0][
+            "buffer_records"
+        ]["hip_api"]
         assert len(hip_events) == 3
         assert hip_events[0]["operation"] == "__hipRegisterFatBinary"
 
     def test_include_api_true_has_hsa_events(self, converted_json_with_api: dict):
-        hsa_events = converted_json_with_api["rocprofiler-sdk-tool"][0]["buffer_records"]["hsa_api"]
+        hsa_events = converted_json_with_api["rocprofiler-sdk-tool"][0][
+            "buffer_records"
+        ]["hsa_api"]
         assert len(hsa_events) == 1
         assert hsa_events[0]["operation"] == "hsa_signal_wait_scacquire"
 
@@ -605,7 +658,9 @@ class TestConvertRocprofCsvToJson:
             convert_rocprof_csv_to_json(str(empty_dir), str(tmp_path / "out.json"))
 
     def test_grid_and_workgroup_sizes(self, converted_json: dict):
-        solver_dispatch = converted_json["rocprofiler-sdk-tool"][0]["buffer_records"]["kernel_dispatch"][3]
+        solver_dispatch = converted_json["rocprofiler-sdk-tool"][0]["buffer_records"][
+            "kernel_dispatch"
+        ][3]
         assert solver_dispatch["dispatch_info"]["grid_size"]["x"] == 65536
         assert solver_dispatch["dispatch_info"]["workgroup_size"]["x"] == 64
 
@@ -679,7 +734,12 @@ class TestLoadCapture:
     def test_reads_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             capture = _create_capture_dir(Path(tmp))
-            manifest = {"timestamp": "20260529_181047", "n_envs": 8192, "num_steps": 500, "precision": "32"}
+            manifest = {
+                "timestamp": "20260529_181047",
+                "n_envs": 8192,
+                "num_steps": 500,
+                "precision": "32",
+            }
             (capture / "combined_manifest.json").write_text(json.dumps(manifest))
             result = load_capture(str(capture))
             assert result["manifest"]["n_envs"] == 8192
@@ -845,11 +905,13 @@ class TestWriteExcel:
             xlsx_path = Path(tmp) / "report.xlsx"
             sections = {
                 "rocprof": {
-                    "gpu_timeline": pd.DataFrame({
-                        "type": ["total_time", "kernel", "idle"],
-                        "time ms": [100.0, 80.0, 20.0],
-                        "percent": [100.0, 80.0, 20.0],
-                    }),
+                    "gpu_timeline": pd.DataFrame(
+                        {
+                            "type": ["total_time", "kernel", "idle"],
+                            "time ms": [100.0, 80.0, 20.0],
+                            "percent": [100.0, 80.0, 20.0],
+                        }
+                    ),
                 },
             }
             write_excel(xlsx_path, sections)
@@ -897,28 +959,34 @@ class TestWriteGenesisSummaryMd:
     def _sample_reports(self) -> dict:
         return {
             "rocprof": {
-                "gpu_timeline": pd.DataFrame({
-                    "type": ["total_time", "kernel", "memory", "busy_time", "idle"],
-                    "time ms": [3980.0, 3800.0, 0.0, 3800.0, 180.0],
-                    "percent": [100.0, 95.5, 0.0, 95.5, 4.5],
-                }),
-                "kernel_summary": pd.DataFrame({
-                    "name": [
-                        "_kernel_solve_body_tiled_wc_amdgpu_c530_0_kernel_0_range_for",
-                        "func_broad_phase_c402_0_kernel_3_range_for",
-                    ],
-                    "Count": [471, 511],
-                    "Total Kernel Time (ms)": [2021.9, 159.1],
-                    "Percentage (%)": [50.3, 3.96],
-                    "Category": ["Rigid Body Solver", "Broadphase Collision"],
-                }),
-                "kernel_summary_by_category": pd.DataFrame({
-                    "op category": ["Rigid Body Solver", "Broadphase Collision"],
-                    "Count": [471, 511],
-                    "total_direct_kernel_time_ms": [2021.9, 159.1],
-                    "Percentage (%)": [92.7, 7.3],
-                    "Cumulative Percentage (%)": [92.7, 100.0],
-                }),
+                "gpu_timeline": pd.DataFrame(
+                    {
+                        "type": ["total_time", "kernel", "memory", "busy_time", "idle"],
+                        "time ms": [3980.0, 3800.0, 0.0, 3800.0, 180.0],
+                        "percent": [100.0, 95.5, 0.0, 95.5, 4.5],
+                    }
+                ),
+                "kernel_summary": pd.DataFrame(
+                    {
+                        "name": [
+                            "_kernel_solve_body_tiled_wc_amdgpu_c530_0_kernel_0_range_for",
+                            "func_broad_phase_c402_0_kernel_3_range_for",
+                        ],
+                        "Count": [471, 511],
+                        "Total Kernel Time (ms)": [2021.9, 159.1],
+                        "Percentage (%)": [50.3, 3.96],
+                        "Category": ["Rigid Body Solver", "Broadphase Collision"],
+                    }
+                ),
+                "kernel_summary_by_category": pd.DataFrame(
+                    {
+                        "op category": ["Rigid Body Solver", "Broadphase Collision"],
+                        "Count": [471, 511],
+                        "total_direct_kernel_time_ms": [2021.9, 159.1],
+                        "Percentage (%)": [92.7, 7.3],
+                        "Cumulative Percentage (%)": [92.7, 100.0],
+                    }
+                ),
             },
         }
 
@@ -932,7 +1000,9 @@ class TestWriteGenesisSummaryMd:
                 "gpu_util_pct": 95.5,
                 "window_ms": 3980.0,
             }
-            write_genesis_summary_md(md_path, capture, self._sample_reports(), steady_meta)
+            write_genesis_summary_md(
+                md_path, capture, self._sample_reports(), steady_meta
+            )
             assert md_path.exists()
             assert "TraceLens Genesis Performance Report" in md_path.read_text()
 
@@ -940,8 +1010,15 @@ class TestWriteGenesisSummaryMd:
         with tempfile.TemporaryDirectory() as tmp:
             md_path = Path(tmp) / "summary.md"
             capture = {"capture_dir": Path(tmp), "manifest": None}
-            steady_meta = {"method": "after_max_gap", "dispatch_count": 53000, "gpu_util_pct": 95.5, "window_ms": 3980.0}
-            write_genesis_summary_md(md_path, capture, self._sample_reports(), steady_meta)
+            steady_meta = {
+                "method": "after_max_gap",
+                "dispatch_count": 53000,
+                "gpu_util_pct": 95.5,
+                "window_ms": 3980.0,
+            }
+            write_genesis_summary_md(
+                md_path, capture, self._sample_reports(), steady_meta
+            )
             content = md_path.read_text()
             assert "95.5%" in content
             assert "53,000 dispatches" in content
@@ -950,8 +1027,15 @@ class TestWriteGenesisSummaryMd:
         with tempfile.TemporaryDirectory() as tmp:
             md_path = Path(tmp) / "summary.md"
             capture = {"capture_dir": Path(tmp), "manifest": None}
-            steady_meta = {"method": "x", "dispatch_count": 1, "gpu_util_pct": 50, "window_ms": 1}
-            write_genesis_summary_md(md_path, capture, self._sample_reports(), steady_meta)
+            steady_meta = {
+                "method": "x",
+                "dispatch_count": 1,
+                "gpu_util_pct": 50,
+                "window_ms": 1,
+            }
+            write_genesis_summary_md(
+                md_path, capture, self._sample_reports(), steady_meta
+            )
             content = md_path.read_text()
             assert "Top 10 Kernels" in content
             assert "Rigid Body Solver" in content
@@ -961,10 +1045,22 @@ class TestWriteGenesisSummaryMd:
             md_path = Path(tmp) / "summary.md"
             capture = {
                 "capture_dir": Path(tmp),
-                "manifest": {"timestamp": "20260529_181047", "n_envs": 8192, "num_steps": 500, "precision": "32"},
+                "manifest": {
+                    "timestamp": "20260529_181047",
+                    "n_envs": 8192,
+                    "num_steps": 500,
+                    "precision": "32",
+                },
             }
-            steady_meta = {"method": "x", "dispatch_count": 1, "gpu_util_pct": 50, "window_ms": 1}
-            write_genesis_summary_md(md_path, capture, self._sample_reports(), steady_meta)
+            steady_meta = {
+                "method": "x",
+                "dispatch_count": 1,
+                "gpu_util_pct": 50,
+                "window_ms": 1,
+            }
+            write_genesis_summary_md(
+                md_path, capture, self._sample_reports(), steady_meta
+            )
             content = md_path.read_text()
             assert "n_envs=8192" in content
             assert "steps=500" in content

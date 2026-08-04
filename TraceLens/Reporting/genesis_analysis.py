@@ -12,15 +12,23 @@ import pandas as pd
 # Taichi / Genesis physics kernel name patterns (not ML GEMM/conv categories)
 GENESIS_CATEGORIES: Dict[str, List[str]] = {
     "Rigid Body Solver": [
-        "_kernel_solve_body", "_kernel_solve_one_iter", "func_solve_body",
-        "func_solve_init", "_kernel_linesearch",
-        "_kernel_solve_iter_post_linesearch", "_kernel_update_constraint",
-        "_kernel_update_gradient", "_kernel_cg_save", "_kernel_update_search_direction",
+        "_kernel_solve_body",
+        "_kernel_solve_one_iter",
+        "func_solve_body",
+        "func_solve_init",
+        "_kernel_linesearch",
+        "_kernel_solve_iter_post_linesearch",
+        "_kernel_update_constraint",
+        "_kernel_update_gradient",
+        "_kernel_cg_save",
+        "_kernel_update_search_direction",
         "kernel_compute_mass_matrix",
     ],
     "Broadphase Collision": ["func_broad_phase"],
     "Narrowphase Collision": [
-        "_func_narrowphase", "_func_prepare_gjk", "_func_reset_narrowphase",
+        "_func_narrowphase",
+        "_func_prepare_gjk",
+        "_func_reset_narrowphase",
     ],
     "Contact Management": ["func_sort_contacts", "func_update_contact"],
     "Time Integration": ["kernel_step_1", "kernel_step_2", "func_update_qacc"],
@@ -28,11 +36,18 @@ GENESIS_CATEGORIES: Dict[str, List[str]] = {
     "Forward Kinematics": ["kernel_forward_kinematics", "kernel_update_verts"],
     "Geometry / AABB": ["kernel_update_geom", "kernel_bit_reduction"],
     "Memory Ops (ROCm)": [
-        "__amd_rocclr_copyBuffer", "__amd_rocclr_fillBuffer", "__amd_rocclr_initHeap",
+        "__amd_rocclr_copyBuffer",
+        "__amd_rocclr_fillBuffer",
+        "__amd_rocclr_initHeap",
     ],
     "Runtime Init": [
-        "runtime_initialize", "runtime_get_memory", "runtime_allocate", "fill_ndarray",
-        "kernel_init_geom", "kernel_init_vvert", "ext_arr_to_ndarray",
+        "runtime_initialize",
+        "runtime_get_memory",
+        "runtime_allocate",
+        "fill_ndarray",
+        "kernel_init_geom",
+        "kernel_init_vvert",
+        "ext_arr_to_ndarray",
     ],
     "PyTorch Runtime": ["at::native::", "elementwise_kernel"],
 }
@@ -202,7 +217,10 @@ def rebuild_kernel_summary_by_category(kernel_summary: pd.DataFrame) -> pd.DataF
         df["Category"] = df["name"].apply(categorize_kernel)
     grouped = (
         df.groupby("Category", as_index=False)
-        .agg(Count=("Count", "sum"), total_direct_kernel_time_ms=("Total Kernel Time (ms)", "sum"))
+        .agg(
+            Count=("Count", "sum"),
+            total_direct_kernel_time_ms=("Total Kernel Time (ms)", "sum"),
+        )
         .rename(columns={"Category": "op category"})
     )
     total = grouped["total_direct_kernel_time_ms"].sum()
@@ -210,10 +228,14 @@ def rebuild_kernel_summary_by_category(kernel_summary: pd.DataFrame) -> pd.DataF
         grouped["total_direct_kernel_time_ms"] / total * 100.0 if total > 0 else 0.0
     )
     grouped["Cumulative Percentage (%)"] = grouped["Percentage (%)"].cumsum()
-    return grouped.sort_values("total_direct_kernel_time_ms", ascending=False).reset_index(drop=True)
+    return grouped.sort_values(
+        "total_direct_kernel_time_ms", ascending=False
+    ).reset_index(drop=True)
 
 
-def apply_genesis_categories_to_rocprof(rocprof_reports: Dict[str, pd.DataFrame]) -> None:
+def apply_genesis_categories_to_rocprof(
+    rocprof_reports: Dict[str, pd.DataFrame],
+) -> None:
     """Replace TraceLens ML categories in rocprof sheets with Genesis physics categories."""
     kernel_summary = rocprof_reports.get("kernel_summary")
     if kernel_summary is None or kernel_summary.empty:
