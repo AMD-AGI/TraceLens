@@ -399,7 +399,7 @@ class aten_addmm(GEMM):
     @staticmethod
     def get_param_details(event):
         input_dims = event["args"]["Input Dims"]
-        C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
+        _C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
         M = A_shape[0]
         N = B_shape[1]
         K = A_shape[1]
@@ -587,7 +587,7 @@ class aten_baddbmm(GEMM):
     def get_param_details(event):
         """Extract B, M, N, K and metadata from the profiler event."""
         input_dims = event["args"]["Input Dims"]
-        C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
+        _C_shape, A_shape, B_shape = input_dims[0], input_dims[1], input_dims[2]
 
         B_dim, M, K = A_shape  # (B, M, K)
         _, _, N = B_shape  # (B, K, N)
@@ -735,7 +735,7 @@ class tex_ts_te_gemm_ts(GEMM):
     def get_param_details(self, event):
         input_dims = event["args"]["Input Dims"]
 
-        C_shape, A_shape, B_shape = input_dims[10], input_dims[0], input_dims[5]
+        _C_shape, A_shape, B_shape = input_dims[10], input_dims[0], input_dims[5]
 
         # index 4 and 9 are transa and transb respectively
         # https://github.com/ROCm/TransformerEngine/blob/e9772d4d18b2980e8e0643c94591a94cad9bb8b7/transformer_engine/pytorch/cpp_extensions/gemm.py#L248
@@ -2069,7 +2069,6 @@ class SDPA:
             block_N_Q = min(N_Q, N_Q)
             block_N_KV = min(128, N_KV)
 
-        num_blocks_N_Q = math.ceil(N_Q / block_N_Q)
         num_blocks_N_KV = math.ceil(N_KV / block_N_KV)
         # Partition happens on ∇K and ∇V and not ∇Q
         total_num_blocks = num_blocks_N_KV * B * H_Q
@@ -3109,9 +3108,7 @@ class vllm_unified_attention_with_output(SDPA):
             )
         input_dims = event["args"]["Input Dims"]
 
-        concrete_inputs = event["args"]["Concrete Inputs"]
-        q_shape, k_shape, v_shape = input_dims[0], input_dims[1], input_dims[3]
-        bhnd_idx = 0, 2, 1, 3
+        q_shape, k_shape, _v_shape = input_dims[0], input_dims[1], input_dims[3]
         B = 1
         N_Q, H_Q, d_h_qk = q_shape
         N_KV, H_KV, d_h_v = k_shape
@@ -4714,7 +4711,6 @@ class GroupNorm(Normalization):
     def get_param_details(event):
         args_input_dims = event["args"]["Input Dims"]
         # concrete_inputs[1] = num_groups
-        concrete_inputs = event["args"]["Concrete Inputs"]
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
@@ -5583,7 +5579,7 @@ class FusedLnModulate(Normalization):
         except (KeyError, IndexError):
             stride_input = None
 
-        T, B, H = x_shape[0], x_shape[1], x_shape[2]
+        _T, _B, H = x_shape[0], x_shape[1], x_shape[2]
         return {
             "op_shape": x_shape,
             "dtype_in_out": (dtype_in, None),
@@ -5642,7 +5638,7 @@ class FusedLnModulateBackward(Normalization):
         except (KeyError, IndexError):
             stride_input = None
 
-        T, B, H = grad_shape[0], grad_shape[1], grad_shape[2]
+        _T, _B, H = grad_shape[0], grad_shape[1], grad_shape[2]
         return {
             "op_shape": grad_shape,
             "dtype_in_out": (dtype_in, None),

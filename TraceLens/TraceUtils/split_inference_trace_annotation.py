@@ -180,7 +180,6 @@ from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TraceUtils.annotation_utils import (
     ITERATION_PATTERNS,
     ITERATION_BACKUP_PATTERNS,
-    IterationAnnotation,
     find_events_by_patterns,
     find_phase_from_window,
     has_context,
@@ -452,7 +451,6 @@ def extract_iteration(
 
     # For each iteration root, filter CPU events and collect correlation ids
     for iteration_root in tqdm(iteration_roots):
-        batch = 0
         start_time = []
         end_time = []
         iter_tid = iteration_root.get("tid")

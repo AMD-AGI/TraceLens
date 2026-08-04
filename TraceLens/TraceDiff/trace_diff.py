@@ -1530,7 +1530,6 @@ class TraceDiff:
                             n1_list_copy = n1_list.copy()
                             n2_list = mapping["trace2"]["name"]
                             for n1 in n1_list:
-                                found = 0
                                 for n2 in n2_list:
                                     if n1 == n2:
                                         n1_list_copy.remove(n1)

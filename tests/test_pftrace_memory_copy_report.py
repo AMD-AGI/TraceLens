@@ -173,7 +173,7 @@ class TestGeneratePerfReportPftraceMemoryCopy:
             trace_path = f.name
         with tempfile.TemporaryDirectory() as out_dir:
             try:
-                dfs = generate_perf_report_pftrace_memory_copy(
+                generate_perf_report_pftrace_memory_copy(
                     trace_path=trace_path,
                     output_csvs_dir=out_dir,
                 )

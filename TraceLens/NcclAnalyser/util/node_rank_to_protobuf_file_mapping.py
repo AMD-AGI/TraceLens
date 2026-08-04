@@ -196,7 +196,6 @@ def extract_node_name_from_path(file_path):
         str: Node name or None if not found
     """
     path = Path(file_path)
-    path_parts = path.parts
 
     # Method 1: Node name from filename (e.g., nodeXXX.xplane.pb -> nodeXXX)
     if path.is_file() and path.suffix in [".pb", ".log"]:

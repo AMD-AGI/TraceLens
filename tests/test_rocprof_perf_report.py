@@ -247,7 +247,7 @@ class TestGeneratePerfReport:
     def test_generate_csv_reports(self, rocprof_file):
         """Test generating CSV reports"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            dfs = generate_perf_report_rocprof(
+            generate_perf_report_rocprof(
                 profile_json_path=rocprof_file,
                 output_csvs_dir=tmpdir,
                 kernel_summary=True,

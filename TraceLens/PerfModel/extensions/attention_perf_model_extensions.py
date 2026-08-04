@@ -790,7 +790,6 @@ class gdn_attention_core(InferenceAttention):
         g_sq = stats["g_sq"]
 
         input_dims = event["args"]["Input Dims"]
-        T = input_dims[0][0]
         D = input_dims[0][1]  # 2*H_K*d_k + H_V*d_v
         H_V = input_dims[1][1]  # num_v_heads / tp
         d_v = input_dims[3][2]  # head_v_dim

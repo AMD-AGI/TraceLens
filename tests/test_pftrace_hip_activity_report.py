@@ -133,7 +133,7 @@ class TestGeneratePerfReportPftraceHipActivity:
             trace_path = os.path.join(tmpdir, "trace.json")
             with open(trace_path, "w") as f:
                 json.dump({"traceEvents": _minimal_trace_events_with_agent()}, f)
-            dfs = generate_perf_report_pftrace_hip_activity(
+            generate_perf_report_pftrace_hip_activity(
                 trace_path=trace_path,
                 output_csvs_dir=tmpdir,
                 min_event_ns=0,

@@ -1047,7 +1047,7 @@ def generate_perf_report_pytorch(
     if kernel_summary:
         try:
             df_kernels = perf_analyzer.get_df_kernels(launcher_detail=True)
-        except Exception as e:
+        except Exception:
             df_kernels = pd.DataFrame()
         if not df_kernels.empty and "Kernel duration (µs)" in df_kernels.columns:
             # Fallback: If Parent cpu_op is missing, fill it from Launcher (for display purposes)

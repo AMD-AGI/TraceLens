@@ -972,7 +972,6 @@ class moe_aiter_unfused_down(UnfusedMoE_Down):
         kernel_input_shape = args["Input Dims"]
         input_shape = kernel_input_shape[0]
         w1_shape = kernel_input_shape[1]
-        w2_shape = kernel_input_shape[2]
 
         num_tokens, topk, inter_dim = input_shape
 
