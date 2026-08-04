@@ -40,6 +40,7 @@ Examples:
 
 import argparse
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -48,6 +49,8 @@ import torch
 from triton.testing import do_bench
 
 from .microbench_utils import check_gpu_idle
+
+logger = logging.getLogger(__name__)
 
 try:
     import triton
@@ -255,6 +258,7 @@ def _resolve_fp8_dtype(device: int, M: int, N: int, K: int) -> Optional[torch.dt
             print(f"    FP8 dtype: {fp8_dtype}")
             return fp8_dtype
         except Exception:
+            logger.debug("FP8 dtype %s probe failed", fp8_dtype, exc_info=True)
             continue
 
     print("    No supported FP8 dtype for torch._scaled_mm on this stack.")

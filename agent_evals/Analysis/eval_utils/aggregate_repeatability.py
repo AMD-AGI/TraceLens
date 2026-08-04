@@ -13,6 +13,14 @@ import os
 import re
 from collections import defaultdict
 
+
+def _optional_int(value, default=None):
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 RESULTS_ROOT = os.environ.get(
     "RESULTS_ROOT",
     os.path.join(
@@ -310,10 +318,9 @@ def parse_ndjson_stream(ndjson_path):
                 if mcid:
                     parts = mcid.rsplit("-", 2)
                     if len(parts) >= 3:
-                        try:
-                            turn_ids.add(int(parts[-2]))
-                        except ValueError:
-                            pass
+                        turn_id = _optional_int(parts[-2])
+                        if turn_id is not None:
+                            turn_ids.add(turn_id)
                 if rec.get("subtype") == "started":
                     tool_call_count += 1
                 tc = rec.get("tool_call", {})
@@ -331,10 +338,9 @@ def parse_ndjson_stream(ndjson_path):
                 if mcid:
                     parts = mcid.rsplit("-", 2)
                     if len(parts) >= 3:
-                        try:
-                            turn_ids.add(int(parts[-2]))
-                        except ValueError:
-                            pass
+                        turn_id = _optional_int(parts[-2])
+                        if turn_id is not None:
+                            turn_ids.add(turn_id)
 
     diag["turns"] = pi_turn_count if pi_turn_count else len(turn_ids)
     diag["tool_calls"] = pi_tool_calls if pi_tool_calls else tool_call_count

@@ -18,6 +18,13 @@ from TraceLens.PerfModel.perf_model import (
 from math import prod
 
 
+def _optional_int(value, default=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class gemm_a8w8_blockscale(GEMM):
     """
     Performance model for AITER's gemm_a8w8_blockscale kernel.
@@ -83,7 +90,7 @@ class gemm_a8w8_blockscale(GEMM):
             ),
         }
         # FP8/INT8 block-scale quant config; block sizes derived from scale-tensor shapes.
-        try:
+        if len(dims) > 3:
             x_scale, w_scale = dims[2], dims[3]
             block_k = (
                 (-(-K // x_scale[-1])) if x_scale and x_scale[-1] else None
@@ -98,8 +105,6 @@ class gemm_a8w8_blockscale(GEMM):
                     "scale_dtype": types[2] if len(types) > 2 else "float32",
                 }
             )
-        except (IndexError, TypeError, ZeroDivisionError):
-            pass
         # Output spec is inferred (torch traces record input dims only): Y[M, N] in bf16.
         details["output_shape"] = (M, N)
         details["output_dtype"] = "c10::bfloat16"
@@ -584,10 +589,9 @@ class vllm_triton_per_token_group_quant_fp8(GroupQuant):
         if len(concrete) > 1:
             raw = str(concrete[1]).strip()
             if raw and raw.lower() not in ("none",):
-                try:
-                    group_size = int(raw)
-                except ValueError:
-                    pass
+                parsed_group_size = _optional_int(raw)
+                if parsed_group_size is not None:
+                    group_size = parsed_group_size
 
         num_groups = max(1, (N + group_size - 1) // group_size)
         dtype_x = args.get("Input type", ("",))[0] if args.get("Input type") else ""

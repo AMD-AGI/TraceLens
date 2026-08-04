@@ -178,9 +178,8 @@ def _parse_pg_ranks(value: Union[str, List[int], tuple]) -> List[int]:
             parsed = ast.literal_eval(value)
             if isinstance(parsed, (list, tuple)):
                 return [int(x) for x in parsed]
-        except Exception:
-            pass
-        return [int(s) for s in re.findall(r"\d+", value)]
+        except (ValueError, SyntaxError):
+            return [int(s) for s in re.findall(r"\d+", value)]
     return []
 
 

@@ -20,9 +20,12 @@ Usage:
 """
 
 import os
+import logging
 import textwrap
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 ops: set[str] = set()
 
@@ -33,7 +36,7 @@ for ns_name in dir(torch.ops):
         ns = getattr(torch.ops, ns_name)
         ops.update(n for n in dir(ns) if not n.startswith("__"))
     except Exception:
-        pass
+        logger.debug("Skipping torch.ops namespace %s", ns_name, exc_info=True)
 
 if hasattr(torch, "distributed"):
     ops.update(n for n in dir(torch.distributed) if not n.startswith("_") and "_" in n)

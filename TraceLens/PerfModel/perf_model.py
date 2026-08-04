@@ -649,24 +649,18 @@ class vllm_gemm_with_dynamic_quant(GEMM):
         A_shape = None
         B_shape = None
         for shape in input_dims:
-            try:
-                if isinstance(shape, (list, tuple)) and len(shape) == 2:
-                    if A_shape is None:
-                        A_shape = tuple(shape)
-                    elif B_shape is None:
-                        B_shape = tuple(shape)
-                        break
-            except Exception:
-                continue
+            if isinstance(shape, (list, tuple)) and len(shape) == 2:
+                if A_shape is None:
+                    A_shape = tuple(shape)
+                elif B_shape is None:
+                    B_shape = tuple(shape)
+                    break
         # Fallback: try first two entries if not caught above
         if (A_shape is None or B_shape is None) and len(input_dims) >= 2:
-            try:
-                if A_shape is None and isinstance(input_dims[0], (list, tuple)):
-                    A_shape = tuple(input_dims[0])
-                if B_shape is None and isinstance(input_dims[1], (list, tuple)):
-                    B_shape = tuple(input_dims[1])
-            except Exception:
-                pass
+            if A_shape is None and isinstance(input_dims[0], (list, tuple)):
+                A_shape = tuple(input_dims[0])
+            if B_shape is None and isinstance(input_dims[1], (list, tuple)):
+                B_shape = tuple(input_dims[1])
 
         if not A_shape or not B_shape or len(A_shape) != 2 or len(B_shape) != 2:
             raise ValueError(
@@ -2223,6 +2217,16 @@ class SDPA:
         return simulated_time
 
 
+def _optional_float(value, default=0.0):
+    """Parse a trace concrete-input value as float, returning *default* on failure."""
+    if value in ("", "None", None):
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
 def extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx):
     B_q, H_Q, N_Q, d_h_Q = tuple(q_shape[i] for i in bhnd_idx)
     B_k, H_K, N_K, d_h_K = tuple(k_shape[i] for i in bhnd_idx)
@@ -2618,12 +2622,7 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
 
-        dropout_p = 0.0
-        if concrete_inputs[5] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[5])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[5])
 
         is_causal = (
             concrete_inputs[6].lower() == "true"
@@ -2672,12 +2671,7 @@ class aten__scaled_dot_product_efficient_attention(SDPA):
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
 
-        dropout_p = 0.0
-        if concrete_inputs[5] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[5])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[5])
 
         is_causal = (
             concrete_inputs[6].lower() == "true"
@@ -2725,12 +2719,7 @@ class aten__scaled_dot_product_flash_attention(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = 0.0
-        if concrete_inputs[3] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[3])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[3])
         is_causal = (
             concrete_inputs[4].lower() == "true"
             if concrete_inputs[4] not in ("", "None")
@@ -2781,12 +2770,7 @@ class aiter__flash_attn_forward(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = 0.0
-        if concrete_inputs[3] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[3])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[3])
         is_causal = (
             concrete_inputs[5].lower() == "true"
             if concrete_inputs[5] not in ("", "None")
@@ -2834,12 +2818,7 @@ class aiter__flash_attn_backward(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = 0.0
-        if concrete_inputs[10] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[10])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[10])
         is_causal = (
             concrete_inputs[12].lower() == "true"
             if concrete_inputs[12] not in ("", "None")
@@ -2913,12 +2892,7 @@ class aiter__fmha_v3_forward(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = 0.0
-        if concrete_inputs[4] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[4])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[4])
         is_causal = (
             concrete_inputs[6].lower() == "true"
             if concrete_inputs[6] not in ("", "None")
@@ -2953,12 +2927,7 @@ class aiter__fmha_v3_backward(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = 0.0
-        if concrete_inputs[7] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[7])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[7])
         is_causal = (
             concrete_inputs[9].lower() == "true"
             if concrete_inputs[9] not in ("", "None")
@@ -3001,12 +2970,7 @@ def _parse_aiter_mha_fwd_args(event):
     B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
         sdpa_cfg[key] for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
     )
-    dropout_p = 0.0
-    if concrete_inputs[3] not in ("", "None"):
-        try:
-            dropout_p = float(concrete_inputs[3])
-        except (ValueError, TypeError):
-            pass
+    dropout_p = _optional_float(concrete_inputs[3])
     is_causal = (
         concrete_inputs[5].lower() == "true"
         if concrete_inputs[5] not in ("", "None")
@@ -3061,12 +3025,7 @@ class aiter__mha_bwd(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = 0.0
-        if concrete_inputs[6] not in ("", "None"):
-            try:
-                dropout_p = float(concrete_inputs[6])
-            except (ValueError, TypeError):
-                pass
+        dropout_p = _optional_float(concrete_inputs[6])
         is_causal = (
             concrete_inputs[8].lower() == "true"
             if concrete_inputs[8] not in ("", "None")

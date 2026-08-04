@@ -66,14 +66,21 @@ def _discover_agent_to_devid(events: List[Dict[str, Any]]) -> Dict[str, int]:
     return agent_to_idx
 
 
+def _optional_int(value, default=None):
+    """Parse *value* as int, returning *default* when conversion fails."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _get_device_id(e: Dict[str, Any], agent_to_idx: Dict[str, int]) -> Optional[int]:
     args = e.get("args") or {}
     for k in ("device_id", "deviceId", "dev_id", "DevId", "gpu_id", "gpuId"):
         if k in args:
-            try:
-                return int(args[k])
-            except (TypeError, ValueError):
-                pass
+            device_id = _optional_int(args[k])
+            if device_id is not None:
+                return device_id
     agent = args.get("agent")
     if agent and agent in agent_to_idx:
         return agent_to_idx[agent]
@@ -113,10 +120,9 @@ def _get_corr_id(e: Dict[str, Any]) -> Optional[int]:
     args = e.get("args") or {}
     for k in ("corr_id", "correlation_id", "correlationId", "CorrId"):
         if k in args:
-            try:
-                return int(args[k])
-            except (TypeError, ValueError):
-                pass
+            corr_id = _optional_int(args[k])
+            if corr_id is not None:
+                return corr_id
     return None
 
 

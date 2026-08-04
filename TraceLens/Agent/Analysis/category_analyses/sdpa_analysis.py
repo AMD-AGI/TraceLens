@@ -13,11 +13,14 @@ Supports both Flash Attention and Paged Attention (vLLM) analysis.
 
 import argparse
 import ast
+import logging
 import re
 import sys
 import os
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -103,7 +106,7 @@ def parse_kernel_breakdown(kernel_details_str: str) -> dict:
         result["total_kernel_time_us"] = round(total_time, 2)
 
     except Exception:
-        pass
+        logger.debug("Failed to parse kernel breakdown", exc_info=True)
 
     return result
 
@@ -171,14 +174,9 @@ def parse_perf_params(perf_params_str: str) -> dict:
                 result["attention_pattern"] = "unknown"
 
     except Exception:
-        pass
+        logger.debug("Failed to parse perf params", exc_info=True)
 
     return result
-
-
-# ---------------------------------------------------------------------------
-# SDPA classification and extraction
-# ---------------------------------------------------------------------------
 
 
 def classify_sdpa_operation(op_name: str, row) -> dict:

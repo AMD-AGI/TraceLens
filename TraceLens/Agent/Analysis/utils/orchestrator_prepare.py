@@ -510,7 +510,7 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
                         }
                     )
             except (KeyError, IndexError):
-                pass
+                continue
         if len(kernels) < 2:
             continue
 
@@ -562,7 +562,7 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
                 }
             )
         except (KeyError, IndexError):
-            pass
+            continue
 
     sibling_seqs = []
     seen_sibling_bases = {}
