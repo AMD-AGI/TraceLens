@@ -103,9 +103,11 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 ### Build and Cache Command Prefix
 
-After collecting inputs, build a command template and save it to `<output_dir>/cache/cmd_prefix.txt`. Create the directory with `mkdir -p <output_dir>/cache`.
+After collecting inputs, build a command template. Create the directory with `mkdir -p <output_dir>/cache`.
 
 The template uses `{CMD}` as a placeholder for the actual command.
+
+**Local:** When `<venv_path>` is set, use `source <venv_path>/bin/activate && cd <tracelens_dir> && {CMD}`. When `<venv_path>` is empty, use `cd <tracelens_dir> && {CMD}` if `<tracelens_dir>` is known; otherwise run `{CMD}` directly.
 
 **Cluster:** Before building the prefix, locate the TraceLens project root on the remote environment.
 
@@ -129,13 +131,28 @@ Build the cluster prefix using this lookup:
 | Yes | No | `ssh <node> "docker exec <container> bash -c 'cd <tracelens_dir> && {CMD}'"` |
 | No | Yes | `ssh <node> "bash -c 'source <venv_path>/bin/activate && cd <tracelens_dir> && {CMD}'"` |
 
-Write the resolved template to `<output_dir>/cache/cmd_prefix.txt`. Then validate it works:
+Write the resolved template to `<output_dir>/cache/cmd_prefix.txt`. Then validate that TraceLens is importable in the target environment through the prefix:
 
 ```bash
 <prefix> python3 -c "import TraceLens; print('PREFIX_OK')"
 ```
 
-If this fails, inform the user with `[DIAG:pipeline:PREFIX_FAIL]` and check that `<tracelens_dir>` is the **parent** of TraceLens (not the repo root itself), verify the container/venv is accessible, rebuild, and retry. Do NOT proceed to Step 1 until validation passes.
+If this fails, the cause is either a bad prefix or a missing package:
+- Verify `<tracelens_dir>` is the parent of TraceLens (not the repo root itself) and that the container/venv is accessible; if wrong, rebuild prefix and retry once. If it still fails, inform the user with `[DIAG:pipeline:PREFIX_FAIL]`.
+- If the environment is reachable but TraceLens is not installed, ask the user where to install it and if they require a new venv <venv_path>.
+  ```bash
+  # Install into the container / bare metal directly (no prefix rebuild needed):
+  <prefix> pip install TraceLens
+
+  # Create a new Python venv (if requested)
+  <prefix> python3 -m venv <venv_path>
+
+  # Install into the python venv:
+  <prefix> <venv_path>/bin/pip install TraceLens
+  ```
+Rebuild the prefix and re-validate after installing.
+
+Do NOT proceed to Step 1 until validation passes.
 
 ### Command Execution Pattern
 

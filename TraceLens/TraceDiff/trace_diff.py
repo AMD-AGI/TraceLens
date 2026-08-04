@@ -1411,10 +1411,24 @@ class TraceDiff:
         cols.insert(1, "operation_count")
         df_agg = df_agg[cols]
 
-        # 10. Sort by the trace1 kernel time sum
+        # 10. Sort by the trace1 kernel time sum, then stable tie-breakers so
+        # row order is deterministic across Python/pandas versions.
         sort_col = "kernel_time_sum"
         if sort_col in df_agg.columns:
-            df_agg = df_agg.sort_values(by=sort_col, ascending=False, ignore_index=True)
+            tiebreak_cols = [c for c in df_agg.columns if c != sort_col]
+            for col in reversed(tiebreak_cols):
+                df_agg = df_agg.sort_values(
+                    by=col,
+                    kind="mergesort",
+                    na_position="last",
+                    key=lambda s: s.astype(str),
+                )
+            df_agg = df_agg.sort_values(
+                by=sort_col,
+                ascending=False,
+                kind="mergesort",
+                ignore_index=True,
+            )
 
         self.diff_stats_unique_args_summary_df = df_agg
         return df_agg
