@@ -1,5 +1,7 @@
 ###############################################################################
-# Genesis extension for TraceLens — rocprof capture utilities
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
 ###############################################################################
 
 from __future__ import annotations

@@ -1,11 +1,7 @@
 ###############################################################################
-# TraceLens Genesis extension — rocprof/pftrace reports for physics sim workloads
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
-# Extends standard TraceLens rocprof + pftrace tools with:
-#   - Steady-state GPU timeline (post-JIT simulation burst)
-#   - Genesis physics kernel categorization
-#   - Capture directory loading (run_combined_trace.sh output)
-#   - CSV→JSON fallback when native rocprof JSON has invalid UTF-8
+# See LICENSE for license information.
 ###############################################################################
 
 from __future__ import annotations
