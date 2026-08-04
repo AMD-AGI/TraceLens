@@ -598,4 +598,3 @@ def find_execution_details(execution_root) -> Optional[str]:
     if len(parts) > 1 and parts[1].lstrip("-").isdigit():
         return parts[1]
     return None
-
