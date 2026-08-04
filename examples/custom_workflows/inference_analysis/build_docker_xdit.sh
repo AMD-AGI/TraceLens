@@ -30,7 +30,7 @@ case "${XDIT_VERSION}" in
     v26.6)
         BASE_IMAGE="rocm/pytorch-xdit:v26.6"
         PATCH_FILE="config_xdit_v26.6.patch"
-        XDIT_COMMIT="175e0bfec974d0b44a0be9fa511df2f9f5ead080"
+        XDIT_COMMIT="2b8b5b709e3c63bcbf0f0640e11e916a15a85b46"
         ;;
     *)
         echo "Error: unsupported xDiT version '${XDIT_VERSION}'"
