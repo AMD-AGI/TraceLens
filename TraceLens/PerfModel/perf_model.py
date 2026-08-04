@@ -1463,7 +1463,7 @@ class ConvBias_Backward(CONV):
                 f"Data types of input and weight are different: {dtype_input_weight}"
             )
         bpe = name2bpe(dtype_input_weight[0])
-        return super().bytes(bpe)
+        return super().bytes_bwd(bpe)
 
     def bytes_bwd(self, bytes_per_element=None):
         if self.param_details["input_shape"] is None:
@@ -1671,7 +1671,7 @@ class ConvBiasReLU_Backward(CONV):
                 f"Data types of input and weight are different: {dtype_input_weight}"
             )
         bpe = name2bpe(dtype_input_weight[0])
-        return super().bytes(bpe)
+        return super().bytes_bwd(bpe)
 
     def bytes_bwd(self, bytes_per_element=None):
         if self.param_details["input_shape"] is None:
