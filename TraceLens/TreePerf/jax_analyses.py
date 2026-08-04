@@ -10,7 +10,6 @@ import re
 import string
 from itertools import chain
 
-
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from ..PerfModel import perf_model
 from ..PerfModel.utils import add_simulation_time_columns
