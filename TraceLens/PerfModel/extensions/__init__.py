@@ -54,8 +54,12 @@ from .custom_collectives_perf_model_extensions import (
     aiter_fused_allreduce_rmsnorm,
     aiter_fused_allreduce_rmsnorm_,
     custom_ar_all_reduce,
+    custom_ar_qr_all_reduce,
     aiter_reduce_scatter,
     aiter_all_gather_reg,
+    sgl_kernel_all_reduce_reg,
+    sgl_kernel_qr_all_reduce,
+    sgl_kernel_reg_all_gather_into_tensor,
 )
 from .pseudo_ops_perf_utils import (
     get_pseudo_op_mappings,
