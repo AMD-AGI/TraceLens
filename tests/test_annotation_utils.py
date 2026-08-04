@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for TraceLens.annotation_utils.
+"""Unit tests for TraceLens.TraceUtils.annotation_utils.
 
 Covers every worked annotation examples
 - vLLM native / detailed (``execute_...``)
@@ -21,7 +21,7 @@ both are consumed by key elsewhere and must agree on ``batch_size``.
 
 import pytest
 
-from TraceLens.annotation_utils import (
+from TraceLens.TraceUtils.annotation_utils import (
     ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
     PHASE_DECODE_ONLY,
