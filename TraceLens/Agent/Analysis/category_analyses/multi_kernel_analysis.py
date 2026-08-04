@@ -14,6 +14,7 @@ Reads pre-computed multi_kernel_data.json from utils/orchestrator_prepare.py.
 Outputs multi_kernel_metrics.json with severity assessments.
 """
 
+import argparse
 import json
 import os
 import sys
@@ -23,7 +24,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis_utils import write_metrics_json
+from analysis_utils import perf_report_csv_dir, write_metrics_json
 
 
 def classify_memcpy_severity(memcpy_summary, total_time_ms):
@@ -234,7 +235,7 @@ def main():
     print(f"  ✓ Loaded multi-kernel data")
 
     # Read GPU timeline for total time reference
-    csv_dir = f"{output_dir}/perf_report_csvs"
+    csv_dir = perf_report_csv_dir(output_dir)
     total_time_ms = 0
     try:
         gpu_timeline = pd.read_csv(f"{csv_dir}/gpu_timeline.csv")

@@ -5,8 +5,6 @@
 ###############################################################################
 
 import argparse
-import os
-import sys
 
 from TraceLens.PerfModel.perf_model import GEMM, SDPA, simulation_dtype_map
 

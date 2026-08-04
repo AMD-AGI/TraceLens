@@ -8,7 +8,15 @@
 Performance models for RMSNorm pseudo-op extensions.
 """
 
-from TraceLens.PerfModel.perf_model import RMSNorm
+from TraceLens.PerfModel.perf_model import RMSNorm as CoreRMSNorm
+
+
+class RMSNorm(CoreRMSNorm):
+    """Extension-side RMSNorm family reported separately from generic normalization."""
+
+    category = "RMSNorm"
+    bwd_category = None
+    sheet_category = "RMSNorm"
 
 
 class aiter_rms_norm(RMSNorm):
@@ -147,6 +155,184 @@ class aiter_rmsnorm2d_fwd_with_dynamicquant_ck(RMSNorm):
         bytes_write_quant = self.num_elems * 1  # FP8 = 1 byte/elem
         bytes_write_scales = M * 1 * 4  # FP32 per-token scales [M, 1]
         return bytes_read_x + bytes_read_weight + bytes_write_quant + bytes_write_scales
+
+
+class aiter_rmsnorm_quant(RMSNorm):
+    """
+    Performance model for aiter::rmsnorm_quant.
+
+    Reference implementation:
+        aiter/aiter/ops/rmsnorm.py
+
+    Fused RMSNorm + per-group dynamic FP8 quantization (no residual add).
+    Signature: rmsnorm_quant(out, input, scale, weight, epsilon, group_size,
+        shuffle_scale, gemma_norm)
+        out         — shape [M, N], dtype FP8   (quantized RMSNorm output)
+        input       — shape [M, N], dtype BFloat16
+        scale       — shape [M, N // group_size], dtype FP32 (per-group scale)
+        weight      — shape [N],    dtype BFloat16 (affine scale)
+        epsilon     — float scalar
+        group_size  — int scalar (elements per quant group along N)
+        shuffle_scale — bool scalar
+
+
+    FLOPs: RMSNorm (inherited) + per-group quant (2 * num_elems: max-abs + scale).
+    Bytes: read input (BF16) + weight (BF16), write out (FP8) + per-group FP32 scales.
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
+        try:
+            self.group_size = int(event["args"]["Concrete Inputs"][5])
+        except (KeyError, IndexError, ValueError, TypeError):
+            self.group_size = 0
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][1])  # input: [M, N]
+        dtype_in = event["args"]["Input type"][1]  # BFloat16
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        num_channels = event["args"]["Input Dims"][3][0]  # weight.shape[0] = N
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),  # output is FP8, handled in bytes()
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+        }
+
+    def flops(self):
+        # RMSNorm flops + quantization: max-abs per group + scale each element
+        return super().flops() + 2 * self.num_elems
+
+    def bytes(self):
+        M = self.num_elems // self.num_channels
+        N = self.num_channels
+        gs = self.group_size if self.group_size and self.group_size > 0 else N
+        num_groups = (N + gs - 1) // gs
+        bytes_read_x = self.num_elems * self.bpe_in  # BF16 input
+        bytes_read_weight = N * self.bpe_in  # BF16 weight
+        bytes_write_quant = self.num_elems * 1  # FP8 = 1 byte/elem
+        bytes_write_scales = M * num_groups * 4  # FP32 per-group scales
+        return bytes_read_x + bytes_read_weight + bytes_write_quant + bytes_write_scales
+
+
+class fused_rms_mxfp4_quant(RMSNorm):
+    """
+    Performance model for aiter.ops.triton.quant.fused_mxfp4_quant.fused_rms_mxfp4_quant
+    (surfaced in traces as sglang_profiler::fused_mxfp4_quant_fused_rms_mxfp4_quant).
+
+    Fused (optional residual-add) + RMSNorm on x1, optional separate RMSNorm on x2,
+    then MXFP4 quantization on the normalized x1 only.
+
+    Reference implementation:
+        aiter/aiter/ops/triton/quant/fused_mxfp4_quant.py:22
+
+    Signature:
+        fused_rms_mxfp4_quant(
+            x1: Tensor,                       # (M, N1), bf16/fp16
+            x1_weight: Tensor,                # (N1,),   bf16/fp16
+            x1_epsilon: float,
+            x2: Optional[Tensor] = None,      # (M, N2), bf16/fp16
+            x2_weight: Optional[Tensor] = None,
+            x2_epsilon: float = 0.0,
+            res1: Optional[Tensor] = None,    # (M, N1), bf16/fp16
+            shuffle: bool = False,
+            scale_shuffle_padding: bool = False,
+            output_unquantized_inp1: bool = False,
+        )
+        ->  (out1_fp4, out1_bs),              # (M, N1 // 2) uint8, (M, ceil(N1/32)) uint8
+            out1_unquant,                     # (M, N1) bf16/fp16 (optional)
+            out2,                             # (M, N2) bf16/fp16 (optional, normalized)
+            out_res1                          # (M, N1) bf16/fp16 (optional, x1 + res1)
+
+    The trace only carries shape and dtype info. We detect optional x2 / res1
+    presence from the Input Dims list length and rank.
+
+    Roofline -- FLOPs:
+        RMSNorm on x1 (inherited)
+        + optional residual-add (M * N1)
+        + optional RMSNorm on x2 (M * N2 * RMSNorm-cost-per-elem; counted same way)
+        + MXFP4 quant of x1 output (~2 * M * N1: max-abs per 32-elem block + scale)
+
+    Roofline -- Bytes:
+        read  x1, x1_weight, [res1, x2, x2_weight]
+        write out1_fp4 (0.5 B/elem), out1_bs (1/32 B/elem),
+              [out_res1, out2] when present
+
+    Compute precision: BF16/FP16 (from x1 dtype). The 4-bit output is materialised
+    via quant; bandwidth uses 0.5 B/elem for the FP4 packed tensor.
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
+        input_dims = event["args"]["Input Dims"]
+        input_types = event["args"]["Input type"]
+
+        self.has_res1 = False
+        self.has_x2 = False
+        self.n2 = 0
+        # The trace layout follows the positional signature; presence is detected
+        # by inspecting tensor ranks (rank-2 -> tensor present; () -> scalar/None).
+        # x1 at [0], x1_weight at [1], x1_epsilon scalar at [2], x2 at [3], ...
+        if len(input_dims) > 3 and len(input_dims[3]) == 2:
+            self.has_x2 = True
+            self.n2 = input_dims[3][1]
+        if len(input_dims) > 6 and len(input_dims[6]) == 2:
+            self.has_res1 = True
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][0])  # x1: (M, N1)
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        num_channels = event["args"]["Input Dims"][1][0]  # x1_weight.shape[0] = N1
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+        }
+
+    def flops(self):
+        M = self.num_elems // self.num_channels
+        N1 = self.num_channels
+        flops = super().flops()
+        if self.has_res1:
+            flops += M * N1
+        if self.has_x2:
+            # Approximate x2 RMSNorm cost: same per-elem flop intensity as x1.
+            x2_elems = M * self.n2
+            flops += int(super().flops() * x2_elems / max(self.num_elems, 1))
+        # MXFP4 quant: max-abs per 32-elem block + per-elem scale
+        flops += 2 * self.num_elems
+        return flops
+
+    def bytes(self):
+        M = self.num_elems // self.num_channels
+        N1 = self.num_channels
+        bytes_read_x1 = self.num_elems * self.bpe_in
+        bytes_read_w1 = N1 * self.bpe_in
+        bytes_write_fp4 = self.num_elems * 0.5
+        bytes_write_scales = (self.num_elems // 32) * 1
+
+        total = bytes_read_x1 + bytes_read_w1 + bytes_write_fp4 + bytes_write_scales
+        if self.has_res1:
+            total += self.num_elems * self.bpe_in  # read residual
+            total += self.num_elems * self.bpe_in  # write updated residual
+        if self.has_x2:
+            x2_elems = M * self.n2
+            total += x2_elems * self.bpe_in  # read x2
+            total += self.n2 * self.bpe_in  # read x2_weight
+            total += x2_elems * self.bpe_in  # write out2
+        return total
 
 
 class vllm_rocm_aiter_rmsnorm_fp8_group_quant(RMSNorm):

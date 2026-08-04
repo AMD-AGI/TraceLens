@@ -347,6 +347,16 @@ def main():
         choices=["sdpa_fwd", "sdpa_bwd", "inferenceattention"],
         help="SDPA category to analyze (default: sdpa_fwd)",
     )
+
+    parser.add_argument(
+        "--comparison_scope",
+        choices=("standalone", "comparative"),
+        default="standalone",
+        help=(
+            "standalone: roofline efficiency in operations[].efficiency; "
+            "comparative: 100*t2/t1 (needs TraceDiff CSV columns)"
+        ),
+    )
     args = parser.parse_args()
 
     run_category_analysis(
@@ -363,6 +373,7 @@ def main():
             "operation_classifier": classify_sdpa_operation,
         },
         extract_fn=extract_category_specific,
+        comparison_scope=args.comparison_scope,
     )
 
 

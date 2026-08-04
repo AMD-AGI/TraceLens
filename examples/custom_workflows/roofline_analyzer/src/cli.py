@@ -6,8 +6,7 @@
 
 import typer
 import tomli
-from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from rich.console import Console
 from rich.table import Table
 

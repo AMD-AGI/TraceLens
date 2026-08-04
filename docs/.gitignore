@@ -1,0 +1,6 @@
+_build/
+_doxygen/
+_toc.yml
+sphinx/_toc.yml
+.venv/
+__pycache__/

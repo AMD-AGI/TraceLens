@@ -114,7 +114,6 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "impact_score": 100.0,
                 "impact_score_low": 85.0,
                 "impact_score_high": 115.0,
-                "confidence": "high",
             },
             {
                 "operation": "aten::mm",
@@ -123,7 +122,6 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "impact_score": 50.0,
                 "impact_score_low": 42.0,
                 "impact_score_high": 58.0,
-                "confidence": "medium",
             },
         ],
         "category_findings": [
@@ -153,7 +151,6 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "impact_score": 80.0,
                 "impact_score_low": 68.0,
                 "impact_score_high": 92.0,
-                "confidence": "medium",
             },
         ],
         "category_findings": [
@@ -328,7 +325,123 @@ def test_compute_impact_estimates_min_impact_score():
     assert len(estimates_strict) == 0
 
 
-# ----- Unit tests: generate_priority_data -----
+def test_comparative_impact_from_operations_trace2_faster():
+    """Comparative efficiency_percent = 100*t2/t1; impact uses same 75/87.5/100 bands."""
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm", "aten::addmm", "aten::bmm"],
+            "count": [1, 1, 1],
+            "Kernel Time (µs)_sum": [10_000.0, 5_000.0, 2_000.0],
+            "speedup (trace1/trace2)": [0.5, 1.2, 0.8],
+            "delta_us (trace2 - trace1)": [-5_000.0, 1_000.0, -200.0],
+        }
+    )
+    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    config: dict = {}
+    operations = build_operation_metrics(
+        df, metadata, config, comparison_scope="comparative"
+    )
+    mm_op = next(o for o in operations if o["name"] == "aten::mm")
+    assert mm_op["efficiency"]["efficiency_percent"] == 50.0
+    bmm_op = next(o for o in operations if o["name"] == "aten::bmm")
+    assert bmm_op["efficiency"]["efficiency_percent"] == 90.0
+
+    out = compute_impact_estimates(
+        operations, "gemm", min_impact_score=0.01, baseline_ms=1000.0
+    )
+    # Row 1: eff 120 -> gap_high 0 -> excluded; row 0 and 2 remain
+    assert len(out) == 2
+    assert out[0]["operation"] == "aten::mm"
+    assert out[0]["type"] == "kernel_tuning"
+    assert out[0]["efficiency_pct"] == 50.0
+    assert out[0]["impact_score"] == 0.44
+    assert out[0]["impact_score_high"] == 0.5
+    assert out[0]["impact_score_low"] == 0.38
+    assert out[1]["operation"] == "aten::bmm"
+    assert out[1]["efficiency_pct"] == 90.0
+    assert out[1]["impact_score_high"] == 0.02
+
+
+def test_comparative_roofline_cap_clamps_savings():
+    """Projected savings must not exceed trace1 roofline when trace2 is faster than the ceiling."""
+    # trace2 is 4x faster than trace1 (comp_pct = 25%) but roofline is 60%.
+    # The physically achievable efficiency floor is 60%, so savings should be
+    # capped at time * (1 - 60/100), not time * (1 - 25/100).
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [10_000.0],
+            "delta_us (trace2 - trace1)": [-7_500.0],  # comp_pct = 25%
+            "Pct Roofline_mean": [60.0],  # roofline floor
+        }
+    )
+    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    operations = build_operation_metrics(
+        df, metadata, {}, comparison_scope="comparative"
+    )
+    mm_op = operations[0]
+    eff = mm_op["efficiency"]
+    # efficiency_percent clamped to roofline (60), not raw comp_pct (25)
+    assert eff["efficiency_percent"] == 60.0
+    assert eff["warning"] is not None
+    assert "ROOFLINE CAP" in eff["warning"]
+    # gap_high = 1 - 60/100 = 0.4; impact_high = 0.4 * 10/1000 * 100 = 0.4 (not 0.75 from unclamped 25%)
+    out = compute_impact_estimates(
+        operations, "gemm", min_impact_score=0.01, baseline_ms=1000.0
+    )
+    assert len(out) == 1
+    assert out[0]["impact_score_high"] == 0.4
+    assert out[0]["impact_score"] == 0.35
+
+
+def test_comparative_roofline_cap_no_clamp_when_trace2_above_roofline():
+    """When trace2 efficiency is already above the roofline (slower), no clamping occurs."""
+    # comp_pct = 80% (trace2 is 1.25x faster), roofline = 60%.
+    # 80 > 60 so no clamping — savings = time * (1 - 80/100).
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [10_000.0],
+            "delta_us (trace2 - trace1)": [-2_000.0],  # comp_pct = 80%
+            "Pct Roofline_mean": [60.0],
+        }
+    )
+    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    operations = build_operation_metrics(
+        df, metadata, {}, comparison_scope="comparative"
+    )
+    eff = operations[0]["efficiency"]
+    assert eff["efficiency_percent"] == 80.0
+    assert eff["warning"] is None
+    out = compute_impact_estimates(
+        operations, "gemm", min_impact_score=0.01, baseline_ms=1000.0
+    )
+    assert out[0]["impact_score_high"] == 0.2
+
+
+def test_comparative_roofline_cap_no_roofline_column():
+    """When Pct Roofline_mean is absent, comparative efficiency is unchanged."""
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [10_000.0],
+            "delta_us (trace2 - trace1)": [-7_500.0],  # comp_pct = 25%
+            # no Pct Roofline_mean column
+        }
+    )
+    metadata = {"peak_hbm_bw_tbs": 5.3, "peak_bf16_maf_tflops": 700.0}
+    operations = build_operation_metrics(
+        df, metadata, {}, comparison_scope="comparative"
+    )
+    eff = operations[0]["efficiency"]
+    assert eff["efficiency_percent"] == 25.0
+    assert eff["warning"] is None
+
+
+# ----- Unit tests: generate_plot_data -----
 
 
 def test_generate_priority_data(output_dir_with_manifest_and_metrics):
@@ -436,6 +549,70 @@ def test_build_operation_metrics(output_dir_with_category_data):
         assert "time_ms" in o
         assert "efficiency" in o
         assert "efficiency_percent" in o["efficiency"] or "efficiency" in o
+
+
+def test_build_operation_metrics_comparative_uses_delta():
+    """comparative scope falls back to delta column when speedup is absent."""
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [10_000.0],
+            "TFLOPS/s_mean": [400.0],
+            "TB/s_mean": [0.5],
+            "FLOPS/Byte": [2000.0],
+            "Compute Spec": ["matrix_bf16"],
+            # delta = -2000 us → t2 = 8000 us → eff = 80%
+            "delta_us (trace2 - trace1)": [-2_000.0],
+        }
+    )
+    meta = {
+        "peak_hbm_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 708},
+        "gpu_utilization": {"total_time_ms": 1000.0},
+    }
+    ops = build_operation_metrics(df, meta, {}, comparison_scope="comparative")
+    assert ops[0]["efficiency"]["efficiency_percent"] == 80.0
+
+
+def test_build_operation_metrics_comparative_no_comparative_cols_yields_none():
+    """comparative scope with no speedup/delta columns → efficiency_percent is None."""
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm"],
+            "count": [1],
+            "Kernel Time (µs)_sum": [10_000.0],
+            "TFLOPS/s_mean": [400.0],
+            "TB/s_mean": [0.5],
+            "FLOPS/Byte": [2000.0],
+            "Compute Spec": ["matrix_bf16"],
+        }
+    )
+    meta = {
+        "peak_hbm_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 708},
+        "gpu_utilization": {"total_time_ms": 1000.0},
+    }
+    ops = build_operation_metrics(df, meta, {}, comparison_scope="comparative")
+    assert ops[0]["efficiency"]["efficiency_percent"] is None
+
+
+# ----- Unit tests: compute_impact_estimates (comparative mode) -----
+
+
+def test_compute_impact_estimates_comparative_at_100_pct_no_savings():
+    """An op at exactly 100% efficiency produces zero savings and is excluded by default threshold."""
+    operations = [
+        {
+            "name": "aten::mm",
+            "time_ms": 10.0,
+            "efficiency": {"efficiency_percent": 100.0, "is_anomaly": False},
+        },
+    ]
+    estimates = compute_impact_estimates(
+        operations, "gemm", min_impact_score=0.01, baseline_ms=100.0
+    )
+    assert len(estimates) == 0
 
 
 # ----- Unit tests: classify_other_operation -----
@@ -666,3 +843,4 @@ def test_gemm_analysis_script_with_minimal_data(output_dir_with_category_data):
     if m.get("status") == "OK":
         assert "operations" in m
         assert "impact_estimates" in m
+        assert m.get("comparison_scope") == "standalone"

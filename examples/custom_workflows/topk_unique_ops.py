@@ -5,9 +5,7 @@
 ###############################################################################
 
 import argparse
-import pandas as pd
 from TraceLens import TreePerfAnalyzer
-from typing import List, Dict, Any
 
 
 def main():

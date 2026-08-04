@@ -5,7 +5,6 @@
 ###############################################################################
 
 import pandas as pd
-import itertools
 import tqdm
 from TraceLens.util import TraceEventUtils
 

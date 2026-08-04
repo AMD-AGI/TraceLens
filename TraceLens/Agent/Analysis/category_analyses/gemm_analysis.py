@@ -45,7 +45,6 @@ def extract_category_specific(ops_df, metadata) -> dict:
 
     missing_perf_model = 0
     if "TFLOPS/s_mean" in ops_df.columns:
-        import pandas as pd
 
         missing_perf_model = ops_df["TFLOPS/s_mean"].isna().sum()
 
@@ -59,6 +58,15 @@ def extract_category_specific(ops_df, metadata) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Analyze GEMM operations")
     parser.add_argument("--output-dir", required=True, help="Output directory")
+    parser.add_argument(
+        "--comparison_scope",
+        choices=("standalone", "comparative"),
+        default="standalone",
+        help=(
+            "standalone: roofline Pct Roofline in operations[].efficiency; "
+            "comparative: 100*t2/t1 in operations[].efficiency (needs TraceDiff CSV columns)"
+        ),
+    )
     args = parser.parse_args()
 
     run_category_analysis(
@@ -69,6 +77,7 @@ def main():
             "operation_classifier": classify_gemm_operation,
         },
         extract_fn=extract_category_specific,
+        comparison_scope=args.comparison_scope,
     )
 
 

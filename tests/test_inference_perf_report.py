@@ -24,6 +24,7 @@ from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch,
     classify_graph_capture_trace,
 )
+import TraceLens.Trace2Tree.trace_capture_merge_experimental as _merge_mod
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
@@ -207,6 +208,15 @@ def find_inference_test_cases():
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _clear_capture_tree_cache():
+    # Reproduce per-process isolation: the capture-tree cache is keyed by
+    # {batch_size}_{mode}, which collides across fixtures sharing a key.
+    _merge_mod._capture_tree_cache.clear()
+    yield
+    _merge_mod._capture_tree_cache.clear()
+
+
 @pytest.mark.parametrize(
     "dirpath,trace_gz,capture_folder,gpu_arch_path",
     find_inference_test_cases(),
@@ -242,6 +252,7 @@ def test_inference_perf_report(
         group_by_parent_module=True,
         group_by_num_kernels=True,
         collective_analysis=False,
+        include_call_stack=True,
     )
 
     # result is a dict[str, pd.DataFrame]

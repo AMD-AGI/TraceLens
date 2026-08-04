@@ -4,12 +4,15 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import contextlib
 import itertools
 import json
 import logging
 import os
 import re
 import glob
+import sys
+import tempfile
 from collections import defaultdict
 
 try:
@@ -23,6 +26,47 @@ except ImportError:
 from typing import List, Dict, Callable, Iterable, Tuple, Optional
 
 logger = logging.getLogger(__name__)
+
+
+# Benign native XLA logs (id > INT_MAX, from packed HLO instruction ids in xprof
+# 2.20.1). Emitted to fd 2 before absl init, so only filterable at the fd level.
+_NATIVE_LOG_NOISE = re.compile(
+    r"Instruction with id > INT_MAX"
+    r"|not intended behavior and might indicate a bug in the HLO proto serialization"
+    r"|hlo_instruction\.cc"
+)
+
+
+@contextlib.contextmanager
+def suppress_native_hlo_logs():
+    """Filter benign native XLA ``id > INT_MAX`` stderr during a call.
+
+    Set ``TRACELENS_VERBOSE_NATIVE_LOGS=1`` to disable filtering.
+    """
+    if os.environ.get("TRACELENS_VERBOSE_NATIVE_LOGS"):
+        yield
+        return
+
+    sys.stderr.flush()
+    saved_fd = os.dup(2)
+    tmp = tempfile.TemporaryFile(mode="w+b")
+    try:
+        os.dup2(tmp.fileno(), 2)
+        yield
+    finally:
+        sys.stderr.flush()
+        os.dup2(saved_fd, 2)
+        os.close(saved_fd)
+        tmp.seek(0)
+        for raw in tmp.read().splitlines(keepends=True):
+            try:
+                line = raw.decode("utf-8", "replace")
+            except Exception:
+                os.write(2, raw)
+                continue
+            if not _NATIVE_LOG_NOISE.search(line):
+                os.write(2, raw)
+        tmp.close()
 
 
 # generic data loader class for json, json.gz, or tensorboard pb files
@@ -46,7 +90,10 @@ class DataLoader:
                     "for trace conversion. Install xprof for JAX 0.8+ support."
                 )
 
-            data, _ = convert.xspace_to_tool_data([filename_path], "trace_viewer@^", {})
+            with suppress_native_hlo_logs():
+                data, _ = convert.xspace_to_tool_data(
+                    [filename_path], "trace_viewer@^", {}
+                )
             if data is None:
                 raise RuntimeError(
                     f"Trace conversion using '{converter_lib}' returned None for "
@@ -88,6 +135,40 @@ class DataLoader:
 class JaxProfileProcessor:
     gemm_columns = ["Batch", "M", "N", "K", "Beta", "Type"]
 
+    # Substrings used to detect parseable HLO graph-viewer text lines.
+    # The legacy list only covered float types; integer/bool lines were skipped and
+    # later showed up as "Missing hlo_op" when the profiler trace referenced them.
+    _HLO_LINE_ELEMENT_TYPE_HINTS_LEGACY = [
+        "get-tuple-element",
+        "bf16",
+        "f8",
+        "f16",
+        "f32",
+        "f64",
+    ]
+    _HLO_LINE_ELEMENT_TYPE_HINTS = _HLO_LINE_ELEMENT_TYPE_HINTS_LEGACY + [
+        "s32",
+        "s64",
+        "u32",
+        "u64",
+        "pred",
+    ]
+
+    @staticmethod
+    def _should_parse_hlo_graph_line(line: str) -> bool:
+        """Return True if a graph-viewer text line should be parsed into hlo_ops."""
+        line_processed = line.strip()
+        if not line_processed or line_processed.startswith("HloModule "):
+            return False
+        if line_processed.startswith("ROOT"):
+            return False
+        if "metadata" in line_processed and not re.search(r"\)$", line_processed):
+            return True
+        return any(
+            hint in line_processed
+            for hint in JaxProfileProcessor._HLO_LINE_ELEMENT_TYPE_HINTS
+        )
+
     @staticmethod
     def process_xla_file(xla_file_name):
         hlo_ops = {}
@@ -105,10 +186,11 @@ class JaxProfileProcessor:
                 raw_to_tool_data as convert,
             )
 
-        dir_name = os.path.dirname(protobuf_file_name) + "/"
+        dir_name = os.path.dirname(os.path.abspath(protobuf_file_name)) + "/"
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) != 1:
-            convert.xspace_to_tool_names([protobuf_file_name])
+            with suppress_native_hlo_logs():
+                convert.xspace_to_tool_names([protobuf_file_name])
         hlo_filename = glob.glob(dir_name + os.path.sep + module_name + "*hlo_proto.pb")
         if len(hlo_filename) > 1:
             logger.warning(f"Multiple matching hlo_filenames: {hlo_filename}")
@@ -133,7 +215,8 @@ class JaxProfileProcessor:
             "type": "long_txt",
         }
         params = {"graph_viewer_options": graph_viewer_options}
-        data, _ = convert.xspace_to_tool_data([dir_name], "graph_viewer^", params)
+        with suppress_native_hlo_logs():
+            data, _ = convert.xspace_to_tool_data([dir_name], "graph_viewer^", params)
         data = data.decode("utf-8").split("\n")
         for line in data:
             JaxProfileProcessor.process_line(hlo_ops, line)
@@ -172,22 +255,82 @@ class JaxProfileProcessor:
     @staticmethod
     def process_line(hlo_ops: dict, line: str):
         line_processed = line.strip()
-        if (
-            (
-                "metadata" in line_processed
-                and not (re.search(r"\)$", line_processed))
-                and not (line_processed.startswith("ROOT"))
-            )
-            or any(
-                t in line_processed
-                for t in ["get-tuple-element", "bf16", "f8", "f16", "f32", "f64"]
-            )
-            and not (line_processed.startswith("HloModule "))
-        ):
-            k, v = JaxProfileProcessor.get_dict(hlo_ops, line_processed)
-            hlo_ops[k] = v
-            return True
-        return False
+        if not JaxProfileProcessor._should_parse_hlo_graph_line(line_processed):
+            return False
+        k, v = JaxProfileProcessor.get_dict(hlo_ops, line_processed)
+        hlo_ops[k] = v
+        return True
+
+    # Async collectives in HLO text use *-start/*-done names; runtime traces may
+    # use numbered aliases (e.g. reduce-scatter.12 -> reduce-scatter-start).
+    _ASYNC_COLLECTIVE_FAMILIES = ("all-to-all", "reduce-scatter", "all-gather")
+
+    @staticmethod
+    def _normalize_hlo_op_key(hlo_op: str) -> str:
+        return hlo_op if hlo_op.startswith("%") else f"%{hlo_op}"
+
+    @staticmethod
+    def _collective_start_keys(module_ops: dict, family: str) -> list:
+        start_keys = sorted(k for k in module_ops if k.startswith(f"%{family}-start"))
+        if start_keys:
+            return start_keys
+        return sorted(k for k in module_ops if k.startswith(f"%{family}-done"))
+
+    @classmethod
+    def build_collective_hlo_aliases(cls, module_ops: dict, trace_hlo_ops) -> dict:
+        """Map numbered runtime collective tags to parsed HLO dump keys."""
+        aliases = {}
+        normalized_ops = {cls._normalize_hlo_op_key(op) for op in trace_hlo_ops}
+
+        for family in cls._ASYNC_COLLECTIVE_FAMILIES:
+            numbered = []
+            for op_key in normalized_ops:
+                if op_key in module_ops:
+                    continue
+                bare = op_key.lstrip("%")
+                prefix = f"{family}."
+                if not bare.startswith(prefix):
+                    continue
+                suffix = bare[len(prefix) :]
+                if suffix.isdigit():
+                    numbered.append((int(suffix), op_key))
+
+            if not numbered:
+                continue
+
+            start_keys = cls._collective_start_keys(module_ops, family)
+            if not start_keys:
+                continue
+
+            numbered.sort()
+            if len(start_keys) == 1:
+                for _, op_key in numbered:
+                    aliases[op_key] = start_keys[0]
+            else:
+                for idx, (_, op_key) in enumerate(numbered):
+                    aliases[op_key] = start_keys[min(idx, len(start_keys) - 1)]
+
+        return aliases
+
+    @classmethod
+    def resolve_hlo_op_key(cls, hlo_op: str, module_ops: dict, aliases=None):
+        """Resolve a trace hlo_op to a key present in module_ops."""
+        key = cls._normalize_hlo_op_key(hlo_op)
+        if key in module_ops:
+            return key
+        if aliases and key in aliases and aliases[key] in module_ops:
+            return aliases[key]
+
+        bare = key.lstrip("%")
+        match = re.match(
+            r"^(all-to-all|reduce-scatter|all-gather)\.(\d+)$",
+            bare,
+        )
+        if match:
+            start_keys = cls._collective_start_keys(module_ops, match.group(1))
+            if start_keys:
+                return start_keys[0]
+        return None
 
     @staticmethod
     def get_operands(operands):
@@ -313,31 +456,47 @@ class JaxProfileProcessor:
                 if outputs.startswith("("):
                     if not outputs.endswith(")"):
                         raise ValueError("Mistmatched parens in outputs in ", outputs)
-                    output_list = outputs[1:-2].split("},")
-                    # this code assumes that the first output is the one we care about
-                    # we should be able to make this an RE
-                    sizes_string = [
-                        [i, d] for i in output_list for d in dtypes if i.startswith(d)
+                    # Extract all tensor tokens from the tuple using regex so that
+                    # scalars (e.g. f32[]) and workspace buffers (e.g. s8[N]{0})
+                    # don't corrupt the split. Handles damax_output=true tuples like
+                    # (f8e5m2[M,N]{1,0}, f32[], s8[W]{0}).
+                    inner = outputs[1:-1]
+                    tokens = re.findall(
+                        r"[a-z0-9]+\[[^\]]*\]\{[^}]*\}|[a-z0-9]+\[[^\]]*\]", inner
+                    )
+                    tensor_tokens = [
+                        t
+                        for t in tokens
+                        if any(t.startswith(d) for d in dtypes) and not t.endswith("[]")
                     ]
-                    if len(sizes_string) != 1:
+                    if len(tensor_tokens) == 0:
                         raise ValueError("Did not find wide output ", op)
-                    sizes_string = sizes_string[0]
-                    sizes_string[0] = (
-                        sizes_string[0] + "}"
-                    )  # restore the } that was removed
+                    # Take the first tensor output; for FP8 GEMMs this is the result.
+                    sizes_string = [
+                        tensor_tokens[0],
+                        next(d for d in dtypes if tensor_tokens[0].startswith(d)),
+                    ]
                 else:
                     sizes_string = outputs
                 operand_list = []
                 for opid in op["operands"]:
-                    if "[" in opid and "]" in opid:
-                        # pb format, shapes in operand list
+                    if (
+                        "[" in opid
+                        and "]" in opid
+                        and not opid.split("[")[1].startswith("]")
+                    ):
+                        # pb format, shapes in operand list; exclude scalars e.g. f32[]
                         operand_list.append(opid)
-                    else:
-                        output = hlo_ops[opid]["output"]
+                    elif "[" not in opid:
+                        # Strip /*index=N*/ prefix that appears in some FP8 operand refs
+                        hlo_key = re.sub(r"^/\*index=\d+\*/", "", opid).strip()
+                        if hlo_key not in hlo_ops:
+                            continue
+                        output = hlo_ops[hlo_key]["output"]
                         if any(
                             output.startswith(d) for d in dtypes + ["f8"]
                         ) and not output.endswith("[]"):
-                            operand_list.append(hlo_ops[opid]["output"])
+                            operand_list.append(hlo_ops[hlo_key]["output"])
                 if int(beta) == 1 and len(operand_list) < 3:
                     print(
                         "Bias is set, however onLy two operands found!", op
@@ -395,6 +554,15 @@ COMMUNICATION_KEYS = ["rccl", "nccl"]
 # (kernel-name regex fragment, canonical collective name for inference)
 DEFAULT_CUSTOM_COLLECTIVE_PATTERNS: List[Tuple[str, str]] = [
     (r"cross_device_reduce", "allreduce"),
+]
+
+DEFAULT_COMMUNICATION_REGEXES: List[re.Pattern] = [
+    re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS
+]
+
+DEFAULT_CUSTOM_COLLECTIVE_REGEXES: List[re.Pattern] = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern, _ in DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
 ]
 
 
@@ -553,7 +721,7 @@ class TraceEventUtils:
 
     @staticmethod
     def default_categorizer(event: dict) -> str:
-        return event.get(TraceEventUtils.TraceKeys.Category)
+        return event["cat"]
 
     # TODO separate util class for Jax
     # returns a curried function to categorizes events based on the
@@ -655,20 +823,16 @@ class TraceEventUtils:
     ) -> List[re.Pattern]:
         """Return compiled patterns for NCCL/RCCL plus optional custom collectives.
 
-        When *custom_collective_patterns* is ``None``, built-in defaults from
-        ``DEFAULT_CUSTOM_COLLECTIVE_PATTERNS`` (e.g. vLLM ``cross_device_reduce``)
-        are included. Pass an explicit list (possibly empty) to override that
-        set while keeping NCCL/RCCL markers.
+        When *custom_collective_patterns* is ``None``, returns the built-in defaults from
+        ``DEFAULT_COMMUNICATION_REGEXES + DEFAULT_CUSTOM_COLLECTIVE_REGEXES``.
+        Pass an explicit list (possibly empty) to override the set while keeping NCCL/RCCL markers.
         """
-        regexes = [re.compile(p, re.IGNORECASE) for p in COMMUNICATION_KEYS]
-        custom = (
-            DEFAULT_CUSTOM_COLLECTIVE_PATTERNS
-            if custom_collective_patterns is None
-            else custom_collective_patterns
-        )
-        for pattern, _ in custom:
-            regexes.append(re.compile(pattern, re.IGNORECASE))
-        return regexes
+        if custom_collective_patterns is None:
+            return DEFAULT_COMMUNICATION_REGEXES + DEFAULT_CUSTOM_COLLECTIVE_REGEXES
+        return DEFAULT_COMMUNICATION_REGEXES + [
+            re.compile(pattern, re.IGNORECASE)
+            for pattern, _ in custom_collective_patterns
+        ]
 
     @staticmethod
     def build_collective_filter_and_inference_rules(

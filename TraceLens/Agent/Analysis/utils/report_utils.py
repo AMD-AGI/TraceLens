@@ -15,7 +15,7 @@ import json
 import os
 from collections import defaultdict
 from typing import List
-
+import re
 import pandas as pd
 
 
@@ -26,23 +26,57 @@ def load_manifest(output_dir: str) -> dict:
         return json.load(f)
 
 
-def extract_condensed_op_info(output_dir: str) -> bool:
-    """Extract name, Input type, Input Dims to metadata/condensed_op_info.csv.
+def prepare_model_identification_data(
+    output_dir: str, comparison_scope: str = "standalone"
+) -> bool:
+    """Prepare metadata files for the model-identification subagent.
 
-    Reads perf_report_csvs/unified_perf_summary.csv and writes the three columns
-    for the condensed op info subagent. Returns True on success.
+    Reads unified_perf_summary.csv and writes two files under metadata/:
+    - condensed_op_info.csv: name, Input type, Input Dims columns for op-level inference.
+    - nn_modules.txt: unique nn.Module class names from trace.
+
+    Args:
+        output_dir: Base analysis output directory.
+        comparison_scope: ``"standalone"`` reads from ``perf_report_csvs/``;
+            ``"comparative"`` reads from ``perf_report_trace1_csvs/``.
+
+    Returns:
+        True on success, False if unified_perf_summary.csv is missing or unreadable.
     """
-    _CONDENSED_OP_INFO_COLUMNS = ("name", "Input type", "Input Dims")
-    csv_path = os.path.join(output_dir, "perf_report_csvs", "unified_perf_summary.csv")
+
+    csv_dir = (
+        "perf_report_trace1_csvs"
+        if comparison_scope == "comparative"
+        else "perf_report_csvs"
+    )
+    csv_path = os.path.join(output_dir, csv_dir, "unified_perf_summary.csv")
     if not os.path.isfile(csv_path):
         return False
+
     try:
-        df = pd.read_csv(csv_path, usecols=list(_CONDENSED_OP_INFO_COLUMNS))
+        df = pd.read_csv(
+            csv_path, usecols=["name", "Input type", "Input Dims", "call_stack_full"]
+        )
     except (ValueError, KeyError):
         return False
-    out_path = os.path.join(output_dir, "metadata", "condensed_op_info.csv")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    df.to_csv(out_path, index=False)
+
+    metadata_dir = os.path.join(output_dir, "metadata")
+    os.makedirs(metadata_dir, exist_ok=True)
+
+    df[["name", "Input type", "Input Dims"]].to_csv(
+        os.path.join(metadata_dir, "condensed_op_info.csv"), index=False
+    )
+
+    nn_modules = sorted(
+        {
+            m
+            for cell in df["call_stack_full"].dropna()
+            for m in re.findall(r"nn\.Module:\s*([^\s',\]]+)", str(cell))
+        }
+    )
+    with open(os.path.join(metadata_dir, "nn_modules.txt"), "w") as f:
+        f.write("\n".join(nn_modules) + "\n" if nn_modules else "")
+
     return True
 
 
@@ -174,9 +208,8 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
     table, and the optional detailed extension plot.
 
     Produces four top-level arrays:
-      - ``findings``: per-(category, bound_type, library) groups, concatenated
-        from each ``_metrics.json::category_findings`` (already grouped and
-        gated by ``MIN_PITEM_IMPACT_SCORE`` in the analyzer script). Sorted
+      - ``findings``: per-(category, bound_type, library, eff_bucket) groups
+        from each ``_metrics.json::category_findings``. Sorted
         globally by ``impact_score`` with ``global_rank`` / ``category_rank``
         attached. Drives the report's flat P-numbering.
       - ``priorities``: ranked category list. Quantified categories are a
@@ -235,6 +268,10 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             }
         )
         for f in findings:
+            # Heuristic findings rank in findings[] but are kept out of the
+            # quantified savings rollup/plot (a guess must not inflate projected savings).
+            if f.get("estimate_method") == "heuristic":
+                continue
             cat = f["category"]
             quantified[cat]["impact_score"] += f.get("impact_score", 0)
             quantified[cat]["impact_score_low"] += f.get("impact_score_low", 0)
@@ -278,12 +315,15 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             )
 
         quantified_cats = set(quantified.keys())
+        heuristic_cats = {
+            f["category"] for f in findings if f.get("estimate_method") == "heuristic"
+        }
         unmodeled = []
         for cat_entry in manifest.get("categories", []):
             cat_name = cat_entry.get("name")
             if cat_entry.get("tier") != "compute_kernel":
                 continue
-            if cat_name in quantified_cats:
+            if cat_name in quantified_cats or cat_name in heuristic_cats:
                 continue
             gpu_time = cat_entry.get("gpu_kernel_time_ms", 0)
             if gpu_time >= threshold_ms:
@@ -310,7 +350,9 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             )
             next_rank += 1
 
-        findings.sort(key=lambda f: f["impact_score"], reverse=True)
+        # Every finding now carries a numeric impact_score (quantified or
+        # heuristic); sort descending for the global P-item ranking.
+        findings.sort(key=lambda f: f.get("impact_score", 0), reverse=True)
         for global_rank, f in enumerate(findings, start=1):
             f["global_rank"] = global_rank
 

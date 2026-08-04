@@ -37,7 +37,7 @@ jobs:
       - name: Run function-based tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py
+          pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py tests/test_call_stack_perf_report.py
 
       - name: Run rocprof report tests
         run: |
@@ -53,11 +53,26 @@ jobs:
         run: |
           . .venv/bin/activate
           pytest tests/test_compare_perf_reports.py
+      
+      - name: Run tracediff regression tests
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_tracediff_regression.py tests/test_tracediff.py
 
       - name: Run pytest on inference perf report tests
         run: |
           . .venv/bin/activate
           pytest tests/test_inference_perf_report.py
+
+      - name: Run inference annotation parsing tests
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_annotation_utils.py
+
+      - name: Run inference trace splitting tests
+        run: |
+          . .venv/bin/activate
+          pytest tests/test_split_inference_trace_annotation.py
 
       - name: Run collective analysis tests
         run: |

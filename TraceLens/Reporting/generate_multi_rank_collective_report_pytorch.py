@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import importlib.util
 import os
 import re
 import argparse
@@ -264,9 +265,7 @@ def generate_collective_report(
             print(f"DataFrame '{sheet_name}' written to {csv_path}")
 
     if output_xlsx_path:
-        try:
-            import openpyxl
-        except (ImportError, ModuleNotFoundError):
+        if importlib.util.find_spec("openpyxl") is None:
             print("Error importing openpyxl")
             request_install("openpyxl")
 
