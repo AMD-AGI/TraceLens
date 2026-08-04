@@ -134,6 +134,7 @@ def _fill_sglang_native(ann, name):
         ann.context_requests = bs
         ann.context_sum = ann.c_sq = toks
     ann.batch_size = ann.c_sq + ann.g_sq or bs
+    return True
 
 
 def _fill_sglang_detailed(ann, name):
@@ -163,6 +164,7 @@ def _fill_sglang_detailed(ann, name):
         ann.context_sum, ann.generation_sum = ann.c_sq, ann.g_sq
     ann.batch_size = ann.c_sq + ann.g_sq or toks or bs
     ann.has_sqsk = True
+    return True
 
 
 def _fill_atom(ann, name):
@@ -200,6 +202,7 @@ def _fill_atom(ann, name):
         ann.meta["tbo"] = True
     ann.batch_size = tokens  # tok= is already the whole batch dimension
     ann.has_sqsk = detailed
+    return True
 
 
 class IterationAnnotation:
@@ -323,6 +326,7 @@ def _fill_capture(ann, name):
         return False
     ann.batch_size = int(m.group(1))
     ann.mode = m.group(2)
+    return True
 
 
 class CaptureAnnotation:
