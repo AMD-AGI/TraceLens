@@ -33,7 +33,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install black==26.1.0 ruff==0.16.1  # Pin for CI reproducibility; use same versions locally
+        pip install black==26.1.0 ruff==0.16.1 import-linter==2.13  # Pin for CI reproducibility; use same versions locally
 
     - name: Run Black
       # only run black on changed files based on this example:
@@ -51,3 +51,6 @@ jobs:
           echo "$changed_files" | xargs echo "Running ruff on changed files: "
           echo "$changed_files" | xargs ruff check --select F401,F841
         fi
+
+    - name: Run Import Linter (no circular dependencies)
+      run: lint-imports

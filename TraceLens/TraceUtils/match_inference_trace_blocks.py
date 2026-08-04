@@ -50,7 +50,7 @@ from typing import List, Optional, Tuple
 import pandas as pd
 
 from TraceLens.util import DataLoader
-from TraceLens.TraceUtils.annotation_utils import (
+from .annotation_utils import (
     PHASE_DECODE_ONLY,
     PHASE_PREFILLDECODE,
     PHASE_PREFILL_ONLY,

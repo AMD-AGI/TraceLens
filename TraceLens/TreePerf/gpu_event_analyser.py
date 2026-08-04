@@ -6,7 +6,7 @@
 
 import pandas as pd
 import tqdm
-from TraceLens.util import TraceEventUtils
+from ..util import TraceEventUtils
 
 
 class GPUEventAnalyser:

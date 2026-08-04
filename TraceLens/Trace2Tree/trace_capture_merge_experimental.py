@@ -24,10 +24,6 @@ import TraceLens
 
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
-from ..TraceUtils.annotation_utils import (
-    IterationAnnotation,
-    find_iteration_roots_by_priority,
-)
 
 
 def get_subtree_events(tree, event, cat_filter=None, name_filter=None):
@@ -431,7 +427,25 @@ _CAPTURE_TREE_CACHE_MAX_SIZE = 8
 _capture_tree_cache: OrderedDict = OrderedDict()
 
 
-def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
+def _load_trace_tree_from_file(
+    profile_filepath: str, add_python_func: bool = False
+) -> TraceToTree:
+    """Load a trace file into a built TraceToTree without TreePerfAnalyzer."""
+    from ..util import DataLoader
+
+    data = DataLoader.load_data(profile_filepath)
+    trace_metadata = {key: value for key, value in data.items() if key != "traceEvents"}
+    events = data["traceEvents"]
+    tree = TraceToTree(
+        events,
+        event_to_category=TraceToTree.default_categorizer,
+        trace_metadata=trace_metadata,
+    )
+    tree.build_tree(add_python_func=add_python_func)
+    return tree
+
+
+def _get_cached_capture_tree(key, filepath):
     """Load a capture tree, returning a cached copy when *key* has been seen.
 
     Uses LRU eviction with at most ``_CAPTURE_TREE_CACHE_MAX_SIZE`` entries.
@@ -450,8 +464,7 @@ def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
         return _capture_tree_cache[key]
 
     print("Loading capture trace: {} (key={})".format(filepath, key[0]))
-    capture_perf_analyzer = TreePerfAnalyzer.from_file(filepath, add_python_func=True)
-    capture_tree = capture_perf_analyzer.tree
+    capture_tree = _load_trace_tree_from_file(filepath, add_python_func=True)
     capture_roots = find_capture_roots(capture_tree)
 
     capture_root_data = []
@@ -527,6 +540,8 @@ def find_execution_roots(graph_tree):
 
     Primary (detailed) patterns are tried first, and native (backup) patterns are used only when no primary root is found.
     """
+    from ..TraceUtils.annotation_utils import find_iteration_roots_by_priority
+
     return find_iteration_roots_by_priority(graph_tree.events)
 
 
@@ -637,6 +652,8 @@ def find_execution_details(execution_root) -> Optional[str]:
     Returns ``None`` when no integer batch size can be determined.
     """
     name = execution_root["name"]
+    from ..TraceUtils.annotation_utils import IterationAnnotation
+
     ann = IterationAnnotation(name)
     if ann.matched and ann.batch_size is not None:
         return str(ann.batch_size)
@@ -667,14 +684,7 @@ def merge_capture_trace_into_graph(
     Returns:
         Augmented graph_tree with capture information merged in
     """
-    # Lazy import to avoid circular dependency
-    from ..TreePerf.tree_perf import TreePerfAnalyzer
-
-    graph_perf_analyzer = TreePerfAnalyzer.from_file(
-        graph_tree_filepath, add_python_func=True
-    )
-
-    graph_tree = graph_perf_analyzer.tree
+    graph_tree = _load_trace_tree_from_file(graph_tree_filepath, add_python_func=True)
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
     ##Use cuda graph APIs to find the root node for capture subtrees
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
@@ -718,7 +728,7 @@ def merge_capture_trace_into_graph(
         filepath = capture_map[str_key]
         key = (str_key, os.path.abspath(filepath))
         capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
-            key, filepath, TreePerfAnalyzer
+            key, filepath
         )
 
         print(

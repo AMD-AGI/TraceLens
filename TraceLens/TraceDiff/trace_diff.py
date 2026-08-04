@@ -10,8 +10,8 @@ import re
 
 import pandas as pd
 
-from TraceLens import TraceToTree
-from ..TreePerf import GPUEventAnalyser
+from ..Trace2Tree.trace_to_tree import TraceToTree
+from ..TreePerf.gpu_event_analyser import GPUEventAnalyser
 
 from .util import (
     _CATEGORY,

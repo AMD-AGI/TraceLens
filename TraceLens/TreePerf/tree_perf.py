@@ -8,6 +8,7 @@ import copy
 import inspect
 import json
 import logging
+import os
 import re
 import pprint
 
@@ -35,7 +36,6 @@ from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
-from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..PerfModel.utils import add_simulation_time_columns
 
 
@@ -228,9 +228,13 @@ class TreePerfAnalyzer:
 
         # Optionally merge capture trace into graph tree
         if capture_trace_filepath is not None:
+            metadata_json_path = os.path.join(
+                capture_trace_filepath, "execution_details.json"
+            )
             tree = merge_capture_trace_into_graph(
-                capture_tree_filepath=capture_trace_filepath,
-                graph_tree_filepath=profile_filepath,
+                capture_trace_filepath,
+                metadata_json_path,
+                profile_filepath,
             )
 
         return TreePerfAnalyzer(

@@ -9,7 +9,7 @@
 import os
 import re
 
-import TraceLens.util
+from ..util import TraceEventUtils
 
 _TRACELENS_DEBUG = os.environ.get("TRACELENS_DEBUG", "0") == "1"
 _GRAPH_LAUNCH_NAMES = ["hipGraphLaunch", "cudaGraphLaunch"]
@@ -20,7 +20,7 @@ _KERNEL_LAUNCH_EQUIVALENTS = {
     "cuLaunchKernel": "__kernel_launch__",
 }
 
-_TraceKeys = TraceLens.util.TraceEventUtils.TraceKeys
+_TraceKeys = TraceEventUtils.TraceKeys
 _UID = _TraceKeys.UID
 _NAME = _TraceKeys.Name
 _CATEGORY = _TraceKeys.Category
