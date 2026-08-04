@@ -10,7 +10,7 @@ Covers:
 - Annotation pattern selection with primary/backup fallback
   (``find_iteration_roots``) and the priority of the primary 1211 pattern.
 - Per-iteration splitting / time-window isolation (``extract_iteration``).
-- Annotation-name parsing (``get_iter_details_from_name``).
+- Annotation-name parsing of the names these fixtures generate.
 - Steady-state window finding (``identify_steady_state_regions`` and
   ``find_steady_state_window``).
 
@@ -18,6 +18,7 @@ No trace files are written; everything operates on in-memory dicts.
 """
 
 from TraceLens.TraceUtils import split_inference_trace_annotation as split
+from TraceLens.annotation_utils import IterationAnnotation
 
 # --------------------------------------------------------------------------- #
 # Dummy-trace builder
@@ -124,7 +125,7 @@ def test_1211_only_selection_and_splitting():
     )
     assert num_gpu_events_all == 32  # 16 x 2
 
-    details = split.get_iter_details_from_name(names[0])
+    details = IterationAnnotation(names[0]).iter_details()
     assert details == {
         "batch_size": 129,
         "num_requests": 5,
@@ -148,7 +149,7 @@ def test_1211_prioritized_over_1219():
     roots = split.find_iteration_roots(trace["traceEvents"])
     assert roots is not None
     assert len(roots) == 16  # only the 1211 roots
-    primary = split.ANNOTATION_PATTERN[0]
+    primary = split.ITERATION_PATTERNS[0]
     for r in roots:
         assert primary.match(r["name"])
         assert not r["name"].startswith("step[")
@@ -172,11 +173,11 @@ def test_1219_only_uses_backup():
     assert roots is not None
     assert len(roots) == 16
 
-    decode = split.get_iter_details_from_name("step[DECODE bs=20]")
+    decode = IterationAnnotation("step[DECODE bs=20]").iter_details()
     assert decode["generation_requests"] == 20
     assert decode["context_requests"] == 0
 
-    extend = split.get_iter_details_from_name("step[EXTEND bs=2 toks=800]")
+    extend = IterationAnnotation("step[EXTEND bs=2 toks=800]").iter_details()
     assert extend["context_requests"] == 2
     assert extend["generation_requests"] == 0
 
@@ -194,9 +195,9 @@ def test_1213_only_uses_backup():
     assert roots is not None
     assert len(roots) == 16
 
-    details = split.get_iter_details_from_name(
+    details = IterationAnnotation(
         "execute_context_3(100)_generation_2(50)"
-    )
+    ).iter_details()
     assert details["context_requests"] == 3
     assert details["context_sum"] == 100
     assert details["generation_requests"] == 2

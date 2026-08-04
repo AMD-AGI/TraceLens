@@ -3793,6 +3793,13 @@ def merge_capture_trace_into_graph(
             )
             continue
         batch_size = find_execution_details(execution_root)
+        if batch_size is None:
+            print(
+                "Warning: could not determine batch size for execution root {}".format(
+                    execution_root["name"]
+                )
+            )
+            continue
         closest_batch_size = find_closest_batch_size(
             int(batch_size), capture_batch_sizes
         )

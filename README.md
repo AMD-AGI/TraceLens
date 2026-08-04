@@ -9,7 +9,7 @@ See LICENSE for license information.
 [![Tests](https://github.com/AMD-AGI/TraceLens/actions/workflows/regression-tests.yml/badge.svg)](https://github.com/AMD-AGI/TraceLens/actions/workflows/regression-tests.yml)
 [![Lint](https://github.com/AMD-AGI/TraceLens/actions/workflows/lint.yml/badge.svg)](https://github.com/AMD-AGI/TraceLens/actions/workflows/lint.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](setup.py)
+[![Python](https://img.shields.io/badge/python-3.6%2B-blue)](setup.py)
 
 TraceLens is a Python library for **automated performance analysis of training and inference workloads** from trace files. It reads profiler traces (PyTorch, JAX, rocprofv3) and shows you where GPU time actually goes: which kernels are slow, whether they are compute or memory bound, and where communication or idle gaps are costing you, so you can find and fix bottlenecks without hand-reading traces.
 

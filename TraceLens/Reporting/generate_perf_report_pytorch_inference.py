@@ -29,6 +29,11 @@ from TraceLens.Reporting.reporting_utils import (
     resolve_gpu_arch,
 )
 from TraceLens.util import TraceEventUtils
+from TraceLens.annotation_utils import (
+    CAPTURE_PATTERN,
+    CaptureAnnotation,
+    find_events_by_patterns,
+)
 from TraceLens.TreePerf.tree_perf import merge_capture_trace_into_graph
 
 
@@ -191,7 +196,6 @@ def classify_graph_capture_trace(input_folder: str):
     )
     ## SGLang specific dummy run pattern
     ##dummy_run_pattern = re.compile(r"/sgl-workspace/sglang/python/sglang/srt/model_executor/cuda_graph_runner.py\(\d+\): _capture_graph")
-    annotation_pattern = re.compile(r"capture_(\d+)_(.*)")
 
     def load_trace(path: str) -> dict:
         if path.endswith(".zip"):
@@ -211,22 +215,6 @@ def classify_graph_capture_trace(input_folder: str):
         roots = [e for e in events if dummy_run_pattern.match(e.get("name", ""))]
         roots.sort(key=lambda x: x.get("ts", 0))
         return roots
-
-    def find_annotation_roots(events):
-        roots = [
-            e
-            for e in events
-            if e.get("cat") == "user_annotation"
-            and annotation_pattern.match(e.get("name", ""))
-        ]
-        roots.sort(key=lambda x: x.get("ts", 0))
-        return roots
-
-    def parse_annotation(name: str):
-        m = annotation_pattern.match(name)
-        if not m:
-            raise ValueError(f"Annotation name does not match expected pattern: {name}")
-        return int(m.group(1)), m.group(2)
 
     def count_stream_begin_captures(events):
         return sum(
@@ -276,11 +264,12 @@ def classify_graph_capture_trace(input_folder: str):
         trace_json = load_trace(filepath)
         events = trace_json.get("traceEvents", [])
         dummy_roots = find_dummy_run_roots(events)
-        annotation_roots = find_annotation_roots(events)
+        annotation_roots = find_events_by_patterns(events, [CAPTURE_PATTERN])
         basename = os.path.basename(filepath)
 
         if annotation_roots and len(annotation_roots) == len(dummy_roots):
-            batch_size, mode = parse_annotation(annotation_roots[0]["name"])
+            cap = CaptureAnnotation(annotation_roots[0]["name"])
+            batch_size, mode = cap.batch_size, cap.mode
             print(
                 f"batch_size: {batch_size}, mode: {mode} parsed from annotation, num_captures: {count_stream_begin_captures(events)}"
             )
