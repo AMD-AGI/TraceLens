@@ -58,10 +58,12 @@ setup(
         # 'tensorflow',
     ],
     extras_require={
-        # To install slodels, use a custom index:
-        # pip install "slodels[openai,anthropic,google-genai]"
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
+        ],
+        "dev": [
+            "pytest",
+            "black==26.1.0",
         ],
     },
     description="A library for automating the analysis of ML model performance traces",
