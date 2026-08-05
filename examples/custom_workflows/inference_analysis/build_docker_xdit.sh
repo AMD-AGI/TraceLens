@@ -10,12 +10,12 @@ set -e
 usage() {
     echo "Usage: $0 <xdit-version> <path-to-TraceLens> [--base-image <image>] [docker build args...]"
     echo ""
-    echo "  xdit-version    One of: v26.6"
+    echo "  xdit-version    One of: v26.6, v26.7"
     echo "  --base-image    Override the default base Docker image for the selected xDiT version"
     echo ""
     echo "Examples:"
-    echo "  $0 v26.6 /home/user/TraceLens -t tracelens-xdit:v26.6"
-    echo "  $0 v26.6 . --base-image my-custom/xdit:latest -t tracelens-xdit:custom"
+    echo "  $0 v26.7 /home/user/TraceLens -t tracelens-xdit:v26.7"
+    echo "  $0 v26.7 . --base-image my-custom/xdit:latest -t tracelens-xdit:custom"
     exit 1
 }
 
@@ -30,11 +30,16 @@ case "${XDIT_VERSION}" in
     v26.6)
         BASE_IMAGE="rocm/pytorch-xdit:v26.6"
         PATCH_FILE="config_xdit_v26.6.patch"
-        XDIT_COMMIT="2b8b5b709e3c63bcbf0f0640e11e916a15a85b46"
+        XDIT_CHECKOUT_CMD="git fetch origin && git checkout 2b8b5b709e3c63bcbf0f0640e11e916a15a85b46 && "
+        ;;
+    v26.7)
+        BASE_IMAGE="rocm/pytorch-xdit:v26.7"
+        PATCH_FILE="config_xdit_v26.7.patch"
+        XDIT_CHECKOUT_CMD=""
         ;;
     *)
         echo "Error: unsupported xDiT version '${XDIT_VERSION}'"
-        echo "Supported versions: v26.6"
+        echo "Supported versions: v26.6, v26.7"
         exit 1
         ;;
 esac
@@ -82,9 +87,7 @@ COPY . /tmp/TraceLens
 RUN XDIT_DIR=\$(python -c "import xfuser, os; print(os.path.join(os.path.dirname(xfuser.__file__), '..'))") && \
     cd "\${XDIT_DIR}" && \
     git checkout -- . && \
-    git fetch origin && \
-    git checkout ${XDIT_COMMIT} && \
-    (git apply /tmp/TraceLens/${PATCH_PATH} || patch -p1 --fuzz=10 < /tmp/TraceLens/${PATCH_PATH}) && \
+    ${XDIT_CHECKOUT_CMD}(git apply /tmp/TraceLens/${PATCH_PATH} || patch -p1 --fuzz=10 < /tmp/TraceLens/${PATCH_PATH}) && \
     pip install --upgrade /tmp/TraceLens && \
     rm -rf /tmp/TraceLens
 
