@@ -4,8 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 
 def get_node_rank_protobuf_mapping(traces_folder, pattern="*.xplane.pb"):

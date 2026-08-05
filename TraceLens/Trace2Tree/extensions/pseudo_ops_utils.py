@@ -4,8 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import re
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 

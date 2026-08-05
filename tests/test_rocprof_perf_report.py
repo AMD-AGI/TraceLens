@@ -4,15 +4,17 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import pytest
 import os
-import pandas as pd
 import tempfile
-from TraceLens.util import RocprofParser
-from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
+
+import pandas as pd
+import pytest
+
 from TraceLens.Reporting.generate_perf_report_rocprof import (
     generate_perf_report_rocprof,
 )
+from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
+from TraceLens.util import RocprofParser
 
 
 def find_test_files(ref_root):

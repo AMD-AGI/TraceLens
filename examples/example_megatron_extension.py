@@ -6,9 +6,9 @@
 
 import ast
 import collections
+import logging
 import math
 import re
-import logging
 
 
 def _link_checkpoint_fwd_bwd(trace_tree):
@@ -500,7 +500,7 @@ class tev2_pseudo_gemm(GEMM):
         raise NotImplementedError("Backward pass for tev2_pseudo_gemm is not defined.")
 
 
-from TraceLens.PerfModel import SDPA, GroupedGemm, extract_sdpa_cfg, Normalization
+from TraceLens.PerfModel import SDPA, GroupedGemm, Normalization, extract_sdpa_cfg
 
 
 class transformer_engine_attention(SDPA):

@@ -5,9 +5,11 @@
 ###############################################################################
 
 import os
-import pandas as pd
 from glob import glob
+
 import numpy as np
+import pandas as pd
+
 from TraceLens.NcclAnalyser.util.xla_parser import XLACollectiveParser
 from TraceLens.Trace2Tree.trace_to_tree import JaxTraceToTree
 from TraceLens.util import DataLoader, TraceEventUtils

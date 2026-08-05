@@ -5,15 +5,16 @@
 ###############################################################################
 
 import math
-import pandas as pd
 import re
 import string
 from itertools import chain
 
-from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
+import pandas as pd
+
 from ..PerfModel import perf_model
 from ..PerfModel.utils import add_simulation_time_columns
-from ..util import TraceEventUtils, DataLoader, JaxProfileProcessor
+from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
+from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 
 
 class JaxAnalyses:

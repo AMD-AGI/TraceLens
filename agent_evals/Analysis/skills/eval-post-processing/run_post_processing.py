@@ -15,6 +15,7 @@ reproducer packages, and copies the report tree to eval_reports/latest/.
 
 import csv
 import glob
+import logging
 import os
 import re
 import shutil
@@ -22,6 +23,8 @@ import sys
 import tarfile
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 import yaml
 
@@ -923,7 +926,12 @@ def main():
                     with open(stream_src) as src, open(stream_dst, "w") as dst:
                         dst.write(src.read().replace(repo_abs, "$REPO_ROOT"))
                 except Exception:
-                    pass
+                    logger.warning(
+                        "Failed to sanitize stream log for %s run_%s",
+                        tid,
+                        rid,
+                        exc_info=True,
+                    )
             eval_src = os.path.join(RESULTS_ROOT, tid, f"run_{rid}", "eval_summary.csv")
             eval_dst = os.path.join(folder, f"{tid}_run_{rid}_eval_summary.csv")
             if os.path.isfile(eval_src):

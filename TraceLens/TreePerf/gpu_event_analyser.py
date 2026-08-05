@@ -6,6 +6,7 @@
 
 import pandas as pd
 import tqdm
+
 from ..util import TraceEventUtils
 
 
