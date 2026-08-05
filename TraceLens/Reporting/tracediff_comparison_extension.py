@@ -162,7 +162,11 @@ def _build_uid_to_row_idx(
     kernel_details_summary, which required _summarize_kernel_stats to embed
     internal join state in summary output.
     """
-    if df_unified_perf.empty or unified_perf_summary.empty:
+    if (
+        df_unified_perf is None
+        or df_unified_perf.empty
+        or unified_perf_summary.empty
+    ):
         return {}
     if "kernel_details" not in df_unified_perf.columns:
         return {}
