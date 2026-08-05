@@ -39,4 +39,12 @@ jobs:
       - name: Run unit tests
         run: |
           . .venv/bin/activate
-          python -m pytest tests/ -v --tb=short -n auto
+          python -m pytest tests/ -v --tb=short -n auto --cov=TraceLens --cov-report=xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          fail_ci_if_error: true
+          verbose: true

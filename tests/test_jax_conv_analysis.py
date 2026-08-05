@@ -43,9 +43,7 @@ def conv_events(perf_analyzer):
     assert len(kernel_events) == 25
 
     events = [
-        event
-        for event in kernel_events
-        if event["gpu_kernel_op_cat"].lower() == "conv"
+        event for event in kernel_events if event["gpu_kernel_op_cat"].lower() == "conv"
     ]
     assert len(events) == 10
 
