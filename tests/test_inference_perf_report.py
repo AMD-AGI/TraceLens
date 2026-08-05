@@ -421,8 +421,25 @@ def test_xdit_capture_merge():
         f"vs replay={replay_time_us:.1f}µs"
     )
 
-    # --- 5. Verify call stacks contain _run_timed_pipe and aten::mm ---
+    # --- 5. Verify non-Synthetic ops have input dims and kernel names in call stacks ---
     df_unified = pd.read_csv(os.path.join(ref_csvs_dir, "unified_perf_summary.csv"))
+    non_synth = df_unified[~df_unified["name"].str.contains("Synthetic Op", na=False)]
+    empty_dims = non_synth[non_synth["Input Dims"].isna() | (non_synth["Input Dims"] == "")]
+    assert empty_dims.empty, (
+        f"{len(empty_dims)} non-Synthetic ops have empty Input Dims: "
+        f"{empty_dims['name'].tolist()[:5]}"
+    )
+    for idx, row in non_synth.iterrows():
+        cs = str(row.get("call_stack_full", ""))
+        kd = str(row.get("kernel_details_summary", ""))
+        kernel_names = re.findall(r"'name': '([^']+)'", kd)
+        for kernel_name in kernel_names:
+            assert kernel_name in cs, (
+                f"Row {idx} ({row['name']}): kernel '{kernel_name[:60]}' "
+                f"not found in call_stack_full"
+            )
+
+    # --- 6. Verify call stacks contain _run_timed_pipe and aten::mm ---
     mm_rows = df_unified[df_unified["name"] == "aten::mm"]
     has_expected_stack = mm_rows["call_stack_full"].apply(
         lambda x: isinstance(x, str) and "_run_timed_pipe" in x and "aten::mm" in x
