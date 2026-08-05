@@ -14,7 +14,7 @@ import warnings
 from math import prod
 
 from .kernel_name_parser import gemm_name_parser
-from .utils import name2bpe, parse_bool, torch_dtype_map
+from .utils import name2bpe, optional_float, parse_bool, torch_dtype_map
 
 
 # 1. GEMM
@@ -2218,16 +2218,6 @@ class SDPA:
         return simulated_time
 
 
-def _optional_float(value, default=0.0):
-    """Parse a trace concrete-input value as float, returning *default* on failure."""
-    if value in ("", "None", None):
-        return default
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return default
-
-
 def extract_sdpa_cfg(q_shape, k_shape, v_shape, bhnd_idx):
     B_q, H_Q, N_Q, d_h_Q = tuple(q_shape[i] for i in bhnd_idx)
     B_k, H_K, N_K, d_h_K = tuple(k_shape[i] for i in bhnd_idx)
@@ -2623,7 +2613,7 @@ class aten__scaled_dot_product_cudnn_attention(SDPA):
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
 
-        dropout_p = _optional_float(concrete_inputs[5])
+        dropout_p = optional_float(concrete_inputs[5])
 
         is_causal = (
             concrete_inputs[6].lower() == "true"
@@ -2672,7 +2662,7 @@ class aten__scaled_dot_product_efficient_attention(SDPA):
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
 
-        dropout_p = _optional_float(concrete_inputs[5])
+        dropout_p = optional_float(concrete_inputs[5])
 
         is_causal = (
             concrete_inputs[6].lower() == "true"
@@ -2720,7 +2710,7 @@ class aten__scaled_dot_product_flash_attention(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = _optional_float(concrete_inputs[3])
+        dropout_p = optional_float(concrete_inputs[3])
         is_causal = (
             concrete_inputs[4].lower() == "true"
             if concrete_inputs[4] not in ("", "None")
@@ -2771,7 +2761,7 @@ class aiter__flash_attn_forward(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = _optional_float(concrete_inputs[3])
+        dropout_p = optional_float(concrete_inputs[3])
         is_causal = (
             concrete_inputs[5].lower() == "true"
             if concrete_inputs[5] not in ("", "None")
@@ -2819,7 +2809,7 @@ class aiter__flash_attn_backward(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = _optional_float(concrete_inputs[10])
+        dropout_p = optional_float(concrete_inputs[10])
         is_causal = (
             concrete_inputs[12].lower() == "true"
             if concrete_inputs[12] not in ("", "None")
@@ -2893,7 +2883,7 @@ class aiter__fmha_v3_forward(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = _optional_float(concrete_inputs[4])
+        dropout_p = optional_float(concrete_inputs[4])
         is_causal = (
             concrete_inputs[6].lower() == "true"
             if concrete_inputs[6] not in ("", "None")
@@ -2928,7 +2918,7 @@ class aiter__fmha_v3_backward(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = _optional_float(concrete_inputs[7])
+        dropout_p = optional_float(concrete_inputs[7])
         is_causal = (
             concrete_inputs[9].lower() == "true"
             if concrete_inputs[9] not in ("", "None")
@@ -2971,7 +2961,7 @@ def _parse_aiter_mha_fwd_args(event):
     B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v = (
         sdpa_cfg[key] for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
     )
-    dropout_p = _optional_float(concrete_inputs[3])
+    dropout_p = optional_float(concrete_inputs[3])
     is_causal = (
         concrete_inputs[5].lower() == "true"
         if concrete_inputs[5] not in ("", "None")
@@ -3026,7 +3016,7 @@ class aiter__mha_bwd(SDPA):
             sdpa_cfg[key]
             for key in ["B", "N_Q", "H_Q", "N_KV", "H_KV", "d_h_qk", "d_h_v"]
         )
-        dropout_p = _optional_float(concrete_inputs[6])
+        dropout_p = optional_float(concrete_inputs[6])
         is_causal = (
             concrete_inputs[8].lower() == "true"
             if concrete_inputs[8] not in ("", "None")
