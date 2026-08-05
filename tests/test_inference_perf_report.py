@@ -29,6 +29,8 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _capture_tree_cache,
 )
 
+from conftest import update_reference_csvs
+
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Input list of events is empty.*:UserWarning",
     "ignore:Input DataFrame is empty.*:UserWarning",
@@ -222,7 +224,13 @@ def _clear_capture_tree_cache():
     find_inference_test_cases(),
 )
 def test_inference_perf_report(
-    dirpath, trace_gz, capture_folder, gpu_arch_path, tmp_path, tol=1e-6
+    dirpath,
+    trace_gz,
+    capture_folder,
+    gpu_arch_path,
+    tmp_path,
+    update_references,
+    tol=1e-6,
 ):
     """
     Directly call generate_perf_report_pytorch (from the inference module)
@@ -271,6 +279,10 @@ def test_inference_perf_report(
         assert os.path.exists(
             csv_path
         ), f"CSV output for sheet '{sheet_name}' was not written to {csv_path}"
+
+    if update_references:
+        update_reference_csvs(output_csvs_dir, ref_csvs_dir)
+        return
 
     # Compare each generated CSV against the reference CSV in perf_csvs/
     ref_csv_files = [f for f in os.listdir(ref_csvs_dir) if f.endswith(".csv")]
