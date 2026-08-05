@@ -6,16 +6,11 @@
 
 import logging
 
+from TraceLens.PerfModel.utils import optional_int
+
 from .pseudo_ops_utils import inject_pseudo_op
 
 logger = logging.getLogger(__name__)
-
-
-def _optional_int(value, default=None):
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def create_pseudo_ops_moe_unfused_triton(trace_tree):
@@ -100,7 +95,7 @@ def _extract_topk_from_moe(trace_tree, moe_op_event: dict):
             concrete = event["args"].get("Concrete Inputs", [])
             # TopK's k parameter is the second concrete input
             if len(concrete) > 1 and concrete[1]:
-                topk = _optional_int(concrete[1])
+                topk = optional_int(concrete[1])
                 if topk is not None:
                     return topk
 
