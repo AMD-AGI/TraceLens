@@ -10,3 +10,6 @@ coverage:
   status:
     project: off
     patch: off
+
+fixes:
+  - "/__w/TraceLens/TraceLens/::"

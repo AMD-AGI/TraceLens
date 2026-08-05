@@ -1,0 +1,12 @@
+[run]
+relative_files = true
+source = TraceLens
+
+[paths]
+source =
+    TraceLens/
+    */TraceLens/
+    /__w/TraceLens/TraceLens/TraceLens/
+
+[report]
+show_missing = true
