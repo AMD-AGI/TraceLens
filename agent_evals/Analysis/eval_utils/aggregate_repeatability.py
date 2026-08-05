@@ -13,12 +13,7 @@ import os
 import re
 from collections import defaultdict
 
-
-def _optional_int(value, default=None):
-    try:
-        return int(value)
-    except ValueError:
-        return default
+from TraceLens.PerfModel.utils import optional_int
 
 
 RESULTS_ROOT = os.environ.get(
@@ -318,7 +313,7 @@ def parse_ndjson_stream(ndjson_path):
                 if mcid:
                     parts = mcid.rsplit("-", 2)
                     if len(parts) >= 3:
-                        turn_id = _optional_int(parts[-2])
+                        turn_id = optional_int(parts[-2])
                         if turn_id is not None:
                             turn_ids.add(turn_id)
                 if rec.get("subtype") == "started":
@@ -338,7 +333,7 @@ def parse_ndjson_stream(ndjson_path):
                 if mcid:
                     parts = mcid.rsplit("-", 2)
                     if len(parts) >= 3:
-                        turn_id = _optional_int(parts[-2])
+                        turn_id = optional_int(parts[-2])
                         if turn_id is not None:
                             turn_ids.add(turn_id)
 
