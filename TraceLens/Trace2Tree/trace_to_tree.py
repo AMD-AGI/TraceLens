@@ -162,15 +162,20 @@ class BaseTraceToTree(ABC):
             # Larger bleeds (>= 1 us) are discarded — these are typically
             # python_function instrumentation artifacts (e.g. PyCapsule
             # built-ins whose duration includes GPU sync time).
+            #
+            # Detection also applies this tolerance: on large microsecond
+            # timestamps, float addition of ts + dur can differ by a fraction
+            # of a nanosecond for events that really end at the same time, and
+            # a strict `>` would misclassify that as a (large) bleed.
+            overlap_tolerance_us = 1.0
             if stack and (
                 event[TraceEventUtils.TraceKeys.TimeEnd]
-                > stack[-1][TraceEventUtils.TraceKeys.TimeEnd]
+                > stack[-1][TraceEventUtils.TraceKeys.TimeEnd] + overlap_tolerance_us
             ):
                 overlap_us = (
                     stack[-1][TraceEventUtils.TraceKeys.TimeEnd]
                     - event[TraceEventUtils.TraceKeys.TimeStamp]
                 )
-                overlap_tolerance_us = 1.0
                 if overlap_us < overlap_tolerance_us and len(stack) >= 2:
                     popped_event = stack.pop()
                     if self.event_to_category(popped_event) == "cpu_op":
