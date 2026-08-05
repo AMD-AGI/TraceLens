@@ -16,14 +16,7 @@ from TraceLens.PerfModel.perf_model import (
     FusedRoPE,
     UnaryElementwise,
 )
-from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
-
-
-def _optional_int(value, default=None):
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
+from TraceLens.PerfModel.utils import name2bpe, optional_int, torch_dtype_map
 
 
 def _optional_int(value, default=None):
@@ -615,7 +608,7 @@ class vllm_triton_per_token_group_quant_fp8(GroupQuant):
         if len(concrete) > 1:
             raw = str(concrete[1]).strip()
             if raw and raw.lower() not in ("none",):
-                parsed_group_size = _optional_int(raw)
+                parsed_group_size = optional_int(raw)
                 if parsed_group_size is not None:
                     group_size = parsed_group_size
 

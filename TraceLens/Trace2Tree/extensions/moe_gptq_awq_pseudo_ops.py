@@ -6,16 +6,11 @@
 
 import logging
 
+from TraceLens.PerfModel.utils import optional_int
+
 from .pseudo_ops_utils import inject_pseudo_op
 
 logger = logging.getLogger(__name__)
-
-
-def _optional_int(value, default=None):
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def create_pseudo_ops_moe_gptq_awq(trace_tree):
@@ -79,7 +74,7 @@ def _extract_topk_from_outplace(moe_op_event: dict) -> int:
     try:
         topk_ids_shape = moe_op_event["args"]["Input Dims"][4]
         if len(topk_ids_shape) >= 2:
-            topk = _optional_int(topk_ids_shape[1])
+            topk = optional_int(topk_ids_shape[1])
             if topk is not None:
                 return topk
     except (KeyError, IndexError, TypeError):
