@@ -32,74 +32,28 @@ jobs:
           python -m venv .venv
           . .venv/bin/activate
           python -m pip install --upgrade pip
-          pip install . pytest openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
+          pip install . pytest pytest-xdist openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
 
-      - name: Run function-based tests
+      - name: Run regression tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_subtract_intervals.py tests/test_graph_mode.py tests/test_kernel_launchers.py tests/test_call_stack_perf_report.py
-
-      - name: Run rocprof report tests
-        run: |
-          . .venv/bin/activate
-          pytest tests/test_rocprof_perf_report.py
-
-      - name: Run perf report regression tests
-        run: |
-          . .venv/bin/activate
-          pytest tests/test_perf_report_regression.py
-
-      - name: Run compare perf reports tests
-        run: |
-          . .venv/bin/activate
-          pytest tests/test_compare_perf_reports.py
-      
-      - name: Run tracediff regression tests
-        run: |
-          . .venv/bin/activate
-          pytest tests/test_tracediff_regression.py tests/test_tracediff.py
-
-      - name: Run pytest on inference perf report tests
-        run: |
-          . .venv/bin/activate
-          pytest tests/test_inference_perf_report.py
-
-      - name: Run inference annotation parsing tests
-        run: |
-          . .venv/bin/activate
-          pytest tests/test_annotation_utils.py
-
-      - name: Run inference trace splitting tests
-        run: |
-          . .venv/bin/activate
-          pytest tests/test_split_inference_trace_annotation.py
-
-      - name: Run collective analysis tests
-        run: |
-          . .venv/bin/activate
-          pytest tests/test_collective_analysis.py
-
-      - name: Run all2allv summary tests
-        run: |
-          . .venv/bin/activate
-          pytest tests/test_all2allv_summary.py
-
-      - name: Run JAX perf report tests
-        run: |
-          . .venv/bin/activate
-          pytest tests/test_jax_perf_report.py
-
-      - name: Run detect recompute tests
-        run: |
-          . .venv/bin/activate
-          pytest tests/test_detect_recompute.py
-
-      - name: Run copyright header checks
-        run: |
-          . .venv/bin/activate
-          pytest tests/test_copyright_headers.py
-
-      - name: Run pytest on the analysis agent tests
-        run: |
-          . .venv/bin/activate
-          pytest tests/test_analysis_agent.py
+          python -m pytest \
+            tests/test_subtract_intervals.py \
+            tests/test_graph_mode.py \
+            tests/test_kernel_launchers.py \
+            tests/test_call_stack_perf_report.py \
+            tests/test_rocprof_perf_report.py \
+            tests/test_perf_report_regression.py \
+            tests/test_compare_perf_reports.py \
+            tests/test_tracediff_regression.py \
+            tests/test_tracediff.py \
+            tests/test_inference_perf_report.py \
+            tests/test_annotation_utils.py \
+            tests/test_split_inference_trace_annotation.py \
+            tests/test_collective_analysis.py \
+            tests/test_all2allv_summary.py \
+            tests/test_jax_perf_report.py \
+            tests/test_detect_recompute.py \
+            tests/test_copyright_headers.py \
+            tests/test_analysis_agent.py \
+            -v --tb=short -n auto
