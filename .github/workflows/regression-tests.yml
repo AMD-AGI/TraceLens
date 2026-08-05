@@ -102,4 +102,6 @@ jobs:
       - name: Run pytest on the analysis agent tests
         run: |
           . .venv/bin/activate
-          pytest tests/test_analysis_agent.py
+          pytest tests/test_analysis_agent_helpers.py
+          pytest tests/test_analysis_agent_subtask_helpers.py
+          pytest tests/test_agent_evals.py
