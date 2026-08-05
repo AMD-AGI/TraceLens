@@ -1,0 +1,15 @@
+###############################################################################
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+# Codecov configuration for TraceLens.
+# Upload coverage from CI; do not enforce coverage percentage gates yet.
+coverage:
+  status:
+    project: off
+    patch: off
+
+fixes:
+  - "/__w/TraceLens/TraceLens/::"

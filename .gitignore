@@ -45,6 +45,7 @@ venv.bak/
 .hypothesis/
 .coverage
 .coverage.*
+coverage.xml
 htmlcov/
 *.cover
 *.py.cover
