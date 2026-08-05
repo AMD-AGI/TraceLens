@@ -19,13 +19,6 @@ from TraceLens.PerfModel.perf_model import (
 from TraceLens.PerfModel.utils import name2bpe, optional_int, torch_dtype_map
 
 
-def _optional_int(value, default=None):
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
 class gemm_a8w8_blockscale(GEMM):
     """
     Performance model for AITER's gemm_a8w8_blockscale kernel.
