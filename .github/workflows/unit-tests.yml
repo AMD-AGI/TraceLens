@@ -39,6 +39,4 @@ jobs:
       - name: Run unit tests
         run: |
           . .venv/bin/activate
-          python -m pytest tests/ \
-            --ignore=tests/test_perf_model.py \
-            -v --tb=short
+          python -m pytest tests/ -v --tb=short

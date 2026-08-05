@@ -1,8 +1,19 @@
+#!/usr/bin/env python3
 ###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
+
+"""Generate PyTorch profiler traces for perf-model regression fixtures.
+
+This script is not collected by pytest (filename does not match ``test_*.py``).
+Run from the repo root::
+
+    python tests/generate_perf_model_traces.py --create-normalization-trace
+
+The normalization trace is consumed by tests such as ``test_compare_perf_reports``.
+"""
 
 import argparse
 import os
@@ -10,10 +21,6 @@ import os
 import torch
 import torch.nn
 
-# This file contains classes needed to generate traces for the perf model
-# starting with normalization layers.
-# the standard test_compare_perf_report can use the traces created by this script
-# so no additional tests are needed here
 default_normalization_layer_trace_file = (
     "traces/perf_model/normalization/normalization_layer_test.json.gz"
 )
@@ -86,7 +93,7 @@ def create_normalization_layer_trace(outfile: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Tests for the perf model. Can run this to generate traces."
+        description="Generate profiler traces for perf-model regression fixtures."
     )
     parser.add_argument("--create-normalization-trace", action="store_true")
     parser.add_argument(
