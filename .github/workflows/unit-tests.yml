@@ -1,0 +1,44 @@
+###############################################################################
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+name: Unit Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    # rocm-origami is required by roofline / Origami perf-model tests.
+    container: rocm/dev-ubuntu-24.04:7.2.1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          apt update && apt install -y python3-venv git
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install . pytest openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
+          # CPU wheels: test_event_replay imports torch/torchvision; GPU tests skip without a device.
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run unit tests
+        run: |
+          . .venv/bin/activate
+          python -m pytest tests/ \
+            --ignore=tests/test_perf_model.py \
+            -v --tb=short
