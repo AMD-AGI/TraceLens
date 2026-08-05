@@ -15,7 +15,6 @@ from collections import defaultdict
 
 from TraceLens.PerfModel.utils import optional_int
 
-
 RESULTS_ROOT = os.environ.get(
     "RESULTS_ROOT",
     os.path.join(
