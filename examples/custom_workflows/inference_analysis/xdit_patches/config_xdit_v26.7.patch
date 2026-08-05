@@ -23,7 +23,7 @@ index ddf9abf..e5ffc5e 100644
              "--warmup_calls",
              help="The number of full pipe calls to warmup the model.",
 diff --git a/xfuser/model_executor/models/runner_models/base_model.py b/xfuser/model_executor/models/runner_models/base_model.py
-index de8490e..69ba38d 100644
+index de8490e..f108b43 100644
 --- a/xfuser/model_executor/models/runner_models/base_model.py
 +++ b/xfuser/model_executor/models/runner_models/base_model.py
 @@ -3,6 +3,7 @@ import torch
@@ -58,7 +58,7 @@ index de8490e..69ba38d 100644
          ) as profile_object:
              for iteration in range(num_repetitions):
                  log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
-@@ -616,6 +618,46 @@ class xFuserModel(abc.ABC):
+@@ -616,6 +618,50 @@ class xFuserModel(abc.ABC):
          elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
          return out, elapsed_time
  
@@ -74,11 +74,15 @@ index de8490e..69ba38d 100644
 +
 +        For default mode (no CUDA graphs), the profiler captures individual kernels
 +        on any pass, so no splitting is needed.
++
++        Models whose scheduler uses shift_terminal (e.g. LTX-2.3) cannot run with
++        num_inference_steps=1, so capture profiling is skipped for those models.
 +        """
 +        enable_capture = (
 +            self.config.profile_capture_phase
 +            and get_world_group().rank == 0
 +            and self._get_compile_mode() == "reduce-overhead"
++            and not self.pipe.scheduler.config.shift_terminal
 +        )
 +        if not enable_capture:
 +            self._run_timed_pipe(compile_args)

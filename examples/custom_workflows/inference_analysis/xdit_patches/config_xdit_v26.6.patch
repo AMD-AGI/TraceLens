@@ -143,7 +143,7 @@ index b06d163..e082927 100644
          ) as profile_object:
              for iteration in range(num_repetitions):
                  log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
-@@ -687,6 +689,46 @@ class xFuserModel(abc.ABC):
+@@ -687,6 +689,49 @@ class xFuserModel(abc.ABC):
          elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
          return out, elapsed_time
  
@@ -159,11 +159,15 @@ index b06d163..e082927 100644
 +
 +        For default mode (no CUDA graphs), the profiler captures individual kernels
 +        on any pass, so no splitting is needed.
++
++        Models whose scheduler uses shift_terminal (e.g. LTX-2.3) cannot run with
++        num_inference_steps=1, so capture profiling is skipped for those models.
 +        """
 +        enable_capture = (
 +            self.config.profile_capture_phase
 +            and get_world_group().rank == 0
 +            and self._get_compile_mode() == "reduce-overhead"
++            and not self.pipe.scheduler.config.shift_terminal
 +        )
 +        if not enable_capture:
 +            self._run_timed_pipe(compile_args)
