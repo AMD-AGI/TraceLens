@@ -143,7 +143,7 @@ index b06d163..e082927 100644
          ) as profile_object:
              for iteration in range(num_repetitions):
                  log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
-@@ -687,6 +689,48 @@ class xFuserModel(abc.ABC):
+@@ -687,6 +689,46 @@ class xFuserModel(abc.ABC):
          elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
          return out, elapsed_time
  
@@ -174,8 +174,6 @@ index b06d163..e082927 100644
 +        self._run_timed_pipe(compile_args)
 +
 +        # Phase 2: CUDA graph recording under profiler (1 step).
-+        capture_args = copy.deepcopy(compile_args)
-+        capture_args["num_inference_steps"] = 1
 +        log("Profiling CUDA graph recording phase for shape trace...")
 +        capture_dir = f"{self.config.output_directory}/capture_traces"
 +        os.makedirs(capture_dir, exist_ok=True)
@@ -186,7 +184,7 @@ index b06d163..e082927 100644
 +            with_stack=True,
 +            on_trace_ready=lambda prof: prof.export_chrome_trace(capture_path),
 +        ) as capture_prof:
-+            self._run_timed_pipe(capture_args)
++            self._run_timed_pipe(compile_args)
 +        log(f"Capture trace saved to {capture_path}")
 +
      def get_output_name(self, input_args) -> str:
