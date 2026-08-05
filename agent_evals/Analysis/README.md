@@ -211,10 +211,11 @@ gemm_01_compute_few_tiles,gemm,agent_evals/Analysis/analysis_tests/unit_tests/ge
 For each test case in the traces CSV, the scripts run two phases:
 
 1. **Phase 1 -- Analysis:** Invokes the Analysis agent on the trace file. Output is written to `analysis_output/`. Agent output is logged as stream JSON (`.ndjson`). The orchestrator includes targeted subagent retry (1 retry per failed subagent in Steps 6, 7, and 9) to reduce flaky pipeline failures.
-2. **Phase 2 -- Workflow + Quality Evals (4 parallel tasks):** Launches four tasks concurrently:
+2. **Phase 2 -- Workflow + Quality Evals (5 parallel tasks):** Launches five tasks concurrently:
    - Scripted workflow evals — 13 evals with per-item sub-scoring (via `docker exec`)
    - LLM workflow eval — 1 eval with multi-dimensional weighted scoring (via `agent`)
    - Scripted quality evals — 1 eval (via `docker exec`)
+   - Scripted semantic-purity eval — 1 eval, self-gated to only the two semantic-purity test cases (see [Semantic-Purity Eval](#semantic-purity-eval))
    - LLM quality evals — 2 evals with multi-dimensional weighted scoring (via `agent`)
 3. **Merge Results:** Runs `eval_utils/merge_results.py` to combine per-eval CSVs into a single `eval_summary.csv`.
 
@@ -251,6 +252,41 @@ All scripted evals include **pre-check gates** that immediately FAIL all evals w
 
 LLM evals (2–3) run via `.cursor/skills/quality-llm-eval.md`. System-level P-items are skipped (no Impact field to compare).
 
+### Semantic-Purity Eval
+
+`eval_utils/semantic_partition_scripted_evals.py` computes the LCA-partition purity of the semantic kernel-bucketing method (`_semantic/tracediff_output/diff_stats.csv` in the run's output) against a with-capture ("gold") reference, using the forward/reverse purity and strict forward/reverse consistency metrics from `eval_utils/compare_lca_partitions.py`. **Its own PASS/FAIL is informational only** -- see "Two-stage design" below for why, and `eval_utils/semantic_purity_aggregate.py` for the eval that actually gates.
+
+**Self-gating:** this eval is a no-op (writes an empty results CSV, always exits 0) for every test case except the two whose `reference_dir` contains a `semantic_purity_gold_diff_stats.csv` file: `semantic_purity_deepseek_r1` and `semantic_purity_qwen3_30b_a3b` in `analysis_tests/combined_traces_comparative.csv`. No other test case is affected by this eval.
+
+**Fixtures:** `analysis_tests/semantic_purity_deepseek_r1.tar.gz` and `analysis_tests/semantic_purity_qwen3_30b_a3b.tar.gz` each contain only the with-capture trace pair (`with_capture/MI300`, `with_capture/B300`) plus the pre-generated `analysis_output_ref/semantic_purity_gold_diff_stats.csv` gold reference -- the no-capture trace pair fed to Phase 1 as `trace1_path`/`trace2_path` is **not** stored redundantly in the tarball. Instead, `run_repeatability_parallel.sh` derives `no_capture/` from `with_capture/` on first use (copy the tree, then strip `torch_trace/capture_traces/` under each device folder), matching what `generate_semantic_gold_ref.sh` does for one-off gold regeneration.
+
+**Regenerating gold:** the gold `diff_stats.csv` is produced once (not per-repeat, since the with-capture path has no LLM involved and is deterministic) by running the same full agentic orchestrator on the **with-capture** trace pair and keeping `perf_report_trace1_csvs/diff_stats.csv` from that run's output -- same mechanism `generate_ref.sh` uses for the standard references. Regenerate with:
+
+```bash
+bash agent_evals/Analysis/eval_scripts/generate_semantic_gold_ref.sh [semantic_purity_deepseek_r1 semantic_purity_qwen3_30b_a3b]
+```
+
+**Two-stage design.** The semantic-bucketing method has real run-to-run variance -- most visibly on Qwen3-30B-A3B, where five independently-observed runs ranged strict_forward 0.4677-0.7304 (DeepSeek-R1 was tight: 0.9748-0.9780 across three runs). A single run's metrics are therefore not a trustworthy regression signal on their own, so the gate is split in two:
+
+1. **Per-run (`semantic_partition_scripted_evals.py`):** always records forward_purity / reverse_purity / strict_forward / strict_reverse in `details`, and always reports PASS as long as the metrics were computed (result only turns FAIL for genuine pipeline errors -- candidate output missing, no matched keys). This is what makes it safe to run `NUM_REPEATS=1`: nothing downstream expects a per-run verdict to mean anything about quality.
+2. **Post-repeat (`semantic_purity_aggregate.py`):** runs once after all `NUM_REPEATS` complete (wired into `run_repeatability_parallel.sh` right after the main `wait`, comparative mode only). It averages **strict_forward** specifically (chosen over forward_purity because it's all-or-nothing per gold group, so it doesn't give partial credit the way majority-vote purity does -- more discriminating) across whatever runs it finds, and compares that average against a fixed floor:
+
+   | Test case | Floor (avg strict_forward) | Derivation |
+   |---|---|---|
+   | `semantic_purity_deepseek_r1` | 0.92 | mean(0.9748, 0.9748, 0.9780) = 0.9759, minus ~5% |
+   | `semantic_purity_qwen3_30b_a3b` | 0.55 | mean(0.5671, 0.4677, 0.7304, 0.5691, 0.5677) = 0.5804, minus ~5% |
+
+   These floors are not derived from `compare_lca_partitions.py`'s random-shuffle baseline (Baseline 1, ~0.04-0.06 strict_forward for both models) -- they're set directly from currently-observed real performance with a small buffer. The intent is regression detection ("don't get worse than today"), not an absolute quality bar; raise them if the method is deliberately improved, don't lower them without a documented reason. Writes `semantic_purity_aggregate_verdict.csv` under each test case's results directory and exits non-zero if either test case fails.
+
+**Repeatability:** `NUM_REPEATS=3` is the intended setting for this eval, since the aggregate gate needs several runs to average over -- `NUM_REPEATS=1` still works (the per-run eval never gates), but the aggregate step then warns it's averaging over fewer runs than intended and the resulting verdict is a weaker estimate.
+
+```bash
+NUM_REPEATS=3 TEST_IDS="semantic_purity_deepseek_r1 semantic_purity_qwen3_30b_a3b" \
+    CONTAINER=my_container bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh
+```
+
+**STABLE/FLAKY does not apply to this eval's quality signal.** Because `semantic_purity_1`'s per-run result is always PASS (informational only), its row in `stability_summary.csv` will show `STABLE_PASS` regardless of the actual metric values or of whether `semantic_purity_aggregate.py` failed the case -- this is by design (the per-run/aggregate split was chosen specifically because averaging-then-gating is incompatible with independent per-run STABLE/FLAKY classification), not a bug. Look at `semantic_purity_aggregate_verdict.csv` for the real verdict; `stability_summary.csv`'s row for `semantic_purity_1` on these two test cases only tells you whether the pipeline itself completed each repeat, nothing about quality.
+
 ## Results
 
 Results are written to `agent_evals/Analysis/repeatability_results/<id>/run_<n>/` and include:
@@ -259,6 +295,8 @@ Results are written to `agent_evals/Analysis/repeatability_results/<id>/run_<n>/
 - `workflow_scripted_eval.log` / `workflow_scripted_results.csv` -- scripted workflow eval output.
 - `workflow_llm_eval.ndjson` / `workflow_llm_results.csv` -- LLM workflow eval output.
 - `quality_scripted_eval.log` / `quality_scripted_results.csv` -- scripted quality eval output.
+- `semantic_purity_eval.log` / `semantic_purity_results.csv` -- scripted semantic-purity eval output (empty/no-op for all test cases except the two described in [Semantic-Purity Eval](#semantic-purity-eval)).
+- `semantic_purity_aggregate_verdict.csv` -- written once per test case (not per-repeat) under `repeatability_results/<id>/` (one level up from `run_<n>/`) by `semantic_purity_aggregate.py` after all repeats finish; this is the actual pass/fail verdict for the two semantic-purity test cases (see [Semantic-Purity Eval](#semantic-purity-eval)).
 - `quality_llm_eval.ndjson` / `quality_llm_results.csv` -- LLM quality eval output.
 - `eval_summary.csv` -- merged results for the test case.
 
