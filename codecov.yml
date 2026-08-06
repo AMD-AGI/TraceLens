@@ -5,13 +5,15 @@
 ###############################################################################
 
 # Codecov configuration for TraceLens.
+# Enforce upload/processing and surface coverage in PRs; do not gate on
+# coverage percentage yet (informational status checks).
 coverage:
   status:
     project:
       default:
         target: auto
-        threshold: 0%
         base: auto
+        informational: true
     patch: off
 
 comment:
