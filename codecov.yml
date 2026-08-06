@@ -6,6 +6,7 @@
 
 # Codecov configuration for TraceLens.
 # Upload coverage from CI; do not enforce coverage percentage gates yet.
+# Status checks are informational until project gates are enabled in a follow-up PR.
 coverage:
   status:
     project: off
