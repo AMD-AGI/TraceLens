@@ -553,19 +553,15 @@ def find_capture_roots(capture_tree):
 
 
 def collect_execution_roots_and_graphlaunches(graph_tree):
-    """Single pass: execution roots (sorted) and graph-launch events."""
-    execution_roots = []
-    graphlaunch_events = []
-    for event in graph_tree.events:
-        name = event.get("name", "")
-        low = name.lower()
-        if "graphlaunch" in low:
-            graphlaunch_events.append(event)
-        if event.get("cat") == "user_annotation" and any(
-            p.match(name) for p in EXECUTE_CONTEXT_PATTERNS
-        ):
-            execution_roots.append(event)
-    execution_roots.sort(key=lambda x: x.get("ts", 0))
+    """Return sorted iteration-annotation roots and graph-launch events."""
+    graphlaunch_events = [
+        event
+        for event in graph_tree.events
+        if "graphlaunch" in event.get("name", "").lower()
+    ]
+    execution_roots = sorted(
+        find_execution_roots(graph_tree), key=lambda x: x.get("ts", 0)
+    )
     return execution_roots, graphlaunch_events
 
 

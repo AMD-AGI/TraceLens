@@ -10,8 +10,12 @@ from copy import deepcopy
 
 import pytest
 
+from TraceLens.PerfModel.torch_op_mapping import resolve_perf_model_class
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+
+# A kernel the parent event may have launched; unrelated to the wrapped kernel.
+STALE_PARENT_KERNEL = "void at::native::vectorized_gather_kernel"
 
 GEMM_KERNEL = "Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT16x16x64"
 OTHER_KERNEL = "Cijk_Alik_Bljk_HHS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x128"
@@ -82,7 +86,14 @@ def _make_graph_launch_trace():
     ]
 
 
-def _build_synthetic(analyzer, kernel_name, kernel_dur, parent_dur=700, next_uid=9000):
+def _build_synthetic(
+    analyzer,
+    kernel_name,
+    kernel_dur,
+    parent_dur=700,
+    next_uid=9000,
+    parent_kernel_details=None,
+):
     """Build an off-tree synthetic the same way collect_unified_perf_events does."""
     parent = {
         "name": "hipGraphLaunch",
@@ -93,6 +104,8 @@ def _build_synthetic(analyzer, kernel_name, kernel_dur, parent_dur=700, next_uid
         "children": [],
         "gpu_events": [],
     }
+    if parent_kernel_details is not None:
+        parent["kernel_details"] = parent_kernel_details
     kernel = {
         "UID": 2,
         "name": kernel_name,
@@ -120,6 +133,43 @@ class TestSyntheticOpPerfMetrics:
         assert synthetic["dur"] == 20
         assert synthetic["children"] == []
         assert synthetic["gpu_events"] == [2]
+
+    def test_synthetic_does_not_inherit_parent_kernel_details(self):
+        """A parent's kernel_details must not shadow the wrapped kernel's name."""
+        tree = TraceToTree(deepcopy(_make_graph_launch_trace()))
+        tree.build_tree(add_python_func=False)
+        analyzer = TreePerfAnalyzer(tree, add_python_func=False)
+        synthetic = _build_synthetic(
+            analyzer,
+            GEMM_KERNEL,
+            kernel_dur=20,
+            parent_kernel_details=[{"name": STALE_PARENT_KERNEL}],
+        )
+        assert "kernel_details" not in synthetic
+
+    def test_perf_model_resolves_despite_stale_parent_kernel_details(self):
+        """Perf-model dispatch uses the synthetic's own kernel, not the parent's."""
+        tree = TraceToTree(deepcopy(_make_graph_launch_trace()))
+        tree.build_tree(add_python_func=False)
+        analyzer = TreePerfAnalyzer(tree, add_python_func=False, arch=TEST_ARCH)
+        synthetic = _build_synthetic(
+            analyzer,
+            GEMM_KERNEL,
+            kernel_dur=20,
+            parent_kernel_details=[{"name": STALE_PARENT_KERNEL}],
+        )
+        synthetic["args"] = {
+            "Input Dims": [[4, 3072], [3072, 256]],
+            "Input type": ["float", "float"],
+        }
+        assert resolve_perf_model_class(synthetic) is not None
+        assert analyzer._has_perf_model(synthetic)
+
+        df = analyzer.build_df_unified_perf_table(events=[synthetic])
+        row = df.iloc[0]
+        assert row["has_perf_model"]
+        assert row["GFLOPS"] > 0
+        assert row["kernel_details"][0]["name"] == GEMM_KERNEL
 
     def test_different_synthetics_get_different_durations(self):
         tree = TraceToTree(deepcopy(_make_graph_launch_trace()))

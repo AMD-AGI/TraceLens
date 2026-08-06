@@ -29,7 +29,9 @@ logger = logging.getLogger(__name__)
 
 GRAPH_LAUNCH_NAMES = frozenset({"hipGraphLaunch", "cudaGraphLaunch"})
 CAPTURE_ARGS_KEYS = ("Input Dims", "Input type", "Input Strides", "Concrete Inputs")
-DECODE_STEP_RE = re.compile(r"^step\[DECODE bs=(\d+)\]$")
+# Not anchored at "]": SGLang roofline annotations fold extra aggregates into the
+# same span, e.g. "step[DECODE bs=64 g_sqsq=64 g_sqsk=123904 g_sk=123904]".
+DECODE_STEP_RE = re.compile(r"^step\[DECODE bs=(\d+)\b")
 CAPTURE_FILE_RE = re.compile(r"^bs_(\d+)_rank0\.json\.gz$")
 DEFAULT_CAPTURE_OFFSET = 2
 MAX_OFFSET_SEARCH = 6

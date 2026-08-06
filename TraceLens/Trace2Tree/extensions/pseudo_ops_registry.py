@@ -26,7 +26,9 @@ from .pseudo_ops_utils import (
 logger = logging.getLogger(__name__)
 
 
-def apply_pseudo_op_extensions(tree, verbose: bool = False, show_progress: bool = False):
+def apply_pseudo_op_extensions(
+    tree, verbose: bool = False, show_progress: bool = False
+):
     """
     Apply all available pseudo-op extensions to trace tree.
     Extensions are automatically detected and applied.

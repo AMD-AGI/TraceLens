@@ -157,6 +157,27 @@ def test_find_decode_batch_size_for_graph_launch():
     )
 
 
+def test_index_decode_annotations_matches_folded_roofline_span():
+    """SGLang roofline annotations fold aggregates into the same step span."""
+    folded = "step[DECODE bs=64 g_sqsq=64 g_sqsk=123904 g_sk=123904]"
+    timestamps, batch_sizes = index_decode_annotations(
+        [_mk_event("user_annotation", folded, 900)]
+    )
+    assert timestamps == [900]
+    assert batch_sizes == [64]
+
+
+def test_index_decode_annotations_ignores_non_decode_spans():
+    events = [
+        _mk_event("user_annotation", "step[PREFILL bs=16]", 900),
+        _mk_event("user_annotation", "prefix step[DECODE bs=16]", 950),
+        _mk_event("user_annotation", "step[DECODE bs=8]", 1000),
+    ]
+    timestamps, batch_sizes = index_decode_annotations(events)
+    assert timestamps == [1000]
+    assert batch_sizes == [8]
+
+
 def test_load_sglang_capture_batch_sizes(capture_folder):
     assert load_sglang_capture_batch_sizes(capture_folder) == [16]
 

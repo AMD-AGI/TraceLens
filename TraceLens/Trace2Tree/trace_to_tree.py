@@ -250,7 +250,7 @@ class BaseTraceToTree(ABC):
         Not run automatically from ``build_tree``; call after building or
         mutating a tree when you want a strict sanity check.
         """
-        UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
+        UID = TraceEventUtils.TraceKeys.UID
         gray: set[int] = set()
         black: set[int] = set()
 

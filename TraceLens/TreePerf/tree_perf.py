@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import sys
 import pprint
 
 # TODO: warning should show the stack as well
@@ -441,6 +442,12 @@ class TreePerfAnalyzer:
         synthetic["dur"] = kernel.get("dur", synthetic.get("dur"))
         synthetic["children"] = []
         synthetic["gpu_events"] = [kernel["UID"]]
+        # The synthetic is a shallow copy of its parent, so it can inherit a
+        # kernel_details describing the parent's kernel rather than *kernel*.
+        # That stale value would shadow the synthetic's own name during
+        # perf-model dispatch and categorization; details are rebuilt from
+        # gpu_events in build_df_unified_perf_table.
+        synthetic.pop("kernel_details", None)
 
     def _inherit_user_annotation_from_ancestors(self, start_evt):
         """Return stamped user_annotation text from *start_evt* or an ancestor."""
