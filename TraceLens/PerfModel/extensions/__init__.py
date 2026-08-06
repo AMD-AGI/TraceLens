@@ -20,6 +20,8 @@ from .moe_perf_model_extensions import (
     moe_flydsl_stage1,
     moe_flydsl_stage2,
     sglang_fused_append_shared_experts,
+    BiasedGroupedTopk,
+    MoeSortScatterGather,
 )
 from .attention_perf_model_extensions import (
     InferenceAttention,
@@ -52,8 +54,12 @@ from .custom_collectives_perf_model_extensions import (
     aiter_fused_allreduce_rmsnorm,
     aiter_fused_allreduce_rmsnorm_,
     custom_ar_all_reduce,
+    custom_ar_qr_all_reduce,
     aiter_reduce_scatter,
     aiter_all_gather_reg,
+    sgl_kernel_all_reduce_reg,
+    sgl_kernel_qr_all_reduce,
+    sgl_kernel_reg_all_gather_into_tensor,
 )
 from .pseudo_ops_perf_utils import (
     get_pseudo_op_mappings,
@@ -74,6 +80,8 @@ __all__ = [
     "moe_gptq_awq_down",
     "moe_flydsl_stage1",
     "moe_flydsl_stage2",
+    "BiasedGroupedTopk",
+    "MoeSortScatterGather",
     "mha_varlen_fwd",
     "aiter_fmha_v3_varlen_fwd",
     "vllm_unified_attention_with_output",

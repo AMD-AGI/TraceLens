@@ -11,7 +11,6 @@ and per-category sheets when a GPU arch config is provided.
 
 import json
 import os
-import tempfile
 
 import pandas as pd
 import pytest

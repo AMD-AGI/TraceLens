@@ -11,13 +11,24 @@ Given a trace path and a framework (``"pytorch"`` or ``"jax"``), returns a
 
 * Phase 1 -- kernel presence, drop detection, runtime variability, GPU
   busy/idle, kernel-count structure and metadata richness, off the raw JSON.
-* Phase 2 -- checks derived from TraceLens perf reports.
+* Phase 2 -- checks derived from TraceLens perf reports, plus (JAX) an optional
+  attention-kernel-count sanity check when the model config is supplied.
 
 CLI (runs both phases by default)::
 
-    python examples/custom_workflows/profiler_test/trace_checker.py TRACE.trace.json.gz  --framework pytorch --phase all
+    python examples/custom_workflows/trace_checker.py TRACE.trace.json.gz --framework pytorch --phase all
 
-    python examples/custom_workflows/profiler_test/trace_checker.py --json_trace TRACE.trace.json.gz --framework jax --phase all --xplane-pb-path TRACE.xplane.pb
+    python examples/custom_workflows/trace_checker.py --json_trace TRACE.trace.json.gz --framework jax --phase all --xplane-pb-path TRACE.xplane.pb
+
+Optional outputs and the JAX attention-kernel-count check
+(expected = num_gpus * num_steps * num_layers * calls * unique_kernels; num_gpus
+and unique_kernels are inferred, --num-layers and --num-steps enable the check)::
+
+    python examples/custom_workflows/trace_checker.py --json_trace TRACE.trace.json.gz --framework jax --xplane-pb-path TRACE.xplane.pb \\
+        --output-dir ./perf_csvs --json ./report.json \\
+        --num-layers 4 --num-steps 3 --fwd-attn-calls 2 --bwd-attn-calls 1
+
+Set ``TRACELENS_VERBOSE_NATIVE_LOGS=1`` to keep the raw native XLA/xprof logs.
 """
 
 from __future__ import annotations
@@ -26,6 +37,7 @@ import argparse
 import enum
 import functools
 import json
+import logging
 import math
 import os
 import statistics
@@ -37,6 +49,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from TraceLens import GPUEventAnalyser
 from TraceLens.util import DataLoader
+
+logger = logging.getLogger(__name__)
 
 FRAMEWORK_PYTORCH = "pytorch"
 FRAMEWORK_JAX = "jax"
@@ -190,6 +204,27 @@ class QualityThresholds:
     op_high_idle_pct: float = 40.0
 
 
+@dataclass
+class AttnCountConfig:
+    """Config for the attention-kernel-count check.
+
+    expected = num_gpus * num_steps * num_layers * calls * unique_kernels (per
+    pass). num_gpus and unique_kernels are inferred; num_layers and num_steps
+    must be supplied (else the check SKIPs and just reports observed counts).
+    """
+
+    num_layers: Optional[int] = None
+    num_steps: Optional[int] = None
+    num_gpus: Optional[int] = None
+    fwd_attn_calls: int = 1
+    bwd_attn_calls: int = 1
+    tol: float = 0.0  # relative tolerance; 0.0 == exact
+
+    @property
+    def enabled(self) -> bool:
+        return self.num_layers is not None and self.num_steps is not None
+
+
 def coefficient_of_variation(values: Sequence[float]) -> float:
     """std / mean (population std). 0.0 if empty or mean is 0."""
     n = len(values)
@@ -338,7 +373,7 @@ def _coerce_numeric(event: dict) -> None:
             try:
                 event[key] = float(val)
             except ValueError:
-                pass
+                logger.debug("Skipping non-numeric %s value: %r", key, val)
 
 
 def make_jax_analyzer(xplane_path: str):
@@ -444,8 +479,8 @@ def _check_runtime_variability(
 ) -> QualityResult:
     """Flag kernel groups whose per-invocation duration varies too much."""
     eligible = 0
-    warned: List = []
-    failed: List = []
+    warned: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
     worst_cv = 0.0
     worst_name = None
     for key, durs in groups.items():
@@ -457,20 +492,30 @@ def _check_runtime_variability(
         cv = coefficient_of_variation(durs)
         if cv > worst_cv:
             worst_cv, worst_name = cv, key
-        if cv >= thr.runtime_cv_fail:
-            failed.append((key, cv))
-        elif cv >= thr.runtime_cv_warn:
-            warned.append((key, cv))
+        if cv >= thr.runtime_cv_warn:
+            stats = {
+                "group": key,
+                "cv": round(cv, 3),
+                "count": len(durs),
+                "min_us": round(min(durs), 3),
+                "median_us": round(statistics.median(durs), 3),
+                "max_us": round(max(durs), 3),
+                "mean_us": round(sum(durs) / len(durs), 3),
+            }
+            (failed if cv >= thr.runtime_cv_fail else warned).append(stats)
 
+    failed.sort(key=lambda s: -s["cv"])
+    warned.sort(key=lambda s: -s["cv"])
     metrics = {
         "eligible_groups": eligible,
         "num_warn": len(warned),
         "num_fail": len(failed),
         "worst_cv": round(worst_cv, 3),
         "worst_group": worst_name,
+        "failed_groups": failed,
+        "warned_groups": warned,
         "top_offenders": [
-            {"group": k, "cv": round(c, 3)}
-            for k, c in sorted(failed + warned, key=lambda x: -x[1])[:10]
+            {"group": s["group"], "cv": s["cv"]} for s in (failed + warned)[:10]
         ],
     }
     if eligible == 0:
@@ -488,12 +533,19 @@ def _check_runtime_variability(
             f"{len(failed)}/{eligible} groups exceed CV>={thr.runtime_cv_fail} "
             f"(worst={worst_cv:.2f} '{worst_name}')"
         )
+        msg += _format_variability_detail(
+            failed, "failed (CV>=%.2f)" % thr.runtime_cv_fail
+        )
     elif failed or warned:
         status = Status.WARN
         msg = (
             f"{len(failed)} high / {len(warned)} moderate variability groups "
             f"(worst CV={worst_cv:.2f} '{worst_name}')"
         )
+        if failed:
+            msg += _format_variability_detail(
+                failed, "failed (CV>=%.2f)" % thr.runtime_cv_fail
+            )
     else:
         status = Status.PASS
         msg = f"kernel durations stable across {eligible} groups (worst CV={worst_cv:.2f})"
@@ -504,6 +556,24 @@ def _check_runtime_variability(
         msg,
         metrics,
     )
+
+
+def _format_variability_detail(groups: List[Dict[str, Any]], header: str) -> str:
+    """Multi-line listing of every flagged kernel group with duration stats."""
+    if not groups:
+        return ""
+    lines = [
+        f"\n    {len(groups)} kernel group(s) {header} "
+        "[us: count / CV / min / median / max]:"
+    ]
+    for s in groups:
+        lines.append(
+            f"      - {s['group']}\n"
+            f"          count={s['count']} CV={s['cv']} "
+            f"min={s['min_us']} median={s['median_us']} max={s['max_us']} "
+            f"mean={s['mean_us']}"
+        )
+    return "\n".join(lines)
 
 
 def _check_busy_idle(
@@ -805,7 +875,7 @@ def find_megatron_extension() -> Optional[str]:
         if os.path.exists(candidate):
             return candidate
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("Megatron extension lookup failed", exc_info=True)
     return None
 
 
@@ -1049,11 +1119,181 @@ def _check_sdpa_count(dfs: Dict, sheets: Dict, thr: QualityThresholds) -> Qualit
     )
 
 
+# Perf-report sheets that hold forward / backward attention kernels.
+_ATTN_FWD_SHEETS = ("op_fa_fwd",)
+_ATTN_BWD_SHEETS = ("op_fa_bwd",)
+
+
+def _infer_num_gpus(dfs: Dict) -> Optional[int]:
+    """Number of GPU devices, from the perf-report ``gpu_timeline`` sheet."""
+    tl = dfs.get("gpu_timeline")
+    if tl is None or "gpu_pid" not in getattr(tl, "columns", []):
+        return None
+    try:
+        n = int(tl["gpu_pid"].nunique())
+    except Exception:  # noqa: BLE001
+        return None
+    return n or None
+
+
+def _attention_observed(dfs: Dict, sheet_names: Sequence[str]) -> Dict[str, Any]:
+    """Sum observed launches, count unique kernels, and list per-kernel counts."""
+    launches = 0
+    unique = 0
+    found = []
+    kernels: List[Dict[str, Any]] = []
+    for name in sheet_names:
+        df = dfs.get(name)
+        if df is None or "name_count" not in getattr(df, "columns", []):
+            continue
+        found.append(name)
+        unique += int(len(df))
+        launches += int(df["name_count"].fillna(0).astype(int).sum())
+        names = df["name"] if "name" in df.columns else [None] * len(df)
+        for kname, kcount in zip(names, df["name_count"].fillna(0).astype(int)):
+            kernels.append({"name": kname, "count": int(kcount)})
+    kernels.sort(key=lambda k: -k["count"])
+    return {
+        "launches": launches,
+        "unique_kernels": unique,
+        "sheets": found,
+        "kernels": kernels,
+    }
+
+
+def _format_attn_failure(
+    label: str,
+    obs: Dict[str, Any],
+    num_gpus: int,
+    num_steps: int,
+    num_layers: int,
+    calls: int,
+    expected: int,
+) -> str:
+    """FAIL detail: substituted formula and per-kernel counts."""
+    lines = [
+        f"\n    {label}: expected {expected} != observed {obs['launches']}",
+        "      formula: num_gpus * num_steps * num_layers * calls * unique_kernels",
+        f"               = {num_gpus} * {num_steps} * {num_layers} * {calls} "
+        f"* {obs['unique_kernels']} = {expected}",
+        f"      observed launches = {obs['launches']} "
+        f"across {obs['unique_kernels']} unique kernel(s):",
+    ]
+    for k in obs["kernels"]:
+        lines.append(f"        - count={k['count']:<8} {k['name']}")
+    return "\n".join(lines)
+
+
+def _check_attention_kernel_count(
+    dfs: Dict,
+    cfg: AttnCountConfig,
+) -> QualityResult:
+    """Sanity-check observed attention launches against the model config.
+
+    expected = num_gpus * num_steps * num_layers * calls * unique_kernels,
+    computed separately for the forward and backward passes.
+    """
+    check_id = "attention_kernel_count"
+    name = "Attention kernel count matches config"
+
+    fwd = _attention_observed(dfs, _ATTN_FWD_SHEETS)
+    bwd = _attention_observed(dfs, _ATTN_BWD_SHEETS)
+    if not fwd["sheets"] and not bwd["sheets"]:
+        return QualityResult(
+            check_id,
+            name,
+            Status.SKIP,
+            "no attention (op_fa_fwd/op_fa_bwd) sheets in perf report",
+            {},
+        )
+
+    num_gpus = cfg.num_gpus or _infer_num_gpus(dfs)
+    num_steps = cfg.num_steps
+
+    def _per_pass(obs: Dict[str, Any], calls: int) -> Dict[str, Any]:
+        info: Dict[str, Any] = {
+            "observed_launches": obs["launches"],
+            "unique_kernels": obs["unique_kernels"],
+            "calls": calls,
+            "kernels": obs["kernels"],
+        }
+        # layers*calls implied by the trace (independent of config).
+        denom = (num_gpus or 0) * (num_steps or 0) * (obs["unique_kernels"] or 0)
+        if denom:
+            info["implied_layers_x_calls"] = round(obs["launches"] / denom, 4)
+        return info
+
+    metrics: Dict[str, Any] = {
+        "num_gpus": num_gpus,
+        "num_steps": num_steps,
+        "num_layers": cfg.num_layers,
+        "forward": _per_pass(fwd, cfg.fwd_attn_calls),
+        "backward": _per_pass(bwd, cfg.bwd_attn_calls),
+    }
+
+    if not cfg.enabled:
+        return QualityResult(
+            check_id,
+            name,
+            Status.SKIP,
+            "num_layers and/or num_steps not provided; reporting observed counts "
+            f"only (fwd={fwd['launches']}, bwd={bwd['launches']}, "
+            f"num_gpus={num_gpus})",
+            metrics,
+        )
+    if not num_gpus:
+        return QualityResult(
+            check_id,
+            name,
+            Status.SKIP,
+            "could not infer num_gpus; pass --num-gpus to enable the check",
+            metrics,
+        )
+
+    problems = []
+    for label, obs, calls in (
+        ("forward", fwd, cfg.fwd_attn_calls),
+        ("backward", bwd, cfg.bwd_attn_calls),
+    ):
+        if not obs["sheets"]:
+            continue
+        expected = num_gpus * num_steps * cfg.num_layers * calls * obs["unique_kernels"]
+        metrics[label]["expected_launches"] = expected
+        observed = obs["launches"]
+        tol_abs = cfg.tol * expected
+        ok = abs(observed - expected) <= tol_abs
+        if not ok:
+            problems.append(
+                _format_attn_failure(
+                    label, obs, num_gpus, num_steps, cfg.num_layers, calls, expected
+                )
+            )
+
+    if problems:
+        summary = (
+            f"attention launches do not match config "
+            f"(num_gpus={num_gpus}, num_steps={num_steps}, num_layers={cfg.num_layers})"
+        )
+        return QualityResult(
+            check_id, name, Status.FAIL, summary + "".join(problems), metrics
+        )
+    return QualityResult(
+        check_id,
+        name,
+        Status.PASS,
+        f"attention launches match config "
+        f"(num_gpus={num_gpus}, num_steps={num_steps}, num_layers={cfg.num_layers}; "
+        f"fwd={fwd['launches']}, bwd={bwd['launches']})",
+        metrics,
+    )
+
+
 def run_phase2(
     path: str,
     framework: str,
     thr: Optional[QualityThresholds] = None,
     output_dir: Optional[str] = None,
+    attn_cfg: Optional[AttnCountConfig] = None,
 ) -> List[QualityResult]:
     thr = thr or QualityThresholds()
     sheets = _SHEETS[framework]
@@ -1069,7 +1309,7 @@ def run_phase2(
                 {},
             )
         ]
-    return [
+    results = [
         _check_report_generated(dfs, sheets),
         _check_idle_timeline(dfs, sheets, thr),
         _check_op_count_consistency(dfs, sheets),
@@ -1077,6 +1317,11 @@ def run_phase2(
         _check_high_idle_ops(dfs, sheets, thr),
         _check_sdpa_count(dfs, sheets, thr),
     ]
+    if framework == FRAMEWORK_JAX:
+        results.append(
+            _check_attention_kernel_count(dfs, attn_cfg or AttnCountConfig())
+        )
+    return results
 
 
 # ===========================================================================
@@ -1089,6 +1334,7 @@ def run_quality_checks(
     thresholds: Optional[QualityThresholds] = None,
     xplane_pb_path: Optional[str] = None,
     output_dir: Optional[str] = None,
+    attn_cfg: Optional[AttnCountConfig] = None,
 ) -> QualityReport:
     """Run trace quality checks for a single trace.
 
@@ -1100,6 +1346,7 @@ def run_quality_checks(
         xplane_pb_path: For JAX, the ``*.xplane.pb`` used by phase 2; defaults to
             ``path`` (PyTorch) or a ``.xplane.pb`` sibling guess (JAX).
         output_dir: Optional directory for perf-report CSV output (phase 2).
+        attn_cfg: Optional model config for the attention-kernel-count check.
     """
     framework = framework.lower()
     if framework not in VALID_FRAMEWORKS:
@@ -1129,7 +1376,15 @@ def run_quality_checks(
 
     if "2" in phases:
         p2_path = xplane_pb_path or _default_xplane_pb_path(path, framework)
-        report.extend(run_phase2(p2_path, framework, thr, output_dir=output_dir))
+        report.extend(
+            run_phase2(
+                p2_path,
+                framework,
+                thr,
+                output_dir=output_dir,
+                attn_cfg=attn_cfg,
+            )
+        )
 
     return report
 
@@ -1184,6 +1439,53 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Directory to write perf-report CSVs (phase 2)",
     )
     p.add_argument("--json", default=None, help="Write the full report as JSON here")
+
+    attn = p.add_argument_group(
+        "attention kernel count (JAX phase 2)",
+        "Sanity-check observed attention launches against the model config: "
+        "expected = num_gpus * num_steps * num_layers * calls * unique_kernels "
+        "(forward and backward computed separately). num_gpus and the "
+        "unique-kernel counts are inferred from the trace; --num-layers and "
+        "--num-steps are both required to enable the check (else it SKIPs and "
+        "just reports counts).",
+    )
+    attn.add_argument(
+        "--num-layers",
+        type=int,
+        default=None,
+        help="Number of transformer/attention layers (required to enable the check)",
+    )
+    attn.add_argument(
+        "--num-steps",
+        type=int,
+        default=None,
+        help="Training steps in the trace (required to enable the check)",
+    )
+    attn.add_argument(
+        "--num-gpus",
+        type=int,
+        default=None,
+        help="Number of GPUs (default: inferred from the trace)",
+    )
+    attn.add_argument(
+        "--fwd-attn-calls",
+        type=int,
+        default=1,
+        help="Attention invocations per layer in the forward pass (default: 1; "
+        "use 2 when forward attention is recomputed during backward)",
+    )
+    attn.add_argument(
+        "--bwd-attn-calls",
+        type=int,
+        default=1,
+        help="Attention invocations per layer in the backward pass (default: 1)",
+    )
+    attn.add_argument(
+        "--attn-count-tol",
+        type=float,
+        default=0.0,
+        help="Relative tolerance for the attention-count comparison (default: 0.0)",
+    )
     return p
 
 
@@ -1195,6 +1497,15 @@ def main(argv=None) -> int:
         parser.error("a trace path is required (positional argument or --json_trace)")
     phases = ("1", "2") if args.phase == "all" else (args.phase,)
 
+    attn_cfg = AttnCountConfig(
+        num_layers=args.num_layers,
+        num_steps=args.num_steps,
+        num_gpus=args.num_gpus,
+        fwd_attn_calls=args.fwd_attn_calls,
+        bwd_attn_calls=args.bwd_attn_calls,
+        tol=args.attn_count_tol,
+    )
+
     report = run_quality_checks(
         path=trace_path,
         framework=args.framework,
@@ -1202,6 +1513,7 @@ def main(argv=None) -> int:
         thresholds=QualityThresholds(),
         xplane_pb_path=args.xplane_pb_path,
         output_dir=args.output_dir,
+        attn_cfg=attn_cfg,
     )
 
     print(report)

@@ -13,7 +13,6 @@ Tests verify that:
 3. Parent pointers are properly rewired (pseudo ops are in parent chain)
 """
 
-import pytest
 from typing import Dict
 from copy import deepcopy
 import sys

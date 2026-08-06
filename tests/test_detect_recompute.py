@@ -15,7 +15,6 @@ Uses a ResNet activation-checkpoint trace to verify that:
 
 import os
 
-import pandas as pd
 import pytest
 
 from TraceLens.Reporting.generate_perf_report_pytorch import (

@@ -11,6 +11,7 @@ pftrace_utils (traceconv) and PftraceHipActivityAnalyzer; does not duplicate
 API↔kernel correlation (see generate_perf_report_pftrace_hip_api for that).
 """
 
+import importlib.util
 import os
 import argparse
 import sys
@@ -171,11 +172,9 @@ def generate_perf_report_pftrace_hip_activity(
                 base = base.with_suffix("")
             output_xlsx_path = str(base) + "_pftrace_activity_report.xlsx"
         logger.info("Writing Excel to: %s", output_xlsx_path)
-        try:
-            import openpyxl
-        except (ImportError, ModuleNotFoundError) as e:
-            logger.error("openpyxl required: %s", e)
-            raise
+        if importlib.util.find_spec("openpyxl") is None:
+            logger.error("openpyxl required for Excel output")
+            raise ImportError("openpyxl is required for Excel output")
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
             for sheet_name, df in dict_name2df.items():
                 sn = sheet_name[:31]

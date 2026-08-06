@@ -160,6 +160,69 @@ class aiter_rmsnorm2d_fwd_with_dynamicquant_ck(RMSNorm):
         return bytes_read_x + bytes_read_weight + bytes_write_quant + bytes_write_scales
 
 
+class aiter_rmsnorm_quant(RMSNorm):
+    """
+    Performance model for aiter::rmsnorm_quant.
+
+    Reference implementation:
+        aiter/aiter/ops/rmsnorm.py
+
+    Fused RMSNorm + per-group dynamic FP8 quantization (no residual add).
+    Signature: rmsnorm_quant(out, input, scale, weight, epsilon, group_size,
+        shuffle_scale, gemma_norm)
+        out         — shape [M, N], dtype FP8   (quantized RMSNorm output)
+        input       — shape [M, N], dtype BFloat16
+        scale       — shape [M, N // group_size], dtype FP32 (per-group scale)
+        weight      — shape [N],    dtype BFloat16 (affine scale)
+        epsilon     — float scalar
+        group_size  — int scalar (elements per quant group along N)
+        shuffle_scale — bool scalar
+
+
+    FLOPs: RMSNorm (inherited) + per-group quant (2 * num_elems: max-abs + scale).
+    Bytes: read input (BF16) + weight (BF16), write out (FP8) + per-group FP32 scales.
+    """
+
+    def __init__(self, event, arch=None, python_path=None):
+        super().__init__(event, arch, python_path)
+        try:
+            self.group_size = int(event["args"]["Concrete Inputs"][5])
+        except (KeyError, IndexError, ValueError, TypeError):
+            self.group_size = 0
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][1])  # input: [M, N]
+        dtype_in = event["args"]["Input type"][1]  # BFloat16
+        stride_input = tuple(event["args"]["Input Strides"][1])
+        num_channels = event["args"]["Input Dims"][3][0]  # weight.shape[0] = N
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),  # output is FP8, handled in bytes()
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+        }
+
+    def flops(self):
+        # RMSNorm flops + quantization: max-abs per group + scale each element
+        return super().flops() + 2 * self.num_elems
+
+    def bytes(self):
+        M = self.num_elems // self.num_channels
+        N = self.num_channels
+        gs = self.group_size if self.group_size and self.group_size > 0 else N
+        num_groups = (N + gs - 1) // gs
+        bytes_read_x = self.num_elems * self.bpe_in  # BF16 input
+        bytes_read_weight = N * self.bpe_in  # BF16 weight
+        bytes_write_quant = self.num_elems * 1  # FP8 = 1 byte/elem
+        bytes_write_scales = M * num_groups * 4  # FP32 per-group scales
+        return bytes_read_x + bytes_read_weight + bytes_write_quant + bytes_write_scales
+
+
 class fused_rms_mxfp4_quant(RMSNorm):
     """
     Performance model for aiter.ops.triton.quant.fused_mxfp4_quant.fused_rms_mxfp4_quant
@@ -210,7 +273,6 @@ class fused_rms_mxfp4_quant(RMSNorm):
     def __init__(self, event, arch=None, python_path=None):
         super().__init__(event, arch, python_path)
         input_dims = event["args"]["Input Dims"]
-        input_types = event["args"]["Input type"]
 
         self.has_res1 = False
         self.has_x2 = False

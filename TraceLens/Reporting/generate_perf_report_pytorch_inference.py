@@ -13,9 +13,8 @@ import signal
 import subprocess
 import sys
 import warnings
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
-from tqdm import tqdm
 
 import numpy as np
 import pandas as pd
@@ -33,12 +32,15 @@ from TraceLens.Reporting.reporting_utils import (
     resolve_gpu_arch,
 )
 from TraceLens.util import TraceEventUtils
+from TraceLens.TraceUtils.annotation_utils import (
+    CAPTURE_PATTERN,
+    CaptureAnnotation,
+    find_events_by_patterns,
+)
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     find_execution_roots,
     merge_capture_trace_into_graph,
 )
-
-import TraceLens
 
 
 def _install_interrupt_stack_dumps() -> None:
@@ -217,7 +219,6 @@ def classify_graph_capture_trace(input_folder: str):
     )
     ## SGLang specific dummy run pattern
     ##dummy_run_pattern = re.compile(r"/sgl-workspace/sglang/python/sglang/srt/model_executor/cuda_graph_runner.py\(\d+\): _capture_graph")
-    annotation_pattern = re.compile(r"capture_(\d+)_(.*)")
 
     def load_trace(path: str) -> dict:
         if path.endswith(".zip"):
@@ -237,22 +238,6 @@ def classify_graph_capture_trace(input_folder: str):
         roots = [e for e in events if dummy_run_pattern.match(e.get("name", ""))]
         roots.sort(key=lambda x: x.get("ts", 0))
         return roots
-
-    def find_annotation_roots(events):
-        roots = [
-            e
-            for e in events
-            if e.get("cat") == "user_annotation"
-            and annotation_pattern.match(e.get("name", ""))
-        ]
-        roots.sort(key=lambda x: x.get("ts", 0))
-        return roots
-
-    def parse_annotation(name: str):
-        m = annotation_pattern.match(name)
-        if not m:
-            raise ValueError(f"Annotation name does not match expected pattern: {name}")
-        return int(m.group(1)), m.group(2)
 
     def count_stream_begin_captures(events):
         return sum(
@@ -302,11 +287,12 @@ def classify_graph_capture_trace(input_folder: str):
         trace_json = load_trace(filepath)
         events = trace_json.get("traceEvents", [])
         dummy_roots = find_dummy_run_roots(events)
-        annotation_roots = find_annotation_roots(events)
+        annotation_roots = find_events_by_patterns(events, [CAPTURE_PATTERN])
         basename = os.path.basename(filepath)
 
         if annotation_roots and len(annotation_roots) == len(dummy_roots):
-            batch_size, mode = parse_annotation(annotation_roots[0]["name"])
+            cap = CaptureAnnotation(annotation_roots[0]["name"])
+            batch_size, mode = cap.batch_size, cap.mode
             print(
                 f"batch_size: {batch_size}, mode: {mode} parsed from annotation, num_captures: {count_stream_begin_captures(events)}"
             )
@@ -569,6 +555,7 @@ def generate_perf_report_pytorch(
     topk_ops: Optional[int] = None,
     topk_roofline_ops: Optional[int] = None,
     comparison_json_path: Optional[str] = None,
+    comparison_augmented_tree: Optional[TraceToTree] = None,
     extension_file: Optional[str] = None,
     # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
     python_path: Optional[str] = None,
@@ -587,7 +574,14 @@ def generate_perf_report_pytorch(
         gpu_arch=gpu_arch,
     )
     add_python_func = (
-        True if (group_by_parent_module or include_call_stack is True) else False
+        True
+        if (
+            group_by_parent_module
+            or include_call_stack is True
+            or augmented_tree is not None
+            or comparison_augmented_tree is not None
+        )
+        else False
     )
     if augmented_tree is not None:
         if show_progress:
@@ -651,6 +645,10 @@ def generate_perf_report_pytorch(
             "sglang_profiler::attention_paged_attention_ragged",
             "aiter::mha_batch_prefill",
             "aiter::pa_decode_gluon",
+            "aiter::v4_attention_with_output",
+            "pseudo_v4_paged_decode_swa",
+            "pseudo_v4_paged_decode_csa",
+            "pseudo_v4_paged_decode_hca",
         ]
     )
 
@@ -1019,13 +1017,24 @@ def generate_perf_report_pytorch(
         # Run TraceDiff when a comparison trace is provided. diff_stats_df is generated
         _tracediff_diff_stats: Optional[pd.DataFrame] = None
         if comparison_json_path and not df_unified_perf.empty:
-            perf_analyzer2 = TreePerfAnalyzer.from_file(
-                profile_filepath=comparison_json_path,
-                python_path=perf_analyzer.python_path,
-                include_unlinked_kernels=perf_analyzer.include_unlinked_kernels,
-                enable_pseudo_ops=enable_pseudo_ops,
-                add_python_func=perf_analyzer.add_python_func,
-            )
+            if comparison_augmented_tree is not None:
+                perf_analyzer2 = TreePerfAnalyzer(
+                    tree=comparison_augmented_tree,
+                    arch=gpu_arch_json,
+                    python_path=python_path,
+                    include_unlinked_kernels=include_unlinked_kernels,
+                    add_python_func=add_python_func,
+                    enable_pseudo_ops=enable_pseudo_ops,
+                    rebuild_tree=False,
+                )
+            else:
+                perf_analyzer2 = TreePerfAnalyzer.from_file(
+                    profile_filepath=comparison_json_path,
+                    python_path=perf_analyzer.python_path,
+                    include_unlinked_kernels=perf_analyzer.include_unlinked_kernels,
+                    enable_pseudo_ops=enable_pseudo_ops,
+                    add_python_func=perf_analyzer.add_python_func,
+                )
             perf_analyzer2.tree.apply_annotation(
                 name_filters=["vllm::unified_attention_with_output"]
             )
@@ -1135,7 +1144,7 @@ def generate_perf_report_pytorch(
     if kernel_summary:
         try:
             df_kernels = perf_analyzer.get_df_kernels(launcher_detail=True)
-        except Exception as e:
+        except Exception:
             df_kernels = pd.DataFrame()
         if not df_kernels.empty and "Kernel duration (µs)" in df_kernels.columns:
             # Fallback: If Parent cpu_op is missing, fill it from Launcher (for display purposes)
@@ -1264,10 +1273,8 @@ def generate_perf_report_pytorch(
         if output_xlsx_path is None:
             base_path = profile_json_path.rsplit(".json", 1)[0]
             output_xlsx_path = base_path + "_perf_report.xlsx"
-        try:
-            import openpyxl
-        except (ImportError, ModuleNotFoundError) as e:
-            print(f"Error importing openpyxl: {e}")
+        if importlib.util.find_spec("openpyxl") is None:
+            print("Error importing openpyxl")
             request_install("openpyxl")
 
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
@@ -1419,6 +1426,12 @@ def main():
         help="Path to the capture trace folder",
     )
     parser.add_argument(
+        "--comparison_capture_folder",
+        type=str,
+        required=False,
+        help="Path to the capture trace folder for the comparison trace",
+    )
+    parser.add_argument(
         "--group_by_num_kernels",
         action="store_true",
         default=False,
@@ -1451,6 +1464,8 @@ def main():
             "--capture_folder and --comparison_json_path cannot be used together. "
             "The TraceDiff comparison extension does not support graph capture traces."
         )
+    if args.comparison_capture_folder and not args.comparison_json_path:
+        parser.error("--comparison_capture_folder requires --comparison_json_path.")
     graph_tree = None
     sglang_capture_folder = None
     if args.capture_folder:
@@ -1460,12 +1475,21 @@ def main():
             graph_tree = merge_capture_trace_into_graph(
                 args.capture_folder, metadata_json_path, args.profile_json_path
             )
-            if len(find_execution_roots(graph_tree)) == 0:
+            if graph_tree is not None and len(find_execution_roots(graph_tree)) == 0:
                 sglang_capture_folder = args.capture_folder
         else:
             sglang_capture_folder = args.capture_folder
         print("Graph capture has finished.")
     print("Starting performance report generation...")
+    comparison_graph_tree = None
+    if args.comparison_capture_folder:
+        classify_graph_capture_trace(args.comparison_capture_folder)
+        comp_metadata = os.path.join(
+            args.comparison_capture_folder, "execution_details.json"
+        )
+        comparison_graph_tree = merge_capture_trace_into_graph(
+            args.comparison_capture_folder, comp_metadata, args.comparison_json_path
+        )
     generate_perf_report_pytorch(
         profile_json_path=args.profile_json_path,
         augmented_tree=graph_tree,
@@ -1485,6 +1509,7 @@ def main():
         topk_ops=args.topk_ops,
         topk_roofline_ops=args.topk_roofline_ops,
         comparison_json_path=args.comparison_json_path,
+        comparison_augmented_tree=comparison_graph_tree,
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,

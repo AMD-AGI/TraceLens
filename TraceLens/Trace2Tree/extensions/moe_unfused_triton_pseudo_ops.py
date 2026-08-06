@@ -9,6 +9,8 @@ import sys
 
 from tqdm import tqdm
 
+from TraceLens.PerfModel.utils import optional_int
+
 from .pseudo_ops_utils import inject_pseudo_ops_batch
 
 logger = logging.getLogger(__name__)
@@ -114,10 +116,9 @@ def _extract_topk_from_moe(trace_tree, moe_op_event: dict):
             concrete = event["args"].get("Concrete Inputs", [])
             # TopK's k parameter is the second concrete input
             if len(concrete) > 1 and concrete[1]:
-                try:
-                    return int(concrete[1])
-                except (ValueError, TypeError):
-                    pass
+                topk = optional_int(concrete[1])
+                if topk is not None:
+                    return topk
 
         # Recursively search children (for Python function wrappers)
         # Use native get_children_events() method

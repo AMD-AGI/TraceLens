@@ -12,7 +12,7 @@ import numpy as np
 
 np.random.seed(42)
 
-from TraceLens.TreePerf import JaxTreePerfAnalyzer, TreePerfAnalyzer
+from TraceLens.TreePerf import JaxTreePerfAnalyzer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

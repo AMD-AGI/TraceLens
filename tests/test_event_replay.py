@@ -13,7 +13,7 @@ import subprocess
 import pytest
 import torch
 import torchvision.models as torchvision_models
-from torch.profiler import profile, record_function, ProfilerActivity
+from torch.profiler import profile, ProfilerActivity
 import os
 from TraceLens import EventReplayer, TreePerfAnalyzer, GPUEventAnalyser
 
