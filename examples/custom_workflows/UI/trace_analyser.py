@@ -14,7 +14,6 @@ from typing import Optional
 import pandas as pd
 import streamlit as st
 import torch
-
 from TraceLens.UI.utils.hipblaslt import HipBLASLtColumns, perform_offline_tuning
 from TraceLens.UI.utils.reporting import (
     FAReportColumns,
@@ -110,7 +109,7 @@ def main() -> None:
             value=False,
             disabled=not prepare_for_tuning_chk,
         )
-        iterations = st.selectbox(
+        st.selectbox(
             "Number of iterations",
             options=[100, 200, "All using '--algo_method index'"],
             index=1,

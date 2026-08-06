@@ -9,9 +9,10 @@
 # an exhaustive list can also be pulled from hipblaslt https://github.com/ROCm/rocm-libraries/tree/develop/projects/hipblaslt/library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full/gfx950/Origami
 
 import itertools
-import origami
-from math import ceil, gcd
 import warnings
+from math import ceil, gcd
+
+import origami
 
 
 class OrigamiHelper:
@@ -186,7 +187,6 @@ class OrigamiHelper:
 
         if tiles >= cu_count:
             last_wave_remainder = tiles % cu_count
-            last_wave_occupancy = last_wave_remainder / cu_count
 
             # Really bad last wave, which would have originally been compensated for
             # by changing tile size, but triton tile sizes are limited

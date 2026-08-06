@@ -15,8 +15,6 @@ import argparse
 import sys
 import os
 
-import pandas as pd
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analysis_utils import (

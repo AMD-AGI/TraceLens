@@ -7,7 +7,7 @@
 from ..util import TraceEventUtils
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Optional
+from typing import List, Optional
 import logging
 
 logger = logging.getLogger(__name__)

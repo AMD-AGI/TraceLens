@@ -10,8 +10,8 @@ Performance models for pseudo-op extensions.
 
 from math import prod
 
-from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
 from TraceLens.PerfModel.perf_model import BinaryElementwise
+from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
 
 DTYPE_TO_BYTES = {
     "Float8_e4m3fn": 1,
@@ -156,9 +156,7 @@ class moe_aiter_fused_1stage(FusedMoE):
     """
 
     def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.python_path = python_path
+        super().__init__(event, arch, python_path)
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -272,9 +270,7 @@ class moe_aiter_fused_blockscale(FusedMoE):
     """
 
     def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.python_path = python_path
+        super().__init__(event, arch, python_path)
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -377,7 +373,9 @@ class moe_aiter_fused_blockscale(FusedMoE):
 
     def get_compute_precision(self):
         dtype = self.param_details.get("input_dtype")
-        return torch_dtype_map(dtype) if dtype else None
+        if not dtype:
+            return None
+        return "fp8" if dtype == "fp8" or dtype == "bf16" else torch_dtype_map(dtype)
 
     def get_maf_type(self):
         return "matrix"
@@ -1000,7 +998,6 @@ class moe_aiter_unfused_down(UnfusedMoE_Down):
         kernel_input_shape = args["Input Dims"]
         input_shape = kernel_input_shape[0]
         w1_shape = kernel_input_shape[1]
-        w2_shape = kernel_input_shape[2]
 
         num_tokens, topk, inter_dim = input_shape
 

@@ -37,8 +37,7 @@ setup(
     package_data={
         "TraceLens": [
             "**/*.md",
-            "Agent/**/.cursor/skills/*",
-            "Agent/**/.cursor/agents/*",
+            "Agent/**/skills/**/*",
             "Agent/Analysis/utils/arch/*.json",
         ],
     },
@@ -59,10 +58,12 @@ setup(
         # 'tensorflow',
     ],
     extras_require={
-        # To install slodels, use a custom index:
-        # pip install "slodels[openai,anthropic,google-genai]"
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
+        ],
+        "dev": [
+            "pytest",
+            "black==26.1.0",
         ],
     },
     description="A library for automating the analysis of ML model performance traces",
@@ -86,6 +87,7 @@ setup(
             "TraceLens_generate_perf_report_pftrace_hip_api = TraceLens.Reporting.generate_perf_report_pftrace_hip_api:main",
             "TraceLens_generate_perf_report_pftrace_hip_activity = TraceLens.Reporting.generate_perf_report_pftrace_hip_activity:main",
             "TraceLens_generate_perf_report_pftrace_memory_copy = TraceLens.Reporting.generate_perf_report_pftrace_memory_copy:main",
+            "TraceLens_generate_perf_report_genesis = TraceLens.Reporting.generate_perf_report_genesis:main",
             "TraceLens_split_inference_trace = TraceLens.TraceUtils.split_inference_trace_annotation:main",
         ],
     },

@@ -24,10 +24,12 @@ from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch,
     classify_graph_capture_trace,
 )
-import TraceLens.Trace2Tree.trace_capture_merge_experimental as _merge_mod
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
+    _capture_tree_cache,
 )
+
+from conftest import update_reference_csvs
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Input list of events is empty.*:UserWarning",
@@ -212,9 +214,9 @@ def find_inference_test_cases():
 def _clear_capture_tree_cache():
     # Reproduce per-process isolation: the capture-tree cache is keyed by
     # {batch_size}_{mode}, which collides across fixtures sharing a key.
-    _merge_mod._capture_tree_cache.clear()
+    _capture_tree_cache.clear()
     yield
-    _merge_mod._capture_tree_cache.clear()
+    _capture_tree_cache.clear()
 
 
 @pytest.mark.parametrize(
@@ -222,7 +224,13 @@ def _clear_capture_tree_cache():
     find_inference_test_cases(),
 )
 def test_inference_perf_report(
-    dirpath, trace_gz, capture_folder, gpu_arch_path, tmp_path, tol=1e-6
+    dirpath,
+    trace_gz,
+    capture_folder,
+    gpu_arch_path,
+    tmp_path,
+    update_references,
+    tol=1e-6,
 ):
     """
     Directly call generate_perf_report_pytorch (from the inference module)
@@ -252,6 +260,7 @@ def test_inference_perf_report(
         group_by_parent_module=True,
         group_by_num_kernels=True,
         collective_analysis=False,
+        include_call_stack=True,
     )
 
     # result is a dict[str, pd.DataFrame]
@@ -270,6 +279,10 @@ def test_inference_perf_report(
         assert os.path.exists(
             csv_path
         ), f"CSV output for sheet '{sheet_name}' was not written to {csv_path}"
+
+    if update_references:
+        update_reference_csvs(output_csvs_dir, ref_csvs_dir)
+        return
 
     # Compare each generated CSV against the reference CSV in perf_csvs/
     ref_csv_files = [f for f in os.listdir(ref_csvs_dir) if f.endswith(".csv")]

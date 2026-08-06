@@ -7,18 +7,15 @@
 import argparse
 import ast
 import importlib.util
-import json
 import os
 import re
-import subprocess
-import sys
 import warnings
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
 
-from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
+from TraceLens import NcclAnalyser, TraceDiff, TreePerfAnalyzer
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
@@ -899,7 +896,7 @@ def generate_perf_report_pytorch(
     if kernel_summary:
         try:
             df_kernels = perf_analyzer.get_df_kernels(launcher_detail=True)
-        except Exception as e:
+        except Exception:
             df_kernels = pd.DataFrame()
         if not df_kernels.empty and "Kernel duration (µs)" in df_kernels.columns:
             # Fallback: If Parent cpu_op is missing, fill it from Launcher (for display purposes)
@@ -1028,10 +1025,8 @@ def generate_perf_report_pytorch(
         if output_xlsx_path is None:
             base_path = profile_json_path.rsplit(".json", 1)[0]
             output_xlsx_path = base_path + "_perf_report.xlsx"
-        try:
-            import openpyxl
-        except (ImportError, ModuleNotFoundError) as e:
-            print(f"Error importing openpyxl: {e}")
+        if importlib.util.find_spec("openpyxl") is None:
+            print("Error importing openpyxl")
             request_install("openpyxl")
 
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
