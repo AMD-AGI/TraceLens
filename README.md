@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 # TraceLens
 
-[![Tests](https://github.com/AMD-AGI/TraceLens/actions/workflows/regression-tests.yml/badge.svg)](https://github.com/AMD-AGI/TraceLens/actions/workflows/regression-tests.yml)
+[![Tests](https://github.com/AMD-AGI/TraceLens/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/AMD-AGI/TraceLens/actions/workflows/unit-tests.yml)
 [![Lint](https://github.com/AMD-AGI/TraceLens/actions/workflows/lint.yml/badge.svg)](https://github.com/AMD-AGI/TraceLens/actions/workflows/lint.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.6%2B-blue)](setup.py)
