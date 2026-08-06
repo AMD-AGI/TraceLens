@@ -11,8 +11,9 @@ import json
 import subprocess
 
 import pytest
-import torch
-import torchvision.models as torchvision_models
+
+torch = pytest.importorskip("torch")
+torchvision_models = pytest.importorskip("torchvision").models
 from torch.profiler import profile, ProfilerActivity
 import os
 from TraceLens import EventReplayer, TreePerfAnalyzer, GPUEventAnalyser
