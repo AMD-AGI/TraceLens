@@ -5,11 +5,22 @@
 ###############################################################################
 
 # Codecov configuration for TraceLens.
-# Upload coverage from CI; do not enforce coverage percentage gates yet.
 coverage:
   status:
-    project: off
+    project:
+      default:
+        target: auto
+        threshold: 0%
+        base: auto
     patch: off
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+  require_base: true
+  require_head: true
+  hide_project_coverage: false
 
 fixes:
   - "/__w/TraceLens/TraceLens/::"
