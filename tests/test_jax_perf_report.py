@@ -24,6 +24,10 @@ import pytest
 
 from TraceLens.Reporting.generate_perf_report_jax import generate_perf_report_jax
 
+# xprof writes SSTABLE cache files next to each .xplane.pb; keep all JAX
+# perf-report tests on one xdist worker so trace loads do not race.
+pytestmark = pytest.mark.xdist_group("jax_traces")
+
 from conftest import (
     compare_cols,
     format_diff_details,

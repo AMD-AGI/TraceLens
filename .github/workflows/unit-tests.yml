@@ -32,13 +32,18 @@ jobs:
           python -m venv .venv
           . .venv/bin/activate
           python -m pip install --upgrade pip
+<<<<<<< HEAD
           pip install . pytest pytest-xdist pytest-cov openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
           # CPU wheels: test_event_replay imports torch/torchvision; GPU tests skip without a device.
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+=======
+          pip install . pytest pytest-xdist openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
+>>>>>>> main
 
       - name: Run unit tests
         run: |
           . .venv/bin/activate
+<<<<<<< HEAD
           python -m pytest tests/ -v --tb=short -n auto --cov=./TraceLens --cov-report=xml
 
       - name: Upload coverage report
@@ -68,3 +73,6 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: true
           verbose: true
+=======
+          python -m pytest tests/ -v --tb=short -n auto --dist loadgroup
+>>>>>>> main
