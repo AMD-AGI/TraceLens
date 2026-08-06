@@ -7,15 +7,15 @@ See LICENSE for license information.
 
 # Generate a PyTorch inference performance report
 ```{meta}
-:description: Learn how to collect, split, and analyze PyTorch LLM-serving (vLLM/SGLang) traces with TraceLens, including graph-capture merging for graph-mode inference.
-:keywords: TraceLens, PyTorch profiler, inference, vLLM, SGLang, HIP graph, CUDA graph, graph capture, LLM serving, FusedMoE, roofline, trace splitting, steady state, ROCm
+:description: Learn how to collect, split, and analyze PyTorch inference traces (vLLM, SGLang, xDiT) with TraceLens, including graph-capture merging for graph-mode inference.
+:keywords: TraceLens, PyTorch profiler, inference, vLLM, SGLang, xDiT, diffusion, HIP graph, CUDA graph, graph capture, LLM serving, FusedMoE, roofline, trace splitting, steady state, ROCm
 ```
 
 `TraceLens_generate_perf_report_pytorch_inference` is the inference-oriented
-variant of the PyTorch report. It targets LLM-serving traces (for example, from
-vLLM or SGLang) that run in CUDA/HIP graph mode, and can merge the graph-capture
-traces back into the graph-replay trace to recover the call-stack and input-shape
-metadata that graph execution drops.
+variant of the PyTorch report. It targets inference traces from frameworks such
+as vLLM, SGLang, and xDiT that run in CUDA/HIP graph mode, and can merge the
+graph-capture traces back into the graph-replay trace to recover the call-stack
+and input-shape metadata that graph execution drops.
 
 This topic covers the end-to-end inference workflow: collecting traces, splitting
 them into steady-state windows, and generating the report. For training or
@@ -27,8 +27,8 @@ steady-state region), see
 
 ## Supported frameworks and execution modes
 
-TraceLens inference features are primarily tested with vLLM and SGLang. Feature
-coverage depends on how the model is executed:
+TraceLens inference analysis supports vLLM, SGLang, and xDiT. Feature coverage
+depends on the framework and how the model is executed:
 
 | Mode | Shapes / roofline analysis | Agent analysis | Limitations |
 |------|----------------------------|----------------|-------------|
@@ -38,7 +38,7 @@ coverage depends on how the model is executed:
 | Graph execution + graph capture [^1] | Yes | Yes (patches required) | |
 
 [^1]: Graph-mode analysis using graph-capture and graph-replay traces is
-supported for vLLM and SGLang (proposed patches required).
+supported for vLLM, SGLang, and xDiT (proposed patches required).
 
 ## Before you begin
 
@@ -127,6 +127,22 @@ bash examples/custom_workflows/inference_analysis/build_docker_sglang.sh \
     -t tracelens-sglang
 ```
 
+**xDiT.** The xDiT build script supports diffusion model profiling with xDiT. It takes
+the xDiT version as its first argument, followed by the path to your local
+TraceLens clone and any standard `docker build` flags:
+
+| Version | Base image | Patch file |
+|---------|-----------|------------|
+| `v26.6` | `rocm/pytorch-xdit:v26.6` | `config_xdit_v26.6.patch` |
+| `v26.7` | `rocm/pytorch-xdit:v26.7` | `config_xdit_v26.7.patch` |
+
+```bash
+bash examples/custom_workflows/inference_analysis/build_docker_xdit.sh \
+    v26.7 \
+    /path/to/TraceLens \
+    -t tracelens-xdit:v26.7
+```
+
 Create a container from the resulting image.
 
 #### Apply framework patches manually
@@ -158,7 +174,9 @@ To apply them:
    vLLM patches are in
    [`vllm_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/vllm_patches);
    SGLang patches are in
-   [`sglang_roofline_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/sglang_roofline_patches).
+   [`sglang_roofline_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/sglang_roofline_patches);
+   xDiT patches are in
+   [`xdit_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/xdit_patches).
 
 #### Collection parameters
 
@@ -216,6 +234,17 @@ during the benchmark. Pass both paths to the report generator using
    server argument at startup. This saves one trace file per batch size but misses
    shape information for some operations; add
    `--enable-shape-discovery-for-cuda-graph-profile` for more diverse coverage.
+
+**xDiT.** The `config_xdit_v*.patch` patches add two flags to the `xfuser`
+runner. Pass them via the `EXTRA_XDIT_ARGS` environment variable (or directly to
+the `xdit` CLI):
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--profile_capture_phase` | flag | disabled | Profile the graph-capture phase and write a capture trace to `<output_dir>/capture_traces/capture_rank_0.json.gz`. Required to recover shapes and call stacks in graph-mode analysis. |
+| `--profile_wait` | `int` | `0` | Number of profiler warm-up iterations before active collection during the replay phase. Set to `1` to work around a ROCTracer bug that causes empty traces when `wait=0`. |
+
+In addition, `--profile` must be set to enable xDiT profiling.
 
 ## Split inference traces (optional)
 
