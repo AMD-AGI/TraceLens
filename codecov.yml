@@ -5,8 +5,8 @@
 ###############################################################################
 
 # Codecov configuration for TraceLens.
-# Enforce upload/processing and surface coverage in PRs; do not gate on
-# coverage percentage yet (informational status checks).
+# Enforce upload/processing and surface coverage in PRs. Project and patch
+# status checks are informational (non-blocking) until we add coverage gates.
 coverage:
   status:
     project:
@@ -14,7 +14,11 @@ coverage:
         target: auto
         base: auto
         informational: true
-    patch: off
+    patch:
+      default:
+        target: auto
+        base: auto
+        informational: true
 
 comment:
   layout: "reach, diff, flags, files"
@@ -23,6 +27,9 @@ comment:
   require_base: true
   require_head: true
   hide_project_coverage: false
+
+github_checks:
+  annotations: true
 
 fixes:
   - "/__w/TraceLens/TraceLens/::"
