@@ -475,7 +475,24 @@ class GroupQuant(BinaryElementwise):
     bwd_category = None
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
-        super().__init__(event, arch, python_path, **kwargs)
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        # GroupQuant ops write to shape_out; the scales tensor (shape_in2) need
+        # not be broadcastable to the activation tensor (shape_in1), so skip
+        # the BinaryElementwise broadcast check and derive nelems_out directly.
+        self.nelems_in1 = prod(self.param_details["shape_in1"])
+        self.nelems_in2 = prod(self.param_details["shape_in2"])
+        self.nelems_out = prod(self.param_details["shape_out"])
+        self.dtype_in1_in2_out = self.param_details["dtype_in1_in2_out"]
+        self.stride_input1 = self.param_details["stride_input1"]
+        self.stride_input2 = self.param_details["stride_input2"]
+        self.stride_output = self.param_details["stride_output"]
+
+        dtype_in1, dtype_in2, dtype_out = self.dtype_in1_in2_out
+        self.bpe_in1 = name2bpe(dtype_in1)
+        self.bpe_in2 = name2bpe(dtype_in2)
+        self.bpe_out = name2bpe(dtype_out) if dtype_out is not None else None
 
 
 class per_group_quant(GroupQuant):
@@ -600,6 +617,7 @@ class vllm_triton_per_token_group_quant_fp8(GroupQuant):
             "dtype_x": dtype_x,
             "shape_in1": shape_x,
             "shape_in2": (),
+            "shape_out": shape_x,
             "dtype_in1_in2_out": (dtype_x, None, dtype_fp8),
             "stride_input1": None,
             "stride_input2": None,
