@@ -5,12 +5,43 @@
 ###############################################################################
 
 # Codecov configuration for TraceLens.
-# Upload coverage from CI; do not enforce coverage percentage gates yet.
-# Status checks are informational until project gates are enabled in a follow-up PR.
+# Fail PRs when overall project coverage or patch coverage drops vs the base branch.
 coverage:
   status:
-    project: off
-    patch: off
+    project:
+      default:
+        target: auto
+        threshold: 0%
+        base: auto
+        informational: false
+    patch:
+      default:
+        target: auto
+        base: auto
+        informational: false
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+  require_base: true
+  require_head: true
+  hide_project_coverage: false
+  show_carryforward_flags: true
+
+github_checks:
+  annotations: true
+
+flags:
+  unit:
+    paths:
+      - TraceLens/
+    carryforward: false
+  gpu:
+    paths:
+      - TraceLens/EventReplay/
+      - TraceLens/PerfModel/benchmarking/
+    carryforward: true
 
 fixes:
   - "/__w/TraceLens/TraceLens/::"

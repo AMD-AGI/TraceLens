@@ -33,7 +33,6 @@ from .report_utils import load_manifest, _scan_findings_dir
 _REQUIRED_FINDINGS_HEADERS = ["## Recommendations", "## Detailed Analysis"]
 _COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
-_KERNEL_FUSION_FINDINGS = "kernel_fusion_findings.md"
 # Optional icon / prefix before P<N> (e.g. kernel fusion `### 🟢 P1:`).
 _P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->")
@@ -725,6 +724,11 @@ def _validate_report_comparison_scope_diffs(content, output_dir, comparison_scop
                     f"Kernel Fusion Impact format error: comparative mode "
                     f"should not include perf-model coverage parenthetical "
                     f"but got: {impact_text}"
+                )
+            elif not _KF_IMPACT_COMPARATIVE_RE.search(impact_text):
+                errors.append(
+                    f"Kernel Fusion Impact format error: comparative mode "
+                    f"requires 'impact_score: X.X' but got: {impact_text}"
                 )
     return errors
 

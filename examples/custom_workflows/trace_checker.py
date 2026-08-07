@@ -34,6 +34,7 @@ Set ``TRACELENS_VERBOSE_NATIVE_LOGS=1`` to keep the raw native XLA/xprof logs.
 from __future__ import annotations
 
 import argparse
+import inspect
 import enum
 import functools
 import json
@@ -868,9 +869,7 @@ def find_megatron_extension() -> Optional[str]:
     if override and os.path.exists(override):
         return override
     try:
-        import TraceLens
-
-        base = os.path.dirname(os.path.dirname(os.path.abspath(TraceLens.__file__)))
+        base = os.path.dirname(os.path.dirname(inspect.getfile(GPUEventAnalyser)))
         candidate = os.path.join(base, "examples", "example_megatron_extension.py")
         if os.path.exists(candidate):
             return candidate

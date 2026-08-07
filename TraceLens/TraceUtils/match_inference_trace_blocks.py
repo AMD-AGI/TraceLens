@@ -604,7 +604,6 @@ def main():
     # even when --no-extract is used.
     for m in matches:
         phase = m["phase"]
-        phase_dir = os.path.join(args.output_dir, phase)
         label_base = f"{phase}_best_A{m['a_block_index']}_B{m['b_block_index']}"
         m["a_output_path"] = compute_output_path(
             args.output_dir, phase, f"{label_base}_A", base_a, m["a_block"]
