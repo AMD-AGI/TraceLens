@@ -3238,6 +3238,92 @@ class aten_unary_elementwise(UnaryElementwise):
         }
 
 
+class aten_replication_pad(UnaryElementwise):
+    """
+    Performance model for aten::replication_pad1d / pad2d / pad3d.
+
+    Reference implementation:
+        torch/nn/functional.py (F.pad with mode='replicate')
+        aten/src/ATen/native/ReplicationPadding.cpp
+
+    Replication padding copies border elements to pad each spatial dimension.
+    Pure memory-bandwidth-bound operation with negligible compute.
+
+    Signature: replication_padNd(input, padding) -> output
+        input   — shape [N, C, *spatial], dtype bfloat16/float16/float32
+        padding — ScalarList [left, right, ...] (2 per spatial dim, innermost first)
+
+    Expected Input Dims from trace:
+        [0] = input shape (e.g. (1, 128, 17, 240, 240) for 3d)
+        [1] = () (padding is a scalar list, not a tensor)
+
+    Expected Input type from trace:
+        ['c10::BFloat16', 'ScalarList']
+
+    Concrete Inputs[1] = padding list as string, e.g. '[1, 1, 1, 1, 2, 0]'
+        For 3d: [left, right, top, bottom, front, back]
+        For 2d: [left, right, top, bottom]
+        For 1d: [left, right]
+
+    Roofline -- FLOPs:
+        nelems_out (one copy per output element; negligible vs memory cost)
+
+    Roofline -- bytes moved:
+        bytes_read  = nelems_in  * bpe  (read entire input)
+        bytes_write = nelems_out * bpe  (write entire output)
+        Total       = bytes_read + bytes_write
+
+        Note: border elements are read multiple times but L2 cache makes
+        this negligible. We model the dominant cost as input read + output write.
+
+    Notes:
+        Output shape is computed from input shape + padding. The padding list
+        is ordered innermost-dim-first (W, H, D for 3d). The op_shape is set
+        to the output shape so the base class nelems reflects output size.
+        bytes() is overridden to account for both input read and output write.
+    """
+
+    category = "other"
+    sheet_category = "ReplicationPad"
+
+    @staticmethod
+    def get_param_details(event):
+        input_shape = tuple(event["args"]["Input Dims"][0])
+        dtype = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+
+        # Parse padding from Concrete Inputs: '[left, right, ...]'
+        pad_str = event["args"]["Concrete Inputs"][1]
+        padding = [int(x) for x in pad_str.strip("[]").replace(" ", "").split(",")]
+
+        # Compute output shape: padding is ordered innermost-first
+        # e.g. 3d input (N,C,D,H,W) with padding [l,r,t,b,f,bk]:
+        #   W -> W+l+r, H -> H+t+b, D -> D+f+bk
+        output_shape = list(input_shape)
+        num_spatial = len(padding) // 2
+        for i in range(num_spatial):
+            # padding pairs are innermost-first, spatial dims are last in shape
+            dim_idx = len(input_shape) - num_spatial + i
+            output_shape[dim_idx] += padding[2 * i] + padding[2 * i + 1]
+        output_shape = tuple(output_shape)
+
+        return {
+            "input_shape": input_shape,
+            "output_shape": output_shape,
+            "padding": padding,
+            "op_shape": output_shape,
+            "dtype_in_out": (dtype, dtype),
+            "stride_input": stride_input,
+            "stride_output": None,
+        }
+
+    def bytes(self):
+        """Input read + output write."""
+        nelems_in = prod(self.param_details["input_shape"])
+        nelems_out = self.nelems  # prod(output_shape) from base class
+        return nelems_in * self.bpe_in + nelems_out * self.bpe_out
+
+
 class BinaryElementwise:
     category = "elementwise"
     bwd_category = None

@@ -272,6 +272,14 @@ op_to_perf_model_class_map.update(get_pseudo_op_mappings())
 # Add pseudo-op category-only mappings (no perf model, just a category label).
 CATEGORY_ONLY_OP_MAPPING.update(get_pseudo_op_category_only_mappings())
 
+replication_pad_ops = [
+    "aten::replication_pad1d",
+    "aten::replication_pad2d",
+    "aten::replication_pad3d",
+]
+for op in replication_pad_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_replication_pad
+
 unary_elemwise_ops = [
     "aten::copy",
     "aten::copy_",
