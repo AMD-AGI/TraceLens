@@ -251,6 +251,7 @@ class TestFp4Fp6Helpers:
         )
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 class TestMicrobenchGpuBenchmarks:
     def test_bench_gemm_smoke(self):
