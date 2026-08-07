@@ -108,8 +108,6 @@ def generate_perf_report_jax_analysis(
         print(f"Error: The specified path {output_path} is invalid.", file=sys.stderr)
         sys.exit(1)
 
-    output_filename = output_filename
-
     df_gpu_events_averages, df_gpu_events_categorized_mean, df_xla_grouped = (
         calculate_gpu_event_statistics(profile_xplane_pb_path)
     )
@@ -220,6 +218,9 @@ def main():
         args.num_cus,
         args.name,
     )
+
+
+__all__ = [name for name in globals() if not name.startswith("_")]
 
 
 if __name__ == "__main__":
