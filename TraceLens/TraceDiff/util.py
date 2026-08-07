@@ -21,6 +21,7 @@ _NAME = _TraceKeys.Name
 _CATEGORY = _TraceKeys.Category
 _TS = _TraceKeys.TimeStamp
 
+
 def _sort_by_ts(nodes):
     """Sort nodes by timestamp, return their UIDs."""
     return [n[_UID] for n in sorted(nodes, key=lambda n: n.get(_TS, 0))]
