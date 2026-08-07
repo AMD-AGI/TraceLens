@@ -233,6 +233,7 @@ class TestBatchedReplayHelpers:
         assert kwargs == {}
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 class TestEventReplayGpu:
     def test_build_tensor_on_cuda(self):
