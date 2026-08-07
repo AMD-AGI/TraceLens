@@ -611,7 +611,7 @@ class TestJaxTreePerfAnalyzer:
                 "operands": ["bf16[8,768]{1,0}", "bf16[8,384]{1,0}"],
             }
         }
-        dims, types, _ = JaxTreePerfAnalyzer.parse_operands(event)
+        dims, _, _ = JaxTreePerfAnalyzer.parse_operands(event)
         assert dims == ((8, 768), (8, 384))
         meta = JaxTreePerfAnalyzer.parse_metadata(event)
         assert meta["Input Dims"] == dims
