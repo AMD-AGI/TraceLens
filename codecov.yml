@@ -5,7 +5,7 @@
 ###############################################################################
 
 # Codecov configuration for TraceLens.
-# Fail PRs when overall project coverage drops vs the base branch.
+# Fail PRs when overall project coverage or patch coverage drops vs the base branch.
 coverage:
   status:
     project:
@@ -18,7 +18,7 @@ coverage:
       default:
         target: auto
         base: auto
-        informational: true
+        informational: false
 
 comment:
   layout: "reach, diff, flags, files"
