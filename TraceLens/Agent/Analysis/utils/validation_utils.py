@@ -503,8 +503,11 @@ def _check_coverage(output_dir, manifest):
     messages = []
 
     found_system = set(_scan_findings_dir(output_dir, "system_findings").keys())
+    # _KERNEL_FUSION_FINDINGS names a file used by agent skills/docs but not elsewhere
+    # in Python. CodeQL py/unused-global-variable flags it unless referenced here.
+    # Kernel fusion findings are experimental and not required for coverage checks.
     if _KERNEL_FUSION_FINDINGS not in found_system:
-        pass  # experimental; not required for coverage checks
+        pass
     expected_system = {c["name"] for c in categories if c.get("tier") == "system"}
     missing_system = expected_system - found_system
     if missing_system:
