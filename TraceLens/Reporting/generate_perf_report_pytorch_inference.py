@@ -5,6 +5,7 @@
 ###############################################################################
 
 import argparse
+import glob
 import importlib.util
 import json
 import os
@@ -1360,21 +1361,39 @@ def main():
     if args.comparison_capture_folder and not args.comparison_json_path:
         parser.error("--comparison_capture_folder requires --comparison_json_path.")
     if args.capture_folder:
-        classify_graph_capture_trace(args.capture_folder)
         metadata_json_path = os.path.join(args.capture_folder, "execution_details.json")
+        capture_files = glob.glob(os.path.join(args.capture_folder, "*.json.gz"))
+        single_capture_trace = (
+            not os.path.exists(metadata_json_path) and len(capture_files) == 1
+        )
+        if not single_capture_trace:
+            classify_graph_capture_trace(args.capture_folder)
         graph_tree = merge_capture_trace_into_graph(
-            args.capture_folder, metadata_json_path, args.profile_json_path
+            args.capture_folder,
+            metadata_json_path,
+            args.profile_json_path,
+            single_capture_trace=single_capture_trace,
         )
     else:
         graph_tree = None
     comparison_graph_tree = None
     if args.comparison_capture_folder:
-        classify_graph_capture_trace(args.comparison_capture_folder)
         comp_metadata = os.path.join(
             args.comparison_capture_folder, "execution_details.json"
         )
+        comp_capture_files = glob.glob(
+            os.path.join(args.comparison_capture_folder, "*.json.gz")
+        )
+        single_capture_trace = (
+            not os.path.exists(comp_metadata) and len(comp_capture_files) == 1
+        )
+        if not single_capture_trace:
+            classify_graph_capture_trace(args.comparison_capture_folder)
         comparison_graph_tree = merge_capture_trace_into_graph(
-            args.comparison_capture_folder, comp_metadata, args.comparison_json_path
+            args.comparison_capture_folder,
+            comp_metadata,
+            args.comparison_json_path,
+            single_capture_trace=single_capture_trace,
         )
     generate_perf_report_pytorch(
         profile_json_path=args.profile_json_path,
