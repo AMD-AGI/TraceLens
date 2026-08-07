@@ -418,7 +418,7 @@ def test_compute_output_path(tmp_path):
     assert decode_path == os.path.join(
         str(tmp_path),
         "decode_only",
-        "lbl_A_prefilldecode_0_decode_16_bs8_conc8_trace_a.json.gz",
+        "lbl_A_prefill_0_prefilldecode_0_decode_16_bs8_conc8_trace_a.json.gz",
     )
 
     prefilldecode_path = match.compute_output_path(
@@ -427,18 +427,22 @@ def test_compute_output_path(tmp_path):
     assert prefilldecode_path == os.path.join(
         str(tmp_path),
         "prefilldecode",
-        "lbl_B_prefilldecode_16_decode_0_bs1083_conc10_trace_b.json.gz",
+        "lbl_B_prefill_0_prefilldecode_16_decode_0_bs1083_conc10_trace_b.json.gz",
     )
 
 
-def test_compute_output_path_of_single_step_block_uses_the_step_name(tmp_path):
+def test_compute_output_path_of_single_step_block_stays_structured(tmp_path):
+    """A one-step block is named like any other, not after its step.
+
+    ``main()`` always passes ``output_label``, so ``extract_and_save`` uses the
+    structured name even for a single step; the prediction must match.
+    """
     block = match.find_blocks([{"name": step(c_req=2, c_sq=64, c_sk=64)}])[0]
     path = match.compute_output_path(
         str(tmp_path), PREFILLDECODE, "lbl", "trace_a", block
     )
     assert os.path.basename(path) == (
-        "lbl_execute_72_context_2_sq64sk64sqsq4096sqsk4096"
-        "_generation_8_sq8sk4096sqsq64sqsk32768_trace_a.json.gz"
+        "lbl_prefill_0_prefilldecode_1_decode_0_bs72_conc10_trace_a.json.gz"
     )
 
 
@@ -450,9 +454,8 @@ def test_compute_output_path_of_single_step_block_uses_the_step_name(tmp_path):
 def test_extraction_of_a_matched_block(tmp_path):
     """End-to-end extraction of one matched block, as ``main()`` performs it.
 
-    Also pins a known bug: ``compute_output_path`` (used to report a path under
-    ``--no-extract``) disagrees with the name ``extract_and_save`` actually
-    writes -- the latter has a ``prefill_{n}_`` prefix.
+    Also pins that the path ``compute_output_path`` reports under
+    ``--no-extract`` is the path ``extract_and_save`` actually writes.
     """
     events = A_TRACE["traceEvents"]
     gpu_map, flow_map, meta = preprocess_trace(events)
@@ -491,7 +494,7 @@ def test_extraction_of_a_matched_block(tmp_path):
     predicted = match.compute_output_path(
         str(tmp_path), DECODE_ONLY, label, "trace_a", block
     )
-    assert os.path.basename(predicted) != os.path.basename(written)
+    assert os.path.basename(predicted) == os.path.basename(written)
 
 
 # --------------------------------------------------------------------------- #
@@ -568,10 +571,9 @@ def test_main_no_extract_reports_paths_without_writing_them(
 ):
     """--no-extract still reports a path per side, but writes no trace file.
 
-    This is the CLI-level face of the naming bug pinned by
-    ``test_extraction_of_a_matched_block``: the reported path is the
-    ``compute_output_path`` prediction, which omits the ``prefill_{n}_``
-    prefix and so does not name the file extraction would have produced.
+    The reported path is the ``compute_output_path`` prediction, so it must name
+    the file the default (extracting) invocation writes -- the basenames here are
+    the ones asserted in ``test_main_matches_and_extracts``.
     """
     out_dir = tmp_path / "out"
     run_main(monkeypatch, *trace_paths, "-o", str(out_dir), "--no-extract")
@@ -584,6 +586,16 @@ def test_main_no_extract_reports_paths_without_writing_them(
             assert os.path.dirname(predicted) == str(out_dir / entry["phase"])
             assert not os.path.exists(predicted)
     assert list(out_dir.rglob("*.json.gz")) == []
+
+    decode, prefilldecode = report
+    assert os.path.basename(decode["TraceA"]["output_path"]) == (
+        "decode_only_best_A1_B1_A_prefill_0_prefilldecode_0"
+        "_decode_16_bs8_conc8_run_a.json.gz"
+    )
+    assert os.path.basename(prefilldecode["TraceB"]["output_path"]) == (
+        "prefilldecode_best_A3_B2_B_prefill_0_prefilldecode_16"
+        "_decode_0_bs1083_conc10_run_b.json.gz"
+    )
 
 
 def test_main_without_windowing_finds_no_same_size_pair(
