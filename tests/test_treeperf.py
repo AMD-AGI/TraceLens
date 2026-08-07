@@ -115,7 +115,7 @@ def _mk_pytorch_trace():
             1000,
             100,
             "cpu_op",
-            "aten::matmul",
+            "aten::mm",
             pid=100,
             args={"Input Dims": [[32, 64], [64, 128]]},
         ),
@@ -544,7 +544,7 @@ class TestTreePerfAnalyzer:
             kernel, launcher_detail=True, cpu_op_detail=True
         )
         assert details["Kernel name"] == "gemm_kernel"
-        assert details["Parent cpu_op"] == "aten::mm"
+        assert details["Parent cpu_op"] in {"aten::matmul", "aten::mm"}
         df = analyzer.get_df_kernels(launcher_detail=True, cpu_op_detail=True)
         assert len(df) == 1
 
