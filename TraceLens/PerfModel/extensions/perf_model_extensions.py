@@ -475,20 +475,7 @@ class GroupQuant(BinaryElementwise):
     bwd_category = None
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
-        self.event = event
-        self.arch = arch
-        self.python_path = python_path
-        self.param_details = self.get_param_details(event)
-        self.nelems_in1 = prod(self.param_details["shape_in1"])
-        self.nelems_in2 = prod(self.param_details["shape_in2"])
-        self.nelems_out = prod(self.param_details["shape_out"])
-        self.dtype_in1_in2_out = self.param_details["dtype_in1_in2_out"]
-        self.stride_input1 = self.param_details["stride_input1"]
-        self.stride_input2 = self.param_details["stride_input2"]
-        self.stride_output = self.param_details["stride_output"]
-        self.bpe_in1 = name2bpe(self.dtype_in1_in2_out[0])
-        self.bpe_in2 = name2bpe(self.dtype_in1_in2_out[1])
-        self.bpe_out = name2bpe(self.dtype_in1_in2_out[2])
+        super().__init__(event, arch, python_path, **kwargs)
 
 
 class per_group_quant(GroupQuant):
@@ -577,12 +564,7 @@ class vllm_triton_per_token_group_quant_fp8(GroupQuant):
     """
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
-        # Scales/group_size metadata is not a broadcast operand; keep M/N/group_size
-        # param_details and avoid BinaryElementwise shape inference.
-        self.event = event
-        self.arch = arch
-        self.python_path = python_path
-        self.param_details = self.get_param_details(event)
+        super().__init__(event, arch, python_path, **kwargs)
 
     @staticmethod
     def get_param_details(event):
@@ -607,6 +589,7 @@ class vllm_triton_per_token_group_quant_fp8(GroupQuant):
 
         num_groups = max(1, (N + group_size - 1) // group_size)
         dtype_x = args.get("Input type", ("",))[0] if args.get("Input type") else ""
+        dtype_fp8 = "c10::float8_e4m3fn"
 
         return {
             "M": M,
@@ -615,6 +598,12 @@ class vllm_triton_per_token_group_quant_fp8(GroupQuant):
             "num_groups": num_groups,
             "shape_x": shape_x,
             "dtype_x": dtype_x,
+            "shape_in1": shape_x,
+            "shape_in2": (),
+            "dtype_in1_in2_out": (dtype_x, None, dtype_fp8),
+            "stride_input1": None,
+            "stride_input2": None,
+            "stride_output": None,
         }
 
     def flops(self):
@@ -998,11 +987,15 @@ class sgl_kernel_rotary_embedding(FusedRoPE):
 
     def __init__(self, event, arch=None, python_path=None, **kwargs):
         super().__init__(event, arch, python_path, **kwargs)
-        # Input type[0] is positions (int64); bpe must come from query (Input type[1]).
         qdtype = event["args"]["Input type"][1]
-        bpe = name2bpe(qdtype)
-        self.bpe = bpe if bpe is not None else 2
+        self.q_bpe = name2bpe(qdtype) if name2bpe(qdtype) is not None else 2
         self._qdtype = qdtype
+
+    def bytes(self):
+        if self.q_bpe is None:
+            return None
+        n = self.param_details["num_elements"]
+        return 2 * n * self.q_bpe
 
     def get_compute_precision(self):
         return torch_dtype_map(self._qdtype) if self._qdtype else None
@@ -1095,10 +1088,19 @@ class mixed_sample_outer_exponential:
     bwd_category = None
 
     def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
         self.T = self.param_details["T"]
         self.V = self.param_details["V"]
         self.dtype_logits = self.param_details["dtype_logits"]
         self.dtype_noise = self.param_details["dtype_noise"]
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
         logits_shape = tuple(dims[1])
         T = logits_shape[0] if len(logits_shape) >= 1 else 1
         V = logits_shape[1] if len(logits_shape) >= 2 else 1

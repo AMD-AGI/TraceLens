@@ -113,7 +113,7 @@ class GEMM:
         bytes_bias = (N if bias else 0) * bpe_bias
         return bytes_mat1 + bytes_mat2 + bytes_output + bytes_bias
 
-    def bytes(self, bpe_mat1, bpe_mat2, bpe_bias, bpe_output):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         return self.bytes_func(
             self.M, self.N, self.K, self.bias, bpe_mat1, bpe_mat2, bpe_bias, bpe_output
         )
@@ -988,7 +988,7 @@ class CONV:
         )
         return total_elems_moved * bytes_per_element
 
-    def bytes(self, bytes_per_element):
+    def bytes(self, bytes_per_element=None):
         return self.bytes_func(
             self.x_shape, self.w_shape, self.out_shape, self.bias, bytes_per_element
         )
@@ -2319,9 +2319,6 @@ class flash_attention_backward(SDPA):
 
     def __init__(self, event, arch=None, python_path=None, enable_origami=False):
         super().__init__(event, arch, python_path, enable_origami=enable_origami)
-        self.d_h = (
-            self.d_h_qk
-        )  # head dimension for simulation (used by get_simulation_time_bwd_func)
 
     @staticmethod
     def get_param_details(event):
@@ -5906,3 +5903,6 @@ class aiter_gemm_a4w4(GEMM):
         # param_details (dtype_A_B, dtype_scaleA, dtype_scaleB), all of which
         # this class populates identically.
         return hipblaslt_gemm_fp4.bytes(self)
+
+
+__all__ = [name for name in globals() if not name.startswith("_")]

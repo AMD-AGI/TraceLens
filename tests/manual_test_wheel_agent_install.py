@@ -124,9 +124,9 @@ def _resolve_trace_basename(input_dir: str, trace: Optional[str]) -> str:
     if trace:
         tp = _abs(trace) if os.path.isabs(trace) else os.path.join(ind, trace)
         if not os.path.isfile(tp):
-            sys.exit(f"Trace file not found: {tp}")
+            raise SystemExit(f"Trace file not found: {tp}")
         if os.path.dirname(tp) != ind:
-            sys.exit(
+            raise SystemExit(
                 "When using --trace, the file must live directly under --input-dir "
                 f"(expected under {ind})."
             )
@@ -144,10 +144,10 @@ def _resolve_trace_basename(input_dir: str, trace: Optional[str]) -> str:
     if len(found) == 1:
         return os.path.basename(found[0])
     if not found:
-        sys.exit(
+        raise SystemExit(
             f"No trace file found under {ind}; pass --trace PATH relative to input-dir."
         )
-    sys.exit(
+    raise SystemExit(
         "Multiple trace candidates under input-dir; pass --trace explicitly:\n  "
         + "\n  ".join(found)
     )
@@ -244,7 +244,7 @@ def _agent_cli_suffix(output_format: str) -> str:
         return "--output-format json"
     if output_format == "stream-json":
         return "--output-format stream-json --stream-partial-output"
-    sys.exit(f"Unknown --agent-output-format: {output_format!r}")
+    raise SystemExit(f"Unknown --agent-output-format: {output_format!r}")
 
 
 def _resolve_capture_path(
