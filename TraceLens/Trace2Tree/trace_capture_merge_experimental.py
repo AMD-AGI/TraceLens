@@ -566,12 +566,7 @@ def find_graph_roots_under_execution(execution_root, graphlaunch_events):
 
 
 def build_execution_graph_root_map(graph_tree, single_capture_trace=False):
-    """Build a list of ``(execution_root, [graph_roots])`` for the graph tree.
-
-    When *single_capture_trace* is True and no execution root annotations
-    are found, falls back to grouping all ``hipGraphLaunch`` events under
-    a single synthetic entry.
-    """
+    """Build a list of ``(execution_root, [graph_roots])`` for the graph tree."""
     execution_roots = find_execution_roots(graph_tree)
     print("Found {} execution roots in graph tree".format(len(execution_roots)))
 
@@ -718,8 +713,7 @@ def merge_capture_trace_into_graph(
         filepath = capture_files[0]
         key = ("single", os.path.abspath(filepath))
         capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
-            key,
-            filepath
+            key, filepath
         )
     else:
         capture_map, capture_batch_sizes = load_capture_folder(

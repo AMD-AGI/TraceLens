@@ -356,10 +356,7 @@ def test_xdit_capture_merge():
 
     # --- 1. Load capture trace: find target GEMMs ---
     key = ("single", os.path.abspath(capture_path))
-    cap_tree, cap_roots, cap_root_data = _get_cached_capture_tree(
-        key,
-        capture_path
-    )
+    cap_tree, cap_roots, cap_root_data = _get_cached_capture_tree(key, capture_path)
     cached_events, filtered_uids = cap_root_data[0]
     UID = _merge_mod.UID
     cap_filtered = [e for e in cached_events if e[UID] in filtered_uids]
@@ -436,7 +433,9 @@ def test_xdit_capture_merge():
     # --- 5. Verify non-Synthetic ops have input dims and kernel names in call stacks ---
     df_unified = pd.read_csv(os.path.join(ref_csvs_dir, "unified_perf_summary.csv"))
     non_synth = df_unified[~df_unified["name"].str.contains("Synthetic Op", na=False)]
-    empty_dims = non_synth[non_synth["Input Dims"].isna() | (non_synth["Input Dims"] == "")]
+    empty_dims = non_synth[
+        non_synth["Input Dims"].isna() | (non_synth["Input Dims"] == "")
+    ]
     assert empty_dims.empty, (
         f"{len(empty_dims)} non-Synthetic ops have empty Input Dims: "
         f"{empty_dims['name'].tolist()[:5]}"
