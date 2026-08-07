@@ -388,20 +388,14 @@ def _block_summary_dict(b: Block) -> dict:
 def compute_output_path(
     output_dir: str, phase: str, label: str, base_name: str, block: Block
 ) -> str:
-    """Mirror the naming used by ``extract_and_save`` so the path is known
-    even when ``--no-extract`` is set.
-    """
-    iter_details = block.details
-    phase_details = find_phase_from_window(iter_details)
-    if len(block.roots) == 1:
-        name_append = block.roots[0]["name"].replace("(", "_").replace(")", "")
-    else:
-        name_append = (
-            f"prefilldecode_{phase_details['num_prefilldecode']}_"
-            f"decode_{phase_details['num_decode']}_"
-            f"bs{phase_details['avg_bs']}_"
-            f"conc{phase_details['avg_conc']}"
-        )
+    """Mirror the naming used by ``extract_and_save``"""
+    phase_details = find_phase_from_window(block.details)
+    name_append = (
+        f"prefill_{phase_details['num_prefill']}"
+        f"_prefilldecode_{phase_details['num_prefilldecode']}"
+        f"_decode_{phase_details['num_decode']}"
+        f"_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
+    )
     return os.path.join(output_dir, phase, f"{label}_{name_append}_{base_name}.json.gz")
 
 
