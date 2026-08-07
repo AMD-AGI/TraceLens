@@ -31,8 +31,8 @@ def test_suppress_native_hlo_logs_filters_noise(monkeypatch):
     def capture_write(fd, data):
         if fd == 2:
             writes.append(data)
-        else:
-            return real_write(fd, data)
+            return len(data)
+        return real_write(fd, data)
 
     monkeypatch.setattr(os, "write", capture_write)
 
