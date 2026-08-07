@@ -3239,52 +3239,8 @@ class aten_unary_elementwise(UnaryElementwise):
 
 
 class aten_replication_pad(UnaryElementwise):
-    """
-    Performance model for aten::replication_pad1d / pad2d / pad3d.
-
-    Reference implementation:
-        torch/nn/functional.py (F.pad with mode='replicate')
-        aten/src/ATen/native/ReplicationPadding.cpp
-
-    Replication padding copies border elements to pad each spatial dimension.
-    Pure memory-bandwidth-bound operation with negligible compute.
-
-    Signature: replication_padNd(input, padding) -> output
-        input   — shape [N, C, *spatial], dtype bfloat16/float16/float32
-        padding — ScalarList [left, right, ...] (2 per spatial dim, innermost first)
-
-    Expected Input Dims from trace:
-        [0] = input shape (e.g. (1, 128, 17, 240, 240) for 3d)
-        [1] = () (padding is a scalar list, not a tensor)
-
-    Expected Input type from trace:
-        ['c10::BFloat16', 'ScalarList']
-
-    Concrete Inputs[1] = padding list as string, e.g. '[1, 1, 1, 1, 2, 0]'
-        For 3d: [left, right, top, bottom, front, back]
-        For 2d: [left, right, top, bottom]
-        For 1d: [left, right]
-
-    Roofline -- FLOPs:
-        nelems_out (one copy per output element; negligible vs memory cost)
-
-    Roofline -- bytes moved:
-        bytes_read  = nelems_in  * bpe  (read entire input)
-        bytes_write = nelems_out * bpe  (write entire output)
-        Total       = bytes_read + bytes_write
-
-        Note: border elements are read multiple times but L2 cache makes
-        this negligible. We model the dominant cost as input read + output write.
-
-    Notes:
-        Output shape is computed from input shape + padding. The padding list
-        is ordered innermost-dim-first (W, H, D for 3d). The op_shape is set
-        to the output shape so the base class nelems reflects output size.
-        bytes() is overridden to account for both input read and output write.
-    """
-
-    category = "other"
-    sheet_category = "ReplicationPad"
+    category = "elementwise"
+    sheet_category = "UnaryElementwise"
 
     @staticmethod
     def get_param_details(event):
@@ -3302,8 +3258,9 @@ class aten_replication_pad(UnaryElementwise):
         output_shape = list(input_shape)
         num_spatial = len(padding) // 2
         for i in range(num_spatial):
-            # padding pairs are innermost-first, spatial dims are last in shape
-            dim_idx = len(input_shape) - num_spatial + i
+            # padding pairs are innermost-first: pair 0 -> last dim (W),
+            # pair 1 -> second-to-last (H), pair 2 -> third-to-last (D)
+            dim_idx = len(input_shape) - 1 - i
             output_shape[dim_idx] += padding[2 * i] + padding[2 * i + 1]
         output_shape = tuple(output_shape)
 
