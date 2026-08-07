@@ -33,7 +33,6 @@ from .report_utils import load_manifest, _scan_findings_dir
 _REQUIRED_FINDINGS_HEADERS = ["## Recommendations", "## Detailed Analysis"]
 _COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
-_KERNEL_FUSION_FINDINGS = "kernel_fusion_findings.md"
 # Optional icon / prefix before P<N> (e.g. kernel fusion `### 🟢 P1:`).
 _P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->")
@@ -503,11 +502,6 @@ def _check_coverage(output_dir, manifest):
     messages = []
 
     found_system = set(_scan_findings_dir(output_dir, "system_findings").keys())
-    # _KERNEL_FUSION_FINDINGS names a file used by agent skills/docs but not elsewhere
-    # in Python. CodeQL py/unused-global-variable flags it unless referenced here.
-    # Kernel fusion findings are experimental and not required for coverage checks.
-    if _KERNEL_FUSION_FINDINGS not in found_system:
-        pass
     expected_system = {c["name"] for c in categories if c.get("tier") == "system"}
     missing_system = expected_system - found_system
     if missing_system:
