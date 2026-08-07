@@ -6,5 +6,3 @@
 
 from .generate_perf_report_jax_analysis import *
 from .generate_perf_report_pytorch import *
-
-__all__ = [name for name in globals() if not name.startswith("_")]

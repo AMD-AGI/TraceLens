@@ -228,11 +228,6 @@ if triton_available() and torch.cuda.is_available():
         logger.debug("MXFP4/MXFP6 support probe failed", exc_info=True)
 
 
-def get_mxfp6_kind() -> str:
-    """Return the resolved MXFP6 implementation kind for benchmarking."""
-    return _MXFP6_KIND
-
-
 def _launch_scaled_gemm(
     a: torch.Tensor,
     b_nk: torch.Tensor,  # stored as (N, K // PACK)

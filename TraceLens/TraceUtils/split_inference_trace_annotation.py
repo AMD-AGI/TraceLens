@@ -281,7 +281,7 @@ def extract_iteration(
 
     # Compute the global time window for all iteration roots
     if not iteration_roots:
-        return trace_json.copy(), [], 0, 0, 0
+        return trace_json.copy(), [], 0, 0
     min_iter_ts = min(root.get("ts", 0) for root in iteration_roots)
     max_iter_end = max(
         root.get("ts", 0) + root.get("dur", 0) for root in iteration_roots
@@ -503,6 +503,7 @@ def extract_phases_and_save(
         return extraction_summary
     for root in roots:
         iter_details = iteration_details(root)
+        phase_details = find_phase_from_window(iter_details)
         prefilldecode_steps = [r for r, i in zip(root, iter_details) if has_context(i)]
         decode_steps = [r for r, i in zip(root, iter_details) if is_decode_only(i)]
 
@@ -1156,7 +1157,6 @@ def main():
 
         # Determine the working set and compute steady-state regions once,
         # shared across all downstream calls.
-        steady_state_regions: List[Tuple[int, int]] = []
         if args.iterations != "all":
             working_roots = iteration_roots[start:end]
             steady_state_regions: List[Tuple[int, int]] = [(0, end - start)]

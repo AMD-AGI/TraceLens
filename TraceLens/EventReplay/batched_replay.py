@@ -7,7 +7,6 @@
 # run_repro.py
 import json
 import argparse
-import sys
 import torch
 from utils import TensorCfg, build_tensor, benchmark_func
 
@@ -197,6 +196,6 @@ if __name__ == "__main__":
     print("----------------------")
 
     if errors > 0:
-        sys.exit(1)  # Exit with error code if any operation failed
+        exit(1)  # Exit with error code if any operation failed
     else:
-        sys.exit(0)
+        exit(0)

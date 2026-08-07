@@ -899,6 +899,7 @@ def main():
             (f["trace_id"] for f in failures),
             key=lambda t: sum(1 for f in failures if f["trace_id"] == t),
         )
+        platform = trace_meta.get(worst_trace, {}).get("platform", "unknown")
         container_kv = f'CONTAINER="{CONTAINER}"' if CONTAINER else 'CONTAINER=""'
         repro_cmd = (
             f'{container_kv} TEST_IDS="{worst_trace}" TEST_TRACES_CSV="{test_traces_csv_rel}" '

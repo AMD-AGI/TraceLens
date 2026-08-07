@@ -69,8 +69,6 @@ def read_trace(file: BytesIO) -> TreePerfAnalyzer:
             data = json.load(f)
     elif file.name.endswith(".json"):
         data = json.load(file)
-    else:
-        raise ValueError(f"Unsupported trace file extension: {file.name}")
 
     tree = TraceToTree(data["traceEvents"])
     return TreePerfAnalyzer(tree)

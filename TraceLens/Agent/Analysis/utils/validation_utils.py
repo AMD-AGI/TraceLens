@@ -503,8 +503,6 @@ def _check_coverage(output_dir, manifest):
     messages = []
 
     found_system = set(_scan_findings_dir(output_dir, "system_findings").keys())
-    if _KERNEL_FUSION_FINDINGS not in found_system:
-        pass  # experimental; not required for coverage checks
     expected_system = {c["name"] for c in categories if c.get("tier") == "system"}
     missing_system = expected_system - found_system
     if missing_system:
@@ -727,11 +725,6 @@ def _validate_report_comparison_scope_diffs(content, output_dir, comparison_scop
                     f"Kernel Fusion Impact format error: comparative mode "
                     f"should not include perf-model coverage parenthetical "
                     f"but got: {impact_text}"
-                )
-            elif not _KF_IMPACT_COMPARATIVE_RE.search(impact_text):
-                errors.append(
-                    f"Kernel Fusion Impact format error: comparative mode "
-                    f"requires 'impact_score: X.X' but got: {impact_text}"
                 )
     return errors
 

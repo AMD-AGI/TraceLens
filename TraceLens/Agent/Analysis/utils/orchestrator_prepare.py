@@ -846,7 +846,7 @@ def main():
     print(f"Pseudo Ops: {'Enabled' if enable_pseudo_ops else 'Disabled'}")
     print("=" * 80)
 
-    # Create directory structure
+    # Create directory structure (chmod 777 so host user can write when running in container as root)
     for d in [
         output_dir,
         f"{output_dir}/metadata",
@@ -855,6 +855,7 @@ def main():
         f"{output_dir}/system_findings",
     ]:
         os.makedirs(d, exist_ok=True)
+        os.chmod(d, 0o777)
 
     platform_specs = load_arch(platform)
 
@@ -867,8 +868,6 @@ def main():
     gpu_utilization_metrics = _gpu_utilization_metrics_from_gpu_timeline_df(
         gpu_timeline
     )
-    trace2_gpu_utilization = None
-    trace2_ops_summary_by_category = None
 
     if comparison_scope == "comparative" and trace2_csv_dir is not None:
         trace2_gpu_utilization = _gpu_utilization_metrics_from_gpu_timeline_df(
@@ -1219,6 +1218,7 @@ def main():
         except Exception as ex:
             print(f"  ⚠️  Error during fusion candidate extraction: {ex}")
             traceback.print_exc()
+            fusion_candidates = []
             with open(fusion_candidates_file, "w") as f:
                 json.dump([], f)
 

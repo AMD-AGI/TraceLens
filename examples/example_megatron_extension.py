@@ -281,6 +281,7 @@ def _create_host_mm_ops_common(
 
     is_fp8 = fwd_op_event["args"]["Concrete Inputs"][fp8_bool_idx] == "True"
     if is_fp8:
+        W_dtype = "fp8"
         inp_dtype = "fp8"
 
     X_shape = (math.prod(inp_shape[:-1]), inp_shape[-1])
