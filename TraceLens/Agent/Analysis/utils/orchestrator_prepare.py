@@ -63,7 +63,6 @@ FUSION_ALREADY_FUSED = [
     "flash_attn",
     "flash_fwd",
     "silu_and_mul",
-    "SiluAndMul",
 ]
 _NORM_KERNEL_PATTERNS = [
     "batchnorm",
