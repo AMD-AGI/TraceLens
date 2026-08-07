@@ -6,14 +6,17 @@
 
 """Unit tests for TraceLens.Reporting.generate_perf_report_jax_analysis."""
 
+import importlib
 from unittest import mock
 
 import pandas as pd
 
-from TraceLens.Reporting.generate_perf_report_jax_analysis import (
-    calculate_gpu_event_statistics,
-    generate_perf_report_jax_analysis,
+_JAX_ANALYSIS_MOD = importlib.import_module(
+    "TraceLens.Reporting.generate_perf_report_jax_analysis"
 )
+calculate_gpu_event_statistics = _JAX_ANALYSIS_MOD.calculate_gpu_event_statistics
+generate_perf_report_jax_analysis = _JAX_ANALYSIS_MOD.generate_perf_report_jax_analysis
+JaxAnalyses = _JAX_ANALYSIS_MOD.JaxAnalyses
 
 
 def _sample_averages_df():
@@ -51,8 +54,9 @@ def _mock_side_inputs():
 
 def test_calculate_gpu_event_statistics_adds_overlapped_comm():
     categorized, xla_events = _mock_side_inputs()
-    with mock.patch(
-        "TraceLens.Reporting.generate_perf_report_jax_analysis.JaxAnalyses.summarize_gpu_events",
+    with mock.patch.object(
+        JaxAnalyses,
+        "summarize_gpu_events",
         return_value=(_sample_averages_df(), categorized, xla_events),
     ):
         averages, categorized_out, xla_grouped = calculate_gpu_event_statistics(
@@ -69,14 +73,17 @@ def test_generate_perf_report_jax_analysis_writes_csvs(tmp_path):
     gemms = pd.DataFrame({"time ms": [1.0], "percent": [1.0]}, index=["gemm1"])
     gemms_detailed = pd.DataFrame({"name": ["gemm1"], "tflops": [1.0]})
 
-    with mock.patch(
-        "TraceLens.Reporting.generate_perf_report_jax_analysis.JaxAnalyses.summarize_gpu_events",
+    with mock.patch.object(
+        JaxAnalyses,
+        "summarize_gpu_events",
         return_value=(_sample_averages_df(), categorized, xla_events),
-    ), mock.patch(
-        "TraceLens.Reporting.generate_perf_report_jax_analysis.JaxAnalyses.summarize_gpu_gemm_events_from_pb",
+    ), mock.patch.object(
+        JaxAnalyses,
+        "summarize_gpu_gemm_events_from_pb",
         return_value=gemms,
-    ), mock.patch(
-        "TraceLens.Reporting.generate_perf_report_jax_analysis.JaxAnalyses.gemm_performance_from_pb",
+    ), mock.patch.object(
+        JaxAnalyses,
+        "gemm_performance_from_pb",
         return_value=gemms_detailed,
     ):
         generate_perf_report_jax_analysis(
