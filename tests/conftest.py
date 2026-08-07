@@ -22,13 +22,6 @@ import pytest
 from pandas.api.types import is_float_dtype
 
 
-def pytest_configure(config):
-    config.addinivalue_line(
-        "markers",
-        "gpu: test requires a CUDA/HIP GPU (skipped in CPU-only CI)",
-    )
-
-
 def pytest_addoption(parser):
     parser.addoption(
         "--update-references",
