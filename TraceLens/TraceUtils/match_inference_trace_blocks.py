@@ -388,8 +388,7 @@ def _block_summary_dict(b: Block) -> dict:
 def compute_output_path(
     output_dir: str, phase: str, label: str, base_name: str, block: Block
 ) -> str:
-    """Mirror the naming used by ``extract_and_save``
-    """
+    """Mirror the naming used by ``extract_and_save``"""
     phase_details = find_phase_from_window(block.details)
     name_append = (
         f"prefill_{phase_details['num_prefill']}"
