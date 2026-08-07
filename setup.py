@@ -28,6 +28,9 @@ def _wheel_version():
         return _BASE_VERSION
 
 
+with open("README.md", encoding="utf-8") as _readme:
+    _LONG_DESCRIPTION = _readme.read()
+
 setup(
     name="TraceLens",
     version=_wheel_version(),
@@ -67,7 +70,7 @@ setup(
         ],
     },
     description="A library for automating the analysis of ML model performance traces",
-    long_description=open("README.md").read(),
+    long_description=_LONG_DESCRIPTION,
     long_description_content_type="text/markdown",
     url="https://github.com/AMD-AGI/TraceLens",
     classifiers=[

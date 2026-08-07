@@ -470,6 +470,7 @@ def main():
         parser.error("--output-dir is required")
 
     os.makedirs(args.output_dir, exist_ok=True)
+    results = []
 
     if args.trace_file:
         trace_path = Path(args.trace_file)
