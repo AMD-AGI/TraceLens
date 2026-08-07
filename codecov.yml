@@ -12,5 +12,19 @@ coverage:
     project: off
     patch: off
 
+comment:
+  show_carryforward_flags: true
+
+flags:
+  unit:
+    paths:
+      - TraceLens/
+    carryforward: false
+  gpu:
+    paths:
+      - TraceLens/EventReplay/
+      - TraceLens/PerfModel/benchmarking/
+    carryforward: true
+
 fixes:
   - "/__w/TraceLens/TraceLens/::"
