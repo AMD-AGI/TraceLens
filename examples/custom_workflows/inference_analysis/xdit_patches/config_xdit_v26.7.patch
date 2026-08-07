@@ -23,7 +23,7 @@ index ddf9abf..e5ffc5e 100644
              "--warmup_calls",
              help="The number of full pipe calls to warmup the model.",
 diff --git a/xfuser/model_executor/models/runner_models/base_model.py b/xfuser/model_executor/models/runner_models/base_model.py
-index de8490e..f108b43 100644
+index de8490e..4952a3e 100644
 --- a/xfuser/model_executor/models/runner_models/base_model.py
 +++ b/xfuser/model_executor/models/runner_models/base_model.py
 @@ -3,6 +3,7 @@ import torch
@@ -58,26 +58,12 @@ index de8490e..f108b43 100644
          ) as profile_object:
              for iteration in range(num_repetitions):
                  log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
-@@ -616,6 +618,50 @@ class xFuserModel(abc.ABC):
+@@ -616,6 +618,36 @@ class xFuserModel(abc.ABC):
          elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
          return out, elapsed_time
  
 +    def _run_compile_warmup(self, compile_args: dict) -> None:
-+        """Run the compile warmup, optionally capturing a profiler trace.
-+
-+        For reduce-overhead mode (CUDA graphs), torch.compile uses a three-phase
-+        warmup: (1) eager warmup, (2) CUDA graph recording, (3) CUDA graph replay.
-+        When --profile_capture_phase is enabled, this method splits the warmup so
-+        the profiler is active during phase 2 (CUDA graph recording), capturing
-+        individual kernel launches with shapes and call stacks rather than opaque
-+        cudaGraphLaunch calls.
-+
-+        For default mode (no CUDA graphs), the profiler captures individual kernels
-+        on any pass, so no splitting is needed.
-+
-+        Models whose scheduler uses shift_terminal (e.g. LTX-2.3) cannot run with
-+        num_inference_steps=1, so capture profiling is skipped for those models.
-+        """
++        """Run compilation warmup, optionally profiling the CUDA graph recording phase."""
 +        enable_capture = (
 +            self.config.profile_capture_phase
 +            and get_world_group().rank == 0

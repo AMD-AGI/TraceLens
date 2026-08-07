@@ -143,26 +143,12 @@ index b06d163..e082927 100644
          ) as profile_object:
              for iteration in range(num_repetitions):
                  log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
-@@ -687,6 +689,49 @@ class xFuserModel(abc.ABC):
+@@ -687,6 +689,37 @@ class xFuserModel(abc.ABC):
          elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
          return out, elapsed_time
  
 +    def _run_compile_warmup(self, compile_args: dict) -> None:
-+        """Run the compile warmup, optionally capturing a profiler trace.
-+
-+        For reduce-overhead mode (CUDA graphs), torch.compile uses a three-phase
-+        warmup: (1) eager warmup, (2) CUDA graph recording, (3) CUDA graph replay.
-+        When --profile_capture_phase is enabled, this method splits the warmup so
-+        the profiler is active during phase 2 (CUDA graph recording), capturing
-+        individual kernel launches with shapes and call stacks rather than opaque
-+        cudaGraphLaunch calls.
-+
-+        For default mode (no CUDA graphs), the profiler captures individual kernels
-+        on any pass, so no splitting is needed.
-+
-+        Models whose scheduler uses shift_terminal (e.g. LTX-2.3) cannot run with
-+        num_inference_steps=1, so capture profiling is skipped for those models.
-+        """
++        """Run compilation warmup, optionally profiling the CUDA graph recording phase."""
 +        enable_capture = (
 +            self.config.profile_capture_phase
 +            and get_world_group().rank == 0
