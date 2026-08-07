@@ -19,10 +19,8 @@ import pandas as pd
 import pytest
 import ast
 import re
-from pandas.api.types import is_float_dtype
-
-import gzip
 import json
+from pandas.api.types import is_float_dtype
 
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch,
