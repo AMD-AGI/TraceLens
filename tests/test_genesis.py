@@ -22,7 +22,6 @@ import pandas as pd
 import pytest
 
 from TraceLens.Reporting.genesis_analysis import (
-    GENESIS_CATEGORIES,
     _gpu_timeline_from_intervals,
     _merge_intervals,
     apply_genesis_categories_to_rocprof,

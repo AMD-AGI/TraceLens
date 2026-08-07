@@ -26,7 +26,7 @@ JAX_CONV_MINIMAL_LEGACY = os.path.join(
 
 # Keep trace loading off import: xprof writes SSTABLE cache files next to the trace,
 # and parallel pytest-xdist workers racing on that path fail collection.
-pytestmark = pytest.mark.xdist_group("jax_conv_analysis")
+pytestmark = pytest.mark.xdist_group("jax_traces")
 
 
 @pytest.fixture(scope="module")
