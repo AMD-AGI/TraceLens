@@ -23,6 +23,11 @@ import warnings
 import TraceLens
 
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
+from .event_time_index import (
+    TimeSortedGraphLaunchIndex,
+    build_sorted_time_arrays,
+    collect_events_fully_inside_window,
+)
 from .trace_to_tree import TraceToTree
 
 
@@ -337,6 +342,9 @@ def append_subtree_to_event(tree, subtree_events, parent_event, cpu_root_nodes):
             event[TraceLens.util.TraceEventUtils.TraceKeys.Name]
         ].append(event[TraceLens.util.TraceEventUtils.TraceKeys.UID])
     tree.cpu_root_nodes.extend(cpu_root_nodes)
+    if hasattr(tree, "_next_uid"):
+        max_sub = max((e[UID] for e in subtree_events), default=-1)
+        tree._next_uid = max(tree._next_uid, max_sub + 1)
     return tree
 
 
@@ -489,6 +497,10 @@ def _get_cached_capture_tree(key, filepath):
 def find_capture_roots(capture_tree):
     """Find capture roots by pairing StreamBeginCapture / StreamEndCapture events."""
     capture_roots = []
+    base_events = list(capture_tree.events)
+    base_starts, base_ends, base_sorted = build_sorted_time_arrays(base_events)
+    appended_in_window: List[Dict] = []
+
     capture_begin = [
         event
         for event in capture_tree.events
@@ -504,11 +516,14 @@ def find_capture_roots(capture_tree):
     ]
     capture_end_ts = [event["ts"] for event in capture_end]
     for ts, te in zip(capture_begin_ts, capture_end_ts):
-        filtered = [
-            e
-            for e in capture_tree.events
-            if e["ts"] >= ts and e["ts"] + e.get("dur", 0) <= te
-        ]
+        filtered = collect_events_fully_inside_window(
+            base_starts, base_ends, base_sorted, ts, te
+        )
+        for d in appended_in_window:
+            ds = float(d.get("ts", 0) or 0)
+            de = ds + float(d.get("dur", 0) or 0)
+            if ts <= ds and de <= te:
+                filtered.append(d)
         filtered_uids = {e[UID] for e in filtered}
         root_events = [
             e
@@ -517,7 +532,8 @@ def find_capture_roots(capture_tree):
             and e.get("parent", None) is not None
             and (e.get("cat", "") == "cpu_op" or e.get("cat", "") == "python_function")
         ]
-        new_uid = max(capture_tree.events_by_uid.keys()) + 1
+        root_events.sort(key=lambda x: x.get("ts", 0))
+        new_uid = capture_tree.reserve_uids(1)
         dummy = {
             UID: new_uid,
             "name": "CaptureRoot",
@@ -530,9 +546,23 @@ def find_capture_roots(capture_tree):
         capture_tree.events_by_uid[new_uid] = dummy
         capture_roots.append(dummy)
         capture_tree.events.append(dummy)
+        appended_in_window.append(dummy)
         for e in root_events:
             e["parent"] = new_uid
     return capture_roots
+
+
+def collect_execution_roots_and_graphlaunches(graph_tree):
+    """Return sorted iteration-annotation roots and graph-launch events."""
+    graphlaunch_events = [
+        event
+        for event in graph_tree.events
+        if "graphlaunch" in event.get("name", "").lower()
+    ]
+    execution_roots = sorted(
+        find_execution_roots(graph_tree), key=lambda x: x.get("ts", 0)
+    )
+    return execution_roots, graphlaunch_events
 
 
 def find_execution_roots(graph_tree):
@@ -545,19 +575,19 @@ def find_execution_roots(graph_tree):
     return find_iteration_roots_by_priority(graph_tree.events)
 
 
-def find_graph_roots_under_execution(execution_root, graphlaunch_events):
+def find_graph_roots_under_execution(execution_root, graphlaunch_source):
     """Return all ``graphlaunch`` events that fall within *execution_root*'s time range.
 
-    Accepts a pre-collected list of graphlaunch events so callers can avoid
-    rescanning the full event list for every execution root.  No tree traversal
-    is needed: graphlaunch events are identified directly by name, so filtering
-    by timestamp is sufficient.
+    *graphlaunch_source* is either a :class:`TimeSortedGraphLaunchIndex` (preferred)
+    or a legacy list of graph-launch event dicts.
     """
     exec_ts = execution_root.get("ts", 0)
     exec_te = exec_ts + execution_root.get("dur", 0)
+    if isinstance(graphlaunch_source, TimeSortedGraphLaunchIndex):
+        return graphlaunch_source.roots_in_window(exec_ts, exec_te)
     graph_roots = [
         e
-        for e in graphlaunch_events
+        for e in graphlaunch_source
         if exec_ts <= e.get("ts", 0) and e.get("ts", 0) + e.get("dur", 0) <= exec_te
     ]
     graph_roots.sort(key=lambda x: x.get("ts", 0))
@@ -566,17 +596,16 @@ def find_graph_roots_under_execution(execution_root, graphlaunch_events):
 
 def build_execution_graph_root_map(graph_tree):
     """Build a list of ``(execution_root, [graph_roots])`` for the graph tree."""
-    execution_roots = find_execution_roots(graph_tree)
+    execution_roots, graphlaunch_events = collect_execution_roots_and_graphlaunches(
+        graph_tree
+    )
     print("Found {} execution roots in graph tree".format(len(execution_roots)))
 
-    # Collect graphlaunch events once; reused for every execution root.
-    graphlaunch_events = [
-        e for e in graph_tree.events if "graphlaunch" in e.get("name", "").lower()
-    ]
+    gl_index = TimeSortedGraphLaunchIndex(graphlaunch_events)
 
     result = []
     for exec_root in execution_roots:
-        g_roots = find_graph_roots_under_execution(exec_root, graphlaunch_events)
+        g_roots = find_graph_roots_under_execution(exec_root, gl_index)
         print(
             "  Execution root '{}': {} graph roots".format(
                 exec_root["name"], len(g_roots)
@@ -795,7 +824,7 @@ def merge_capture_trace_into_graph(
                     )
                     continue
 
-            start_uid = graph_tree.events[-1][UID] + 1
+            start_uid = graph_tree.reserve_uids(len(capture_events))
             capture_events, _, cpu_root_nodes = update_subtree_uids_and_timestamps(
                 capture_tree,
                 capture_events,

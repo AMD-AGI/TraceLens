@@ -5,12 +5,48 @@
 ###############################################################################
 
 import logging
+import os
 import re
+import sys
+import time
+from collections import defaultdict
+from functools import partial
+from typing import Any, List, Optional, Sequence, Tuple
+
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
 
 _SGLANG_SUFFIX_RE = re.compile(r"^(sglang_profiler::.+?)_\d+$")
+_MLA_DECODE_FWD_NAME_RE = re.compile(r"aiter/mla.py\(\d+\): mla_decode_fwd")
+_MLA_FP8_PREFILL_NAME_RE = re.compile(r":\s*mla_fp8_prefill_attn(\b|$)")
+
+
+def _any_kernel_event_name_contains(tree, needle: str, *, lower: bool = True) -> bool:
+    """True if some *kernel* event's name contains *needle* (via ``name2event_uids``).
+
+    Avoids scanning all ``tree.events``; only unique names that match the
+    substring are checked, then UIDs are filtered by ``cat == \"kernel\"``.
+    """
+    if lower:
+        needle_l = needle.lower()
+
+        def hit(n: str) -> bool:
+            return needle_l in n.lower()
+
+    else:
+
+        def hit(n: str) -> bool:
+            return needle in n
+
+    for name in tree.name2event_uids:
+        if not hit(name):
+            continue
+        for uid in tree.name2event_uids[name]:
+            if tree.get_UID2event(uid).get("cat") == "kernel":
+                return True
+    return False
 
 
 def normalize_sglang_profiler_op_names(tree):
@@ -44,36 +80,32 @@ def set_bookkeeping_attr(tree, event: dict):
         tree.seq_num2event_uids_map[seq_num].append(UID)
 
 
-def inject_pseudo_op(
-    tree,
-    kernel_evt,
-    name,
+# One inject_pseudo_op spec: kernel, name, seq_num, optional shape/args kwargs.
+PseudoOpInjectSpec = Tuple[
+    dict,
+    str,
+    Any,
+    Optional[Any],
+    Optional[Any],
+    Optional[Any],
+    Optional[Any],
+    Optional[dict],
+]
+
+
+def _build_pseudo_op_event_dict(
+    kernel_evt: dict,
+    orig_cpu_evt: dict,
+    launcher_evt: dict,
+    name: str,
     seq_num,
     dims=None,
     types=None,
     strides=None,
     concrete_inputs=None,
     extra_args=None,
-):
-    """
-    Create pseudo op between parent CPU op and kernel.
-    Creates: Parent CPU Op → Pseudo Op → Launcher → Kernel
-
-    Args:
-        tree: TraceToTree instance
-        kernel_evt: Kernel event to inject pseudo-op for
-        name: Name of the pseudo-op
-        seq_num: Sequence number
-        dims: Input dimensions (uses parent if None)
-        types: Input types (uses parent if None)
-        strides: Input strides (uses parent if None)
-        concrete_inputs: Concrete inputs (uses parent if None)
-        extra_args: Additional custom args to add to pseudo-op (dict)
-    """
-
-    launcher_evt = tree.get_parent_event(kernel_evt)
-    orig_cpu_evt = tree.get_parent_event(launcher_evt)
-
+) -> dict:
+    """Build pseudo cpu_op dict (no bookkeeping / parent / children mutation)."""
     pseudo_evt = {
         "ph": "X",
         "name": name,
@@ -104,10 +136,53 @@ def inject_pseudo_op(
         "children": [launcher_evt["UID"]],
         "gpu_events": [kernel_evt["UID"]],
     }
-
-    # Add any extra custom args
     if extra_args:
         pseudo_evt["args"].update(extra_args)
+    return pseudo_evt
+
+
+def inject_pseudo_op(
+    tree,
+    kernel_evt,
+    name,
+    seq_num,
+    dims=None,
+    types=None,
+    strides=None,
+    concrete_inputs=None,
+    extra_args=None,
+):
+    """
+    Create pseudo op between parent CPU op and kernel.
+    Creates: Parent CPU Op → Pseudo Op → Launcher → Kernel
+
+    Args:
+        tree: TraceToTree instance
+        kernel_evt: Kernel event to inject pseudo-op for
+        name: Name of the pseudo-op
+        seq_num: Sequence number
+        dims: Input dimensions (uses parent if None)
+        types: Input types (uses parent if None)
+        strides: Input strides (uses parent if None)
+        concrete_inputs: Concrete inputs (uses parent if None)
+        extra_args: Additional custom args to add to pseudo-op (dict)
+    """
+
+    launcher_evt = tree.get_parent_event(kernel_evt)
+    orig_cpu_evt = tree.get_parent_event(launcher_evt)
+
+    pseudo_evt = _build_pseudo_op_event_dict(
+        kernel_evt,
+        orig_cpu_evt,
+        launcher_evt,
+        name,
+        seq_num,
+        dims=dims,
+        types=types,
+        strides=strides,
+        concrete_inputs=concrete_inputs,
+        extra_args=extra_args,
+    )
 
     set_bookkeeping_attr(tree, pseudo_evt)
 
@@ -117,12 +192,86 @@ def inject_pseudo_op(
     children.append(pseudo_evt["UID"])
 
 
+def inject_pseudo_ops_batch(tree, specs: Sequence[PseudoOpInjectSpec]) -> int:
+    """Create many pseudo ops; rewrite each parent's ``children`` at most once.
+
+    Equivalent to calling :func:`inject_pseudo_op` repeatedly in *specs* order,
+    but avoids repeated ``list.remove`` on large ``children`` lists (same parent).
+
+    Each spec is
+    ``(kernel_evt, name, seq_num, dims, types, strides, concrete_inputs, extra_args)``
+    with the same semantics as :func:`inject_pseudo_op` (``None`` for optional
+    shape fields means inherit from the resolved parent cpu op).
+
+    Returns:
+        Number of pseudo ops successfully inserted.
+    """
+    pending = defaultdict(list)
+    inserted = 0
+
+    for spec in specs:
+        (
+            kernel_evt,
+            name,
+            seq_num,
+            dims,
+            types,
+            strides,
+            concrete_inputs,
+            extra_args,
+        ) = spec
+        launcher_evt = tree.get_parent_event(kernel_evt)
+        if launcher_evt is None:
+            logger.warning(
+                "inject_pseudo_ops_batch: kernel UID %s has no parent launcher; skip %s",
+                kernel_evt.get("UID"),
+                name,
+            )
+            continue
+        orig_cpu_evt = tree.get_parent_event(launcher_evt)
+        if orig_cpu_evt is None:
+            logger.warning(
+                "inject_pseudo_ops_batch: launcher UID %s has no parent cpu op; skip %s",
+                launcher_evt.get("UID"),
+                name,
+            )
+            continue
+
+        pseudo_evt = _build_pseudo_op_event_dict(
+            kernel_evt,
+            orig_cpu_evt,
+            launcher_evt,
+            name,
+            seq_num,
+            dims=dims,
+            types=types,
+            strides=strides,
+            concrete_inputs=concrete_inputs,
+            extra_args=extra_args,
+        )
+        set_bookkeeping_attr(tree, pseudo_evt)
+        pseudo_evt["parent"] = orig_cpu_evt["UID"]
+        pending[orig_cpu_evt["UID"]].append((launcher_evt["UID"], pseudo_evt["UID"]))
+        inserted += 1
+
+    for _orig_uid, pairs in pending.items():
+        orig = tree.get_UID2event(_orig_uid)
+        ch = orig["children"]
+        launcher_set = {lu for lu, _ in pairs}
+        new_ch = [c for c in ch if c not in launcher_set]
+        new_ch.extend(pu for _, pu in pairs)
+        ch[:] = new_ch
+
+    return inserted
+
+
 def inject_pseudo_op_wrap_children(
     tree,
     parent_evt,
     name,
     shape_donor_evt=None,
     extra_args=None,
+    cpu_roots_acc: Optional[set] = None,
 ):
     """
     Create pseudo op that wraps all children of a parent event.
@@ -137,6 +286,12 @@ def inject_pseudo_op_wrap_children(
         name: Name of the pseudo-op
         shape_donor_evt: Event to inherit shapes from (uses parent if None)
         extra_args: Additional custom args to add to pseudo-op (dict)
+        cpu_roots_acc: If set, CPU root bookkeeping uses this mutable set
+            (membership + ``-= roots_to_remove`` + add pseudo UID) and
+            **does not** rewrite ``tree.cpu_root_nodes``. Callers that pass a
+            shared accumulator across many wraps must assign
+            ``tree.cpu_root_nodes`` once at the end (see MLA decode/prefill).
+            Avoids O(|cpu_root_nodes|) per call when wrapping thousands of ops.
     """
 
     children_uids = parent_evt.get("children", [])
@@ -180,16 +335,28 @@ def inject_pseudo_op_wrap_children(
 
     # Descendants that were cpu_root_nodes are no longer roots since they
     # now live under the pseudo op. Remove them and promote the pseudo op.
-    root_set = set(tree.cpu_root_nodes)
+    roots_to_remove = set()
     stack = list(children_uids)
+    if cpu_roots_acc is not None:
+        root_membership = cpu_roots_acc
+    else:
+        root_membership = frozenset(tree.cpu_root_nodes)
     while stack:
         uid = stack.pop()
-        if uid in root_set:
-            tree.cpu_root_nodes.remove(uid)
-            root_set.discard(uid)
+        if uid in root_membership:
+            roots_to_remove.add(uid)
         evt = tree.get_UID2event(uid)
         stack.extend(evt.get("children", []))
-    tree.cpu_root_nodes.append(pseudo_evt["UID"])
+    if cpu_roots_acc is not None:
+        if roots_to_remove:
+            cpu_roots_acc.difference_update(roots_to_remove)
+        cpu_roots_acc.add(pseudo_evt["UID"])
+    else:
+        if roots_to_remove:
+            tree.cpu_root_nodes[:] = [
+                u for u in tree.cpu_root_nodes if u not in roots_to_remove
+            ]
+        tree.cpu_root_nodes.append(pseudo_evt["UID"])
 
 
 def inject_pseudo_op_above_event(
