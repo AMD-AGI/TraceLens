@@ -320,4 +320,7 @@ def test_compute_output_path_for_single_step_block(tmp_path):
     path = compute_output_path(
         str(tmp_path), PHASE_PREFILLDECODE, "label", "traceB", block
     )
-    assert "execute_0_context_3" in os.path.basename(path)
+    assert (
+        os.path.basename(path)
+        == "label_prefill_0_prefilldecode_0_decode_0_bs129_conc5_traceB.json.gz"
+    )
