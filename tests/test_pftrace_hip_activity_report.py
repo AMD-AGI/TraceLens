@@ -8,21 +8,21 @@
 
 import json
 import os
-import pytest
 import tempfile
-import pandas as pd
 
-from TraceLens.util import PftraceParser
-from TraceLens.Reporting.pftrace_hip_activity_analysis import (
-    PftraceHipActivityAnalyzer,
-    extract_time_ns,
-    discover_gpus,
-    classify,
-    build_event_lists,
-    build_hip_api_events,
-)
+import pandas as pd
+import pytest
+
 from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
     generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Reporting.pftrace_hip_activity_analysis import (
+    PftraceHipActivityAnalyzer,
+    build_event_lists,
+    build_hip_api_events,
+    classify,
+    discover_gpus,
+    extract_time_ns,
 )
 
 
@@ -134,7 +134,7 @@ class TestGeneratePerfReportPftraceHipActivity:
             trace_path = os.path.join(tmpdir, "trace.json")
             with open(trace_path, "w") as f:
                 json.dump({"traceEvents": _minimal_trace_events_with_agent()}, f)
-            dfs = generate_perf_report_pftrace_hip_activity(
+            generate_perf_report_pftrace_hip_activity(
                 trace_path=trace_path,
                 output_csvs_dir=tmpdir,
                 min_event_ns=0,

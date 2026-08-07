@@ -45,7 +45,6 @@ def extract_category_specific(ops_df, metadata) -> dict:
 
     missing_perf_model = 0
     if "TFLOPS/s_mean" in ops_df.columns:
-        import pandas as pd
 
         missing_perf_model = ops_df["TFLOPS/s_mean"].isna().sum()
 

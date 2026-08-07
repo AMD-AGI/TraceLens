@@ -8,7 +8,23 @@
 Utils. for perf. model.
 """
 
-import os
+
+def optional_int(value, default=None):
+    """Parse *value* as int, returning *default* when conversion fails."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def optional_float(value, default=0.0):
+    """Parse *value* as float, returning *default* when conversion fails."""
+    if value in ("", "None", None):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def add_simulation_time_columns(

@@ -5,7 +5,6 @@
 ###############################################################################
 
 import argparse
-import json
 import math
 import re
 from TraceLens import TreePerfAnalyzer, TraceToTree, PerfModel

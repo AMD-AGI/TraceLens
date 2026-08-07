@@ -6,10 +6,10 @@ See LICENSE for license information.
 
 # TraceLens
 
-[![Tests](https://github.com/AMD-AGI/TraceLens/actions/workflows/regression-tests.yml/badge.svg)](https://github.com/AMD-AGI/TraceLens/actions/workflows/regression-tests.yml)
+[![Tests](https://github.com/AMD-AGI/TraceLens/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/AMD-AGI/TraceLens/actions/workflows/unit-tests.yml)
 [![Lint](https://github.com/AMD-AGI/TraceLens/actions/workflows/lint.yml/badge.svg)](https://github.com/AMD-AGI/TraceLens/actions/workflows/lint.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](setup.py)
+[![Python](https://img.shields.io/badge/python-3.6%2B-blue)](setup.py)
 
 TraceLens is a Python library for **automated performance analysis of training and inference workloads** from trace files. It reads profiler traces (PyTorch, JAX, rocprofv3) and shows you where GPU time actually goes: which kernels are slow, whether they are compute or memory bound, and where communication or idle gaps are costing you, so you can find and fix bottlenecks without hand-reading traces.
 
@@ -51,7 +51,15 @@ To try out TraceLens without collecting your own trace, use the [demo traces](te
 
 ### 3. Analyze your Workload
 
-### Building with TraceLens
+## Supported Profile Formats
+
+| Format | Tool | Documentation |
+|--------|------|---------------|
+| **PyTorch** | `torch.profiler` | [docs/generate_perf_report.md](docs/generate_perf_report.md) |
+| **JAX** | XPlane protobuf | [docs/jax_analyses.md](docs/jax_analyses.md) |
+| **rocprofv3 JSON** | AMD ROCm rocprofiler-sdk | [docs/generate_perf_report_rocprof.md](docs/generate_perf_report_rocprof.md) |
+| **rocprofv3 pftrace** | Perfetto-style | [docs/generate_perf_report_rocprof_pftrace.md](docs/generate_perf_report_rocprof_pftrace.md) |
+| **Genesis / Taichi** | rocprofv3 + pftrace | [docs/generate_perf_report_genesis.md](docs/generate_perf_report_genesis.md) |
 
 Generate a performance analysis report from an eager execution PyTorch trace with a single command:
 

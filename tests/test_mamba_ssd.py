@@ -288,7 +288,7 @@ def test_ssd_matmuls_dominate_conv():
         _mamba_event(batch=8, seqlen=8192, d_state=64, nheads=32, headdim=64)
     )
     p = model.param_details
-    B, T, H, P, G, N, C = p["B"], p["T"], p["H"], p["P"], p["G"], p["N"], p["C"]
+    B, T, _H, _P, _G, _N, _C = p["B"], p["T"], p["H"], p["P"], p["G"], p["N"], p["C"]
     conv_channels, d_conv = p["conv_channels"], p["d_conv"]
 
     flops_conv = 2 * B * conv_channels * T * d_conv

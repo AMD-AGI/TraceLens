@@ -9,8 +9,8 @@ Performance models for pseudo-op extensions.
 """
 
 from TraceLens.PerfModel.utils import torch_dtype_map, name2bpe
+from TraceLens.TraceUtils.annotation_utils import IterationAnnotation
 import math
-import re
 
 
 class InferenceAttention:
@@ -93,54 +93,8 @@ class InferenceAttention:
 
     @staticmethod
     def _parse_chunk_stats(annotation):
-        """Parse the sglang/vLLM annotation string into context/generation aggregates.
-
-        Returns a dict with ``c_sq``, ``c_sk``, ``c_sqsq``, ``c_sqsk``,
-        ``g_sq``, ``g_sk``, ``g_sqsq``, ``g_sqsk``. Raises ``NotImplementedError``
-        if the annotation is missing or cannot be parsed.
-        """
-        if annotation == "NA":
-            raise NotImplementedError(
-                "VLLM attention without annotation is not supported"
-            )
-
-        if "sq" not in annotation:
-            requests = annotation.replace("(", "_").replace(")", "_").split("_")
-            if len(requests) < 8:
-                raise NotImplementedError(
-                    "VLLM attention without annotation is not supported"
-                )
-            c_sq = int(requests[3])
-            c_sk = int(requests[3])
-            c_sqsq = int(requests[4])
-            c_sqsk = int(requests[4])
-            g_sq, g_sk, g_sqsq, g_sqsk = 0, 0, 0, 0
-        else:
-            name = annotation.replace("(", "_").replace(")", "_")
-            requests = re.sub(r"[sqk]+", "_", name).split("_")
-            if len(requests) < 16:
-                raise NotImplementedError(
-                    "VLLM attention without annotation is not supported"
-                )
-            c_sq = int(requests[5])
-            c_sk = int(requests[6])
-            c_sqsq = int(requests[7])
-            c_sqsk = int(requests[8])
-            g_sq = int(requests[13])
-            g_sk = int(requests[14])
-            g_sqsq = int(requests[15])
-            g_sqsk = int(requests[16])
-
-        return {
-            "c_sq": c_sq,
-            "c_sk": c_sk,
-            "c_sqsq": c_sqsq,
-            "c_sqsk": c_sqsk,
-            "g_sq": g_sq,
-            "g_sk": g_sk,
-            "g_sqsq": g_sqsq,
-            "g_sqsk": g_sqsk,
-        }
+        """context/generation sq-sk aggregates; raises if not a full sq/sk annotation."""
+        return IterationAnnotation(annotation).chunk_stats()
 
     @staticmethod
     def get_param_details(event):
@@ -821,42 +775,18 @@ class gdn_attention_core(InferenceAttention):
     """
 
     def __init__(self, event, arch=None, python_path=None):
-        self.event = event
-        self.arch = arch
-        self.python_path = python_path
-        self.param_details = self.get_param_details(event)
+        super().__init__(event, arch, python_path)
         self.H_V = self.param_details["H_V"]
         self.d_k = self.param_details["d_h_qk"]
         self.d_v = self.param_details["d_h_v"]
 
     @staticmethod
     def get_param_details(event):
-        annotation = str(event.get("annotation"))
-        if annotation == "NA":
-            raise NotImplementedError(
-                "GDN attention without annotation is not supported"
-            )
-
-        if "sq" not in annotation:
-            requests = annotation.replace("(", "_").replace(")", "_").split("_")
-            if len(requests) < 8:
-                raise NotImplementedError(
-                    "GDN attention without annotation is not supported"
-                )
-            c_sq = int(requests[3])
-            g_sq = 0
-        else:
-            name = annotation.replace("(", "_").replace(")", "_")
-            requests = re.sub(r"[sqk]+", "_", name).split("_")
-            if len(requests) < 16:
-                raise NotImplementedError(
-                    "GDN attention without annotation is not supported"
-                )
-            c_sq = int(requests[5])
-            g_sq = int(requests[13])
+        stats = IterationAnnotation(str(event.get("annotation"))).chunk_stats()
+        c_sq = stats["c_sq"]
+        g_sq = stats["g_sq"]
 
         input_dims = event["args"]["Input Dims"]
-        T = input_dims[0][0]
         D = input_dims[0][1]  # 2*H_K*d_k + H_V*d_v
         H_V = input_dims[1][1]  # num_v_heads / tp
         d_v = input_dims[3][2]  # head_v_dim
@@ -868,17 +798,28 @@ class gdn_attention_core(InferenceAttention):
         dtype_Q = event["args"]["Input type"][0]
 
         return {
+            "B": 1,
+            "N_Q": c_sq + g_sq,
+            "H_Q": H_K,
+            "N_KV": 0,
+            "H_KV": H_K,
             "H_V": H_V,
             "H_K": H_K,
             "d_h_qk": d_k,
             "d_h_v": d_v,
             "c_sq": c_sq,
+            "c_sk": c_sq,
+            "c_sqsq": 0,
+            "c_sqsk": 0,
             "g_sq": g_sq,
+            "g_sk": g_sq,
+            "g_sqsq": 0,
+            "g_sqsk": 0,
             "dtype_Q": dtype_Q,
         }
 
     @staticmethod
-    def flops_func(H_V, d_k, d_v, total_tokens):
+    def _gdn_flops_func(H_V, d_k, d_v, total_tokens):
         """GDN recurrent delta rule FLOPs.
 
         Per token per v-head: 7 * d_v * d_k
@@ -887,7 +828,7 @@ class gdn_attention_core(InferenceAttention):
         return total_tokens * H_V * 7 * d_v * d_k
 
     @staticmethod
-    def bytes_func(H_V, d_k, d_v, total_tokens, bytes_per_element):
+    def _gdn_bytes_func(H_V, d_k, d_v, total_tokens, bytes_per_element):
         """GDN HBM traffic.  State S stays in registers during recurrence.
 
         Per token read:  q(d_k) + k(d_k) shared across 2 v-heads → H_V*d_k
@@ -904,11 +845,11 @@ class gdn_attention_core(InferenceAttention):
             raise NotImplementedError(
                 "GDN perf model requires annotation with non-zero c_sq or g_sq"
             )
-        return self.flops_func(self.H_V, self.d_k, self.d_v, total_tokens)
+        return self._gdn_flops_func(self.H_V, self.d_k, self.d_v, total_tokens)
 
     def bytes(self, bytes_per_element=2):
         total_tokens = self.param_details["c_sq"] + self.param_details["g_sq"]
-        return self.bytes_func(
+        return self._gdn_bytes_func(
             self.H_V, self.d_k, self.d_v, total_tokens, bytes_per_element
         )
 

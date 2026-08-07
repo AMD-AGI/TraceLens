@@ -118,6 +118,20 @@ the SGLang version (`--sglang-version`, default `0.5.9`), and the GPU type
 | `0.5.11` | MI350/MI355 | `lmsysorg/sglang:v0.5.11-rocm720-mi35x` |
 | `0.5.12` | MI300 | `lmsysorg/sglang:v0.5.12-rocm720-mi30x` |
 | `0.5.12` | MI350/MI355 | `lmsysorg/sglang:v0.5.12-rocm720-mi35x` |
+| `0.5.13` | MI300 | `lmsysorg/sglang:v0.5.13-rocm720-mi30x` |
+| `0.5.13` | MI350/MI355 | `lmsysorg/sglang:v0.5.13-rocm720-mi35x` |
+| `0.5.14` | MI300 | `lmsysorg/sglang:v0.5.14-rocm720-mi30x` |
+| `0.5.14` | MI350/MI355 | `lmsysorg/sglang:v0.5.14-rocm720-mi35x` |
+| `0.5.15` | MI300 | `lmsysorg/sglang:v0.5.15-rocm720-mi30x` |
+| `0.5.15` | MI350/MI355 | `lmsysorg/sglang:v0.5.15-rocm720-mi35x` |
+| `0.5.16` | MI300 | `lmsysorg/sglang:v0.5.16-rocm720-mi30x` |
+| `0.5.16` | MI350/MI355 | `lmsysorg/sglang:v0.5.16-rocm720-mi35x` |
+
+On SGLang **0.5.13 / 0.5.14**, kernel-shape wrapping is incompatible with the
+EAGLE/MTP speculative *overlap* decode, so the speculative patches disable capture
+profiling on the speculative graph runners (and, on 0.5.14, the target-verify
+graph) to keep MTP runs fault-free; non-MTP shape profiling is unaffected. Full MTP
+shape profiling (capture + execution) works on **0.5.15 and later**.
 
 ```bash
 bash examples/custom_workflows/inference_analysis/build_docker_sglang.sh \
@@ -234,6 +248,21 @@ during the benchmark. Pass both paths to the report generator using
    server argument at startup. This saves one trace file per batch size but misses
    shape information for some operations; add
    `--enable-shape-discovery-for-cuda-graph-profile` for more diverse coverage.
+4. On SGLang **0.5.13 and later**, writing the per-batch-size graph-capture trace
+   files to disk is opt-in via the `SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE=1`
+   environment variable (default off). Set it *in addition to*
+   `--enable-profile-cuda-graph`; without it the capture profiler still runs (for
+   the summary tables and memory snapshot) but no per-batch-size trace is written to
+   the `capture_traces/` folder. On 0.5.12 and earlier the capture traces are
+   written unconditionally and this variable does not exist.
+
+```{note}
+On SGLang 0.5.13 / 0.5.14 the graph-capture shape profiling is intentionally
+disabled for the EAGLE/MTP speculative graphs (and, on 0.5.14, the target-verify
+graph) to avoid a GPU fault in the speculative overlap decode, so
+`SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE` only yields capture traces for the
+non-speculative graphs there. Full MTP graph-capture profiling works on 0.5.15+.
+```
 
 **xDiT.** The `config_xdit_v*.patch` patches add two flags to the `xfuser`
 runner. Pass them via the `EXTRA_XDIT_ARGS` environment variable (or directly to

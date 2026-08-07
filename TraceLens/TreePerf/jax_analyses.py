@@ -5,17 +5,16 @@
 ###############################################################################
 
 import math
-import pandas as pd
 import re
 import string
 from itertools import chain
 
-from enum import StrEnum
+import pandas as pd
 
-from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from ..PerfModel import perf_model
 from ..PerfModel.utils import add_simulation_time_columns
-from ..util import TraceEventUtils, DataLoader, JaxProfileProcessor
+from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
+from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 
 
 class JaxAnalyses:
@@ -504,7 +503,7 @@ class JaxAnalyses:
             """Total FLOPs for the entire batch."""
             return self.param_details["Op B"] * super().flops()
 
-        def bytes(self):
+        def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
             size_map = {
                 "f32": 4,
                 "f16": 2,
@@ -525,7 +524,7 @@ class JaxAnalyses:
         def flops_bwd(self):
             raise NotImplementedError("Backward pass for JaxGemm is not defined.")
 
-        def bytes_bwd(self, _):
+        def bytes_bwd(self, bytes_per_element=None):
             raise NotImplementedError("Backward pass for JaxGemm is not defined.")
 
     @staticmethod

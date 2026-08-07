@@ -20,6 +20,7 @@ def gemm_name_parser(kernel_name):
     # NVIDIA trace: check if any of the known NVIDIA markers exist in the kernel name
     elif is_cuda_gemm(kernel_name):
         return parse_cuda_gemm(kernel_name)
+    return None
 
 
 def is_rocm_gemm(kernel_name):

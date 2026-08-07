@@ -14,6 +14,7 @@ back to ``0.0`` if unsupported.
 
 from __future__ import annotations
 
+import logging
 from typing import Tuple
 
 import torch
@@ -31,6 +32,8 @@ except Exception:  # pragma: no cover
 # OCP Microscaling Formats (MX) v1.0, Section 5.2:
 # https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
 MX_BLOCK = 32
+
+logger = logging.getLogger(__name__)
 
 
 def triton_available() -> bool:
@@ -222,7 +225,7 @@ if triton_available() and torch.cuda.is_available():
     try:
         _resolve_support()
     except Exception:  # pragma: no cover
-        pass
+        logger.debug("MXFP4/MXFP6 support probe failed", exc_info=True)
 
 
 def _launch_scaled_gemm(

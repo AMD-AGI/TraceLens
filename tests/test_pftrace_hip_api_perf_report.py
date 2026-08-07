@@ -9,7 +9,6 @@ import os
 import pytest
 import tempfile
 import pandas as pd
-from pathlib import Path
 
 from TraceLens.util import PftraceParser
 from TraceLens.Reporting.pftrace_hip_api_analysis import PftraceHipApiAnalyzer

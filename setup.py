@@ -37,14 +37,15 @@ setup(
     package_data={
         "TraceLens": [
             "**/*.md",
-            "Agent/**/.cursor/skills/*",
-            "Agent/**/.cursor/agents/*",
+            "Agent/**/skills/**/*",
             "Agent/Analysis/utils/arch/*.json",
         ],
     },
     install_requires=[
         "pandas",
         "tqdm",
+        'backports.strenum;python_version<"3.11"',
+        'StrEnum;python_version<"3.11"',
         "openpyxl",
         "office365-rest-python-client",
         "msal",
@@ -57,10 +58,12 @@ setup(
         # 'tensorflow',
     ],
     extras_require={
-        # To install slodels, use a custom index:
-        # pip install "slodels[openai,anthropic,google-genai]"
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
+        ],
+        "dev": [
+            "pytest",
+            "black==26.1.0",
         ],
     },
     description="A library for automating the analysis of ML model performance traces",
@@ -69,11 +72,10 @@ setup(
     url="https://github.com/AMD-AGI/TraceLens",
     classifiers=[
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.11",
         # 'License :: OSI Approved :: MIT License',
         "Operating System :: OS Independent",
     ],
-    python_requires=">=3.11",
+    python_requires=">=3.6",
     entry_points={
         "console_scripts": [
             "TraceLens_generate_perf_report_jax = TraceLens.Reporting.generate_perf_report_jax:main",
@@ -85,6 +87,7 @@ setup(
             "TraceLens_generate_perf_report_pftrace_hip_api = TraceLens.Reporting.generate_perf_report_pftrace_hip_api:main",
             "TraceLens_generate_perf_report_pftrace_hip_activity = TraceLens.Reporting.generate_perf_report_pftrace_hip_activity:main",
             "TraceLens_generate_perf_report_pftrace_memory_copy = TraceLens.Reporting.generate_perf_report_pftrace_memory_copy:main",
+            "TraceLens_generate_perf_report_genesis = TraceLens.Reporting.generate_perf_report_genesis:main",
             "TraceLens_split_inference_trace = TraceLens.TraceUtils.split_inference_trace_annotation:main",
         ],
     },
