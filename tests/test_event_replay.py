@@ -238,6 +238,7 @@ def compare_event_replay(perf_analyzer, list_unique_evts, verbose=False):
     return df, list_replay_ir
 
 
+@pytest.mark.gpu
 def test_resnet(full_run_trace_path=None, output_csv_path=None):
     """
     Run and profile a simple ResNet model
