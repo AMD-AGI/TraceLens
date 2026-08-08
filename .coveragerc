@@ -1,6 +1,11 @@
 [run]
 relative_files = true
 source = TraceLens
+omit =
+    TraceLens/EventReplay/*
+    TraceLens/PerfModel/benchmarking/*
+    TraceLens/PerfModel/origami_helper.py
+    TraceLens/PerfModel/run_perf_model.py
 
 [paths]
 source =
@@ -10,3 +15,6 @@ source =
 
 [report]
 show_missing = true
+
+[xml]
+output = coverage.xml

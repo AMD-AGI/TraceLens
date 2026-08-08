@@ -38,7 +38,9 @@ jobs:
         run: |
           . .venv/bin/activate
           python -m pytest tests/ -v --tb=short -n auto --dist loadgroup \
-            --cov=./TraceLens --cov-report=xml \
+            -m "not gpu" \
+            --cov=./TraceLens --cov-config=.coveragerc \
+            --cov-report=xml --cov-fail-under=95 \
             --junitxml=junit.xml -o junit_family=legacy
 
       - name: Upload coverage report

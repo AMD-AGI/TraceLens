@@ -4,9 +4,22 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import os
+from copy import deepcopy
+from types import SimpleNamespace
+
+import pandas as pd
+import pytest
+
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TraceDiff.trace_diff import (
+    TraceDiff,
     _disambiguate_same_name_candidates,
+    _gpu_path_child_names_at_bfs_levels,
 )
+from TraceLens.util import TraceEventUtils
+
+_TK = TraceEventUtils.TraceKeys
 
 
 def _make_uid2node(entries):
@@ -560,3 +573,1183 @@ class TestDisambiguateSameNameCandidates:
                 assert 0 <= i < len(children1)
             if j is not None:
                 assert 0 <= j < len(children2)
+
+
+class TestGpuPathChildNamesAtBfsLevels:
+    def test_collects_gpu_path_children_by_level(self):
+        uid2node = _make_uid2node(
+            [
+                ("root", "opA", ["gpu1"], False),
+                ("gpu1", "kernel_X", ["gpu2"], False),
+                ("gpu2", "kernel_Y", [], False),
+            ]
+        )
+        levels = _gpu_path_child_names_at_bfs_levels("root", uid2node, max_depth=2)
+        assert levels[0] == ("kernel_X",)
+        assert levels[1] == ("kernel_Y",)
+
+    def test_skips_missing_nodes(self):
+        uid2node = _make_uid2node([("root", "opA", ["missing"], False)])
+        levels = _gpu_path_child_names_at_bfs_levels("root", uid2node, max_depth=2)
+        assert levels == [()]
+
+    def test_non_gpu_path_children_excluded(self):
+        uid2node = _make_uid2node(
+            [
+                ("root", "opA", ["off"], False),
+                ("off", "skipped", [], True),
+            ]
+        )
+        levels = _gpu_path_child_names_at_bfs_levels("root", uid2node, max_depth=1)
+        assert levels == [()]
+
+
+def _make_tracediff(baseline_events=None, variant_events=None):
+    baseline_events = baseline_events or {}
+    variant_events = variant_events or {}
+    td = TraceDiff.__new__(TraceDiff)
+    td.baseline = SimpleNamespace(events_by_uid=baseline_events, cpu_root_nodes=[])
+    td.variant = SimpleNamespace(events_by_uid=variant_events, cpu_root_nodes=[])
+    td.db1 = []
+    td.db2 = []
+    td.pod1 = set()
+    td.pod2 = set()
+    td.merged_tree = None
+    td.merged_uid_map = {}
+    td.diff_stats_df = pd.DataFrame()
+    td.diff_stats_summary_df = pd.DataFrame()
+    td.diff_stats_unique_args_summary_df = pd.DataFrame()
+    td.identical_traces = False
+    td.cpu_op_map_trace1 = None
+    td.cpu_op_map_trace2 = None
+    td.cpu_op_map = None
+    td._merged_id_to_event = None
+    td._uid1_to_merged_id = None
+    td._uid2_to_merged_id = None
+    return td
+
+
+class TestTraceDiffHelpers:
+    def test_get_op_name_handles_none_and_missing(self):
+        td = _make_tracediff({1: {_TK.Name: "foo"}}, {})
+        assert td._get_op_name(None, 1) is None
+        assert td._get_op_name(99, 1) is None
+        assert td._get_op_name(1, 1) == "foo"
+
+    def test_get_op_name_falls_back_to_uid_string(self):
+        td = _make_tracediff({5: {_TK.UID: 5}}, {})
+        assert td._get_op_name(5, 1) == "5"
+
+    def test_wagner_fischer_match_insert_delete_and_cache(self):
+        events = {
+            0: {_TK.UID: 0, _TK.Name: "a"},
+            1: {_TK.UID: 1, _TK.Name: "b"},
+            2: {_TK.UID: 2, _TK.Name: "c"},
+        }
+        td = _make_tracediff(events, events)
+        cache = {}
+        ops = td.wagner_fischer([0, 1], [0, 2], cache)
+        assert ("match", 0, 0) in ops
+        assert ("delete", 1, None) in ops
+        assert ("insert", None, 1) in ops
+        cached = td.wagner_fischer([0, 1], [0, 2], cache)
+        assert cached is ops
+
+    def test_wagner_fischer_strip_details(self):
+        events = {
+            0: {_TK.UID: 0, _TK.Name: "/proj/layer.py(1): matmul : a"},
+            1: {_TK.UID: 1, _TK.Name: "/proj/layer.py(2): matmul : b"},
+        }
+        td = _make_tracediff(events, events)
+        ops = td.wagner_fischer([0], [1], {}, strip_details=True)
+        assert ops == [("match", 0, 0)]
+
+    def test_get_diff_stats_df_empty(self, capsys):
+        td = _make_tracediff()
+        assert td.get_diff_stats_df() is None
+        assert "diff_stats_df is empty" in capsys.readouterr().out
+
+    def test_get_diff_stats_summary_df_empty(self, capsys):
+        td = _make_tracediff()
+        assert td.get_diff_stats_summary_df() is None
+        assert "diff_stats_summary_df is empty" in capsys.readouterr().out
+
+    def test_merged_id_cache_and_invalidation(self):
+        td = _make_tracediff()
+        merged_events = [
+            {"merged_id": 0, "uid1": 1, "uid2": 2},
+            {"merged_id": 1, "uid1": 3, "uid2": None},
+        ]
+        td.merged_tree = (merged_events, [0])
+        by_id = td._get_merged_id_to_event()
+        assert by_id[0]["uid1"] == 1
+        uid1_map, uid2_map = td._get_uid_to_merged_id_maps()
+        assert uid1_map[1] == 0
+        assert uid2_map[2] == 0
+        td._invalidate_merged_cache()
+        assert td._merged_id_to_event is None
+
+    def test_format_merged_subtree_merge_types(self):
+        events = {
+            1: {_TK.Name: "same"},
+            2: {_TK.Name: "same"},
+            3: {_TK.Name: "only1"},
+            4: {_TK.Name: "only2"},
+            5: {_TK.Name: "a"},
+            6: {_TK.Name: "b"},
+            7: {_TK.Name: "left"},
+            8: {_TK.Name: "right"},
+        }
+        td = _make_tracediff(events, events)
+        merged_id_to_event = {
+            0: {
+                "merged_id": 0,
+                "uid1": 1,
+                "uid2": 2,
+                "merged_type": "combined",
+                "children": [1, 2, 4],
+            },
+            1: {
+                "merged_id": 1,
+                "uid1": 3,
+                "uid2": None,
+                "merged_type": "trace1",
+                "children": [],
+            },
+            2: {
+                "merged_id": 2,
+                "uid1": None,
+                "uid2": 4,
+                "merged_type": "trace2",
+                "children": [],
+            },
+            3: {
+                "merged_id": 3,
+                "uid1": 5,
+                "uid2": 6,
+                "merged_type": "other",
+                "children": [],
+            },
+            4: {
+                "merged_id": 4,
+                "uid1": 7,
+                "uid2": 8,
+                "merged_type": "combined",
+                "children": [],
+            },
+        }
+        lines = list(td._format_merged_subtree(0, merged_id_to_event))
+        assert any(line.strip().endswith("same") for line in lines)
+        assert any(">> trace1: only1" in line for line in lines)
+        assert any("<< trace2: only2" in line for line in lines)
+        assert any("combined: left | right" in line for line in lines)
+        other_lines = list(td._format_merged_subtree(3, merged_id_to_event))
+        assert any("other: a | b" in line for line in other_lines)
+
+    def test_print_merged_subtree_errors(self):
+        td = _make_tracediff()
+        with pytest.raises(ValueError, match="At least one"):
+            td.print_merged_subtree()
+        td.merged_tree = ([], [])
+        with pytest.raises(ValueError, match="Could not find merged node"):
+            td.print_merged_subtree(uid_tree1=42)
+
+    def test_merge_trees_requires_cpu_roots(self):
+        td = _make_tracediff()
+        with pytest.raises(ValueError, match="cpu_root_nodes"):
+            td.merge_trees()
+
+    def test_disambiguate_returns_ops_when_wf_already_optimal(self):
+        uid2node = _make_uid2node(
+            [
+                ("u0", "opA", [], False),
+                ("u1", "opA", [], False),
+                ("v0", "opA", [], False),
+                ("v1", "opA", [], False),
+            ]
+        )
+        children1 = ["u0", "u1"]
+        children2 = ["v0", "v1"]
+        ops = [("match", 0, 0), ("match", 1, 1)]
+        result = _disambiguate_same_name_candidates(
+            ops, children1, children2, uid2node, uid2node
+        )
+        assert result is ops
+
+    def test_disambiguate_skips_names_not_in_matches(self):
+        uid2node = _make_uid2node(
+            [
+                ("u0", "opB", [], False),
+                ("u1", "opA", [], False),
+                ("v0", "opB", [], False),
+                ("v1", "opA", [], False),
+            ]
+        )
+        children1 = ["u0", "u1"]
+        children2 = ["v0", "v1"]
+        ops = [("match", 0, 0), ("delete", 1, None), ("insert", None, 1)]
+        result = _disambiguate_same_name_candidates(
+            ops, children1, children2, uid2node, uid2node
+        )
+        assert result == ops
+
+
+def _mk_event(cat, name, ts, dur, pid, tid, args=None):
+    return {
+        "ph": "X",
+        "cat": cat,
+        "name": name,
+        "pid": pid,
+        "tid": tid,
+        "ts": ts,
+        "dur": dur,
+        "args": args or {},
+    }
+
+
+def _mk_ac2g(corr_id, pid, tid, ts, phase):
+    evt = {
+        "ph": phase,
+        "id": corr_id,
+        "pid": pid,
+        "tid": tid,
+        "ts": ts,
+        "cat": "ac2g",
+        "name": "ac2g",
+    }
+    if phase == "f":
+        evt["bp"] = "e"
+    return evt
+
+
+def _add_gpu_chain(
+    events,
+    cpu_op,
+    corr,
+    kernel_name,
+    ts_launch,
+    ts_kernel,
+    kernel_dur=20.0,
+):
+    pid = cpu_op["pid"]
+    tid = cpu_op["tid"]
+    if cpu_op not in events:
+        events.append(cpu_op)
+    events.extend(
+        [
+            _mk_event(
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=ts_launch,
+                dur=5,
+                pid=pid,
+                tid=tid,
+                args={"correlation": corr},
+            ),
+            _mk_event(
+                "kernel",
+                kernel_name,
+                ts=ts_kernel,
+                dur=kernel_dur,
+                pid=0,
+                tid=7,
+                args={"correlation": corr, "stream": 7},
+            ),
+            _mk_ac2g(corr, pid=0, tid=7, ts=ts_kernel, phase="s"),
+            _mk_ac2g(corr, pid=0, tid=7, ts=ts_kernel, phase="f"),
+        ]
+    )
+
+
+def _build_tree(events, add_python_func=False):
+    tree = TraceToTree(deepcopy(events), prune_nongpu_paths=False)
+    tree.build_tree(add_python_func=add_python_func)
+    return tree
+
+
+def _build_trace_from_specs(specs, base_ts=1000, add_python_func=False):
+    events = []
+    ts = base_ts
+    corr = 100
+    cpu_pid, cpu_tid = 100, 100
+    for cpu_op_name, kernel_name, kernel_dur in specs:
+        cpu_op = _mk_event(
+            "cpu_op",
+            cpu_op_name,
+            ts=ts,
+            dur=100,
+            pid=cpu_pid,
+            tid=cpu_tid,
+            args={
+                "Input Dims": [[32, 64]],
+                "Input Strides": [[64, 1]],
+                "Input type": ["float"],
+                "Concrete Inputs": ["x"],
+            },
+        )
+        _add_gpu_chain(
+            events,
+            cpu_op,
+            corr,
+            kernel_name,
+            ts_launch=ts + 10,
+            ts_kernel=ts + 50,
+            kernel_dur=kernel_dur,
+        )
+        ts += 300
+        corr += 1
+    return _build_tree(events, add_python_func=add_python_func)
+
+
+def _make_tracediff_from_specs(specs1, specs2, add_python_func=False):
+    tree1 = _build_trace_from_specs(specs1, base_ts=1000, add_python_func=add_python_func)
+    tree2 = _build_trace_from_specs(specs2, base_ts=2000, add_python_func=add_python_func)
+    return TraceDiff(tree1, tree2)
+
+
+class TestTraceDiffSyntheticIntegration:
+    def test_merge_trees_builds_merged_structure(self):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::mm", "gemm_v2", 80.0)],
+        )
+        merged_events, merged_root_ids = td.merged_tree
+        assert merged_events
+        assert merged_root_ids
+        assert td.merged_uid_map[(1, td.baseline.cpu_root_nodes[0])] == (
+            td.variant.cpu_root_nodes[0]
+        )
+
+    def test_generate_diff_stats_detects_differences(self):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0), ("aten::relu", "relu_v1", 20.0)],
+            [("aten::mm", "gemm_v2", 80.0), ("aten::relu", "relu_v2", 25.0)],
+        )
+        df = td.generate_diff_stats()
+        assert not df.empty
+        assert set(df["source"]) == {"trace1", "trace2"}
+        assert td.identical_traces is False
+
+    def test_generate_diff_stats_identical_traces(self):
+        specs = [("aten::mm", "gemm_same", 50.0)]
+        td = _make_tracediff_from_specs(specs, specs)
+        td.generate_diff_stats()
+        assert td.identical_traces is True
+
+    def test_generate_diff_stats_no_gpu_events(self, capsys):
+        events = [_mk_event("cpu_op", "aten::noop", ts=0, dur=10, pid=1, tid=1)]
+        td = TraceDiff(_build_tree(events), _build_tree(events))
+        df = td.generate_diff_stats()
+        assert df.empty
+        assert td.identical_traces is True
+        assert "No GPU events found" in capsys.readouterr().out
+
+    def test_get_df_diff_stats_unique_args(self):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::mm", "gemm_v2", 80.0)],
+        )
+        td.generate_diff_stats()
+        summary = td.get_df_diff_stats_unique_args(agg_metrics=["mean", "median"])
+        assert summary is not None
+        assert "kernel_time_sum" in summary.columns
+
+    def test_get_df_diff_stats_unique_args_empty(self, capsys):
+        td = _make_tracediff()
+        assert td.get_df_diff_stats_unique_args() is None
+        assert "diff_stats_df is empty" in capsys.readouterr().out
+
+    def test_get_diff_stats_df_returns_dataframe(self):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::mm", "gemm_v2", 80.0)],
+        )
+        td.generate_diff_stats()
+        assert td.get_diff_stats_df() is not None
+
+    def test_get_cpu_op_to_kernels_json(self, capsys):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::mm", "gemm_v2", 80.0)],
+        )
+        td.generate_tracediff_report()
+        assert td.cpu_op_map is not None
+        assert "Kernel to CPU op mapping" in capsys.readouterr().out
+
+    def test_get_cpu_op_to_kernels_json_empty_summary(self, capsys):
+        td = _make_tracediff()
+        td.get_cpu_op_to_kernels_json()
+        assert "diff_stats_unique_args_summary_df is empty" in capsys.readouterr().out
+
+    def test_generate_tracediff_report_identical(self):
+        specs = [("aten::mm", "gemm_same", 50.0)]
+        td = _make_tracediff_from_specs(specs, specs)
+        td.generate_tracediff_report()
+        assert td.identical_traces is True
+        assert "source" not in td.diff_stats_df.columns
+
+    def test_print_tracediff_report_files(self, tmp_path):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::mm", "gemm_v2", 80.0)],
+        )
+        td.generate_tracediff_report()
+        out = str(tmp_path / "report")
+        td.print_tracediff_report_files(output_folder=out, prune_non_gpu=True)
+        assert os.path.exists(os.path.join(out, "merged_tree_output.txt"))
+        assert os.path.exists(os.path.join(out, "diff_stats.csv"))
+
+    def test_print_tracediff_report_files_empty_stats(self, tmp_path, capsys):
+        td = _make_tracediff()
+        td.merged_tree = ([], [])
+        td.print_tracediff_report_files(output_folder=str(tmp_path / "empty"))
+        captured = capsys.readouterr().out
+        assert "diff_stats_df is empty" in captured
+        assert "cpu_op_map_trace1 is empty" in captured
+
+    def test_print_merged_subtree_by_uid(self, capsys):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::mm", "gemm_v2", 80.0)],
+        )
+        td.print_merged_subtree(uid_tree1=td.baseline.cpu_root_nodes[0])
+        assert "aten::mm" in capsys.readouterr().out
+
+    def test_print_merged_subtree_by_variant_uid(self, capsys):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::mm", "gemm_v2", 80.0)],
+        )
+        td.print_merged_subtree(uid_tree2=td.variant.cpu_root_nodes[0])
+        assert "aten::mm" in capsys.readouterr().out
+
+    def test_print_merged_tree_writes_file(self, tmp_path):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::mm", "gemm_v2", 80.0)],
+        )
+        out_file = str(tmp_path / "merged.txt")
+        td.print_merged_tree(out_file)
+        with open(out_file) as f:
+            assert f.read()
+
+
+class TestTraceDiffMergeEdgeCases:
+    def test_get_top_level_root_collapses_python_wrapper(self):
+        events = [
+            _mk_event("python_function", "nn.Module: Model", ts=0, dur=1000, pid=1, tid=1),
+            _mk_event("python_function", "nn.Module: Block", ts=5, dur=900, pid=1, tid=1),
+        ]
+        op = _mk_event("cpu_op", "aten::mm", ts=10, dur=100, pid=1, tid=1)
+        _add_gpu_chain(events, op, 100, "gemm_kernel", ts_launch=20, ts_kernel=60)
+        tree = _build_tree(events, add_python_func=True)
+        td = _make_tracediff()
+        td.baseline = tree
+        root = td._get_top_level_root(tree, tree.cpu_root_nodes[0])
+        root_node = tree.get_UID2event(root)
+        assert tree.event_to_category(root_node) == "python_function"
+
+    def test_get_top_level_root_walks_to_parent(self):
+        events = []
+        parent = _mk_event("cpu_op", "aten::parent", ts=0, dur=500, pid=1, tid=1)
+        child = _mk_event("cpu_op", "aten::child", ts=10, dur=100, pid=1, tid=1)
+        _add_gpu_chain(events, parent, 100, "parent_kernel", ts_launch=20, ts_kernel=60)
+        events.append(child)
+        tree = _build_tree(events)
+        td = _make_tracediff()
+        td.baseline = tree
+        child_uid = next(e[_TK.UID] for e in tree.events if e[_TK.Name] == "aten::child")
+        assert td._get_top_level_root(tree, child_uid) == tree.cpu_root_nodes[0]
+
+    def test_merge_with_wrapper_reconciliation(self):
+        events1 = [
+            _mk_event("cpu_op", "aten::wrapper", ts=0, dur=200, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::mm", ts=10, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events1, events1[1], 100, "gemm_v1", ts_launch=20, ts_kernel=60)
+        events2 = [_mk_event("cpu_op", "aten::mm", ts=0, dur=100, pid=1, tid=1)]
+        _add_gpu_chain(events2, events2[0], 200, "gemm_v2", ts_launch=10, ts_kernel=50)
+        td = TraceDiff(_build_tree(events1), _build_tree(events2))
+        assert any(e["merged_type"] == "combined" for e in td.merged_tree[0])
+
+    def test_merge_trees_unequal_root_counts(self):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0), ("aten::add", "add_v1", 10.0)],
+            [("aten::mm", "gemm_v2", 80.0)],
+        )
+        assert len(td.merged_tree[1]) == 2
+
+    def test_generate_diff_stats_with_debug_columns(self, monkeypatch):
+        import importlib
+
+        trace_diff_module = importlib.import_module("TraceLens.TraceDiff.trace_diff")
+        monkeypatch.setattr(trace_diff_module, "_TRACELENS_DEBUG", True)
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::mm", "gemm_v2", 80.0)],
+        )
+        df = td.generate_diff_stats()
+        assert "callstack" in df.columns
+
+    def test_get_df_diff_stats_unique_args_unhashable_fallback(self):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::mm", "gemm_v2", 80.0)],
+        )
+        td.generate_diff_stats()
+        td.diff_stats_df["list_col"] = td.diff_stats_df.apply(
+            lambda row: [row["name"], row["source"]], axis=1
+        )
+        assert td.get_df_diff_stats_unique_args() is not None
+
+    def test_get_cpu_op_to_kernels_json_renames_mismatched_ops(self):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::matmul", "gemm_v2", 80.0)],
+        )
+        td.generate_tracediff_report()
+        assert td.cpu_op_map is not None
+
+    def test_generate_diff_stats_trace1_only_branch(self):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0), ("aten::add", "add_v1", 10.0)],
+            [("aten::mm", "gemm_v2", 80.0)],
+        )
+        df = td.generate_diff_stats()
+        assert not df.empty
+        assert "trace1" in df["source"].values
+
+    def test_generate_diff_stats_trace2_only_branch(self):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::mm", "gemm_v2", 80.0), ("aten::add", "add_v2", 10.0)],
+        )
+        df = td.generate_diff_stats()
+        assert not df.empty
+        assert "trace2" in df["source"].values
+
+    def test_print_merged_tree_prunes_non_gpu(self, tmp_path):
+        events = [_mk_event("cpu_op", "aten::noop", ts=0, dur=10, pid=1, tid=1)]
+        td = TraceDiff(_build_tree(events), _build_tree(events))
+        out_file = str(tmp_path / "pruned.txt")
+        td.print_merged_tree(out_file, prune_non_gpu=True)
+        with open(out_file) as f:
+            content = f.read()
+        assert "aten::noop" in content
+
+    def test_print_tracediff_report_files_writes_json_maps(self, tmp_path):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::mm", "gemm_v2", 80.0)],
+        )
+        td.generate_tracediff_report()
+        out = str(tmp_path / "maps")
+        td.print_tracediff_report_files(output_folder=out)
+        for name in [
+            "cpu_op_map_trace1.json",
+            "cpu_op_map_trace2.json",
+            "cpu_op_map.json",
+        ]:
+            assert os.path.exists(os.path.join(out, name))
+
+    def test_get_diff_stats_summary_df_with_data(self):
+        td = _make_tracediff()
+        td.diff_stats_summary_df = pd.DataFrame({"a": [1]})
+        assert td.get_diff_stats_summary_df() is not None
+
+    def test_get_cpu_op_to_kernels_json_unmatched_and_prefix_rename(self, capsys):
+        td = _make_tracediff_from_specs(
+            [
+                ("aten::mm", "gemm_v1", 100.0),
+                ("aten::add", "add_v1", 10.0),
+            ],
+            [
+                ("aten::matmul", "gemm_v2", 80.0),
+                ("aten::sum", "add_v2", 12.0),
+            ],
+        )
+        td.generate_tracediff_report()
+        captured = capsys.readouterr().out
+        assert td.cpu_op_map is not None
+        assert "Renaming" in captured or "Unmatched for LCA" in captured
+
+    def test_merge_reconcile_insert_name_in_deleted_children(self):
+        events1 = [
+            _mk_event("cpu_op", "aten::wrapper", ts=0, dur=200, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::inner", ts=10, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events1, events1[1], 100, "gemm_v1", ts_launch=20, ts_kernel=60)
+        events2 = [
+            _mk_event("cpu_op", "aten::other", ts=0, dur=100, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::inner", ts=10, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events2, events2[1], 200, "gemm_v2", ts_launch=20, ts_kernel=60)
+        td = TraceDiff(_build_tree(events1), _build_tree(events2))
+        assert td.merged_tree is not None
+
+    def test_merge_single_side_extra_kernel_dispatch_child(self):
+        events1 = [
+            _mk_event("cpu_op", "aten::mm", ts=0, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events1, events1[0], 100, "gemm_v1", ts_launch=10, ts_kernel=50)
+        events1.append(
+            _mk_event(
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=20,
+                dur=5,
+                pid=1,
+                tid=1,
+                args={"correlation": 101},
+            )
+        )
+        events2 = [
+            _mk_event("cpu_op", "aten::mm", ts=0, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events2, events2[0], 200, "gemm_v2", ts_launch=10, ts_kernel=50)
+        td = TraceDiff(_build_tree(events1), _build_tree(events2))
+        assert td.merged_tree is not None
+
+    def test_gpu_path_bfs_skips_missing_frontier_node(self):
+        uid2node = _make_uid2node([("root", "opA", ["ghost"], False)])
+        levels = _gpu_path_child_names_at_bfs_levels("root", uid2node, max_depth=1)
+        assert levels == [()]
+
+    def test_merge_reconcile_wrapper_to_inner_op(self):
+        events1 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=500, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::wrapper", ts=10, dur=200, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::extra", ts=300, dur=100, pid=1, tid=1),
+        ]
+        inner = _mk_event("cpu_op", "aten::mm", ts=20, dur=100, pid=1, tid=1)
+        _add_gpu_chain(events1, inner, 100, "gemm_v1", ts_launch=30, ts_kernel=70)
+        _add_gpu_chain(events1, events1[2], 101, "extra_k", ts_launch=310, ts_kernel=350)
+        events2 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=500, pid=1, tid=1),
+        ]
+        direct = _mk_event("cpu_op", "aten::mm", ts=10, dur=100, pid=1, tid=1)
+        _add_gpu_chain(events2, direct, 200, "gemm_v2", ts_launch=20, ts_kernel=60)
+        td = TraceDiff(_build_tree(events1), _build_tree(events2))
+        merged_events, _ = td.merged_tree
+        assert any(e["merged_type"] == "combined" for e in merged_events)
+
+    def test_merge_cuda_graph_launch_not_treated_as_runtime_mismatch(self):
+        events = [
+            _mk_event("cpu_op", "aten::graph", ts=0, dur=200, pid=1, tid=1),
+            _mk_event(
+                "cuda_runtime",
+                "cudaGraphLaunch",
+                ts=10,
+                dur=5,
+                pid=1,
+                tid=1,
+                args={"correlation": 100},
+            ),
+            _mk_event(
+                "kernel",
+                "graph_kernel",
+                ts=50,
+                dur=20,
+                pid=0,
+                tid=7,
+                args={"correlation": 100, "stream": 7},
+            ),
+            _mk_ac2g(100, pid=0, tid=7, ts=50, phase="s"),
+            _mk_ac2g(100, pid=0, tid=7, ts=50, phase="f"),
+        ]
+        td = TraceDiff(_build_tree(events), _build_tree(events))
+        assert td.merged_tree is not None
+
+    def test_merge_duplicate_python_functions_strip_details_pass2(self):
+        events1 = [
+            _mk_event(
+                "python_function",
+                "/a/model.py(1): forward : x",
+                ts=0,
+                dur=500,
+                pid=1,
+                tid=1,
+            ),
+            _mk_event("cpu_op", "aten::mm", ts=10, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events1, events1[1], 100, "gemm_v1", ts_launch=20, ts_kernel=60)
+        events2 = [
+            _mk_event(
+                "python_function",
+                "/b/model.py(9): forward : y",
+                ts=0,
+                dur=500,
+                pid=1,
+                tid=1,
+            ),
+            _mk_event("cpu_op", "aten::add", ts=10, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events2, events2[1], 200, "add_v2", ts_launch=20, ts_kernel=60)
+        td = TraceDiff(
+            _build_tree(events1, add_python_func=True),
+            _build_tree(events2, add_python_func=True),
+        )
+        assert td.merged_tree is not None
+
+    def test_get_cpu_op_to_kernels_json_one_to_one_module_match(self, capsys):
+        events1 = [
+            _mk_event(
+                "cpu_op",
+                "aten::linear",
+                ts=0,
+                dur=100,
+                pid=1,
+                tid=1,
+                args={"Input Dims": [[32, 64]]},
+            ),
+        ]
+        _add_gpu_chain(events1, events1[0], 100, "gemm_v1", ts_launch=10, ts_kernel=50)
+        events1[0]["nn_module_stack"] = ["Linear"]
+        events2 = [
+            _mk_event(
+                "cpu_op",
+                "aten::linear",
+                ts=0,
+                dur=100,
+                pid=1,
+                tid=1,
+                args={"Input Dims": [[32, 64]]},
+            ),
+        ]
+        _add_gpu_chain(events2, events2[0], 200, "gemm_v2", ts_launch=10, ts_kernel=50)
+        events2[0]["nn_module_stack"] = ["Linear"]
+        td = TraceDiff(_build_tree(events1), _build_tree(events2))
+        td.generate_tracediff_report()
+        assert td.cpu_op_map is not None
+
+    def test_print_merged_subtree_not_initialized(self):
+        td = _make_tracediff()
+        with pytest.raises(ValueError, match="merged_tree is not initialized"):
+            td.print_merged_tree("out.txt")
+
+    def test_merge_collapse_single_gpu_child_branch(self):
+        events1 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=500, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::wrap1", ts=10, dur=200, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::wrap2", ts=20, dur=150, pid=1, tid=1),
+        ]
+        inner = _mk_event("cpu_op", "aten::mm", ts=30, dur=100, pid=1, tid=1)
+        _add_gpu_chain(events1, inner, 100, "gemm_v1", ts_launch=40, ts_kernel=80)
+        events2 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=500, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::mm", ts=10, dur=100, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::add", ts=200, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events2, events2[1], 200, "gemm_v2", ts_launch=20, ts_kernel=60)
+        _add_gpu_chain(events2, events2[2], 201, "add_v2", ts_launch=210, ts_kernel=250)
+        td = TraceDiff(_build_tree(events1), _build_tree(events2))
+        assert td.merged_tree is not None
+
+    def test_merge_phase3_pinned_matches_after_reconcile(self):
+        events1 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=800, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::wrap", ts=10, dur=200, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::shared", ts=300, dur=100, pid=1, tid=1),
+        ]
+        inner = _mk_event("cpu_op", "aten::mm", ts=20, dur=100, pid=1, tid=1)
+        _add_gpu_chain(events1, inner, 100, "gemm_v1", ts_launch=30, ts_kernel=70)
+        _add_gpu_chain(events1, events1[2], 101, "shared_k1", ts_launch=310, ts_kernel=350)
+        events2 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=800, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::mm", ts=10, dur=100, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::shared", ts=300, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events2, events2[1], 200, "gemm_v2", ts_launch=20, ts_kernel=60)
+        _add_gpu_chain(events2, events2[2], 201, "shared_k2", ts_launch=310, ts_kernel=350)
+        td = TraceDiff(_build_tree(events1), _build_tree(events2))
+        assert td.merged_tree is not None
+
+    def test_merge_phase4_strip_details_pass2(self):
+        events1 = [
+            _mk_event(
+                "python_function",
+                "/proj/a.py(1): op : left",
+                ts=0,
+                dur=500,
+                pid=1,
+                tid=1,
+            ),
+            _mk_event("cpu_op", "aten::custom", ts=10, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events1, events1[1], 100, "k1", ts_launch=20, ts_kernel=60)
+        events2 = [
+            _mk_event(
+                "python_function",
+                "/proj/b.py(9): op : right",
+                ts=0,
+                dur=500,
+                pid=1,
+                tid=1,
+            ),
+            _mk_event("cpu_op", "aten::other", ts=10, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events2, events2[1], 200, "k2", ts_launch=20, ts_kernel=60)
+        td = TraceDiff(
+            _build_tree(events1, add_python_func=True),
+            _build_tree(events2, add_python_func=True),
+        )
+        assert td.merged_tree is not None
+
+    def test_get_children_with_missing_adds_non_gpu_path_sibling(self):
+        events1 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=500, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::visible", ts=10, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events1, events1[1], 100, "k1", ts_launch=20, ts_kernel=60)
+        events2 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=500, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::hidden", ts=10, dur=100, pid=1, tid=1, args={}),
+            _mk_event("cpu_op", "aten::visible", ts=200, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events2, events2[2], 200, "k2", ts_launch=210, ts_kernel=250)
+        tree2 = _build_tree(events2)
+        hidden = next(e for e in tree2.events if e[_TK.Name] == "aten::hidden")
+        hidden["non_gpu_path"] = True
+        td = TraceDiff(_build_tree(events1), tree2)
+        assert td.merged_tree is not None
+
+    def test_get_cpu_op_to_kernels_json_different_length_name_lists(self, capsys):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "k1", 10.0), ("aten::add", "k2", 10.0)],
+            [("aten::matmul", "k3", 10.0)],
+        )
+        td.generate_tracediff_report()
+        captured = capsys.readouterr().out
+        assert td.cpu_op_map is not None
+        assert "Renaming" in captured or "Unmatched for LCA" in captured
+
+    def test_generate_diff_stats_kernel_as_combined_node(self):
+        events = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=200, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events, events[0], 100, "direct_kernel", ts_launch=10, ts_kernel=50)
+        tree = _build_tree(events)
+        td = TraceDiff(tree, tree)
+        df = td.generate_diff_stats()
+        assert not df.empty
+
+    def test_get_cpu_op_to_kernels_json_rename_branches_direct(self, capsys):
+        td = _make_tracediff()
+        td.diff_stats_df = pd.DataFrame(
+            [
+                {
+                    "name": "k1",
+                    "cpu_op_name": "aten::mm",
+                    "source": "trace1",
+                    "kernel_time": 10.0,
+                    "lowest_common_ancestor_id": 1,
+                    "nn_module_parent": "Linear",
+                    "nn_module_stack": "root",
+                },
+                {
+                    "name": "k2",
+                    "cpu_op_name": "aten::add",
+                    "source": "trace1",
+                    "kernel_time": 5.0,
+                    "lowest_common_ancestor_id": 1,
+                    "nn_module_parent": "Linear",
+                    "nn_module_stack": "root",
+                },
+                {
+                    "name": "k3",
+                    "cpu_op_name": "aten::matmul",
+                    "source": "trace2",
+                    "kernel_time": 8.0,
+                    "lowest_common_ancestor_id": 1,
+                    "nn_module_parent": "Linear",
+                    "nn_module_stack": "root",
+                },
+            ]
+        )
+        td.diff_stats_unique_args_summary_df = td.diff_stats_df.copy()
+        td.get_cpu_op_to_kernels_json()
+        captured = capsys.readouterr().out
+        assert td.cpu_op_map is not None
+        assert "Renaming" in captured or "Unmatched for LCA" in captured
+
+    def test_get_cpu_op_to_kernels_json_prefix_and_module_rename(self, capsys):
+        td = _make_tracediff()
+        td.diff_stats_df = pd.DataFrame(
+            [
+                {
+                    "name": "k1",
+                    "cpu_op_name": "torch::long_name_a",
+                    "source": "trace1",
+                    "kernel_time": 10.0,
+                    "lowest_common_ancestor_id": 2,
+                    "nn_module_parent": " Block ",
+                    "nn_module_stack": "root",
+                },
+                {
+                    "name": "k2",
+                    "cpu_op_name": "torch::long_name_a_extra",
+                    "source": "trace2",
+                    "kernel_time": 8.0,
+                    "lowest_common_ancestor_id": 2,
+                    "nn_module_parent": " Block ",
+                    "nn_module_stack": "root",
+                },
+            ]
+        )
+        td.diff_stats_unique_args_summary_df = td.diff_stats_df.copy()
+        td.get_cpu_op_to_kernels_json()
+        assert "Renaming" in capsys.readouterr().out
+
+    def test_print_merged_subtree_uninitialized(self):
+        td = _make_tracediff()
+        with pytest.raises(ValueError, match="merged_tree is not initialized"):
+            td.print_merged_subtree(uid_tree1=1)
+
+    def test_get_df_diff_stats_unique_args_with_op_name_filter(self):
+        td = _make_tracediff()
+        td.diff_stats_df = pd.DataFrame(
+            {
+                "name": ["k1", "k2"],
+                "cpu_op_name": ["op1", "op2"],
+                "source": ["trace1", "trace2"],
+                "kernel_time": [1.0, 2.0],
+                "lowest_common_ancestor_id": [0, 0],
+                "gpu_op_uid": [1, 2],
+                "nn_module_stack": ["r", "r"],
+                "nn_module_parent": ["r", "r"],
+            }
+        )
+        summary = td.get_df_diff_stats_unique_args(op_name="k1")
+        assert summary is not None
+        assert all(summary["name"] == "k1")
+
+    def test_get_children_with_missing_same_name_off_gpu_path(self):
+        events1 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=500, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::mm", ts=10, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events1, events1[1], 100, "k1", ts_launch=20, ts_kernel=60)
+        events2 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=500, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::mm", ts=10, dur=100, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::mm", ts=200, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events2, events2[2], 200, "k2", ts_launch=210, ts_kernel=250)
+        tree2 = _build_tree(events2)
+        for e in tree2.events:
+            if e[_TK.Name] == "aten::mm" and e[_TK.UID] == 1:
+                e["non_gpu_path"] = True
+        td = TraceDiff(_build_tree(events1), tree2)
+        assert td.merged_tree is not None
+
+    def test_generate_diff_stats_non_combined_kernel_children(self):
+        td = _make_tracediff_from_specs(
+            [("aten::mm", "gemm_v1", 100.0)],
+            [("aten::mm", "gemm_v2", 80.0), ("aten::add", "add_v2", 10.0)],
+        )
+        df = td.generate_diff_stats()
+        assert not df.empty
+        assert set(df["source"]) == {"trace1", "trace2"}
+
+    def test_get_cpu_op_to_kernels_json_equal_name_pairing(self, capsys):
+        td = _make_tracediff()
+        td.diff_stats_df = pd.DataFrame(
+            [
+                {
+                    "name": "k1",
+                    "cpu_op_name": "aten::same",
+                    "source": "trace1",
+                    "kernel_time": 10.0,
+                    "lowest_common_ancestor_id": 3,
+                    "nn_module_parent": "Mod",
+                    "nn_module_stack": "root",
+                },
+                {
+                    "name": "k2",
+                    "cpu_op_name": "aten::same",
+                    "source": "trace2",
+                    "kernel_time": 8.0,
+                    "lowest_common_ancestor_id": 3,
+                    "nn_module_parent": "Mod",
+                    "nn_module_stack": "root",
+                },
+            ]
+        )
+        td.diff_stats_unique_args_summary_df = td.diff_stats_df.copy()
+        td.get_cpu_op_to_kernels_json()
+        assert td.cpu_op_map is not None
+
+    def test_merge_phase1_collapse_single_child_side(self):
+        events1 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=800, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::wrap", ts=10, dur=300, pid=1, tid=1),
+        ]
+        inner = _mk_event("cpu_op", "aten::mm", ts=20, dur=100, pid=1, tid=1)
+        _add_gpu_chain(events1, inner, 100, "gemm_v1", ts_launch=30, ts_kernel=70)
+        events2 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=800, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::mm", ts=10, dur=100, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::add", ts=200, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events2, events2[1], 200, "gemm_v2", ts_launch=20, ts_kernel=60)
+        _add_gpu_chain(events2, events2[2], 201, "add_v2", ts_launch=210, ts_kernel=250)
+        td = TraceDiff(_build_tree(events1), _build_tree(events2))
+        assert td.merged_tree is not None
+
+    def test_merge_phase3_free_only_inserts_and_deletes(self):
+        events1 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=800, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::wrap", ts=10, dur=200, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::only1", ts=300, dur=100, pid=1, tid=1),
+        ]
+        inner = _mk_event("cpu_op", "aten::mm", ts=20, dur=100, pid=1, tid=1)
+        _add_gpu_chain(events1, inner, 100, "gemm_v1", ts_launch=30, ts_kernel=70)
+        _add_gpu_chain(events1, events1[2], 101, "only_k1", ts_launch=310, ts_kernel=350)
+        events2 = [
+            _mk_event("cpu_op", "aten::root", ts=0, dur=800, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::mm", ts=10, dur=100, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::only2", ts=300, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events2, events2[1], 200, "gemm_v2", ts_launch=20, ts_kernel=60)
+        _add_gpu_chain(events2, events2[2], 201, "only_k2", ts_launch=310, ts_kernel=350)
+        td = TraceDiff(_build_tree(events1), _build_tree(events2))
+        assert td.merged_tree is not None
+
+    def test_get_cpu_op_to_kernels_json_one_to_many_kernel_mapping(self, capsys):
+        td = _make_tracediff()
+        td.diff_stats_df = pd.DataFrame(
+            [
+                {
+                    "name": "shared_kernel",
+                    "cpu_op_name": "aten::op_a",
+                    "source": "trace1",
+                    "kernel_time": 10.0,
+                    "lowest_common_ancestor_id": 4,
+                    "nn_module_parent": "M",
+                    "nn_module_stack": "root",
+                },
+                {
+                    "name": "shared_kernel",
+                    "cpu_op_name": "aten::op_b",
+                    "source": "trace1",
+                    "kernel_time": 12.0,
+                    "lowest_common_ancestor_id": 4,
+                    "nn_module_parent": "M",
+                    "nn_module_stack": "root",
+                },
+            ]
+        )
+        td.diff_stats_unique_args_summary_df = td.diff_stats_df.copy()
+        td.get_cpu_op_to_kernels_json()
+        assert "Kernel to CPU op mapping" in capsys.readouterr().out
+
+    def test_get_cpu_op_to_kernels_json_exact_name_match_in_else_branch(self):
+        td = _make_tracediff()
+        td.diff_stats_df = pd.DataFrame(
+            [
+                {
+                    "name": "k1",
+                    "cpu_op_name": "aten::exact",
+                    "source": "trace1",
+                    "kernel_time": 10.0,
+                    "lowest_common_ancestor_id": 5,
+                    "nn_module_parent": "M",
+                    "nn_module_stack": "root",
+                },
+                {
+                    "name": "k2",
+                    "cpu_op_name": "aten::other",
+                    "source": "trace1",
+                    "kernel_time": 5.0,
+                    "lowest_common_ancestor_id": 5,
+                    "nn_module_parent": "M",
+                    "nn_module_stack": "root",
+                },
+                {
+                    "name": "k3",
+                    "cpu_op_name": "aten::exact",
+                    "source": "trace2",
+                    "kernel_time": 8.0,
+                    "lowest_common_ancestor_id": 5,
+                    "nn_module_parent": "M",
+                    "nn_module_stack": "root",
+                },
+            ]
+        )
+        td.diff_stats_unique_args_summary_df = td.diff_stats_df.copy()
+        td.get_cpu_op_to_kernels_json()
+        assert td.cpu_op_map is not None
+
+    def test_get_cpu_op_to_kernels_json_find_common_name_branches(self, capsys):
+        td = _make_tracediff()
+        td.diff_stats_df = pd.DataFrame(
+            [
+                {
+                    "name": "k1",
+                    "cpu_op_name": "aten::abcdef",
+                    "source": "trace1",
+                    "kernel_time": 10.0,
+                    "lowest_common_ancestor_id": 6,
+                    "nn_module_parent": "Block",
+                    "nn_module_stack": "root",
+                },
+                {
+                    "name": "k2",
+                    "cpu_op_name": "aten::abc",
+                    "source": "trace2",
+                    "kernel_time": 8.0,
+                    "lowest_common_ancestor_id": 6,
+                    "nn_module_parent": "Block",
+                    "nn_module_stack": "root",
+                },
+                {
+                    "name": "k3",
+                    "cpu_op_name": "aten::prefix1234567890",
+                    "source": "trace1",
+                    "kernel_time": 5.0,
+                    "lowest_common_ancestor_id": 7,
+                    "nn_module_parent": "Block",
+                    "nn_module_stack": "root",
+                },
+                {
+                    "name": "k4",
+                    "cpu_op_name": "aten::prefix1234567899",
+                    "source": "trace2",
+                    "kernel_time": 4.0,
+                    "lowest_common_ancestor_id": 7,
+                    "nn_module_parent": "Block",
+                    "nn_module_stack": "root",
+                },
+            ]
+        )
+        td.diff_stats_unique_args_summary_df = td.diff_stats_df.copy()
+        td.get_cpu_op_to_kernels_json()
+        assert "Renaming" in capsys.readouterr().out
+
+    def test_get_cpu_op_to_kernels_json_trace2_one_to_many(self, capsys):
+        td = _make_tracediff()
+        td.diff_stats_df = pd.DataFrame(
+            [
+                {
+                    "name": "shared_kernel",
+                    "cpu_op_name": "aten::op_x",
+                    "source": "trace2",
+                    "kernel_time": 10.0,
+                    "lowest_common_ancestor_id": 8,
+                    "nn_module_parent": "M",
+                    "nn_module_stack": "root",
+                },
+                {
+                    "name": "shared_kernel",
+                    "cpu_op_name": "aten::op_y",
+                    "source": "trace2",
+                    "kernel_time": 12.0,
+                    "lowest_common_ancestor_id": 8,
+                    "nn_module_parent": "M",
+                    "nn_module_stack": "root",
+                },
+            ]
+        )
+        td.diff_stats_unique_args_summary_df = td.diff_stats_df.copy()
+        td.get_cpu_op_to_kernels_json()
+        assert "Kernel to CPU op mapping" in capsys.readouterr().out

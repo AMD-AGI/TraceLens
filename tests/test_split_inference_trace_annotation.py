@@ -17,6 +17,12 @@ Covers:
 No trace files are written; everything operates on in-memory dicts.
 """
 
+import gzip
+import json
+import os
+import zipfile
+from typing import Dict, List
+
 from TraceLens.TraceUtils import split_inference_trace_annotation as split
 from TraceLens.TraceUtils.annotation_utils import IterationAnnotation
 
@@ -249,3 +255,241 @@ def test_find_steady_state_window_returns_contiguous_slice():
     # The window is a contiguous slice of the original roots.
     start = roots.index(window[0])
     assert window == roots[start : start + 8]
+
+
+def test_parse_range_variants():
+    assert split.parse_range("all", 16) == (0, 16)
+    assert split.parse_range("5", 16) == (5, 6)
+    assert split.parse_range("10:20", 16) == (10, 16)
+
+
+def test_preprocess_trace_collects_flow_and_gpu_maps():
+    events = [
+        {"ph": "M", "name": "process_name", "pid": 1},
+        {"ph": "s", "id": 7, "ts": 0, "pid": 1, "tid": 1},
+        {"ph": "f", "id": 7, "ts": 10, "pid": 1, "tid": 1},
+        {
+            "name": "kernel_a",
+            "cat": "kernel",
+            "ph": "X",
+            "ts": 5,
+            "dur": 3,
+            "pid": 1,
+            "tid": 2,
+            "args": {"correlation": 7},
+        },
+    ]
+    gpu_map, flow_map, meta = split.preprocess_trace(events)
+    assert 7 in gpu_map and gpu_map[7][0]["name"] == "kernel_a"
+    assert 7 in flow_map and len(flow_map[7]) == 2
+    assert len(meta) == 1
+
+
+def test_extract_iteration_empty_roots():
+    trace = make_trace([VLLM_PRIMARY_ANNOTATION.format(i=0)])
+    events = trace["traceEvents"]
+    gpu_map, flow_map, meta = split.preprocess_trace(events)
+    out, batch_list, num_gpu, gpu_dur, gpu_busy = split.extract_iteration(
+        [], events, trace, gpu_map, flow_map, meta
+    )
+    assert out["traceEvents"] == trace["traceEvents"]
+    assert batch_list == []
+    assert num_gpu == 0
+    assert gpu_dur == 0
+    assert gpu_busy == 0
+
+
+def test_extract_and_save_writes_gzip(tmp_path):
+    names = [VLLM_PRIMARY_ANNOTATION.format(i=i) for i in range(4)]
+    trace = make_trace(names)
+    events = trace["traceEvents"]
+    gpu_map, flow_map, meta = split.preprocess_trace(events)
+    roots = split.find_iteration_roots(events)
+    grouped = [[r] for r in roots]
+    summary = split.extract_and_save(
+        grouped,
+        events,
+        trace,
+        str(tmp_path),
+        "trace",
+        "annotation_iteration",
+        0,
+        2,
+        gpu_map,
+        flow_map,
+        meta,
+    )
+    assert len(summary) == 2
+    assert os.path.exists(summary[0]["output_path"])
+    with gzip.open(summary[0]["output_path"], "rt", encoding="utf-8") as f:
+        loaded = json.load(f)
+    assert len(loaded["traceEvents"]) > 0
+
+
+def test_extract_phases_and_save(tmp_path):
+    names = [VLLM_PRIMARY_ANNOTATION.format(i=i) for i in range(8)]
+    trace = make_trace(names)
+    events = trace["traceEvents"]
+    gpu_map, flow_map, meta = split.preprocess_trace(events)
+    roots = split.find_iteration_roots(events)
+    summary = split.extract_phases_and_save(
+        [[r] for r in roots],
+        events,
+        trace,
+        str(tmp_path),
+        "trace",
+        "annotation_iteration",
+        0,
+        8,
+        gpu_map,
+        flow_map,
+        meta,
+    )
+    assert len(summary) >= 1
+    assert all(os.path.exists(item["output_path"]) for item in summary)
+
+
+def test_compute_reference_pd_ratio():
+    iter_details = [_details(20 if i % 2 else 2) for i in range(20)]
+    regions = [(0, 20)]
+    (start, end), avg_ratio, largest_ratio = split.compute_reference_pd_ratio(
+        regions, iter_details
+    )
+    assert (start, end) == (0, 20)
+    assert 0.0 <= avg_ratio <= 1.0
+    assert 0.0 <= largest_ratio <= 1.0
+
+
+def test_find_steady_state_window_decode_only_mode():
+    roots = [
+        {
+            "name": SGLANG_DECODE_ANNOTATION.format(i=20),
+            "cat": "user_annotation",
+            "ts": i,
+            "dur": 1,
+        }
+        for i in range(32)
+    ]
+    window = split.find_steady_state_window(
+        roots,
+        num_steps=8,
+        steady_state_regions=[(0, 32)],
+        mode="decode_only",
+    )
+    assert len(window) == 8
+
+
+def test_divide_phases_and_save(tmp_path):
+    names = [VLLM_PRIMARY_ANNOTATION.format(i=i) for i in range(12)]
+    trace = make_trace(names)
+    events = trace["traceEvents"]
+    gpu_map, flow_map, meta = split.preprocess_trace(events)
+    roots = split.find_iteration_roots(events)
+    summary = split.divide_phases_and_save(
+        roots,
+        events,
+        trace,
+        str(tmp_path),
+        "trace",
+        gpu_map,
+        flow_map,
+        meta,
+        steady_state_regions=[(0, len(roots))],
+    )
+    assert len(summary) >= 1
+    assert any("prefilldecodemix" in item["output_path"] for item in summary)
+
+
+def test_get_filename_json_and_zip(tmp_path):
+    trace = make_trace([VLLM_PRIMARY_ANNOTATION.format(i=0)])
+    json_path = tmp_path / "trace.json"
+    json_path.write_text(json.dumps(trace))
+    assert split.get_filename(str(json_path)) == str(json_path)
+
+    zip_path = tmp_path / "trace.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("inner/trace.json", json.dumps(trace))
+    assert split.get_filename(str(zip_path)) == "inner/trace.json"
+
+
+def test_find_iteration_roots_generic_fallback():
+    from TraceLens.Trace2Tree.inference_iteration_roots import (
+        find_iteration_roots_generic,
+    )
+
+    events: List[Dict] = []
+    events.append(
+        {
+            "ph": "X",
+            "cat": "cpu_op",
+            "name": "training_loop",
+            "pid": 1,
+            "tid": 1,
+            "ts": 0,
+            "dur": 7000,
+            "args": {"Sequence number": 0},
+        }
+    )
+    corr = 300
+    for iteration in range(3):
+        base_ts = 100 + iteration * 2000
+        for step_name, offset in [("iter_fwd", 0), ("iter_bwd", 400)]:
+            op = {
+                "ph": "X",
+                "cat": "cpu_op",
+                "name": step_name,
+                "pid": 1,
+                "tid": 1,
+                "ts": base_ts + offset,
+                "dur": 300,
+                "args": {"Sequence number": iteration, "correlation": corr},
+            }
+            events.append(op)
+            events.extend(
+                [
+                    {
+                        "ph": "X",
+                        "cat": "cuda_runtime",
+                        "name": "hipLaunchKernel",
+                        "pid": 1,
+                        "tid": 1,
+                        "ts": base_ts + offset + 10,
+                        "dur": 5,
+                        "args": {"correlation": corr},
+                    },
+                    {
+                        "ph": "X",
+                        "cat": "kernel",
+                        "name": f"{step_name}_kernel",
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base_ts + offset + 50,
+                        "dur": 20,
+                        "args": {"correlation": corr, "stream": 7},
+                    },
+                    {
+                        "ph": "s",
+                        "id": corr,
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base_ts + offset + 50,
+                        "cat": "ac2g",
+                        "name": "ac2g",
+                    },
+                    {
+                        "ph": "f",
+                        "id": corr,
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base_ts + offset + 70,
+                        "cat": "ac2g",
+                        "name": "ac2g",
+                        "bp": "e",
+                    },
+                ]
+            )
+            corr += 1
+
+    roots = find_iteration_roots_generic(events)
+    assert roots is not None
+    assert len(roots) >= 1
