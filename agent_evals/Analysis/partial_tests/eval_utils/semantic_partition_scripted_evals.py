@@ -7,30 +7,29 @@
 """Scripted eval: LCA-partition purity vs. a with-capture (gold) reference.
 
 Self-gating: only test cases whose reference_dir contains a
-``semantic_purity_gold_diff_stats.csv`` (produced once by
-``generate_semantic_gold_ref.sh``) are scored. All other comparative test
-cases produce zero rows here, so this eval is a no-op for the existing
-MI300-vs-H100 suite.
+``semantic_purity_gold_diff_stats.csv`` (which ships pre-baked in each
+partial-test fixture; regenerated only rarely by
+``generate_updated_semantic_gold.sh``) are scored. Any other test case
+produces zero rows here, so this eval is inert unless a gold reference is
+present.
 
 For gated test cases, this reuses compare_lca_partitions.py's forward/reverse
 purity and strict forward/reverse consistency metrics, computed between the
 gold partition and the candidate's semantic-bucketing output
-(``_semantic/tracediff_output/diff_stats.csv``), and records them.
+(``tracediff_output/diff_stats.csv``, produced by the semantic-comparison
+workflow through its "Generate TraceDiff Output" step), and records them.
 
 IMPORTANT: this per-run result is informational only. Because the semantic
 method has real run-to-run variance (observed on Qwen3-30B-A3B), a single
 run's metrics are not a reliable regression signal by themselves -- the
 actual pass/fail decision is made by semantic_purity_aggregate.py, which
-averages strict_forward across NUM_REPEATS runs (intended: 3) and compares
-against a floor derived from currently-observed performance. See that
-script and the "Semantic-purity quality gate" section of README.md.
+averages strict_forward across NUM_REPEATS runs and compares against a
+floor derived from currently-observed performance. See that script and the
+partial_tests/README.md "Semantic-purity quality gate" section.
 
 Consequently the "result" written here is PASS whenever the metrics were
 computed at all; it only turns FAIL for genuine pipeline errors (candidate
-output missing, no matched keys). Do not read STABLE/FLAKY classification
-of this eval's row (via aggregate_repeatability.py) as a quality signal --
-it is dropped from that role by design and only reflects whether the
-per-run pipeline itself succeeded.
+output missing, no matched keys).
 """
 
 import argparse
@@ -38,7 +37,12 @@ import csv
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# compare_lca_partitions.py is the shared metric implementation; it stays in
+# agent_evals/Analysis/eval_utils/ (also imported by tests/test_compare_lca_partitions.py).
+# This eval now lives in partial_tests/eval_utils/, so reach two levels up.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ANALYSIS_EVAL_UTILS = os.path.abspath(os.path.join(_HERE, "..", "..", "eval_utils"))
+sys.path.insert(0, _ANALYSIS_EVAL_UTILS)
 from compare_lca_partitions import LCA_COL, both_purities, both_strict, load  # noqa: E402
 
 CSV_COLUMNS = [
@@ -52,7 +56,7 @@ CSV_COLUMNS = [
 ]
 
 GOLD_FILENAME = "semantic_purity_gold_diff_stats.csv"
-CANDIDATE_RELPATH = os.path.join("_semantic", "tracediff_output", "diff_stats.csv")
+CANDIDATE_RELPATH = os.path.join("tracediff_output", "diff_stats.csv")
 
 
 def _write(results_path: str, rows: list[dict]) -> None:
@@ -65,7 +69,7 @@ def _write(results_path: str, rows: list[dict]) -> None:
 def run(output_dir: str, reference_dir: str, results_path: str) -> list[dict]:
     gold_path = os.path.join(reference_dir, GOLD_FILENAME)
     if not os.path.isfile(gold_path):
-        # Not a semantic-purity test case; self-gate to a no-op.
+        # No gold reference here; self-gate to a no-op.
         _write(results_path, [])
         return []
 
@@ -79,7 +83,7 @@ def run(output_dir: str, reference_dir: str, results_path: str) -> list[dict]:
                 "result": "FAIL",
                 "details": f"Candidate semantic diff-stats not found: {candidate_path}",
                 "root_cause": "pipeline",
-                "recommended_fix": "Analysis run did not produce a semantic-bucketing output; check the run log",
+                "recommended_fix": "Semantic workflow did not produce tracediff_output/diff_stats.csv; check the run log",
             }
         ]
         _write(results_path, rows)
@@ -102,7 +106,7 @@ def run(output_dir: str, reference_dir: str, results_path: str) -> list[dict]:
                 "result": "FAIL",
                 "details": "No matched (source, gpu_op_uid) keys between gold and candidate",
                 "root_cause": "data",
-                "recommended_fix": "Check that candidate and gold were generated from the same trace pair",
+                "recommended_fix": "Check that candidate and gold were generated from the same DECODE trace pair",
             }
         ]
         _write(results_path, rows)
@@ -140,12 +144,6 @@ def main():
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--reference-dir", required=True)
     parser.add_argument("--results", required=True)
-    parser.add_argument(
-        "--comparison-scope",
-        choices=["standalone", "comparative"],
-        default="comparative",
-        help="Only comparative mode is supported; accepted for CLI consistency with other evals",
-    )
     args = parser.parse_args()
 
     rows = run(args.output_dir, args.reference_dir, args.results)

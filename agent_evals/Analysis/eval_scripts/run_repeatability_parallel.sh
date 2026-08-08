@@ -126,7 +126,7 @@ run_single_job() {
     log_status "  $tag [$(ts)] Phase 1 complete."
     sleep "$SLEEP_BETWEEN"
 
-    # -- Phase 2: 5 parallel evals ------------------------------------------
+    # -- Phase 2: 4 parallel evals ------------------------------------------
     log_status "  $tag [$(ts)] Phase 2: evals starting"
     local eval_pids=()
 
@@ -149,13 +149,6 @@ run_single_job() {
         --results "$CASE_RESULTS/quality_scripted_results.csv" \
         --comparison-scope "$COMPARISON_SCOPE" \
         > "$CASE_RESULTS/quality_scripted_eval.log" 2>&1 &
-    eval_pids+=($!)
-
-    "${DEXEC[@]}" python3 "$EVALS_DIR/eval_utils/semantic_partition_scripted_evals.py" \
-        --output-dir "$OUTPUT_DIR" --reference-dir "$reference_dir" \
-        --results "$CASE_RESULTS/semantic_purity_results.csv" \
-        --comparison-scope "$COMPARISON_SCOPE" \
-        > "$CASE_RESULTS/semantic_purity_eval.log" 2>&1 &
     eval_pids+=($!)
 
     (
@@ -204,17 +197,6 @@ mkdir -p "$RESULTS_ROOT"
 if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
     expand_archive unit_tests_comparative
     expand_archive e2e_tests_comparative
-    expand_archive semantic_purity_deepseek_r1
-    expand_archive semantic_purity_qwen3_30b_a3b
-    for case_id in semantic_purity_deepseek_r1 semantic_purity_qwen3_30b_a3b; do
-        wc_dir="$EVALS_DIR/analysis_tests/$case_id/with_capture"
-        nc_dir="$EVALS_DIR/analysis_tests/$case_id/no_capture"
-        if [[ -d "$wc_dir" ]] && [[ ! -d "$nc_dir" ]]; then
-            echo "Deriving no-capture trace tree for $case_id..."
-            cp -r "$wc_dir" "$nc_dir"
-            find "$nc_dir" -type d -name capture_traces -prune -exec rm -rf {} \;
-        fi
-    done
 else
     expand_archive unit_tests_standalone
     expand_archive e2e_tests_standalone
@@ -278,17 +260,6 @@ echo "========================================="
 echo "  Repeatability test finished."
 echo "  Results in: $RESULTS_ROOT"
 echo "========================================="
-
-# ---------------------------------------------------------------------------
-# Semantic-purity regression gate: averages strict_forward across the
-# NUM_REPEATS runs just produced and compares to a fixed, observed-
-# performance-derived floor. Per-run PASS/FAIL from
-# semantic_partition_scripted_evals.py is informational only (see that
-# script's docstring); this is the actual gate. Comparative mode only.
-# ---------------------------------------------------------------------------
-if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
-    "${DEXEC[@]}" python3 "$EVALS_DIR/eval_utils/semantic_purity_aggregate.py"         --results-root "$RESULTS_ROOT" || true
-fi
 
 # ---------------------------------------------------------------------------
 # Post-processing: aggregate results and generate reports via Cursor agent
