@@ -126,6 +126,8 @@ the SGLang version (`--sglang-version`, default `0.5.9`), and the GPU type
 | `0.5.15` | MI350/MI355 | `lmsysorg/sglang:v0.5.15-rocm720-mi35x` |
 | `0.5.16` | MI300 | `lmsysorg/sglang:v0.5.16-rocm720-mi30x` |
 | `0.5.16` | MI350/MI355 | `lmsysorg/sglang:v0.5.16-rocm720-mi35x` |
+| `0.5.17` | MI300 | `lmsysorg/sglang:v0.5.17-rocm720-mi30x` |
+| `0.5.17` | MI350/MI355 | `lmsysorg/sglang:v0.5.17-rocm720-mi35x` |
 
 On SGLang **0.5.13 / 0.5.14**, kernel-shape wrapping is incompatible with the
 EAGLE/MTP speculative *overlap* decode, so the speculative patches disable capture
