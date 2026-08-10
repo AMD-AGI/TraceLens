@@ -3235,6 +3235,43 @@ class aten_unary_elementwise(UnaryElementwise):
         }
 
 
+class aten_upsample_nearest(UnaryElementwise):
+    # Nearest-neighbor upsampling (F.interpolate mode='nearest'), 1d/2d/3d.
+    # Each output element copies the nearest input element — pure bandwidth-bound.
+    # Output shape from Concrete Inputs[1], e.g. '[16, 240, 240]'.
+    # bytes = nelems_in * bpe (read) + nelems_out * bpe (write).
+
+    category = "elementwise"
+    sheet_category = "UnaryElementwise"
+
+    @staticmethod
+    def get_param_details(event):
+        input_shape = tuple(event["args"]["Input Dims"][0])
+        dtype = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+
+        # Parse output spatial size from Concrete Inputs[1]: '[16, 240, 240]'
+        out_spatial = ast.literal_eval(event["args"]["Concrete Inputs"][1])
+
+        # Output shape: (N, C, *out_spatial)
+        output_shape = input_shape[:2] + tuple(out_spatial)
+
+        return {
+            "input_shape": input_shape,
+            "output_shape": output_shape,
+            "op_shape": output_shape,
+            "dtype_in_out": (dtype, dtype),
+            "stride_input": stride_input,
+            "stride_output": None,
+        }
+
+    def bytes(self):
+        """Input read + output write."""
+        nelems_in = prod(self.param_details["input_shape"])
+        nelems_out = self.nelems  # prod(output_shape) from base class
+        return nelems_in * self.bpe_in + nelems_out * self.bpe_out
+
+
 class BinaryElementwise:
     category = "elementwise"
     bwd_category = None
