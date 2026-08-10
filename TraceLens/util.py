@@ -667,9 +667,10 @@ class TraceEventUtils:
     def split_by_field(
         events: List[dict], field: str, defaultKey: str = None
     ) -> Dict[str, List]:
-        return dict(
-            itertools.groupby(events, lambda event: event.get(field, defaultKey))
-        )
+        grouped = defaultdict(list)
+        for event in events:
+            grouped[event.get(field, defaultKey)].append(event)
+        return dict(grouped)
 
     # Splits metadata and non-metadata events
     # Merges metadata events into a dictionary hierarchy per process
