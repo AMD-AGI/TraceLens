@@ -344,7 +344,7 @@ class OrigamiHelper:
             if largest_bitsize < 8:
                 raise ValueError("MI200 doesn't support F4/F6")
         # Architecture Detected is not valid
-        if mi_dim == None:
+        if mi_dim is None:
             raise ValueError(
                 f"No Valid Matrix Instruction integrated for {self._a_dtype_bitsize}-bit or {self._b_dtype_bitsize}-bit datatypes"
             )

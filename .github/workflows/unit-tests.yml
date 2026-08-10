@@ -37,13 +37,23 @@ jobs:
       - name: Run unit tests
         run: |
           . .venv/bin/activate
-          python -m pytest tests/ -v --tb=short -n auto --dist loadgroup --cov=./TraceLens --cov-report=xml
+          python -m pytest tests/ -v --tb=short -n auto --dist loadgroup \
+            --cov=./TraceLens --cov-report=xml \
+            --junitxml=junit.xml -o junit_family=legacy
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: coverage.xml
+          if-no-files-found: error
+
+      - name: Upload junit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-report
+          path: junit.xml
           if-no-files-found: error
 
   codecov:
@@ -59,10 +69,27 @@ jobs:
         with:
           name: coverage-report
 
+      - name: Download junit report
+        uses: actions/download-artifact@v4
+        with:
+          name: junit-report
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
+          flags: unit
+          fail_ci_if_error: true
+          verbose: true
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: junit.xml
+          report_type: test_results
+          flags: unit
           fail_ci_if_error: true
           verbose: true

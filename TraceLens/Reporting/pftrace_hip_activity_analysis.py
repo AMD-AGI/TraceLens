@@ -617,11 +617,11 @@ def build_hip_summary_df(
 
     def key_of(e: HIPEvent):
         if group == "name":
-            return (e.name,)
+            return (e.name, 0, 0)
         if group == "name+stream":
-            return (e.name, e.stream_id or 0)
+            return (e.name, e.stream_id or 0, 0)
         if group == "name+op":
-            return (e.name, e.operation or 0)
+            return (e.name, 0, e.operation or 0)
         return (e.name, e.stream_id or 0, e.operation or 0)
 
     buckets: Dict[Tuple, List[int]] = defaultdict(list)

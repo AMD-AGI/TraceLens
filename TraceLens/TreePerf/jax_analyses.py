@@ -143,6 +143,7 @@ class JaxAnalyses:
             )
         )
 
+    @staticmethod
     def create_gpu_summary(
         analyzer: JaxGPUEventAnalyser,
         group_by_gpu: bool = False,

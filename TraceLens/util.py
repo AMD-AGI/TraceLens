@@ -5,7 +5,6 @@
 ###############################################################################
 
 import contextlib
-import itertools
 import json
 import logging
 import os
@@ -348,11 +347,11 @@ class JaxProfileProcessor:
         line = re.sub(r", ", ",", line)
         line = re.sub(r" %", "%", line)
         backend_config = re.search(
-            r"backend_config=\{[a-zA-Z_=\"\(\)\/0-9\ @.-:,\[\]\{\}]*", line
+            r"backend_config=\{[a-zA-Z_=\"\(\)\/ @.,:\[\]\{\}0-9-]*", line
         )
-        metadata = re.search(r"metadata=\{[a-zA-Z_=\"\(\)\/0-9\ @.-]*", line)
+        metadata = re.search(r"metadata=\{[a-zA-Z_=\"\(\)\/ @.0-9-]*", line)
         custom_call_target = re.search(
-            r"custom_call_target=\"[a-zA-Z_=\"\(\)\/0-9\ @.\-\$]*", line
+            r"custom_call_target=\"[a-zA-Z_=\"\(\)\/ @.$0-9-]*", line
         )
         replica_groups = re.search(
             r"replica_groups=(?P<replica_string>(?:\{(?:\{[0-9]+(?:,[0-9]+)*\}(?:,\{[0-9]+(?:,[0-9]+)*\})*)\}|\[[0-9]+(?:,[0-9]+)*\]<=\[[0-9]+(?:,[0-9]+)*\])(?:T\([0-9,]+\)\s+dimensions=\{[0-9,]*\})?)",
@@ -667,9 +666,10 @@ class TraceEventUtils:
     def split_by_field(
         events: List[dict], field: str, defaultKey: str = None
     ) -> Dict[str, List]:
-        return dict(
-            itertools.groupby(events, lambda event: event.get(field, defaultKey))
-        )
+        grouped = defaultdict(list)
+        for event in events:
+            grouped[event.get(field, defaultKey)].append(event)
+        return dict(grouped)
 
     # Splits metadata and non-metadata events
     # Merges metadata events into a dictionary hierarchy per process

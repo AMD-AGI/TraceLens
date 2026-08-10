@@ -483,6 +483,7 @@ def generate_perf_report_pytorch(
     df_kernel_launchers_summary = pd.DataFrame()
     df_kernel_launchers_summary_by_category = pd.DataFrame()
     df_kernel_launchers_unique_args = pd.DataFrame()
+    df_kernel_launchers_unique_args_overlapping_kernels = pd.DataFrame()
     perf_metrics_dfs = {}
     df_hist = pd.DataFrame()
     df_short_kernels = pd.DataFrame()
@@ -1233,6 +1234,9 @@ def main():
         inductor_cache_dir=args.inductor_cache_dir,
         include_call_stack=args.include_call_stack,
     )
+
+
+__all__ = [name for name in globals() if not name.startswith("_")]
 
 
 if __name__ == "__main__":
