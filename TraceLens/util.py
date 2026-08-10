@@ -5,7 +5,6 @@
 ###############################################################################
 
 import contextlib
-import itertools
 import json
 import logging
 import os
