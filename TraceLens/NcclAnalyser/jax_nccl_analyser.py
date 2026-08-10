@@ -5,9 +5,11 @@
 ###############################################################################
 
 import os
-import pandas as pd
 from glob import glob
+
 import numpy as np
+import pandas as pd
+
 from TraceLens.NcclAnalyser.util.xla_parser import XLACollectiveParser
 from TraceLens.Trace2Tree.trace_to_tree import JaxTraceToTree
 from TraceLens.util import DataLoader, TraceEventUtils
@@ -84,7 +86,9 @@ class JaxNcclAnalyser:
                 event_to_category=categorizer,
                 linking_key=linking_key,
             )
-            tree.build_tree(metadata_events, pb_file_name=protobuf_filepath)
+            tree.build_tree(
+                metadata_events=metadata_events, pb_file_name=protobuf_filepath
+            )
             nccl_events = [
                 event for event in tree.events if self._nccl_event_filter(event)
             ]

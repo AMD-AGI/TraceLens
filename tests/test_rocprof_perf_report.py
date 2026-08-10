@@ -4,16 +4,17 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import pytest
 import os
-import pandas as pd
 import tempfile
-from pathlib import Path
-from TraceLens.util import RocprofParser
-from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
+
+import pandas as pd
+import pytest
+
 from TraceLens.Reporting.generate_perf_report_rocprof import (
     generate_perf_report_rocprof,
 )
+from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
+from TraceLens.util import RocprofParser
 
 
 def find_test_files(ref_root):
@@ -248,7 +249,7 @@ class TestGeneratePerfReport:
     def test_generate_csv_reports(self, rocprof_file):
         """Test generating CSV reports"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            dfs = generate_perf_report_rocprof(
+            generate_perf_report_rocprof(
                 profile_json_path=rocprof_file,
                 output_csvs_dir=tmpdir,
                 kernel_summary=True,

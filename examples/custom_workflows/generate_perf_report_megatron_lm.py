@@ -5,9 +5,9 @@
 ###############################################################################
 
 import argparse
+import importlib.util
 import json
 import pandas as pd
-from TraceLens import TraceToTree
 from TraceLens import TreePerfAnalyzer
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 
@@ -73,9 +73,7 @@ class transformer_engine_attention(SDPA):
 def main():
 
     # check openpyxl is installed
-    try:
-        import openpyxl
-    except ImportError:
+    if importlib.util.find_spec("openpyxl") is None:
         raise ImportError(
             "openpyxl is required to write Excel files for perf report gen. Please install it using 'pip install openpyxl'."
         )

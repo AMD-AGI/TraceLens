@@ -75,12 +75,13 @@ def _check_csv_alignment_dirs(gen_dir: str, ref_dir: str) -> tuple[str, str]:
         if missing_cols:
             mismatches.append(f"{fname}: missing required columns: {missing_cols}")
             continue
-        gen_df = gen_df[ref_df.columns]
+        compare_cols = [c for c in ref_df.columns if c in gen_df.columns]
+        gen_df = gen_df[compare_cols]
         if len(ref_df) != len(gen_df):
             mismatches.append(f"{fname}: row count {len(gen_df)} vs ref {len(ref_df)}")
             continue
 
-        for col in ref_df.columns:
+        for col in compare_cols:
             if pd.api.types.is_bool_dtype(ref_df[col]) or pd.api.types.is_bool_dtype(
                 gen_df[col]
             ):

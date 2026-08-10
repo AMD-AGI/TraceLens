@@ -8,12 +8,10 @@ import argparse
 import importlib.util
 import json
 import os
-import subprocess
 import sys
 import warnings
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
-from tqdm import tqdm
 
 import numpy as np
 import pandas as pd
@@ -31,11 +29,14 @@ from TraceLens.Reporting.reporting_utils import (
     resolve_gpu_arch,
 )
 from TraceLens.util import TraceEventUtils
+from TraceLens.TraceUtils.annotation_utils import (
+    CAPTURE_PATTERN,
+    CaptureAnnotation,
+    find_events_by_patterns,
+)
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
-
-import TraceLens
 
 
 def perf_report_sanity_check(
@@ -197,7 +198,6 @@ def classify_graph_capture_trace(input_folder: str):
     )
     ## SGLang specific dummy run pattern
     ##dummy_run_pattern = re.compile(r"/sgl-workspace/sglang/python/sglang/srt/model_executor/cuda_graph_runner.py\(\d+\): _capture_graph")
-    annotation_pattern = re.compile(r"capture_(\d+)_(.*)")
 
     def load_trace(path: str) -> dict:
         if path.endswith(".zip"):
@@ -217,22 +217,6 @@ def classify_graph_capture_trace(input_folder: str):
         roots = [e for e in events if dummy_run_pattern.match(e.get("name", ""))]
         roots.sort(key=lambda x: x.get("ts", 0))
         return roots
-
-    def find_annotation_roots(events):
-        roots = [
-            e
-            for e in events
-            if e.get("cat") == "user_annotation"
-            and annotation_pattern.match(e.get("name", ""))
-        ]
-        roots.sort(key=lambda x: x.get("ts", 0))
-        return roots
-
-    def parse_annotation(name: str):
-        m = annotation_pattern.match(name)
-        if not m:
-            raise ValueError(f"Annotation name does not match expected pattern: {name}")
-        return int(m.group(1)), m.group(2)
 
     def count_stream_begin_captures(events):
         return sum(
@@ -282,11 +266,12 @@ def classify_graph_capture_trace(input_folder: str):
         trace_json = load_trace(filepath)
         events = trace_json.get("traceEvents", [])
         dummy_roots = find_dummy_run_roots(events)
-        annotation_roots = find_annotation_roots(events)
+        annotation_roots = find_events_by_patterns(events, [CAPTURE_PATTERN])
         basename = os.path.basename(filepath)
 
         if annotation_roots and len(annotation_roots) == len(dummy_roots):
-            batch_size, mode = parse_annotation(annotation_roots[0]["name"])
+            cap = CaptureAnnotation(annotation_roots[0]["name"])
+            batch_size, mode = cap.batch_size, cap.mode
             print(
                 f"batch_size: {batch_size}, mode: {mode} parsed from annotation, num_captures: {count_stream_begin_captures(events)}"
             )
@@ -650,6 +635,8 @@ def generate_perf_report_pytorch(
     df_kernel_launchers_summary = pd.DataFrame()
     df_kernel_launchers_summary_by_category = pd.DataFrame()
     df_kernel_launchers_unique_args = pd.DataFrame()
+    df_kernel_launchers_unique_args_overlapping_kernels = pd.DataFrame()
+    df_kernel_launchers = pd.DataFrame()
     perf_metrics_dfs = {}
     df_hist = pd.DataFrame()
     df_short_kernels = pd.DataFrame()
@@ -1062,7 +1049,7 @@ def generate_perf_report_pytorch(
     if kernel_summary:
         try:
             df_kernels = perf_analyzer.get_df_kernels(launcher_detail=True)
-        except Exception as e:
+        except Exception:
             df_kernels = pd.DataFrame()
         if not df_kernels.empty and "Kernel duration (µs)" in df_kernels.columns:
             # Fallback: If Parent cpu_op is missing, fill it from Launcher (for display purposes)
@@ -1191,10 +1178,8 @@ def generate_perf_report_pytorch(
         if output_xlsx_path is None:
             base_path = profile_json_path.rsplit(".json", 1)[0]
             output_xlsx_path = base_path + "_perf_report.xlsx"
-        try:
-            import openpyxl
-        except (ImportError, ModuleNotFoundError) as e:
-            print(f"Error importing openpyxl: {e}")
+        if importlib.util.find_spec("openpyxl") is None:
+            print("Error importing openpyxl")
             request_install("openpyxl")
 
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:

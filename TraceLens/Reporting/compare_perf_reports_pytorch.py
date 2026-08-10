@@ -7,8 +7,9 @@
 #!/usr/bin/env python3
 import argparse
 import os
-from typing import List, Sequence, Dict, Optional
 import re
+from typing import Dict, List, Optional, Sequence
+
 import pandas as pd
 from openpyxl.utils import get_column_letter
 
@@ -398,7 +399,6 @@ def generate_compare_perf_reports_pytorch(
     tags = (
         names if names else [os.path.splitext(os.path.basename(p))[0] for p in reports]
     )
-    baseline_tag = tags[0]
     if len(set(tags)) != len(tags):
         raise ValueError("Tags must be unique – use --names to disambiguate.")
     results: dict[str, pd.DataFrame] = {}

@@ -11,6 +11,7 @@ Direction column indicates: h2d (which GPU), d2h (which GPU to host), d2d (which
 Uses shared pftrace_utils (traceconv) and PftraceParser.
 """
 
+import importlib.util
 import os
 import argparse
 import sys
@@ -163,13 +164,9 @@ def generate_perf_report_pftrace_memory_copy(
                 base = base.with_suffix("")
             output_xlsx_path = str(base) + "_pftrace_memory_copy_report.xlsx"
         logger.info("Writing Excel file to: %s", output_xlsx_path)
-        try:
-            import openpyxl  # noqa: F401
-        except (ImportError, ModuleNotFoundError) as e:
-            logger.error(
-                "openpyxl required for Excel output: %s. pip install openpyxl", e
-            )
-            raise
+        if importlib.util.find_spec("openpyxl") is None:
+            logger.error("openpyxl required for Excel output. pip install openpyxl")
+            raise ImportError("openpyxl is required for Excel output")
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
             for sheet_name, df in dfs.items():
                 df.to_excel(writer, sheet_name=sheet_name, index=False)

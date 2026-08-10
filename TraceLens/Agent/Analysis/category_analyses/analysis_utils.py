@@ -408,9 +408,12 @@ def calculate_efficiency(
     result["resolved_peak_maf"] = round(peak_maf, 2) if peak_maf else None
     result["resolved_peak_hbm_bw"] = round(peak_hbm_bw, 2) if peak_hbm_bw else None
 
-    if flops_byte:
-        balance_point = peak_maf / peak_hbm_bw
-        result["bound_type"] = "compute" if flops_byte > balance_point else "memory"
+    roofline_bound = row.get("Roofline Bound")
+    if isinstance(roofline_bound, str):
+        if roofline_bound == "COMPUTE_BOUND":
+            result["bound_type"] = "compute"
+        elif roofline_bound == "MEMORY_BOUND":
+            result["bound_type"] = "memory"
 
     if comparison_scope == "comparative":
         comparative_efficiency(result, row)

@@ -270,7 +270,6 @@ class fused_rms_mxfp4_quant(RMSNorm):
     def __init__(self, event, arch=None, python_path=None):
         super().__init__(event, arch, python_path)
         input_dims = event["args"]["Input Dims"]
-        input_types = event["args"]["Input type"]
 
         self.has_res1 = False
         self.has_x2 = False

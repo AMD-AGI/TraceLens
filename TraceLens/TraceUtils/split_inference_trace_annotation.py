@@ -172,18 +172,24 @@ import json
 import math
 import os
 import re
-import sys
 import zipfile
 from typing import List, Set, Tuple, Optional
-from dataclasses import dataclass, field
-import csv
 from statistics import mean
-from TraceLens.util import DataLoader
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from ..util import DataLoader
+from .annotation_utils import (
+    ITERATION_PATTERNS,
+    ITERATION_BACKUP_PATTERNS,
+    find_events_by_patterns,
+    find_phase_from_window,
+    has_context,
+    has_generation,
+    is_decode_only,
+    is_mixed,
+    iteration_details,
+)
 import pandas as pd
 
 # Try to use faster JSON parser (orjson is 2-10x faster than json)
-import orjson
 from tqdm import tqdm
 
 GPU_EVENT_CATEGORIES = ["kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation"]
@@ -204,209 +210,30 @@ def get_filename(filepath: str) -> dict:
     return filepath
 
 
-def find_events_by_pattern(
-    events: List[dict], patterns, name: str, cat: str = None
-) -> List[dict]:
-    """Find events matching a regex pattern."""
-    matches = []
-    for pattern in patterns:
-        matches.extend([e for e in events if pattern.match(e.get("name", ""))])
-        if cat is not None:
-            matches = [e for e in matches if e.get("cat") == cat]
-    matches.sort(key=lambda x: x.get("ts", 0))
-    print(f"Found {len(matches)} {name} events")
-    for m in matches:
-        print(m["name"])
-    if len(matches) == 0:
-        return None
-    return matches
-
-
-# Iteration marker patterns. The primary pattern is preferred; the backup
-# patterns are only consulted when the primary matches nothing (see
-# find_iteration_roots). The execute_new_<n>_cached_<n> shape is intentionally
-# excluded because get_iter_details_from_name cannot parse it.
-ANNOTATION_PATTERN = [
-    re.compile(
-        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
-    ),
-]
-ANNOTATION_PATTERN_BACKUP = [
-    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
-    re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"),
-    # SGLang profiler per-step annotations, e.g.
-    #   "step[EXTEND bs=1 toks=862]"  (prefill / extend batch)
-    #   "step[DECODE bs=25]"          (decode batch)
-    re.compile(r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]"),
-]
-
-
 def find_iteration_roots(events: List[dict]) -> Optional[List[dict]]:
     """Return iteration-root events.
 
     Tries the primary annotation pattern first, then backup patterns, then
     falls back to generic call-tree traversal via Trace2Tree.
     """
-    roots = find_events_by_pattern(
-        events, ANNOTATION_PATTERN, "execution steps (iteration)", cat="user_annotation"
+    roots = find_events_by_patterns(
+        events, ITERATION_PATTERNS, label="execution steps (iteration)", verbose=True
     )
-    if roots is None:
+    if len(roots) == 0:
         print("No primary annotations found; falling back to backup patterns...")
-        roots = find_events_by_pattern(
+        roots = find_events_by_patterns(
             events,
-            ANNOTATION_PATTERN_BACKUP,
-            "execution steps (iteration, backup)",
-            cat="user_annotation",
+            ITERATION_BACKUP_PATTERNS,
+            label="execution steps (iteration, backup)",
+            verbose=True,
         )
-    if roots is None:
+    if len(roots) == 0:
         print("No annotation patterns found; trying generic call-tree traversal...")
-        roots = find_iteration_roots_generic(events)
-    return roots
-
-
-def _find_repeating_period(
-    names: List[str], min_repeats: int = 3
-) -> Tuple[Optional[int], Optional[List[str]], Optional[int]]:
-    """Find the shortest repeating name sequence anywhere in ``names``.
-
-    Slides a start offset forward to skip any non-repeating prefix (setup
-    events before the loop body). Returns ``(period, pattern, start_offset)``
-    where ``start_offset`` is the index in ``names`` where the first block
-    begins. Returns ``(None, None, None)`` if no qualifying period is found.
-
-    Requires at least ``min_repeats`` consecutive repetitions covering more
-    than half of the suffix starting at ``start_offset``.
-    """
-    n = len(names)
-    for start in range(n):
-        suffix = names[start:]
-        m = len(suffix)
-        for p in range(1, m // 2 + 1):
-            pattern = suffix[:p]
-            count = 0
-            i = 0
-            while i + p <= m and suffix[i : i + p] == pattern:
-                count += 1
-                i += p
-            if count >= min_repeats and count * p > m * 0.5:
-                return p, pattern, start
-    return None, None, None
-
-
-def _detect_iteration_roots_from_tree(tree: TraceToTree, roots) -> Optional[List[dict]]:
-    """BFS down the tree from one or more root nodes to find and return synthetic
-    iteration-root events.
-
-    ``roots`` may be a single event dict or a list of event dicts — all are
-    seeded into the BFS at depth 0 so they are explored level-by-level together.
-
-    Pattern detection uses all children (not just GPU-path ones) so that
-    leading CPU-only events (e.g. ``next`` in the OWL pipeline) are included
-    as part of the iteration anchor. A minimum child count guards against false
-    positives from short utility-function child lists.
-
-    Returns a list of synthetic root events, one per detected iteration, where
-    each event's ``dur`` spans from the first to the last child of the block.
-    """
-    from collections import deque
-
-    if isinstance(roots, dict):
-        roots = [roots]
-
-    queue = deque((node, 0) for node in roots)
-    while queue:
-        current, depth = queue.popleft()
-        children = tree.get_children_events(current)
-        if not children:
-            continue
-
-        # Only recurse into GPU-bearing subtrees.
-        if not any(c.get("gpu_events") for c in children):
-            continue
-
-        p, _, start = _find_repeating_period([c.get("name", "") for c in children])
-        if p is None:
-            for child in children:
-                if child.get("gpu_events"):
-                    queue.append((child, depth + 1))
-            continue
-
-        print(
-            f"Generic fallback: repeating pattern found under '{current.get('name')}' at depth {depth}"
+        from ..Trace2Tree.inference_iteration_roots import (
+            find_iteration_roots_generic,
         )
-        print(f"Generic fallback: period={p}")
 
-        # Anchor each iteration between the Nth occurrence of the first and last
-        # events in the detected pattern. Using all-children anchors means
-        # CPU-only leading/trailing events are included naturally.
-        first_anchor_name = children[start]["name"]
-        last_anchor_name = children[start + p - 1]["name"]
-
-        first_anchors = [
-            i
-            for i, c in enumerate(children)
-            if i >= start and c.get("name") == first_anchor_name
-        ]
-        last_anchors = [
-            i
-            for i, c in enumerate(children)
-            if i >= start and c.get("name") == last_anchor_name
-        ]
-
-        iteration_roots = []
-        for n in range(min(len(first_anchors), len(last_anchors))):
-            block_start = first_anchors[n]
-            block_end = last_anchors[n]
-            if block_end < block_start:
-                break
-            block = children[block_start : block_end + 1]
-            first, last = block[0], block[-1]
-            root_event = dict(first)
-            root_event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
-            iteration_roots.append(root_event)
-
-        print(f"Generic fallback: identified {len(iteration_roots)} iterations.")
-        return iteration_roots if iteration_roots else None
-
-    return None
-
-
-def find_iteration_roots_generic(events: List[dict]) -> Optional[List[dict]]:
-    """Fallback: detect iteration roots by finding a repeating child pattern in
-    the call tree, using Trace2Tree for parent/child relationships.
-
-    Works for any workload (diffusion, training, etc.) where the iteration loop
-    body is a repeating sequence of top-level calls under a common parent.
-    """
-    try:
-        tree = TraceToTree(events, prune_nongpu_paths=False)
-        tree.build_tree(add_python_func=True)
-    except Exception as e:
-        print(f"Generic fallback: Trace2Tree build failed ({e}), skipping.")
-        return None
-
-    # Walk every cpu_root_node upward through python_function parents until
-    # reaching a parentless node — these are the true per-thread entry points.
-    seen_roots: set = set()
-    trace_roots = []
-    for uid in tree.cpu_root_nodes:
-        e = tree.get_UID2event(uid)
-        while True:
-            parent = tree.get_parent_event(e)
-            if parent is None:
-                break
-            e = parent
-        if id(e) not in seen_roots:
-            seen_roots.add(id(e))
-            trace_roots.append(e)
-
-    if not trace_roots:
-        print("Generic fallback: no root nodes found.")
-        return None
-
-    roots = _detect_iteration_roots_from_tree(tree, trace_roots)
-    if roots is None:
-        print("Generic fallback: no repeating child pattern found.")
+        roots = find_iteration_roots_generic(events)
     return roots
 
 
@@ -454,7 +281,7 @@ def extract_iteration(
 
     # Compute the global time window for all iteration roots
     if not iteration_roots:
-        return trace_json.copy(), [], 0, 0
+        return trace_json.copy(), [], 0, 0, 0
     min_iter_ts = min(root.get("ts", 0) for root in iteration_roots)
     max_iter_end = max(
         root.get("ts", 0) + root.get("dur", 0) for root in iteration_roots
@@ -481,7 +308,6 @@ def extract_iteration(
 
     # For each iteration root, filter CPU events and collect correlation ids
     for iteration_root in tqdm(iteration_roots):
-        batch = 0
         start_time = []
         end_time = []
         iter_tid = iteration_root.get("tid")
@@ -548,118 +374,6 @@ def parse_range(range_str: str, max_len: int) -> Tuple[int, int]:
     return start, min(end, max_len)
 
 
-def get_iter_details_from_name(name: str, prefix: str = "annotation_iteration") -> dict:
-
-    # SGLang profiler step annotations, e.g. "step[EXTEND bs=1 toks=862]" (prefill)
-    # or "step[DECODE bs=25]" (decode). Map to the context/generation request and
-    # token counts that the steady-state logic downstream expects.
-    sglang_step = re.match(r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]", name)
-    if sglang_step:
-        kind, bs = sglang_step.group(1), int(sglang_step.group(2))
-        toks = int(sglang_step.group(3) or 0)
-        if kind == "DECODE":
-            ctx_req, ctx_sum, gen_req, gen_sum, batch_size = 0, 0, bs, bs, bs
-        else:  # EXTEND / MIXED treated as prefill; toks = total prompt tokens.
-            ctx_req, ctx_sum, gen_req, gen_sum, batch_size = (
-                bs,
-                toks,
-                0,
-                0,
-                (toks or bs),
-            )
-        return {
-            "batch_size": batch_size,
-            "num_requests": ctx_req + gen_req,
-            "context_requests": ctx_req,
-            "context_sum": ctx_sum,
-            "generation_requests": gen_req,
-            "generation_sum": gen_sum,
-        }
-
-    if "annotation_iteration" not in prefix:
-        # Generic workload (e.g. diffusion): treat every iteration as one
-        # decode-equivalent step so steady-state detection sees a flat line.
-        return {
-            "batch_size": 1,
-            "num_requests": 1,
-            "context_requests": 0,
-            "context_sum": 0,
-            "generation_requests": 1,
-            "generation_sum": 1,
-        }
-
-    # vLLM execute_..._context_..._generation_... annotations: strip parens and the
-    # sq/sk shape letters to a flat token list, then pick counts by index.
-    try:
-        parts = re.sub(r"[sqk]+", "_", name.replace("(", "_").replace(")", "_")).split(
-            "_"
-        )
-        if len(parts) < 10:
-            idx = (2, 3, 6, 7)
-        elif len(parts) < 12:
-            idx = (2, 3, 7, 8)
-        else:
-            idx = (3, 5, 11, 13)
-        ctx_req, ctx_sum, gen_req, gen_sum = (int(parts[i]) for i in idx)
-        return {
-            "batch_size": ctx_sum + gen_sum,
-            "num_requests": ctx_req + gen_req,
-            "context_requests": ctx_req,
-            "context_sum": ctx_sum,
-            "generation_requests": gen_req,
-            "generation_sum": gen_sum,
-        }
-    except (ValueError, IndexError):
-        return {
-            "batch_size": 1,
-            "num_requests": 1,
-            "context_requests": 0,
-            "context_sum": 0,
-            "generation_requests": 1,
-            "generation_sum": 1,
-        }
-
-
-def find_phase_from_window(iter_details: List[dict]) -> dict:
-
-    num_prefill = len(
-        [
-            d
-            for d in iter_details
-            if d.get("context_requests", 0) > 0 and d.get("generation_requests", 0) == 0
-        ]
-    )
-    num_prefilldecode = len(
-        [
-            d
-            for d in iter_details
-            if d.get("context_requests", 0) > 0 and d.get("generation_requests", 0) > 0
-        ]
-    )
-
-    num_decode = len(
-        [
-            d
-            for d in iter_details
-            if d.get("generation_requests", 0) > 0 and d.get("context_requests", 0) == 0
-        ]
-    )
-    avg_batch_size = int(
-        sum(d.get("batch_size", 0) for d in iter_details) / len(iter_details)
-    )
-    avg_concurrency = int(
-        sum(d.get("num_requests", 0) for d in iter_details) / len(iter_details)
-    )
-
-    return {
-        "num_prefill": num_prefill,
-        "num_prefilldecode": num_prefilldecode,
-        "num_decode": num_decode,
-        "avg_bs": avg_batch_size,
-        "avg_conc": avg_concurrency,
-    }
-
-
 def extract_and_save(
     roots: List[List[dict]],
     events: List[dict],
@@ -691,7 +405,7 @@ def extract_and_save(
         print(f"No {prefix} events found in the specified range, skipping extraction")
         return extraction_summary
     for idx, root in zip(indices, selected):
-        iter_details = [get_iter_details_from_name(r["name"], prefix) for r in root]
+        iter_details = iteration_details(root)
         iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = extract_iteration(
             root, events, trace_json, gpu_corr_map, flow_corr_map, meta_events
         )
@@ -720,7 +434,7 @@ def extract_and_save(
             root_name = root[0]["name"]
             is_known_annotation = any(
                 pat.match(root_name)
-                for pat in ANNOTATION_PATTERN + ANNOTATION_PATTERN_BACKUP
+                for pat in ITERATION_PATTERNS + ITERATION_BACKUP_PATTERNS
             )
             if is_known_annotation:
                 name_append = (
@@ -788,22 +502,12 @@ def extract_phases_and_save(
         print("phase extraction only supported for annotation iterations, skipping")
         return extraction_summary
     for root in roots:
-        iter_details = [get_iter_details_from_name(r["name"], prefix) for r in root]
-        phase_details = find_phase_from_window(iter_details)
-        prefilldecode_steps = [
-            r for r, i in zip(root, iter_details) if i.get("context_requests", 0) > 0
-        ]
-        decode_steps = [
-            r
-            for r, i in zip(root, iter_details)
-            if i.get("generation_requests", 0) > 0 and i.get("context_requests", 0) == 0
-        ]
+        iter_details = iteration_details(root)
+        prefilldecode_steps = [r for r, i in zip(root, iter_details) if has_context(i)]
+        decode_steps = [r for r, i in zip(root, iter_details) if is_decode_only(i)]
 
         if len(prefilldecode_steps) > 0:
-            iter_details = [
-                get_iter_details_from_name(r["name"], prefix)
-                for r in prefilldecode_steps
-            ]
+            iter_details = iteration_details(prefilldecode_steps)
             phase_details = find_phase_from_window(iter_details)
 
             iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = (
@@ -836,9 +540,7 @@ def extract_phases_and_save(
                 }
             )
         if len(decode_steps) > 0:
-            iter_details = [
-                get_iter_details_from_name(r["name"], prefix) for r in decode_steps
-            ]
+            iter_details = iteration_details(decode_steps)
             phase_details = find_phase_from_window(iter_details)
             iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = (
                 extract_iteration(
@@ -953,7 +655,7 @@ def compute_reference_pd_ratio(
         window = iter_details[s:e]
         total = len(window)
         total_steps += total
-        pd_count = sum(1 for t in window if t.get("context_requests", 0) > 0)
+        pd_count = sum(1 for t in window if has_context(t))
         total_pd_steps += pd_count
         ratio = pd_count / total if total > 0 else 0.0
         region_stats.append({"start": s, "end": e, "size": total, "pd_ratio": ratio})
@@ -999,7 +701,7 @@ def divide_phases_and_save(
         Pre-computed steady-state region list as ``(start, end)`` index pairs.
         Pass ``[(0, len(iteration_roots))]`` to treat the entire slice as steady state.
     """
-    iter_details = [get_iter_details_from_name(r["name"]) for r in iteration_roots]
+    iter_details = iteration_details(iteration_roots)
     regions = steady_state_regions
     print(f"[divide-phases] Steady-state regions: {regions}")
 
@@ -1009,9 +711,9 @@ def divide_phases_and_save(
         for idx in range(s, e):
             detail = iter_details[idx]
             root = iteration_roots[idx]
-            if detail.get("context_requests", 0) > 0:
+            if has_context(detail):
                 steady_steps.append(("prefilldecodemix", root))
-            elif detail.get("generation_requests", 0) > 0:
+            elif has_generation(detail):
                 steady_steps.append(("decode_only", root))
             # steps that are neither (e.g. idle) are skipped
 
@@ -1053,9 +755,7 @@ def divide_phases_and_save(
             chunk_idx = do_chunk_idx
             do_chunk_idx += 1
 
-        phase_details = find_phase_from_window(
-            [get_iter_details_from_name(r["name"]) for r in chunk_roots]
-        )
+        phase_details = find_phase_from_window(iteration_details(chunk_roots))
         name_append = (
             f"chunk{chunk_idx}_"
             f"steps{len(chunk_roots)}_"
@@ -1128,7 +828,7 @@ def find_steady_state_window(
     ``"max_prefilldecode"``
         Most-PD window: sub-window with highest pd_ratio.
     """
-    iter_details = [get_iter_details_from_name(r["name"]) for r in iteration_roots]
+    iter_details = iteration_details(iteration_roots)
     regions = steady_state_regions
     global_max = max(t["num_requests"] for t in iter_details)
 
@@ -1186,16 +886,12 @@ def find_steady_state_window(
 
     def _count_mixed(window: List[dict]) -> int:
         """Count truly-mixed steps (both context and generation requests > 0)."""
-        return sum(
-            1
-            for t in window
-            if t.get("context_requests", 0) > 0 and t.get("generation_requests", 0) > 0
-        )
+        return sum(1 for t in window if is_mixed(t))
 
     if (e - s) >= num_steps:
         for s1 in range(s, e - num_steps + 1, step):
             window = iter_details[s1 : s1 + num_steps]
-            pd_count = sum(1 for t in window if t.get("context_requests", 0) > 0)
+            pd_count = sum(1 for t in window if has_context(t))
             candidates.append(
                 {
                     "start": s1,
@@ -1209,7 +905,7 @@ def find_steady_state_window(
     else:
         # Region is smaller than num_steps — use the whole region
         window = iter_details[s:e]
-        pd_count = sum(1 for t in window if t.get("context_requests", 0) > 0)
+        pd_count = sum(1 for t in window if has_context(t))
         candidates.append(
             {
                 "start": s,
@@ -1261,12 +957,7 @@ def find_steady_state_window(
         do_runs: List[Tuple[int, int]] = []  # (start, end) in iter_details coords
         run_start: Optional[int] = None
         for idx in range(largest_start, largest_end):
-            step_info = iter_details[idx]
-            is_do = (
-                step_info.get("generation_requests", 0) > 0
-                and step_info.get("context_requests", 0) == 0
-            )
-            if is_do:
+            if is_decode_only(iter_details[idx]):
                 if run_start is None:
                     run_start = idx
             else:
@@ -1300,8 +991,7 @@ def find_steady_state_window(
         pd_runs: List[Tuple[int, int]] = []  # (start, end) in iter_details coords
         run_start: Optional[int] = None
         for idx in range(largest_start, largest_end):
-            is_pd = iter_details[idx].get("context_requests", 0) > 0
-            if is_pd:
+            if has_context(iter_details[idx]):
                 if run_start is None:
                     run_start = idx
             else:
@@ -1419,7 +1109,6 @@ def main():
     execution_details = []
     RUNTIME_EVENT_PATTERN = [
         re.compile(r"vllm/v1/worker/gpu_model_runner\.py\(\d+\): _dummy_run"),
-        ## re.compile(r"/sgl-workspace/sglang/python/sglang/srt/managers/scheduler\.py\(\d+\): run_batch"),
         re.compile(
             r"/sgl-workspace/sglang/python/sglang/srt/model_executor/cuda_graph_runner.py\(\d+\): _capture_graph"
         ),
@@ -1433,7 +1122,9 @@ def main():
 
     # Find iterations and dummy runs
     iteration_roots = find_iteration_roots(events)
-    dummy_roots = find_events_by_pattern(events, RUNTIME_EVENT_PATTERN, "_dummy_run")
+    dummy_roots = find_events_by_patterns(
+        events, RUNTIME_EVENT_PATTERN, cat=None, label="_dummy_run", verbose=True
+    )
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -1465,6 +1156,7 @@ def main():
 
         # Determine the working set and compute steady-state regions once,
         # shared across all downstream calls.
+        steady_state_regions: List[Tuple[int, int]] = []
         if args.iterations != "all":
             working_roots = iteration_roots[start:end]
             steady_state_regions: List[Tuple[int, int]] = [(0, end - start)]
@@ -1474,9 +1166,7 @@ def main():
         else:
             working_roots = iteration_roots
             if args.find_steady_state or args.divide_phases:
-                _iter_details = [
-                    get_iter_details_from_name(r["name"]) for r in working_roots
-                ]
+                _iter_details = iteration_details(working_roots)
                 steady_state_regions, _ = identify_steady_state_regions(
                     _iter_details, args.num_steps
                 )

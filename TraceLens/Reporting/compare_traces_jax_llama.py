@@ -527,7 +527,7 @@ def summarize_one(
     )
 
     top_kernels = top_stats_by_key(stream, key_fn=lambda e: e.name, top_n=top_kernels_n)
-    top_ops = top_stats_by_key(stream, key_fn=lambda e: get_path(e), top_n=top_ops_n)
+    top_ops = top_stats_by_key(stream, key_fn=get_path, top_n=top_ops_n)
 
     return Summary(
         label=label,

@@ -11,9 +11,10 @@ import json
 import subprocess
 
 import pytest
-import torch
-import torchvision.models as torchvision_models
-from torch.profiler import profile, record_function, ProfilerActivity
+
+torch = pytest.importorskip("torch")
+torchvision_models = pytest.importorskip("torchvision").models
+from torch.profiler import profile, ProfilerActivity
 import os
 from TraceLens import EventReplayer, TreePerfAnalyzer, GPUEventAnalyser
 
@@ -237,6 +238,7 @@ def compare_event_replay(perf_analyzer, list_unique_evts, verbose=False):
     return df, list_replay_ir
 
 
+@pytest.mark.gpu
 def test_resnet(full_run_trace_path=None, output_csv_path=None):
     """
     Run and profile a simple ResNet model
