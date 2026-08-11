@@ -7,7 +7,7 @@ index 951f35495e..14bd9f921c 100644
      # Only profile these stages and ignore others
      profile_stages: Optional[List[str]] = None
 +    # Add iteration-level annotations (KV / request aggregates) for roofline-style analysis
-+    roofline_annotations: bool = False
++    detailed_annotations: bool = False
 +    # Whether to enable shape discovery (Triton / FlashInfer kernel metadata)
 +    shape_discovery: bool = False
  
@@ -18,7 +18,7 @@ index 951f35495e..14bd9f921c 100644
      profile_prefix: Optional[str] = None
      profile_stages: Optional[List[str]] = None
 +    # Add iteration-level annotations (KV / request aggregates) for roofline-style analysis
-+    roofline_annotations: bool = False
++    detailed_annotations: bool = False
 +    # Whether to enable shape discovery (Triton / FlashInfer kernel metadata)
 +    shape_discovery: bool = False
  
