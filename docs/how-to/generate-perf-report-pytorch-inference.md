@@ -226,14 +226,14 @@ during the benchmark. Pass both paths to the report generator using
 
 1. Pass `shape_discovery=True` to enable shape discovery and registration for
    operations not covered by the default SGLang profile.
-2. Pass `roofline_annotations=True` to annotate the trace with the detailed
+2. Pass `detailed_annotations=True` to annotate the trace with the detailed
    information used for roofline analysis.
 3. To profile the graph-capture phase, pass the `--enable-profile-cuda-graph`
    server argument at startup. This saves one trace file per batch size but misses
    shape information for some operations; add
    `--enable-shape-discovery-for-cuda-graph-profile` for more diverse coverage.
 4. On SGLang **0.5.13 and later**, writing the per-batch-size graph-capture trace
-   files to disk is opt-in via the `SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE=1`
+   files to disk is opt-in via the `SGLANG_GRAPH_BATCH_CAPTURE=1`
    environment variable (default off). Set it *in addition to*
    `--enable-profile-cuda-graph`; without it the capture profiler still runs (for
    the summary tables and memory snapshot) but no per-batch-size trace is written to
@@ -244,7 +244,7 @@ during the benchmark. Pass both paths to the report generator using
 On SGLang 0.5.13 / 0.5.14 the graph-capture shape profiling is intentionally
 disabled for the EAGLE/MTP speculative graphs (and, on 0.5.14, the target-verify
 graph) to avoid a GPU fault in the speculative overlap decode, so
-`SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE` only yields capture traces for the
+`SGLANG_GRAPH_BATCH_CAPTURE` only yields capture traces for the
 non-speculative graphs there. Full MTP graph-capture profiling works on 0.5.15+.
 ```
 
