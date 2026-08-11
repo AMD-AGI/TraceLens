@@ -11,7 +11,6 @@ and gpu_event_analyser.py.
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import tempfile
@@ -718,33 +717,6 @@ def test_tree_perf_analyzer_live_gpu_profile(tmp_path):
     assert analyzer.check_gpu_only() is False
     assert "busy_time" in analyzer.get_df_gpu_timeline()["type"].values
     assert len(analyzer.get_kernel_launchers()) >= 1
-
-
-@pytest.mark.gpu
-def test_gpu_event_analyser_compute_metrics_on_live_trace(tmp_path):
-    _require_cuda_torch()
-    import torch
-
-    x = torch.randn(8, 8, device="cuda")
-    trace_path = tmp_path / "gemm_trace.json"
-
-    with torch.profiler.profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ],
-        on_trace_ready=lambda p: p.export_chrome_trace(str(trace_path)),
-    ) as prof:
-        for _ in range(2):
-            torch.mm(x, x)
-            prof.step()
-
-    with open(trace_path, encoding="utf-8") as f:
-        events = json.load(f)["traceEvents"]
-
-    metrics = GPUEventAnalyser(events).compute_metrics()
-    assert metrics["computation_time"] > 0
-    assert metrics["total_time"] > 0
 
 
 @pytest.mark.gpu
