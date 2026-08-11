@@ -128,12 +128,16 @@ index b06d163..e082927 100644
  
  
      def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
-@@ -591,12 +592,13 @@ class xFuserModel(abc.ABC):
+@@ -591,14 +592,22 @@ class xFuserModel(abc.ABC):
              active=self.config.profile_active,
          )
          num_repetitions = self.config.profile_wait + self.config.profile_warmup + self.config.profile_active
 +        with_stack = self.config.profile_capture_phase
- 
++        batch_size = input_args.get("num_images_per_prompt", 1)
++        height = input_args.get("height", 0)
++        width = input_args.get("width", 0)
++        replay_annotation = f"execute_diffusion_{batch_size}_{height}x{width}"
+
          with profile(
              activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
              schedule=schedule,
@@ -143,7 +147,10 @@ index b06d163..e082927 100644
          ) as profile_object:
              for iteration in range(num_repetitions):
                  log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
-@@ -687,6 +689,37 @@ class xFuserModel(abc.ABC):
+-                out, elapsed_time = self._run_timed_pipe(input_args)
++                with torch.profiler.record_function(replay_annotation):
++                    out, elapsed_time = self._run_timed_pipe(input_args)
+@@ -687,6 +697,35 @@ class xFuserModel(abc.ABC):
          elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
          return out, elapsed_time
  

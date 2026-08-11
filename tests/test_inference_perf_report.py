@@ -250,17 +250,12 @@ def test_inference_perf_report(
     graph_tree = None
     if capture_folder:
         metadata_json_path = os.path.join(capture_folder, "execution_details.json")
-        capture_files = glob.glob(os.path.join(capture_folder, "*.json.gz"))
-        single_capture_trace = (
-            not os.path.exists(metadata_json_path) and len(capture_files) == 1
-        )
-        if not single_capture_trace:
+        if not os.path.exists(metadata_json_path):
             classify_graph_capture_trace(capture_folder)
         graph_tree = merge_capture_trace_into_graph(
             capture_folder,
             metadata_json_path,
             profile_path,
-            single_capture_trace=single_capture_trace,
         )
 
     # Call the function under test — write CSVs to a temp directory
@@ -397,7 +392,7 @@ def test_xdit_capture_merge():
 
     graph_perf = TreePerfAnalyzer.from_file(profile_path, add_python_func=True)
     exec_map = build_execution_graph_root_map(
-        graph_perf.tree, single_capture_trace=True
+        graph_perf.tree
     )
     _, graph_roots = exec_map[0]
 

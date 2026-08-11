@@ -565,7 +565,7 @@ def find_graph_roots_under_execution(execution_root, graphlaunch_events):
     return graph_roots
 
 
-def build_execution_graph_root_map(graph_tree, single_capture_trace=False):
+def build_execution_graph_root_map(graph_tree):
     """Build a list of ``(execution_root, [graph_roots])`` for the graph tree."""
     execution_roots = find_execution_roots(graph_tree)
     print("Found {} execution roots in graph tree".format(len(execution_roots)))
@@ -575,7 +575,7 @@ def build_execution_graph_root_map(graph_tree, single_capture_trace=False):
         e for e in graph_tree.events if "graphlaunch" in e.get("name", "").lower()
     ]
 
-    if not execution_roots and single_capture_trace:
+    if not execution_roots:
         graphlaunch_events.sort(key=lambda x: x.get("ts", 0))
         if graphlaunch_events:
             return [({"name": "fallback"}, graphlaunch_events)]
@@ -674,21 +674,14 @@ def merge_capture_trace_into_graph(
     capture_folder: str = None,
     metadata_json_path: str = None,
     graph_tree_filepath: str = None,
-    single_capture_trace: bool = False,
 ) -> "TraceToTree":
     """Merge capture trace information into a graph replay trace.
 
     Args:
         capture_folder: Directory containing capture trace files.
         metadata_json_path: Path to ``execution_details.json`` metadata
-            index (vLLM/SGLang).  Required when *single_capture_trace* is
-            False.
+            index.
         graph_tree_filepath: Path to the graph-replay timing trace.
-        single_capture_trace: When True, the folder is expected to contain
-            a single ``.json.gz`` capture trace (diffusion / general).
-            Its capture roots are paired with all graph roots directly.
-            When False (default), ``metadata_json_path`` is used for
-            multi-variant matching by batch size.
 
     Returns:
         Augmented graph_tree with capture information merged in, or ``None``
@@ -697,28 +690,11 @@ def merge_capture_trace_into_graph(
     graph_tree = _load_trace_tree_from_file(graph_tree_filepath, add_python_func=True)
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
 
-    execution_graph_root_map = build_execution_graph_root_map(
-        graph_tree, single_capture_trace=single_capture_trace
-    )
+    execution_graph_root_map = build_execution_graph_root_map(graph_tree)
 
-    # ── Load capture data ──
-    if single_capture_trace:
-        capture_files = sorted(glob.glob(os.path.join(capture_folder, "*.json.gz")))
-        if not capture_files:
-            warnings.warn(
-                "No capture traces found in {}".format(capture_folder),
-                stacklevel=2,
-            )
-            return graph_tree
-        filepath = capture_files[0]
-        key = ("single", os.path.abspath(filepath))
-        capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
-            key, filepath
-        )
-    else:
-        capture_map, capture_batch_sizes = load_capture_folder(
-            capture_folder, metadata_json_path
-        )
+    capture_map, capture_batch_sizes = load_capture_folder(
+        capture_folder, metadata_json_path
+    )
 
     # ── Per-execution-root merge loop ──
     merge_failed = False
@@ -733,7 +709,8 @@ def merge_capture_trace_into_graph(
             continue
 
         # ── Resolve capture tree + roots for this execution root ──
-        if not single_capture_trace:
+        is_fallback = execution_root.get("name") == "fallback"
+        if not is_fallback:
             batch_size = find_execution_details(execution_root)
             if batch_size is None:
                 print(
@@ -763,10 +740,21 @@ def merge_capture_trace_into_graph(
             capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
                 key, filepath
             )
-        # Build (capture_root, graph_root) pairs.  In single-capture-trace
-        # mode, the same capture root is applied to every graph root (all
-        # graph launches replay the same captured graph).
-        if single_capture_trace:
+        else:
+            # No annotation roots found; use the first capture entry from
+            # execution_details.json and pair its roots with all graph roots.
+            first_key = next(iter(capture_map))
+            filepath = capture_map[first_key]
+            key = (first_key, os.path.abspath(filepath))
+            capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
+                key, filepath
+            )
+
+        # Build (capture_root, graph_root) pairs.  When there is a single
+        # capture root (e.g. diffusion where one captured graph is replayed
+        # across many denoising steps), map it to every graph root.
+        # Otherwise pair 1:1 positionally (vLLM/SGLang).
+        if len(capture_roots) == 1:
             pairs = [(capture_roots[0], g) for g in graph_roots]
             data = [capture_root_data[0]] * len(graph_roots)
         else:
