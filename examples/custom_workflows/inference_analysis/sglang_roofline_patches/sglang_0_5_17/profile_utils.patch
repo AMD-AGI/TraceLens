@@ -1,0 +1,124 @@
+diff --git a/python/sglang/srt/utils/profile_utils.py b/python/sglang/srt/utils/profile_utils.py
+index 562ffd2..f18e8ae 100644
+--- a/python/sglang/srt/utils/profile_utils.py
++++ b/python/sglang/srt/utils/profile_utils.py
+@@ -8,10 +8,11 @@ from typing import Callable, Dict, List, Optional
+ 
+ import torch
+ 
++import sglang.srt.utils.kernel_shape_profiler as kernel_shape_profiler
+ from sglang.srt.distributed.parallel_state_wrapper import ParallelState
+ from sglang.srt.environ import envs
+ from sglang.srt.managers.io_struct import ProfileReqOutput
+-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
++from sglang.srt.model_executor.forward_batch_info import ForwardMode
+ from sglang.srt.platforms import current_platform
+ from sglang.srt.runtime_context import get_device
+ from sglang.srt.utils import is_npu
+@@ -31,29 +32,6 @@ if _is_npu:
+ logger = logging.getLogger(__name__)
+ 
+ 
+-def export_cuda_graph_capture_trace(prof_context, *, runner_name: str, tp_rank: int):
+-    """Persist a CUDA-graph capture profiler trace (chrome trace) to disk.
+-
+-    Opt-in via ``SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE`` (no-op otherwise). The
+-    capture profiler must have run with ``record_shapes=True`` so the trace can
+-    be inspected offline as a per-kernel shape/identity record. The file lands in
+-    ``<SGLANG_TORCH_PROFILER_DIR>/graph_capture_profile/`` and is namespaced by
+-    runner class and TP rank so concurrent capture passes (e.g. EAGLE3
+-    target/draft/draft-extend) and ranks don't overwrite each other.
+-    """
+-    if not envs.SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE.get():
+-        return
+-    output_dir = os.path.join(
+-        envs.SGLANG_TORCH_PROFILER_DIR.get(), "graph_capture_profile"
+-    )
+-    os.makedirs(output_dir, exist_ok=True)
+-    path = os.path.join(
+-        output_dir, f"cuda_graph_capture-{runner_name}-TP-{tp_rank}.json.gz"
+-    )
+-    prof_context.export_chrome_trace(path)
+-    logger.info(f"CUDA graph capture trace saved to: {path}")
+-
+-
+ class ProfileManager:
+     def __init__(self, ps: ParallelState, cpu_group):
+         self.stage_based_trigger = _StageBasedTrigger(
+@@ -87,7 +65,12 @@ class ProfileManager:
+         merge_profiles: bool,
+         profile_prefix: str,
+         profile_stages: Optional[List[str]] = None,
++        shape_discovery: bool = False,
++        roofline_annotations: bool = False,
+     ):
++        # Roofline step-span folding is toggled on the model_runner by the
++        # scheduler's profiler manager (via set_roofline_annotations), so the
++        # flag only needs to be accepted here for the V2 configure path.
+         # not supported yet
+         assert start_step is None
+         assert (
+@@ -107,6 +90,7 @@ class ProfileManager:
+             output_dir=output_dir,
+             output_prefix=profile_prefix,
+             profile_id=profile_id,
++            shape_discovery=shape_discovery,
+         )
+ 
+         self.stage_based_trigger.configure(
+@@ -291,11 +275,19 @@ class _ProfilerConcreteBase(_ProfilerBase):
+ 
+ 
+ class _ProfilerTorch(_ProfilerConcreteBase):
+-    def __init__(self, with_stack: bool, record_shapes: bool, activities, **kwargs):
++    def __init__(
++        self,
++        with_stack: bool,
++        record_shapes: bool,
++        activities,
++        shape_discovery: bool = False,
++        **kwargs,
++    ):
+         super().__init__(**kwargs)
+         self.with_stack = with_stack
+         self.record_shapes = record_shapes
+         self.activities = activities
++        self.shape_discovery = shape_discovery
+ 
+     def start(self):
+         activity_map = {
+@@ -324,12 +316,20 @@ class _ProfilerTorch(_ProfilerConcreteBase):
+                 else torch_npu.profiler.tensorboard_trace_handler(self.output_dir)
+             ),
+         )
++
++        if self.record_shapes and self.shape_discovery:
++            kernel_shape_profiler.enable()
++
+         self.torch_profiler.start()
+ 
+     def stop(self):
+         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+ 
+         self.torch_profiler.stop()
++
++        if self.record_shapes and self.shape_discovery:
++            kernel_shape_profiler.disable()
++
+         if not _is_npu:
+             # Build filename with only non-zero ranks to maintain backward compatibility
+             filename_parts = [self.profile_id, f"TP-{self.ps.tp_rank}"]
+@@ -432,13 +432,3 @@ class _ProfilerRPD(_ProfilerConcreteBase):
+             from sglang.srt.utils.rpd_utils import rpd_to_chrome_trace
+ 
+             rpd_to_chrome_trace("trace.rpd", self.rpd_profile_path)
+-
+-
+-def build_step_span_name(forward_batch: ForwardBatch) -> str:
+-    """Build a profile-trace span name for one forward step."""
+-    mode = forward_batch.forward_mode
+-    bs = forward_batch.batch_size
+-    if mode == ForwardMode.EXTEND:
+-        ext_toks = forward_batch.extend_num_tokens or 0
+-        return f"step[EXTEND bs={bs} toks={ext_toks}]"
+-    return f"step[{mode.name} bs={bs}]"

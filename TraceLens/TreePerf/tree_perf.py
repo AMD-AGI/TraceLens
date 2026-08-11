@@ -1093,8 +1093,12 @@ class TreePerfAnalyzer:
         include_args=False,
         args_cols=None,
     ):
-        if args_cols is None:
-            args_cols = ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]
+        effective_args_cols = args_cols or [
+            "Input Dims",
+            "Input type",
+            "Input Strides",
+            "Concrete Inputs",
+        ]
 
         def list_to_tuple(obj):
             if isinstance(obj, list):
@@ -1117,7 +1121,7 @@ class TreePerfAnalyzer:
             }
             if include_first_occurrence_time:
                 metrics_event["ts"] = event.get("ts")
-            for arg in ["Input Dims", "Input type", "Input Strides", "Concrete Inputs"]:
+            for arg in effective_args_cols:
                 if arg in event["args"]:
                     metrics_event[arg] = list_to_tuple(event["args"][arg])
                 else:
@@ -3336,7 +3340,6 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         """
         backend_config = event.get("metadata", {}).get("backend_config", None)
         if backend_config is None:
-            beta = 0
             raise ValueError("Backend config information missing!", event["metadata"])
         else:
             dict_backend_config = json.loads(
@@ -3603,11 +3606,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         self, event, bwd=False, non_data_mov=False, perf_model_class=None
     ):
         # Select the appropriate dictionary for FLOPS and memory functions
-        if perf_model_class is not None:
-            perf_model_name = None
-        else:
-            perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)
+        perf_model_name = None
         if perf_model_class is None:
+            perf_model_name = JaxTreePerfAnalyzer.get_event_perf_model_name(event)
             perf_model_class = self.jax_op_to_perf_model_class_map.get(
                 perf_model_name, None
             )

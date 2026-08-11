@@ -71,11 +71,13 @@ benchmark:
 
 ### Step 1b: Check Docker Image for Profiling Patches
 
-After reading the config, ask the user whether their Docker image already includes TraceLens profiling patches. These patches are required for capturing kernel-level detail (shapes, roofline data, call stacks) in both eager and graph-mode traces.
+After reading the config, work out whether the image needs profiling patches at all. The patches only exist to expose the profiler options used in Step 2b; TraceLens itself does **not** need to be installed inside the container, because the server only writes traces and every analysis step in this workflow runs on the host against the mounted output directory.
 
-Ask:
+**For vLLM, check the version first.** Both profiler options ship in upstream vLLM from **v0.26.0** onwards ([vllm-project/vllm#37524](https://github.com/vllm-project/vllm/pull/37524)), so a stock v0.26.0+ image is ready as-is — skip the rest of this step and go to Step 2. Only **v0.14-v0.25** need a patched image.
 
-> "Does the Docker image in your config (or the default image Magpie will select) already have TraceLens profiling patches applied? If you're unsure, I can build a patched image for you."
+If the framework is SGLang, or the vLLM version is below v0.26.0 or unknown, ask:
+
+> "Does the Docker image in your config (or the default image Magpie will select) already have the profiling patches applied? If you're unsure, I can build a patched image for you."
 
 #### If the user's image is already patched
 
@@ -107,6 +109,8 @@ ssh <node> "cd <TraceLens_repo> && \
 ```
 
 Where `<version_tag>` is one of the `vXX` tags listed in the script's `case` statement.
+
+The script only carries arms for versions that still need a patch, and rejects anything newer with a message saying the options are upstream. If the user asks for a version it does not list, do not look for a workaround — tell them to run the stock upstream image for that version. The profiler flags in Step 2b are identical for patched and upstream images, so nothing else in this workflow changes.
 
 **For SGLang (`framework: sglang`):**
 
@@ -184,13 +188,13 @@ Add these flags to `EXTRA_VLLM_ARGS` in the user's YAML config (append to any ex
 ```yaml
 benchmark:
   envs:
-    EXTRA_VLLM_ARGS: "... --profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces --profiler-config.detailed_trace_annotation True"
+    EXTRA_VLLM_ARGS: "... --profiler-config.capture_torch_profiler True --profiler-config.detailed_trace_annotation True"
 ```
 
-Use the literal path `/workspace/torch_trace/capture_traces` rather than `${TRACE_DIR}/capture_traces`. Bash does not recursively expand variables — `$EXTRA_VLLM_ARGS` is word-split but its contents are not re-evaluated for variable references, so `${TRACE_DIR}` would be passed as a literal string to vLLM. For `--run-mode local`, replace `/workspace/torch_trace` with the actual host-side trace directory.
-
-- `--profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces` — enables graph-capture tracing. vLLM writes separate traces for CUDA graph capture phases into this directory, which are needed for downstream TraceLens analysis of graph-replayed operations.
+- `--profiler-config.capture_torch_profiler True` — enables graph-capture tracing. vLLM writes separate traces for the CUDA graph capture phases into `<torch_profiler_dir>/capture_traces` (i.e. `/workspace/torch_trace/capture_traces` under Magpie's container mount), which are needed for downstream TraceLens analysis of graph-replayed operations.
 - `--profiler-config.detailed_trace_annotation True` — enables detailed annotations in the trace (iteration boundaries, phase labels, scheduling metadata). These annotations are required by `split_inference_trace_annotation` for accurate trace splitting.
+
+Both flags take the same form on every supported version: they come from the TraceLens patch on vLLM **v0.14-v0.25** and from upstream vLLM on **v0.26.0 and later**.
 
 ##### Common SGLang flags
 
@@ -334,7 +338,7 @@ Replace `10` with a different multiplier if the user requests it. Without this f
 ##### Option B: Profile the entire benchmark
 
 Do **not** add `start_step`/`delay_iterations` args or increase `num_prompts`. The common flags from the shared section above **still apply** and must be present:
-- **vLLM:** No `delay_iterations` / `max_iterations` — the profiler captures everything from start to finish. The common vLLM flags (`capture_torch_profiler_dir`, `detailed_trace_annotation`) must be in `EXTRA_VLLM_ARGS`.
+- **vLLM:** No `delay_iterations` / `max_iterations` — the profiler captures everything from start to finish. The common vLLM flags (`capture_torch_profiler`, `detailed_trace_annotation`) must be in `EXTRA_VLLM_ARGS`.
 - **SGLang:** `num_steps` stays at `1` (or user can manually increase it without setting `start_step`). The common SGLang flags (env vars `SGLANG_PROFILE_WITH_STACK`/`SGLANG_PROFILE_RECORD_SHAPE`, `EXTRA_SGLANG_ARGS` with graph-capture flags, and the `shape_discovery`/`roofline_annotations` patch to `benchmark_serving.py`) must all be applied.
 - `num_prompts` stays at `CONC` — keeps the trace to a manageable size since every iteration is profiled.
 
