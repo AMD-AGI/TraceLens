@@ -1607,7 +1607,8 @@ def _layout_fork_join_branch(
         tail_pos.top_y = join_pos.bottom - v_gap
 
     side_pos = positions[cluster.side_source]
-    side_pos.top_y = join_pos.top_y + (join_pos.height - side_pos.height) / 2
+    align_pos = main_branch_pos
+    side_pos.top_y = align_pos.top_y + (align_pos.height - side_pos.height) / 2
     side_pos.cx = _node_content_right(join_pos) + h_gap + side_pos.width / 2
 
     if inner_frame_indices:
@@ -1834,9 +1835,23 @@ def _clear_side_branches_from_gate_frame(
             cluster.join,
             cluster.tail,
         }
+        cluster_min_left = min_left
+        side_left = _node_content_left(positions[cluster.side_source])
+        for frame in graph.inline_frames:
+            members = set(frame.node_indices)
+            if cluster.side_source in members:
+                continue
+            if not members.intersection(
+                {cluster.main_source, cluster.main_branch, cluster.join, cluster.tail}
+            ):
+                continue
+            frame_right = max(_node_content_right(positions[index]) for index in frame.node_indices)
+            required_left = frame_right + INLINE_FRAME_PAD + min_horizontal_block_gap()
+            if frame.frame_id == "shared_experts" or side_left < required_left:
+                cluster_min_left = max(cluster_min_left, required_left)
         cluster_left = min(_node_content_left(positions[index]) for index in cluster_indices)
-        if cluster_left < min_left:
-            delta = min_left - cluster_left
+        if cluster_left < cluster_min_left:
+            delta = cluster_min_left - cluster_left
             for index in cluster_indices:
                 positions[index].cx += delta
 

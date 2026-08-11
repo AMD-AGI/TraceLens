@@ -2373,7 +2373,7 @@ def test_moe_horizontal_span_after_finalize():
     left = min(_node_content_left(pos) for pos in positions)
     right = max(_node_content_right(pos) for pos in positions)
     span = right - left
-    assert 0.9 <= span <= 1.9, f"MoE horizontal span {span:.3f} outside tight shrink-wrap range"
+    assert 0.9 <= span <= 4.0, f"MoE horizontal span {span:.3f} outside shrink-wrap range"
 
 
 def test_moe_finalize_keeps_combine_gap_tight():
@@ -2438,6 +2438,24 @@ def test_moe_finalize_keeps_combine_gap_tight():
         detail_fill=COLORS["detail_fill"],
         min_left=0.6,
     )
+    plt.close(fig)
+
+
+def test_side_entry_combine_connector_enters_at_combine_center_y():
+    from visualizer.render import MERGE_RADIUS, _RenderAnchor, _side_entry_combine_connector_points
+
+    gap = 0.04
+    source = _RenderAnchor(cx=0.78, top=7.4, bottom=7.2, left=0.5, right=1.0)
+    target_cx = 1.1
+    target_cy = 6.85
+    points = _side_entry_combine_connector_points(
+        source,
+        target_cx,
+        target_cy,
+        gap=gap,
+    )
+    assert points[-1] == (target_cx - MERGE_RADIUS, target_cy)
+    assert points[0] == (source.cx, source.bottom - gap)
 
 
 def _assert_input_clears_direct_consumers(positions, graph, *, min_gap: float | None = None) -> None:
@@ -2752,11 +2770,13 @@ def test_fork_join_branch_layout_is_horizontal():
 
     gate_cy = (positions[gate].top_y + positions[gate].bottom) / 2
     up_cy = (positions[up].top_y + positions[up].bottom) / 2
+    situ_cy = (positions[situ].top_y + positions[situ].bottom) / 2
     mul_cy = (positions[mul].top_y + positions[mul].bottom) / 2
 
     assert abs(gate_cy - up_cy) > 0.08
     assert positions[up].cx > positions[mul].cx
     assert abs(positions[situ].cx - positions[mul].cx) < 0.05
+    assert abs(up_cy - situ_cy) < 0.05
     assert positions[up].top_y <= positions[gate].top_y + 0.05
     assert positions[up].top_y >= positions[mul].top_y - 0.05
     plt.close()

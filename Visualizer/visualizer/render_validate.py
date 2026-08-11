@@ -1348,6 +1348,12 @@ def finalize_detail_layout(
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    _separate_parallel_tiles_from_inline_frames(
+        positions,
+        elements,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+    )
     validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden).raise_if_invalid()
     plan = _finalize_spine_aligned_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
