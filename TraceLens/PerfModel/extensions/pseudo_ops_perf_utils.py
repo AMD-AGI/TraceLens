@@ -52,6 +52,7 @@ def get_pseudo_op_mappings():
         "aiter::mxfp4_moe_sort_hip": moe_perf_model_extensions.MoeSortScatterGather,
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
+        "vllm::rocm_aiter_sparse_attn_indexer": attention_perf_model_extensions.rocm_aiter_sparse_attn_indexer,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
         "aiter::fmha_v3_varlen_fwd": attention_perf_model_extensions.aiter_fmha_v3_varlen_fwd,
         "aiter::mha_batch_prefill": attention_perf_model_extensions.aiter_mha_batch_prefill,
