@@ -24,6 +24,8 @@ from visualizer.ast_analyze import (
     attention_kernel_label,
     displays_as_linear,
     expand_conditional_block_components,
+    is_kda_attention_step,
+    kernel_name_from_step_details,
     _build_components,
     _classify_role,
     _label_for,
@@ -82,11 +84,14 @@ def block_purpose(node: BlockNode) -> str | None:
     """Generic one-line description of what a block computes."""
     if node.class_name == "AttentionOp" or node.attr_name == SYNTHETIC_ATTENTION:
         if any("delta rule" in detail.lower() for detail in node.details):
-            return "\n".join(detail for detail in node.details if not detail.startswith("kernel:"))
+            return node.details[0] if node.details else None
 
     if node.class_name == "OutputGate" or (node.role == "gate" and node.details):
         if node.details:
-            return "\n".join(node.details)
+            return node.details[0]
+
+    if node.class_name == "DeltaAttention":
+        return node.details[0] if node.details else None
 
     for detail in node.details:
         cleaned = detail.strip()
@@ -224,8 +229,8 @@ def inline_block_frame_label(block: BlockNode) -> str:
 
 
 def inline_block_frame_sublabel(block: BlockNode) -> str | None:
-    """Optional purpose line shown under an inline frame label."""
-    return block_purpose(block)
+    """Expanded composites show step labels only; omit frame purpose lines."""
+    return None
 
 
 def is_single_function_tree(node: BlockNode) -> bool:
@@ -361,7 +366,7 @@ class Branch:
 
     label: str
     steps: list[BlockNode]
-    port_style: PortStyle = "floating"
+    port_style: PortStyle | None = None
 
     @property
     def port_label(self) -> str:
@@ -535,7 +540,7 @@ def _output_gate_details(
     consumer, spec = _gate_side_consumer(side_inputs, gate_attr)
     inline_activation = gate_activations.get(gate_attr)
 
-    lines: list[str] = [f"g = {gate_attr}(hidden_states)"]
+    lines: list[str] = [f"g = Linear {gate_attr}(hidden_states)"]
 
     if consumer_class == "FusedRMSNormGated" or (consumer and "Gated" in (consumer_class or "")):
         lines.append("reshape → [num_heads, head_dim]")
@@ -562,27 +567,82 @@ def _output_gate_details(
     return lines
 
 
+def _delta_attention_block_node(
+    *,
+    forward_order: int | None,
+    details: list[str],
+    attention_inputs: dict[str, list[str]] | None = None,
+) -> BlockNode:
+    """Expand KDA delta attention into an inline straight-line pipeline."""
+    kernel = kernel_name_from_step_details(details)
+    extra_inputs: list[str] = []
+    if attention_inputs:
+        extra_inputs = [label for label in attention_inputs if label not in {"Q", "K", "V"}]
+    input_ports = f"Q,K,V,{','.join(extra_inputs)}" if extra_inputs else "Q,K,V"
+    return BlockNode(
+        attr_name=SYNTHETIC_ATTENTION,
+        class_name="DeltaAttention",
+        role="attention",
+        label=attention_kernel_label(details),
+        forward_order=forward_order,
+        details=[f"linear recurrent delta attention · {kernel or 'chunk_kda'}"],
+        is_basic=False,
+        children=[
+            _leaf_node(
+                attr_name="@attn_merge",
+                class_name="AttentionMerge",
+                forward_order=0,
+                label="Merge inputs",
+                details=[f"ports: {input_ports}"],
+            ),
+            _leaf_node(
+                attr_name="@attn_delta",
+                class_name="DeltaUpdate",
+                forward_order=1,
+                label="Delta state S",
+                details=["S ← (I−βkkᵀ)Diag(α)S + βkvᵀ"],
+            ),
+            _leaf_node(
+                attr_name="@attn_chunk",
+                class_name="ChunkScan",
+                forward_order=2,
+                label="Chunk scan",
+                details=[f"kernel: {kernel or 'chunk_kda'}"],
+            ),
+        ],
+    )
+
+
 def _output_gate_block_node(
     linear_step: BlockNode,
     activation: str | None,
     details: list[str] | None = None,
+    *,
+    consumer_class: str | None = None,
 ) -> BlockNode:
     """Expand a parallel output gate into its own nested sub-diagram."""
     gate_details = list(details or [])
+    linear_label = (
+        "Linear"
+        if displays_as_linear(linear_step.attr_name, linear_step.class_name)
+        else linear_step.label
+    )
+    linear_detail = gate_details if gate_details else ["g = Linear(hidden_states)"]
     linear_step = _leaf_node(
         attr_name=linear_step.attr_name,
         class_name=linear_step.class_name,
         forward_order=linear_step.forward_order,
-        label=linear_step.label,
-        details=gate_details[:1] if gate_details else ["Linear projection from hidden_states"],
+        label=linear_label,
+        details=linear_detail,
     )
     children: list[BlockNode] = [linear_step]
+    step_order = (linear_step.forward_order or 0) + 1
     if activation:
         children.append(
             _leaf_node(
                 attr_name=SYNTHETIC_GATE_ACTIVATION,
                 class_name="ActivationOp",
-                forward_order=(linear_step.forward_order or 0) + 1,
+                forward_order=step_order,
                 label=activation,
                 details=[f"g = {activation}(g)"],
             )
@@ -628,6 +688,7 @@ def _wrap_parallel_gate_children(
                 child,
                 gate_activations.get(child.attr_name),
                 details=details,
+                consumer_class=consumer_node.class_name if consumer_node else None,
             )
         )
     return wrapped
@@ -916,6 +977,11 @@ def build_block_node(
 
     if attr_name == SYNTHETIC_ATTENTION:
         step_details = list(details or [])
+        if is_kda_attention_step(step_details):
+            return _delta_attention_block_node(
+                forward_order=forward_order,
+                details=step_details,
+            )
         return _leaf_node(
             attr_name=attr_name,
             class_name="AttentionOp",
@@ -973,15 +1039,24 @@ def build_block_node(
         child_details = cls.forward_step_details.get(call_attr) or cls.init_details.get(call_attr, [])
 
         if call_attr == SYNTHETIC_ATTENTION:
-            child_nodes.append(
-                _leaf_node(
-                    attr_name=call_attr,
-                    class_name="AttentionOp",
-                    forward_order=child_order,
-                    label=attention_kernel_label(child_details),
-                    details=attention_kernel_details(child_details, cls.attention_inputs),
+            if is_kda_attention_step(child_details):
+                child_nodes.append(
+                    _delta_attention_block_node(
+                        forward_order=child_order,
+                        details=child_details,
+                        attention_inputs=cls.attention_inputs,
+                    )
                 )
-            )
+            else:
+                child_nodes.append(
+                    _leaf_node(
+                        attr_name=call_attr,
+                        class_name="AttentionOp",
+                        forward_order=child_order,
+                        label=attention_kernel_label(child_details),
+                        details=attention_kernel_details(child_details, cls.attention_inputs),
+                    )
+                )
             continue
 
         if call_attr == SYNTHETIC_FUNCTIONAL_LINEAR:

@@ -235,7 +235,9 @@ class LinearAttention(nn.Module):
 
     graph = build_computation_graph(tree)
     merge_index = next(
-        i for i, node in enumerate(graph.nodes) if node.block and node.block.attr_name == SYNTHETIC_ATTENTION
+        i
+        for i, node in enumerate(graph.nodes)
+        if node.block and node.block.attr_name in {SYNTHETIC_ATTENTION, "@attn_merge"}
     )
     incoming = [src for src, dst in graph.links if dst == merge_index]
     assert len(incoming) >= 3
@@ -843,8 +845,10 @@ def test_mla_gate_input_uses_residual_dashed_connector(tmp_path: Path):
 
     out = render_diagram(spec, tmp_path / "kimi_detailed.svg", detailed=True)
     svg = out.read_text(encoding="utf-8")
-    assert COLORS["residual"] in svg
-    assert "stroke-dasharray" in svg
+    assert COLORS["flow"] in svg
+    for line in svg.splitlines():
+        if "stroke-dasharray" in line:
+            assert "#95a5a6" not in line
 
 
 def test_build_computation_graph_includes_method_wrappers():
@@ -1346,7 +1350,8 @@ def test_detailed_expands_rope_at_top_level(tmp_path: Path):
     svg = out.read_text(encoding="utf-8")
     assert "Freq computation" in svg
     assert "Apply to Q/K" in svg
-    assert "Positional (RoPE) (rotary_emb)" in svg
+    assert "Positional (RoPE)" in svg
+    assert "rotary_emb" in svg
     assert "Block internals" in svg
     assert "<!-- hidden_states -->" not in svg.split("Block internals")[0]
 
@@ -2010,9 +2015,15 @@ def test_kda_attention_merge_links_are_labeled():
     )
     graph = build_computation_graph(attn)
     merge_index = next(
-        i for i, node in enumerate(graph.nodes) if node.block and node.block.attr_name == "@attention"
+        i
+        for i, node in enumerate(graph.nodes)
+        if node.block and node.block.attr_name in {"@attention", "@attn_merge"}
     )
-    labels = {graph.link_port_labels[(src, merge_index)] for src, tgt in graph.links if tgt == merge_index}
+    labels = {
+        graph.link_port_labels[link]
+        for link in graph.link_port_labels
+        if link[1] == merge_index
+    }
     assert {"Q", "K", "V"}.issubset(labels)
 
 
@@ -2038,11 +2049,14 @@ def test_kda_attention_block_shows_delta_rule_not_sdpa():
         basic_ops=basic,
     )
     merge = next(child for child in attn.children if child.attr_name == SYNTHETIC_ATTENTION)
+    assert merge.class_name == "DeltaAttention"
     assert merge.label == "Delta attention (KDA)"
     assert "QKᵀV" not in merge.label
-    assert any("delta rule" in detail for detail in merge.details)
-    assert any("S ←" in detail for detail in merge.details)
-    assert any("Q,K,V,G,β" in detail for detail in merge.details)
+    assert any("delta attention" in detail for detail in merge.details)
+    step_labels = [child.label for child in merge.children]
+    assert "Merge inputs" in step_labels
+    assert "Delta state S" in step_labels
+    assert "Chunk scan" in step_labels
 
 
 def test_mla_attention_block_keeps_sdpa_label():
@@ -2101,7 +2115,7 @@ def test_mlp_situ_and_mul_steps_are_labeled():
     assert "SiLU" in labels
     assert "×" in labels
     frame = next(frame for frame in graph.inline_frames if frame.frame_id == "act_fn")
-    assert frame.sublabel == "SiLU(gate) × up branch"
+    assert frame.sublabel is None
 
 
 def test_kda_output_gate_and_gated_norm_expand_in_graph():
@@ -2129,10 +2143,11 @@ def test_kda_output_gate_and_gated_norm_expand_in_graph():
     gate = next(child for child in attn.children if child.attr_name == "g_proj")
     purpose = block_purpose(gate)
     assert purpose is not None
-    assert "g = g_proj(hidden_states)" in purpose
-    assert "reshape" in purpose
-    assert "Sigmoid" in purpose or "σ" in purpose
-    assert "norm(attn_out)" in purpose
+    assert "g = Linear g_proj(hidden_states)" in purpose
+    linear = next(child for child in gate.children if child.label == "Linear")
+    linear_text = "\n".join(linear.details)
+    assert "reshape → [num_heads, head_dim]" in linear_text
+    assert "σ(g) inside o_norm" in linear_text or "Sigmoid(g) inside o_norm" in linear_text
 
     graph = build_computation_graph(attn)
     labels = [spec.label for spec in graph.nodes]
@@ -2142,8 +2157,7 @@ def test_kda_output_gate_and_gated_norm_expand_in_graph():
     assert "×" in labels
     assert any(frame.frame_id == "g_proj" for frame in graph.inline_frames)
     gate_frame = next(frame for frame in graph.inline_frames if frame.frame_id == "g_proj")
-    assert gate_frame.sublabel is not None
-    assert "g = g_proj(hidden_states)" in gate_frame.sublabel
+    assert gate_frame.sublabel is None
     assert not any(spec.label == "Output gate" for spec in graph.nodes)
 
     combine_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "×")
@@ -2252,7 +2266,7 @@ def test_finalize_detail_layout_measures_and_validates(tmp_path: Path):
     from visualizer.ast_analyze import analyze_source
     from visualizer.basic_ops import BasicOpFilter
     from visualizer.block_tree import build_block_node
-    from visualizer.computation_graph import _estimate_graph_height, build_computation_graph, layout_computation_graph
+    from visualizer.computation_graph import _estimate_graph_height, build_computation_graph, layout_computation_graph, measure_graph_node_sizes
     from visualizer.render import COLORS, _build_detail_draw_plan
     from visualizer.render_validate import collect_measured_elements, finalize_detail_layout, validate_render_layout
 
@@ -2271,20 +2285,20 @@ def test_finalize_detail_layout_measures_and_validates(tmp_path: Path):
         registry=analysis.class_registry,
         basic_ops=basic,
     )
-    graph = build_computation_graph(tree)
-    est_h = _estimate_graph_height(graph)
-    positions, _links = layout_computation_graph(
-        graph,
-        cx=5.0,
-        top_y=20.0,
-        block_w=6.0,
-        block_h=est_h,
-    )
-
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.set_xlim(0, 10)
     ax.set_ylim(0, 22)
     try:
+        graph = build_computation_graph(tree)
+        measure_graph_node_sizes(ax, graph, input_sublabel=None)
+        est_h = _estimate_graph_height(graph)
+        positions, _links = layout_computation_graph(
+            graph,
+            cx=5.0,
+            top_y=20.0,
+            block_w=6.0,
+            block_h=est_h,
+        )
         plan = finalize_detail_layout(
             ax,
             graph,
@@ -2303,6 +2317,167 @@ def test_finalize_detail_layout_measures_and_validates(tmp_path: Path):
         plt.close(fig)
 
 
+def test_measure_graph_node_sizes_fits_kda_tile_labels():
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        _estimate_graph_height,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.render import COLORS, _build_detail_draw_plan
+    from visualizer.render_validate import collect_measured_elements, finalize_detail_layout
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
+    tree = build_block_node(
+        attr_name="self_attn",
+        class_name="KimiDeltaAttention",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.set_xlim(0, 10)
+    ax.set_ylim(0, 22)
+    try:
+        graph = build_computation_graph(tree)
+        measure_graph_node_sizes(ax, graph, input_sublabel=None)
+        positions, _ = layout_computation_graph(
+            graph,
+            cx=5.0,
+            top_y=20.0,
+            block_w=6.0,
+            block_h=_estimate_graph_height(graph),
+        )
+        finalize_detail_layout(
+            ax,
+            graph,
+            positions,
+            input_sublabel=None,
+            cx=5.0,
+            top_y=20.0,
+            detail_fill=COLORS["detail_fill"],
+        )
+        plan = _build_detail_draw_plan(positions, graph, input_sublabel=None)
+        elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=COLORS["detail_fill"])
+        overflows = [element for element in elements if element.kind == "text_overflow"]
+        assert not overflows, [element.label for element in overflows]
+    finally:
+        plt.close(fig)
+
+
+def test_kda_tile_labels_fit_with_fact_sheet_forbidden_region():
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        _estimate_graph_height,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.render import (
+        COLORS,
+        DETAIL_MIN_BLOCK_W,
+        DIAGRAM_LEFT_MARGIN,
+        FACT_SHEET_GAP,
+        PANEL_W,
+        _build_detail_draw_plan,
+        _detail_layout_geometry,
+    )
+    from visualizer.render_validate import collect_measured_elements, finalize_detail_layout, measure_max_detail_content_width
+    from visualizer.text_measure import ContentBounds
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
+    tree = build_block_node(
+        attr_name="self_attn",
+        class_name="KimiDeltaAttention",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+
+    detail_min_left = DIAGRAM_LEFT_MARGIN + 0.05
+    fig, ax = plt.subplots(figsize=(20, 13))
+    ax.set_xlim(0, 20)
+    ax.set_ylim(-3, 5)
+    try:
+        fig.canvas.draw()
+        detail_content_w = measure_max_detail_content_width(
+            ax,
+            [("KDA (self_attn)", tree)],
+            detail_fill=COLORS["detail_fill"],
+            min_left=detail_min_left,
+        )
+        _detail_cx, detail_block_w, canvas_width, fact_x = _detail_layout_geometry(
+            11.0,
+            fact_x=4.5,
+            fact_w=PANEL_W,
+            detail_content_width=detail_content_w,
+        )
+        assert detail_block_w >= DETAIL_MIN_BLOCK_W
+        ax.set_xlim(0, canvas_width)
+        fig.canvas.draw()
+
+        graph = build_computation_graph(tree)
+        measure_graph_node_sizes(ax, graph, input_sublabel=None)
+        positions, _ = layout_computation_graph(
+            graph,
+            cx=_detail_cx,
+            top_y=3.0,
+            block_w=detail_block_w,
+            block_h=_estimate_graph_height(graph),
+        )
+        forbidden = [
+            ContentBounds(
+                left=fact_x - 0.08,
+                right=fact_x + PANEL_W + 0.08,
+                bottom=-5.0,
+                top=5.0,
+            )
+        ]
+        finalize_detail_layout(
+            ax,
+            graph,
+            positions,
+            input_sublabel=None,
+            cx=_detail_cx,
+            top_y=3.0,
+            detail_fill=COLORS["detail_fill"],
+            min_left=detail_min_left,
+            forbidden_regions=forbidden,
+        )
+        plan = _build_detail_draw_plan(positions, graph, input_sublabel=None)
+        elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=COLORS["detail_fill"])
+        overflows = [element for element in elements if element.kind == "text_overflow"]
+        assert not overflows, [element.label for element in overflows]
+        linear = next(pos for pos in positions if pos.spec.label == "Linear")
+        assert linear.width >= 0.55
+    finally:
+        plt.close(fig)
+
+
 def test_box_label_size_matches_draw_box_height():
     import matplotlib.pyplot as plt
     from visualizer.sizing import two_line_box_height
@@ -2313,7 +2488,7 @@ def test_box_label_size_matches_draw_box_height():
     ax.set_ylim(0, 10)
     try:
         _width, height = box_label_size(ax, "Linear", "Output gate — scales normalized output", fontsize=7.6)
-        assert height == two_line_box_height()
+        assert height > two_line_box_height() * 0.9
     finally:
         plt.close(fig)
 

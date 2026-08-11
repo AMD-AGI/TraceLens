@@ -62,6 +62,8 @@ class GraphNodeSpec:
     synthetic: str | None = None
     width: float = 90.0
     height: float = 42.0
+    diagram_width: float | None = None
+    diagram_height: float | None = None
 
 
 @dataclass
@@ -325,7 +327,7 @@ def _add_linear_pipeline_chain(
             key=f"{key_prefix}:{sub_step.attr_name}:{sub_index}",
             block=sub_step,
             label=inline_wrapper_step_label(wrapper, sub_step, sub_index),
-            sublabel=block_purpose(wrapper) if sub_index == 0 and wrapper is not None else None,
+            sublabel="" if wrapper is not None else None,
             port_label=port_label if sub_index == 0 else None,
             port_style=port_style if sub_index == 0 else None,
         )
@@ -526,16 +528,34 @@ def build_computation_graph(
                     _link_forward_input(graph, input_index, first_index, dashed=False)
                 if tail is not None:
                     branch_tails.append((tail, branch.port_label))
-            merge_index = _add_node(
-                graph,
-                key=f"merge:{segment_index}",
-                block=segment.merge,
-            )
-            for tail, port_label in branch_tails:
-                graph.links.append((tail, merge_index))
-                graph.link_port_labels[(tail, merge_index)] = port_label
-            last_index = merge_index
-            _track_attr_index(attr_last_index, segment.merge.attr_name, merge_index)
+            merge_steps, merge_wrapper = inline_composite_steps(segment.merge)
+            if merge_wrapper is not None:
+                merge_indices, merge_tail = _add_linear_pipeline_chain(
+                    graph,
+                    merge_steps,
+                    wrapper=merge_wrapper,
+                    key_prefix=f"merge:{segment_index}",
+                    attr_last_index=attr_last_index,
+                )
+                merge_first = merge_indices[0] if merge_indices else None
+                if merge_first is not None:
+                    for tail, port_label in branch_tails:
+                        graph.links.append((tail, merge_first))
+                        graph.link_port_labels[(tail, merge_first)] = port_label
+                last_index = merge_tail
+                if merge_tail is not None:
+                    _track_attr_index(attr_last_index, merge_wrapper.attr_name, merge_tail)
+            else:
+                merge_index = _add_node(
+                    graph,
+                    key=f"merge:{segment_index}",
+                    block=segment.merge,
+                )
+                for tail, port_label in branch_tails:
+                    graph.links.append((tail, merge_index))
+                    graph.link_port_labels[(tail, merge_index)] = port_label
+                last_index = merge_index
+                _track_attr_index(attr_last_index, segment.merge.attr_name, merge_index)
             continue
 
         if isinstance(segment, SideCombineSegment):
@@ -872,21 +892,86 @@ DETAIL_TOP_INSET = 0.04
 DETAIL_BOTTOM_INSET = 0.04
 
 
-def _rendered_label_and_sublabel(spec: GraphNodeSpec) -> tuple[str, str | None]:
+def _rendered_label_and_sublabel(
+    spec: GraphNodeSpec,
+    *,
+    inline_frame_members: frozenset[int] | None = None,
+    node_index: int | None = None,
+) -> tuple[str, str | None]:
     """Label pair used when drawing a graph node (matches render.py inline ports)."""
     label = spec.label
-    sublabel = spec.sublabel or block_sublabel(spec.block)
+    if inline_frame_members is not None and node_index is not None and node_index in inline_frame_members:
+        sublabel = None
+    elif spec.sublabel is not None:
+        sublabel = spec.sublabel or None
+    else:
+        sublabel = block_sublabel(spec.block)
     if spec.port_label and spec.port_style == "inline":
         label = spec.port_label
-        if spec.block is not None:
+        if (
+            spec.block is not None
+            and not (
+                inline_frame_members is not None
+                and node_index is not None
+                and node_index in inline_frame_members
+            )
+        ):
             sublabel = spec.block.attr_name
     return label, sublabel
 
 
-def _diagram_size_for_rendered_spec(spec: GraphNodeSpec) -> tuple[float, float]:
+def inline_frame_member_indices(graph: ComputationGraph) -> frozenset[int]:
+    """Node indices grouped inside dotted inline frames."""
+    return frozenset(index for frame in graph.inline_frames for index in frame.node_indices)
+
+
+def measure_graph_node_sizes(
+    ax,
+    graph: ComputationGraph,
+    *,
+    input_sublabel: str | None = None,
+    title_fontsize: float = 7.6,
+) -> None:
+    """Measure every tile label at draw time and cache diagram-unit sizes before layout."""
+    from visualizer.text_measure import box_label_size
+
+    inline_members = inline_frame_member_indices(graph)
+    for index, spec in enumerate(graph.nodes):
+        if _is_combine_synthetic(spec.synthetic):
+            spec.diagram_width, spec.diagram_height = COMBINE_OP_SIZE, COMBINE_OP_SIZE
+            continue
+        if spec.synthetic == SYNTHETIC_INPUT:
+            width, height = box_label_size(ax, spec.label, input_sublabel, fontsize=7.2)
+            spec.diagram_width, spec.diagram_height = width, height
+            continue
+        if spec.synthetic == SYNTHETIC_HIDDEN:
+            width, height = box_label_size(ax, spec.label, None, fontsize=6.5)
+            spec.diagram_width, spec.diagram_height = width, height
+            continue
+        label, sublabel = _rendered_label_and_sublabel(
+            spec,
+            inline_frame_members=inline_members,
+            node_index=index,
+        )
+        width, height = box_label_size(ax, label, sublabel, fontsize=title_fontsize)
+        spec.diagram_width, spec.diagram_height = width, height
+
+
+def _diagram_size_for_rendered_spec(
+    spec: GraphNodeSpec,
+    *,
+    inline_frame_members: frozenset[int] | None = None,
+    node_index: int | None = None,
+) -> tuple[float, float]:
     from visualizer.sizing import estimate_block_size
 
-    label, sublabel = _rendered_label_and_sublabel(spec)
+    if spec.diagram_width is not None and spec.diagram_height is not None:
+        return spec.diagram_width, spec.diagram_height
+    label, sublabel = _rendered_label_and_sublabel(
+        spec,
+        inline_frame_members=inline_frame_members,
+        node_index=node_index,
+    )
     return estimate_block_size(label, sublabel)
 
 

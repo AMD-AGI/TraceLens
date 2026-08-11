@@ -23,12 +23,23 @@ def single_line_box_height() -> float:
 
 
 def two_line_box_height() -> float:
-    """Height for a title + sublabel box using the same vertical padding as RMSNorm."""
-    return BLOCK_PAD_Y + TITLE_LINE_H + LABEL_LINE_GAP + SUB_LINE_H + BLOCK_PAD_Y
+    """Height for a title + one sublabel line."""
+    return titled_box_height(1)
+
+
+def titled_box_height(sub_line_count: int) -> float:
+    """Height for a title plus ``sub_line_count`` stacked sublabel lines."""
+    if sub_line_count <= 0:
+        return single_line_box_height()
+    sub_block = sub_line_count * SUB_LINE_H + max(0, sub_line_count - 1) * LABEL_LINE_GAP
+    return BLOCK_PAD_Y + TITLE_LINE_H + LABEL_LINE_GAP + sub_block + BLOCK_PAD_Y
 
 
 def box_height_for_content(sublabel: str | None = None) -> float:
-    return two_line_box_height() if sublabel else single_line_box_height()
+    if not sublabel:
+        return single_line_box_height()
+    sub_lines = [line for line in sublabel.split("\n") if line.strip()]
+    return titled_box_height(len(sub_lines))
 
 
 def box_width_for_text_width(text_width: float, *, pad_x: float | None = None) -> float:
@@ -56,6 +67,7 @@ def block_sublabel(block: BlockNode | None) -> str | None:
     if block is None:
         return None
     from visualizer.block_tree import block_purpose
+    from visualizer.ast_analyze import displays_as_linear
 
     lines: list[str] = []
     purpose = block_purpose(block)
@@ -64,6 +76,8 @@ def block_sublabel(block: BlockNode | None) -> str | None:
     elif block.class_name and block.class_name != block.label:
         lines.append(block.class_name)
     elif block.details:
+        if len(block.details) > 1 and displays_as_linear(block.attr_name, block.class_name):
+            return "\n".join(line.strip() for line in block.details if line.strip())
         lines.append(block.details[0])
     return lines[0] if len(lines) == 1 else "\n".join(lines) if lines else None
 
@@ -80,8 +94,9 @@ def estimate_block_size(
     pad_y = BLOCK_PAD_Y
     title_line_h = TITLE_LINE_H
     sub_line_h = SUB_LINE_H
-    char_w_title = fontsize * 0.0078
-    char_w_sub = sub_fontsize * 0.0078
+    # Fallback widths when matplotlib measurement is unavailable (DejaVu Sans Bold).
+    char_w_title = fontsize * 0.0155
+    char_w_sub = sub_fontsize * 0.0135
 
     title_lines = label.split("\n") if label else [""]
     sub_lines = sublabel.split("\n") if sublabel else []
@@ -96,7 +111,7 @@ def estimate_block_size(
     if label == "SituAndMul" or label == "Gated multiply":
         width += BLOCK_PAD_X
     if sub_lines:
-        return width, two_line_box_height()
+        return width, titled_box_height(len(sub_lines))
     if len(title_lines) == 1:
         return width, single_line_box_height()
     height = pad_y + len(title_lines) * title_line_h + pad_y

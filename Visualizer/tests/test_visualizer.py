@@ -151,9 +151,9 @@ def test_residual_merge_side_entry_uses_merge_center():
             branch_x=branch_x,
         )
 
-    dashed_arrows = [call for call in calls if call[0] == "arrow" and call[5] == "--"]
-    assert len(dashed_arrows) == 1
-    _, x1, y1, x2, y2, _ = dashed_arrows[0]
+    solid_arrows = [call for call in calls if call[0] == "arrow" and call[5] in {None, "solid"}]
+    assert len(solid_arrows) == 1
+    _, x1, y1, x2, y2, _ = solid_arrows[0]
     assert y1 == merge_y
     assert y2 == merge_y
     assert x2 == spine_x - MERGE_RADIUS
@@ -261,7 +261,7 @@ def test_render_diagram(tmp_path: Path):
 
 
 def test_stroke_white_text_in_svg():
-    from visualizer.render import _stroke_white_text_in_svg
+    from visualizer.render import _finalize_svg_styling, _stroke_white_text_in_svg
 
     svg = (
         '<g style="fill: #ffffff" transform="translate(1 2) scale(0.076 -0.076)">'
@@ -269,11 +269,16 @@ def test_stroke_white_text_in_svg():
         '<use xlink:href="#B" transform="translate(10 0)"/>'
         "</g>"
         '<path style="fill: #ffffff; stroke: #d0d0d0"/>'
+        '<path style="fill: #bdc3c7; stroke: #bdc3c7; stroke-width: 1.2"/>'
     )
     stroked = _stroke_white_text_in_svg(svg)
     assert 'stroke-width: 39.4737' in stroked
     assert stroked.count('stroke: #000000') == 2
     assert 'style="fill: #ffffff; stroke: #d0d0d0"' in stroked
+
+    finalized = _finalize_svg_styling(svg)
+    assert "fill: #bdc3c7; stroke: #000000;" in finalized
+    assert "fill: #bdc3c7; stroke: #bdc3c7;" not in finalized
 
 
 def test_ast_custom_decoder_layer():

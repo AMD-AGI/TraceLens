@@ -47,6 +47,7 @@ from visualizer.sizing import (
     min_vertical_block_gap,
     single_line_box_height,
 )
+from visualizer.text_measure import ContentBounds
 from visualizer.computation_graph import (
     SYNTHETIC_HIDDEN,
     SYNTHETIC_COMBINE,
@@ -102,6 +103,14 @@ _WHITE_TEXT_GROUP = re.compile(
     re.DOTALL,
 )
 WHITE_TEXT_OUTLINE_PX = 3.0
+_BASIC_OP_EDGE = "#000000"
+
+
+def _default_box_edgecolor(node: Node) -> str:
+    """Pick a visible border; basic-op tiles use black instead of matching gray fill."""
+    if node.facecolor == COLORS["basic_op"]:
+        return _BASIC_OP_EDGE
+    return node.facecolor
 
 
 def _stroke_white_text_in_svg(svg: str) -> str:
@@ -135,14 +144,25 @@ def _stroke_white_text_in_svg(svg: str) -> str:
     return _WHITE_TEXT_GROUP.sub(_patch_group, svg)
 
 
+def _finalize_svg_styling(svg: str) -> str:
+    """Post-process SVG for readable labels and basic-op borders."""
+    svg = _stroke_white_text_in_svg(svg)
+    svg = re.sub(
+        r"fill: #bdc3c7; stroke: #bdc3c7;",
+        "fill: #bdc3c7; stroke: #000000;",
+        svg,
+    )
+    return svg
+
+
 def _detail_block_facecolor(block: BlockNode) -> str:
     """Face color for nodes drawn inside a detailed block-internals graph."""
     if block.is_basic:
         return COLORS["basic_op"]
     return ROLE_COLORS.get(block.role, ROLE_COLORS["other"])
 
-PANEL_W = 4.35
-PANEL_WRAP_WIDTH = 48
+PANEL_W = 5.85
+PANEL_WRAP_WIDTH = 64
 PANEL_TITLE_FONT = 11
 PANEL_TITLE_COLOR = COLORS["text"]
 SECTION_TITLE_GAP = 0.10
@@ -166,6 +186,8 @@ STACK_BOX_BOTTOM_OUTSET = 0.01
 MAIN_BLOCK_W = 5.1
 DIAGRAM_LEFT_MARGIN = 0.55
 DIAGRAM_RIGHT_MARGIN = 0.45
+DETAIL_MIN_BLOCK_W = 7.8
+FACT_SHEET_GAP = 0.5  # ~1/2 inch in diagram coordinates (axes units match figure inches)
 MEASURE_CANVAS_WIDTH = 13.0
 PANEL_BODY_FONT = 8.3
 PANEL_BODY_COLOR = COLORS["text"]
@@ -190,6 +212,8 @@ DETAIL_FRAME_GAP = 0.025
 DETAIL_FRAME_PAD_Y_EXTRA = 0.012
 INLINE_FRAME_PAD = 0.10
 INLINE_FRAME_LABEL_GAP = 0.04
+INLINE_FRAME_LABEL_CHAR_W = 6.4 * 0.0078
+INLINE_FRAME_LABEL_LINE_H = 0.11
 # Extra space reserved above an expanded spine block for its dotted-frame label.
 SPINE_EXPANDED_BLOCK_TOP_RESERVE = 0.44
 
@@ -267,43 +291,47 @@ def _draw_box(
         node.h,
         boxstyle="round,pad=0.01,rounding_size=0.08",
         linewidth=1.2,
-        edgecolor=edgecolor or node.facecolor,
+        edgecolor=edgecolor or _default_box_edgecolor(node),
         facecolor=node.facecolor,
         linestyle=linestyle,
         zorder=zorder,
     )
     ax.add_patch(patch)
-    title_y = node.top - BLOCK_PAD_Y - TITLE_LINE_H / 2
+    title_y = node.top - BLOCK_PAD_Y
     if node.sublabel:
+        sub_fontsize = max(6.5, node.fontsize - 1.5)
         ax.text(
             node.cx,
             title_y,
             node.label,
             ha="center",
-            va="center",
+            va="top",
             fontsize=node.fontsize,
             color=node.text_color,
             fontweight="bold",
             zorder=6,
         )
-        sub_y = title_y - TITLE_LINE_H / 2 - LABEL_LINE_GAP - SUB_LINE_H / 2
-        ax.text(
-            node.cx,
-            sub_y,
-            node.sublabel,
-            ha="center",
-            va="center",
-            fontsize=max(6.5, node.fontsize - 1.5),
-            color=node.text_color,
-            zorder=6,
-        )
+        sub_lines = [line for line in node.sublabel.split("\n") if line.strip()]
+        sub_y = title_y - TITLE_LINE_H - LABEL_LINE_GAP
+        for line in sub_lines:
+            ax.text(
+                node.cx,
+                sub_y,
+                line,
+                ha="center",
+                va="top",
+                fontsize=sub_fontsize,
+                color=node.text_color,
+                zorder=6,
+            )
+            sub_y -= SUB_LINE_H + LABEL_LINE_GAP
     else:
         ax.text(
             node.cx,
             title_y,
             node.label,
             ha="center",
-            va="center",
+            va="top",
             fontsize=node.fontsize,
             color=node.text_color,
             fontweight="bold",
@@ -436,18 +464,18 @@ def _residual_merge(
     merge_left = spine_x - MERGE_RADIUS
 
     # Residual bypass: route around the left side and enter the merge at its center.
-    _line(ax, spine_x, skip_from_y, spine_x, branch_y, color=COLORS["residual"], linestyle="--")
-    _line(ax, spine_x, branch_y, branch_x, branch_y, color=COLORS["residual"], linestyle="--")
-    _line(ax, branch_x, branch_y, branch_x, merge_y, color=COLORS["residual"], linestyle="--")
+    _line(ax, spine_x, skip_from_y, spine_x, branch_y, color=COLORS["flow"], linestyle="solid")
+    _line(ax, spine_x, branch_y, branch_x, branch_y, color=COLORS["flow"], linestyle="solid")
+    _line(ax, branch_x, branch_y, branch_x, merge_y, color=COLORS["flow"], linestyle="solid")
     _arrow(
         ax,
         branch_x,
         merge_y,
         merge_left,
         merge_y,
-        color=COLORS["residual"],
+        color=COLORS["flow"],
         linewidth=1.5,
-        linestyle="--",
+        linestyle="solid",
     )
 
     # Main path: share the same bus and vertical entry at the merge node.
@@ -576,8 +604,72 @@ def _fact_lines(spec: ArchitectureSpec) -> list[str]:
 FACT_SUBLINE_INDENT = "    "
 
 
+FIGURE_CONTENT_MARGIN = 0.35
+
+
+def _figure_content_bounds(ax) -> ContentBounds | None:
+    """Union of visible artist bounds in data coordinates."""
+    fig = ax.figure
+    fig.canvas.draw()
+    union: ContentBounds | None = None
+    for artist in ax.get_children():
+        if not artist.get_visible():
+            continue
+        try:
+            display_bb = artist.get_window_extent(fig.canvas.get_renderer())
+        except Exception:
+            continue
+        if display_bb.width <= 1 or display_bb.height <= 1:
+            continue
+        data_bb = display_bb.transformed(ax.transData.inverted())
+        bounds = ContentBounds(
+            left=data_bb.x0,
+            right=data_bb.x1,
+            bottom=data_bb.y0,
+            top=data_bb.y1,
+        )
+        union = bounds if union is None else union.union(bounds)
+    return union
+
+
+def _fit_figure_to_content(
+    ax,
+    fig,
+    *,
+    margin: float = FIGURE_CONTENT_MARGIN,
+    min_width: float | None = None,
+) -> tuple[float, float]:
+    """Expand axis limits so every drawn artist fits inside the figure."""
+    content = _figure_content_bounds(ax)
+    if content is None:
+        x_left, x_right = ax.get_xlim()
+        y_bottom, y_top = ax.get_ylim()
+    else:
+        x_left = content.left - margin
+        x_right = content.right + margin
+        y_bottom = content.bottom - margin
+        y_top = content.top + margin
+        if min_width is not None and x_right - x_left < min_width:
+            pad = (min_width - (x_right - x_left)) / 2
+            x_left -= pad
+            x_right += pad
+    ax.set_xlim(x_left, x_right)
+    ax.set_ylim(y_bottom, y_top)
+    width = x_right - x_left
+    height = y_top - y_bottom
+    fig.set_size_inches(width, max(height, 1.0))
+    return width, height
+
+
 def _wrap_fact_text(text: str, *, width: int = 48) -> list[str]:
     return textwrap.wrap(text, width=width, break_long_words=False, break_on_hyphens=False) or [text]
+
+
+def _inline_frame_label_lines(label: str, frame_width: float) -> list[str]:
+    """Wrap an inline-frame caption to stay inside the dotted frame width."""
+    usable = max(0.35, frame_width - 0.04)
+    wrap_width = max(8, int(usable / INLINE_FRAME_LABEL_CHAR_W))
+    return _wrap_fact_text(label, width=wrap_width)
 
 
 def _fact_sheet_content_rows(bullet_lines: list[str], *, wrap_width: int) -> int:
@@ -1121,6 +1213,31 @@ def _main_block_width(
         label_widths.append(_block_width_for_repeat_label(ax, repeat_label))
         return max(*label_widths)
     return max(MAIN_BLOCK_W, *label_widths)
+
+
+def _detail_layout_geometry(
+    canvas_width: float,
+    *,
+    fact_x: float,
+    fact_w: float = PANEL_W,
+    detail_content_width: float | None = None,
+) -> tuple[float, float, float, float]:
+    """Return detail band geometry: (detail_cx, detail_block_w, canvas_width, fact_x)."""
+    detail_min_left = DIAGRAM_LEFT_MARGIN + 0.05
+    detail_block_w = max(DETAIL_MIN_BLOCK_W, detail_content_width or DETAIL_MIN_BLOCK_W)
+    detail_cx = detail_min_left + detail_block_w / 2
+    fact_x = max(fact_x, detail_min_left + detail_block_w + FACT_SHEET_GAP)
+    required_canvas = max(
+        fact_x + fact_w + DIAGRAM_RIGHT_MARGIN,
+        detail_min_left + detail_block_w + DIAGRAM_RIGHT_MARGIN,
+    )
+    canvas_width = max(canvas_width, required_canvas)
+    return detail_cx, detail_block_w, canvas_width, fact_x
+
+
+def _fact_sheet_x(main_model_right: float, *, gap: float = FACT_SHEET_GAP) -> float:
+    """Place the fact sheet just to the right of the main model spine."""
+    return main_model_right + gap
 
 
 def _draw_block_frame(
@@ -1787,6 +1904,7 @@ def _draw_graph_connector(
     *,
     color: str | None = None,
     linestyle: str = "solid",
+    side_entry: bool = False,
     inline_port: bool = False,
     floating_port: bool = False,
     combine_side_entry: bool = False,
@@ -1811,18 +1929,17 @@ def _draw_graph_connector(
             combine_center_y,
             gap=gap,
         )
-    elif inline_port and linestyle == "dashed":
+    elif inline_port and side_entry:
         points = _inline_dashed_port_connector_points(source, target, gap=gap, bus_y=bus_y)
     elif floating_port:
         points = _orthogonal_path(source, target, obstacles, bus_near=bus_near, bus_y=bus_y)
-    elif linestyle == "dashed" and abs(source.cx - target.cx) < 0.08:
+    elif side_entry and abs(source.cx - target.cx) < 0.08:
         y_start = source.bottom - gap
         y_end = target.top + gap
         points = [(source.cx, y_start), (source.cx, y_end)]
     else:
         points = _orthogonal_path(source, target, obstacles, bus_near=bus_near, bus_y=bus_y)
-    connector_color = color or (COLORS["residual"] if linestyle == "dashed" else None)
-    _draw_path(ax, points, color=connector_color, linestyle=linestyle)
+    _draw_path(ax, points, color=color, linestyle=linestyle)
 
 
 def _draw_floating_port_label(
@@ -1995,26 +2112,31 @@ def _render_inline_linear_frames(
             zorder=0.5,
         )
         ax.add_patch(patch)
-        ax.text(
-            frame_left + 0.02,
-            max_top + pad + INLINE_FRAME_LABEL_GAP,
-            frame.label,
-            ha="left",
-            va="bottom",
-            fontsize=6.4,
-            color=COLORS["muted"],
-        )
-        if frame.sublabel:
+        caption_top = max_top + pad + INLINE_FRAME_LABEL_GAP
+        label_lines = _inline_frame_label_lines(frame.label, frame_w)
+        for line_index, line in enumerate(label_lines):
             ax.text(
                 frame_left + 0.02,
-                max_top + pad + INLINE_FRAME_LABEL_GAP - 0.11,
-                frame.sublabel,
+                caption_top - line_index * INLINE_FRAME_LABEL_LINE_H,
+                line,
                 ha="left",
                 va="bottom",
-                fontsize=5.6,
+                fontsize=6.4,
                 color=COLORS["muted"],
-                style="italic",
             )
+        if frame.sublabel:
+            sub_lines = [line for line in frame.sublabel.split("\n") if line.strip()]
+            for line_index, line in enumerate(sub_lines):
+                ax.text(
+                    frame_left + 0.02,
+                    max_top + pad + INLINE_FRAME_LABEL_GAP - 0.11 - line_index * 0.11,
+                    line,
+                    ha="left",
+                    va="bottom",
+                    fontsize=5.6,
+                    color=COLORS["muted"],
+                    style="italic",
+                )
 
 
 def _build_detail_draw_plan(
@@ -2025,6 +2147,11 @@ def _build_detail_draw_plan(
 ) -> DetailDrawPlan:
     """Build node/label draw descriptors without painting (for measurement + validation)."""
     plan = DetailDrawPlan(input_sublabel=input_sublabel)
+    inline_frame_members = {
+        node_index
+        for frame in graph.inline_frames
+        for node_index in frame.node_indices
+    }
 
     for index, pos in enumerate(positions):
         spec = pos.spec
@@ -2104,14 +2231,19 @@ def _build_detail_draw_plan(
             continue
 
         display_label = spec.label
-        sublabel = spec.sublabel or block_sublabel(block)
+        if index in inline_frame_members:
+            sublabel = None
+        elif spec.sublabel is not None:
+            sublabel = spec.sublabel or None
+        else:
+            sublabel = block_sublabel(block)
 
         if spec.port_label:
             if spec.port_style == "inline":
                 display_label = spec.port_label
-                if block is not None:
+                if block is not None and index not in inline_frame_members:
                     sublabel = block.attr_name
-            else:
+            elif spec.port_style == "floating":
                 label_x = pos.cx - pos.width / 2 - 0.10
                 label_y = pos.top_y - pos.height / 2
                 plan.branch_labels.append(
@@ -2186,6 +2318,8 @@ def _render_laid_out_computation_graph(
     draw_section_frame: bool = True,
     root_frame_label: str | None = None,
     include_input: bool = True,
+    min_left: float | None = None,
+    forbidden_regions: list | None = None,
 ) -> tuple[float, float, _RenderAnchor | None]:
     """Lay out a computation graph with graph-layout and draw it."""
     from visualizer.render_validate import finalize_detail_layout
@@ -2193,6 +2327,9 @@ def _render_laid_out_computation_graph(
     graph = build_computation_graph(root, prefix_steps=prefix_steps, include_input=include_input)
     if root_frame_label:
         add_root_pipeline_frame(graph, root, label=root_frame_label)
+    from visualizer.computation_graph import measure_graph_node_sizes
+
+    measure_graph_node_sizes(ax, graph, input_sublabel=input_sublabel)
     est_h = _estimate_graph_height(graph)
     positions, links = layout_computation_graph(
         graph,
@@ -2212,6 +2349,8 @@ def _render_laid_out_computation_graph(
         cx=cx,
         top_y=top_y,
         detail_fill=COLORS["detail_fill"],
+        min_left=min_left,
+        forbidden_regions=forbidden_regions,
     )
     anchors = _anchors_from_detail_plan(positions, plan)
 
@@ -2325,12 +2464,12 @@ def _render_laid_out_computation_graph(
                 entry_x,
                 bus_y=bus_y,
             )
-            linestyle = "dashed" if link_key in graph.dashed_links else "solid"
-            connector_color = COLORS["residual"] if linestyle == "dashed" else None
-            _draw_path(ax, points, color=connector_color, linestyle=linestyle)
+            _draw_path(ax, points)
             merge_link_labels.append((port_label, entry_x, target.top + 0.05))
             continue
-        linestyle = "dashed" if link_key in graph.dashed_links else "solid"
+        is_side_link = (
+            link_key in graph.dashed_links or link_key in graph.side_entry_links
+        )
         route_obstacles = [
             anchor for node_index, anchor in anchors.items() if node_index not in {src, tgt}
         ] + label_obstacles
@@ -2340,13 +2479,14 @@ def _render_laid_out_computation_graph(
         combine_side_entry = (
             _is_combine_synthetic(target_spec.synthetic) and (src, tgt) in graph.side_entry_links
         )
-        has_dashed_incoming = any(
-            (side_src, tgt) in graph.dashed_links for side_src, _ in incoming.get(tgt, [])
+        has_side_incoming = any(
+            (side_src, tgt) in graph.dashed_links or (side_src, tgt) in graph.side_entry_links
+            for side_src, _ in incoming.get(tgt, [])
         )
         combine_top_entry = (
             _is_combine_synthetic(target_spec.synthetic)
-            and linestyle == "solid"
-            and has_dashed_incoming
+            and not is_side_link
+            and has_side_incoming
             and not combine_side_entry
         )
         combine_center_y = (
@@ -2365,7 +2505,7 @@ def _render_laid_out_computation_graph(
             source,
             target,
             route_obstacles,
-            linestyle=linestyle,
+            side_entry=is_side_link,
             inline_port=inline_port,
             floating_port=floating_port,
             combine_side_entry=combine_side_entry,
@@ -2416,6 +2556,8 @@ def _render_block_tree_node(
     input_sublabel: str | None = None,
     prefix_steps: list[BlockNode] | None = None,
     inline_linear_frames: bool = True,
+    min_left: float | None = None,
+    forbidden_regions: list | None = None,
 ) -> tuple[float, float | None]:
     """Render a block tree node via computation-graph layout (always includes forward input)."""
     if is_method_wrapper(node):
@@ -2431,6 +2573,8 @@ def _render_block_tree_node(
         input_sublabel=input_sublabel,
         prefix_steps=prefix_steps,
         inline_linear_frames=inline_linear_frames,
+        min_left=min_left,
+        forbidden_regions=forbidden_regions,
     )
     return bottom, frame_right
 
@@ -2447,6 +2591,8 @@ def _render_diagram_section(
     input_sublabel: str | None = None,
     prefix_steps: list[BlockNode] | None = None,
     inline_linear_frames: bool = True,
+    min_left: float | None = None,
+    forbidden_regions: list | None = None,
 ) -> float:
     """Render one titled block diagram. Returns y below the diagram."""
     title_y = cursor
@@ -2472,6 +2618,8 @@ def _render_diagram_section(
         input_sublabel=input_sublabel,
         prefix_steps=prefix_steps,
         inline_linear_frames=inline_linear_frames,
+        min_left=min_left,
+        forbidden_regions=forbidden_regions,
     )
     return diagram_bottom - 0.5
 
@@ -2487,6 +2635,8 @@ def _render_block_tree(
     input_sublabel: str | None = None,
     prefix_steps: list[BlockNode] | None = None,
     inline_linear_frames: bool = True,
+    min_left: float | None = None,
+    forbidden_regions: list | None = None,
 ) -> tuple[float, float | None]:
     """Render one recursive block tree from top_y downward."""
     return _render_block_tree_node(
@@ -2499,6 +2649,8 @@ def _render_block_tree(
         input_sublabel=input_sublabel,
         prefix_steps=prefix_steps,
         inline_linear_frames=inline_linear_frames,
+        min_left=min_left,
+        forbidden_regions=forbidden_regions,
     )
 
 
@@ -2514,9 +2666,11 @@ def _render_detailed_internals(
     panel_w: float = PANEL_W,
     wrap_width: int = PANEL_WRAP_WIDTH,
     inline_linear_frames: bool = True,
+    forbidden_regions: list | None = None,
 ) -> float:
     """Render recursive internal block diagrams below the main model."""
     panel_x = panel_x if panel_x is not None else cx + block_w / 2 + 0.55
+    detail_min_left = DIAGRAM_LEFT_MARGIN + 0.05
 
     cursor = start_y - 0.45
     ax.text(
@@ -2567,6 +2721,8 @@ def _render_detailed_internals(
             tree=tree,
             input_sublabel=input_sublabel,
             inline_linear_frames=inline_linear_frames,
+            min_left=detail_min_left,
+            forbidden_regions=forbidden_regions,
         )
         bottom = cursor
         for sub_title, sub_tree in collect_nested_diagrams(tree):
@@ -2585,6 +2741,8 @@ def _render_detailed_internals(
                         tree=sub_tree,
                         input_sublabel=nested_sublabel,
                         inline_linear_frames=inline_linear_frames,
+                        min_left=detail_min_left,
+                        forbidden_regions=forbidden_regions,
                     )
                     bottom = cursor
                     continue
@@ -2603,6 +2761,8 @@ def _render_detailed_internals(
                 tree=sub_tree,
                 input_sublabel=nested_sublabel,
                 inline_linear_frames=inline_linear_frames,
+                min_left=detail_min_left,
+                forbidden_regions=forbidden_regions,
             )
             bottom = cursor
 
@@ -2667,7 +2827,7 @@ def render_diagram(
     canvas_width = 11.0
     top_y = 12.55
     bottom_margin = 0.35
-    fact_gap = 0.55
+    fact_gap = FACT_SHEET_GAP
     fact_w = PANEL_W
     wrap_width = PANEL_WRAP_WIDTH
 
@@ -2691,9 +2851,11 @@ def render_diagram(
         inner_w=inner_w,
     )
     cx = DIAGRAM_LEFT_MARGIN + block_w / 2
+    main_model_right = cx + block_w / 2
+    fact_x = _fact_sheet_x(main_model_right, gap=fact_gap)
     canvas_width = max(
         canvas_width,
-        cx + block_w / 2 + fact_gap + fact_w + DIAGRAM_RIGHT_MARGIN,
+        fact_x + fact_w + DIAGRAM_RIGHT_MARGIN,
     )
     ax.set_xlim(0, canvas_width)
     ax.set_ylim(0, 13)
@@ -2707,6 +2869,8 @@ def render_diagram(
         inner_w=inner_w,
     )
     cx = DIAGRAM_LEFT_MARGIN + block_w / 2
+    main_model_right = cx + block_w / 2
+    fact_x = _fact_sheet_x(main_model_right, gap=fact_gap)
     ax.axis("off")
 
     diagram_title = title or spec.name
@@ -2916,35 +3080,67 @@ def render_diagram(
 
     diagram_bottom = tail_nodes[-1].bottom if tail_nodes else frame_bottom
 
-    fact_x = cx + block_w / 2 + fact_gap
+    if detailed:
+        from visualizer.render_validate import measure_max_detail_content_width
+
+        detail_min_left = DIAGRAM_LEFT_MARGIN + 0.05
+        detail_content_w = measure_max_detail_content_width(
+            ax,
+            spec.detailed_block_trees,
+            detail_fill=COLORS["detail_fill"],
+            min_left=detail_min_left,
+        )
+        detail_cx, detail_block_w, canvas_width, fact_x = _detail_layout_geometry(
+            canvas_width,
+            fact_x=fact_x,
+            fact_w=fact_w,
+            detail_content_width=detail_content_w,
+        )
+        ax.set_xlim(0, canvas_width)
+        fig.set_size_inches(canvas_width, 13)
+        fig.canvas.draw()
+    else:
+        detail_cx = cx
+        detail_block_w = block_w
     fact_y = stack_top - fact_h
     _draw_fact_sheet(ax, spec, fact_x=fact_x, fact_y=fact_y, fact_w=fact_w, wrap_width=wrap_width)
 
     if detailed:
+        fact_sheet_bounds = [
+            ContentBounds(
+                left=fact_x - 0.08,
+                right=fact_x + fact_w + 0.08,
+                bottom=fact_y - fact_h - 0.15,
+                top=fact_y + 0.15,
+            )
+        ]
+        internals_start_y = min(diagram_bottom, fact_y) - 0.25
         diagram_bottom = _render_detailed_internals(
             layout,
             ax,
             spec,
-            cx=cx,
-            start_y=diagram_bottom - 0.25,
-            block_w=block_w,
+            cx=detail_cx,
+            start_y=internals_start_y,
+            block_w=detail_block_w,
             panel_x=fact_x,
             panel_w=fact_w,
             wrap_width=wrap_width,
             inline_linear_frames=inline_linear_frames,
+            forbidden_regions=fact_sheet_bounds,
         )
 
-    y_min = min(diagram_bottom, fact_y) - bottom_margin
-    y_max = top_y + 0.35
-    ax.set_ylim(y_min, y_max)
-
-    canvas_height = y_max - y_min
-    fig.set_size_inches(canvas_width, canvas_height)
+    min_canvas_width = canvas_width if detailed else None
+    canvas_width, canvas_height = _fit_figure_to_content(
+        ax,
+        fig,
+        margin=bottom_margin,
+        min_width=min_canvas_width,
+    )
 
     fmt = output_path.suffix.lstrip(".").lower() or "svg"
     fig.savefig(output_path, format=fmt, bbox_inches="tight", pad_inches=0.08, facecolor=COLORS["bg"])
     plt.close(fig)
     if fmt == "svg":
         svg = output_path.read_text(encoding="utf-8")
-        output_path.write_text(_stroke_white_text_in_svg(svg), encoding="utf-8")
+        output_path.write_text(_finalize_svg_styling(svg), encoding="utf-8")
     return output_path

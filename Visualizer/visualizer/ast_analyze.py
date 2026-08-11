@@ -1036,6 +1036,10 @@ def _is_kda_attention_kernel(kernel: str | None) -> bool:
     return any(marker in lowered for marker in _KDA_KERNEL_MARKERS)
 
 
+def is_kda_attention_step(details: list[str]) -> bool:
+    return _is_kda_attention_kernel(kernel_name_from_step_details(details))
+
+
 def attention_kernel_label(details: list[str]) -> str:
     kernel = kernel_name_from_step_details(details)
     if _is_kda_attention_kernel(kernel):

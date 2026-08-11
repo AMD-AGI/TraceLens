@@ -12,7 +12,6 @@ from visualizer.sizing import (
     TITLE_LINE_H,
     box_width_for_text_width,
     single_line_box_height,
-    two_line_box_height,
 )
 
 
@@ -37,6 +36,14 @@ class ContentBounds:
         horizontal = self.right + min_gap > other.left and other.right + min_gap > self.left
         vertical = self.bottom - min_gap < other.top and other.bottom - min_gap < self.top
         return horizontal and vertical
+
+    def contains(self, other: ContentBounds, *, min_gap: float = 0.0) -> bool:
+        return (
+            other.left >= self.left - min_gap
+            and other.right <= self.right + min_gap
+            and other.bottom >= self.bottom - min_gap
+            and other.top <= self.top + min_gap
+        )
 
     def union(self, other: ContentBounds) -> ContentBounds:
         return ContentBounds(
@@ -96,14 +103,41 @@ def box_label_size(
     sub_fontsize: float | None = None,
 ) -> tuple[float, float]:
     """Return (width, height) for a detail tile matching ``_draw_box`` geometry."""
-    title_w = max(text_width_in_axes(ax, line, fontsize=fontsize) for line in label.split("\n") or [""])
-    width = box_width_for_text_width(title_w)
-    if not sublabel:
-        return width, single_line_box_height()
-    sub_fs = sub_fontsize if sub_fontsize is not None else max(6.5, fontsize - 1.5)
-    sub_w = max(text_width_in_axes(ax, line, fontsize=sub_fs, fontweight="normal") for line in sublabel.split("\n"))
-    width = max(width, box_width_for_text_width(max(sub_w, title_w)))
-    return width, two_line_box_height()
+    ref_top = 10.0
+    cx = 0.0
+    title_y = ref_top - BLOCK_PAD_Y
+    text_bounds = measure_text_bounds(
+        ax,
+        label,
+        cx,
+        title_y,
+        fontsize=fontsize,
+        ha="center",
+        va="top",
+        fontweight="bold",
+    )
+
+    if sublabel:
+        sub_fs = sub_fontsize if sub_fontsize is not None else max(6.5, fontsize - 1.5)
+        sub_lines = [line for line in sublabel.split("\n") if line.strip()]
+        sub_y = title_y - TITLE_LINE_H - LABEL_LINE_GAP
+        for line in sub_lines:
+            line_bounds = measure_text_bounds(
+                ax,
+                line,
+                cx,
+                sub_y,
+                fontsize=sub_fs,
+                ha="center",
+                va="top",
+                fontweight="normal",
+            )
+            text_bounds = text_bounds.union(line_bounds)
+            sub_y -= SUB_LINE_H + LABEL_LINE_GAP
+
+    width = box_width_for_text_width(text_bounds.width)
+    height = ref_top - text_bounds.bottom + BLOCK_PAD_Y
+    return width, max(single_line_box_height(), height)
 
 
 def box_bounds_at(cx: float, top_y: float, width: float, height: float, *, visual_inset: float = 0.0) -> ContentBounds:
