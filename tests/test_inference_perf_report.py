@@ -250,8 +250,7 @@ def test_inference_perf_report(
     graph_tree = None
     if capture_folder:
         metadata_json_path = os.path.join(capture_folder, "execution_details.json")
-        if not os.path.exists(metadata_json_path):
-            classify_graph_capture_trace(capture_folder)
+        classify_graph_capture_trace(capture_folder)
         graph_tree = merge_capture_trace_into_graph(
             capture_folder,
             metadata_json_path,

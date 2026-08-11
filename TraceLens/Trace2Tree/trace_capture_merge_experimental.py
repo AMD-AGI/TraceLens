@@ -575,12 +575,6 @@ def build_execution_graph_root_map(graph_tree):
         e for e in graph_tree.events if "graphlaunch" in e.get("name", "").lower()
     ]
 
-    if not execution_roots:
-        graphlaunch_events.sort(key=lambda x: x.get("ts", 0))
-        if graphlaunch_events:
-            return [({"name": "fallback"}, graphlaunch_events)]
-        return []
-
     result = []
     for exec_root in execution_roots:
         g_roots = find_graph_roots_under_execution(exec_root, graphlaunch_events)
@@ -709,46 +703,49 @@ def merge_capture_trace_into_graph(
             continue
 
         # ── Resolve capture tree + roots for this execution root ──
-        is_fallback = execution_root.get("name") == "fallback"
-        if not is_fallback:
-            batch_size = find_execution_details(execution_root)
-            if batch_size is None:
-                print(
-                    "Warning: could not determine batch size for execution root {}".format(
-                        execution_root["name"]
-                    )
+        batch_size = find_execution_details(execution_root)
+        if batch_size is None:
+            print(
+                "Warning: could not determine batch size for execution root {}".format(
+                    execution_root["name"]
                 )
-                continue
-            closest_batch_size = find_closest_batch_size(
-                int(batch_size), capture_batch_sizes
             )
-            if closest_batch_size is None:
-                print(
-                    "Warning: no capture batch size found for batch size {}".format(
-                        batch_size
-                    )
+            continue
+        closest_batch_size = find_closest_batch_size(
+            int(batch_size), capture_batch_sizes
+        )
+        if closest_batch_size is None:
+            print(
+                "Warning: no capture batch size found for batch size {}".format(
+                    batch_size
                 )
-                continue
-            num_graph_roots = len(graph_roots)
-            if num_graph_roots != 1:
-                mode = "PIECEWISE"
-            else:
-                mode = "FULL"
-            str_key = "{}_{}".format(closest_batch_size, mode)
-            filepath = capture_map[str_key]
-            key = (str_key, os.path.abspath(filepath))
-            capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
-                key, filepath
             )
+            continue
+        # Look up the capture trace by batch_size.  The mode (FULL vs
+        # PIECEWISE) is already determined in execution_details.json from
+        # the capture trace's StreamBeginCapture count.  Try both modes
+        # and use whichever is available; when both exist, prefer the one
+        # matching the graph launch count.
+        full_key = "{}_FULL".format(closest_batch_size)
+        piece_key = "{}_PIECEWISE".format(closest_batch_size)
+        if full_key in capture_map and piece_key in capture_map:
+            str_key = piece_key if len(graph_roots) != 1 else full_key
+        elif full_key in capture_map:
+            str_key = full_key
+        elif piece_key in capture_map:
+            str_key = piece_key
         else:
-            # No annotation roots found; use the first capture entry from
-            # execution_details.json and pair its roots with all graph roots.
-            first_key = next(iter(capture_map))
-            filepath = capture_map[first_key]
-            key = (first_key, os.path.abspath(filepath))
-            capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
-                key, filepath
+            print(
+                "Warning: no capture trace for batch size {}".format(
+                    closest_batch_size
+                )
             )
+            continue
+        filepath = capture_map[str_key]
+        key = (str_key, os.path.abspath(filepath))
+        capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
+            key, filepath
+        )
 
         # Build (capture_root, graph_root) pairs.  When there is a single
         # capture root (e.g. diffusion where one captured graph is replayed
