@@ -31,7 +31,7 @@ from visualizer.ast_analyze import (
     _label_for,
 )
 from visualizer.basic_ops import BasicOpFilter, introspect_is_modeling_operation, resolve_is_basic
-from visualizer.blocks import BlockComponent, norm_input_sources
+from visualizer.blocks import BlockComponent, upstream_input_sources
 
 _SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "getattr"})
 
@@ -57,6 +57,8 @@ def wrapper_bullet_lines(node: BlockNode) -> tuple[str, str]:
 def wrapper_bullet(node: BlockNode) -> str:
     """Human-readable bullet text for a method wrapper."""
     label, attr = wrapper_bullet_lines(node)
+    if is_method_wrapper(node):
+        return f"{label} ({attr})"
     if label.replace(" ", "_").strip("_") == attr.strip("_"):
         return label
     return f"{label} ({attr})"
@@ -129,7 +131,7 @@ def block_purpose(node: BlockNode) -> str | None:
     if class_name == "RouterOp":
         return node.details[0] if node.details else node.label
     if class_name == "SituAndMul":
-        return "SiLU(gate) × up branch"
+        return "Situ(gate) × up branch"
     if class_name == "FusedRMSNormGated":
         return "RMSNorm × gated activation"
     if class_name == "Split" or node.attr_name == "split_gate_up":
@@ -215,28 +217,29 @@ def is_straight_line_module(node: BlockNode) -> bool:
 
 
 def is_linear_pipeline_block(node: BlockNode) -> bool:
-    """Alias for :func:`is_straight_line_module`."""
-    return is_straight_line_module(node)
+    """True for straight-line composites and Situ-gated MLPs that expand inline."""
+    return is_straight_line_module(node) or is_situ_gated_mlp(node)
+
+
+def is_inline_expandable_module(node: BlockNode) -> bool:
+    """True when a composite should render as expanded inline steps rather than a nested diagram."""
+    return is_linear_pipeline_block(node)
 
 
 def should_expand_composite_wrapper(node: BlockNode) -> bool:
     """True when a composite wrapper should expand inline (straight-line modules only)."""
-    return is_straight_line_module(node)
+    return is_inline_expandable_module(node)
 
 
 def straight_line_steps(node: BlockNode) -> list[BlockNode]:
-    """Expand a straight-line composite into ordered steps, recursively inlining nested modules."""
+    """Expand a straight-line composite into ordered direct child steps."""
     if not is_straight_line_module(node):
         return [node]
     steps: list[BlockNode] = []
     for segment in collect_computation_segments(node):
         if not isinstance(segment, SeqSegment):
             return [node]
-        child = segment.step
-        if is_straight_line_module(child):
-            steps.extend(straight_line_steps(child))
-        else:
-            steps.append(child)
+        steps.append(segment.step)
     return steps
 
 
@@ -247,6 +250,10 @@ def linear_pipeline_steps(node: BlockNode) -> list[BlockNode]:
 
 def inline_block_frame_label(block: BlockNode) -> str:
     """Display label for a dotted inline frame around an expanded sub-block."""
+    if block.class_name in {"DeltaAttention", "KimiMoEGate"}:
+        return block.label if block.class_name == "DeltaAttention" else block.class_name
+    if block.class_name == "SituAndMul":
+        return block.class_name
     return block.attr_name
 
 
@@ -262,7 +269,11 @@ def is_single_function_tree(node: BlockNode) -> bool:
     return len(collect_function_steps(node)) == 1
 
 
-def inline_composite_steps(step: BlockNode) -> tuple[list[BlockNode], BlockNode | None]:
+def inline_composite_steps(
+    step: BlockNode,
+    *,
+    basic_ops: BasicOpFilter | None = None,
+) -> tuple[list[BlockNode], BlockNode | None]:
     """Inline a straight-line composite wrapper into its internal forward steps."""
     if not is_straight_line_module(step):
         return [step], None
@@ -305,27 +316,18 @@ def _show_single_function_in_diagram(tree: BlockNode) -> bool:
 
 def partition_detail_trees(
     trees: list[tuple[str, BlockNode]],
-    wrappers: list[BlockNode],
-) -> tuple[list[tuple[str, BlockNode]], list[BlockNode]]:
-    """Move single-function block trees into the wrapped-modules list."""
+) -> list[tuple[str, BlockNode]]:
+    """Keep block trees that warrant a dedicated internal diagram."""
     kept: list[tuple[str, BlockNode]] = []
-    wrapped = [node for node in wrappers if not _omit_from_detailed_view(node)]
-    seen = {node.attr_name for node in wrapped}
     for title, tree in trees:
         if _omit_from_detailed_view(tree):
             continue
         if is_straight_line_module(tree):
             continue
-        if is_single_function_tree(tree):
-            if _show_single_function_in_diagram(tree):
-                kept.append((title, tree))
-                continue
-            if tree.attr_name not in seen:
-                seen.add(tree.attr_name)
-                wrapped.append(tree)
+        if is_single_function_tree(tree) and _show_single_function_in_diagram(tree):
             continue
         kept.append((title, tree))
-    return kept, wrapped
+    return kept
 
 
 def collect_method_wrappers(node: BlockNode) -> list[BlockNode]:
@@ -346,6 +348,14 @@ def output_gate_combine_sublabel(node: BlockNode | None) -> str | None:
         if "×" in line:
             return line
     return node.details[-1]
+
+
+def gated_norm_combine_sublabel(
+    consumer: BlockNode | None,
+    gate_producer: BlockNode | None,
+) -> str | None:
+    """Gated-norm combine tiles show the × symbol only (no caption)."""
+    return None
 
 
 def _is_output_gate_node(node: BlockNode) -> bool:
@@ -465,8 +475,11 @@ ComputationSegment = (
 
 def _method_combine_op(step: BlockNode) -> tuple[str, str | None]:
     """Map a method wrapper to an operator symbol and short computation label."""
-    if step.attr_name == "moe_infer":
-        return "Σ", "∑ w·expert"
+    from visualizer.ast_analyze import combine_op_from_step_details
+
+    op = combine_op_from_step_details(step.details)
+    if op is not None:
+        return op, None
     label, _attr = wrapper_bullet_lines(step)
     return "ƒ", label
 
@@ -603,6 +616,7 @@ def _delta_attention_block_node(
     forward_order: int | None,
     details: list[str],
     attention_inputs: dict[str, list[str]] | None = None,
+    parent_class_name: str | None = None,
 ) -> BlockNode:
     """Expand KDA delta attention into an inline straight-line pipeline."""
     kernel = kernel_name_from_step_details(details)
@@ -614,7 +628,7 @@ def _delta_attention_block_node(
         attr_name=SYNTHETIC_ATTENTION,
         class_name="DeltaAttention",
         role="attention",
-        label=attention_kernel_label(details),
+        label=parent_class_name or "DeltaAttention",
         forward_order=forward_order,
         details=[f"linear recurrent delta attention · {kernel or 'chunk_kda'}"],
         is_basic=False,
@@ -706,6 +720,10 @@ def _wrap_parallel_gate_children(
     wrapped: list[BlockNode] = []
     for child in child_nodes:
         if child.attr_name not in gate_attrs:
+            wrapped.append(child)
+            continue
+        activation = gate_activations.get(child.attr_name)
+        if activation is None and displays_as_linear(child.attr_name, child.class_name):
             wrapped.append(child)
             continue
         consumer, _ = _gate_side_consumer(side_inputs, child.attr_name)
@@ -841,7 +859,7 @@ def _situ_and_mul_block_node(
                 attr_name="situ_activation",
                 class_name="SituActivation",
                 forward_order=step_order,
-                label="SiLU",
+                label="Situ",
                 details=["activation on gate half"],
                 basic=False,
             ),
@@ -861,7 +879,7 @@ def _situ_and_mul_block_node(
         role=role,
         label="Gated multiply",
         forward_order=forward_order,
-        details=list(details or ["SiLU(gate) × up branch"]),
+        details=list(details or ["Situ(gate) × up branch"]),
         is_basic=False,
         input_label="gate_up",
         children=children,
@@ -913,7 +931,7 @@ def _branches_from_provenance(
         nodes = [by_attr[attr] for attr in chain if attr in by_attr]
         nodes = _append_branch_followups(nodes, pre_merge)
         if nodes:
-            branches.append(Branch(label=label, steps=nodes))
+            branches.append(Branch(label=label, steps=nodes, port_style="inline"))
 
     if len(branches) >= 2:
         return _collapse_identical_kv_branches(branches)
@@ -928,7 +946,7 @@ def _collapse_identical_kv_branches(branches: list[Branch]) -> list[Branch]:
     if [node.attr_name for node in by_label["K"].steps] != [node.attr_name for node in by_label["V"].steps]:
         return branches
     collapsed = [branch for branch in branches if branch.label not in {"K", "V"}]
-    collapsed.append(Branch(label="KV", steps=by_label["K"].steps))
+    collapsed.append(Branch(label="KV", steps=by_label["K"].steps, port_style="inline"))
     return collapsed
 
 
@@ -944,16 +962,16 @@ def _partition_named_branches(pre_merge: list[BlockNode], prefix_rules: dict[str
 
     branches: list[Branch] = []
     if buckets.get("K") and not buckets.get("V") and buckets.get("Q"):
-        branches.append(Branch(label="Q", steps=buckets["Q"]))
-        branches.append(Branch(label="KV", steps=list(buckets["K"])))
+        branches.append(Branch(label="Q", steps=buckets["Q"], port_style="inline"))
+        branches.append(Branch(label="KV", steps=list(buckets["K"]), port_style="inline"))
     elif buckets.get("K") and buckets.get("V") and [n.attr_name for n in buckets["K"]] == [n.attr_name for n in buckets["V"]]:
         if buckets.get("Q"):
-            branches.append(Branch(label="Q", steps=buckets["Q"]))
-        branches.append(Branch(label="KV", steps=list(buckets["K"])))
+            branches.append(Branch(label="Q", steps=buckets["Q"], port_style="inline"))
+        branches.append(Branch(label="KV", steps=list(buckets["K"]), port_style="inline"))
     else:
         for label, nodes in buckets.items():
             if nodes:
-                branches.append(Branch(label=label, steps=nodes))
+                branches.append(Branch(label=label, steps=nodes, port_style="inline"))
     return branches
 
 
@@ -984,6 +1002,54 @@ def _side_feed_targets(node: BlockNode) -> dict[str, str]:
     return targets
 
 
+def _situ_gated_mlp_parts(
+    node: BlockNode,
+) -> tuple[BlockNode, BlockNode, BlockNode, BlockNode, BlockNode] | None:
+    """Return (gate, up, act_fn, situ, down) when ``node`` is a Situ-gated MLP."""
+    if not node.children:
+        return None
+    by_attr = {child.attr_name: child for child in node.children}
+    act_fn = by_attr.get("act_fn")
+    if act_fn is None or act_fn.class_name != "SituAndMul":
+        return None
+    gate = by_attr.get("gate_proj") or by_attr.get("w1")
+    up = by_attr.get("up_proj") or by_attr.get("w3")
+    down = by_attr.get("down_proj") or by_attr.get("w2")
+    if gate is None or up is None or down is None:
+        return None
+    situ = next(
+        (child for child in act_fn.children if child.class_name == "SituActivation"),
+        None,
+    )
+    if situ is None:
+        return None
+    return gate, up, act_fn, situ, down
+
+
+def is_situ_gated_mlp(node: BlockNode) -> bool:
+    """True when a block is a gate/up projection pair feeding SituAndMul."""
+    return _situ_gated_mlp_parts(node) is not None
+
+
+def _situ_gated_mlp_segments(node: BlockNode) -> list[ComputationSegment] | None:
+    """Model Situ-gated MLPs as gate → Situ combined with a parallel up branch."""
+    parts = _situ_gated_mlp_parts(node)
+    if parts is None:
+        return None
+    gate, up, _act_fn, situ, down = parts
+    return [
+        SeqSegment(step=gate),
+        SeqSegment(step=situ),
+        CombineSegment(
+            side=up,
+            after=[down],
+            side_port_label="up",
+            side_port_style="inline",
+            op="×",
+        ),
+    ]
+
+
 def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
     """Build generic render segments from forward-ordered block children."""
     children = node.children
@@ -995,6 +1061,9 @@ def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
         None,
     )
     if merge_idx is None:
+        situ_segments = _situ_gated_mlp_segments(node)
+        if situ_segments is not None:
+            return situ_segments
         return [_segment_for_step(node, child) for child in children]
 
     pre_merge = children[:merge_idx]
@@ -1004,7 +1073,7 @@ def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
     branches = _branches_from_provenance(pre_merge, node.attention_inputs)
     if len(branches) < 2:
         branches = [
-            Branch(label=branch.label, steps=branch.steps)
+            Branch(label=branch.label, steps=branch.steps, port_style="inline")
             for branch in _partition_named_branches(pre_merge, _name_prefix_branch_rules())
             if branch.steps
         ]
@@ -1087,20 +1156,17 @@ def tile_display_labels(
         return block.label, tile_sublabel(block, in_inline_frame=True)
 
     if port_label and port_style == "inline":
-        sublabel = block.attr_name if block is not None else None
-        return port_label, sublabel
+        if block is not None and block.is_basic:
+            return block.label, None
+
+    if block is not None and block.is_basic:
+        return block.label, None
+
+    if block is not None and block.class_name in {"ActivationOp", "AttentionOp", "DeltaAttention"}:
+        return block.label, None
 
     if block is None:
         return spec_label or "", None
-
-    operation = block.label
-    if (
-        block.attr_name
-        and not block.attr_name.startswith("@")
-        and operation
-        and operation != block.attr_name
-    ):
-        return block.attr_name, operation
 
     sublabel = tile_sublabel(block, in_inline_frame=False)
     return spec_label or block.label, sublabel
@@ -1123,7 +1189,7 @@ def collect_nested_diagrams(
     def consider(block: BlockNode | None, parent_block: BlockNode | None) -> None:
         if block is None or not _is_composite_block(block):
             return
-        if is_straight_line_module(block):
+        if is_inline_expandable_module(block):
             return
         if block.attr_name in seen:
             return
@@ -1168,6 +1234,7 @@ def build_block_node(
             return _delta_attention_block_node(
                 forward_order=forward_order,
                 details=step_details,
+                parent_class_name=class_name,
             )
         return _leaf_node(
             attr_name=attr_name,
@@ -1240,6 +1307,7 @@ def build_block_node(
                         forward_order=child_order,
                         details=child_details,
                         attention_inputs=cls.attention_inputs,
+                        parent_class_name=class_name,
                     )
                 )
             else:
@@ -1288,7 +1356,7 @@ def build_block_node(
                     attr_name=call_attr,
                     class_name=call_attr,
                     forward_order=child_order,
-                    details=[f"method `{call_attr}()`"],
+                    details=child_details or [f"method `{call_attr}()`"],
                 )
             )
             continue
@@ -1354,8 +1422,8 @@ def build_block_node(
 
 
 def _input_sources_for_components(components: list[BlockComponent]) -> dict[str, str]:
-    """Map compute module attr names to the norm label that feeds them in the decoder layer."""
-    return norm_input_sources(components)
+    """Map compute module attr names to the upstream operator that feeds them."""
+    return upstream_input_sources(components)
 
 
 def fallback_positional_tree(positional_encoding: str) -> BlockNode:
@@ -1473,10 +1541,9 @@ def build_decoder_block_trees(
     basic_ops: BasicOpFilter,
     *,
     decoder_class: str | None = None,
-) -> tuple[list[tuple[str, BlockNode]], list[BlockNode]]:
-    """Build recursive trees for detailed diagrams and collect standalone method wrappers."""
+) -> list[tuple[str, BlockNode]]:
+    """Build recursive trees for detailed diagrams."""
     trees: list[tuple[str, BlockNode]] = []
-    standalone_wrappers: list[BlockNode] = []
     seen: set[tuple[str, str]] = set()
     decoder = registry.get(decoder_class) if decoder_class else None
     detail_components = (
@@ -1515,13 +1582,12 @@ def build_decoder_block_trees(
             forward_order=comp.forward_order,
         )
         if is_method_wrapper(tree):
-            standalone_wrappers.append(tree)
             continue
         tree.input_label = "hidden_states"
         tree.input_source = input_sources.get(comp.attr_name)
         trees.append((title, tree))
 
-    return trees, standalone_wrappers
+    return trees
 
 
 def build_full_detailed_block_trees(
@@ -1532,7 +1598,7 @@ def build_full_detailed_block_trees(
     positional_encoding: str,
     norm_type: str,
     decoder_class: str | None = None,
-) -> tuple[list[tuple[str, BlockNode]], list[BlockNode]]:
+) -> list[tuple[str, BlockNode]]:
     """Build pipeline, decoder-layer, and LM head detail sections in main-diagram order."""
     pipeline = build_pipeline_block_trees(
         positional_encoding=positional_encoding,
@@ -1540,9 +1606,8 @@ def build_full_detailed_block_trees(
         basic_ops=basic_ops,
     )
     decoder_trees: list[tuple[str, BlockNode]] = []
-    wrappers: list[BlockNode] = []
     if components:
-        decoder_trees, wrappers = build_decoder_block_trees(
+        decoder_trees = build_decoder_block_trees(
             components,
             registry,
             basic_ops,
@@ -1553,7 +1618,7 @@ def build_full_detailed_block_trees(
         registry=registry,
         basic_ops=basic_ops,
     )
-    return partition_detail_trees(pipeline + decoder_trees + head_trees, wrappers)
+    return partition_detail_trees(pipeline + decoder_trees + head_trees)
 
 
 def collect_graph_segments(

@@ -49,25 +49,52 @@ def ordered_components(components: list[BlockComponent]) -> list[BlockComponent]
 def collect_norm_module_pairs(
     components: list[BlockComponent],
 ) -> list[tuple[BlockComponent, BlockComponent]]:
-    """Pair each norm with the compute module that follows it in forward order."""
+    """Pair each norm with every compute module it feeds before the next norm."""
     pairs: list[tuple[BlockComponent, BlockComponent]] = []
     pending_norm: BlockComponent | None = None
+    paired_order: int | None = None
     for comp in ordered_components(components):
         if comp.role == "norm":
             pending_norm = comp
+            paired_order = None
             continue
         if pending_norm is None:
             continue
+        if paired_order is None:
+            paired_order = comp.forward_order
+        elif comp.forward_order != paired_order:
+            pending_norm = None
+            paired_order = None
+            continue
         pairs.append((pending_norm, comp))
-        pending_norm = None
     return pairs
 
 
+def upstream_input_sources(components: list[BlockComponent]) -> dict[str, str]:
+    """Map compute module attr names to the nearest upstream operator in forward order."""
+    ordered = ordered_components(components)
+    sources: dict[str, str] = {}
+    for comp in ordered:
+        if comp.role == "norm" or comp.forward_order is None:
+            continue
+        upstream_candidates = [
+            candidate
+            for candidate in ordered
+            if candidate.forward_order is not None and candidate.forward_order < comp.forward_order
+        ]
+        if not upstream_candidates:
+            continue
+        upstream_order = max(candidate.forward_order for candidate in upstream_candidates)
+        upstream_at_order = [
+            candidate for candidate in upstream_candidates if candidate.forward_order == upstream_order
+        ]
+        sources[comp.attr_name] = upstream_at_order[-1].attr_name
+    return sources
+
+
 def norm_input_sources(components: list[BlockComponent]) -> dict[str, str]:
-    """Map compute module attr names to the norm label that feeds them."""
-    return {
-        module.attr_name: norm.label for norm, module in collect_norm_module_pairs(components)
-    }
+    """Backwards-compatible alias for upstream_input_sources."""
+    return upstream_input_sources(components)
 
 
 @dataclass

@@ -14,15 +14,13 @@ from matplotlib.patches import Circle, FancyBboxPatch
 from visualizer.blocks import BlockComponent
 from visualizer.ast_analyze import displays_as_linear
 from visualizer.basic_ops import BasicOpFilter
-from visualizer.blocks import BlockComponent, collect_norm_module_pairs
+from visualizer.blocks import BlockComponent, collect_norm_module_pairs, upstream_input_sources
 from visualizer.block_tree import (
     BlockNode,
     _is_composite_block,
     _omit_from_detailed_view,
     _show_single_function_in_diagram,
     build_stack_component_tree,
-    collect_method_wrappers,
-    collect_parallel_gate_wrappers,
     collect_nested_diagrams,
     is_method_wrapper,
     is_simple_modeled_tile,
@@ -34,7 +32,6 @@ from visualizer.block_tree import (
     wrapper_bullet,
     wrapper_bullet_lines,
     wrapper_module_comment,
-    wrapper_panel_line,
 )
 from visualizer.sizing import (
     BLOCK_PAD_X,
@@ -45,6 +42,7 @@ from visualizer.sizing import (
     TITLE_LINE_H,
     block_sublabel,
     box_height_for_content,
+    box_text_lines,
     box_width_for_text_width,
     estimate_block_size_for_node,
     INPUT_PAD_X,
@@ -206,6 +204,9 @@ MERGE_CLEARANCE = 0.05
 COMBINE_OP_SIZE = 2 * (MERGE_RADIUS + MERGE_CLEARANCE)
 MERGE_OUTPUT_GAP = 0.06
 RESIDUAL_BRANCH_LIFT = 0.07
+FLOW_CONNECTOR_ZORDER = 2
+DETAIL_CONNECTOR_ZORDER = 5.5
+COMBINE_OP_ZORDER = 6
 
 DETAIL_TILE_ROUNDING = 0.08
 DETAIL_TILE_BOX_PAD = 0.008
@@ -303,46 +304,23 @@ def _draw_box(
         zorder=zorder,
     )
     ax.add_patch(patch)
-    pad_x = node.pad_x if node.pad_x is not None else BLOCK_PAD_X
-    pad_y = node.pad_y if node.pad_y is not None else BLOCK_PAD_Y
-    title_y = node.top - pad_y
-    if node.sublabel:
-        sub_fontsize = max(6.5, node.fontsize - 1.5)
+    for line in box_text_lines(
+        node.top,
+        node.h,
+        node.label,
+        node.sublabel,
+        pad_y=node.pad_y,
+        title_fontsize=node.fontsize,
+    ):
         ax.text(
             node.cx,
-            title_y,
-            node.label,
+            line.y,
+            line.text,
             ha="center",
-            va="top",
-            fontsize=node.fontsize,
+            va=line.va,
+            fontsize=line.fontsize,
             color=node.text_color,
-            fontweight="bold",
-            zorder=6,
-        )
-        sub_lines = [line for line in node.sublabel.split("\n") if line.strip()]
-        sub_y = title_y - TITLE_LINE_H - LABEL_LINE_GAP
-        for line in sub_lines:
-            ax.text(
-                node.cx,
-                sub_y,
-                line,
-                ha="center",
-                va="top",
-                fontsize=sub_fontsize,
-                color=node.text_color,
-                zorder=6,
-            )
-            sub_y -= SUB_LINE_H + LABEL_LINE_GAP
-    else:
-        ax.text(
-            node.cx,
-            title_y,
-            node.label,
-            ha="center",
-            va="top",
-            fontsize=node.fontsize,
-            color=node.text_color,
-            fontweight="bold",
+            fontweight=line.fontweight,
             zorder=6,
         )
 
@@ -357,8 +335,19 @@ def _arrow(
     color: str | None = None,
     linewidth: float = 1.5,
     linestyle: str = "solid",
+    zorder: float = FLOW_CONNECTOR_ZORDER,
 ) -> None:
-    _line(ax, x1, y1, x2, y2, color=color, linewidth=linewidth, linestyle=linestyle)
+    _line(
+        ax,
+        x1,
+        y1,
+        x2,
+        y2,
+        color=color,
+        linewidth=linewidth,
+        linestyle=linestyle,
+        zorder=zorder,
+    )
 
 
 def _line(
@@ -371,6 +360,7 @@ def _line(
     color: str | None = None,
     linewidth: float = 1.6,
     linestyle: str = "solid",
+    zorder: float = FLOW_CONNECTOR_ZORDER,
 ) -> None:
     ax.plot(
         [x1, x2],
@@ -378,7 +368,7 @@ def _line(
         color=color or COLORS["flow"],
         linewidth=linewidth,
         linestyle=linestyle,
-        zorder=2,
+        zorder=zorder,
         solid_capstyle="round",
     )
 
@@ -398,10 +388,19 @@ def _draw_op_circle(ax, x: float, y: float, symbol: str) -> None:
         facecolor=COLORS["bg"],
         edgecolor=COLORS["residual"],
         linewidth=1.6,
-        zorder=5,
+        zorder=COMBINE_OP_ZORDER,
     )
     ax.add_patch(circle)
-    ax.text(x, y, symbol, ha="center", va="center", fontsize=11, color=COLORS["residual"], zorder=6)
+    ax.text(
+        x,
+        y,
+        symbol,
+        ha="center",
+        va="center",
+        fontsize=11,
+        color=COLORS["residual"],
+        zorder=COMBINE_OP_ZORDER + 1,
+    )
 
 
 def _draw_merge(ax, x: float, y: float) -> None:
@@ -523,17 +522,34 @@ def _attention_label(spec: ArchitectureSpec) -> str:
     return attn
 
 
+def _ffn_class_display_name(class_name: str) -> str:
+    """Short display names for FFN/MoE classes on the main decoder spine."""
+    aliases = {
+        "KimiSparseMoeBlock": "KimiMoE",
+        "KimiMLP": "KimiMLP",
+    }
+    return aliases.get(class_name, class_name)
+
+
 def _ffn_label(spec: ArchitectureSpec) -> tuple[str, str | None]:
     if spec.layer_variants:
+        ffn_classes: list[str] = []
+        for variant in spec.layer_variants:
+            cls = variant.ffn_class or variant.ffn_label
+            if cls not in ffn_classes:
+                ffn_classes.append(cls)
+        if len(ffn_classes) > 1:
+            return " / ".join(_ffn_class_display_name(cls) for cls in ffn_classes), None
+        if len(ffn_classes) == 1:
+            return _ffn_class_display_name(ffn_classes[0]), None
         labels: list[str] = []
         for variant in spec.layer_variants:
             if variant.ffn_label not in labels:
                 labels.append(variant.ffn_label)
         if len(labels) > 1:
-            if "MoE" in labels:
-                label = f"MoE / {spec.ffn_type or 'FFN'}"
-                return label, None
             return " / ".join(labels), None
+        if len(labels) == 1:
+            return labels[0], None
     if spec.decoder_type == "Sparse MoE":
         experts = spec.num_experts or "?"
         label = f"MoE ({experts} experts)"
@@ -778,62 +794,6 @@ def _draw_fact_sheet(
     return fact_h
 
 
-def _wrapper_info_height(wrappers: list[BlockNode], *, wrap_width: int = PANEL_WRAP_WIDTH) -> float:
-    line_height = PANEL_LINE_HEIGHT
-    padding_top = PANEL_PAD_TOP
-    padding_bottom = PANEL_PAD_BOTTOM
-    total_lines = 0
-    for node in wrappers:
-        total_lines += len(_wrap_fact_text(wrapper_panel_line(node), width=wrap_width))
-    return max(0.9, padding_top + total_lines * line_height + padding_bottom)
-
-
-def _draw_wrapper_info_box(
-    ax,
-    wrappers: list[BlockNode],
-    *,
-    box_x: float,
-    box_top: float,
-    box_w: float = PANEL_W,
-    wrap_width: int = PANEL_WRAP_WIDTH,
-) -> float:
-    """Draw a bulleted info panel for method wrappers omitted from diagrams."""
-    if not wrappers:
-        return box_top
-
-    box_h = _wrapper_info_height(wrappers, wrap_width=wrap_width)
-    box_y = box_top - box_h
-    patch = FancyBboxPatch(
-        (box_x, box_y),
-        box_w,
-        box_h,
-        boxstyle="round,pad=0.01,rounding_size=0.08",
-        linewidth=1.0,
-        edgecolor=COLORS["fact_border"],
-        facecolor=COLORS["fact_bg"],
-        zorder=1,
-    )
-    ax.add_patch(patch)
-    _draw_panel_title(ax, box_x + PANEL_PAD_X, box_top - PANEL_TITLE_Y, "Simply wrapped modules")
-
-    cursor_y = box_top - PANEL_PAD_TOP
-    for node in wrappers:
-        rows = _wrap_fact_text(wrapper_panel_line(node), width=wrap_width)
-        for index, row in enumerate(rows):
-            prefix = "• " if index == 0 else "  "
-            ax.text(
-                box_x + PANEL_PAD_X,
-                cursor_y,
-                f"{prefix}{row}",
-                fontsize=PANEL_BODY_FONT,
-                color=PANEL_BODY_COLOR,
-                va="top",
-                zorder=5,
-            )
-            cursor_y -= PANEL_LINE_HEIGHT
-    return box_y
-
-
 def _ordered_block_components(spec: ArchitectureSpec) -> list[BlockComponent]:
     if not spec.block_components:
         return []
@@ -879,7 +839,7 @@ def _default_stack_tail(spec: ArchitectureSpec) -> list[BlockComponent]:
             attr_name="norm",
             class_name=norm_type,
             role="norm",
-            label=f"Final {norm_type}",
+            label=norm_type,
             forward_order=0,
         ),
         BlockComponent(
@@ -909,17 +869,32 @@ def _spine_color(role: str) -> str:
     }.get(role, COLORS["embed"])
 
 
+def _basic_component_labels(comp: BlockComponent) -> tuple[str, str | None] | None:
+    """Return operation label pair for basic spine/decoder tiles."""
+    from visualizer.ast_analyze import _label_for
+
+    if comp.role == "embedding":
+        return comp.label, None
+    if displays_as_linear(comp.attr_name, comp.class_name):
+        return "Linear", None
+    if comp.role == "norm":
+        return _label_for("norm", comp.class_name, comp.attr_name), None
+    return None
+
+
 def _spine_display_label(component: BlockComponent, spec: ArchitectureSpec) -> str:
     if component.role == "positional":
         return f"Positional ({spec.positional_encoding})"
+    basic = _basic_component_labels(component)
+    if basic is not None:
+        return basic[0]
     return component.label
 
 
 def _spine_sublabel(component: BlockComponent) -> str | None:
-    if component.role == "embedding":
-        return "Gather rows by token id"
-    if displays_as_linear(component.attr_name, component.class_name):
-        return "Linear"
+    basic = _basic_component_labels(component)
+    if basic is not None:
+        return basic[1]
     return None
 
 
@@ -929,11 +904,8 @@ def _spine_box_height(component: BlockComponent) -> float:
 
 
 def _module_input_labels(spec: ArchitectureSpec) -> dict[str, str]:
-    """Map compute module attr names to the norm label that feeds them in the outer block."""
-    labels: dict[str, str] = {}
-    for norm, comp in _collect_sublayer_pairs(_ordered_block_components(spec)):
-        labels[comp.attr_name] = norm.label
-    return labels
+    """Map compute module attr names to the upstream operator that feeds them in the outer block."""
+    return upstream_input_sources(_ordered_block_components(spec))
 
 
 def _block_frame_header_height(repeat_label: str | None = None) -> float:
@@ -1421,10 +1393,19 @@ def _render_sublayer(
 
 
 def _component_sublabel(comp: BlockComponent) -> str | None:
+    if _basic_component_labels(comp) is not None:
+        return None
     sublabel = comp.class_name if comp.class_name != comp.label else None
     if comp.details:
         sublabel = (sublabel + "\n" if sublabel else "") + comp.details[0][:28]
     return sublabel
+
+
+def _component_display_label(comp: BlockComponent) -> str:
+    basic = _basic_component_labels(comp)
+    if basic is not None:
+        return basic[0]
+    return comp.label
 
 
 def _block_content_widths(ax, spec: ArchitectureSpec) -> tuple[float, float]:
@@ -1434,7 +1415,7 @@ def _block_content_widths(ax, spec: ArchitectureSpec) -> tuple[float, float]:
         norm_w = 0.0
         inner_w = 0.0
         for norm_comp, comp in pairs:
-            norm_w = max(norm_w, _box_label_width(ax, norm_comp.label, fontsize=8))
+            norm_w = max(norm_w, _box_label_width(ax, _component_display_label(norm_comp), fontsize=8))
             inner_w = max(
                 inner_w,
                 _box_label_width(
@@ -1534,7 +1515,7 @@ def _layout_component_block(
             branch_x=branch_x,
             top_y=entry_top,
             spine_y=spine_y,
-            norm_label=norm_comp.label,
+            norm_label=_component_display_label(norm_comp),
             norm_id=norm_comp.attr_name,
             module_label=module_label,
             module_id=comp.attr_name,
@@ -1814,6 +1795,7 @@ def _draw_path(
     color: str | None = None,
     linewidth: float = 1.5,
     linestyle: str = "solid",
+    zorder: float = FLOW_CONNECTOR_ZORDER,
 ) -> None:
     if len(points) < 2:
         return
@@ -1822,7 +1804,17 @@ def _draw_path(
         for index in range(len(points) - 1):
             x1, y1 = points[index]
             x2, y2 = points[index + 1]
-            _line(ax, x1, y1, x2, y2, color=stroke, linewidth=linewidth, linestyle=linestyle)
+            _line(
+                ax,
+                x1,
+                y1,
+                x2,
+                y2,
+                color=stroke,
+                linewidth=linewidth,
+                linestyle=linestyle,
+                zorder=zorder,
+            )
         return
 
     xs = [point[0] for point in points]
@@ -1833,12 +1825,22 @@ def _draw_path(
         color=stroke,
         linewidth=linewidth,
         linestyle=linestyle,
-        zorder=2,
+        zorder=zorder,
         solid_capstyle="round",
     )
     last_x, last_y = points[-2]
     end_x, end_y = points[-1]
-    _arrow(ax, last_x, last_y, end_x, end_y, color=stroke, linewidth=linewidth, linestyle=linestyle)
+    _arrow(
+        ax,
+        last_x,
+        last_y,
+        end_x,
+        end_y,
+        color=stroke,
+        linewidth=linewidth,
+        linestyle=linestyle,
+        zorder=zorder,
+    )
 
 
 def _inline_dashed_port_connector_points(
@@ -1899,6 +1901,14 @@ def _side_entry_combine_connector_points(
     gap: float = 0.04,
 ) -> list[tuple[float, float]]:
     """Route a parallel gate branch into the side of a combine (×) node, like a residual merge."""
+    source_cy = (source.top + source.bottom) / 2
+    if abs(source_cy - target_cy) <= max(source.top - source.bottom, 0.12) * 0.6:
+        if source.cx >= target_cx:
+            entry_x = target_cx + MERGE_RADIUS
+        else:
+            entry_x = target_cx - MERGE_RADIUS
+        return [(source.cx, target_cy), (entry_x, target_cy)]
+
     y_start = source.bottom - gap
     entry_y = target_cy
     if source.cx >= target_cx:
@@ -1924,6 +1934,7 @@ def _draw_graph_connector(
     combine_center_y: float | None = None,
     bus_near: str = "target",
     bus_y: float | None = None,
+    zorder: float = FLOW_CONNECTOR_ZORDER,
 ) -> None:
     """Draw an orthogonal connector that routes around node boxes when needed."""
     gap = 0.04
@@ -1951,7 +1962,7 @@ def _draw_graph_connector(
         points = [(source.cx, y_start), (source.cx, y_end)]
     else:
         points = _orthogonal_path(source, target, obstacles, bus_near=bus_near, bus_y=bus_y)
-    _draw_path(ax, points, color=color, linestyle=linestyle)
+    _draw_path(ax, points, color=color, linestyle=linestyle, zorder=zorder)
 
 
 def _draw_floating_port_label(
@@ -2032,20 +2043,6 @@ def _detail_content_bounds(
     frame_bottom = min_bottom - pad_y
     frame_top = max_top + pad_y
     return frame_left, frame_right, frame_bottom, frame_top
-
-
-def _graph_method_wrapper_attrs(
-    tree: BlockNode,
-    *,
-    prefix_steps: list[BlockNode] | None = None,
-    basic_ops: BasicOpFilter | None = None,
-) -> set[str]:
-    graph = build_computation_graph(tree, prefix_steps=prefix_steps, basic_ops=basic_ops)
-    return {
-        spec.block.attr_name
-        for spec in graph.nodes
-        if spec.block is not None and is_method_wrapper(spec.block)
-    }
 
 
 def _format_input_source_sublabel(source: str | None) -> str | None:
@@ -2351,6 +2348,8 @@ def _render_laid_out_computation_graph(
         include_input=include_input,
         basic_ops=basic_ops,
     )
+    if not graph.nodes:
+        return top_y, cx + block_w / 2, None
     if root_frame_label:
         add_root_pipeline_frame(graph, root, label=root_frame_label)
     from visualizer.computation_graph import measure_graph_node_sizes
@@ -2475,6 +2474,10 @@ def _render_laid_out_computation_graph(
 
     merge_link_labels: list[tuple[str, float, float]] = []
 
+    for leaf, draw_kwargs in plan.node_draws:
+        layout.add(leaf)
+        _draw_box(ax, leaf, **draw_kwargs)
+
     for src, tgt in links:
         source = anchors.get(src)
         target = anchors.get(tgt)
@@ -2482,6 +2485,7 @@ def _render_laid_out_computation_graph(
             continue
         link_key = (src, tgt)
         port_label = graph.link_port_labels.get(link_key)
+        connector_style = "solid"
         if port_label and link_key in merge_entry_x:
             entry_x = merge_entry_x[link_key]
             bus_y = merge_link_bus.get(link_key)
@@ -2491,7 +2495,12 @@ def _render_laid_out_computation_graph(
                 entry_x,
                 bus_y=bus_y,
             )
-            _draw_path(ax, points)
+            _draw_path(
+                ax,
+                points,
+                linestyle=connector_style,
+                zorder=DETAIL_CONNECTOR_ZORDER,
+            )
             merge_link_labels.append((port_label, entry_x, target.top + 0.05))
             continue
         is_side_link = (
@@ -2532,6 +2541,7 @@ def _render_laid_out_computation_graph(
             source,
             target,
             route_obstacles,
+            linestyle=connector_style,
             side_entry=is_side_link,
             inline_port=inline_port,
             floating_port=floating_port,
@@ -2540,11 +2550,8 @@ def _render_laid_out_computation_graph(
             combine_center_y=combine_center_y,
             bus_near=bus_near,
             bus_y=bus_y,
+            zorder=DETAIL_CONNECTOR_ZORDER,
         )
-
-    for leaf, draw_kwargs in plan.node_draws:
-        layout.add(leaf)
-        _draw_box(ax, leaf, **draw_kwargs)
 
     for op_x, op_y, symbol, op_sublabel in plan.combine_ops:
         _draw_combine_op(ax, op_x, op_y, symbol, sublabel=op_sublabel)
@@ -2724,23 +2731,10 @@ def _render_detailed_internals(
     panel_x = panel_x if panel_x is not None else cx + 3.0
     detail_min_left = DIAGRAM_LEFT_MARGIN + 0.05
 
-    title_drop = 0.28 if compact_header else 0.45
     section_drop = 0.22 if compact_header else 0.35
-    cursor = start_y - title_drop
-    ax.text(
-        detail_min_left,
-        cursor,
-        "Block internals",
-        ha="left",
-        va="center",
-        fontsize=PANEL_TITLE_FONT,
-        color=PANEL_TITLE_COLOR,
-        fontweight="bold",
-    )
-    cursor -= section_drop
-    section_top = cursor
+    cursor = start_y - section_drop
 
-    if not spec.detailed_block_trees and not spec.detailed_wrapped_modules:
+    if not spec.detailed_block_trees:
         ax.text(
             cx,
             cursor,
@@ -2753,17 +2747,7 @@ def _render_detailed_internals(
         return cursor - 0.35
 
     bottom = cursor
-    wrappers: list[BlockNode] = []
-    seen: set[str] = set()
     basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
-    for node in spec.detailed_wrapped_modules:
-        if _omit_from_detailed_view(node):
-            continue
-        if node.attr_name in seen:
-            continue
-        seen.add(node.attr_name)
-        wrappers.append(node)
-
     for title, tree, input_sublabel in _detail_sections_to_render(spec):
         section_w = measure_detail_tree_content_width(
             ax,
@@ -2789,56 +2773,6 @@ def _render_detailed_internals(
             basic_ops=basic_ops,
         )
         bottom = cursor
-        for sub_title, sub_tree in collect_nested_diagrams(tree, basic_ops=basic_ops):
-            if is_single_function_tree(sub_tree):
-                if _omit_from_detailed_view(sub_tree):
-                    continue
-                if not _show_single_function_in_diagram(sub_tree):
-                    if sub_tree.attr_name not in seen:
-                        seen.add(sub_tree.attr_name)
-                        wrappers.append(sub_tree)
-                    continue
-                continue
-
-    rendered_in_graph: set[str] = set()
-    for title, tree in spec.detailed_block_trees:
-        rendered_in_graph.update(_graph_method_wrapper_attrs(tree, basic_ops=basic_ops))
-        for _, sub_tree in collect_nested_diagrams(tree, basic_ops=basic_ops):
-            if is_single_function_tree(sub_tree):
-                continue
-            rendered_in_graph.update(_graph_method_wrapper_attrs(sub_tree))
-
-    wrappers = [
-        node
-        for node in wrappers
-        if node.attr_name not in rendered_in_graph
-        and not _omit_from_detailed_view(node)
-        and not (is_single_function_tree(node) and _show_single_function_in_diagram(node))
-    ]
-
-    for _, tree in spec.detailed_block_trees:
-        for node in collect_method_wrappers(tree):
-            if node.attr_name in seen or node.attr_name in rendered_in_graph:
-                continue
-            if node.attr_name in tree.side_inputs and is_method_wrapper(node):
-                continue
-            seen.add(node.attr_name)
-            wrappers.append(node)
-        for node in collect_parallel_gate_wrappers(tree):
-            if node.attr_name in seen:
-                continue
-            seen.add(node.attr_name)
-            wrappers.append(node)
-
-    if wrappers:
-        _draw_wrapper_info_box(
-            ax,
-            wrappers,
-            box_x=panel_x,
-            box_top=section_top,
-            box_w=panel_w,
-            wrap_width=wrap_width,
-        )
 
     return bottom
 
@@ -2938,9 +2872,14 @@ def render_diagram(
                 _box_label_width(ax, _spine_display_label(comp, spec), fontsize=9.0, sublabel=sublabel),
             )
     tail_w = max(
-        _box_label_width(ax, comp.label, fontsize=9.0, sublabel=_spine_sublabel(comp))
+        _box_label_width(
+            ax,
+            _spine_display_label(comp, spec),
+            fontsize=9.0,
+            sublabel=_spine_sublabel(comp),
+        )
         if _spine_sublabel(comp)
-        else _box_label_width(ax, comp.label, fontsize=9.0)
+        else _box_label_width(ax, _spine_display_label(comp, spec), fontsize=9.0)
         for comp in stack_tail
     )
 
@@ -3094,7 +3033,7 @@ def render_diagram(
             tail_cursor,
             tail_w,
             _spine_box_height(comp),
-            comp.label,
+            _spine_display_label(comp, spec),
             _spine_color(comp.role),
             sublabel=_spine_sublabel(comp),
         )

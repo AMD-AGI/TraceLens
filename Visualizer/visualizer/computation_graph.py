@@ -25,10 +25,12 @@ from visualizer.block_tree import (
     inline_composite_steps,
     inline_wrapper_step_label,
     is_gated_norm_module,
+    is_situ_gated_mlp,
     is_straight_line_module,
     is_method_wrapper,
     block_purpose,
     output_gate_combine_sublabel,
+    gated_norm_combine_sublabel,
     side_producer_has_activation,
     tile_display_labels,
     tile_sublabel,
@@ -93,6 +95,17 @@ class ComputationGraph:
     inline_frames: list[InlineFrameSpec] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ForkJoinCluster:
+    """Main spine and side branch meeting at a combine node, then continuing downstream."""
+
+    main_source: int
+    side_source: int
+    main_branch: int
+    join: int
+    tail: int
+
+
 @dataclass
 class LayoutPosition:
     """Positioned node in diagram coordinates (matplotlib, y-up)."""
@@ -137,7 +150,7 @@ def _add_node(
     port_style: PortStyle | None = None,
     synthetic: str | None = None,
 ) -> int:
-    display = label or (block.label if block else key)
+    display = label if label is not None else (block.label if block else key)
     node_sublabel = sublabel if sublabel is not None else block_sublabel(block)
     spec = GraphNodeSpec(
         key=key,
@@ -175,6 +188,7 @@ def _add_chain(
     port_style: PortStyle | None = None,
     key_prefix: str,
     attr_last_index: dict[str, int] | None = None,
+    basic_ops: BasicOpFilter | None = None,
 ) -> tuple[int | None, int | None]:
     """Add a sequential chain, inlining straight-line composite wrappers."""
     first_index: int | None = None
@@ -198,7 +212,7 @@ def _add_chain(
             previous = node_index
             continue
 
-        expanded_steps, wrapper = inline_composite_steps(step)
+        expanded_steps, wrapper = inline_composite_steps(step, basic_ops=basic_ops)
         if wrapper is not None:
             chain_indices, tail = _add_linear_pipeline_chain(
                 graph,
@@ -327,6 +341,31 @@ def _add_linear_pipeline_chain(
     chain_last = last_index
 
     for sub_index, sub_step in enumerate(steps):
+        inner_steps, inner_wrapper = inline_composite_steps(sub_step)
+        if inner_wrapper is not None:
+            inner_indices, inner_tail = _add_linear_pipeline_chain(
+                graph,
+                inner_steps,
+                wrapper=inner_wrapper,
+                key_prefix=f"{key_prefix}:{sub_step.attr_name}",
+                attr_last_index=attr_last_index,
+                input_index=input_index if sub_index == 0 else None,
+                last_index=chain_last if sub_index == 0 else indices[-1],
+                fork_from_input=fork_from_input and sub_index == 0,
+                branch_from_input_dashed=branch_from_input_dashed and sub_index == 0,
+                port_label=port_label if sub_index == 0 else None,
+                port_style=port_style if sub_index == 0 else None,
+            )
+            if frame is not None:
+                for inner_index in inner_indices:
+                    _append_inline_frame_node(frame, inner_index)
+            if attr_last_index is not None:
+                _track_attr_index(attr_last_index, sub_step.attr_name, inner_tail)
+                _track_attr_index(attr_last_index, inner_wrapper.attr_name, inner_tail)
+            indices.extend(inner_indices)
+            chain_last = inner_tail
+            continue
+
         step_index = _add_node(
             graph,
             key=f"{key_prefix}:{sub_step.attr_name}:{sub_index}",
@@ -361,6 +400,112 @@ def _add_linear_pipeline_chain(
     return indices, indices[-1]
 
 
+def _add_situ_gated_mlp_chain(
+    graph: ComputationGraph,
+    node: BlockNode,
+    *,
+    key_prefix: str,
+    attr_last_index: dict[str, int] | None = None,
+    input_index: int | None = None,
+    last_index: int | None = None,
+    branch_from_input_dashed: bool = False,
+    port_label: str | None = None,
+    port_style: PortStyle | None = None,
+    create_outer_frame: bool = False,
+) -> tuple[list[int], int | None]:
+    """Expand gate/up → Situ × up → down with both multiply inputs visible."""
+    from visualizer.block_tree import _situ_gated_mlp_parts
+
+    parts = _situ_gated_mlp_parts(node)
+    if parts is None:
+        return [], last_index
+    gate, up, act_fn, situ, down = parts
+
+    outer_frame = _start_inline_frame(graph, node) if create_outer_frame else None
+    indices: list[int] = []
+
+    def _track(node_block: BlockNode, index: int | None) -> None:
+        if attr_last_index is not None and index is not None:
+            _track_attr_index(attr_last_index, node_block.attr_name, index)
+
+    def _append_outer(index: int) -> None:
+        if outer_frame is not None:
+            _append_inline_frame_node(outer_frame, index)
+
+    gate_index = _add_node(
+        graph,
+        key=f"{key_prefix}:gate_proj",
+        block=gate,
+        port_label=port_label,
+        port_style=port_style,
+    )
+    if branch_from_input_dashed and input_index is not None:
+        _link_forward_input(graph, input_index, gate_index, dashed=True)
+    else:
+        _append_step_link(
+            graph,
+            input_index=input_index if input_index is not None else 0,
+            last_index=last_index,
+            step_index=gate_index,
+            fork_from_input=last_index is None and input_index is not None,
+        )
+    _track(gate, gate_index)
+    _append_outer(gate_index)
+    indices.append(gate_index)
+
+    up_index = _add_node(
+        graph,
+        key=f"{key_prefix}:up_proj",
+        block=up,
+        port_label="up",
+        port_style="inline",
+    )
+    if input_index is not None:
+        _link_forward_input(graph, input_index, up_index, dashed=True)
+    _track(up, up_index)
+    indices.append(up_index)
+
+    act_frame = _start_inline_frame(graph, act_fn)
+    situ_index = _add_node(
+        graph,
+        key=f"{key_prefix}:situ",
+        block=situ,
+    )
+    graph.links.append((gate_index, situ_index))
+    _append_inline_frame_node(act_frame, situ_index)
+    _track(situ, situ_index)
+    _append_outer(situ_index)
+    indices.append(situ_index)
+
+    mult_index = _add_node(
+        graph,
+        key=f"{key_prefix}:mul",
+        label="×",
+        sublabel=None,
+        synthetic=SYNTHETIC_COMBINE,
+    )
+    graph.links.append((situ_index, mult_index))
+    graph.links.append((up_index, mult_index))
+    graph.dashed_links.add((up_index, mult_index))
+    graph.side_entry_links.add((up_index, mult_index))
+    _append_inline_frame_node(act_frame, mult_index)
+    _track(act_fn, mult_index)
+    _append_outer(mult_index)
+    indices.append(mult_index)
+
+    down_index = _add_node(
+        graph,
+        key=f"{key_prefix}:down_proj",
+        block=down,
+    )
+    graph.links.append((mult_index, down_index))
+    _track(down, down_index)
+    _append_outer(down_index)
+    indices.append(down_index)
+
+    return indices, down_index
+
+
 def _append_side_producer_link(
     graph: ComputationGraph,
     *,
@@ -382,9 +527,10 @@ def _add_side_producer_index(
     port_style: PortStyle | None,
     input_index: int | None,
     attr_last_index: dict[str, int],
+    basic_ops: BasicOpFilter | None = None,
 ) -> int | None:
     """Add a side-path producer, inlining straight-line output gates when possible."""
-    expanded_steps, wrapper = inline_composite_steps(producer)
+    expanded_steps, wrapper = inline_composite_steps(producer, basic_ops=basic_ops)
     if wrapper is not None:
         chain_indices, tail = _add_linear_pipeline_chain(
             graph,
@@ -519,12 +665,15 @@ def _filter_graph_basic_only(graph: ComputationGraph) -> ComputationGraph:
             expanded.extend(_expand_succs(target))
         return expanded
 
-    bridged_links: set[tuple[int, int]] = {
-        (source, target)
-        for source, target in graph.links
-        if source not in remove_indices and target not in remove_indices
-    }
+    bridged_links: set[tuple[int, int]] = set()
     bridged_port_labels: dict[tuple[int, int], str] = {}
+    for source, target in graph.links:
+        if source in remove_indices or target in remove_indices:
+            continue
+        bridged_links.add((source, target))
+        port_label = graph.link_port_labels.get((source, target))
+        if port_label:
+            bridged_port_labels[(source, target)] = port_label
     bridged_dashed: set[tuple[int, int]] = set()
     bridged_side: set[tuple[int, int]] = set()
 
@@ -626,23 +775,34 @@ def build_computation_graph(
         last_index = step_index
         _track_attr_index(attr_last_index, step.attr_name, step_index)
 
+    if is_situ_gated_mlp(root):
+        _, last_index = _add_situ_gated_mlp_chain(
+            graph,
+            root,
+            key_prefix=root.attr_name,
+            attr_last_index=attr_last_index,
+            input_index=input_index,
+            last_index=last_index,
+            create_outer_frame=False,
+        )
+        return graph
+
     for segment_index, segment in enumerate(segments):
         if isinstance(segment, FanOutSegment):
-            branch_tails: list[tuple[int, str]] = []
+            branch_tails: list[int] = []
             for branch_index, branch in enumerate(segment.branches):
                 first_index, tail = _add_chain(
                     graph,
                     branch.steps,
-                    port_label=branch.port_label,
-                    port_style=branch.port_style,
                     key_prefix=f"fan{segment_index}-{branch_index}",
                     attr_last_index=attr_last_index,
+                    basic_ops=basic_ops,
                 )
                 if input_index is not None and first_index is not None:
                     _link_forward_input(graph, input_index, first_index, dashed=False)
                 if tail is not None:
-                    branch_tails.append((tail, branch.port_label))
-            merge_steps, merge_wrapper = inline_composite_steps(segment.merge)
+                    branch_tails.append(tail)
+            merge_steps, merge_wrapper = inline_composite_steps(segment.merge, basic_ops=basic_ops)
             if merge_wrapper is not None:
                 merge_indices, merge_tail = _add_linear_pipeline_chain(
                     graph,
@@ -653,9 +813,8 @@ def build_computation_graph(
                 )
                 merge_first = merge_indices[0] if merge_indices else None
                 if merge_first is not None:
-                    for tail, port_label in branch_tails:
+                    for tail in branch_tails:
                         graph.links.append((tail, merge_first))
-                        graph.link_port_labels[(tail, merge_first)] = port_label
                 last_index = merge_tail
                 if merge_tail is not None:
                     _track_attr_index(attr_last_index, merge_wrapper.attr_name, merge_tail)
@@ -665,9 +824,8 @@ def build_computation_graph(
                     key=f"merge:{segment_index}",
                     block=segment.merge,
                 )
-                for tail, port_label in branch_tails:
+                for tail in branch_tails:
                     graph.links.append((tail, merge_index))
-                    graph.link_port_labels[(tail, merge_index)] = port_label
                 last_index = merge_index
                 _track_attr_index(attr_last_index, segment.merge.attr_name, merge_index)
             continue
@@ -703,30 +861,43 @@ def build_computation_graph(
 
         if isinstance(segment, ResidualAddSegment):
             module = segment.module
-            expanded_steps, wrapper = inline_composite_steps(module)
-            if wrapper is not None:
-                _branch_indices, module_tail = _add_linear_pipeline_chain(
+            if is_situ_gated_mlp(module):
+                _branch_indices, module_tail = _add_situ_gated_mlp_chain(
                     graph,
-                    expanded_steps,
-                    wrapper=wrapper,
+                    module,
                     key_prefix=f"residual_branch:{segment_index}:{module.attr_name}",
                     attr_last_index=attr_last_index,
                     input_index=input_index,
                     last_index=None,
                     branch_from_input_dashed=True,
+                    create_outer_frame=True,
                 )
-                _track_attr_index(attr_last_index, wrapper.attr_name, module_tail)
                 _track_attr_index(attr_last_index, module.attr_name, module_tail)
             else:
-                module_index = _add_node(
-                    graph,
-                    key=f"residual_branch:{segment_index}:{module.attr_name}",
-                    block=module,
-                )
-                if input_index is not None:
-                    _link_forward_input(graph, input_index, module_index, dashed=True)
-                _track_attr_index(attr_last_index, module.attr_name, module_index)
-                module_tail = module_index
+                expanded_steps, wrapper = inline_composite_steps(module, basic_ops=basic_ops)
+                if wrapper is not None:
+                    _branch_indices, module_tail = _add_linear_pipeline_chain(
+                        graph,
+                        expanded_steps,
+                        wrapper=wrapper,
+                        key_prefix=f"residual_branch:{segment_index}:{module.attr_name}",
+                        attr_last_index=attr_last_index,
+                        input_index=input_index,
+                        last_index=None,
+                        branch_from_input_dashed=True,
+                    )
+                    _track_attr_index(attr_last_index, wrapper.attr_name, module_tail)
+                    _track_attr_index(attr_last_index, module.attr_name, module_tail)
+                else:
+                    module_index = _add_node(
+                        graph,
+                        key=f"residual_branch:{segment_index}:{module.attr_name}",
+                        block=module,
+                    )
+                    if input_index is not None:
+                        _link_forward_input(graph, input_index, module_index, dashed=True)
+                    _track_attr_index(attr_last_index, module.attr_name, module_index)
+                    module_tail = module_index
             combine_index = _add_node(
                 graph,
                 key=f"residual_add:{segment_index}",
@@ -766,7 +937,7 @@ def build_computation_graph(
                         if gate_producer is not None:
                             break
 
-                combine_sublabel = output_gate_combine_sublabel(gate_producer) or "norm × gate"
+                combine_sublabel = gated_norm_combine_sublabel(consumer, gate_producer)
                 combine_index = _add_node(
                     graph,
                     key=f"sidefeed:{segment_index}:{consumer.attr_name}:mul",
@@ -799,6 +970,7 @@ def build_computation_graph(
                             port_style="inline",
                             input_index=input_index,
                             attr_last_index=attr_last_index,
+                            basic_ops=basic_ops,
                         )
                     if source_index is None:
                         continue
@@ -870,6 +1042,7 @@ def build_computation_graph(
                         port_style="inline",
                         input_index=input_index,
                         attr_last_index=attr_last_index,
+                        basic_ops=basic_ops,
                     )
                     if source_index is None:
                         continue
@@ -888,6 +1061,7 @@ def build_computation_graph(
                     after_nodes,
                     key_prefix=f"post:{segment_index}",
                     attr_last_index=attr_last_index,
+                    basic_ops=basic_ops,
                 )
                 if first_after is not None:
                     graph.links.append((last_index, first_after))
@@ -895,7 +1069,7 @@ def build_computation_graph(
                 continue
 
             side = segment.side
-            expanded_side, side_wrapper = inline_composite_steps(side)
+            expanded_side, side_wrapper = inline_composite_steps(side, basic_ops=basic_ops)
             if side_wrapper is not None:
                 _side_indices, side_tail = _add_linear_pipeline_chain(
                     graph,
@@ -944,6 +1118,7 @@ def build_computation_graph(
                 after_nodes,
                 key_prefix=f"post:{segment_index}",
                 attr_last_index=attr_last_index,
+                basic_ops=basic_ops,
             )
             if first_after is not None:
                 graph.links.append((mult_index, first_after))
@@ -974,7 +1149,7 @@ def build_computation_graph(
                 last_index = step_index
                 _track_attr_index(attr_last_index, step.attr_name, step_index)
                 continue
-            expanded_steps, wrapper = inline_composite_steps(step)
+            expanded_steps, wrapper = inline_composite_steps(step, basic_ops=basic_ops)
             if wrapper is not None:
                 _step_indices, last_index = _add_linear_pipeline_chain(
                     graph,
@@ -1095,7 +1270,28 @@ def _optimize_layer_order(
 def _is_layout_chain_node(spec: GraphNodeSpec) -> bool:
     if spec.synthetic in {SYNTHETIC_INPUT, SYNTHETIC_HIDDEN}:
         return False
-    return not _is_combine_synthetic(spec.synthetic)
+    return True
+
+
+def _spine_predecessor(
+    graph: ComputationGraph,
+    incoming: list[list[int]],
+    index: int,
+) -> int | None:
+    """Return the forward-path predecessor, ignoring dashed side feeds."""
+    predecessors = incoming[index]
+    if not predecessors:
+        return None
+    forward = [
+        pred
+        for pred in predecessors
+        if (pred, index) not in graph.dashed_links and (pred, index) not in graph.side_entry_links
+    ]
+    if len(forward) == 1:
+        return forward[0]
+    if len(predecessors) == 1:
+        return predecessors[0]
+    return None
 
 
 def _center_align_vertical_chains(
@@ -1121,13 +1317,18 @@ def _center_align_vertical_chains(
             return None
         if index in frame_members:
             return None
-        predecessors = incoming[index]
-        if len(predecessors) != 1:
+        predecessor = _spine_predecessor(graph, incoming, index)
+        if predecessor is None:
             return None
-        predecessor = predecessors[0]
         if not _is_layout_chain_node(positions[predecessor].spec):
             return None
-        if len(outgoing[predecessor]) != 1:
+        forward_successors = [
+            target
+            for target in outgoing[predecessor]
+            if (predecessor, target) not in graph.dashed_links
+            and (predecessor, target) not in graph.side_entry_links
+        ]
+        if len(forward_successors) != 1 or forward_successors[0] != index:
             return None
         return positions[predecessor].cx
 
@@ -1144,6 +1345,8 @@ def _center_align_vertical_chains(
             break
 
     for frame in graph.inline_frames:
+        if _frame_has_fork_join_branching(graph, frame):
+            continue
         indices = _ordered_inline_frame_chain(graph, list(frame.node_indices))
         if len(indices) < 2:
             continue
@@ -1243,6 +1446,371 @@ def _ordered_inline_frame_chain(
     return sorted(frame_indices, key=lambda index: index)
 
 
+def _shared_fork_predecessors(
+    incoming: dict[int, list[int]],
+    left: int,
+    right: int,
+) -> set[int]:
+    return set(incoming[left]) & set(incoming[right])
+
+
+def _is_multiply_combine(graph: ComputationGraph, join: int) -> bool:
+    label = graph.nodes[join].label.strip()
+    return label in {"×", "x", "*", "⨉"}
+
+
+def _find_fork_join_clusters(graph: ComputationGraph) -> list[ForkJoinCluster]:
+    """Return fork/join clusters: parallel branches meeting at ×, then continuing downstream."""
+    clusters: list[ForkJoinCluster] = []
+    seen: set[tuple[int, int, int, int, int]] = set()
+
+    incoming: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    outgoing: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    link_set = set(graph.links)
+    for source, target in graph.links:
+        incoming[target].append(source)
+        outgoing[source].append(target)
+
+    for side_source, join in graph.side_entry_links:
+        join_spec = graph.nodes[join]
+        if not _is_combine_synthetic(join_spec.synthetic):
+            continue
+        if not _is_multiply_combine(graph, join):
+            continue
+
+        main_branch_candidates = [
+            source
+            for source in incoming[join]
+            if (source, join) not in graph.side_entry_links
+        ]
+        if len(main_branch_candidates) != 1:
+            continue
+        main_branch = main_branch_candidates[0]
+
+        main_source_candidates = [
+            source
+            for source in incoming[main_branch]
+            if (source, main_branch) not in graph.dashed_links
+            and (source, main_branch) not in graph.side_entry_links
+        ]
+        if len(main_source_candidates) != 1:
+            continue
+        main_source = main_source_candidates[0]
+
+        if (main_source, main_branch) not in link_set or (main_branch, join) not in link_set:
+            continue
+        if not _shared_fork_predecessors(incoming, main_source, side_source):
+            continue
+
+        tail_candidates = [
+            target
+            for target in outgoing[join]
+            if (join, target) not in graph.dashed_links
+        ]
+        if len(tail_candidates) != 1:
+            continue
+        tail = tail_candidates[0]
+
+        cluster_key = (main_source, side_source, main_branch, join, tail)
+        if cluster_key in seen:
+            continue
+        seen.add(cluster_key)
+        clusters.append(
+            ForkJoinCluster(
+                main_source=main_source,
+                side_source=side_source,
+                main_branch=main_branch,
+                join=join,
+                tail=tail,
+            )
+        )
+
+    return clusters
+
+
+def _inner_act_frame_indices(
+    graph: ComputationGraph,
+    cluster: ForkJoinCluster,
+) -> list[int]:
+    for frame in graph.inline_frames:
+        frame_set = set(frame.node_indices)
+        if (
+            cluster.join in frame_set
+            and cluster.main_branch in frame_set
+            and cluster.side_source not in frame_set
+        ):
+            return list(frame.node_indices)
+    return []
+
+
+def _layout_fork_join_branch(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    cluster: ForkJoinCluster,
+) -> None:
+    """Lay out a fork/join cluster: gate above inner frame, up beside join, down below."""
+    from visualizer.render import (
+        INLINE_FRAME_LABEL_GAP,
+        INLINE_FRAME_LABEL_LINE_H,
+        INLINE_FRAME_PAD,
+    )
+
+    v_gap = min_vertical_block_gap()
+    h_gap = min_horizontal_block_gap()
+    main_cx = positions[cluster.main_source].cx
+    inner_frame_indices = _inner_act_frame_indices(graph, cluster)
+    caption_band = (
+        INLINE_FRAME_PAD + INLINE_FRAME_LABEL_GAP + INLINE_FRAME_LABEL_LINE_H
+        if inner_frame_indices
+        else 0.0
+    )
+
+    join_pos = positions[cluster.join]
+    main_branch_pos = positions[cluster.main_branch]
+    main_source_pos = positions[cluster.main_source]
+    tail_pos = positions[cluster.tail]
+
+    join_pos.cx = main_cx
+    main_branch_pos.cx = main_cx
+    main_branch_pos.top_y = join_pos.top_y + v_gap + main_branch_pos.height
+
+    inner_block_top = main_branch_pos.top_y + caption_band
+    main_source_pos.cx = main_cx
+    main_source_pos.top_y = inner_block_top + v_gap + main_source_pos.height
+
+    tail_pos.cx = main_cx
+    plus_index = next(
+        (
+            target
+            for source, target in graph.links
+            if source == cluster.tail and graph.nodes[target].label == "+"
+        ),
+        None,
+    )
+    if plus_index is not None:
+        merge_siblings = [
+            source
+            for source, target in graph.links
+            if target == plus_index and source != cluster.tail
+        ]
+        if len(merge_siblings) == 1:
+            tail_pos.top_y = positions[merge_siblings[0]].top_y
+        elif inner_frame_indices:
+            inner_bottom = min(positions[index].bottom for index in inner_frame_indices)
+            tail_pos.top_y = inner_bottom - INLINE_FRAME_PAD - v_gap
+        else:
+            tail_pos.top_y = join_pos.bottom - v_gap
+    elif inner_frame_indices:
+        inner_bottom = min(positions[index].bottom for index in inner_frame_indices)
+        tail_pos.top_y = inner_bottom - INLINE_FRAME_PAD - v_gap
+    else:
+        tail_pos.top_y = join_pos.bottom - v_gap
+
+    side_pos = positions[cluster.side_source]
+    side_pos.top_y = join_pos.top_y + (join_pos.height - side_pos.height) / 2
+    side_pos.cx = _node_content_right(join_pos) + h_gap + side_pos.width / 2
+
+    if inner_frame_indices:
+        frame_right = (
+            max(_node_content_right(positions[index]) for index in inner_frame_indices)
+            + INLINE_FRAME_PAD
+        )
+        min_side_cx = frame_right + h_gap + side_pos.width / 2
+        if side_pos.cx < min_side_cx:
+            side_pos.cx = min_side_cx
+
+
+def _ensure_input_above_fork_join_clusters(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float,
+) -> None:
+    """Keep the synthetic input above fork/join main sources after branch layout."""
+    input_pos = next((pos for pos in positions if pos.spec.synthetic == SYNTHETIC_INPUT), None)
+    if input_pos is None:
+        return
+    for cluster in _find_fork_join_clusters(graph):
+        main_source = positions[cluster.main_source]
+        if (
+            input_pos.cx + input_pos.width / 2 + min_gap <= main_source.cx - main_source.width / 2
+            or main_source.cx + main_source.width / 2 + min_gap <= input_pos.cx - input_pos.width / 2
+        ):
+            continue
+        min_input_bottom = main_source.top_y + min_gap
+        if input_pos.bottom < min_input_bottom:
+            input_pos.top_y += min_input_bottom - input_pos.bottom
+
+
+def _router_spine_column_indices(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+) -> set[int]:
+    """Node indices in the MoE router spine column (Σ and downstream main path)."""
+    sigma = next(
+        (
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.label == "Σ" and _is_combine_synthetic(spec.synthetic)
+        ),
+        None,
+    )
+    if sigma is None:
+        return set()
+
+    fork_join = set()
+    for cluster in _find_fork_join_clusters(graph):
+        fork_join |= {
+            cluster.main_source,
+            cluster.side_source,
+            cluster.main_branch,
+            cluster.join,
+            cluster.tail,
+        }
+
+    outgoing: dict[int, list[int]] = {index: [] for index in range(len(positions))}
+    for source, target in graph.links:
+        outgoing[source].append(target)
+
+    spine: set[int] = set()
+    queue = [sigma]
+    while queue:
+        index = queue.pop(0)
+        if index in spine or index in fork_join:
+            continue
+        spine.add(index)
+        for target in outgoing[index]:
+            if target not in fork_join:
+                queue.append(target)
+
+    plus = next(
+        (
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.label == "+" and _is_combine_synthetic(spec.synthetic)
+        ),
+        None,
+    )
+    if plus is not None:
+        spine.add(plus)
+    return spine
+
+
+def _align_router_spine_column(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+) -> None:
+    """Keep the MoE router spine (Σ and its non-fork/join chain) in one column."""
+    sigma = next(
+        (
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.label == "Σ" and _is_combine_synthetic(spec.synthetic)
+        ),
+        None,
+    )
+    if sigma is None:
+        return
+
+    spine_cx = positions[sigma].cx
+    for index in _router_spine_column_indices(positions, graph):
+        positions[index].cx = spine_cx
+
+
+def _layout_fork_join_branches(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+) -> None:
+    for cluster in _find_fork_join_clusters(graph):
+        _layout_fork_join_branch(positions, graph, cluster)
+    _clear_side_branches_from_gate_frame(positions, graph)
+    _align_router_spine_column(positions, graph)
+    plus_index = next(
+        (
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.label == "+" and _is_combine_synthetic(spec.synthetic)
+        ),
+        None,
+    )
+    if plus_index is not None:
+        _align_merge_nodes(positions, graph, only_targets={plus_index})
+
+
+def _clear_side_branches_from_gate_frame(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+) -> None:
+    """Keep MoE router side paths and fork/join columns outside the gate inline frame."""
+    gate_frame = next((frame for frame in graph.inline_frames if frame.frame_id == "gate"), None)
+    from visualizer.render import INLINE_FRAME_PAD
+
+    min_left = 0.0
+    if gate_frame is not None:
+        gate_right = max(_node_content_right(positions[index]) for index in gate_frame.node_indices)
+        min_left = gate_right + INLINE_FRAME_PAD + min_horizontal_block_gap()
+
+    fork_join_joins = {cluster.join for cluster in _find_fork_join_clusters(graph)}
+    spine_indices = _router_spine_column_indices(positions, graph)
+    if spine_indices:
+        min_left = max(
+            min_left,
+            max(_node_content_right(positions[index]) for index in spine_indices)
+            + min_horizontal_block_gap()
+            + INLINE_FRAME_PAD,
+        )
+    for index, spec in enumerate(graph.nodes):
+        if not _is_combine_synthetic(spec.synthetic) or index in fork_join_joins:
+            continue
+        if index in spine_indices:
+            continue
+        combine_right = _node_content_right(positions[index])
+        min_left = max(min_left, combine_right + min_horizontal_block_gap() + INLINE_FRAME_PAD)
+
+    for cluster in _find_fork_join_clusters(graph):
+        cluster_indices = {
+            cluster.main_source,
+            cluster.side_source,
+            cluster.main_branch,
+            cluster.join,
+            cluster.tail,
+        }
+        cluster_left = min(_node_content_left(positions[index]) for index in cluster_indices)
+        if cluster_left < min_left:
+            delta = min_left - cluster_left
+            for index in cluster_indices:
+                positions[index].cx += delta
+
+    if gate_frame is None:
+        return
+    gate_right = max(_node_content_right(positions[index]) for index in gate_frame.node_indices)
+    min_left = gate_right + INLINE_FRAME_PAD + min_horizontal_block_gap()
+    for index, spec in enumerate(graph.nodes):
+        if "routed_expert_down" not in spec.key:
+            continue
+        left = _node_content_left(positions[index])
+        if left < min_left:
+            positions[index].cx += min_left - left
+
+
+def _frame_has_fork_join_branching(
+    graph: ComputationGraph,
+    frame: InlineFrameSpec,
+) -> bool:
+    """True when an inline frame wraps a fork/join spine (gate, branch, join, tail)."""
+    frame_members = set(frame.node_indices)
+    for cluster in _find_fork_join_clusters(graph):
+        spine = {
+            cluster.main_source,
+            cluster.main_branch,
+            cluster.join,
+            cluster.tail,
+        }
+        if spine.issubset(frame_members):
+            return True
+    return False
+
+
 def stack_inline_frame_positions(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
@@ -1251,7 +1819,10 @@ def stack_inline_frame_positions(
 ) -> None:
     """Re-stack each inline frame column using measured tile heights."""
     gap = min_vertical_block_gap() if min_gap is None else min_gap
+    _layout_fork_join_branches(positions, graph)
     for frame in graph.inline_frames:
+        if _frame_has_fork_join_branching(graph, frame):
+            continue
         indices = _ordered_inline_frame_chain(graph, list(frame.node_indices))
         if len(indices) < 2:
             if indices:
@@ -1302,6 +1873,7 @@ def _align_merge_nodes(
     graph: ComputationGraph,
     *,
     merge_gap: float | None = None,
+    only_targets: set[int] | None = None,
 ) -> None:
     """Place merge/combine nodes one layer gap below the deepest incoming branch."""
     gap = DETAIL_LAYER_GAP if merge_gap is None else merge_gap
@@ -1310,6 +1882,8 @@ def _align_merge_nodes(
         incoming[target].append(source)
 
     for target, sources in incoming.items():
+        if only_targets is not None and target not in only_targets:
+            continue
         if len(sources) < 2:
             continue
         deepest_bottom = min(positions[source].bottom for source in sources)
@@ -1865,6 +2439,7 @@ def layout_computation_graph(
     else:
         _center_positions_horizontally(positions, cx)
     _resolve_layout_overlaps(positions, graph)
+    _layout_fork_join_branches(positions, graph)
 
     return positions, graph.links
 

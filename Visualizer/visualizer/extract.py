@@ -86,7 +86,6 @@ class ArchitectureSpec:
     analysis_notes: list[str] = field(default_factory=list)
     custom_blocks: list[str] = field(default_factory=list)
     detailed_block_trees: list[tuple[str, BlockNode]] = field(default_factory=list)
-    detailed_wrapped_modules: list[BlockNode] = field(default_factory=list)
     class_registry: dict = field(default_factory=dict, repr=False)
     basic_ops: BasicOpFilter | None = None
 
@@ -642,9 +641,8 @@ def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None
 def _build_detailed_block_trees(spec: ArchitectureSpec, basic_ops: BasicOpFilter) -> None:
     if not spec.class_registry:
         spec.detailed_block_trees = []
-        spec.detailed_wrapped_modules = []
         return
-    spec.detailed_block_trees, spec.detailed_wrapped_modules = build_full_detailed_block_trees(
+    spec.detailed_block_trees = build_full_detailed_block_trees(
         components=spec.block_components,
         registry=spec.class_registry,
         basic_ops=basic_ops,

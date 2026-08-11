@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from visualizer.block_tree import BlockNode
 
 PIXELS_PER_UNIT = 80.0
@@ -17,6 +19,58 @@ TITLE_LINE_H = 0.145
 SUB_LINE_H = 0.125
 LABEL_LINE_GAP = 0.02
 SINGLE_LINE_BOX_H = BLOCK_PAD_Y + TITLE_LINE_H + BLOCK_PAD_Y
+
+
+@dataclass(frozen=True)
+class BoxTextLine:
+    """One centered label row inside a diagram tile."""
+
+    text: str
+    y: float
+    fontsize: float
+    fontweight: str = "bold"
+    va: str = "center"
+
+
+def box_text_block_height(sublabel: str | None) -> float:
+    """Nominal stacked label height used for vertical centering."""
+    sub_lines = [line for line in (sublabel or "").split("\n") if line.strip()]
+    height = TITLE_LINE_H
+    if sub_lines:
+        height += LABEL_LINE_GAP + len(sub_lines) * SUB_LINE_H + max(0, len(sub_lines) - 1) * LABEL_LINE_GAP
+    return height
+
+
+def box_text_lines(
+    top_y: float,
+    height: float,
+    label: str,
+    sublabel: str | None,
+    *,
+    pad_y: float | None = None,
+    title_fontsize: float = DEFAULT_TITLE_FONT,
+) -> list[BoxTextLine]:
+    """Return vertically centered label rows for a tile."""
+    pad = BLOCK_PAD_Y if pad_y is None else pad_y
+    interior_top = top_y - pad
+    interior_bottom = top_y - height + pad
+    interior_h = interior_top - interior_bottom
+    text_h = box_text_block_height(sublabel)
+    text_block_top = interior_top - (interior_h - text_h) / 2
+
+    sub_lines = [line for line in (sublabel or "").split("\n") if line.strip()]
+    sub_fontsize = max(6.5, title_fontsize - 1.5)
+    lines = [BoxTextLine(label, text_block_top - TITLE_LINE_H / 2, title_fontsize, "bold")]
+
+    if not sub_lines:
+        return lines
+
+    cursor = text_block_top - TITLE_LINE_H - LABEL_LINE_GAP - SUB_LINE_H / 2
+    for index, line in enumerate(sub_lines):
+        if index > 0:
+            cursor -= SUB_LINE_H + LABEL_LINE_GAP
+        lines.append(BoxTextLine(line, cursor, sub_fontsize, "normal"))
+    return lines
 
 
 def single_line_box_height(*, pad_y: float | None = None) -> float:
@@ -63,11 +117,6 @@ def min_vertical_block_gap() -> float:
 def min_horizontal_block_gap() -> float:
     """Minimum horizontal space between stacked diagram columns."""
     return min_vertical_block_gap()
-
-
-def block_top_text_y(node_top: float, *, has_sublabel: bool, title_line_h: float = TITLE_LINE_H) -> float:
-    """Y coordinate for the primary label (va=center), measured from block top downward."""
-    return node_top - BLOCK_PAD_Y - title_line_h / 2
 
 
 def block_sublabel(block: BlockNode | None) -> str | None:

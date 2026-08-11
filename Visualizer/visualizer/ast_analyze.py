@@ -421,6 +421,89 @@ def _router_forward_step_details(
     return details
 
 
+COMBINE_DETAIL_PREFIX = "combine:"
+
+
+def combine_op_from_step_details(details: list[str] | None) -> str | None:
+    """Return a combine-operator symbol recorded by AST analysis (e.g. Σ)."""
+    if not details:
+        return None
+    prefix = f"{COMBINE_DETAIL_PREFIX} "
+    for item in details:
+        if item.startswith(prefix):
+            symbol = item[len(prefix) :].strip()
+            if symbol:
+                return symbol
+    return None
+
+
+def _subexpr_has_multiplication(node: ast.AST) -> bool:
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute):
+            if sub.func.attr in {"mul", "mul_", "multiply"}:
+                return True
+        if isinstance(sub, ast.BinOp) and isinstance(sub.op, (ast.Mult, ast.MatMult)):
+            return True
+    return False
+
+
+def _expr_is_weighted_sum(node: ast.AST) -> bool:
+    """True when an expression reduces a weighted tensor via sum()."""
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Call) or not isinstance(sub.func, ast.Attribute):
+            continue
+        if sub.func.attr != "sum":
+            continue
+        if _subexpr_has_multiplication(sub.func.value):
+            return True
+    return False
+
+
+def _detect_method_combine_op(func: ast.FunctionDef) -> str | None:
+    """Infer a combine-operator symbol from a helper method body."""
+    for node in ast.walk(func):
+        value: ast.AST | None = None
+        if isinstance(node, ast.Return):
+            value = node.value
+        elif isinstance(node, ast.Assign):
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            value = node.value
+        if value is not None and _expr_is_weighted_sum(value):
+            return "Σ"
+    return None
+
+
+def _method_forward_step_details(
+    class_node: ast.ClassDef,
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+) -> dict[str, list[str]]:
+    """Attach AST-derived metadata to forward helper methods."""
+    method_funcs = {
+        item.name: item
+        for item in class_node.body
+        if isinstance(item, ast.FunctionDef)
+    }
+    details: dict[str, list[str]] = {}
+    for call_attr in forward_calls:
+        if call_attr in init_assignments:
+            continue
+        if call_attr.startswith("@") or call_attr == SYNTHETIC_ATTENTION:
+            continue
+        func = method_funcs.get(call_attr)
+        if func is None:
+            continue
+        combine_op = _detect_method_combine_op(func)
+        if combine_op is None:
+            continue
+        details[call_attr] = [
+            f"method `{call_attr}()`",
+            f"{COMBINE_DETAIL_PREFIX} {combine_op}",
+        ]
+    return details
+
+
 def _register_forward_calls(
     stmt_calls: list[str],
     calls: list[str],
@@ -650,6 +733,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 gate_activations = _parallel_gate_activations_from_forward(item, parallel_gates)
                 forward_step_details = _router_forward_step_details(node.name, item, forward_calls)
                 forward_step_details.update(parsed_step_details)
+                forward_step_details.update(
+                    _method_forward_step_details(node, forward_calls, init_assignments)
+                )
 
         self.classes[node.name] = ClassStructure(
             name=node.name,
@@ -1023,6 +1109,23 @@ def kernel_name_from_step_details(details: list[str]) -> str | None:
 
 _KDA_KERNEL_MARKERS = ("kda", "delta", "linear_attn", "linear_attention")
 
+_STANDARD_ATTENTION_MARKERS = (
+    "sdpa",
+    "scaled_dot_product",
+    "flash_attn",
+    "flash_attention",
+    "eager_attention",
+    "attention_interface",
+    "transformer_engine",
+    "transformerengine",
+    "fused_attention",
+    "fused_attn",
+    "memory_efficient_attention",
+    "xformers",
+    "dot_product_attention",
+    "multi_head_attention",
+)
+
 
 def _is_kda_attention_kernel(kernel: str | None) -> bool:
     if not kernel:
@@ -1031,18 +1134,34 @@ def _is_kda_attention_kernel(kernel: str | None) -> bool:
     return any(marker in lowered for marker in _KDA_KERNEL_MARKERS)
 
 
+def is_standard_attention_kernel(kernel: str | None) -> bool:
+    """True for kernels that delegate to a common attention library (SDPA, Flash, TE, …)."""
+    if not kernel:
+        return False
+    if _is_kda_attention_kernel(kernel):
+        return False
+    lowered = kernel.lower()
+    if lowered in _SYNTHETIC_ATTENTION_NAMES:
+        return True
+    return any(marker in lowered for marker in _STANDARD_ATTENTION_MARKERS)
+
+
 def is_kda_attention_step(details: list[str]) -> bool:
     return _is_kda_attention_kernel(kernel_name_from_step_details(details))
+
+
+def is_standard_attention_step(details: list[str]) -> bool:
+    return is_standard_attention_kernel(kernel_name_from_step_details(details))
 
 
 def attention_kernel_label(details: list[str]) -> str:
     kernel = kernel_name_from_step_details(details)
     if _is_kda_attention_kernel(kernel):
-        return "Delta attention (KDA)"
+        return "KDA"
+    if is_standard_attention_kernel(kernel):
+        return "Attention"
     if kernel:
-        lowered = kernel.lower()
-        if any(token in lowered for token in ("flash", "sdpa")):
-            return "Flash attention"
+        return kernel
     return "Attention"
 
 
@@ -1149,7 +1268,7 @@ def _side_port_label(
         lowered = arg.id.lower()
         if "topk" in lowered or lowered in {"topk_idx", "topk_weight", "router_logits"}:
             return "router"
-    if callee == "moe_infer" and source_chain:
+    if source_chain and _classify_role(source_chain[-1], "") == "router":
         return "router"
     return _arg_name(arg, arg_index)
 
@@ -1645,11 +1764,10 @@ def build_stack_components(
             attr = "norm"
             class_name = stack_model.init_assignments[attr]
             tail.append(
-                BlockComponent(
+                _stack_component(
                     attr_name=attr,
                     class_name=class_name,
                     role="norm",
-                    label=f"Final {_label_for('norm', class_name, attr)}",
                     forward_order=order.get(attr),
                     details=stack_model.init_details.get(attr, []),
                 )

@@ -47,7 +47,6 @@ _MODELING_ATTR_PATTERNS: tuple[str, ...] = (
     r"(?i)_conv1d$",
     r"(?i)_conv2d$",
     r"(?i)^conv1d$",
-    r"(?i)^embed_tokens$",
 )
 
 # Parallel output-gate attrs detected by AST (`g_proj`, etc.) — not MoE routers.
@@ -164,6 +163,8 @@ def introspect_is_modeling_operation(
     if _matches_any(attr_name, _OUTPUT_GATE_ATTR_PATTERNS):
         attr_key = attr_name.strip("_").lower()
         if attr_key not in {"gate", "router"}:
+            if class_name and re.match(r"(?i)^Linear$", class_name):
+                return False
             return True
     if _detail_implies_modeling(details):
         return True
@@ -221,6 +222,54 @@ def show_in_detail_graph(
 
 _BASIC_DETAIL_LABELS = frozenset({"Linear", "RMSNorm", "LayerNorm", "Embedding"})
 
+_DETAIL_OPERATION_LABELS = _BASIC_DETAIL_LABELS | frozenset(
+    {
+        "Depthwise Conv",
+        "SiLU",
+        "Silu",
+        "Sigmoid",
+        "GELU",
+        "Gelu",
+        "Tanh",
+        "ReLU",
+        "Relu",
+        "Attention",
+        "Merge inputs",
+        "Delta state S",
+        "Chunk scan",
+        "Freq computation",
+        "Apply to Q/K",
+        "Token Embedding",
+        "Embedding",
+        "×",
+        "Expert bias",
+        "Group routing",
+        "Top-k experts",
+        "Gather weights",
+        "Renormalize",
+        "Route scaling",
+        "Score activation",
+    }
+)
+
+_DETAIL_COMBINE_LABELS = frozenset({"×", "Σ", "+", "Elementwise ×"})
+
+_DETAIL_OPERATION_CLASSES = frozenset(
+    {
+        "ActivationOp",
+        "AttentionOp",
+        "AttentionMerge",
+        "DeltaUpdate",
+        "ChunkScan",
+        "ShortConvolution",
+        "RotaryEmbedding",
+        "ApplyRotary",
+        "RouterOp",
+        "Multiply",
+        "SituActivation",
+    }
+)
+
 
 def keep_detail_graph_node(
     *,
@@ -235,8 +284,10 @@ def keep_detail_graph_node(
     if synthetic in {"@input", "@hidden_states"}:
         return True
     if synthetic is not None:
-        return False
+        return label in _DETAIL_COMBINE_LABELS
     display = label or (block.label if block else "")
-    if display in _BASIC_DETAIL_LABELS:
+    if display in _DETAIL_OPERATION_LABELS:
+        return True
+    if block is not None and block.class_name in _DETAIL_OPERATION_CLASSES:
         return True
     return show_in_detail_graph(block, basic_only=basic_only)

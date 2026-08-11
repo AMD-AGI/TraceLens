@@ -17,14 +17,18 @@ from visualizer.computation_graph import (
     ComputationGraph,
     LayoutPosition,
     MIN_HORIZONTAL_BLOCK_GAP,
+    SYNTHETIC_COMBINE,
     SYNTHETIC_HIDDEN,
     SYNTHETIC_INPUT,
     _fanout_branch_index,
+    _layout_fork_join_branches,
     _resolve_layout_overlaps,
+    _ensure_input_above_fork_join_clusters,
     stack_inline_frame_positions,
+    _center_align_vertical_chains,
 )
 from visualizer.text_measure import ContentBounds, box_bounds_at, box_label_size, floating_port_label_bounds, input_box_label_size
-from visualizer.sizing import BLOCK_PAD_Y, INPUT_PAD_X, INPUT_PAD_Y, LABEL_LINE_GAP, SUB_LINE_H, TITLE_LINE_H
+from visualizer.sizing import BLOCK_PAD_Y, INPUT_PAD_X, INPUT_PAD_Y, box_text_lines
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
@@ -186,49 +190,33 @@ def collect_measured_elements(
             )
         )
         pad_y = leaf.pad_y if leaf.pad_y is not None else BLOCK_PAD_Y
-        title_bounds = measure_text_bounds(
-            ax,
+        for line in box_text_lines(
+            pos.top_y,
+            pos.height,
             leaf.label,
-            pos.cx,
-            pos.top_y - pad_y,
-            fontsize=leaf.fontsize,
-            ha="center",
-            va="top",
-            fontweight="bold",
-        )
-        if not tile_bounds.contains(title_bounds, min_gap=-0.015):
-            elements.append(
-                MeasuredElement(
-                    kind="text_overflow",
-                    bounds=title_bounds,
-                    label=f"title {leaf.label!r}",
-                    node_index=index,
-                )
+            leaf.sublabel,
+            pad_y=pad_y,
+            title_fontsize=leaf.fontsize,
+        ):
+            line_bounds = measure_text_bounds(
+                ax,
+                line.text,
+                pos.cx,
+                line.y,
+                fontsize=line.fontsize,
+                ha="center",
+                va=line.va,
+                fontweight=line.fontweight,
             )
-        if leaf.sublabel:
-            sub_fontsize = max(6.5, leaf.fontsize - 1.5)
-            sub_y = pos.top_y - pad_y - TITLE_LINE_H - LABEL_LINE_GAP
-            for line in [part for part in leaf.sublabel.split("\n") if part.strip()]:
-                sub_bounds = measure_text_bounds(
-                    ax,
-                    line,
-                    pos.cx,
-                    sub_y,
-                    fontsize=sub_fontsize,
-                    ha="center",
-                    va="top",
-                    fontweight="normal",
-                )
-                sub_y -= SUB_LINE_H + LABEL_LINE_GAP
-                if not tile_bounds.contains(sub_bounds, min_gap=-0.015):
-                    elements.append(
-                        MeasuredElement(
-                            kind="text_overflow",
-                            bounds=sub_bounds,
-                            label=f"sublabel {line!r}",
-                            node_index=index,
-                        )
+            if not tile_bounds.contains(line_bounds, min_gap=-0.015):
+                elements.append(
+                    MeasuredElement(
+                        kind="text_overflow",
+                        bounds=line_bounds,
+                        label=f"{'title' if line.fontweight == 'bold' else 'sublabel'} {line.text!r}",
+                        node_index=index,
                     )
+                )
         draw_index += 1
 
     for label, x, y, ha, va in plan.branch_labels:
@@ -312,6 +300,46 @@ def _is_combine(synthetic: str | None) -> bool:
     return synthetic == SYNTHETIC_COMBINE
 
 
+def _inline_frame_member_sets(elements: list[MeasuredElement]) -> dict[str, set[int]]:
+    return {
+        element.frame_id: set(element.frame_node_indices)
+        for element in elements
+        if element.kind == "inline_frame" and element.frame_id
+    }
+
+
+def _nested_inline_frame_pair(
+    left: MeasuredElement,
+    right: MeasuredElement,
+    *,
+    member_sets: dict[str, set[int]],
+) -> bool:
+    """True when two inline frames are nested (inner nodes subset of outer)."""
+    if left.kind != "inline_frame" or right.kind != "inline_frame":
+        return False
+    left_members = member_sets.get(left.frame_id or "", set(left.frame_node_indices))
+    right_members = member_sets.get(right.frame_id or "", set(right.frame_node_indices))
+    if not left_members or not right_members:
+        return False
+    return left_members.issubset(right_members) or right_members.issubset(left_members)
+
+
+def _frame_caption_belongs_to_nested_frame(
+    caption: MeasuredElement,
+    frame: MeasuredElement,
+    *,
+    member_sets: dict[str, set[int]],
+) -> bool:
+    """True when a frame caption sits inside a containing inline frame."""
+    if caption.kind not in {"frame_label", "frame_sublabel"} or frame.kind != "inline_frame":
+        return False
+    if not caption.frame_id or not frame.frame_id or caption.frame_id == frame.frame_id:
+        return False
+    inner = member_sets.get(caption.frame_id, set())
+    outer = member_sets.get(frame.frame_id, set(frame.frame_node_indices))
+    return bool(inner) and inner.issubset(outer)
+
+
 def validate_render_layout(
     elements: list[MeasuredElement],
     *,
@@ -330,6 +358,7 @@ def validate_render_layout(
             report.invisible.append(f"text overflows tile: {element.label}")
 
     overlap_obstacles = [element for element in obstacles if element.kind != "text_overflow"]
+    frame_member_sets = _inline_frame_member_sets(elements)
 
     for left_index, left in enumerate(overlap_obstacles):
         for right in overlap_obstacles[left_index + 1 :]:
@@ -337,6 +366,12 @@ def validate_render_layout(
                 if left.node_index is not None and left.node_index == right.node_index:
                     continue
             elif left.frame_id and left.frame_id == right.frame_id:
+                continue
+            elif _nested_inline_frame_pair(left, right, member_sets=frame_member_sets):
+                continue
+            elif _frame_caption_belongs_to_nested_frame(left, right, member_sets=frame_member_sets):
+                continue
+            elif _frame_caption_belongs_to_nested_frame(right, left, member_sets=frame_member_sets):
                 continue
             elif right.kind == "inline_frame" and left.node_index is not None:
                 if left.node_index in right.frame_node_indices:
@@ -431,8 +466,19 @@ def _classify_layout_zones(
     side |= {
         index
         for index, pos in enumerate(positions)
-        if "routed_expert" in pos.spec.key
+        if pos.spec.block is not None
+        and pos.spec.block.attr_name in {"up_proj", "w3"}
+        and any((index, target) in graph.side_entry_links for target in range(len(graph.nodes)))
     }
+    from visualizer.computation_graph import _find_fork_join_clusters
+
+    for cluster in _find_fork_join_clusters(graph):
+        side |= {
+            cluster.main_source,
+            cluster.main_branch,
+            cluster.join,
+            cluster.tail,
+        }
     input_hidden = {
         index
         for index, pos in enumerate(positions)
@@ -470,21 +516,25 @@ def _ensure_input_above_inline_frames(
     *,
     min_gap: float,
 ) -> None:
-    """Raise the synthetic input tile so it clears inline-frame caption bands."""
+    """Raise the synthetic input tile so it clears inline-frame caption bands in its column."""
+    input_pos = next((pos for pos in positions if pos.spec.synthetic == SYNTHETIC_INPUT), None)
+    if input_pos is None:
+        return
+    input_left = input_pos.cx - input_pos.width / 2
+    input_right = input_pos.cx + input_pos.width / 2
     caption_tops = [
         element.bounds.top
         for element in elements
         if element.kind in {"inline_frame", "frame_label", "frame_sublabel"}
+        and element.bounds.right + min_gap > input_left
+        and element.bounds.left - min_gap < input_right
     ]
     if not caption_tops:
         return
     max_caption_top = max(caption_tops)
-    for pos in positions:
-        if pos.spec.synthetic != SYNTHETIC_INPUT:
-            continue
-        min_bottom = max_caption_top + min_gap
-        if pos.bottom < min_bottom:
-            pos.top_y += min_bottom - pos.bottom
+    min_bottom = max_caption_top + min_gap
+    if input_pos.bottom < min_bottom:
+        input_pos.top_y += min_bottom - input_pos.bottom
 
 
 def _align_and_stack_inline_frames(
@@ -499,6 +549,7 @@ def _align_and_stack_inline_frames(
     stack_inline_frame_positions(positions, graph, min_gap=min_gap)
     _align_merge_nodes(positions, graph)
     repack_inline_frame_columns(positions, graph)
+    _layout_fork_join_branches(positions, graph)
 
 
 def _place_layout_zones(
@@ -591,6 +642,12 @@ def _separate_overlapping_inline_frames(
     for left_index in range(len(frames) - 1):
         left = frames[left_index]
         right = frames[left_index + 1]
+        left_members = frame_members.get(left.frame_id or "", set())
+        right_members = frame_members.get(right.frame_id or "", set())
+        if left_members and right_members and (
+            left_members.issubset(right_members) or right_members.issubset(left_members)
+        ):
+            continue
         overlap = left.bounds.right + min_gap - right.bounds.left
         if overlap <= 0:
             continue
@@ -823,6 +880,14 @@ def _nudge_apart_remaining_tiles(
                 if shift > 0:
                     pos.cx += shift
                 continue
+            if any(
+                box_index == source and target < len(graph.nodes)
+                for source, target in graph.side_entry_links
+            ):
+                shift = frame.bounds.right + min_gap - box.bounds.left
+                if shift > 0:
+                    pos.cx += shift
+                continue
             if box.bounds.left < frame.bounds.left:
                 shift = frame.bounds.left - min_gap - box.bounds.right
                 if shift < 0:
@@ -890,7 +955,7 @@ def measure_detail_tree_content_width(
         layout_computation_graph,
         measure_graph_node_sizes,
     )
-    from visualizer.render import COLORS, _build_detail_draw_plan
+    from visualizer.render import COLORS, MEASURE_CANVAS_WIDTH, _build_detail_draw_plan
 
     if not isinstance(tree, BlockNode):
         return 1.2
@@ -901,18 +966,22 @@ def measure_detail_tree_content_width(
         prefix_steps=prefix_steps,
         basic_ops=basic_ops or BasicOpFilter.for_detailed(),
     )
-    measure_graph_node_sizes(ax, graph, input_sublabel=input_sublabel)
-    positions, _ = layout_computation_graph(
-        graph,
-        cx=cx,
-        top_y=10.0,
-        block_w=layout_block_w,
-        block_h=_estimate_graph_height(graph),
-        content_left=min_left,
-    )
+    import matplotlib.pyplot as plt
+
+    measure_fig, measure_ax = plt.subplots(figsize=(MEASURE_CANVAS_WIDTH, 13))
+    measure_fig.canvas.draw()
     try:
+        measure_graph_node_sizes(measure_ax, graph, input_sublabel=input_sublabel)
+        positions, _ = layout_computation_graph(
+            graph,
+            cx=cx,
+            top_y=10.0,
+            block_w=layout_block_w,
+            block_h=_estimate_graph_height(graph),
+            content_left=min_left,
+        )
         finalize_detail_layout(
-            ax,
+            measure_ax,
             graph,
             positions,
             input_sublabel=input_sublabel,
@@ -924,10 +993,13 @@ def measure_detail_tree_content_width(
         )
     except LayoutValidationError:
         pass
-    from visualizer.render import _detail_content_bounds
+    finally:
+        from visualizer.render import _detail_content_bounds
 
-    frame_left, frame_right, _frame_bottom, _frame_top = _detail_content_bounds(positions)
-    return max(1.2, frame_right - frame_left + 0.05)
+        frame_left, frame_right, _frame_bottom, _frame_top = _detail_content_bounds(positions)
+        width = max(1.2, frame_right - frame_left + 0.05)
+        plt.close(measure_fig)
+        return width
 
 
 def measure_max_detail_content_width(
@@ -1060,6 +1132,21 @@ def _forbidden_max_right(
     return min(region.left for region in forbidden_regions) - min_gap - INLINE_FRAME_PAD
 
 
+def _finalize_spine_aligned_plan(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    input_sublabel: str | None,
+) -> DetailDrawPlan:
+    """Center-align spine columns and rebuild the draw plan."""
+    from visualizer.computation_graph import _align_merge_nodes, _center_align_vertical_chains
+    from visualizer.render import _build_detail_draw_plan
+
+    _align_merge_nodes(positions, graph)
+    _center_align_vertical_chains(positions, graph)
+    return _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+
+
 def finalize_detail_layout(
     ax: Axes,
     graph: ComputationGraph,
@@ -1138,7 +1225,7 @@ def finalize_detail_layout(
         )
         report = validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden)
         if report.ok:
-            return plan
+            break
         _nudge_apart_remaining_tiles(positions, elements, graph, min_gap=VALIDATE_MIN_GAP)
         _separate_parallel_tiles_from_inline_frames(
             positions,
@@ -1211,6 +1298,36 @@ def finalize_detail_layout(
     )
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    _layout_fork_join_branches(positions, graph)
+    _ensure_input_above_fork_join_clusters(positions, graph, min_gap=VALIDATE_MIN_GAP)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    _ensure_input_above_inline_frames(positions, elements, min_gap=VALIDATE_MIN_GAP)
+    _separate_parallel_tiles_from_inline_frames(
+        positions,
+        elements,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+    )
+    _layout_fork_join_branches(positions, graph)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden).raise_if_invalid()
+    plan = _finalize_spine_aligned_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    _layout_fork_join_branches(positions, graph)
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    _separate_parallel_tiles_from_inline_frames(
+        positions,
+        elements,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+    )
+    _layout_fork_join_branches(positions, graph)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
     validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden).raise_if_invalid()
     return plan

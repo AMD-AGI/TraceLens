@@ -10,8 +10,10 @@ from visualizer.sizing import (
     LABEL_LINE_GAP,
     SUB_LINE_H,
     TITLE_LINE_H,
+    box_text_lines,
     box_width_for_text_width,
     single_line_box_height,
+    titled_box_height,
 )
 
 
@@ -110,41 +112,40 @@ def box_label_size(
     box_pad_y = BLOCK_PAD_Y if pad_y is None else pad_y
     ref_top = 10.0
     cx = 0.0
-    title_y = ref_top - box_pad_y
-    text_bounds = measure_text_bounds(
-        ax,
-        label,
-        cx,
-        title_y,
-        fontsize=fontsize,
-        ha="center",
-        va="top",
-        fontweight="bold",
+    sub_lines = [line for line in (sublabel or "").split("\n") if line.strip()]
+    height = (
+        titled_box_height(len(sub_lines))
+        if sub_lines
+        else single_line_box_height(pad_y=box_pad_y)
     )
-
-    if sublabel:
-        sub_fs = sub_fontsize if sub_fontsize is not None else max(6.5, fontsize - 1.5)
-        sub_lines = [line for line in sublabel.split("\n") if line.strip()]
-        sub_y = title_y - TITLE_LINE_H - LABEL_LINE_GAP
-        for line in sub_lines:
+    text_bounds = None
+    for _ in range(2):
+        for line in box_text_lines(
+            ref_top,
+            height,
+            label,
+            sublabel,
+            pad_y=box_pad_y,
+            title_fontsize=fontsize,
+        ):
             line_bounds = measure_text_bounds(
                 ax,
-                line,
+                line.text,
                 cx,
-                sub_y,
-                fontsize=sub_fs,
+                line.y,
+                fontsize=line.fontsize,
                 ha="center",
-                va="top",
-                fontweight="normal",
+                va=line.va,
+                fontweight=line.fontweight,
             )
-            text_bounds = text_bounds.union(line_bounds)
-            sub_y -= SUB_LINE_H + LABEL_LINE_GAP
+            text_bounds = line_bounds if text_bounds is None else text_bounds.union(line_bounds)
+        assert text_bounds is not None
+        needed = (text_bounds.top - text_bounds.bottom) + 2 * box_pad_y
+        if needed <= height + 1e-6:
+            break
+        height = needed
 
     width = box_width_for_text_width(text_bounds.width, pad_x=box_pad_x)
-    height = ref_top - text_bounds.bottom + box_pad_y
-    return width, max(single_line_box_height(pad_y=box_pad_y), height)
-
-
     return width, max(single_line_box_height(pad_y=box_pad_y), height)
 
 

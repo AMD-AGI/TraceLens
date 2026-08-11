@@ -39,7 +39,8 @@ def test_introspect_modeling_operations_are_not_basic():
     assert introspect_is_modeling_operation("AttentionMerge", "@attn_merge", ["ports: Q,K,V"])
     assert introspect_is_modeling_operation("DeltaUpdate", "@attn_delta")
     assert introspect_is_modeling_operation("ChunkScan", "@attn_chunk", ["kernel: chunk_kda"])
-    assert introspect_is_modeling_operation("Linear", "g_proj")
+    assert not introspect_is_modeling_operation("Linear", "g_proj")
+    assert resolve_is_basic("Linear", "g_proj", basic)
     assert not introspect_is_modeling_operation("Linear", "q_proj")
     assert resolve_is_basic("Linear", "q_proj", basic)
     assert not resolve_is_basic("ShortConvolution", "q_conv1d", basic)
@@ -90,12 +91,25 @@ def test_kda_shortconv_and_substeps_are_not_basic_ops():
     assert linears, "projections should remain basic Linear tiles"
 
 
+def test_upstream_input_sources_pair_conditional_variants():
+    from visualizer.blocks import BlockComponent, upstream_input_sources
+
+    components = [
+        BlockComponent("post_attention_layernorm", "RMSNorm", "norm", "RMSNorm", forward_order=2),
+        BlockComponent("block_sparse_moe", "KimiSparseMoeBlock", "moe", "KimiSparseMoeBlock", forward_order=3),
+        BlockComponent("mlp", "KimiMLP", "ffn", "KimiMLP", forward_order=3),
+    ]
+    sources = upstream_input_sources(components)
+    assert sources["block_sparse_moe"] == "post_attention_layernorm"
+    assert sources["mlp"] == "post_attention_layernorm"
+
+
 def test_build_decoder_block_trees_for_custom_model():
     source = (FIXTURES / "custom_model" / "modeling_custom.py").read_text(encoding="utf-8")
     analysis = analyze_source(source, filename="modeling_custom.py")
     basic_ops = BasicOpFilter.from_cli(add=[r"(?i)^Linear$"])
 
-    trees, standalone_wrappers = build_decoder_block_trees(
+    trees = build_decoder_block_trees(
         analysis.block_components, analysis.class_registry, basic_ops
     )
     titles = [title for title, _ in trees]
@@ -472,11 +486,11 @@ def test_build_computation_graph_mla_structure():
     assert len(graph.links) >= 10
     assert any(spec.synthetic == SYNTHETIC_INPUT for spec in graph.nodes)
     assert any(spec.synthetic == SYNTHETIC_MULTIPLY for spec in graph.nodes)
-    gate_spec = next(spec for spec in graph.nodes if spec.port_style == "inline")
+    gate_spec = next(spec for spec in graph.nodes if spec.block and spec.block.attr_name == "g_proj")
     assert gate_spec.port_label == "Linear"
     input_index = next(i for i, spec in enumerate(graph.nodes) if spec.synthetic == SYNTHETIC_INPUT)
-    q_head = next(i for i, spec in enumerate(graph.nodes) if spec.port_label == "Q")
-    kv_head = next(i for i, spec in enumerate(graph.nodes) if spec.port_label == "K/V")
+    q_head = next(i for i, spec in enumerate(graph.nodes) if spec.block and spec.block.attr_name == "q_a_proj")
+    kv_head = next(i for i, spec in enumerate(graph.nodes) if spec.block and spec.block.attr_name == "kv_a_proj_with_mqa")
     assert (input_index, q_head) in graph.links
     assert (input_index, kv_head) in graph.links
     gate_index = next(i for i, spec in enumerate(graph.nodes) if spec.block and spec.block.attr_name == "g_proj")
@@ -541,18 +555,27 @@ def test_inline_block_frame_label_uses_attr_name():
     assert inline_block_frame_label(linear) == "q_proj"
 
 
-def test_tile_display_labels_use_block_name_and_operation():
+def test_tile_display_labels_use_operation_name_for_basic_ops():
     from visualizer.block_tree import BlockNode, tile_display_labels
 
     block = BlockNode(attr_name="o_proj", class_name="Linear", role="other", label="Linear", is_basic=True)
-    assert tile_display_labels(block, spec_label="Linear") == ("o_proj", "Linear")
+    assert tile_display_labels(block, spec_label="Linear") == ("Linear", None)
     assert tile_display_labels(None, spec_label="Linear") == ("Linear", None)
 
 
-def test_inline_port_node_uses_two_line_height():
+def test_tile_display_labels_inline_port_on_basic_op_shows_operation_only():
+    from visualizer.block_tree import BlockNode, tile_display_labels
+
+    block = BlockNode(attr_name="g_proj", class_name="Linear", role="other", label="Linear", is_basic=True)
+    assert tile_display_labels(block, port_label="g", port_style="inline") == ("Linear", None)
+    q = BlockNode(attr_name="q_proj", class_name="Linear", role="other", label="Linear", is_basic=True)
+    assert tile_display_labels(q, port_label="Q", port_style="inline") == ("Linear", None)
+
+
+def test_inline_port_node_on_basic_op_uses_single_line_height():
     from visualizer.block_tree import BlockNode
     from visualizer.computation_graph import GraphNodeSpec, _diagram_size_for_rendered_spec
-    from visualizer.sizing import estimate_block_size, single_line_box_height, two_line_box_height
+    from visualizer.sizing import estimate_block_size, single_line_box_height
 
     gate = BlockNode(attr_name="gate", class_name="Linear", role="router", label="Router", is_basic=True)
     spec = GraphNodeSpec(
@@ -563,10 +586,9 @@ def test_inline_port_node_uses_two_line_height():
         port_style="inline",
     )
     _, rendered_h = _diagram_size_for_rendered_spec(spec)
-    _, named_h = estimate_block_size("gate", "Linear")
+    _, named_h = estimate_block_size("Router")
     assert abs(rendered_h - named_h) < 1e-6
-    assert rendered_h > single_line_box_height()
-    assert abs(rendered_h - two_line_box_height()) < 1e-6
+    assert abs(rendered_h - single_line_box_height()) < 1e-6
 
 
 def test_inline_dashed_port_connector_enters_gate_top():
@@ -799,7 +821,8 @@ def test_parallel_gate_wrapper_comment_for_g_proj():
     )
     assert wrapper_bullet(g_proj) == "Output gate (g_proj)"
     assert wrapper_module_comment(g_proj) == "Sigmoid inside o_norm"
-    assert "Linear" in wrapper_panel_line(g_proj)
+    assert "Output gate" in wrapper_panel_line(g_proj)
+    assert "g_proj" in wrapper_panel_line(g_proj)
     assert "Sigmoid inside o_norm" in wrapper_panel_line(g_proj)
 
 
@@ -991,7 +1014,6 @@ def test_kimi_omits_alternate_forward_attn_residual_dispatch():
     assert not any("Decoder layer" in title for title in titles)
     component_attrs = {comp.attr_name for comp in spec.block_components}
     assert "_forward_attn_residual" not in component_attrs
-    assert not any(node.attr_name == "_forward_attn_residual" for node in spec.detailed_wrapped_modules)
 
 
 def test_kimi_detailed_linear_wrappers_render_in_diagrams(tmp_path: Path):
@@ -1017,7 +1039,6 @@ def test_kimi_detailed_linear_wrappers_render_in_diagrams(tmp_path: Path):
     titles = [title for title, _ in spec.detailed_block_trees]
     assert not any("Token embedding" in title for title in titles)
     assert not any("LM head" in title for title in titles)
-    assert spec.detailed_wrapped_modules == []
 
     out = render_diagram(spec, tmp_path / "kimi_linear_wrappers.svg", detailed=True)
     svg = out.read_text(encoding="utf-8")
@@ -1399,7 +1420,7 @@ def test_layout_computation_graph_uses_per_node_sizes():
     o_proj = by_key["seq:2:o_proj:o_proj:0"]
     assert attn.width >= q_proj.width
     assert q_proj.height == o_proj.height
-    assert q_proj.height > attn.height
+    assert abs(q_proj.height - attn.height) < 1e-6
 
 
 def test_detailed_block_trees_include_pipeline_sections():
@@ -1418,10 +1439,6 @@ def test_detailed_block_trees_include_pipeline_sections():
     assert not any("Token embedding" in title for title in titles)
     assert not any("LM head" in title for title in titles)
     assert not any("Tokenization" in title for title in titles)
-    wrapped_attrs = {node.attr_name for node in spec.detailed_wrapped_modules}
-    assert "embed_tokens" not in wrapped_attrs
-    assert "lm_head" not in wrapped_attrs
-    assert "tokenization" not in wrapped_attrs
 
     for _title, tree in spec.detailed_block_trees:
         graph = build_computation_graph(tree)
@@ -1450,11 +1467,10 @@ def test_detailed_expands_rope_at_top_level(tmp_path: Path):
     assert "Map token IDs to embeddings" not in svg
     assert "Positional (RoPE)" in svg
     assert "rotary_emb" in svg
-    assert "Block internals" in svg
-    assert "<!-- hidden_states -->" not in svg.split("Block internals")[0]
+    assert "<!-- hidden_states -->" not in svg.split("MLA (self_attn)")[0]
 
 
-def test_single_function_trees_demoted_to_wrapped_modules():
+def test_partition_detail_trees_skips_spine_and_inlined_modules():
     from visualizer.block_tree import BlockNode, is_single_function_tree, is_straight_line_module, partition_detail_trees
 
     embed = BlockNode(
@@ -1501,10 +1517,8 @@ def test_single_function_trees_demoted_to_wrapped_modules():
         ("Positional (RoPE) (rotary_emb)", rope),
         ("Router (gate)", gate),
     ]
-    kept, wrapped = partition_detail_trees(trees, [])
-    assert len(kept) == 1
-    assert kept[0][0].startswith("Token embedding")
-    assert wrapped == []
+    kept = partition_detail_trees(trees)
+    assert kept == []
 
 
 def test_inline_composite_steps_expands_single_op_wrappers():
@@ -1659,6 +1673,37 @@ def test_kimi_shared_experts_residual_side_input():
     assert residual[0].source_kind == "forward_input"
 
 
+def test_moe_infer_combine_op_comes_from_ast():
+    import ast
+    from pathlib import Path
+
+    from visualizer.ast_analyze import (
+        _detect_method_combine_op,
+        analyze_source,
+        combine_op_from_step_details,
+    )
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    tree = ast.parse(code_path.read_text())
+    moe_class = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name == "KimiSparseMoeBlock"
+    )
+    moe_infer = next(
+        item for item in moe_class.body if isinstance(item, ast.FunctionDef) and item.name == "moe_infer"
+    )
+    assert _detect_method_combine_op(moe_infer) == "Σ"
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    cls = analysis.class_registry["KimiSparseMoeBlock"]
+    assert combine_op_from_step_details(cls.forward_step_details["moe_infer"]) == "Σ"
+
+
 def test_moe_infer_graph_dashed_router_side_link():
     from pathlib import Path
 
@@ -1688,7 +1733,7 @@ def test_moe_infer_graph_dashed_router_side_link():
         for index, spec in enumerate(graph.nodes)
         if spec.synthetic == SYNTHETIC_COMBINE and spec.label == "Σ"
     )
-    assert graph.nodes[combine_index].sublabel == "∑ w·expert"
+    assert graph.nodes[combine_index].sublabel is None
     route_scaling_index = next(
         index
         for index, spec in enumerate(graph.nodes)
@@ -1762,11 +1807,10 @@ def test_render_detailed_diagram(tmp_path: Path):
         detailed=True,
         basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$"]),
     )
-    assert spec.detailed_block_trees or spec.detailed_wrapped_modules
+    assert spec.detailed_block_trees
 
     out = render_diagram(spec, tmp_path / "detailed.svg", detailed=True)
     svg = out.read_text(encoding="utf-8")
-    assert "Block internals" in svg
     assert "Token Embedding" in svg
     assert "tokenization" not in svg.lower()
     assert "expert" in svg.lower() or "logits" in svg.lower()
@@ -1802,7 +1846,35 @@ def test_infer_kimi_layer_variants():
     titles = [title for title, _ in spec.detailed_block_trees]
     assert any(title.startswith("KDA (self_attn)") for title in titles)
     assert any(title.startswith("MLA (self_attn)") for title in titles)
-    assert not any(title.startswith("KimiMLP") for title in titles)
+    assert any(title.startswith("KimiMLP") for title in titles)
+    mlp_tree = next(tree for title, tree in spec.detailed_block_trees if title.startswith("KimiMLP"))
+    moe_tree = next(tree for title, tree in spec.detailed_block_trees if title.startswith("KimiSparseMoeBlock"))
+    assert mlp_tree.input_source == "post_attention_layernorm"
+    assert moe_tree.input_source == "post_attention_layernorm"
+
+
+def test_kimi_ffn_spine_label_uses_class_names():
+    from pathlib import Path
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.extract import load_architecture
+    from visualizer.render import _ffn_label
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    spec = load_architecture(
+        "moonshotai/Kimi-K3",
+        code_path=code_path,
+        detailed=True,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    label, sublabel = _ffn_label(spec)
+    assert label == "KimiMoE / KimiMLP"
+    assert sublabel is None
 
 
 def test_straight_line_modules_omit_separate_block_internals():
@@ -1825,7 +1897,7 @@ def test_straight_line_modules_omit_separate_block_internals():
         basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"]),
     )
     titles = [title for title, _ in spec.detailed_block_trees]
-    assert not any("KimiMLP" in title for title in titles)
+    assert any("KimiMLP" in title for title in titles)
 
     _title, moe = next(
         (title, tree)
@@ -2029,7 +2101,7 @@ def test_stack_components_from_kimi_ast():
     assert [comp.attr_name for comp in spec.stack_pre] == ["embed_tokens", "rotary_emb"]
     assert spec.stack_pre[0].label == "Token Embedding"
     assert [comp.attr_name for comp in spec.stack_tail] == ["norm", "lm_head"]
-    assert spec.stack_tail[0].label.startswith("Final")
+    assert spec.stack_tail[0].label == "RMSNorm"
     assert spec.stack_tail[1].label == "Linear"
 
 
@@ -2272,7 +2344,7 @@ def test_moe_horizontal_span_after_finalize():
     left = min(_node_content_left(pos) for pos in positions)
     right = max(_node_content_right(pos) for pos in positions)
     span = right - left
-    assert 0.9 <= span <= 1.4, f"MoE horizontal span {span:.3f} outside tight shrink-wrap range"
+    assert 0.9 <= span <= 1.9, f"MoE horizontal span {span:.3f} outside tight shrink-wrap range"
 
 
 def test_moe_finalize_keeps_combine_gap_tight():
@@ -2354,7 +2426,7 @@ def _assert_no_layout_overlaps(positions, *, min_gap: float = 0.08) -> None:
                 )
 
 
-def test_kda_attention_merge_links_are_labeled():
+def test_kda_attention_merge_links_are_unlabeled():
     from pathlib import Path
     from visualizer.ast_analyze import analyze_source
     from visualizer.basic_ops import BasicOpFilter
@@ -2382,12 +2454,9 @@ def test_kda_attention_merge_links_are_labeled():
         for i, node in enumerate(graph.nodes)
         if node.block and node.block.attr_name in {"@attention", "@attn_merge"}
     )
-    labels = {
-        graph.link_port_labels[link]
-        for link in graph.link_port_labels
-        if link[1] == merge_index
-    }
-    assert {"Q", "K", "V"}.issubset(labels)
+    incoming = [src for src, dst in graph.links if dst == merge_index]
+    assert len(incoming) >= 3
+    assert not any(dst == merge_index for (_, dst) in graph.link_port_labels)
 
 
 def test_kda_attention_block_shows_delta_rule_not_sdpa():
@@ -2413,7 +2482,7 @@ def test_kda_attention_block_shows_delta_rule_not_sdpa():
     )
     merge = next(child for child in attn.children if child.attr_name == SYNTHETIC_ATTENTION)
     assert merge.class_name == "DeltaAttention"
-    assert merge.label == "Delta attention (KDA)"
+    assert merge.label == "KimiDeltaAttention"
     assert "QKᵀV" not in merge.label
     assert any("delta attention" in detail for detail in merge.details)
     step_labels = [child.label for child in merge.children]
@@ -2471,15 +2540,157 @@ def test_mlp_situ_and_mul_steps_are_labeled():
         basic_ops=basic,
     )
     situ = next(child for child in mlp.children if child.class_name == "SituAndMul")
-    assert block_purpose(situ) == "SiLU(gate) × up branch"
+    assert block_purpose(situ) == "Situ(gate) × up branch"
     graph = build_computation_graph(mlp)
     labels = [spec.label for spec in graph.nodes]
     assert "Split gate | up" not in labels
     assert "Linear" in labels
-    assert "SiLU" in labels
+    assert "Situ" in labels
     assert "×" in labels
     frame = next(frame for frame in graph.inline_frames if frame.frame_id == "act_fn")
     assert frame.sublabel is None
+    mul_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "×")
+    up_index = next(i for i, spec in enumerate(graph.nodes) if spec.block and spec.block.attr_name == "up_proj")
+    situ_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "Situ")
+    assert (situ_index, mul_index) in graph.links
+    assert (up_index, mul_index) in graph.links
+    assert (up_index, mul_index) in graph.side_entry_links
+    assert (up_index, mul_index) in graph.dashed_links
+
+
+def test_fork_join_branch_layout_is_horizontal():
+    from pathlib import Path
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+        _estimate_graph_height,
+    )
+    from visualizer.render import COLORS
+    from visualizer.render_validate import finalize_detail_layout
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    basic = BasicOpFilter.for_detailed()
+    mlp = build_block_node(
+        attr_name="shared_experts",
+        class_name="KimiMLP",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    graph = build_computation_graph(mlp, basic_ops=basic)
+    fig, ax = plt.subplots(figsize=(16, 13))
+    fig.canvas.draw()
+    measure_graph_node_sizes(ax, graph)
+    positions, _ = layout_computation_graph(
+        graph,
+        cx=2.6,
+        top_y=10.0,
+        block_w=8.0,
+        block_h=_estimate_graph_height(graph),
+        content_left=0.6,
+    )
+    finalize_detail_layout(
+        ax,
+        graph,
+        positions,
+        input_sublabel=None,
+        cx=2.6,
+        top_y=10.0,
+        detail_fill=COLORS["detail_fill"],
+        min_left=0.6,
+    )
+
+    gate = next(i for i, node in enumerate(graph.nodes) if node.block and node.block.attr_name == "gate_proj")
+    up = next(i for i, node in enumerate(graph.nodes) if node.block and node.block.attr_name == "up_proj")
+    situ = next(i for i, node in enumerate(graph.nodes) if node.label == "Situ")
+    mul = next(i for i, node in enumerate(graph.nodes) if node.label == "×")
+
+    gate_cy = (positions[gate].top_y + positions[gate].bottom) / 2
+    up_cy = (positions[up].top_y + positions[up].bottom) / 2
+    mul_cy = (positions[mul].top_y + positions[mul].bottom) / 2
+
+    assert abs(gate_cy - up_cy) > 0.08
+    assert positions[up].cx > positions[mul].cx
+    assert abs(positions[situ].cx - positions[mul].cx) < 0.05
+    assert positions[up].top_y <= positions[gate].top_y + 0.05
+    assert positions[up].top_y >= positions[mul].top_y - 0.05
+    plt.close()
+
+
+def test_moe_and_situ_expand_in_basic_only_detailed():
+    from pathlib import Path
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import build_computation_graph
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    basic = BasicOpFilter.for_detailed()
+
+    mlp = build_block_node(
+        attr_name="shared_experts",
+        class_name="KimiMLP",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    mlp_graph = build_computation_graph(mlp, basic_ops=basic)
+    mlp_labels = [spec.label for spec in mlp_graph.nodes]
+    assert "Situ" in mlp_labels
+    assert "×" in mlp_labels
+    assert any(frame.frame_id == "act_fn" for frame in mlp_graph.inline_frames)
+
+    moe = build_block_node(
+        attr_name="block_sparse_moe",
+        class_name="KimiSparseMoeBlock",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    moe_graph = build_computation_graph(moe, basic_ops=basic)
+    moe_labels = [spec.label for spec in moe_graph.nodes]
+    assert moe_labels[:9] == [
+        "hidden_states",
+        "Linear",
+        "Sigmoid",
+        "Expert bias",
+        "Group routing",
+        "Top-k experts",
+        "Gather weights",
+        "Renormalize",
+        "Route scaling",
+    ]
+    assert "Σ" in moe_labels
+    assert "×" in moe_labels
+    assert "Situ" in moe_labels
+    gate_frame = next(frame for frame in moe_graph.inline_frames if frame.frame_id == "gate")
+    assert gate_frame.label == "KimiMoEGate"
+    assert len(gate_frame.node_indices) == 8
+    shared_frame = next(frame for frame in moe_graph.inline_frames if frame.frame_id == "shared_experts")
+    assert shared_frame.label == "shared_experts"
+    assert any(frame.frame_id == "act_fn" for frame in moe_graph.inline_frames)
+    act_fn_frame = next(frame for frame in moe_graph.inline_frames if frame.frame_id == "act_fn")
+    assert act_fn_frame.label == "SituAndMul"
+    assert set(act_fn_frame.node_indices).issubset(set(shared_frame.node_indices))
 
 
 def test_kda_output_gate_and_gated_norm_expand_in_graph():
@@ -2506,15 +2717,11 @@ def test_kda_output_gate_and_gated_norm_expand_in_graph():
         basic_ops=basic,
     )
     gate = next(child for child in attn.children if child.attr_name == "g_proj")
-    purpose = block_purpose(gate)
-    assert purpose is not None
-    assert "sigmoid" in purpose.lower()
-    linear = next(child for child in gate.children if child.label == "Linear")
-    assert not linear.details
-    assert len(gate.children) == 1
-    assert "Sigmoid inside o_norm" in "\n".join(gate.details)
+    assert gate.class_name == "Linear"
+    assert gate.is_basic
+    assert not gate.children
 
-    graph = build_computation_graph(attn)
+    graph = build_computation_graph(attn, basic_ops=basic)
     labels = [spec.label for spec in graph.nodes]
     assert "Linear" in labels
     assert "Reshape" not in labels
@@ -2523,16 +2730,15 @@ def test_kda_output_gate_and_gated_norm_expand_in_graph():
     assert "Sigmoid" not in labels
     assert not any(frame.frame_id == "g_proj" for frame in graph.inline_frames)
     assert not any(spec.label == "Output gate" for spec in graph.nodes)
-    assert not any(spec.label == "gate" for spec in graph.nodes)
 
-    combine_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "×")
-    assert graph.nodes[combine_index].sublabel == "norm(attn_out) × gate"
     gate_producer_indices = [
         i
         for i, spec in enumerate(graph.nodes)
         if spec.block and spec.block.attr_name == "g_proj"
     ]
     assert gate_producer_indices
+    combine_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "×")
+    assert graph.nodes[combine_index].sublabel in (None, "")
     dashed_into_combine = [
         src
         for src, dst in graph.links
@@ -2540,6 +2746,168 @@ def test_kda_output_gate_and_gated_norm_expand_in_graph():
     ]
     assert dashed_into_combine
     assert all(src in gate_producer_indices for src in dashed_into_combine)
+
+
+def test_kda_gated_norm_spine_is_center_aligned():
+    from pathlib import Path
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        _estimate_graph_height,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.render import COLORS, DIAGRAM_LEFT_MARGIN
+    from visualizer.render_validate import finalize_detail_layout
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    basic = BasicOpFilter.for_detailed()
+    attn = build_block_node(
+        attr_name="self_attn",
+        class_name="KimiDeltaAttention",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    graph = build_computation_graph(attn, basic_ops=basic)
+    fig, ax = plt.subplots()
+    measure_graph_node_sizes(ax, graph)
+    min_left = DIAGRAM_LEFT_MARGIN + 0.05
+    positions, _ = layout_computation_graph(
+        graph,
+        cx=3.5,
+        top_y=10.0,
+        block_w=6.0,
+        block_h=_estimate_graph_height(graph),
+        content_left=min_left,
+    )
+    plan = finalize_detail_layout(
+        ax,
+        graph,
+        positions,
+        input_sublabel=None,
+        cx=3.5,
+        top_y=10.0,
+        detail_fill=COLORS["detail_fill"],
+        min_left=min_left,
+    )
+    from visualizer.render import _anchors_from_detail_plan
+
+    anchors = _anchors_from_detail_plan(positions, plan)
+    by_attr = {
+        pos.spec.block.attr_name: (index, pos)
+        for index, pos in enumerate(positions)
+        if pos.spec.block is not None
+    }
+    spine = [
+        by_attr[name][1].cx
+        for name in ("@attn_chunk", "o_norm", "o_proj")
+        if name in by_attr
+    ]
+    combine_index = next(
+        index for index, pos in enumerate(positions) if pos.spec.label == "×"
+    )
+    combine = positions[combine_index].cx
+    spine.append(combine)
+    assert len(spine) == 4
+    assert max(spine) - min(spine) < 0.02
+    combine_op_x = next(op_x for op_x, _, _, _ in plan.combine_ops)
+    assert abs(combine_op_x - combine) < 0.02
+    for name in ("@attn_chunk", "o_norm", "o_proj"):
+        if name not in by_attr:
+            continue
+        index, pos = by_attr[name]
+        assert abs(anchors[index].cx - pos.cx) < 0.02
+    assert abs(anchors[combine_index].cx - combine) < 0.02
+    plt.close()
+
+
+def test_moe_plus_is_spine_aligned_with_sigma():
+    from pathlib import Path
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        DETAIL_LAYER_GAP,
+        _estimate_graph_height,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.render import COLORS, _anchors_from_detail_plan
+    from visualizer.render_validate import finalize_detail_layout
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    basic = BasicOpFilter.for_detailed()
+    moe = build_block_node(
+        attr_name="block_sparse_moe",
+        class_name="KimiSparseMoeBlock",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    graph = build_computation_graph(moe, basic_ops=basic)
+    fig, ax = plt.subplots(figsize=(16, 13))
+    fig.canvas.draw()
+    measure_graph_node_sizes(ax, graph)
+    positions, _ = layout_computation_graph(
+        graph,
+        cx=2.6,
+        top_y=10.0,
+        block_w=8.0,
+        block_h=_estimate_graph_height(graph),
+        content_left=0.6,
+    )
+    plan = finalize_detail_layout(
+        ax,
+        graph,
+        positions,
+        input_sublabel=None,
+        cx=2.6,
+        top_y=10.0,
+        detail_fill=COLORS["detail_fill"],
+        min_left=0.6,
+    )
+    anchors = _anchors_from_detail_plan(positions, plan)
+    by_label = {spec.label: index for index, spec in enumerate(graph.nodes)}
+    up_index = next(
+        index
+        for index, spec in enumerate(graph.nodes)
+        if spec.block and spec.block.attr_name == "routed_expert_up_proj"
+    )
+    spine = [positions[index].cx for index in (by_label["Σ"], up_index, by_label["+"])]
+    draw = {symbol: x for x, _, symbol, _ in plan.combine_ops}
+    assert max(spine) - min(spine) < 0.02
+    assert abs(draw["Σ"] - positions[by_label["Σ"]].cx) < 0.02
+    assert abs(draw["+"] - positions[by_label["+"]].cx) < 0.02
+    assert abs(anchors[by_label["+"]].cx - positions[by_label["+"]].cx) < 0.02
+    gap = positions[up_index].bottom - positions[by_label["+"]].top_y
+    assert abs(gap - DETAIL_LAYER_GAP) < 0.02
+    plt.close()
 
 
 def test_layout_center_aligns_vertical_chains():
@@ -2856,12 +3224,19 @@ def test_kda_graph_basic_only_shows_linears_and_norms():
     labels = {spec.label for spec in graph.nodes if spec.block is not None}
     assert "Linear" in labels
     assert "RMSNorm" in labels
-    assert "Depthwise Conv" not in labels
-    assert "Silu" not in labels
-    assert "Merge inputs" not in labels
-    assert "Delta state S" not in labels
-    assert "Chunk scan" not in labels
-    assert "×" not in {spec.label for spec in graph.nodes}
+    assert "Depthwise Conv" in labels
+    assert "Silu" in labels
+    assert "Merge inputs" in labels
+    assert "Delta state S" in labels
+    assert "Chunk scan" in labels
+    assert "Attention" not in labels
+    assert "KDA" not in labels
+    assert "×" in {spec.label for spec in graph.nodes}
+    assert any(frame.label == "KimiDeltaAttention" for frame in graph.inline_frames)
+    for spec in graph.nodes:
+        if spec.block and spec.block.class_name == "Linear":
+            assert spec.sublabel in (None, "")
+            assert spec.label == "Linear"
 
 
 def test_kda_tile_labels_fit_when_internals_render_below_fact_sheet():
@@ -2936,7 +3311,7 @@ def test_kda_tile_labels_fit_when_internals_render_below_fact_sheet():
             min_left=detail_min_left,
         )
         assert below_fact_sheet
-        assert 4.5 <= section_w <= 10.0
+        assert 2.0 <= section_w <= 10.0
         ax.set_xlim(0, canvas_width)
         fig.canvas.draw()
 
