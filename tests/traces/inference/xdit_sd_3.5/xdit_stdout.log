@@ -1,215 +1,0 @@
-Unable to import `torchao` Tensor objects. This may affect loading checkpoints serialized with `torchao`
-[aiter] WARNING: NUMA balancing is enabled, which may cause errors. It is recommended to disable NUMA balancing by running "sudo sh -c 'echo 0 > /proc/sys/kernel/numa_balancing'" for more details: https://rocm.docs.amd.com/en/latest/how-to/system-optimization/mi300x.html#disable-numa-auto-balancing
-[aiter] start build [module_aiter_core] under /app/external/aiter/aiter/jit/build/module_aiter_core
-[aiter] Current hipcc not support: -mllvm -amdgpu-coerce-illegal-types=1, skip it.
-[aiter] [32mfinish build [module_aiter_core], cost 14.9s [0m
-[aiter] import [module_aiter_core] under /app/external/aiter/aiter/jit/module_aiter_core.so
-INFO 08-04 22:46:15 [envs.py:412] Using AITER GroupNorm as torch.nn.GroupNorm
-Unable to import `torchao` Tensor objects. This may affect loading checkpoints serialized with `torchao`
-[aiter] WARNING: NUMA balancing is enabled, which may cause errors. It is recommended to disable NUMA balancing by running "sudo sh -c 'echo 0 > /proc/sys/kernel/numa_balancing'" for more details: https://rocm.docs.amd.com/en/latest/how-to/system-optimization/mi300x.html#disable-numa-auto-balancing
-[aiter] import [module_aiter_core] under /app/external/aiter/aiter/jit/module_aiter_core.so
-INFO 08-04 22:46:22 [envs.py:412] Using AITER GroupNorm as torch.nn.GroupNorm
-DEBUG 08-04 22:46:23 [runner_utils.py:290] torchao Float8Tensor FSDP2 patches applied: ['aten.split.Tensor', 'aten.new_empty.default', 'aten.new_zeros.default', 'aten.copy_.default', 'aten.view.default', 'aten.as_strided.default', '__torch_dispatch__ fallthrough', 'fsdp_pre_all_gather', 'fsdp_post_all_gather']
-WARNING 08-04 22:46:23 [args.py:847] Distributed environment is not initialized. Initializing...
-DEBUG 08-04 22:46:23 [parallel_state.py:239] world_size=-1 rank=-1 local_rank=-1 distributed_init_method=env:// backend=nccl
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-INFO 08-04 22:46:23 [config.py:201] Pipeline patch number not set, using default value 1
-INFO 08-04 22:46:23 [runner_utils.py:30] Model Runner Arguments:
-INFO 08-04 22:46:23 [runner_utils.py:30]   model: SD3.5
-INFO 08-04 22:46:23 [runner_utils.py:30]   use_parallel_vae: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   use_torch_compile: True
-INFO 08-04 22:46:23 [runner_utils.py:30]   attention_backend: aiter
-INFO 08-04 22:46:23 [runner_utils.py:30]   cross_attention_backend: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   use_cfg_parallel: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   data_parallel_degree: 1
-INFO 08-04 22:46:23 [runner_utils.py:30]   ulysses_degree: 1
-INFO 08-04 22:46:23 [runner_utils.py:30]   ring_degree: 1
-INFO 08-04 22:46:23 [runner_utils.py:30]   pipefusion_parallel_degree: 1
-INFO 08-04 22:46:23 [runner_utils.py:30]   tensor_parallel_degree: 1
-INFO 08-04 22:46:23 [runner_utils.py:30]   fully_shard_degree: 1
-INFO 08-04 22:46:23 [runner_utils.py:30]   reshard_after_forward: True
-INFO 08-04 22:46:23 [runner_utils.py:30]   memory_efficient_sharding: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   height: 1024
-INFO 08-04 22:46:23 [runner_utils.py:30]   width: 1024
-INFO 08-04 22:46:23 [runner_utils.py:30]   num_frames: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   prompt: ['a photo of a cat']
-INFO 08-04 22:46:23 [runner_utils.py:30]   negative_prompt: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   num_inference_steps: 4
-INFO 08-04 22:46:23 [runner_utils.py:30]   max_sequence_length: 512
-INFO 08-04 22:46:23 [runner_utils.py:30]   seed: 42
-INFO 08-04 22:46:23 [runner_utils.py:30]   guidance_scale: 4.0
-INFO 08-04 22:46:23 [runner_utils.py:30]   guidance_scale_2: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   flow_shift: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   enable_sequential_cpu_offload: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   enable_model_cpu_offload: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   enable_tiling: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   enable_slicing: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   use_int8_gemms: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   use_fp8_gemms: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   use_fp4_gemms: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   fp8_precision_override_prefix_patterns: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   fp8_precision_override_suffix_patterns: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   num_iterations: 1
-INFO 08-04 22:46:23 [runner_utils.py:30]   profile: True
-INFO 08-04 22:46:23 [runner_utils.py:30]   profile_wait: 1
-INFO 08-04 22:46:23 [runner_utils.py:30]   profile_warmup: 2
-INFO 08-04 22:46:23 [runner_utils.py:30]   profile_active: 1
-INFO 08-04 22:46:23 [runner_utils.py:30]   profile_capture_phase: True
-INFO 08-04 22:46:23 [runner_utils.py:30]   warmup_calls: 1
-INFO 08-04 22:46:23 [runner_utils.py:30]   output_directory: /workspace/output/xdit_run.G0HJ7w
-INFO 08-04 22:46:23 [runner_utils.py:30]   input_images: ['/app/data/flux_cat.png']
-INFO 08-04 22:46:23 [runner_utils.py:30]   resize_input_images: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   task: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   batch_size: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   dataset_path: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   use_hybrid_attn_schedule: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   hybrid_attn_low_precision_backend: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   hybrid_attn_high_precision_backend: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   num_hybrid_attn_high_precision_steps: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   hybrid_attn_schedule: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   use_hybrid_gemm_schedule: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   num_hybrid_gemm_high_precision_steps: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   use_vae_channels_last_format: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   use_ssta_sparse_text_to_image: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   spargeattn_simthreshold: 0.3
-INFO 08-04 22:46:23 [runner_utils.py:30]   spargeattn_cdfthreshold: 0.92
-INFO 08-04 22:46:23 [runner_utils.py:30]   spargeattn_reorder_sequence: True
-INFO 08-04 22:46:23 [runner_utils.py:30]   use_spargeattn_static_block_mask: True
-INFO 08-04 22:46:23 [runner_utils.py:30]   use_spargeattn_head_balance: False
-INFO 08-04 22:46:23 [runner_utils.py:30]   distilled_transformer_path: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   distilled_transformer_2_path: None
-INFO 08-04 22:46:23 [runner_utils.py:30]   use_fbcache: False
-INFO 08-04 22:46:23 [runner_utils.py:30] Initializing model: SD3.5
-INFO 08-04 22:46:23 [config.py:201] Pipeline patch number not set, using default value 1
-INFO 08-04 22:46:23 [runner_utils.py:30] Loading model pipeline...
-INFO:httpx:HTTP Request: GET https://huggingface.co/api/models/stabilityai/stable-diffusion-3.5-large "HTTP/1.1 200 OK"
-INFO:httpx:HTTP Request: HEAD https://huggingface.co/stabilityai/stable-diffusion-3.5-large/resolve/main/model_index.json "HTTP/1.1 401 Unauthorized"
-Loading pipeline components...:   0%|          | 0/9 [00:00<?, ?it/s]Loading pipeline components...:  11%|█         | 1/9 [00:00<00:01,  7.86it/s]
-Loading weights:   0%|          | 0/517 [00:00<?, ?it/s][A
-Loading weights:   0%|          | 2/517 [00:00<00:40, 12.70it/s][A
-Loading weights:   5%|▍         | 24/517 [00:00<00:05, 89.37it/s][A
-Loading weights:  10%|▉         | 50/517 [00:00<00:03, 135.32it/s][A
-Loading weights:  14%|█▍        | 72/517 [00:00<00:02, 159.31it/s][A
-Loading weights:  20%|█▉        | 103/517 [00:00<00:02, 188.85it/s][A
-Loading weights:  24%|██▍       | 123/517 [00:00<00:02, 161.36it/s][A
-Loading weights:  30%|██▉       | 154/517 [00:00<00:01, 195.72it/s][A
-Loading weights:  34%|███▍      | 175/517 [00:01<00:01, 180.00it/s][A
-Loading weights:  38%|███▊      | 194/517 [00:01<00:01, 176.13it/s][A
-Loading weights:  42%|████▏     | 216/517 [00:01<00:01, 169.55it/s][A
-Loading weights:  45%|████▌     | 234/517 [00:01<00:01, 165.16it/s][A
-Loading weights:  50%|█████     | 260/517 [00:01<00:01, 188.48it/s][A
-Loading weights:  54%|█████▍    | 280/517 [00:01<00:01, 173.11it/s][A
-Loading weights:  60%|██████    | 312/517 [00:01<00:01, 181.03it/s][A
-Loading weights:  67%|██████▋   | 344/517 [00:02<00:00, 194.75it/s][A
-Loading weights:  70%|███████   | 364/517 [00:02<00:00, 194.21it/s][A
-Loading weights:  76%|███████▌  | 392/517 [00:02<00:00, 193.53it/s][A
-Loading weights:  81%|████████  | 418/517 [00:02<00:00, 207.97it/s][A
-Loading weights:  85%|████████▌ | 440/517 [00:02<00:00, 191.85it/s][A
-Loading weights:  91%|█████████▏| 472/517 [00:02<00:00, 207.93it/s][A
-Loading weights:  96%|█████████▌| 494/517 [00:02<00:00, 206.88it/s][ALoading weights: 100%|██████████| 517/517 [00:02<00:00, 184.35it/s]
-Loading pipeline components...:  22%|██▏       | 2/9 [00:03<00:12,  1.82s/it]Loading pipeline components...:  44%|████▍     | 4/9 [00:03<00:03,  1.31it/s]
-Loading weights:   0%|          | 0/197 [00:00<?, ?it/s][A
-Loading weights:   1%|          | 2/197 [00:00<00:09, 19.51it/s][A
-Loading weights:  37%|███▋      | 72/197 [00:00<00:00, 411.96it/s][A
-Loading weights:  61%|██████    | 120/197 [00:00<00:00, 417.69it/s][A
-Loading weights:  82%|████████▏ | 162/197 [00:00<00:00, 403.70it/s][ALoading weights: 100%|██████████| 197/197 [00:00<00:00, 394.38it/s]
-Loading pipeline components...:  67%|██████▋   | 6/9 [00:04<00:01,  1.81it/s]
-Loading weights:   0%|          | 0/219 [00:00<?, ?it/s][A
-Loading weights:   1%|▏         | 3/219 [00:00<00:08, 24.16it/s][A
-Loading weights:   3%|▎         | 7/219 [00:00<00:11, 19.06it/s][A
-Loading weights:   5%|▌         | 12/219 [00:00<00:07, 27.40it/s][A
-Loading weights:   7%|▋         | 16/219 [00:00<00:08, 25.20it/s][A
-Loading weights:   9%|▊         | 19/219 [00:00<00:07, 25.27it/s][A
-Loading weights:  11%|█         | 23/219 [00:00<00:07, 27.35it/s][A
-Loading weights:  12%|█▏        | 26/219 [00:01<00:08, 23.47it/s][A
-Loading weights:  14%|█▍        | 31/219 [00:01<00:06, 29.18it/s][A
-Loading weights:  16%|█▌        | 35/219 [00:01<00:08, 21.60it/s][A
-Loading weights:  18%|█▊        | 40/219 [00:01<00:07, 25.38it/s][A
-Loading weights:  20%|█▉        | 43/219 [00:01<00:07, 24.09it/s][A
-Loading weights:  21%|██        | 46/219 [00:01<00:07, 23.70it/s][A
-Loading weights:  24%|██▎       | 52/219 [00:02<00:07, 22.56it/s][A
-Loading weights:  26%|██▌       | 57/219 [00:02<00:05, 27.27it/s][A
-Loading weights:  28%|██▊       | 61/219 [00:02<00:06, 24.70it/s][A
-Loading weights:  30%|███       | 66/219 [00:02<00:05, 28.42it/s][A
-Loading weights:  32%|███▏      | 70/219 [00:03<00:07, 18.77it/s][A
-Loading weights:  34%|███▍      | 75/219 [00:03<00:06, 22.09it/s][A
-Loading weights:  36%|███▌      | 79/219 [00:03<00:06, 22.33it/s][A
-Loading weights:  37%|███▋      | 82/219 [00:03<00:05, 23.07it/s][A
-Loading weights:  39%|███▉      | 86/219 [00:03<00:05, 24.12it/s][A
-Loading weights:  41%|████      | 89/219 [00:03<00:05, 22.23it/s][A
-Loading weights:  42%|████▏     | 93/219 [00:03<00:05, 25.15it/s][A
-Loading weights:  44%|████▍     | 97/219 [00:04<00:04, 24.61it/s][A
-Loading weights:  46%|████▌     | 100/219 [00:04<00:04, 24.43it/s][A
-Loading weights:  48%|████▊     | 106/219 [00:04<00:05, 21.65it/s][A
-Loading weights:  51%|█████     | 112/219 [00:04<00:04, 24.08it/s][A
-Loading weights:  53%|█████▎    | 116/219 [00:04<00:04, 24.40it/s][A
-Loading weights:  55%|█████▌    | 121/219 [00:04<00:03, 26.48it/s][A
-Loading weights:  57%|█████▋    | 124/219 [00:05<00:03, 26.23it/s][A
-Loading weights:  58%|█████▊    | 127/219 [00:05<00:03, 25.55it/s][A
-Loading weights:  61%|██████    | 133/219 [00:05<00:03, 23.80it/s][A
-Loading weights:  63%|██████▎   | 138/219 [00:05<00:02, 27.96it/s][A
-Loading weights:  65%|██████▍   | 142/219 [00:05<00:02, 25.99it/s][A
-Loading weights:  66%|██████▌   | 145/219 [00:05<00:02, 25.76it/s][A
-Loading weights:  68%|██████▊   | 149/219 [00:06<00:02, 28.49it/s][A
-Loading weights:  70%|██████▉   | 153/219 [00:06<00:02, 24.97it/s][A
-Loading weights:  71%|███████   | 156/219 [00:06<00:02, 24.26it/s][A
-Loading weights:  73%|███████▎  | 160/219 [00:06<00:02, 26.97it/s][A
-Loading weights:  74%|███████▍  | 163/219 [00:06<00:02, 23.60it/s][A
-Loading weights:  76%|███████▋  | 167/219 [00:06<00:02, 23.37it/s][A
-Loading weights:  78%|███████▊  | 170/219 [00:06<00:02, 23.05it/s][A
-Loading weights:  79%|███████▉  | 174/219 [00:07<00:01, 25.61it/s][A
-Loading weights:  81%|████████▏ | 178/219 [00:07<00:01, 25.87it/s][A
-Loading weights:  83%|████████▎ | 181/219 [00:07<00:01, 25.28it/s][A
-Loading weights:  84%|████████▍ | 185/219 [00:07<00:01, 26.59it/s][A
-Loading weights:  86%|████████▌ | 188/219 [00:07<00:01, 22.43it/s][A
-Loading weights:  88%|████████▊ | 192/219 [00:07<00:01, 26.11it/s][A
-Loading weights:  89%|████████▉ | 196/219 [00:07<00:00, 25.23it/s][A
-Loading weights:  92%|█████████▏| 202/219 [00:08<00:00, 25.25it/s][A
-Loading weights:  94%|█████████▎| 205/219 [00:08<00:00, 23.56it/s][A
-Loading weights:  95%|█████████▍| 208/219 [00:08<00:00, 24.68it/s][A
-Loading weights:  98%|█████████▊| 214/219 [00:08<00:00, 22.02it/s][A
-Loading weights: 100%|██████████| 219/219 [00:09<00:00, 22.35it/s][ALoading weights: 100%|██████████| 219/219 [00:09<00:00, 24.31it/s]
-Loading pipeline components...:  78%|███████▊  | 7/9 [00:13<00:05,  2.86s/it]
-Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s][A
-Loading checkpoint shards:  50%|█████     | 1/2 [00:01<00:01,  1.31s/it][A
-Loading checkpoint shards: 100%|██████████| 2/2 [00:02<00:00,  1.07s/it][ALoading checkpoint shards: 100%|██████████| 2/2 [00:02<00:00,  1.10s/it]
-Loading pipeline components...: 100%|██████████| 9/9 [00:16<00:00,  2.18s/it]Loading pipeline components...: 100%|██████████| 9/9 [00:16<00:00,  1.80s/it]
-WARNING 08-04 22:46:40 [runtime_state.py:90] Model parallel is not initialized, initializing...
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-WARNING 08-04 22:46:40 [runtime_state.py:127] Using AITER as attention backend.
-INFO 08-04 22:46:40 [base_pipeline.py:376] Transformer backbone found, but model parallelism is not enabled, use naive model
-INFO 08-04 22:46:41 [base_pipeline.py:456] Scheduler found, trying to parallel scheduler...
-INFO 08-04 22:46:41 [runner_utils.py:30] Initializing runtime state...
-WARNING 08-04 22:46:41 [runtime_state.py:1033] Runtime state is already initialized, reinitializing with pipeline...
-WARNING 08-04 22:46:41 [runtime_state.py:127] Using AITER as attention backend.
-INFO 08-04 22:47:55 [runner_utils.py:30] Torch.compile enabled. Warming up torch compiler ...
-  0%|          | 0/2 [00:00<?, ?it/s]final peak_memory=364267008
-final peak_memory=364267008
-final peak_memory=364267008
- 50%|█████     | 1/2 [01:03<01:03, 63.00s/it]100%|██████████| 2/2 [01:03<00:00, 31.51s/it]
-[aiter] start build [module_groupnorm] under /app/external/aiter/aiter/jit/build/module_groupnorm
-[aiter] Current hipcc not support: -mllvm -amdgpu-coerce-illegal-types=1, skip it.
-[aiter] [32mfinish build [module_groupnorm], cost 36.9s [0m
-[aiter] import [module_groupnorm] under /app/external/aiter/aiter/jit/module_groupnorm.so
-[aiter] type hints mismatch, override to --> _groupnorm_run(arg0: torch.Tensor, arg1: int, arg2: torch.Tensor, arg3: torch.Tensor, arg4: float) -> torch.Tensor
-INFO 08-04 22:49:41 [runner_utils.py:30] Model initialization complete.
-INFO 08-04 22:49:41 [runner_utils.py:30] Profiling iteration 1/4
-  0%|          | 0/4 [00:00<?, ?it/s] 25%|██▌       | 1/4 [00:00<00:00,  6.37it/s]100%|██████████| 4/4 [00:00<00:00, 18.71it/s]
-INFO 08-04 22:49:41 [runner_utils.py:30] Profiling iteration 1 completed in 0.75s
-INFO 08-04 22:49:41 [runner_utils.py:30] Profiling iteration 2/4
-  0%|          | 0/4 [00:00<?, ?it/s] 25%|██▌       | 1/4 [00:00<00:00,  6.38it/s]100%|██████████| 4/4 [00:00<00:00, 17.82it/s]
-INFO 08-04 22:49:42 [runner_utils.py:30] Profiling iteration 2 completed in 0.76s
-INFO 08-04 22:49:42 [runner_utils.py:30] Profiling iteration 3/4
-  0%|          | 0/4 [00:00<?, ?it/s] 25%|██▌       | 1/4 [00:00<00:00,  6.19it/s]100%|██████████| 4/4 [00:00<00:00, 17.48it/s]
-INFO 08-04 22:49:43 [runner_utils.py:30] Profiling iteration 3 completed in 0.77s
-INFO 08-04 22:49:43 [runner_utils.py:30] Profiling iteration 4/4
-  0%|          | 0/4 [00:00<?, ?it/s] 25%|██▌       | 1/4 [00:00<00:00,  3.99it/s] 50%|█████     | 2/4 [00:00<00:00,  4.01it/s] 75%|███████▌  | 3/4 [00:00<00:00,  4.01it/s]100%|██████████| 4/4 [00:00<00:00,  4.01it/s]100%|██████████| 4/4 [00:00<00:00,  4.01it/s]
-[rank0]:[W804 22:49:44.847592806 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 60909 (function operator())
-INFO 08-04 22:49:45 [runner_utils.py:30] Profiling iteration 4 completed in 1.19s
-INFO 08-04 22:49:48 [runner_utils.py:30] Profile trace saved to /workspace/output/xdit_run.G0HJ7w/profile_trace_rank_0.json.gz
-INFO 08-04 22:49:49 [runner_utils.py:30] Cleaned up resources.
