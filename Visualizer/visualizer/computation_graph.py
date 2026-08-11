@@ -1064,6 +1064,29 @@ def _resolve_horizontal_overlaps(
                 right.cx += overlap
 
 
+def _compact_layer_positions(
+    positions: list[LayoutPosition],
+    layers: list[list[int]],
+    cx: float,
+    *,
+    min_gap: float = MIN_HORIZONTAL_BLOCK_GAP,
+) -> None:
+    """Pack each topological layer to minimum width and center it on ``cx``."""
+    for layer_indices in layers:
+        if not layer_indices:
+            continue
+        layer_positions = [positions[index] for index in layer_indices]
+        if len(layer_positions) == 1:
+            layer_positions[0].cx = cx
+            continue
+        ordered = sorted(layer_positions, key=lambda pos: pos.cx)
+        total_w = sum(pos.width for pos in ordered) + min_gap * (len(ordered) - 1)
+        cursor = cx - total_w / 2
+        for pos in ordered:
+            pos.cx = cursor + pos.width / 2
+            cursor += pos.width + min_gap
+
+
 def _fanout_branch_index(spec: GraphNodeSpec) -> int | None:
     """Extract fan-out branch index from node keys like fan0-2:q_proj:0."""
     match = re.match(r"fan\d+-(\d+):", spec.key)
@@ -1198,6 +1221,7 @@ def layout_computation_graph(
 
     layers = _topological_layers(graph)
     _assign_layered_vertical_positions(positions, layers, top_y=top_y)
+    _compact_layer_positions(positions, layers, cx)
     _order_fanout_branch_positions(positions)
     _resolve_layout_overlaps(positions, graph)
     _center_positions_horizontally(positions, cx)

@@ -2378,7 +2378,7 @@ def test_measure_graph_node_sizes_fits_kda_tile_labels():
         plt.close(fig)
 
 
-def test_kda_tile_labels_fit_with_fact_sheet_forbidden_region():
+def test_kda_tile_labels_fit_when_internals_render_below_fact_sheet():
     import matplotlib.pyplot as plt
     from pathlib import Path
     from visualizer.ast_analyze import analyze_source
@@ -2394,13 +2394,17 @@ def test_kda_tile_labels_fit_with_fact_sheet_forbidden_region():
         COLORS,
         DETAIL_MIN_BLOCK_W,
         DIAGRAM_LEFT_MARGIN,
-        FACT_SHEET_GAP,
         PANEL_W,
         _build_detail_draw_plan,
         _detail_layout_geometry,
+        _fact_sheet_x,
     )
-    from visualizer.render_validate import collect_measured_elements, finalize_detail_layout, measure_max_detail_content_width
-    from visualizer.text_measure import ContentBounds
+    from visualizer.render_validate import (
+        collect_measured_elements,
+        finalize_detail_layout,
+        measure_detail_tree_content_width,
+        measure_max_detail_content_width,
+    )
 
     code_path = (
         Path.home()
@@ -2419,24 +2423,34 @@ def test_kda_tile_labels_fit_with_fact_sheet_forbidden_region():
     )
 
     detail_min_left = DIAGRAM_LEFT_MARGIN + 0.05
-    fig, ax = plt.subplots(figsize=(20, 13))
-    ax.set_xlim(0, 20)
+    fact_x = _fact_sheet_x(5.0)
+    fig, ax = plt.subplots(figsize=(16, 13))
+    ax.set_xlim(0, 16)
     ax.set_ylim(-3, 5)
     try:
         fig.canvas.draw()
         detail_content_w = measure_max_detail_content_width(
             ax,
             [("KDA (self_attn)", tree)],
+            cx=3.5,
             detail_fill=COLORS["detail_fill"],
             min_left=detail_min_left,
         )
-        _detail_cx, detail_block_w, canvas_width, fact_x = _detail_layout_geometry(
+        canvas_width, below_fact_sheet = _detail_layout_geometry(
             11.0,
-            fact_x=4.5,
+            fact_x=fact_x,
             fact_w=PANEL_W,
             detail_content_width=detail_content_w,
         )
-        assert detail_block_w >= DETAIL_MIN_BLOCK_W
+        section_w = measure_detail_tree_content_width(
+            ax,
+            tree,
+            cx=3.5,
+            detail_fill=COLORS["detail_fill"],
+            min_left=detail_min_left,
+        )
+        assert below_fact_sheet
+        assert 8.0 <= section_w <= 13.0
         ax.set_xlim(0, canvas_width)
         fig.canvas.draw()
 
@@ -2444,36 +2458,82 @@ def test_kda_tile_labels_fit_with_fact_sheet_forbidden_region():
         measure_graph_node_sizes(ax, graph, input_sublabel=None)
         positions, _ = layout_computation_graph(
             graph,
-            cx=_detail_cx,
+            cx=3.5,
             top_y=3.0,
-            block_w=detail_block_w,
+            block_w=section_w,
             block_h=_estimate_graph_height(graph),
         )
-        forbidden = [
-            ContentBounds(
-                left=fact_x - 0.08,
-                right=fact_x + PANEL_W + 0.08,
-                bottom=-5.0,
-                top=5.0,
-            )
-        ]
         finalize_detail_layout(
             ax,
             graph,
             positions,
             input_sublabel=None,
-            cx=_detail_cx,
+            cx=3.5,
             top_y=3.0,
             detail_fill=COLORS["detail_fill"],
             min_left=detail_min_left,
-            forbidden_regions=forbidden,
+            forbidden_regions=None,
         )
         plan = _build_detail_draw_plan(positions, graph, input_sublabel=None)
         elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=COLORS["detail_fill"])
         overflows = [element for element in elements if element.kind == "text_overflow"]
         assert not overflows, [element.label for element in overflows]
-        linear = next(pos for pos in positions if pos.spec.label == "Linear")
-        assert linear.width >= 0.55
+    finally:
+        plt.close(fig)
+
+
+def test_uniform_detail_section_width_is_max_shrink_wrap():
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.extract import load_architecture
+    from visualizer.render import COLORS, DIAGRAM_LEFT_MARGIN, _detail_sections_to_render
+    from visualizer.render_validate import (
+        measure_detail_tree_content_width,
+        measure_uniform_detail_section_width,
+    )
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    spec = load_architecture(
+        "moonshotai/Kimi-K3",
+        code_path=code_path,
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"]),
+    )
+    detail_min_left = DIAGRAM_LEFT_MARGIN + 0.05
+    fig, ax = plt.subplots(figsize=(16, 13))
+    ax.set_xlim(0, 16)
+    ax.set_ylim(-3, 5)
+    try:
+        fig.canvas.draw()
+        cx = 3.5
+        individual = [
+            measure_detail_tree_content_width(
+                ax,
+                tree,
+                cx=cx,
+                detail_fill=COLORS["detail_fill"],
+                min_left=detail_min_left,
+                input_sublabel=input_sublabel,
+            )
+            for _title, tree, input_sublabel in _detail_sections_to_render(spec)
+        ]
+        uniform = measure_uniform_detail_section_width(
+            ax,
+            spec,
+            cx=cx,
+            detail_fill=COLORS["detail_fill"],
+            min_left=detail_min_left,
+        )
+        assert individual
+        assert uniform == max(individual)
+        assert uniform > min(individual)
     finally:
         plt.close(fig)
 

@@ -1221,18 +1221,24 @@ def _detail_layout_geometry(
     fact_x: float,
     fact_w: float = PANEL_W,
     detail_content_width: float | None = None,
-) -> tuple[float, float, float, float]:
-    """Return detail band geometry: (detail_cx, detail_block_w, canvas_width, fact_x)."""
+) -> tuple[float, bool]:
+    """Return ``(canvas_width, below_fact_sheet)`` for detailed diagram placement.
+
+    The fact sheet stays at ``fact_x`` beside the main model. When the widest
+    measured detail section is broader than the band left of the fact sheet,
+    block internals are rendered below the fact sheet. Individual sections are
+    sized to their own content width at render time.
+    """
     detail_min_left = DIAGRAM_LEFT_MARGIN + 0.05
-    detail_block_w = max(DETAIL_MIN_BLOCK_W, detail_content_width or DETAIL_MIN_BLOCK_W)
-    detail_cx = detail_min_left + detail_block_w / 2
-    fact_x = max(fact_x, detail_min_left + detail_block_w + FACT_SHEET_GAP)
+    content_w = max(DETAIL_MIN_BLOCK_W, detail_content_width or DETAIL_MIN_BLOCK_W)
+    available_beside = max(0.5, fact_x - FACT_SHEET_GAP - detail_min_left)
+    below_fact_sheet = content_w > available_beside + 0.15
     required_canvas = max(
         fact_x + fact_w + DIAGRAM_RIGHT_MARGIN,
-        detail_min_left + detail_block_w + DIAGRAM_RIGHT_MARGIN,
+        detail_min_left + content_w + DIAGRAM_RIGHT_MARGIN,
     )
     canvas_width = max(canvas_width, required_canvas)
-    return detail_cx, detail_block_w, canvas_width, fact_x
+    return canvas_width, below_fact_sheet
 
 
 def _fact_sheet_x(main_model_right: float, *, gap: float = FACT_SHEET_GAP) -> float:
@@ -2320,6 +2326,7 @@ def _render_laid_out_computation_graph(
     include_input: bool = True,
     min_left: float | None = None,
     forbidden_regions: list | None = None,
+    section_frame_w: float | None = None,
 ) -> tuple[float, float, _RenderAnchor | None]:
     """Lay out a computation graph with graph-layout and draw it."""
     from visualizer.render_validate import finalize_detail_layout
@@ -2355,6 +2362,13 @@ def _render_laid_out_computation_graph(
     anchors = _anchors_from_detail_plan(positions, plan)
 
     frame_left, frame_right, frame_bottom, frame_top = _detail_content_bounds(positions)
+    if section_frame_w is not None:
+        content_w = frame_right - frame_left
+        if section_frame_w > content_w:
+            center = (frame_left + frame_right) / 2
+            half = section_frame_w / 2
+            frame_left = center - half
+            frame_right = center + half
     frame_w = frame_right - frame_left
     frame_h = frame_top - frame_bottom
     block_patch = FancyBboxPatch(
@@ -2553,6 +2567,7 @@ def _render_block_tree_node(
     cx: float,
     top_y: float,
     block_w: float,
+    section_frame_w: float | None = None,
     input_sublabel: str | None = None,
     prefix_steps: list[BlockNode] | None = None,
     inline_linear_frames: bool = True,
@@ -2575,8 +2590,24 @@ def _render_block_tree_node(
         inline_linear_frames=inline_linear_frames,
         min_left=min_left,
         forbidden_regions=forbidden_regions,
+        section_frame_w=section_frame_w,
     )
     return bottom, frame_right
+
+
+def _detail_sections_to_render(spec: ArchitectureSpec) -> list[tuple[str, BlockNode, str | None]]:
+    """Return titled block trees rendered as internal diagram subsections."""
+    sections: list[tuple[str, BlockNode, str | None]] = []
+    for title, tree in spec.detailed_block_trees:
+        sections.append((title, tree, _format_input_source_sublabel(tree.input_source)))
+        for sub_title, sub_tree in collect_nested_diagrams(tree):
+            if is_single_function_tree(sub_tree):
+                if _omit_from_detailed_view(sub_tree):
+                    continue
+                if not _show_single_function_in_diagram(sub_tree):
+                    continue
+            sections.append((sub_title, sub_tree, _format_input_source_sublabel(sub_tree.input_source)))
+    return sections
 
 
 def _render_diagram_section(
@@ -2615,6 +2646,7 @@ def _render_diagram_section(
         cx=cx,
         top_y=diagram_top,
         block_w=block_w - 0.2,
+        section_frame_w=block_w,
         input_sublabel=input_sublabel,
         prefix_steps=prefix_steps,
         inline_linear_frames=inline_linear_frames,
@@ -2632,6 +2664,7 @@ def _render_block_tree(
     cx: float,
     top_y: float,
     block_w: float,
+    section_frame_w: float | None = None,
     input_sublabel: str | None = None,
     prefix_steps: list[BlockNode] | None = None,
     inline_linear_frames: bool = True,
@@ -2646,6 +2679,7 @@ def _render_block_tree(
         cx=cx,
         top_y=top_y,
         block_w=block_w,
+        section_frame_w=section_frame_w,
         input_sublabel=input_sublabel,
         prefix_steps=prefix_steps,
         inline_linear_frames=inline_linear_frames,
@@ -2661,18 +2695,22 @@ def _render_detailed_internals(
     *,
     cx: float,
     start_y: float,
-    block_w: float,
     panel_x: float | None = None,
     panel_w: float = PANEL_W,
     wrap_width: int = PANEL_WRAP_WIDTH,
     inline_linear_frames: bool = True,
     forbidden_regions: list | None = None,
+    compact_header: bool = False,
 ) -> float:
     """Render recursive internal block diagrams below the main model."""
-    panel_x = panel_x if panel_x is not None else cx + block_w / 2 + 0.55
+    from visualizer.render_validate import measure_uniform_detail_section_width
+
+    panel_x = panel_x if panel_x is not None else cx + 3.0
     detail_min_left = DIAGRAM_LEFT_MARGIN + 0.05
 
-    cursor = start_y - 0.45
+    title_drop = 0.28 if compact_header else 0.45
+    section_drop = 0.22 if compact_header else 0.35
+    cursor = start_y - title_drop
     ax.text(
         cx,
         cursor,
@@ -2683,7 +2721,7 @@ def _render_detailed_internals(
         color=PANEL_TITLE_COLOR,
         fontweight="bold",
     )
-    cursor -= 0.35
+    cursor -= section_drop
     section_top = cursor
 
     if not spec.detailed_block_trees and not spec.detailed_wrapped_modules:
@@ -2709,14 +2747,21 @@ def _render_detailed_internals(
         seen.add(node.attr_name)
         wrappers.append(node)
 
-    for title, tree in spec.detailed_block_trees:
-        input_sublabel = _format_input_source_sublabel(tree.input_source)
+    uniform_block_w = measure_uniform_detail_section_width(
+        ax,
+        spec,
+        cx=cx,
+        detail_fill=COLORS["detail_fill"],
+        min_left=detail_min_left,
+    )
+
+    for title, tree, input_sublabel in _detail_sections_to_render(spec):
         cursor = _render_diagram_section(
             layout,
             ax,
             cx=cx,
             cursor=cursor,
-            block_w=block_w,
+            block_w=uniform_block_w,
             title=title,
             tree=tree,
             input_sublabel=input_sublabel,
@@ -2729,42 +2774,12 @@ def _render_detailed_internals(
             if is_single_function_tree(sub_tree):
                 if _omit_from_detailed_view(sub_tree):
                     continue
-                if _show_single_function_in_diagram(sub_tree):
-                    nested_sublabel = _format_input_source_sublabel(sub_tree.input_source)
-                    cursor = _render_diagram_section(
-                        layout,
-                        ax,
-                        cx=cx,
-                        cursor=cursor,
-                        block_w=block_w,
-                        title=sub_title,
-                        tree=sub_tree,
-                        input_sublabel=nested_sublabel,
-                        inline_linear_frames=inline_linear_frames,
-                        min_left=detail_min_left,
-                        forbidden_regions=forbidden_regions,
-                    )
-                    bottom = cursor
+                if not _show_single_function_in_diagram(sub_tree):
+                    if sub_tree.attr_name not in seen:
+                        seen.add(sub_tree.attr_name)
+                        wrappers.append(sub_tree)
                     continue
-                if sub_tree.attr_name not in seen:
-                    seen.add(sub_tree.attr_name)
-                    wrappers.append(sub_tree)
                 continue
-            nested_sublabel = _format_input_source_sublabel(sub_tree.input_source)
-            cursor = _render_diagram_section(
-                layout,
-                ax,
-                cx=cx,
-                cursor=cursor,
-                block_w=block_w,
-                title=sub_title,
-                tree=sub_tree,
-                input_sublabel=nested_sublabel,
-                inline_linear_frames=inline_linear_frames,
-                min_left=detail_min_left,
-                forbidden_regions=forbidden_regions,
-            )
-            bottom = cursor
 
     rendered_in_graph: set[str] = set()
     for title, tree in spec.detailed_block_trees:
@@ -3081,16 +3096,17 @@ def render_diagram(
     diagram_bottom = tail_nodes[-1].bottom if tail_nodes else frame_bottom
 
     if detailed:
-        from visualizer.render_validate import measure_max_detail_content_width
+        from visualizer.render_validate import measure_uniform_detail_section_width
 
         detail_min_left = DIAGRAM_LEFT_MARGIN + 0.05
-        detail_content_w = measure_max_detail_content_width(
+        detail_content_w = measure_uniform_detail_section_width(
             ax,
-            spec.detailed_block_trees,
+            spec,
+            cx=cx,
             detail_fill=COLORS["detail_fill"],
             min_left=detail_min_left,
         )
-        detail_cx, detail_block_w, canvas_width, fact_x = _detail_layout_geometry(
+        canvas_width, internals_below_fact_sheet = _detail_layout_geometry(
             canvas_width,
             fact_x=fact_x,
             fact_w=fact_w,
@@ -3100,33 +3116,40 @@ def render_diagram(
         fig.set_size_inches(canvas_width, 13)
         fig.canvas.draw()
     else:
-        detail_cx = cx
-        detail_block_w = block_w
-    fact_y = stack_top - fact_h
+        internals_below_fact_sheet = False
+    if detailed and internals_below_fact_sheet:
+        fact_y = diagram_bottom
+    else:
+        fact_y = stack_top - fact_h
     _draw_fact_sheet(ax, spec, fact_x=fact_x, fact_y=fact_y, fact_w=fact_w, wrap_width=wrap_width)
 
     if detailed:
-        fact_sheet_bounds = [
-            ContentBounds(
-                left=fact_x - 0.08,
-                right=fact_x + fact_w + 0.08,
-                bottom=fact_y - fact_h - 0.15,
-                top=fact_y + 0.15,
-            )
-        ]
-        internals_start_y = min(diagram_bottom, fact_y) - 0.25
+        fact_sheet_bounds = None
+        if not internals_below_fact_sheet:
+            fact_sheet_bounds = [
+                ContentBounds(
+                    left=fact_x - 0.08,
+                    right=fact_x + fact_w + 0.08,
+                    bottom=fact_y - 0.15,
+                    top=fact_y + fact_h + 0.15,
+                )
+            ]
+        if internals_below_fact_sheet:
+            internals_start_y = fact_y - 0.25
+        else:
+            internals_start_y = min(diagram_bottom, fact_y) - 0.25
         diagram_bottom = _render_detailed_internals(
             layout,
             ax,
             spec,
-            cx=detail_cx,
+            cx=cx,
             start_y=internals_start_y,
-            block_w=detail_block_w,
             panel_x=fact_x,
             panel_w=fact_w,
             wrap_width=wrap_width,
             inline_linear_frames=inline_linear_frames,
             forbidden_regions=fact_sheet_bounds,
+            compact_header=internals_below_fact_sheet,
         )
 
     min_canvas_width = canvas_width if detailed else None

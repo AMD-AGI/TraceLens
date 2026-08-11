@@ -799,69 +799,117 @@ def _content_horizontal_extent(elements: list[MeasuredElement]) -> tuple[float, 
     return left, right
 
 
-def measure_max_detail_content_width(
+def measure_detail_tree_content_width(
     ax: Axes,
-    block_trees: list[tuple[str, object]],
+    tree,
     *,
+    cx: float,
     detail_fill: str,
     min_left: float,
+    input_sublabel: str | None = None,
+    prefix_steps: list | None = None,
     layout_block_w: float = 18.0,
 ) -> float:
-    """Pre-measure the widest finalized detail section to size the detail band."""
-    from visualizer.block_tree import BlockNode, collect_nested_diagrams, is_single_function_tree
+    """Measure the finalized horizontal extent of one detail section."""
+    from visualizer.block_tree import BlockNode
     from visualizer.computation_graph import (
         _estimate_graph_height,
         build_computation_graph,
         layout_computation_graph,
         measure_graph_node_sizes,
     )
-    from visualizer.render import COLORS, DETAIL_MIN_BLOCK_W, _build_detail_draw_plan, _format_input_source_sublabel
+    from visualizer.render import COLORS, _build_detail_draw_plan
+
+    if not isinstance(tree, BlockNode):
+        return 1.2
 
     fill = detail_fill or COLORS["detail_fill"]
-    detail_cx = min_left + layout_block_w / 2
-    max_width = DETAIL_MIN_BLOCK_W
-
-    def _measure_tree(tree: BlockNode) -> None:
-        nonlocal max_width
-        sub = _format_input_source_sublabel(tree.input_source)
-        graph = build_computation_graph(tree)
-        measure_graph_node_sizes(ax, graph, input_sublabel=sub)
-        positions, _ = layout_computation_graph(
+    graph = build_computation_graph(tree, prefix_steps=prefix_steps)
+    measure_graph_node_sizes(ax, graph, input_sublabel=input_sublabel)
+    positions, _ = layout_computation_graph(
+        graph,
+        cx=cx,
+        top_y=10.0,
+        block_w=layout_block_w,
+        block_h=_estimate_graph_height(graph),
+    )
+    try:
+        finalize_detail_layout(
+            ax,
             graph,
-            cx=detail_cx,
+            positions,
+            input_sublabel=input_sublabel,
+            cx=cx,
             top_y=10.0,
-            block_w=layout_block_w,
-            block_h=_estimate_graph_height(graph),
+            detail_fill=fill,
+            min_left=min_left,
+            forbidden_regions=None,
         )
-        try:
-            finalize_detail_layout(
-                ax,
-                graph,
-                positions,
-                input_sublabel=sub,
-                cx=detail_cx,
-                top_y=10.0,
-                detail_fill=fill,
-                min_left=min_left,
-                forbidden_regions=None,
-            )
-        except LayoutValidationError:
-            pass
-        plan = _build_detail_draw_plan(positions, graph, input_sublabel=sub)
-        elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
-        left, right = _content_horizontal_extent(elements)
-        max_width = max(max_width, right - left + 0.8)
+    except LayoutValidationError:
+        pass
+    from visualizer.render import _detail_content_bounds
 
+    frame_left, frame_right, _frame_bottom, _frame_top = _detail_content_bounds(positions)
+    return max(1.2, frame_right - frame_left + 0.05)
+
+
+def measure_max_detail_content_width(
+    ax: Axes,
+    block_trees: list[tuple[str, object]],
+    *,
+    cx: float,
+    detail_fill: str,
+    min_left: float,
+    layout_block_w: float = 18.0,
+) -> float:
+    """Pre-measure the widest shrink-wrapped detail section to size the canvas."""
+    from visualizer.block_tree import BlockNode
+    from visualizer.render import _format_input_source_sublabel
+
+    max_width = 1.2
     for _title, tree in block_trees:
         if not isinstance(tree, BlockNode):
             continue
-        _measure_tree(tree)
-        for _sub_title, sub_tree in collect_nested_diagrams(tree):
-            if is_single_function_tree(sub_tree):
-                continue
-            _measure_tree(sub_tree)
-
+        sub = _format_input_source_sublabel(tree.input_source)
+        width = measure_detail_tree_content_width(
+            ax,
+            tree,
+            cx=cx,
+            detail_fill=detail_fill,
+            min_left=min_left,
+            input_sublabel=sub,
+            layout_block_w=layout_block_w,
+        )
+        max_width = max(max_width, width)
     return max_width
+
+
+def measure_uniform_detail_section_width(
+    ax: Axes,
+    spec,
+    *,
+    cx: float,
+    detail_fill: str,
+    min_left: float,
+    layout_block_w: float = 18.0,
+) -> float:
+    """Shrink-wrap each rendered subsection and return the widest width."""
+    from visualizer.render import COLORS, _detail_sections_to_render
+
+    fill = detail_fill or COLORS["detail_fill"]
+    uniform_w = 1.2
+    for _title, tree, input_sublabel in _detail_sections_to_render(spec):
+        width = measure_detail_tree_content_width(
+            ax,
+            tree,
+            cx=cx,
+            detail_fill=fill,
+            min_left=min_left,
+            input_sublabel=input_sublabel,
+            layout_block_w=layout_block_w,
+        )
+        uniform_w = max(uniform_w, width)
+    return uniform_w
 
 
 def _shift_positions(positions: list[LayoutPosition], delta_x: float) -> None:
