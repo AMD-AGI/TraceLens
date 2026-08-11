@@ -30,7 +30,7 @@ from visualizer.ast_analyze import (
     _classify_role,
     _label_for,
 )
-from visualizer.basic_ops import BasicOpFilter
+from visualizer.basic_ops import BasicOpFilter, introspect_is_modeling_operation, resolve_is_basic
 from visualizer.blocks import BlockComponent, norm_input_sources
 
 _SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "getattr"})
@@ -46,11 +46,6 @@ def is_method_wrapper(node: BlockNode) -> bool:
 def wrapper_bullet_lines(node: BlockNode) -> tuple[str, str]:
     """Return display label and method name for wrapped-module bullets."""
     attr = node.attr_name
-    if _is_output_gate_node(node) or _looks_like_output_gate_attr(attr):
-        return _parallel_side_port_label(node), attr
-    if displays_as_linear(attr, node.class_name):
-        return "Linear", attr
-
     label = node.label.strip()
     if label in {"", attr, node.class_name}:
         label = attr.strip("_").replace("_", " ")
@@ -62,6 +57,8 @@ def wrapper_bullet_lines(node: BlockNode) -> tuple[str, str]:
 def wrapper_bullet(node: BlockNode) -> str:
     """Human-readable bullet text for a method wrapper."""
     label, attr = wrapper_bullet_lines(node)
+    if label.replace(" ", "_").strip("_") == attr.strip("_"):
+        return label
     return f"{label} ({attr})"
 
 
@@ -85,13 +82,25 @@ def block_purpose(node: BlockNode) -> str | None:
     if node.class_name == "AttentionOp" or node.attr_name == SYNTHETIC_ATTENTION:
         if any("delta rule" in detail.lower() for detail in node.details):
             return node.details[0] if node.details else None
+        return None
 
     if node.class_name == "OutputGate" or (node.role == "gate" and node.details):
-        if node.details:
-            return node.details[0]
+        for detail in node.details:
+            cleaned = detail.strip()
+            if cleaned and cleaned != "Linear":
+                return cleaned
+        return None
 
     if node.class_name == "DeltaAttention":
         return node.details[0] if node.details else None
+
+    if node.class_name == "ShortConvolution":
+        if node.label == "Depthwise Conv":
+            return None
+        if node.details and node.details[0] == "depthwise conv":
+            return "depthwise conv"
+        if _short_conv_activation(node.details) and len(node.details) == 1:
+            return "depthwise conv"
 
     for detail in node.details:
         cleaned = detail.strip()
@@ -104,6 +113,21 @@ def block_purpose(node: BlockNode) -> str | None:
 
     if class_name == "OutputGate" or role == "gate":
         return "Output gate — scales normalized output"
+    if class_name == "ShortConvolution":
+        activation = node.details[0] if node.details else None
+        return f"depthwise conv" + (f" · {activation}" if activation else "")
+    if class_name == "AttentionMerge":
+        for detail in node.details:
+            if detail.startswith("ports:"):
+                return detail.replace("ports:", "ports ·").strip()
+        return None
+    if class_name == "DeltaUpdate" and node.details:
+        return node.details[0]
+    if class_name == "ChunkScan" and node.details:
+        detail = node.details[0]
+        return detail.replace("kernel:", "kernel ·").strip() if detail.startswith("kernel:") else detail
+    if class_name == "RouterOp":
+        return node.details[0] if node.details else node.label
     if class_name == "SituAndMul":
         return "SiLU(gate) × up branch"
     if class_name == "FusedRMSNormGated":
@@ -111,6 +135,8 @@ def block_purpose(node: BlockNode) -> str | None:
     if class_name == "Split" or node.attr_name == "split_gate_up":
         return "Split fused gate/up projection"
     if class_name in {"ActivationOp", "SituActivation"}:
+        if class_name == "ActivationOp" and node.attr_name.endswith("_activation"):
+            return None
         return f"Apply {node.label} to gate half"
     if class_name == "Multiply" or node.label in {"×", "Elementwise ×"}:
         return "Multiply gate and up activations"
@@ -118,14 +144,14 @@ def block_purpose(node: BlockNode) -> str | None:
         return "Project to vocabulary logits"
     if role == "router" or attr in {"gate", "router"}:
         return "Score and route tokens to experts"
-    if role == "moe" or "moe" in attr or "expert" in attr:
-        return "Dispatch tokens to experts and combine outputs"
     if role == "ffn":
         return "Position-wise feed-forward transform"
-    if role == "norm":
-        return "Normalize activations"
-    if role == "embedding" or "embedding" in class_name.lower():
-        return "Map token IDs to embeddings"
+    if class_name == "ApplyRotary" or attr == "apply_rotary":
+        return "q·cos + rotate_half(q)·sin"
+    if attr == "freqs":
+        return "cos, sin from inv_freq × position"
+    if role == "embedding":
+        return "Gather rows by token id"
     return None
 
 
@@ -153,10 +179,6 @@ def inline_wrapper_step_label(
     """Label for the first inlined step of a composite wrapper."""
     if sub_index != 0 or wrapper is None:
         return None
-    if sub_step.attr_name == SYNTHETIC_FUNCTIONAL_LINEAR or displays_as_linear(
-        sub_step.attr_name, sub_step.class_name
-    ):
-        return "Linear"
     return sub_step.label
 
 
@@ -225,7 +247,7 @@ def linear_pipeline_steps(node: BlockNode) -> list[BlockNode]:
 
 def inline_block_frame_label(block: BlockNode) -> str:
     """Display label for a dotted inline frame around an expanded sub-block."""
-    return f"{block.label} ({block.attr_name})"
+    return block.attr_name
 
 
 def inline_block_frame_sublabel(block: BlockNode) -> str | None:
@@ -245,8 +267,10 @@ def inline_composite_steps(step: BlockNode) -> tuple[list[BlockNode], BlockNode 
     if not is_straight_line_module(step):
         return [step], None
     inner_steps = straight_line_steps(step)
-    if inner_steps and (len(inner_steps) > 1 or inner_steps[0] is not step):
+    if len(inner_steps) > 1:
         return inner_steps, step
+    if len(inner_steps) == 1 and _is_output_gate_node(step):
+        return inner_steps, None
     return [step], None
 
 
@@ -274,6 +298,8 @@ def _omit_from_detailed_view(tree: BlockNode) -> bool:
 
 def _show_single_function_in_diagram(tree: BlockNode) -> bool:
     """True when a one-op module should render as a diagram tile instead of the panel."""
+    if tree.attr_name == "embed_tokens":
+        return True
     return displays_as_linear(tree.attr_name, tree.class_name)
 
 
@@ -287,6 +313,8 @@ def partition_detail_trees(
     seen = {node.attr_name for node in wrapped}
     for title, tree in trees:
         if _omit_from_detailed_view(tree):
+            continue
+        if is_straight_line_module(tree):
             continue
         if is_single_function_tree(tree):
             if _show_single_function_in_diagram(tree):
@@ -310,12 +338,14 @@ def collect_method_wrappers(node: BlockNode) -> list[BlockNode]:
     return wrappers
 
 
-def _looks_like_output_gate_attr(attr_name: str) -> bool:
-    """True for common output-gate attribute names (e.g. g_proj, out_gate)."""
-    attr = attr_name.strip("_").lower()
-    if attr in {"gate", "router"}:
-        return False
-    return bool(re.search(r"g_proj|out_gate|output_gate|_gate$|^gate_", attr))
+def output_gate_combine_sublabel(node: BlockNode | None) -> str | None:
+    """Sublabel for norm×gate combine nodes from gate AST details."""
+    if node is None or not node.details:
+        return None
+    for line in reversed(node.details):
+        if "×" in line:
+            return line
+    return node.details[-1]
 
 
 def _is_output_gate_node(node: BlockNode) -> bool:
@@ -487,6 +517,8 @@ def _segment_for_step(node: BlockNode, step: BlockNode) -> ComputationSegment:
 def _label_for_call(attr_name: str, class_name: str | None) -> str:
     if attr_name == SYNTHETIC_ATTENTION:
         return "Attention kernel"
+    if class_name == "ShortConvolution":
+        return "Depthwise Conv"
     if displays_as_linear(attr_name, class_name):
         return "Linear"
     if class_name:
@@ -540,19 +572,18 @@ def _output_gate_details(
     consumer, spec = _gate_side_consumer(side_inputs, gate_attr)
     inline_activation = gate_activations.get(gate_attr)
 
-    lines: list[str] = [f"g = Linear {gate_attr}(hidden_states)"]
+    lines: list[str] = ["Linear"]
 
     if consumer_class == "FusedRMSNormGated" or (consumer and "Gated" in (consumer_class or "")):
-        lines.append("reshape → [num_heads, head_dim]")
         if inline_activation:
-            lines.append(f"g = {inline_activation}(g)")
-            lines.append(f"norm(attn_out) × g → {consumer or 'o_norm'}")
+            lines.append(f"{inline_activation}(linear out)")
+            lines.append(f"norm(attn_out) × gate → {consumer or 'o_norm'}")
         else:
-            activation = norm_gate_activation or "σ"
-            lines.append(f"{activation}(g) inside {consumer or 'o_norm'}")
+            activation = norm_gate_activation or "Sigmoid"
+            lines.append(f"{activation} inside {consumer or 'o_norm'}")
             lines.append("norm(attn_out) × gate")
     elif inline_activation:
-        lines.append(f"g = {inline_activation}(g)")
+        lines.append(f"{inline_activation}(linear out)")
         if consumer:
             port = spec.port_label if spec else None
             suffix = f" port {port!r}" if port else ""
@@ -594,6 +625,7 @@ def _delta_attention_block_node(
                 forward_order=0,
                 label="Merge inputs",
                 details=[f"ports: {input_ports}"],
+                basic=False,
             ),
             _leaf_node(
                 attr_name="@attn_delta",
@@ -601,6 +633,7 @@ def _delta_attention_block_node(
                 forward_order=1,
                 label="Delta state S",
                 details=["S ← (I−βkkᵀ)Diag(α)S + βkvᵀ"],
+                basic=False,
             ),
             _leaf_node(
                 attr_name="@attn_chunk",
@@ -608,6 +641,7 @@ def _delta_attention_block_node(
                 forward_order=2,
                 label="Chunk scan",
                 details=[f"kernel: {kernel or 'chunk_kda'}"],
+                basic=False,
             ),
         ],
     )
@@ -627,13 +661,12 @@ def _output_gate_block_node(
         if displays_as_linear(linear_step.attr_name, linear_step.class_name)
         else linear_step.label
     )
-    linear_detail = gate_details if gate_details else ["g = Linear(hidden_states)"]
     linear_step = _leaf_node(
         attr_name=linear_step.attr_name,
         class_name=linear_step.class_name,
         forward_order=linear_step.forward_order,
         label=linear_label,
-        details=linear_detail,
+        details=[],
     )
     children: list[BlockNode] = [linear_step]
     step_order = (linear_step.forward_order or 0) + 1
@@ -644,7 +677,8 @@ def _output_gate_block_node(
                 class_name="ActivationOp",
                 forward_order=step_order,
                 label=activation,
-                details=[f"g = {activation}(g)"],
+                details=[f"{activation}(linear out)"],
+                basic=False,
             )
         )
     return BlockNode(
@@ -720,14 +754,107 @@ def gated_norm_activation(node: BlockNode) -> str | None:
     return None
 
 
+def _short_conv_activation(details: list[str] | None) -> str | None:
+    """Return the init-time activation name for a ShortConvolution, if any."""
+    if not details:
+        return None
+    for detail in details:
+        cleaned = detail.strip()
+        if not cleaned or cleaned.startswith("method `") or cleaned.startswith("kernel:"):
+            continue
+        if "=" in cleaned:
+            continue
+        return cleaned
+    return None
+
+
+def _short_convolution_block_node(
+    *,
+    attr_name: str,
+    forward_order: int | None,
+    activation: str,
+    details: list[str] | None = None,
+) -> list[BlockNode]:
+    """Expand ShortConvolution + activation into separate conv and act steps."""
+    base_order = forward_order or 0
+    return [
+        _leaf_node(
+            attr_name=attr_name,
+            class_name="ShortConvolution",
+            forward_order=base_order,
+            label="Depthwise Conv",
+            details=[],
+            basic=False,
+        ),
+        _leaf_node(
+            attr_name=f"{attr_name}_activation",
+            class_name="ActivationOp",
+            forward_order=base_order + 1,
+            label=activation,
+            details=[],
+            basic=False,
+        ),
+    ]
+
+
+def _gate_up_linear_attr_names() -> frozenset[str]:
+    return frozenset({"gate_proj", "up_proj", "w1", "w3"})
+
+
+def _has_upstream_gate_up_linears(prior_steps: list[BlockNode]) -> bool:
+    """True when separate gate/up projection linears already precede act_fn."""
+    found = {
+        step.attr_name
+        for step in prior_steps
+        if displays_as_linear(step.attr_name, step.class_name)
+        and step.attr_name in _gate_up_linear_attr_names()
+    }
+    return {"gate_proj", "up_proj"}.issubset(found) or {"w1", "w3"}.issubset(found)
+
+
 def _situ_and_mul_block_node(
     *,
     attr_name: str,
     forward_order: int | None,
     details: list[str] | None = None,
     role: str = "ffn",
+    prior_steps: list[BlockNode] | None = None,
 ) -> BlockNode:
     """Expand SituAndMul into a small internal pipeline for its own nested diagram."""
+    prior_steps = list(prior_steps or [])
+    children: list[BlockNode] = []
+    step_order = 0
+    if not _has_upstream_gate_up_linears(prior_steps):
+        children.append(
+            _leaf_node(
+                attr_name="split_gate_up",
+                class_name="Linear",
+                forward_order=step_order,
+                label="Linear",
+                details=[],
+            )
+        )
+        step_order += 1
+    children.extend(
+        [
+            _leaf_node(
+                attr_name="situ_activation",
+                class_name="SituActivation",
+                forward_order=step_order,
+                label="SiLU",
+                details=["activation on gate half"],
+                basic=False,
+            ),
+            _leaf_node(
+                attr_name="elementwise_mul",
+                class_name="Multiply",
+                forward_order=step_order + 1,
+                label="×",
+                details=["gate × up"],
+                basic=False,
+            ),
+        ]
+    )
     return BlockNode(
         attr_name=attr_name,
         class_name="SituAndMul",
@@ -737,29 +864,7 @@ def _situ_and_mul_block_node(
         details=list(details or ["SiLU(gate) × up branch"]),
         is_basic=False,
         input_label="gate_up",
-        children=[
-            _leaf_node(
-                attr_name="split_gate_up",
-                class_name="Split",
-                forward_order=0,
-                label="Split gate | up",
-                details=["split fused projection"],
-            ),
-            _leaf_node(
-                attr_name="situ_activation",
-                class_name="SituActivation",
-                forward_order=1,
-                label="SiLU",
-                details=["activation on gate half"],
-            ),
-            _leaf_node(
-                attr_name="elementwise_mul",
-                class_name="Multiply",
-                forward_order=2,
-                label="×",
-                details=["gate × up"],
-            ),
-        ],
+        children=children,
     )
 
 
@@ -772,6 +877,25 @@ def _nested_input_source(parent: BlockNode, child: BlockNode) -> str:
     if child.input_label and child.input_label not in {"hidden_states", "x"}:
         return f"{child.input_label} in {parent.class_name}"
     return f"{parent.class_name}"
+
+
+def _append_branch_followups(steps: list[BlockNode], pre_merge: list[BlockNode]) -> list[BlockNode]:
+    """Append immediate post-step siblings (e.g. conv → activation) to a provenance branch."""
+    if not steps:
+        return steps
+    by_attr = {node.attr_name: node for node in pre_merge}
+    order = [node.attr_name for node in pre_merge]
+    extended = list(steps)
+    last_attr = steps[-1].attr_name
+    while True:
+        follow_attr = f"{last_attr}_activation"
+        if follow_attr not in by_attr:
+            break
+        if order.index(follow_attr) != order.index(last_attr) + 1:
+            break
+        extended.append(by_attr[follow_attr])
+        last_attr = follow_attr
+    return extended
 
 
 def _branches_from_provenance(
@@ -787,6 +911,7 @@ def _branches_from_provenance(
         if not chain:
             continue
         nodes = [by_attr[attr] for attr in chain if attr in by_attr]
+        nodes = _append_branch_followups(nodes, pre_merge)
         if nodes:
             branches.append(Branch(label=label, steps=nodes))
 
@@ -842,9 +967,10 @@ def _name_prefix_branch_rules() -> dict[str, str]:
 
 def _parallel_side_port_label(side: BlockNode) -> str:
     """Readable inline port label for a parallel side branch."""
-    if _is_output_gate_node(side) or _looks_like_output_gate_attr(side.attr_name):
-        return "gate"
-    return _label_for_call(side.attr_name, side.class_name)
+    steps = collect_function_steps(side)
+    if steps:
+        return steps[0].label
+    return side.label
 
 
 def _side_feed_targets(node: BlockNode) -> dict[str, str]:
@@ -926,9 +1052,70 @@ def _is_composite_block(node: BlockNode | None) -> bool:
     return node is not None and not node.is_basic and bool(node.children) and not is_method_wrapper(node)
 
 
-def collect_nested_diagrams(root: BlockNode) -> list[tuple[str, BlockNode]]:
+def is_simple_modeled_tile(node: BlockNode) -> bool:
+    """Modeled op rendered as a gray tile with operation text (not a role-colored leaf)."""
+    if node.is_basic or is_method_wrapper(node):
+        return False
+    if node.class_name == "OutputGate" and len(straight_line_steps(node)) <= 1:
+        return True
+    if _is_composite_block(node):
+        return False
+    return introspect_is_modeling_operation(node.class_name, node.attr_name, node.details)
+
+
+def tile_sublabel(block: BlockNode | None, *, in_inline_frame: bool = False) -> str | None:
+    """Secondary label for a diagram tile; modeled ops keep text inside inline frames."""
+    if block is None:
+        return None
+    if in_inline_frame and not is_simple_modeled_tile(block):
+        return None
+    from visualizer.sizing import block_sublabel
+
+    return block_sublabel(block)
+
+
+def tile_display_labels(
+    block: BlockNode | None,
+    *,
+    spec_label: str | None = None,
+    in_inline_frame: bool = False,
+    port_label: str | None = None,
+    port_style: PortStyle | None = None,
+) -> tuple[str, str | None]:
+    """Primary and secondary labels for a diagram tile from block-tree metadata."""
+    if block is not None and in_inline_frame:
+        return block.label, tile_sublabel(block, in_inline_frame=True)
+
+    if port_label and port_style == "inline":
+        sublabel = block.attr_name if block is not None else None
+        return port_label, sublabel
+
+    if block is None:
+        return spec_label or "", None
+
+    operation = block.label
+    if (
+        block.attr_name
+        and not block.attr_name.startswith("@")
+        and operation
+        and operation != block.attr_name
+    ):
+        return block.attr_name, operation
+
+    sublabel = tile_sublabel(block, in_inline_frame=False)
+    return spec_label or block.label, sublabel
+
+
+def collect_nested_diagrams(
+    root: BlockNode,
+    *,
+    basic_ops: BasicOpFilter | None = None,
+) -> list[tuple[str, BlockNode]]:
     """Collect composite blocks referenced in a diagram for separate sub-diagrams."""
     from visualizer.computation_graph import build_computation_graph
+    from visualizer.basic_ops import BasicOpFilter as _BasicOpFilter
+
+    resolved_basic_ops = basic_ops or _BasicOpFilter.for_detailed()
 
     seen: set[str] = set()
     ordered: list[tuple[str, BlockNode]] = []
@@ -944,11 +1131,11 @@ def collect_nested_diagrams(root: BlockNode) -> list[tuple[str, BlockNode]]:
         if block.input_source is None and parent_block is not None:
             block.input_source = _nested_input_source(parent_block, block)
         ordered.append((f"{block.label} ({block.attr_name})", block))
-        inner = build_computation_graph(block)
+        inner = build_computation_graph(block, basic_ops=resolved_basic_ops)
         for spec in inner.nodes:
             consider(spec.block, block)
 
-    graph = build_computation_graph(root)
+    graph = build_computation_graph(root, basic_ops=resolved_basic_ops)
     for spec in graph.nodes:
         consider(spec.block, root)
 
@@ -988,9 +1175,16 @@ def build_block_node(
             forward_order=forward_order,
             label=attention_kernel_label(step_details),
             details=attention_kernel_details(step_details),
+            basic=False,
         )
 
-    if basic_ops.is_basic(class_name, attr_name):
+    if resolve_is_basic(
+        class_name,
+        attr_name,
+        basic_ops,
+        details=details,
+        in_registry=class_name in registry,
+    ):
         return _leaf_node(
             attr_name=attr_name,
             class_name=class_name,
@@ -1004,6 +1198,7 @@ def build_block_node(
             class_name=class_name,
             forward_order=forward_order,
             details=details,
+            basic=False,
         )
 
     if class_name in visited:
@@ -1055,6 +1250,7 @@ def build_block_node(
                         forward_order=child_order,
                         label=attention_kernel_label(child_details),
                         details=attention_kernel_details(child_details, cls.attention_inputs),
+                        basic=False,
                     )
                 )
             continue
@@ -1078,6 +1274,7 @@ def build_block_node(
                     forward_order=child_order,
                     details=child_details,
                     label=_router_synthetic_label(call_attr, child_details),
+                    basic=False,
                 )
             )
             continue
@@ -1103,9 +1300,23 @@ def build_block_node(
                     forward_order=child_order,
                     details=child_details,
                     role=role,
+                    prior_steps=child_nodes,
                 )
             )
             continue
+
+        if child_class == "ShortConvolution":
+            activation = _short_conv_activation(child_details)
+            if activation:
+                child_nodes.extend(
+                    _short_convolution_block_node(
+                        attr_name=call_attr,
+                        forward_order=child_order,
+                        activation=activation,
+                        details=child_details,
+                    )
+                )
+                continue
 
         child_nodes.append(
             build_block_node(
@@ -1160,14 +1371,16 @@ def fallback_positional_tree(positional_encoding: str) -> BlockNode:
                 class_name="RotaryEmbedding",
                 role="other",
                 label="Freq computation",
-                is_basic=True,
+                is_basic=False,
+                details=["cos, sin from inv_freq × position"],
             ),
             BlockNode(
                 attr_name="apply_rotary",
                 class_name="ApplyRotary",
                 role="other",
                 label="Apply to Q/K",
-                is_basic=True,
+                is_basic=False,
+                details=["q·cos + rotate_half(q)·sin"],
             ),
         ],
     )
@@ -1217,7 +1430,13 @@ def build_stack_component_tree(
         label=component.label,
         forward_order=component.forward_order,
         details=list(component.details),
-        is_basic=True,
+        is_basic=resolve_is_basic(
+            component.class_name,
+            component.attr_name,
+            basic_ops,
+            details=list(component.details),
+            in_registry=False,
+        ),
     )
 
 

@@ -38,11 +38,12 @@ class ContentBounds:
         return horizontal and vertical
 
     def contains(self, other: ContentBounds, *, min_gap: float = 0.0) -> bool:
+        eps = 1e-6
         return (
-            other.left >= self.left - min_gap
-            and other.right <= self.right + min_gap
-            and other.bottom >= self.bottom - min_gap
-            and other.top <= self.top + min_gap
+            other.left >= self.left - min_gap - eps
+            and other.right <= self.right + min_gap + eps
+            and other.bottom >= self.bottom - min_gap - eps
+            and other.top <= self.top + min_gap + eps
         )
 
     def union(self, other: ContentBounds) -> ContentBounds:
@@ -101,11 +102,15 @@ def box_label_size(
     *,
     fontsize: float,
     sub_fontsize: float | None = None,
+    pad_x: float | None = None,
+    pad_y: float | None = None,
 ) -> tuple[float, float]:
     """Return (width, height) for a detail tile matching ``_draw_box`` geometry."""
+    box_pad_x = BLOCK_PAD_X if pad_x is None else pad_x
+    box_pad_y = BLOCK_PAD_Y if pad_y is None else pad_y
     ref_top = 10.0
     cx = 0.0
-    title_y = ref_top - BLOCK_PAD_Y
+    title_y = ref_top - box_pad_y
     text_bounds = measure_text_bounds(
         ax,
         label,
@@ -135,9 +140,34 @@ def box_label_size(
             text_bounds = text_bounds.union(line_bounds)
             sub_y -= SUB_LINE_H + LABEL_LINE_GAP
 
-    width = box_width_for_text_width(text_bounds.width)
-    height = ref_top - text_bounds.bottom + BLOCK_PAD_Y
-    return width, max(single_line_box_height(), height)
+    width = box_width_for_text_width(text_bounds.width, pad_x=box_pad_x)
+    height = ref_top - text_bounds.bottom + box_pad_y
+    return width, max(single_line_box_height(pad_y=box_pad_y), height)
+
+
+    return width, max(single_line_box_height(pad_y=box_pad_y), height)
+
+
+def input_box_label_size(
+    ax,
+    label: str,
+    sublabel: str | None = None,
+    *,
+    fontsize: float = 7.2,
+    sub_fontsize: float | None = None,
+) -> tuple[float, float]:
+    """Measure an input tile on the diagram axes with tighter padding."""
+    from visualizer.sizing import INPUT_PAD_X, INPUT_PAD_Y
+
+    return box_label_size(
+        ax,
+        label,
+        sublabel,
+        fontsize=fontsize,
+        sub_fontsize=sub_fontsize,
+        pad_x=INPUT_PAD_X,
+        pad_y=INPUT_PAD_Y,
+    )
 
 
 def box_bounds_at(cx: float, top_y: float, width: float, height: float, *, visual_inset: float = 0.0) -> ContentBounds:

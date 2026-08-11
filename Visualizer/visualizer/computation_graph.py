@@ -28,13 +28,18 @@ from visualizer.block_tree import (
     is_straight_line_module,
     is_method_wrapper,
     block_purpose,
+    output_gate_combine_sublabel,
     side_producer_has_activation,
+    tile_display_labels,
+    tile_sublabel,
     wrapper_bullet_lines,
 )
 from visualizer.ast_analyze import SYNTHETIC_ATTENTION, SYNTHETIC_GATE_ACTIVATION
+from visualizer.basic_ops import BasicOpFilter, keep_detail_graph_node
 from visualizer.sizing import (
     block_sublabel,
     estimate_block_size_for_node,
+    min_horizontal_block_gap,
     min_vertical_block_gap,
     PIXELS_PER_UNIT,
     to_layout_pixels,
@@ -317,7 +322,7 @@ def _add_linear_pipeline_chain(
     if not steps:
         return [], last_index
 
-    frame = _start_inline_frame(graph, wrapper) if wrapper is not None else None
+    frame = _start_inline_frame(graph, wrapper) if wrapper is not None and len(steps) > 1 else None
     indices: list[int] = []
     chain_last = last_index
 
@@ -398,10 +403,11 @@ def _add_side_producer_index(
             _track_attr_index(attr_last_index, source_attr, tail)
         return tail
 
+    block = expanded_steps[0] if len(expanded_steps) == 1 else producer
     source_index = _add_node(
         graph,
         key=f"sideproducer:{segment_index}:{source_attr}",
-        block=producer,
+        block=block,
         port_label=port_label,
         port_style=port_style,
     )
@@ -476,11 +482,119 @@ def _append_step_link(
         graph.links.append((input_index, step_index))
 
 
+def _filter_graph_basic_only(graph: ComputationGraph) -> ComputationGraph:
+    """Drop modeled-op nodes and bridge links across removed vertices."""
+    remove_indices = {
+        index
+        for index, spec in enumerate(graph.nodes)
+        if not keep_detail_graph_node(
+            block=spec.block,
+            synthetic=spec.synthetic,
+            label=spec.label,
+            basic_only=True,
+        )
+    }
+    if not remove_indices:
+        return graph
+
+    preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    succs: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    for source, target in graph.links:
+        preds[target].append(source)
+        succs[source].append(target)
+
+    def _expand_preds(index: int) -> list[int]:
+        if index not in remove_indices:
+            return [index]
+        expanded: list[int] = []
+        for source in preds[index]:
+            expanded.extend(_expand_preds(source))
+        return expanded
+
+    def _expand_succs(index: int) -> list[int]:
+        if index not in remove_indices:
+            return [index]
+        expanded: list[int] = []
+        for target in succs[index]:
+            expanded.extend(_expand_succs(target))
+        return expanded
+
+    bridged_links: set[tuple[int, int]] = {
+        (source, target)
+        for source, target in graph.links
+        if source not in remove_indices and target not in remove_indices
+    }
+    bridged_port_labels: dict[tuple[int, int], str] = {}
+    bridged_dashed: set[tuple[int, int]] = set()
+    bridged_side: set[tuple[int, int]] = set()
+
+    for removed in remove_indices:
+        for source in preds[removed]:
+            for target in succs[removed]:
+                port_label = graph.link_port_labels.get((source, removed)) or graph.link_port_labels.get(
+                    (removed, target)
+                )
+                dashed = (source, removed) in graph.dashed_links or (removed, target) in graph.dashed_links
+                side = (source, removed) in graph.side_entry_links or (removed, target) in graph.side_entry_links
+                for kept_source in _expand_preds(source):
+                    for kept_target in _expand_succs(target):
+                        if kept_source == kept_target:
+                            continue
+                        bridged_links.add((kept_source, kept_target))
+                        if port_label and (kept_source, kept_target) not in bridged_port_labels:
+                            bridged_port_labels[(kept_source, kept_target)] = port_label
+                        if dashed:
+                            bridged_dashed.add((kept_source, kept_target))
+                        if side:
+                            bridged_side.add((kept_source, kept_target))
+
+    old_to_new: dict[int, int] = {}
+    new_nodes: list[GraphNodeSpec] = []
+    for index, spec in enumerate(graph.nodes):
+        if index in remove_indices:
+            continue
+        old_to_new[index] = len(new_nodes)
+        new_nodes.append(spec)
+
+    def _remap(index: int) -> int:
+        return old_to_new[index]
+
+    filtered = ComputationGraph(
+        nodes=new_nodes,
+        links=[(_remap(source), _remap(target)) for source, target in bridged_links],
+        dashed_links={(_remap(source), _remap(target)) for source, target in bridged_dashed},
+        side_entry_links={(_remap(source), _remap(target)) for source, target in bridged_side},
+        link_port_labels={
+            (_remap(source), _remap(target)): label
+            for (source, target), label in bridged_port_labels.items()
+            if source not in remove_indices and target not in remove_indices
+        },
+    )
+
+    for frame in graph.inline_frames:
+        kept_indices = [_remap(index) for index in frame.node_indices if index not in remove_indices]
+        if len(kept_indices) >= 2:
+            filtered.inline_frames.append(
+                InlineFrameSpec(
+                    frame_id=frame.frame_id,
+                    label=frame.label,
+                    sublabel=frame.sublabel,
+                    node_indices=kept_indices,
+                )
+            )
+        elif len(kept_indices) == 1:
+            # Unwrap single-step inline frames after filtering modeled steps away.
+            pass
+
+    return filtered
+
+
 def build_computation_graph(
     root: BlockNode,
     *,
     prefix_steps: list[BlockNode] | None = None,
     include_input: bool = True,
+    basic_ops: BasicOpFilter | None = None,
 ) -> ComputationGraph:
     """Convert a block tree into a directed acyclic computation graph."""
     graph = ComputationGraph()
@@ -638,17 +752,26 @@ def build_computation_graph(
                     key=f"sidefeed:{segment_index}:{consumer.attr_name}:norm",
                     block=consumer,
                     label="RMSNorm",
+                    sublabel="",
                 )
                 if last_index is not None:
                     graph.links.append((last_index, norm_index))
                 elif input_index is not None:
                     graph.links.append((input_index, norm_index))
 
+                gate_producer = None
+                for side in segment.sides:
+                    if side.source_chain:
+                        gate_producer = segment.side_producer_nodes.get(side.source_chain[-1])
+                        if gate_producer is not None:
+                            break
+
+                combine_sublabel = output_gate_combine_sublabel(gate_producer) or "norm × gate"
                 combine_index = _add_node(
                     graph,
                     key=f"sidefeed:{segment_index}:{consumer.attr_name}:mul",
                     label="×",
-                    sublabel="× gate",
+                    sublabel=combine_sublabel,
                     synthetic=SYNTHETIC_COMBINE,
                 )
                 graph.links.append((norm_index, combine_index))
@@ -685,6 +808,7 @@ def build_computation_graph(
                         activation
                         and producer is not None
                         and not side_producer_has_activation(producer)
+                        and not is_gated_norm_module(consumer)
                     ):
                         gate_index = _add_node(
                             graph,
@@ -789,10 +913,11 @@ def build_computation_graph(
                 _track_attr_index(attr_last_index, side_wrapper.attr_name, side_index)
                 _track_attr_index(attr_last_index, side.attr_name, side_index)
             else:
+                side_block = expanded_side[0] if len(expanded_side) == 1 else side
                 side_index = _add_node(
                     graph,
                     key=f"side:{segment_index}",
-                    block=side,
+                    block=side_block,
                     port_label=segment.side_port_label,
                     port_style=segment.side_port_style,
                 )
@@ -883,6 +1008,8 @@ def build_computation_graph(
             if expanded_steps:
                 _track_attr_index(attr_last_index, step.attr_name, last_index)
 
+    if basic_ops is not None and basic_ops.basic_only:
+        return _filter_graph_basic_only(graph)
     return graph
 
 
@@ -890,6 +1017,170 @@ FLOATING_PORT_LABEL_CLEARANCE = 0.46
 DETAIL_LAYER_GAP = 2 * min_vertical_block_gap()
 DETAIL_TOP_INSET = 0.04
 DETAIL_BOTTOM_INSET = 0.04
+LAYOUT_CROSSING_ITERATIONS = 256
+LAYOUT_EXACT_LAYER_ORDER_MAX = 8
+
+
+def _graph_link_dicts(graph: ComputationGraph) -> list[dict[str, int]]:
+    return [{"source": src, "target": tgt} for src, tgt in graph.links]
+
+
+def _real_sugiyama_layers(layout: SugiyamaLayout, node_count: int) -> list[list[int]]:
+    """Extract per-layer node order from Sugiyama, dropping dummy nodes."""
+    layers: list[list[int]] = []
+    for layer in layout._layers:
+        real = [node for node in layer if node < node_count]
+        if real:
+            layers.append(real)
+    return layers
+
+
+def _count_layout_crossings(layers: list[list[int]], graph: ComputationGraph) -> int:
+    from graph_layout.preprocessing import count_crossings
+
+    return count_crossings(layers, _graph_link_dicts(graph))
+
+
+def _optimize_layer_order(
+    layers: list[list[int]],
+    graph: ComputationGraph,
+    *,
+    iterations: int = LAYOUT_CROSSING_ITERATIONS,
+    exact_max: int = LAYOUT_EXACT_LAYER_ORDER_MAX,
+) -> list[list[int]]:
+    """Minimize edge crossings with barycenter sweeps plus local/exhaustive search."""
+    import itertools
+
+    from graph_layout.preprocessing import count_crossings, minimize_crossings_barycenter
+
+    if len(layers) < 2:
+        return [list(layer) for layer in layers]
+
+    links = _graph_link_dicts(graph)
+    best = minimize_crossings_barycenter(layers, links, iterations=iterations)
+    best_count = count_crossings(best, links)
+
+    improved = True
+    while improved:
+        improved = False
+        for layer_idx, layer in enumerate(best):
+            if len(layer) <= 1:
+                continue
+            if len(layer) <= exact_max:
+                permutations = itertools.permutations(layer)
+            else:
+                permutations = []
+                current = list(layer)
+                for swap_index in range(len(current) - 1):
+                    swapped = list(current)
+                    swapped[swap_index], swapped[swap_index + 1] = (
+                        swapped[swap_index + 1],
+                        swapped[swap_index],
+                    )
+                    permutations.append(tuple(swapped))
+
+            for perm in permutations:
+                trial = [list(row) for row in best]
+                trial[layer_idx] = list(perm)
+                count = count_crossings(trial, links)
+                if count < best_count:
+                    best = trial
+                    best_count = count
+                    improved = True
+                    break
+
+    return best
+
+
+def _is_layout_chain_node(spec: GraphNodeSpec) -> bool:
+    if spec.synthetic in {SYNTHETIC_INPUT, SYNTHETIC_HIDDEN}:
+        return False
+    return not _is_combine_synthetic(spec.synthetic)
+
+
+def _center_align_vertical_chains(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+) -> None:
+    """Center-align stacked blocks on straight-line paths to reduce connector jogs."""
+    node_count = len(positions)
+    if node_count == 0:
+        return
+
+    incoming: list[list[int]] = [[] for _ in range(node_count)]
+    outgoing: list[list[int]] = [[] for _ in range(node_count)]
+    for source, target in graph.links:
+        incoming[target].append(source)
+        outgoing[source].append(target)
+
+    frame_members = inline_frame_member_indices(graph)
+
+    def chain_anchor(index: int) -> float | None:
+        spec = positions[index].spec
+        if not _is_layout_chain_node(spec):
+            return None
+        if index in frame_members:
+            return None
+        predecessors = incoming[index]
+        if len(predecessors) != 1:
+            return None
+        predecessor = predecessors[0]
+        if not _is_layout_chain_node(positions[predecessor].spec):
+            return None
+        if len(outgoing[predecessor]) != 1:
+            return None
+        return positions[predecessor].cx
+
+    for _ in range(node_count):
+        changed = False
+        for index in range(node_count):
+            anchor = chain_anchor(index)
+            if anchor is None:
+                continue
+            if abs(positions[index].cx - anchor) > 1e-6:
+                positions[index].cx = anchor
+                changed = True
+        if not changed:
+            break
+
+    for frame in graph.inline_frames:
+        indices = _ordered_inline_frame_chain(graph, list(frame.node_indices))
+        if len(indices) < 2:
+            continue
+        frame_cx = sum(positions[index].cx for index in indices) / len(indices)
+        for index in indices:
+            positions[index].cx = frame_cx
+
+
+def _pack_ordered_layer_row(
+    positions: list[LayoutPosition],
+    layer_indices: list[int],
+    *,
+    anchor_x: float,
+    align_left: bool,
+    min_gap: float,
+) -> None:
+    """Place one layer left-to-right using a fixed index order."""
+    if not layer_indices:
+        return
+    layer_positions = [positions[index] for index in layer_indices]
+    if len(layer_positions) == 1:
+        pos = layer_positions[0]
+        pos.cx = anchor_x + pos.width / 2 if align_left else anchor_x
+        return
+    total_w = sum(pos.width for pos in layer_positions) + min_gap * (len(layer_positions) - 1)
+    cursor = anchor_x if align_left else anchor_x - total_w / 2
+    for pos in layer_positions:
+        pos.cx = cursor + pos.width / 2
+        cursor += pos.width + min_gap
+
+
+def _layer_order_from_positions(
+    positions: list[LayoutPosition],
+    layers: list[list[int]],
+) -> list[list[int]]:
+    """Rebuild layer node order from the current left-to-right positions."""
+    return [sorted(layer_indices, key=lambda index: positions[index].cx) for layer_indices in layers]
 
 
 def _rendered_label_and_sublabel(
@@ -899,30 +1190,292 @@ def _rendered_label_and_sublabel(
     node_index: int | None = None,
 ) -> tuple[str, str | None]:
     """Label pair used when drawing a graph node (matches render.py inline ports)."""
-    label = spec.label
-    if inline_frame_members is not None and node_index is not None and node_index in inline_frame_members:
-        sublabel = None
-    elif spec.sublabel is not None:
-        sublabel = spec.sublabel or None
-    else:
-        sublabel = block_sublabel(spec.block)
-    if spec.port_label and spec.port_style == "inline":
-        label = spec.port_label
-        if (
-            spec.block is not None
-            and not (
-                inline_frame_members is not None
-                and node_index is not None
-                and node_index in inline_frame_members
-            )
-        ):
-            sublabel = spec.block.attr_name
-    return label, sublabel
+    if spec.sublabel is not None:
+        return spec.label, spec.sublabel or None
+    in_inline_frame = (
+        inline_frame_members is not None
+        and node_index is not None
+        and node_index in inline_frame_members
+    )
+    return tile_display_labels(
+        spec.block,
+        spec_label=spec.label,
+        in_inline_frame=in_inline_frame,
+        port_label=spec.port_label,
+        port_style=spec.port_style,
+    )
 
 
 def inline_frame_member_indices(graph: ComputationGraph) -> frozenset[int]:
     """Node indices grouped inside dotted inline frames."""
     return frozenset(index for frame in graph.inline_frames for index in frame.node_indices)
+
+
+def _ordered_inline_frame_chain(
+    graph: ComputationGraph,
+    frame_indices: list[int],
+) -> list[int]:
+    """Return frame member indices in forward link order when they form a chain."""
+    if len(frame_indices) <= 1:
+        return list(frame_indices)
+
+    index_set = set(frame_indices)
+    incoming = {index: 0 for index in frame_indices}
+    outgoing: dict[int, list[int]] = {index: [] for index in frame_indices}
+    for source, target in graph.links:
+        if source in index_set and target in index_set:
+            outgoing[source].append(target)
+            incoming[target] += 1
+
+    starts = [index for index in frame_indices if incoming[index] == 0]
+    if len(starts) != 1:
+        return sorted(frame_indices)
+
+    ordered: list[int] = []
+    cursor = starts[0]
+    while cursor is not None:
+        ordered.append(cursor)
+        next_nodes = outgoing.get(cursor, [])
+        cursor = next_nodes[0] if len(next_nodes) == 1 else None
+
+    if len(ordered) == len(frame_indices):
+        return ordered
+    return sorted(frame_indices, key=lambda index: index)
+
+
+def stack_inline_frame_positions(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float | None = None,
+) -> None:
+    """Re-stack each inline frame column using measured tile heights."""
+    gap = min_vertical_block_gap() if min_gap is None else min_gap
+    for frame in graph.inline_frames:
+        indices = _ordered_inline_frame_chain(graph, list(frame.node_indices))
+        if len(indices) < 2:
+            if indices:
+                positions[indices[0]].cx = sum(positions[index].cx for index in indices) / len(indices)
+            continue
+
+        frame_cx = sum(positions[index].cx for index in indices) / len(indices)
+        cursor_top = max(positions[index].top_y for index in indices)
+        for index in indices:
+            pos = positions[index]
+            pos.cx = frame_cx
+            pos.top_y = cursor_top
+            cursor_top -= pos.height + gap
+
+
+def _inline_frame_internal_pairs(graph: ComputationGraph) -> set[tuple[int, int]]:
+    pairs: set[tuple[int, int]] = set()
+    for frame in graph.inline_frames:
+        chain = _ordered_inline_frame_chain(graph, list(frame.node_indices))
+        pairs.update(zip(chain, chain[1:]))
+    return pairs
+
+
+def _shift_node_subtree(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    root: int,
+    delta_y: float,
+) -> None:
+    """Shift ``root`` and all downstream nodes by ``delta_y`` (negative moves up)."""
+    if abs(delta_y) < 1e-9:
+        return
+    visited: set[int] = set()
+    queue = [root]
+    while queue:
+        index = queue.pop(0)
+        if index in visited:
+            continue
+        visited.add(index)
+        positions[index].top_y -= delta_y
+        for source, target in graph.links:
+            if source == index and target not in visited:
+                queue.append(target)
+
+
+def _align_merge_nodes(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    merge_gap: float | None = None,
+) -> None:
+    """Place merge/combine nodes one layer gap below the deepest incoming branch."""
+    gap = DETAIL_LAYER_GAP if merge_gap is None else merge_gap
+    incoming: dict[int, list[int]] = {index: [] for index in range(len(positions))}
+    for source, target in graph.links:
+        incoming[target].append(source)
+
+    for target, sources in incoming.items():
+        if len(sources) < 2:
+            continue
+        deepest_bottom = min(positions[source].bottom for source in sources)
+        target_top = deepest_bottom - gap
+        if abs(positions[target].top_y - target_top) <= 1e-6:
+            continue
+        _shift_node_subtree(
+            positions,
+            graph,
+            target,
+            positions[target].top_y - target_top,
+        )
+
+
+def _column_horizontal_bounds(
+    positions: list[LayoutPosition],
+    indices: list[int],
+) -> tuple[float, float]:
+    left = min(_node_content_left(positions[index]) for index in indices)
+    right = max(_node_content_right(positions[index]) for index in indices)
+    return left, right
+
+
+def compact_horizontal_shrink_wrap(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_left: float | None = None,
+) -> None:
+    """Pack inline-frame columns tightly; align loose nodes from graph connectivity."""
+    if not positions:
+        return
+
+    gap = min_horizontal_block_gap()
+    frame_members = inline_frame_member_indices(graph)
+    from visualizer.render import INLINE_FRAME_PAD
+
+    frame_pad = INLINE_FRAME_PAD
+    frame_columns: list[list[int]] = []
+    for frame in graph.inline_frames:
+        indices = _ordered_inline_frame_chain(graph, list(frame.node_indices))
+        if indices:
+            frame_columns.append(indices)
+
+    def frame_column_bounds(indices: list[int]) -> tuple[float, float]:
+        left = min(_node_content_left(positions[index]) for index in indices) - frame_pad
+        right = max(_node_content_right(positions[index]) for index in indices) + frame_pad
+        return left, right
+
+    if frame_columns:
+        frame_columns.sort(key=lambda indices: frame_column_bounds(indices)[0])
+        cursor_left: float | None = None
+        for indices in frame_columns:
+            left, right = frame_column_bounds(indices)
+            width = right - left
+            if cursor_left is None:
+                cursor_left = left
+            shift = cursor_left - left
+            for index in indices:
+                positions[index].cx += shift
+            cursor_left += width + gap
+
+    free_indices = [
+        index
+        for index, pos in enumerate(positions)
+        if index not in frame_members
+        and pos.spec.synthetic not in {SYNTHETIC_INPUT, SYNTHETIC_HIDDEN}
+    ]
+    incoming: dict[int, list[int]] = {index: [] for index in range(len(positions))}
+    outgoing: dict[int, list[int]] = {index: [] for index in range(len(positions))}
+    for source, target in graph.links:
+        incoming[target].append(source)
+        outgoing[source].append(target)
+
+    for index in free_indices:
+        refs = incoming[index] + outgoing[index]
+        if not refs:
+            continue
+        chain_predecessors = incoming[index]
+        if (
+            len(chain_predecessors) == 1
+            and len(outgoing[chain_predecessors[0]]) == 1
+            and _is_layout_chain_node(positions[index].spec)
+            and _is_layout_chain_node(positions[chain_predecessors[0]].spec)
+        ):
+            positions[index].cx = positions[chain_predecessors[0]].cx
+            continue
+        positions[index].cx = sum(positions[ref].cx for ref in refs) / len(refs)
+
+    if free_indices or frame_columns:
+        _resolve_horizontal_overlaps(positions, _topological_layers(graph), min_gap=gap)
+
+    packed = [
+        pos
+        for pos in positions
+        if pos.spec.synthetic not in {SYNTHETIC_INPUT, SYNTHETIC_HIDDEN}
+    ]
+    if packed:
+        content_left = min(_node_content_left(pos) for pos in packed)
+        content_right = max(_node_content_right(pos) for pos in packed)
+        content_cx = (content_left + content_right) / 2
+        for pos in positions:
+            if pos.spec.synthetic in {SYNTHETIC_INPUT, SYNTHETIC_HIDDEN}:
+                pos.cx = content_cx
+
+    if min_left is not None:
+        _align_positions_left(positions, min_left)
+
+
+def repack_inline_frame_columns(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+) -> None:
+    """Re-pack inline-frame columns after measured resize; leave loose nodes in place."""
+    if not graph.inline_frames:
+        return
+
+    from visualizer.render import INLINE_FRAME_PAD
+
+    gap = min_horizontal_block_gap()
+    pad = INLINE_FRAME_PAD
+    frame_columns: list[list[int]] = []
+    for frame in graph.inline_frames:
+        indices = _ordered_inline_frame_chain(graph, list(frame.node_indices))
+        if indices:
+            frame_columns.append(indices)
+
+    if not frame_columns:
+        return
+
+    def frame_bounds(indices: list[int]) -> tuple[float, float]:
+        left = min(_node_content_left(positions[index]) for index in indices) - pad
+        right = max(_node_content_right(positions[index]) for index in indices) + pad
+        return left, right
+
+    frame_columns.sort(key=lambda indices: frame_bounds(indices)[0])
+    cursor_left: float | None = None
+    for indices in frame_columns:
+        left, right = frame_bounds(indices)
+        width = right - left
+        if cursor_left is None:
+            cursor_left = left
+        shift = cursor_left - left
+        for index in indices:
+            positions[index].cx += shift
+        cursor_left += width + gap
+
+
+def _inline_frame_internal_gap(
+    graph: ComputationGraph,
+    layers: list[list[int]],
+    *,
+    upper_layer_index: int,
+) -> float:
+    """Gap between two layer rows when they advance the same inline frame chain."""
+    if upper_layer_index < 0 or upper_layer_index + 1 >= len(layers):
+        return DETAIL_LAYER_GAP
+
+    upper = set(layers[upper_layer_index])
+    lower = set(layers[upper_layer_index + 1])
+    for frame in graph.inline_frames:
+        chain = _ordered_inline_frame_chain(graph, list(frame.node_indices))
+        for source, target in zip(chain, chain[1:]):
+            if source in upper and target in lower:
+                return min_vertical_block_gap()
+    return DETAIL_LAYER_GAP
 
 
 def measure_graph_node_sizes(
@@ -933,7 +1486,7 @@ def measure_graph_node_sizes(
     title_fontsize: float = 7.6,
 ) -> None:
     """Measure every tile label at draw time and cache diagram-unit sizes before layout."""
-    from visualizer.text_measure import box_label_size
+    from visualizer.text_measure import box_label_size, input_box_label_size
 
     inline_members = inline_frame_member_indices(graph)
     for index, spec in enumerate(graph.nodes):
@@ -941,11 +1494,11 @@ def measure_graph_node_sizes(
             spec.diagram_width, spec.diagram_height = COMBINE_OP_SIZE, COMBINE_OP_SIZE
             continue
         if spec.synthetic == SYNTHETIC_INPUT:
-            width, height = box_label_size(ax, spec.label, input_sublabel, fontsize=7.2)
+            width, height = input_box_label_size(ax, spec.label, input_sublabel, fontsize=7.2)
             spec.diagram_width, spec.diagram_height = width, height
             continue
         if spec.synthetic == SYNTHETIC_HIDDEN:
-            width, height = box_label_size(ax, spec.label, None, fontsize=6.5)
+            width, height = input_box_label_size(ax, spec.label, None, fontsize=6.5)
             spec.diagram_width, spec.diagram_height = width, height
             continue
         label, sublabel = _rendered_label_and_sublabel(
@@ -978,10 +1531,6 @@ def _diagram_size_for_rendered_spec(
 def _diagram_size_for_spec(spec: GraphNodeSpec) -> tuple[float, float]:
     if _is_combine_synthetic(spec.synthetic):
         return COMBINE_OP_SIZE, COMBINE_OP_SIZE
-    if spec.synthetic == SYNTHETIC_INPUT:
-        return 0.90, 0.38
-    if spec.synthetic == SYNTHETIC_HIDDEN:
-        return 0.62, 0.30
     return _diagram_size_for_rendered_spec(spec)
 
 
@@ -1013,21 +1562,32 @@ def _topological_layers(graph: ComputationGraph) -> list[list[int]]:
     return [layers_map[layer_id] for layer_id in sorted(layers_map)]
 
 
+INPUT_INLINE_FRAME_CAPTION_CLEARANCE = 0.28
+
+
 def _assign_layered_vertical_positions(
     positions: list[LayoutPosition],
     layers: list[list[int]],
     *,
     top_y: float,
     min_gap: float = DETAIL_LAYER_GAP,
+    graph: ComputationGraph | None = None,
 ) -> None:
     """Stack graph layers downward using only the space each row needs."""
     cursor_top = top_y - DETAIL_TOP_INSET
-    for layer_indices in layers:
+    for layer_index, layer_indices in enumerate(layers):
         layer_positions = [positions[index] for index in layer_indices]
         row_height = max(pos.height for pos in layer_positions)
         for pos in layer_positions:
             pos.top_y = cursor_top
         cursor_top -= row_height + min_gap
+        if (
+            layer_index == 0
+            and graph is not None
+            and graph.inline_frames
+            and layer_index + 1 < len(layers)
+        ):
+            cursor_top -= INPUT_INLINE_FRAME_CAPTION_CLEARANCE
 
 
 def _node_content_left(pos: LayoutPosition) -> float:
@@ -1042,7 +1602,7 @@ def _node_content_right(pos: LayoutPosition) -> float:
     return pos.cx + pos.width / 2
 
 
-MIN_HORIZONTAL_BLOCK_GAP = 0.14
+MIN_HORIZONTAL_BLOCK_GAP = min_horizontal_block_gap()
 
 
 def _resolve_horizontal_overlaps(
@@ -1067,24 +1627,20 @@ def _resolve_horizontal_overlaps(
 def _compact_layer_positions(
     positions: list[LayoutPosition],
     layers: list[list[int]],
-    cx: float,
+    anchor_x: float,
     *,
     min_gap: float = MIN_HORIZONTAL_BLOCK_GAP,
+    align_left: bool = False,
 ) -> None:
-    """Pack each topological layer to minimum width and center it on ``cx``."""
+    """Pack each topological layer to minimum width using the given node order."""
     for layer_indices in layers:
-        if not layer_indices:
-            continue
-        layer_positions = [positions[index] for index in layer_indices]
-        if len(layer_positions) == 1:
-            layer_positions[0].cx = cx
-            continue
-        ordered = sorted(layer_positions, key=lambda pos: pos.cx)
-        total_w = sum(pos.width for pos in ordered) + min_gap * (len(ordered) - 1)
-        cursor = cx - total_w / 2
-        for pos in ordered:
-            pos.cx = cursor + pos.width / 2
-            cursor += pos.width + min_gap
+        _pack_ordered_layer_row(
+            positions,
+            layer_indices,
+            anchor_x=anchor_x,
+            align_left=align_left,
+            min_gap=min_gap,
+        )
 
 
 def _fanout_branch_index(spec: GraphNodeSpec) -> int | None:
@@ -1093,26 +1649,79 @@ def _fanout_branch_index(spec: GraphNodeSpec) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _order_fanout_branch_positions(positions: list[LayoutPosition]) -> None:
-    """Reorder fan-out layer nodes left-to-right by branch index to reduce wire crossings."""
-    layer_groups: dict[float, list[LayoutPosition]] = {}
-    for pos in positions:
+def _fanout_branch_node_groups(positions: list[LayoutPosition]) -> dict[int, list[int]]:
+    """Group positioned nodes by fan-out branch index."""
+    groups: dict[int, list[int]] = {}
+    for index, pos in enumerate(positions):
         branch_index = _fanout_branch_index(pos.spec)
         if branch_index is None:
             continue
-        layer_groups.setdefault(pos.top_y, []).append(pos)
+        groups.setdefault(branch_index, []).append(index)
+    return groups
 
-    for layer_positions in layer_groups.values():
-        if len(layer_positions) < 2:
+
+def _order_fanout_branch_positions(positions: list[LayoutPosition]) -> None:
+    """Reorder entire fan-out branch columns left-to-right to reduce wire crossings."""
+    branch_groups = _fanout_branch_node_groups(positions)
+    if len(branch_groups) < 2:
+        return
+
+    columns: list[tuple[int, list[int], float, float]] = []
+    for branch_index in sorted(branch_groups):
+        indices = branch_groups[branch_index]
+        left = min(_node_content_left(positions[index]) for index in indices)
+        right = max(_node_content_right(positions[index]) for index in indices)
+        columns.append((branch_index, indices, left, right))
+
+    cursor_left = min(left for _branch, _indices, left, _right in columns)
+    for _branch_index, indices, left, right in columns:
+        shift = cursor_left - left
+        for index in indices:
+            positions[index].cx += shift
+        cursor_left += (right - left) + MIN_HORIZONTAL_BLOCK_GAP
+
+
+def _align_fanout_branch_columns(positions: list[LayoutPosition]) -> None:
+    """Give every node in a fan-out branch the same column center."""
+    for indices in _fanout_branch_node_groups(positions).values():
+        if len(indices) < 2:
             continue
-        ordered = sorted(layer_positions, key=lambda pos: _fanout_branch_index(pos.spec) or 0)
-        left = min(pos.cx - pos.width / 2 for pos in ordered)
-        right = max(pos.cx + pos.width / 2 for pos in ordered)
-        span = max(right - left, sum(pos.width for pos in ordered) + MIN_HORIZONTAL_BLOCK_GAP * (len(ordered) - 1))
-        cursor = left + span / 2 - sum(pos.width for pos in ordered) / 2 - MIN_HORIZONTAL_BLOCK_GAP * (len(ordered) - 1) / 2
-        for pos in ordered:
-            pos.cx = cursor + pos.width / 2
-            cursor += pos.width + MIN_HORIZONTAL_BLOCK_GAP
+        column_cx = sum(positions[index].cx for index in indices) / len(indices)
+        for index in indices:
+            positions[index].cx = column_cx
+
+
+def _resolve_branch_column_overlaps(
+    positions: list[LayoutPosition],
+    *,
+    min_gap: float,
+) -> None:
+    """Separate fan-out branch columns without breaking intra-column alignment."""
+    branch_groups = _fanout_branch_node_groups(positions)
+    if len(branch_groups) < 2:
+        return
+
+    columns: list[tuple[list[int], float, float]] = []
+    for branch_index in sorted(branch_groups):
+        indices = branch_groups[branch_index]
+        left = min(_node_content_left(positions[index]) for index in indices)
+        right = max(_node_content_right(positions[index]) for index in indices)
+        columns.append((indices, left, right))
+
+    columns.sort(key=lambda item: item[1])
+    for index in range(1, len(columns)):
+        prev_indices, prev_left, prev_right = columns[index - 1]
+        curr_indices, curr_left, curr_right = columns[index]
+        overlap = prev_right + min_gap - curr_left
+        if overlap <= 0:
+            continue
+        for node_index in curr_indices:
+            positions[node_index].cx += overlap
+        columns[index] = (
+            curr_indices,
+            curr_left + overlap,
+            curr_right + overlap,
+        )
 
 
 def _resolve_layout_overlaps(
@@ -1126,9 +1735,18 @@ def _resolve_layout_overlaps(
     if not positions:
         return
     layers = _topological_layers(graph)
-    _resolve_horizontal_overlaps(positions, layers, min_gap=min_horizontal_gap)
+    branch_groups = _fanout_branch_node_groups(positions)
+    if branch_groups:
+        _align_fanout_branch_columns(positions)
+        _resolve_branch_column_overlaps(positions, min_gap=min_horizontal_gap)
+    else:
+        _resolve_horizontal_overlaps(positions, layers, min_gap=min_horizontal_gap)
     _resolve_vertical_overlaps(positions, min_gap=min_vertical_gap)
-    _resolve_horizontal_overlaps(positions, layers, min_gap=min_horizontal_gap)
+    if branch_groups:
+        _align_fanout_branch_columns(positions)
+        _resolve_branch_column_overlaps(positions, min_gap=min_horizontal_gap)
+    else:
+        _resolve_horizontal_overlaps(positions, layers, min_gap=min_horizontal_gap)
 
 
 def _center_positions_horizontally(positions: list[LayoutPosition], cx: float) -> None:
@@ -1144,6 +1762,18 @@ def _center_positions_horizontally(positions: list[LayoutPosition], cx: float) -
         pos.cx += shift
 
 
+def _align_positions_left(positions: list[LayoutPosition], content_left: float) -> None:
+    """Shift nodes so the leftmost content edge starts at ``content_left``."""
+    if not positions:
+        return
+    min_left = min(_node_content_left(pos) for pos in positions)
+    shift = content_left - min_left
+    if abs(shift) < 0.001:
+        return
+    for pos in positions:
+        pos.cx += shift
+
+
 def layout_computation_graph(
     graph: ComputationGraph,
     *,
@@ -1151,6 +1781,7 @@ def layout_computation_graph(
     top_y: float,
     block_w: float,
     block_h: float | None = None,
+    content_left: float | None = None,
 ) -> tuple[list[LayoutPosition], list[tuple[int, int]]]:
     """Run Sugiyama layout and map coordinates into the diagram frame."""
     if not graph.nodes:
@@ -1161,10 +1792,11 @@ def layout_computation_graph(
         diagram_w, diagram_h = _diagram_size_for_spec(spec)
         width = min(block_w - 0.4, diagram_w)
         height = diagram_h
+        node_cx = (content_left + width / 2) if content_left is not None else cx
         return [
             LayoutPosition(
                 spec=spec,
-                cx=cx,
+                cx=node_cx,
                 top_y=top_y - DETAIL_TOP_INSET,
                 width=width,
                 height=height,
@@ -1189,42 +1821,49 @@ def layout_computation_graph(
         layer_separation=layer_separation,
         node_separation=48.0,
         orientation="top-to-bottom",
+        crossing_iterations=LAYOUT_CROSSING_ITERATIONS,
     )
     layout.run()
 
-    xs = [node.x for node in layout.nodes]
-    min_x = min(xs)
-    max_x = max(xs)
-    x_span = max_x - min_x
+    node_count = len(graph.nodes)
+    layers = _real_sugiyama_layers(layout, node_count) or _topological_layers(graph)
+    layers = _optimize_layer_order(layers, graph)
 
-    inner_w = block_w - 0.45
-    pad_x = 0.20
-    usable_w = max(0.5, inner_w - 2 * pad_x)
+    align_left = content_left is not None
+    anchor_x = content_left if align_left else cx
 
     positions: list[LayoutPosition] = []
     for index, spec in enumerate(graph.nodes):
-        gl_node = layout.nodes[index]
-        if x_span < 1.0:
-            px = cx
-        else:
-            px = cx - usable_w / 2 + ((gl_node.x - min_x) / x_span) * usable_w
         width, height = diagram_sizes[index]
         positions.append(
             LayoutPosition(
                 spec=spec,
-                cx=px,
+                cx=anchor_x,
                 top_y=top_y,
                 width=width,
                 height=height,
             )
         )
 
-    layers = _topological_layers(graph)
-    _assign_layered_vertical_positions(positions, layers, top_y=top_y)
-    _compact_layer_positions(positions, layers, cx)
+    _assign_layered_vertical_positions(positions, layers, top_y=top_y, graph=graph)
+    _compact_layer_positions(positions, layers, anchor_x, align_left=align_left)
+    stack_inline_frame_positions(positions, graph)
+    _align_merge_nodes(positions, graph)
+    _center_align_vertical_chains(positions, graph)
+    layers = _optimize_layer_order(layers, graph)
+    _compact_layer_positions(positions, layers, anchor_x, align_left=align_left)
+    compact_horizontal_shrink_wrap(positions, graph, min_left=content_left if align_left else None)
+    _center_align_vertical_chains(positions, graph)
     _order_fanout_branch_positions(positions)
+    _align_fanout_branch_columns(positions)
+    layers = _optimize_layer_order(_layer_order_from_positions(positions, layers), graph)
+    _compact_layer_positions(positions, layers, anchor_x, align_left=align_left)
+    _center_align_vertical_chains(positions, graph)
     _resolve_layout_overlaps(positions, graph)
-    _center_positions_horizontally(positions, cx)
+    if align_left:
+        _align_positions_left(positions, content_left)
+    else:
+        _center_positions_horizontally(positions, cx)
     _resolve_layout_overlaps(positions, graph)
 
     return positions, graph.links
@@ -1237,7 +1876,11 @@ def _estimate_graph_height(graph: ComputationGraph) -> float:
     layers = _topological_layers(graph)
     heights = [_diagram_size_for_spec(spec)[1] for spec in graph.nodes]
     content = sum(max(heights[index] for index in layer) for layer in layers)
-    gaps = DETAIL_LAYER_GAP * max(0, len(layers) - 1)
+    gaps = 0.0
+    for layer_index in range(max(0, len(layers) - 1)):
+        gaps += _inline_frame_internal_gap(graph, layers, upper_layer_index=layer_index)
+    if graph.inline_frames and len(layers) > 1:
+        gaps += INPUT_INLINE_FRAME_CAPTION_CLEARANCE
     return content + gaps + DETAIL_TOP_INSET + DETAIL_BOTTOM_INSET
 
 

@@ -215,10 +215,37 @@ def test_fanout_connectors_share_source_bus():
 
 
 def test_min_vertical_block_gap_matches_top_text_inset():
-    from visualizer.sizing import BLOCK_PAD_Y, TITLE_LINE_H, min_vertical_block_gap
+    from visualizer.sizing import min_vertical_block_gap, single_line_box_height
 
-    assert min_vertical_block_gap() >= BLOCK_PAD_Y
-    assert min_vertical_block_gap() == BLOCK_PAD_Y + TITLE_LINE_H / 2
+    assert min_vertical_block_gap() == single_line_box_height() / 2
+
+
+def test_input_box_uses_tighter_padding():
+    import matplotlib.pyplot as plt
+
+    from visualizer.sizing import BLOCK_PAD_X, INPUT_PAD_X
+    from visualizer.text_measure import box_label_size, input_box_label_size
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    fig.canvas.draw()
+    default_w, _ = box_label_size(ax, "hidden_states", None, fontsize=7.2)
+    input_w, _ = input_box_label_size(ax, "hidden_states", None, fontsize=7.2)
+    assert INPUT_PAD_X < BLOCK_PAD_X
+    assert input_w < default_w
+
+
+def test_basic_rmsnorm_has_no_box_sublabel():
+    from visualizer.block_tree import BlockNode
+    from visualizer.sizing import block_sublabel
+
+    norm = BlockNode(
+        attr_name="input_layernorm",
+        class_name="KimiRMSNorm",
+        role="norm",
+        label="RMSNorm",
+        is_basic=False,
+    )
+    assert block_sublabel(norm) is None
 
 
 def test_parse_llama_like_config():

@@ -19,11 +19,12 @@ from visualizer.computation_graph import (
     MIN_HORIZONTAL_BLOCK_GAP,
     SYNTHETIC_HIDDEN,
     SYNTHETIC_INPUT,
-    _center_positions_horizontally,
     _fanout_branch_index,
     _resolve_layout_overlaps,
+    stack_inline_frame_positions,
 )
-from visualizer.text_measure import ContentBounds, box_bounds_at, box_label_size, floating_port_label_bounds
+from visualizer.text_measure import ContentBounds, box_bounds_at, box_label_size, floating_port_label_bounds, input_box_label_size
+from visualizer.sizing import BLOCK_PAD_Y, INPUT_PAD_X, INPUT_PAD_Y, LABEL_LINE_GAP, SUB_LINE_H, TITLE_LINE_H
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
 
 DEFAULT_MIN_GAP = 0.02
 VALIDATE_MIN_GAP = 0.02
-INLINE_FRAME_STACK_GAP = 0.05
+INLINE_FRAME_SEPARATION_EPS = 1e-3
 _TILE_KINDS = frozenset({"box", "combine"})
 _OBSTACLE_KINDS = _TILE_KINDS | frozenset({"inline_frame", "frame_label", "frame_sublabel", "floating_label"})
 
@@ -90,14 +91,14 @@ def apply_measured_node_sizes(
         if _is_combine(spec.synthetic):
             continue
         if spec.synthetic == "@input":
-            width, height = box_label_size(
+            width, height = input_box_label_size(
                 ax,
                 spec.label,
                 plan.input_sublabel,
                 fontsize=7.2,
             )
-            pos.width = max(pos.width, width)
-            pos.height = max(pos.height, height)
+            pos.width = width
+            pos.height = height
             if draw_index < len(plan.node_draws):
                 leaf, _ = plan.node_draws[draw_index]
                 leaf.w = pos.width
@@ -107,9 +108,9 @@ def apply_measured_node_sizes(
                 draw_index += 1
             continue
         if spec.synthetic == "@hidden_states":
-            width, height = box_label_size(ax, spec.label, None, fontsize=6.5)
-            pos.width = max(pos.width, width)
-            pos.height = max(pos.height, height)
+            width, height = input_box_label_size(ax, spec.label, None, fontsize=6.5)
+            pos.width = width
+            pos.height = height
             if draw_index < len(plan.node_draws):
                 leaf, _ = plan.node_draws[draw_index]
                 leaf.w = pos.width
@@ -146,7 +147,6 @@ def collect_measured_elements(
         INLINE_FRAME_PAD,
         _inline_frame_label_lines,
     )
-    from visualizer.sizing import BLOCK_PAD_Y, LABEL_LINE_GAP, SUB_LINE_H, TITLE_LINE_H
     from visualizer.text_measure import measure_text_bounds
 
     elements: list[MeasuredElement] = []
@@ -185,11 +185,12 @@ def collect_measured_elements(
                 frame_id=frame_members.get(index),
             )
         )
+        pad_y = leaf.pad_y if leaf.pad_y is not None else BLOCK_PAD_Y
         title_bounds = measure_text_bounds(
             ax,
             leaf.label,
             pos.cx,
-            pos.top_y - BLOCK_PAD_Y,
+            pos.top_y - pad_y,
             fontsize=leaf.fontsize,
             ha="center",
             va="top",
@@ -206,7 +207,7 @@ def collect_measured_elements(
             )
         if leaf.sublabel:
             sub_fontsize = max(6.5, leaf.fontsize - 1.5)
-            sub_y = pos.top_y - BLOCK_PAD_Y - TITLE_LINE_H - LABEL_LINE_GAP
+            sub_y = pos.top_y - pad_y - TITLE_LINE_H - LABEL_LINE_GAP
             for line in [part for part in leaf.sublabel.split("\n") if part.strip()]:
                 sub_bounds = measure_text_bounds(
                     ax,
@@ -427,6 +428,11 @@ def _classify_layout_zones(
         for index, pos in enumerate(positions)
         if "sidefeed" in pos.spec.key and ":gate_act" in pos.spec.key
     }
+    side |= {
+        index
+        for index, pos in enumerate(positions)
+        if "routed_expert" in pos.spec.key
+    }
     input_hidden = {
         index
         for index, pos in enumerate(positions)
@@ -458,25 +464,41 @@ def _shift_node_indices(
         positions[index].cx += delta_x
 
 
+def _ensure_input_above_inline_frames(
+    positions: list[LayoutPosition],
+    elements: list[MeasuredElement],
+    *,
+    min_gap: float,
+) -> None:
+    """Raise the synthetic input tile so it clears inline-frame caption bands."""
+    caption_tops = [
+        element.bounds.top
+        for element in elements
+        if element.kind in {"inline_frame", "frame_label", "frame_sublabel"}
+    ]
+    if not caption_tops:
+        return
+    max_caption_top = max(caption_tops)
+    for pos in positions:
+        if pos.spec.synthetic != SYNTHETIC_INPUT:
+            continue
+        min_bottom = max_caption_top + min_gap
+        if pos.bottom < min_bottom:
+            pos.top_y += min_bottom - pos.bottom
+
+
 def _align_and_stack_inline_frames(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
     *,
-    min_gap: float,
+    min_gap: float | None = None,
 ) -> None:
     """Keep straight-line inline frames vertically stacked on one column."""
-    for frame in graph.inline_frames:
-        indices = list(frame.node_indices)
-        if not indices:
-            continue
-        frame_cx = sum(positions[index].cx for index in indices) / len(indices)
-        for index in indices:
-            positions[index].cx = frame_cx
-        cursor_top = max(positions[index].top_y for index in indices)
-        for index in indices:
-            pos = positions[index]
-            pos.top_y = cursor_top
-            cursor_top -= pos.height + min_gap
+    from visualizer.computation_graph import _align_merge_nodes, repack_inline_frame_columns
+
+    stack_inline_frame_positions(positions, graph, min_gap=min_gap)
+    _align_merge_nodes(positions, graph)
+    repack_inline_frame_columns(positions, graph)
 
 
 def _place_layout_zones(
@@ -490,14 +512,20 @@ def _place_layout_zones(
 ) -> None:
     """Separate fan-out, main path, and side branches into non-overlapping columns."""
     fanout, main, side, input_hidden = _classify_layout_zones(positions, graph)
-    zone_gap = max(0.28, min_gap * 4)
+    from visualizer.sizing import min_horizontal_block_gap
+
+    zone_gap = max(min_gap * 2, min_horizontal_block_gap())
+    all_indices = fanout | main | side | input_hidden
 
     main_bounds = _cluster_horizontal_bounds(positions, main | input_hidden)
     if main_bounds is None:
         return
     main_left, main_right = main_bounds
-    main_center = (main_left + main_right) / 2
-    _shift_node_indices(positions, main | input_hidden, cx - main_center)
+    if min_left is not None:
+        _shift_node_indices(positions, main | input_hidden, -main_left)
+    else:
+        main_center = (main_left + main_right) / 2
+        _shift_node_indices(positions, main | input_hidden, cx - main_center)
 
     main_bounds = _cluster_horizontal_bounds(positions, main | input_hidden)
     if main_bounds is None:
@@ -515,21 +543,21 @@ def _place_layout_zones(
         target_side_left = main_right + zone_gap
         _shift_node_indices(positions, side, target_side_left - side_left)
 
+    content_left, content_right = _content_horizontal_extent_from_positions(positions, graph)
+    if min_left is not None:
+        _shift_node_indices(positions, all_indices, min_left - content_left)
+        content_left, content_right = _content_horizontal_extent_from_positions(positions, graph)
+
     if max_right is None:
         return
-    content_left, content_right = _content_horizontal_extent_from_positions(positions, graph)
     if content_right <= max_right:
         return
     overflow = content_right - max_right
-    _shift_node_indices(positions, fanout | main | side | input_hidden, -overflow)
+    _shift_node_indices(positions, all_indices, -overflow)
     content_left, _content_right = _content_horizontal_extent_from_positions(positions, graph)
     target_min_left = min_left if min_left is not None else content_left
     if content_left < target_min_left:
-        _shift_node_indices(
-            positions,
-            fanout | main | side | input_hidden,
-            target_min_left - content_left,
-        )
+        _shift_node_indices(positions, all_indices, target_min_left - content_left)
 
 
 def _content_horizontal_extent_from_positions(
@@ -566,11 +594,12 @@ def _separate_overlapping_inline_frames(
         overlap = left.bounds.right + min_gap - right.bounds.left
         if overlap <= 0:
             continue
+        shift = overlap + INLINE_FRAME_SEPARATION_EPS
         members = frame_members.get(right.frame_id or "", set())
-        _shift_node_indices(positions, members, overlap)
+        _shift_node_indices(positions, members, shift)
         right.bounds = ContentBounds(
-            left=right.bounds.left + overlap,
-            right=right.bounds.right + overlap,
+            left=right.bounds.left + shift,
+            right=right.bounds.right + shift,
             bottom=right.bounds.bottom,
             top=right.bounds.top,
         )
@@ -682,7 +711,7 @@ def _repack_after_caption_nudges(
             detail_fill=detail_fill,
         )
         _nudge_clear_frame_caption_overlaps(positions, graph, elements, min_gap=min_gap)
-        _align_and_stack_inline_frames(positions, graph, min_gap=INLINE_FRAME_STACK_GAP)
+        _align_and_stack_inline_frames(positions, graph)
         current_plan = _build_detail_draw_plan(positions, graph, input_sublabel=current_plan.input_sublabel)
 
 
@@ -698,7 +727,7 @@ def _resolve_obstacle_layout(
     min_left: float | None = None,
 ) -> None:
     """Repack columns and frames after measured resize."""
-    _align_and_stack_inline_frames(positions, graph, min_gap=INLINE_FRAME_STACK_GAP)
+    _align_and_stack_inline_frames(positions, graph)
     _place_layout_zones(
         positions,
         graph,
@@ -710,6 +739,47 @@ def _resolve_obstacle_layout(
     _separate_overlapping_inline_frames(positions, graph, elements, min_gap=min_gap)
     if forbidden_regions:
         _shift_clear_forbidden_regions(positions, elements, forbidden_regions, min_gap=min_gap)
+
+
+def _separate_parallel_tiles_from_inline_frames(
+    positions: list[LayoutPosition],
+    elements: list[MeasuredElement],
+    graph: ComputationGraph,
+    *,
+    min_gap: float,
+) -> None:
+    """Shift parallel branch tiles just outside dotted inline-frame borders."""
+    fanout, _main, side, _input_hidden = _classify_layout_zones(positions, graph)
+    parallel_indices = fanout | side
+    frame_members = _frame_member_indices(graph)
+    frames = [element for element in elements if element.kind == "inline_frame"]
+    boxes = [
+        element
+        for element in elements
+        if element.kind == "box" and element.node_index is not None
+    ]
+    for box in boxes:
+        box_index = box.node_index
+        if box_index is None or box_index in frame_members:
+            continue
+        if box_index not in parallel_indices:
+            continue
+        pos = positions[box_index]
+        if pos.spec.synthetic in {SYNTHETIC_INPUT, SYNTHETIC_HIDDEN}:
+            continue
+        for frame in frames:
+            if box_index in frame.frame_node_indices:
+                continue
+            if not box.bounds.overlaps(frame.bounds, min_gap=min_gap):
+                continue
+            if _fanout_branch_index(pos.spec) is not None:
+                shift = frame.bounds.left - min_gap - box.bounds.right
+                if shift < 0:
+                    pos.cx += shift
+            else:
+                shift = frame.bounds.right + min_gap - box.bounds.left
+                if shift > 0:
+                    pos.cx += shift
 
 
 def _nudge_apart_remaining_tiles(
@@ -809,9 +879,11 @@ def measure_detail_tree_content_width(
     input_sublabel: str | None = None,
     prefix_steps: list | None = None,
     layout_block_w: float = 18.0,
+    basic_ops=None,
 ) -> float:
     """Measure the finalized horizontal extent of one detail section."""
     from visualizer.block_tree import BlockNode
+    from visualizer.basic_ops import BasicOpFilter
     from visualizer.computation_graph import (
         _estimate_graph_height,
         build_computation_graph,
@@ -824,7 +896,11 @@ def measure_detail_tree_content_width(
         return 1.2
 
     fill = detail_fill or COLORS["detail_fill"]
-    graph = build_computation_graph(tree, prefix_steps=prefix_steps)
+    graph = build_computation_graph(
+        tree,
+        prefix_steps=prefix_steps,
+        basic_ops=basic_ops or BasicOpFilter.for_detailed(),
+    )
     measure_graph_node_sizes(ax, graph, input_sublabel=input_sublabel)
     positions, _ = layout_computation_graph(
         graph,
@@ -832,6 +908,7 @@ def measure_detail_tree_content_width(
         top_y=10.0,
         block_w=layout_block_w,
         block_h=_estimate_graph_height(graph),
+        content_left=min_left,
     )
     try:
         finalize_detail_layout(
@@ -878,6 +955,34 @@ def measure_max_detail_content_width(
             detail_fill=detail_fill,
             min_left=min_left,
             input_sublabel=sub,
+            layout_block_w=layout_block_w,
+        )
+        max_width = max(max_width, width)
+    return max_width
+
+
+def measure_max_detail_section_width(
+    ax: Axes,
+    spec,
+    *,
+    cx: float,
+    detail_fill: str,
+    min_left: float,
+    layout_block_w: float = 18.0,
+) -> float:
+    """Return the widest shrink-wrapped detail subsection (for canvas sizing)."""
+    from visualizer.render import COLORS, _detail_sections_to_render
+
+    fill = detail_fill or COLORS["detail_fill"]
+    max_width = 1.2
+    for _title, tree, input_sublabel in _detail_sections_to_render(spec):
+        width = measure_detail_tree_content_width(
+            ax,
+            tree,
+            cx=cx,
+            detail_fill=fill,
+            min_left=min_left,
+            input_sublabel=input_sublabel,
             layout_block_w=layout_block_w,
         )
         max_width = max(max_width, width)
@@ -985,7 +1090,7 @@ def finalize_detail_layout(
         apply_measured_node_sizes(ax, positions, plan)
         _resize_input_nodes(positions, input_sublabel)
         apply_measured_node_sizes(ax, positions, plan)
-        _align_and_stack_inline_frames(positions, graph, min_gap=INLINE_FRAME_STACK_GAP)
+        _align_and_stack_inline_frames(positions, graph)
         if positions:
             resolve_measured_overlaps(
                 positions,
@@ -993,9 +1098,10 @@ def finalize_detail_layout(
                 top_y=top_y,
                 min_gap=MIN_HORIZONTAL_BLOCK_GAP,
             )
-            _align_and_stack_inline_frames(positions, graph, min_gap=INLINE_FRAME_STACK_GAP)
+            _align_and_stack_inline_frames(positions, graph)
         plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
         elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+        _ensure_input_above_inline_frames(positions, elements, min_gap=VALIDATE_MIN_GAP)
         _resolve_obstacle_layout(
             positions,
             graph,
@@ -1024,10 +1130,22 @@ def finalize_detail_layout(
         )
         plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
         elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+        _separate_parallel_tiles_from_inline_frames(
+            positions,
+            elements,
+            graph,
+            min_gap=VALIDATE_MIN_GAP,
+        )
         report = validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden)
         if report.ok:
             return plan
         _nudge_apart_remaining_tiles(positions, elements, graph, min_gap=VALIDATE_MIN_GAP)
+        _separate_parallel_tiles_from_inline_frames(
+            positions,
+            elements,
+            graph,
+            min_gap=VALIDATE_MIN_GAP,
+        )
         if positions:
             resolve_measured_overlaps(
                 positions,
@@ -1035,7 +1153,7 @@ def finalize_detail_layout(
                 top_y=top_y,
                 min_gap=MIN_HORIZONTAL_BLOCK_GAP,
             )
-            _align_and_stack_inline_frames(positions, graph, min_gap=INLINE_FRAME_STACK_GAP)
+            _align_and_stack_inline_frames(positions, graph)
         plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
 
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
@@ -1066,13 +1184,29 @@ def finalize_detail_layout(
             top_y=top_y,
             min_gap=MIN_HORIZONTAL_BLOCK_GAP,
         )
-        _align_and_stack_inline_frames(positions, graph, min_gap=INLINE_FRAME_STACK_GAP)
+        _align_and_stack_inline_frames(positions, graph)
     _repack_after_caption_nudges(
         ax,
         graph,
         positions,
         plan,
         detail_fill=fill,
+        min_gap=VALIDATE_MIN_GAP,
+    )
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    _ensure_input_above_inline_frames(positions, elements, min_gap=VALIDATE_MIN_GAP)
+    _separate_parallel_tiles_from_inline_frames(
+        positions,
+        elements,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+    )
+    _separate_overlapping_inline_frames(
+        positions,
+        graph,
+        elements,
         min_gap=VALIDATE_MIN_GAP,
     )
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)

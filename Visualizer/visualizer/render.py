@@ -25,9 +25,12 @@ from visualizer.block_tree import (
     collect_parallel_gate_wrappers,
     collect_nested_diagrams,
     is_method_wrapper,
+    is_simple_modeled_tile,
     is_single_function_tree,
     is_straight_line_module,
     spine_expanded_frame_label,
+    tile_display_labels,
+    tile_sublabel,
     wrapper_bullet,
     wrapper_bullet_lines,
     wrapper_module_comment,
@@ -44,6 +47,8 @@ from visualizer.sizing import (
     box_height_for_content,
     box_width_for_text_width,
     estimate_block_size_for_node,
+    INPUT_PAD_X,
+    INPUT_PAD_Y,
     min_vertical_block_gap,
     single_line_box_height,
 )
@@ -54,7 +59,6 @@ from visualizer.computation_graph import (
     SYNTHETIC_INPUT,
     SYNTHETIC_MULTIPLY,
     LayoutPosition,
-    _center_positions_horizontally,
     _estimate_graph_height,
     _node_content_left,
     _node_content_right,
@@ -157,7 +161,7 @@ def _finalize_svg_styling(svg: str) -> str:
 
 def _detail_block_facecolor(block: BlockNode) -> str:
     """Face color for nodes drawn inside a detailed block-internals graph."""
-    if block.is_basic:
+    if block.is_basic or is_simple_modeled_tile(block):
         return COLORS["basic_op"]
     return ROLE_COLORS.get(block.role, ROLE_COLORS["other"])
 
@@ -233,6 +237,8 @@ class Node:
     sublabel: str | None = None
     fontsize: float = 9.0
     residual_merge: bool = False
+    pad_x: float | None = None
+    pad_y: float | None = None
 
     @property
     def cx(self) -> float:
@@ -297,7 +303,9 @@ def _draw_box(
         zorder=zorder,
     )
     ax.add_patch(patch)
-    title_y = node.top - BLOCK_PAD_Y
+    pad_x = node.pad_x if node.pad_x is not None else BLOCK_PAD_X
+    pad_y = node.pad_y if node.pad_y is not None else BLOCK_PAD_Y
+    title_y = node.top - pad_y
     if node.sublabel:
         sub_fontsize = max(6.5, node.fontsize - 1.5)
         ax.text(
@@ -523,21 +531,13 @@ def _ffn_label(spec: ArchitectureSpec) -> tuple[str, str | None]:
                 labels.append(variant.ffn_label)
         if len(labels) > 1:
             if "MoE" in labels:
-                active = spec.num_experts_per_tok or "?"
                 label = f"MoE / {spec.ffn_type or 'FFN'}"
-                sub = f"{active} active / token; dense prefix"
-                if spec.num_shared_experts:
-                    sub += f", {spec.num_shared_experts} shared"
-                return label, sub
+                return label, None
             return " / ".join(labels), None
     if spec.decoder_type == "Sparse MoE":
         experts = spec.num_experts or "?"
-        active = spec.num_experts_per_tok or "?"
         label = f"MoE ({experts} experts)"
-        sub = f"{active} active / token"
-        if spec.num_shared_experts:
-            sub += f", {spec.num_shared_experts} shared"
-        return label, sub
+        return label, None
     return spec.ffn_type, None
 
 
@@ -886,7 +886,7 @@ def _default_stack_tail(spec: ArchitectureSpec) -> list[BlockComponent]:
             attr_name="lm_head",
             class_name="Linear",
             role="head",
-            label="LM head / output projection",
+            label="Linear",
             forward_order=1,
         ),
     ]
@@ -916,6 +916,8 @@ def _spine_display_label(component: BlockComponent, spec: ArchitectureSpec) -> s
 
 
 def _spine_sublabel(component: BlockComponent) -> str | None:
+    if component.role == "embedding":
+        return "Gather rows by token id"
     if displays_as_linear(component.attr_name, component.class_name):
         return "Linear"
     return None
@@ -1329,6 +1331,8 @@ def _make_node(
     text_color: str = "white",
     sublabel: str | None = None,
     fontsize: float = 9.0,
+    pad_x: float | None = None,
+    pad_y: float | None = None,
 ) -> Node:
     return Node(
         node_id=node_id,
@@ -1341,6 +1345,8 @@ def _make_node(
         text_color=text_color,
         sublabel=sublabel,
         fontsize=fontsize,
+        pad_x=pad_x,
+        pad_y=pad_y,
     )
 
 
@@ -2032,8 +2038,9 @@ def _graph_method_wrapper_attrs(
     tree: BlockNode,
     *,
     prefix_steps: list[BlockNode] | None = None,
+    basic_ops: BasicOpFilter | None = None,
 ) -> set[str]:
-    graph = build_computation_graph(tree, prefix_steps=prefix_steps)
+    graph = build_computation_graph(tree, prefix_steps=prefix_steps, basic_ops=basic_ops)
     return {
         spec.block.attr_name
         for spec in graph.nodes
@@ -2068,6 +2075,8 @@ def _resize_input_nodes(
             input_sublabel,
             fontsize=7.2,
             sub_fontsize=6.5,
+            pad_x=INPUT_PAD_X,
+            pad_y=INPUT_PAD_Y,
         )
         pos.width = max(pos.width, width)
         pos.height = max(pos.height, height)
@@ -2174,6 +2183,8 @@ def _build_detail_draw_plan(
                 text_color=COLORS["text"],
                 sublabel=input_sublabel,
                 fontsize=7.2,
+                pad_x=INPUT_PAD_X,
+                pad_y=INPUT_PAD_Y,
             )
             plan.node_draws.append((input_leaf, {}))
             continue
@@ -2189,6 +2200,8 @@ def _build_detail_draw_plan(
                 COLORS["bg"],
                 text_color=COLORS["residual"],
                 fontsize=6.5,
+                pad_x=INPUT_PAD_X,
+                pad_y=INPUT_PAD_Y,
             )
             plan.node_draws.append(
                 (
@@ -2237,19 +2250,20 @@ def _build_detail_draw_plan(
             continue
 
         display_label = spec.label
-        if index in inline_frame_members:
-            sublabel = None
-        elif spec.sublabel is not None:
+        sublabel: str | None
+        if spec.sublabel is not None:
             sublabel = spec.sublabel or None
         else:
-            sublabel = block_sublabel(block)
+            display_label, sublabel = tile_display_labels(
+                block,
+                spec_label=spec.label,
+                in_inline_frame=index in inline_frame_members,
+                port_label=spec.port_label,
+                port_style=spec.port_style,
+            )
 
         if spec.port_label:
-            if spec.port_style == "inline":
-                display_label = spec.port_label
-                if block is not None and index not in inline_frame_members:
-                    sublabel = block.attr_name
-            elif spec.port_style == "floating":
+            if spec.port_style == "floating":
                 label_x = pos.cx - pos.width / 2 - 0.10
                 label_y = pos.top_y - pos.height / 2
                 plan.branch_labels.append(
@@ -2326,12 +2340,17 @@ def _render_laid_out_computation_graph(
     include_input: bool = True,
     min_left: float | None = None,
     forbidden_regions: list | None = None,
-    section_frame_w: float | None = None,
+    basic_ops: BasicOpFilter | None = None,
 ) -> tuple[float, float, _RenderAnchor | None]:
     """Lay out a computation graph with graph-layout and draw it."""
     from visualizer.render_validate import finalize_detail_layout
 
-    graph = build_computation_graph(root, prefix_steps=prefix_steps, include_input=include_input)
+    graph = build_computation_graph(
+        root,
+        prefix_steps=prefix_steps,
+        include_input=include_input,
+        basic_ops=basic_ops,
+    )
     if root_frame_label:
         add_root_pipeline_frame(graph, root, label=root_frame_label)
     from visualizer.computation_graph import measure_graph_node_sizes
@@ -2344,6 +2363,7 @@ def _render_laid_out_computation_graph(
         top_y=top_y,
         block_w=block_w,
         block_h=est_h,
+        content_left=min_left,
     )
     if not positions:
         return top_y - est_h, cx + block_w / 2, None
@@ -2362,13 +2382,6 @@ def _render_laid_out_computation_graph(
     anchors = _anchors_from_detail_plan(positions, plan)
 
     frame_left, frame_right, frame_bottom, frame_top = _detail_content_bounds(positions)
-    if section_frame_w is not None:
-        content_w = frame_right - frame_left
-        if section_frame_w > content_w:
-            center = (frame_left + frame_right) / 2
-            half = section_frame_w / 2
-            frame_left = center - half
-            frame_right = center + half
     frame_w = frame_right - frame_left
     frame_h = frame_top - frame_bottom
     block_patch = FancyBboxPatch(
@@ -2567,12 +2580,12 @@ def _render_block_tree_node(
     cx: float,
     top_y: float,
     block_w: float,
-    section_frame_w: float | None = None,
     input_sublabel: str | None = None,
     prefix_steps: list[BlockNode] | None = None,
     inline_linear_frames: bool = True,
     min_left: float | None = None,
     forbidden_regions: list | None = None,
+    basic_ops: BasicOpFilter | None = None,
 ) -> tuple[float, float | None]:
     """Render a block tree node via computation-graph layout (always includes forward input)."""
     if is_method_wrapper(node):
@@ -2590,7 +2603,7 @@ def _render_block_tree_node(
         inline_linear_frames=inline_linear_frames,
         min_left=min_left,
         forbidden_regions=forbidden_regions,
-        section_frame_w=section_frame_w,
+        basic_ops=basic_ops,
     )
     return bottom, frame_right
 
@@ -2598,9 +2611,10 @@ def _render_block_tree_node(
 def _detail_sections_to_render(spec: ArchitectureSpec) -> list[tuple[str, BlockNode, str | None]]:
     """Return titled block trees rendered as internal diagram subsections."""
     sections: list[tuple[str, BlockNode, str | None]] = []
+    basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
     for title, tree in spec.detailed_block_trees:
         sections.append((title, tree, _format_input_source_sublabel(tree.input_source)))
-        for sub_title, sub_tree in collect_nested_diagrams(tree):
+        for sub_title, sub_tree in collect_nested_diagrams(tree, basic_ops=basic_ops):
             if is_single_function_tree(sub_tree):
                 if _omit_from_detailed_view(sub_tree):
                     continue
@@ -2624,16 +2638,18 @@ def _render_diagram_section(
     inline_linear_frames: bool = True,
     min_left: float | None = None,
     forbidden_regions: list | None = None,
+    basic_ops: BasicOpFilter | None = None,
 ) -> float:
     """Render one titled block diagram. Returns y below the diagram."""
     title_y = cursor
     frame_top_pad = _detail_frame_edge_pad()
     diagram_top = cursor - SECTION_TITLE_HEIGHT - SECTION_TITLE_GAP - frame_top_pad
+    title_x = min_left if min_left is not None else cx
     ax.text(
-        cx,
+        title_x,
         title_y,
         title,
-        ha="center",
+        ha="left" if min_left is not None else "center",
         va="bottom",
         fontsize=PANEL_TITLE_FONT,
         color=PANEL_TITLE_COLOR,
@@ -2646,12 +2662,12 @@ def _render_diagram_section(
         cx=cx,
         top_y=diagram_top,
         block_w=block_w - 0.2,
-        section_frame_w=block_w,
         input_sublabel=input_sublabel,
         prefix_steps=prefix_steps,
         inline_linear_frames=inline_linear_frames,
         min_left=min_left,
         forbidden_regions=forbidden_regions,
+        basic_ops=basic_ops,
     )
     return diagram_bottom - 0.5
 
@@ -2664,12 +2680,12 @@ def _render_block_tree(
     cx: float,
     top_y: float,
     block_w: float,
-    section_frame_w: float | None = None,
     input_sublabel: str | None = None,
     prefix_steps: list[BlockNode] | None = None,
     inline_linear_frames: bool = True,
     min_left: float | None = None,
     forbidden_regions: list | None = None,
+    basic_ops: BasicOpFilter | None = None,
 ) -> tuple[float, float | None]:
     """Render one recursive block tree from top_y downward."""
     return _render_block_tree_node(
@@ -2679,12 +2695,12 @@ def _render_block_tree(
         cx=cx,
         top_y=top_y,
         block_w=block_w,
-        section_frame_w=section_frame_w,
         input_sublabel=input_sublabel,
         prefix_steps=prefix_steps,
         inline_linear_frames=inline_linear_frames,
         min_left=min_left,
         forbidden_regions=forbidden_regions,
+        basic_ops=basic_ops,
     )
 
 
@@ -2703,7 +2719,7 @@ def _render_detailed_internals(
     compact_header: bool = False,
 ) -> float:
     """Render recursive internal block diagrams below the main model."""
-    from visualizer.render_validate import measure_uniform_detail_section_width
+    from visualizer.render_validate import measure_detail_tree_content_width
 
     panel_x = panel_x if panel_x is not None else cx + 3.0
     detail_min_left = DIAGRAM_LEFT_MARGIN + 0.05
@@ -2712,10 +2728,10 @@ def _render_detailed_internals(
     section_drop = 0.22 if compact_header else 0.35
     cursor = start_y - title_drop
     ax.text(
-        cx,
+        detail_min_left,
         cursor,
         "Block internals",
-        ha="center",
+        ha="left",
         va="center",
         fontsize=PANEL_TITLE_FONT,
         color=PANEL_TITLE_COLOR,
@@ -2739,6 +2755,7 @@ def _render_detailed_internals(
     bottom = cursor
     wrappers: list[BlockNode] = []
     seen: set[str] = set()
+    basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
     for node in spec.detailed_wrapped_modules:
         if _omit_from_detailed_view(node):
             continue
@@ -2747,30 +2764,32 @@ def _render_detailed_internals(
         seen.add(node.attr_name)
         wrappers.append(node)
 
-    uniform_block_w = measure_uniform_detail_section_width(
-        ax,
-        spec,
-        cx=cx,
-        detail_fill=COLORS["detail_fill"],
-        min_left=detail_min_left,
-    )
-
     for title, tree, input_sublabel in _detail_sections_to_render(spec):
+        section_w = measure_detail_tree_content_width(
+            ax,
+            tree,
+            cx=cx,
+            detail_fill=COLORS["detail_fill"],
+            min_left=detail_min_left,
+            input_sublabel=input_sublabel,
+            basic_ops=basic_ops,
+        )
         cursor = _render_diagram_section(
             layout,
             ax,
             cx=cx,
             cursor=cursor,
-            block_w=uniform_block_w,
+            block_w=section_w,
             title=title,
             tree=tree,
             input_sublabel=input_sublabel,
             inline_linear_frames=inline_linear_frames,
             min_left=detail_min_left,
             forbidden_regions=forbidden_regions,
+            basic_ops=basic_ops,
         )
         bottom = cursor
-        for sub_title, sub_tree in collect_nested_diagrams(tree):
+        for sub_title, sub_tree in collect_nested_diagrams(tree, basic_ops=basic_ops):
             if is_single_function_tree(sub_tree):
                 if _omit_from_detailed_view(sub_tree):
                     continue
@@ -2783,8 +2802,8 @@ def _render_detailed_internals(
 
     rendered_in_graph: set[str] = set()
     for title, tree in spec.detailed_block_trees:
-        rendered_in_graph.update(_graph_method_wrapper_attrs(tree))
-        for _, sub_tree in collect_nested_diagrams(tree):
+        rendered_in_graph.update(_graph_method_wrapper_attrs(tree, basic_ops=basic_ops))
+        for _, sub_tree in collect_nested_diagrams(tree, basic_ops=basic_ops):
             if is_single_function_tree(sub_tree):
                 continue
             rendered_in_graph.update(_graph_method_wrapper_attrs(sub_tree))
@@ -2983,6 +3002,7 @@ def render_diagram(
                     draw_section_frame=False,
                     root_frame_label=frame_title if inline_linear_frames else None,
                     include_input=comp.role != "positional",
+                    basic_ops=spec.basic_ops or BasicOpFilter.for_detailed(),
                 )
                 if spine and expanded_entry is not None:
                     _arrow(
@@ -3096,10 +3116,10 @@ def render_diagram(
     diagram_bottom = tail_nodes[-1].bottom if tail_nodes else frame_bottom
 
     if detailed:
-        from visualizer.render_validate import measure_uniform_detail_section_width
+        from visualizer.render_validate import measure_max_detail_section_width
 
         detail_min_left = DIAGRAM_LEFT_MARGIN + 0.05
-        detail_content_w = measure_uniform_detail_section_width(
+        detail_content_w = measure_max_detail_section_width(
             ax,
             spec,
             cx=cx,

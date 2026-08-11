@@ -63,6 +63,7 @@ SYNTHETIC_ROUTER_GATHER = "@router_gather"
 SYNTHETIC_ROUTER_RENORM = "@router_renorm"
 SYNTHETIC_ROUTER_SCALE = "@router_scale"
 SYNTHETIC_GATE_ACTIVATION = "@gate_activation"
+SYNTHETIC_GATE_RESHAPE = "@gate_reshape"
 _GATE_ACTIVATION_NAMES = {
     "sigmoid": "Sigmoid",
     "softmax": "Softmax",
@@ -534,21 +535,17 @@ def _classify_role(attr_name: str, class_name: str) -> str:
 
 def displays_as_linear(attr_name: str, class_name: str | None) -> bool:
     """True when a module should be drawn as a plain Linear op."""
-    if class_name and re.match(r"(?i)^Linear$", class_name):
-        return True
-    if attr_name == "embed_tokens" and class_name and re.match(r"(?i)^Embedding$", class_name):
-        return True
-    return False
+    return bool(class_name and re.match(r"(?i)^Linear$", class_name))
 
 
 def _label_for(role: str, class_name: str, attr_name: str) -> str:
     if role == "embedding":
-        if displays_as_linear(attr_name, class_name):
+        if attr_name == "embed_tokens":
             return "Token Embedding"
         return class_name if len(class_name) <= 24 else attr_name
     if role == "head":
         if displays_as_linear(attr_name, class_name):
-            return "LM head / output projection"
+            return "Linear"
         return class_name if len(class_name) <= 24 else attr_name
     if role == "positional":
         if class_name in {"RotaryEmbedding", "RotaryEmbeddingModule"}:
@@ -740,8 +737,6 @@ def _assignment_details(node: ast.AST, class_name: str) -> list[str]:
             if isinstance(raw, str):
                 details.append(_GATE_ACTIVATION_NAMES.get(raw.lower(), raw.capitalize()))
 
-    if MOE_CLASS_RE.search(class_name):
-        details.append("mixture-of-experts")
     if re.search(r"SharedExpert|shared", class_name, re.I):
         details.append("shared expert path")
     return details
@@ -1047,8 +1042,8 @@ def attention_kernel_label(details: list[str]) -> str:
     if kernel:
         lowered = kernel.lower()
         if any(token in lowered for token in ("flash", "sdpa")):
-            return "Flash attention (QKᵀV)"
-    return "Attention (QKᵀV)"
+            return "Flash attention"
+    return "Attention"
 
 
 def attention_kernel_details(
@@ -1071,7 +1066,7 @@ def attention_kernel_details(
         return lines
 
     if kernel and kernel.lower() in _SYNTHETIC_ATTENTION_NAMES:
-        return ["scaled dot-product attention (QKᵀV)"]
+        return []
 
     if kernel:
         lines = [f"kernel: {kernel}"]
@@ -1079,7 +1074,7 @@ def attention_kernel_details(
             lines.append(f"inputs: {','.join(attention_inputs.keys())}")
         return lines
 
-    return ["scaled dot-product attention"]
+    return []
 
 
 def _capture_attention_inputs(

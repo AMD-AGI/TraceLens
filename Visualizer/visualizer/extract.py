@@ -88,6 +88,7 @@ class ArchitectureSpec:
     detailed_block_trees: list[tuple[str, BlockNode]] = field(default_factory=list)
     detailed_wrapped_modules: list[BlockNode] = field(default_factory=list)
     class_registry: dict = field(default_factory=dict, repr=False)
+    basic_ops: BasicOpFilter | None = None
 
 
 def _first(*values: Any) -> Any:
@@ -590,6 +591,10 @@ def _finalize_layer_repeat_lines(spec: ArchitectureSpec) -> None:
             if line not in existing:
                 lines.append(line)
                 existing.add(line)
+    if spec.raw_config:
+        from visualizer.layer_repeat_simplify import simplify_layer_repeat_lines
+
+        lines = simplify_layer_repeat_lines(lines, spec.raw_config)
     spec.layer_repeat_lines = lines
 
 
@@ -748,7 +753,9 @@ def load_architecture(
         spec.github_source = code_labels[0]
     spec.code_sources = code_labels or spec.code_sources
     if detailed:
-        _build_detailed_block_trees(spec, basic_ops or BasicOpFilter.for_detailed())
+        resolved_basic_ops = basic_ops or BasicOpFilter.for_detailed()
+        spec.basic_ops = resolved_basic_ops
+        _build_detailed_block_trees(spec, resolved_basic_ops)
     return spec
 
 
