@@ -83,6 +83,10 @@ _SYNTHETIC_ATTENTION_NAMES = {
     "sdpa_attention_forward",
     "attention_interface",
 }
+_KERNEL_MERGE_NAME_RE = re.compile(
+    r"(attention|attn|kda|recurrent|flash|sdpa|linear_attn|delta)",
+    re.IGNORECASE,
+)
 _SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "getattr"})
 
 
@@ -108,6 +112,48 @@ _METHOD_CHAIN_OPS = {
     "sum",
     "sigmoid",
 }
+
+_DATA_MOVEMENT_NAMES = frozenset(
+    {
+        "cat",
+        "stack",
+        "split",
+        "view",
+        "reshape",
+        "transpose",
+        "permute",
+        "contiguous",
+        "squeeze",
+        "unsqueeze",
+        "flatten",
+        "pad",
+        "index_select",
+        "gather",
+        "rearrange",
+        "index_first_axis",
+        "pad_input",
+        "get_unpad_data",
+        "unpad_input",
+        "chunk",
+        "concat",
+        "where",
+        "masked_fill",
+        "softmax",
+        "dropout",
+        "clone",
+        "detach",
+        "to",
+        "expand",
+        "repeat",
+        "roll",
+        "triu",
+        "tril",
+        "matmul",
+        "bmm",
+        "einsum",
+    }
+    | _METHOD_CHAIN_OPS
+)
 
 
 def _assign_target(stmt: ast.AST) -> str | None:
@@ -173,8 +219,9 @@ def _extract_self_calls_ordered(node: ast.AST, out: list[str]) -> None:
             return
 
         target = _expr_name(func)
-        if target in _SYNTHETIC_ATTENTION_NAMES:
+        if target in _SYNTHETIC_ATTENTION_NAMES or _is_kernel_merge_call(func):
             _append_forward_call(out, SYNTHETIC_ATTENTION)
+            return
         return
 
     if isinstance(node, ast.BinOp):
@@ -589,7 +636,13 @@ class _ModelAstVisitor(ast.NodeVisitor):
             if isinstance(item, ast.FunctionDef) and item.name == "__init__":
                 init_assignments, init_details, init_assignment_options = _parse_init(item)
             if isinstance(item, ast.FunctionDef) and item.name == "forward":
-                forward_calls, norm_before, attention_inputs, side_inputs = _parse_forward(item)
+                (
+                    forward_calls,
+                    norm_before,
+                    attention_inputs,
+                    side_inputs,
+                    parsed_step_details,
+                ) = _parse_forward(item)
                 alternate = _alternate_forward_dispatches(item)
                 if alternate:
                     forward_calls = [call for call in forward_calls if call not in alternate]
@@ -599,6 +652,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     parallel_gates = [gate for gate in parallel_gates if gate != forward_calls[0]]
                 gate_activations = _parallel_gate_activations_from_forward(item, parallel_gates)
                 forward_step_details = _router_forward_step_details(node.name, item, forward_calls)
+                forward_step_details.update(parsed_step_details)
 
         self.classes[node.name] = ClassStructure(
             name=node.name,
@@ -681,6 +735,10 @@ def _assignment_details(node: ast.AST, class_name: str) -> list[str]:
             value = ast.literal_eval(keyword.value) if _is_literal(keyword.value) else None
             if value is not None:
                 details.append(f"{keyword.arg}={value}")
+        if keyword.arg == "activation" and _is_literal(keyword.value):
+            raw = ast.literal_eval(keyword.value)
+            if isinstance(raw, str):
+                details.append(_GATE_ACTIVATION_NAMES.get(raw.lower(), raw.capitalize()))
 
     if MOE_CLASS_RE.search(class_name):
         details.append("mixture-of-experts")
@@ -760,6 +818,29 @@ def _trace_var_chain(
     return _merge_chains_from_value(value, var_chains, stmt_calls)
 
 
+def _tuple_source_names(value: ast.AST) -> list[str] | None:
+    """Names of inputs when a tuple assignment maps 1:1 over an input tuple."""
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "map":
+        if len(value.args) < 2 or not isinstance(value.args[1], (ast.Tuple, ast.List)):
+            return None
+        names: list[str] = []
+        for elt in value.args[1].elts:
+            if isinstance(elt, ast.Name):
+                names.append(elt.id)
+            else:
+                return None
+        return names
+    if isinstance(value, (ast.Tuple, ast.List)):
+        names = []
+        for elt in value.elts:
+            if isinstance(elt, ast.Name):
+                names.append(elt.id)
+            else:
+                return None
+        return names
+    return None
+
+
 def _record_assign_targets(
     node: ast.Assign,
     stmt_calls: list[str],
@@ -777,10 +858,224 @@ def _record_assign_targets(
 
     target = node.targets[0]
     if isinstance(target, ast.Tuple):
+        source_names = _tuple_source_names(node.value)
+        if source_names is not None and len(source_names) == len(target.elts):
+            zipped = True
+            for elt, source_name in zip(target.elts, source_names):
+                if not isinstance(elt, ast.Name):
+                    zipped = False
+                    break
+                source_chain = list(var_chains.get(source_name, []))
+                for call in stmt_calls:
+                    if call not in source_chain:
+                        source_chain.append(call)
+                assign_one(elt, source_chain or list(stmt_calls))
+            if zipped:
+                return
         for elt in target.elts:
             assign_one(elt, chain)
         return
     assign_one(target, chain)
+
+
+_KERNEL_PRODUCER_SKIP_KWARGS = frozenset(
+    {
+        "initial_state",
+        "recurrent_state",
+        "A_log",
+        "dt_bias",
+        "cu_seqlens",
+        "cache",
+        "output_final_state",
+        "use_qk_l2norm_in_kernel",
+        "use_gate_in_kernel",
+        "use_beta_sigmoid_in_kernel",
+        "safe_gate",
+        "lower_bound",
+        "transpose_state_layout",
+        "attention_mask",
+        "position_ids",
+        "past_key_values",
+        "cache_params",
+    }
+)
+
+
+def _kernel_input_label(name: str) -> str:
+    normalized = {
+        "q": "Q",
+        "query": "Q",
+        "query_states": "Q",
+        "k": "K",
+        "key": "K",
+        "key_states": "K",
+        "v": "V",
+        "value": "V",
+        "value_states": "V",
+        "g": "G",
+        "gate": "G",
+        "beta": "β",
+    }
+    lowered = name.lower()
+    if lowered in normalized:
+        return normalized[lowered]
+    if len(name) <= 4:
+        return name.upper()
+    return name
+
+
+def _is_data_movement_call(func: ast.AST) -> bool:
+    name = _expr_name(func)
+    if not name:
+        return False
+    base = name.split(".")[-1]
+    return base in _DATA_MOVEMENT_NAMES
+
+
+def _is_kernel_merge_call(func: ast.AST) -> bool:
+    if _is_data_movement_call(func):
+        return False
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "self":
+        return False
+    if _is_functional_linear_call(func):
+        return False
+    name = _expr_name(func) or ""
+    base = name.split(".")[-1]
+    if base in _SYNTHETIC_ATTENTION_NAMES:
+        return True
+    return bool(_KERNEL_MERGE_NAME_RE.search(base))
+
+
+def _collect_kernel_producers(
+    call: ast.Call,
+    var_chains: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    producers: dict[str, list[str]] = {}
+
+    def consider(label: str, arg: ast.AST) -> None:
+        if not isinstance(arg, ast.Name):
+            return
+        chain = var_chains.get(arg.id, [])
+        if chain:
+            producers[_kernel_input_label(label)] = list(chain)
+
+    for keyword in call.keywords:
+        if keyword.arg in _KERNEL_PRODUCER_SKIP_KWARGS:
+            continue
+        if isinstance(keyword.value, ast.Attribute):
+            continue
+        if keyword.arg:
+            consider(keyword.arg, keyword.value)
+
+    args = call.args
+    start = 1 if args and isinstance(args[0], ast.Name) and args[0].id == "self" else 0
+    positional_labels = ["Q", "K", "V"]
+    for index, arg in enumerate(args[start:], start=start):
+        label = positional_labels[index - start] if (index - start) < len(positional_labels) else f"in{index - start}"
+        consider(label, arg)
+
+    return producers
+
+
+def _inject_kernel_merge(
+    node: ast.AST,
+    var_chains: dict[str, list[str]],
+    stmt_calls: list[str],
+    attention_inputs: dict[str, list[str]],
+    forward_step_details: dict[str, list[str]],
+) -> None:
+    if any(label in attention_inputs for label in ("Q", "K", "V")):
+        return
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        producers = _collect_kernel_producers(call, var_chains)
+        if not producers:
+            continue
+        is_named_kernel = _is_kernel_merge_call(call.func)
+        is_generic_external = (
+            not isinstance(call.func, ast.Attribute)
+            and len(producers) >= 3
+            and _expr_name(call.func) is not None
+        )
+        if not (is_named_kernel or is_generic_external):
+            continue
+        if _is_data_movement_call(call.func):
+            continue
+        if SYNTHETIC_ATTENTION not in stmt_calls:
+            stmt_calls.append(SYNTHETIC_ATTENTION)
+        attention_inputs.update(producers)
+        kernel_name = _expr_name(call.func) or "kernel"
+        forward_step_details[SYNTHETIC_ATTENTION] = [f"kernel: {kernel_name.split('.')[-1]}"]
+        return
+
+
+def _dedupe_kernel_merge_calls(calls: list[str]) -> list[str]:
+    if SYNTHETIC_ATTENTION not in calls:
+        return calls
+    first = calls.index(SYNTHETIC_ATTENTION)
+    without = [call for call in calls if call != SYNTHETIC_ATTENTION]
+    without.insert(first, SYNTHETIC_ATTENTION)
+    return without
+
+
+def kernel_name_from_step_details(details: list[str]) -> str | None:
+    for item in details:
+        if item.startswith("kernel:"):
+            return item.split(":", 1)[1].strip()
+    return None
+
+
+_KDA_KERNEL_MARKERS = ("kda", "delta", "linear_attn", "linear_attention")
+
+
+def _is_kda_attention_kernel(kernel: str | None) -> bool:
+    if not kernel:
+        return False
+    lowered = kernel.lower()
+    return any(marker in lowered for marker in _KDA_KERNEL_MARKERS)
+
+
+def attention_kernel_label(details: list[str]) -> str:
+    kernel = kernel_name_from_step_details(details)
+    if _is_kda_attention_kernel(kernel):
+        return "Delta attention (KDA)"
+    if kernel:
+        lowered = kernel.lower()
+        if any(token in lowered for token in ("flash", "sdpa")):
+            return "Flash attention (QKᵀV)"
+    return "Attention (QKᵀV)"
+
+
+def attention_kernel_details(
+    details: list[str],
+    attention_inputs: dict[str, list[str]] | None = None,
+) -> list[str]:
+    kernel = kernel_name_from_step_details(details)
+    extra_inputs: list[str] = []
+    if attention_inputs:
+        extra_inputs = [label for label in attention_inputs if label not in {"Q", "K", "V"}]
+
+    if _is_kda_attention_kernel(kernel):
+        summary = "recurrent delta rule (not softmax QKᵀV)"
+        if kernel:
+            summary = f"{summary} · {kernel}"
+        lines = [summary]
+        if extra_inputs:
+            lines.append(f"inputs: Q,K,V,{','.join(extra_inputs)}")
+        lines.append("S ← (I−βkkᵀ)Diag(α)S + βkvᵀ")
+        return lines
+
+    if kernel and kernel.lower() in _SYNTHETIC_ATTENTION_NAMES:
+        return ["scaled dot-product attention (QKᵀV)"]
+
+    if kernel:
+        lines = [f"kernel: {kernel}"]
+        if attention_inputs:
+            lines.append(f"inputs: {','.join(attention_inputs.keys())}")
+        return lines
+
+    return ["scaled dot-product attention"]
 
 
 def _capture_attention_inputs(
@@ -1024,13 +1319,14 @@ def _parallel_gate_activations_from_forward(
 
 def _parse_forward(
     func: ast.FunctionDef,
-) -> tuple[list[str], list[str], dict[str, list[str]], dict[str, list[SideInputSpec]]]:
+) -> tuple[list[str], list[str], dict[str, list[str]], dict[str, list[SideInputSpec]], dict[str, list[str]]]:
     calls: list[str] = []
     norm_before: list[str] = []
     pending_norm: str | None = None
     var_chains: dict[str, list[str]] = {}
     attention_inputs: dict[str, list[str]] = {}
     side_inputs: dict[str, list[SideInputSpec]] = {}
+    forward_step_details: dict[str, list[str]] = {}
     forward_input_names = _forward_input_names(func)
 
     for node in func.body:
@@ -1043,8 +1339,9 @@ def _parse_forward(
             attention_inputs,
             side_inputs,
             forward_input_names,
+            forward_step_details,
         )
-    return calls, norm_before, attention_inputs, side_inputs
+    return _dedupe_kernel_merge_calls(calls), norm_before, attention_inputs, side_inputs, forward_step_details
 
 
 def _walk_forward_stmt(
@@ -1056,10 +1353,18 @@ def _walk_forward_stmt(
     attention_inputs: dict[str, list[str]],
     side_inputs: dict[str, list[SideInputSpec]],
     forward_input_names: set[str],
+    forward_step_details: dict[str, list[str]],
 ) -> str | None:
     if isinstance(node, ast.Assign):
         stmt_calls: list[str] = []
         _extract_self_calls_ordered(node.value, stmt_calls)
+        _inject_kernel_merge(
+            node.value,
+            var_chains,
+            stmt_calls,
+            attention_inputs,
+            forward_step_details,
+        )
         _record_assign_targets(node, stmt_calls, var_chains)
         _capture_attention_inputs(node, var_chains, attention_inputs)
         _capture_call_side_inputs(node, var_chains, forward_input_names, side_inputs, calls)
@@ -1068,6 +1373,13 @@ def _walk_forward_stmt(
     if isinstance(node, ast.AnnAssign) and node.value is not None:
         stmt_calls = []
         _extract_self_calls_ordered(node.value, stmt_calls)
+        _inject_kernel_merge(
+            node.value,
+            var_chains,
+            stmt_calls,
+            attention_inputs,
+            forward_step_details,
+        )
         if isinstance(node.target, ast.Name):
             chain = _trace_var_chain(node.value, var_chains, stmt_calls)
             if chain:
@@ -1079,6 +1391,13 @@ def _walk_forward_stmt(
     if isinstance(node, ast.Expr):
         stmt_calls = []
         _extract_self_calls_ordered(node.value, stmt_calls)
+        _inject_kernel_merge(
+            node.value,
+            var_chains,
+            stmt_calls,
+            attention_inputs,
+            forward_step_details,
+        )
         _capture_attention_inputs(node, var_chains, attention_inputs)
         _capture_call_side_inputs(node, var_chains, forward_input_names, side_inputs, calls)
         return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
@@ -1086,12 +1405,26 @@ def _walk_forward_stmt(
     if isinstance(node, ast.AugAssign):
         stmt_calls = []
         _extract_self_calls_ordered(node.value, stmt_calls)
+        _inject_kernel_merge(
+            node.value,
+            var_chains,
+            stmt_calls,
+            attention_inputs,
+            forward_step_details,
+        )
         _capture_call_side_inputs(node, var_chains, forward_input_names, side_inputs, calls)
         return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
 
     if isinstance(node, ast.Return) and node.value is not None:
         stmt_calls = []
         _extract_self_calls_ordered(node.value, stmt_calls)
+        _inject_kernel_merge(
+            node.value,
+            var_chains,
+            stmt_calls,
+            attention_inputs,
+            forward_step_details,
+        )
         _capture_attention_inputs(node, var_chains, attention_inputs)
         _capture_call_side_inputs(node, var_chains, forward_input_names, side_inputs, calls)
         return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
@@ -1108,6 +1441,7 @@ def _walk_forward_stmt(
                 attention_inputs,
                 side_inputs,
                 forward_input_names,
+                forward_step_details,
             )
         return pending_norm
 
@@ -1122,6 +1456,7 @@ def _walk_forward_stmt(
                 attention_inputs,
                 side_inputs,
                 forward_input_names,
+                forward_step_details,
             )
         return pending_norm
 
@@ -1136,6 +1471,7 @@ def _walk_forward_stmt(
                 attention_inputs,
                 side_inputs,
                 forward_input_names,
+                forward_step_details,
             )
         return pending_norm
 
@@ -1441,14 +1777,15 @@ def _build_components(decoder: ClassStructure) -> list[BlockComponent]:
 
     for index, attr in enumerate(decoder.forward_calls):
         if attr == SYNTHETIC_ATTENTION:
+            step_details = decoder.forward_step_details.get(attr, [])
             components.append(
                 BlockComponent(
                     attr_name=attr,
                     class_name="AttentionOp",
                     role="attention",
-                    label="Attention (QKᵀV)",
+                    label=attention_kernel_label(step_details),
                     forward_order=index,
-                    details=["scaled dot-product attention"],
+                    details=attention_kernel_details(step_details, decoder.attention_inputs),
                 )
             )
             continue

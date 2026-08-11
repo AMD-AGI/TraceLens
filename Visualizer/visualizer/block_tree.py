@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -19,6 +20,8 @@ from visualizer.ast_analyze import (
     _ROUTER_SYNTHETICS,
     ClassStructure,
     SideInputSpec,
+    attention_kernel_details,
+    attention_kernel_label,
     displays_as_linear,
     expand_conditional_block_components,
     _build_components,
@@ -41,7 +44,7 @@ def is_method_wrapper(node: BlockNode) -> bool:
 def wrapper_bullet_lines(node: BlockNode) -> tuple[str, str]:
     """Return display label and method name for wrapped-module bullets."""
     attr = node.attr_name
-    if _is_parallel_gate_attr(attr):
+    if _is_output_gate_node(node) or _looks_like_output_gate_attr(attr):
         return _parallel_side_port_label(node), attr
     if displays_as_linear(attr, node.class_name):
         return "Linear", attr
@@ -75,41 +78,57 @@ def wrapper_skips_comment(node: BlockNode) -> bool:
     return any("residual" in detail.lower() for detail in node.details)
 
 
+def block_purpose(node: BlockNode) -> str | None:
+    """Generic one-line description of what a block computes."""
+    if node.class_name == "AttentionOp" or node.attr_name == SYNTHETIC_ATTENTION:
+        if any("delta rule" in detail.lower() for detail in node.details):
+            return "\n".join(detail for detail in node.details if not detail.startswith("kernel:"))
+
+    if node.class_name == "OutputGate" or (node.role == "gate" and node.details):
+        if node.details:
+            return "\n".join(node.details)
+
+    for detail in node.details:
+        cleaned = detail.strip()
+        if cleaned and not cleaned.startswith("method `") and not cleaned.startswith("kernel:"):
+            return cleaned
+
+    class_name = node.class_name or ""
+    role = node.role
+    attr = node.attr_name.lower()
+
+    if class_name == "OutputGate" or role == "gate":
+        return "Output gate — scales normalized output"
+    if class_name == "SituAndMul":
+        return "SiLU(gate) × up branch"
+    if class_name == "FusedRMSNormGated":
+        return "RMSNorm × gated activation"
+    if class_name == "Split" or node.attr_name == "split_gate_up":
+        return "Split fused gate/up projection"
+    if class_name in {"ActivationOp", "SituActivation"}:
+        return f"Apply {node.label} to gate half"
+    if class_name == "Multiply" or node.label in {"×", "Elementwise ×"}:
+        return "Multiply gate and up activations"
+    if role == "head" or attr == "lm_head":
+        return "Project to vocabulary logits"
+    if role == "router" or attr in {"gate", "router"}:
+        return "Score and route tokens to experts"
+    if role == "moe" or "moe" in attr or "expert" in attr:
+        return "Dispatch tokens to experts and combine outputs"
+    if role == "ffn":
+        return "Position-wise feed-forward transform"
+    if role == "norm":
+        return "Normalize activations"
+    if role == "embedding" or "embedding" in class_name.lower():
+        return "Map token IDs to embeddings"
+    return None
+
+
 def wrapper_module_comment(node: BlockNode) -> str | None:
     """Short description of what a wrapped module does, when applicable."""
     if wrapper_skips_comment(node):
         return None
-
-    for detail in node.details:
-        cleaned = detail.strip()
-        if cleaned and not cleaned.startswith("method `"):
-            return cleaned
-
-    attr = node.attr_name.lower()
-    role = node.role
-
-    if _is_parallel_gate_attr(node.attr_name):
-        return "Gates attention output on the parallel branch before o_proj"
-    if role == "head" or attr == "lm_head":
-        return "Projects final hidden states to vocabulary logits"
-    if role == "router" or attr in {"gate", "router"}:
-        return "Scores hidden states and selects expert routes"
-    if role == "moe" or "moe" in attr or "expert" in attr:
-        return "Dispatches tokens to experts and combines expert outputs"
-    if role == "ffn":
-        return "Applies a position-wise feed-forward transform"
-    if role == "norm":
-        return "Normalizes activations before the next sublayer"
-    if role == "embedding":
-        return "Maps token IDs to continuous embedding vectors"
-
-    class_lower = node.class_name.lower()
-    if "embedding" in class_lower:
-        return "Maps token IDs to continuous embedding vectors"
-    if "linear" in class_lower and attr == "lm_head":
-        return "Projects final hidden states to vocabulary logits"
-
-    return None
+    return block_purpose(node)
 
 
 def wrapper_panel_line(node: BlockNode) -> str:
@@ -133,7 +152,7 @@ def inline_wrapper_step_label(
         sub_step.attr_name, sub_step.class_name
     ):
         return "Linear"
-    return wrapper.label
+    return sub_step.label
 
 
 def collect_function_steps(node: BlockNode) -> list[BlockNode]:
@@ -202,6 +221,11 @@ def linear_pipeline_steps(node: BlockNode) -> list[BlockNode]:
 def inline_block_frame_label(block: BlockNode) -> str:
     """Display label for a dotted inline frame around an expanded sub-block."""
     return f"{block.label} ({block.attr_name})"
+
+
+def inline_block_frame_sublabel(block: BlockNode) -> str | None:
+    """Optional purpose line shown under an inline frame label."""
+    return block_purpose(block)
 
 
 def is_single_function_tree(node: BlockNode) -> bool:
@@ -281,10 +305,17 @@ def collect_method_wrappers(node: BlockNode) -> list[BlockNode]:
     return wrappers
 
 
-def _is_parallel_gate_attr(attr_name: str) -> bool:
-    """True for attention output gates like g_proj shown as inline 'gate' ports."""
+def _looks_like_output_gate_attr(attr_name: str) -> bool:
+    """True for common output-gate attribute names (e.g. g_proj, out_gate)."""
     attr = attr_name.strip("_").lower()
-    return "g_proj" in attr or (attr.endswith("gate") and attr not in {"gate", "router"})
+    if attr in {"gate", "router"}:
+        return False
+    return bool(re.search(r"g_proj|out_gate|output_gate|_gate$|^gate_", attr))
+
+
+def _is_output_gate_node(node: BlockNode) -> bool:
+    """True for parallel output-gate modules (e.g. g_proj wrapped as OutputGate)."""
+    return node.class_name == "OutputGate" or node.role == "gate"
 
 
 def collect_parallel_gate_wrappers(node: BlockNode, *, inside_output_gate: bool = False) -> list[BlockNode]:
@@ -292,8 +323,8 @@ def collect_parallel_gate_wrappers(node: BlockNode, *, inside_output_gate: bool 
     wrappers: list[BlockNode] = []
     gate_attrs = set(node.parallel_gates)
     for child in node.children:
-        in_gate = inside_output_gate or child.class_name == "OutputGate"
-        if not in_gate and (child.attr_name in gate_attrs or _is_parallel_gate_attr(child.attr_name)):
+        in_gate = inside_output_gate or _is_output_gate_node(child)
+        if not in_gate and child.attr_name in gate_attrs:
             if not _is_composite_block(child):
                 wrappers.append(child)
         wrappers.extend(collect_parallel_gate_wrappers(child, inside_output_gate=in_gate))
@@ -371,6 +402,7 @@ class SideFeedSegment:
 
     consumer: BlockNode
     sides: list[SideInputSpec]
+    side_producer_nodes: dict[str, BlockNode] = field(default_factory=dict)
 
 
 @dataclass
@@ -411,6 +443,13 @@ def _segment_for_step(node: BlockNode, step: BlockNode) -> ComputationSegment:
 
     has_prior_side = any(side.source_kind == "prior_step" for side in side_specs)
     has_residual_side = any(side.source_kind == "forward_input" for side in side_specs)
+    side_producer_nodes = {
+        side.source_chain[-1]: child
+        for side in side_specs
+        if side.source_kind == "prior_step" and side.source_chain
+        for child in node.children
+        if child.attr_name == side.source_chain[-1]
+    }
 
     if is_method_wrapper(step) and has_prior_side:
         op, sublabel = _method_combine_op(step)
@@ -433,12 +472,16 @@ def _segment_for_step(node: BlockNode, step: BlockNode) -> ComputationSegment:
             op_sublabel=sublabel,
         )
 
-    return SideFeedSegment(consumer=step, sides=list(side_specs))
+    return SideFeedSegment(
+        consumer=step,
+        sides=list(side_specs),
+        side_producer_nodes=side_producer_nodes,
+    )
 
 
 def _label_for_call(attr_name: str, class_name: str | None) -> str:
     if attr_name == SYNTHETIC_ATTENTION:
-        return "Attention (QKᵀV)"
+        return "Attention kernel"
     if displays_as_linear(attr_name, class_name):
         return "Linear"
     if class_name:
@@ -469,8 +512,70 @@ def _leaf_node(
     )
 
 
-def _output_gate_block_node(linear_step: BlockNode, activation: str | None) -> BlockNode:
+def _gate_side_consumer(
+    side_inputs: dict[str, list[SideInputSpec]],
+    gate_attr: str,
+) -> tuple[str | None, SideInputSpec | None]:
+    for consumer, specs in side_inputs.items():
+        for spec in specs:
+            if spec.source_chain and spec.source_chain[-1] == gate_attr:
+                return consumer, spec
+    return None, None
+
+
+def _output_gate_details(
+    gate_attr: str,
+    *,
+    side_inputs: dict[str, list[SideInputSpec]],
+    gate_activations: dict[str, str],
+    consumer_class: str | None = None,
+    norm_gate_activation: str | None = None,
+) -> list[str]:
+    """Describe how a parallel output gate is computed and consumed."""
+    consumer, spec = _gate_side_consumer(side_inputs, gate_attr)
+    inline_activation = gate_activations.get(gate_attr)
+
+    lines: list[str] = [f"g = {gate_attr}(hidden_states)"]
+
+    if consumer_class == "FusedRMSNormGated" or (consumer and "Gated" in (consumer_class or "")):
+        lines.append("reshape → [num_heads, head_dim]")
+        if inline_activation:
+            lines.append(f"g = {inline_activation}(g)")
+            lines.append(f"norm(attn_out) × g → {consumer or 'o_norm'}")
+        else:
+            activation = norm_gate_activation or "σ"
+            lines.append(f"{activation}(g) inside {consumer or 'o_norm'}")
+            lines.append("norm(attn_out) × gate")
+    elif inline_activation:
+        lines.append(f"g = {inline_activation}(g)")
+        if consumer:
+            port = spec.port_label if spec else None
+            suffix = f" port {port!r}" if port else ""
+            lines.append(f"feeds {consumer}{suffix}")
+    elif consumer:
+        port = spec.port_label if spec else None
+        suffix = f" port {port!r}" if port else ""
+        lines.append(f"feeds {consumer}{suffix}")
+    else:
+        lines.append("output gate for normalized branch")
+
+    return lines
+
+
+def _output_gate_block_node(
+    linear_step: BlockNode,
+    activation: str | None,
+    details: list[str] | None = None,
+) -> BlockNode:
     """Expand a parallel output gate into its own nested sub-diagram."""
+    gate_details = list(details or [])
+    linear_step = _leaf_node(
+        attr_name=linear_step.attr_name,
+        class_name=linear_step.class_name,
+        forward_order=linear_step.forward_order,
+        label=linear_step.label,
+        details=gate_details[:1] if gate_details else ["Linear projection from hidden_states"],
+    )
     children: list[BlockNode] = [linear_step]
     if activation:
         children.append(
@@ -479,7 +584,7 @@ def _output_gate_block_node(linear_step: BlockNode, activation: str | None) -> B
                 class_name="ActivationOp",
                 forward_order=(linear_step.forward_order or 0) + 1,
                 label=activation,
-                details=[activation],
+                details=[f"g = {activation}(g)"],
             )
         )
     return BlockNode(
@@ -488,6 +593,7 @@ def _output_gate_block_node(linear_step: BlockNode, activation: str | None) -> B
         role="gate",
         label="Output gate",
         forward_order=linear_step.forward_order,
+        details=gate_details,
         is_basic=False,
         children=children,
     )
@@ -497,17 +603,60 @@ def _wrap_parallel_gate_children(
     child_nodes: list[BlockNode],
     parallel_gates: list[str],
     gate_activations: dict[str, str],
+    side_inputs: dict[str, list[SideInputSpec]] | None = None,
 ) -> list[BlockNode]:
     if not parallel_gates:
         return child_nodes
     gate_attrs = set(parallel_gates)
+    side_inputs = side_inputs or {}
     wrapped: list[BlockNode] = []
     for child in child_nodes:
         if child.attr_name not in gate_attrs:
             wrapped.append(child)
             continue
-        wrapped.append(_output_gate_block_node(child, gate_activations.get(child.attr_name)))
+        consumer, _ = _gate_side_consumer(side_inputs, child.attr_name)
+        consumer_node = next((node for node in child_nodes if node.attr_name == consumer), None)
+        details = _output_gate_details(
+            child.attr_name,
+            side_inputs=side_inputs,
+            gate_activations=gate_activations,
+            consumer_class=consumer_node.class_name if consumer_node else None,
+            norm_gate_activation=gated_norm_activation(consumer_node) if consumer_node else None,
+        )
+        wrapped.append(
+            _output_gate_block_node(
+                child,
+                gate_activations.get(child.attr_name),
+                details=details,
+            )
+        )
     return wrapped
+
+
+def side_producer_has_activation(producer: BlockNode) -> bool:
+    """True when an output-gate side producer already ends with an activation step."""
+    if producer.class_name == "OutputGate":
+        return any(child.attr_name == SYNTHETIC_GATE_ACTIVATION for child in producer.children)
+    return False
+
+
+def is_gated_norm_module(node: BlockNode) -> bool:
+    """True for fused RMS/Layer norms that combine normalization with a gate input."""
+    class_name = node.class_name or ""
+    if class_name == "FusedRMSNormGated":
+        return True
+    return node.role == "norm" and bool(re.search(r"Fused.*Gated|Gated.*Norm", class_name, re.I))
+
+
+def gated_norm_activation(node: BlockNode) -> str | None:
+    """Return the gate activation applied inside a gated norm module, if known."""
+    known = {"Sigmoid", "SiLU", "GELU", "Tanh", "ReLU", "Silu", "Gelu"}
+    for detail in node.details:
+        if detail in known:
+            return detail
+    if node.class_name == "FusedRMSNormGated":
+        return "Sigmoid"
+    return None
 
 
 def _situ_and_mul_block_node(
@@ -522,9 +671,9 @@ def _situ_and_mul_block_node(
         attr_name=attr_name,
         class_name="SituAndMul",
         role=role,
-        label="SituAndMul",
+        label="Gated multiply",
         forward_order=forward_order,
-        details=list(details or []),
+        details=list(details or ["SiLU(gate) × up branch"]),
         is_basic=False,
         input_label="gate_up",
         children=[
@@ -533,18 +682,21 @@ def _situ_and_mul_block_node(
                 class_name="Split",
                 forward_order=0,
                 label="Split gate | up",
+                details=["split fused projection"],
             ),
             _leaf_node(
                 attr_name="situ_activation",
                 class_name="SituActivation",
                 forward_order=1,
-                label="Situ activation",
+                label="SiLU",
+                details=["activation on gate half"],
             ),
             _leaf_node(
                 attr_name="elementwise_mul",
                 class_name="Multiply",
                 forward_order=2,
-                label="Elementwise ×",
+                label="×",
+                details=["gate × up"],
             ),
         ],
     )
@@ -629,10 +781,20 @@ def _name_prefix_branch_rules() -> dict[str, str]:
 
 def _parallel_side_port_label(side: BlockNode) -> str:
     """Readable inline port label for a parallel side branch."""
-    attr = side.attr_name.strip("_").lower()
-    if "g_proj" in attr or attr.endswith("gate") or attr == "gate":
+    if _is_output_gate_node(side) or _looks_like_output_gate_attr(side.attr_name):
         return "gate"
     return _label_for_call(side.attr_name, side.class_name)
+
+
+def _side_feed_targets(node: BlockNode) -> dict[str, str]:
+    """Map side-producer attr -> consumer attr for prior-step side feeds."""
+    targets: dict[str, str] = {}
+    for consumer_name, specs in node.side_inputs.items():
+        for spec in specs:
+            if spec.source_kind != "prior_step" or not spec.source_chain:
+                continue
+            targets[spec.source_chain[-1]] = consumer_name
+    return targets
 
 
 def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
@@ -668,7 +830,19 @@ def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
         segments.append(SeqSegment(step=merge_node))
 
     remaining = list(post_merge)
-    if remaining and remaining[0].attr_name in node.parallel_gates and len(remaining) >= 2:
+    side_feed_targets = _side_feed_targets(node)
+    skip_sequential: set[str] = set()
+    for index, step in enumerate(remaining):
+        consumer = remaining[index + 1] if index + 1 < len(remaining) else None
+        if consumer and side_feed_targets.get(step.attr_name) == consumer.attr_name:
+            skip_sequential.add(step.attr_name)
+
+    if (
+        remaining
+        and remaining[0].attr_name in node.parallel_gates
+        and len(remaining) >= 2
+        and side_feed_targets.get(remaining[0].attr_name) != remaining[1].attr_name
+    ):
         side = remaining[0]
         segments.append(
             CombineSegment(
@@ -679,7 +853,10 @@ def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
             )
         )
     else:
-        segments.extend(_segment_for_step(node, step) for step in remaining)
+        for step in remaining:
+            if step.attr_name in skip_sequential:
+                continue
+            segments.extend([_segment_for_step(node, step)])
     return segments
 
 
@@ -738,11 +915,13 @@ def build_block_node(
     label = _label_for_call(attr_name, class_name)
 
     if attr_name == SYNTHETIC_ATTENTION:
+        step_details = list(details or [])
         return _leaf_node(
             attr_name=attr_name,
             class_name="AttentionOp",
             forward_order=forward_order,
-            details=["scaled dot-product attention"],
+            label=attention_kernel_label(step_details),
+            details=attention_kernel_details(step_details),
         )
 
     if basic_ops.is_basic(class_name, attr_name):
@@ -799,7 +978,8 @@ def build_block_node(
                     attr_name=call_attr,
                     class_name="AttentionOp",
                     forward_order=child_order,
-                    details=["scaled dot-product attention"],
+                    label=attention_kernel_label(child_details),
+                    details=attention_kernel_details(child_details, cls.attention_inputs),
                 )
             )
             continue
@@ -868,6 +1048,7 @@ def build_block_node(
         child_nodes,
         cls.parallel_gates,
         cls.gate_activations,
+        cls.side_inputs,
     )
 
     return BlockNode(

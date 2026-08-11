@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from graph_layout import SugiyamaLayout
@@ -18,13 +19,19 @@ from visualizer.block_tree import (
     SideFeedSegment,
     collect_computation_segments,
     flatten_computation_segments,
+    gated_norm_activation,
     inline_block_frame_label,
+    inline_block_frame_sublabel,
     inline_composite_steps,
     inline_wrapper_step_label,
+    is_gated_norm_module,
     is_straight_line_module,
     is_method_wrapper,
+    block_purpose,
+    side_producer_has_activation,
     wrapper_bullet_lines,
 )
+from visualizer.ast_analyze import SYNTHETIC_ATTENTION, SYNTHETIC_GATE_ACTIVATION
 from visualizer.sizing import (
     block_sublabel,
     estimate_block_size_for_node,
@@ -63,6 +70,7 @@ class InlineFrameSpec:
 
     frame_id: str
     label: str
+    sublabel: str | None = None
     node_indices: list[int] = field(default_factory=list)
 
 
@@ -74,6 +82,7 @@ class ComputationGraph:
     links: list[tuple[int, int]] = field(default_factory=list)
     dashed_links: set[tuple[int, int]] = field(default_factory=set)
     side_entry_links: set[tuple[int, int]] = field(default_factory=set)
+    link_port_labels: dict[tuple[int, int], str] = field(default_factory=dict)
     inline_frames: list[InlineFrameSpec] = field(default_factory=list)
 
 
@@ -160,30 +169,66 @@ def _add_chain(
     key_prefix: str,
     attr_last_index: dict[str, int] | None = None,
 ) -> tuple[int | None, int | None]:
+    """Add a sequential chain, inlining straight-line composite wrappers."""
     first_index: int | None = None
     previous: int | None = None
     for index, step in enumerate(steps):
+        step_port = port_label if index == 0 and first_index is None else None
+        step_port_style = port_style if index == 0 and first_index is None else None
+
         if is_method_wrapper(step):
             node_index = _add_method_wrapper_node(
                 graph,
                 step,
                 key=f"{key_prefix}:{step.attr_name}:{index}",
             )
-        else:
+            if attr_last_index is not None:
+                _track_attr_index(attr_last_index, step.attr_name, node_index)
+            if first_index is None:
+                first_index = node_index
+            if previous is not None:
+                graph.links.append((previous, node_index))
+            previous = node_index
+            continue
+
+        expanded_steps, wrapper = inline_composite_steps(step)
+        if wrapper is not None:
+            chain_indices, tail = _add_linear_pipeline_chain(
+                graph,
+                expanded_steps,
+                wrapper=wrapper,
+                key_prefix=f"{key_prefix}:{step.attr_name}",
+                attr_last_index=attr_last_index,
+                port_label=step_port,
+                port_style=step_port_style,
+                input_index=None,
+                last_index=previous,
+            )
+            if first_index is None and chain_indices:
+                first_index = chain_indices[0]
+            previous = tail
+            if attr_last_index is not None:
+                _track_attr_index(attr_last_index, wrapper.attr_name, tail)
+                _track_attr_index(attr_last_index, step.attr_name, tail)
+            continue
+
+        for sub_index, sub_step in enumerate(expanded_steps):
             node_index = _add_node(
                 graph,
-                key=f"{key_prefix}:{step.attr_name}:{index}",
-                block=step,
-                port_label=port_label if index == 0 else None,
-                port_style=port_style if index == 0 else None,
+                key=f"{key_prefix}:{step.attr_name}:{sub_step.attr_name}:{sub_index}",
+                block=sub_step,
+                port_label=step_port if sub_index == 0 else None,
+                port_style=step_port_style if sub_index == 0 else None,
             )
-        if attr_last_index is not None:
-            _track_attr_index(attr_last_index, step.attr_name, node_index)
-        if first_index is None:
-            first_index = node_index
-        if previous is not None:
-            graph.links.append((previous, node_index))
-        previous = node_index
+            if attr_last_index is not None:
+                _track_attr_index(attr_last_index, sub_step.attr_name, node_index)
+            if first_index is None:
+                first_index = node_index
+            if previous is not None:
+                graph.links.append((previous, node_index))
+            previous = node_index
+        if expanded_steps and attr_last_index is not None:
+            _track_attr_index(attr_last_index, step.attr_name, previous)
     return first_index, previous
 
 
@@ -239,7 +284,11 @@ def _link_forward_input(
 
 
 def _start_inline_frame(graph: ComputationGraph, wrapper: BlockNode) -> InlineFrameSpec:
-    frame = InlineFrameSpec(frame_id=wrapper.attr_name, label=inline_block_frame_label(wrapper))
+    frame = InlineFrameSpec(
+        frame_id=wrapper.attr_name,
+        label=inline_block_frame_label(wrapper),
+        sublabel=inline_block_frame_sublabel(wrapper),
+    )
     graph.inline_frames.append(frame)
     return frame
 
@@ -276,6 +325,7 @@ def _add_linear_pipeline_chain(
             key=f"{key_prefix}:{sub_step.attr_name}:{sub_index}",
             block=sub_step,
             label=inline_wrapper_step_label(wrapper, sub_step, sub_index),
+            sublabel=block_purpose(wrapper) if sub_index == 0 and wrapper is not None else None,
             port_label=port_label if sub_index == 0 else None,
             port_style=port_style if sub_index == 0 else None,
         )
@@ -302,6 +352,61 @@ def _add_linear_pipeline_chain(
         indices.append(step_index)
 
     return indices, indices[-1]
+
+
+def _append_side_producer_link(
+    graph: ComputationGraph,
+    *,
+    source_index: int,
+    target_index: int,
+) -> None:
+    graph.links.append((source_index, target_index))
+    graph.dashed_links.add((source_index, target_index))
+    graph.side_entry_links.add((source_index, target_index))
+
+
+def _add_side_producer_index(
+    graph: ComputationGraph,
+    producer: BlockNode,
+    *,
+    segment_index: int,
+    source_attr: str,
+    port_label: str | None,
+    port_style: PortStyle | None,
+    input_index: int | None,
+    attr_last_index: dict[str, int],
+) -> int | None:
+    """Add a side-path producer, inlining straight-line output gates when possible."""
+    expanded_steps, wrapper = inline_composite_steps(producer)
+    if wrapper is not None:
+        chain_indices, tail = _add_linear_pipeline_chain(
+            graph,
+            expanded_steps,
+            wrapper=wrapper,
+            key_prefix=f"sideproducer:{segment_index}:{source_attr}",
+            attr_last_index=attr_last_index,
+            port_label=port_label,
+            port_style=port_style or "inline",
+            input_index=input_index,
+            last_index=None,
+            branch_from_input_dashed=True,
+        )
+        if tail is not None:
+            _track_attr_index(attr_last_index, wrapper.attr_name, tail)
+            _track_attr_index(attr_last_index, source_attr, tail)
+        return tail
+
+    source_index = _add_node(
+        graph,
+        key=f"sideproducer:{segment_index}:{source_attr}",
+        block=producer,
+        port_label=port_label,
+        port_style=port_style,
+    )
+    if input_index is not None:
+        _link_forward_input(graph, input_index, source_index, dashed=True)
+    _track_attr_index(attr_last_index, source_attr, source_index)
+    return source_index
 
 
 def _consumer_port_label(sides: list) -> str | None:
@@ -407,7 +512,7 @@ def build_computation_graph(
 
     for segment_index, segment in enumerate(segments):
         if isinstance(segment, FanOutSegment):
-            tails: list[int] = []
+            branch_tails: list[tuple[int, str]] = []
             for branch_index, branch in enumerate(segment.branches):
                 first_index, tail = _add_chain(
                     graph,
@@ -420,14 +525,15 @@ def build_computation_graph(
                 if input_index is not None and first_index is not None:
                     _link_forward_input(graph, input_index, first_index, dashed=False)
                 if tail is not None:
-                    tails.append(tail)
+                    branch_tails.append((tail, branch.port_label))
             merge_index = _add_node(
                 graph,
                 key=f"merge:{segment_index}",
                 block=segment.merge,
             )
-            for tail in tails:
+            for tail, port_label in branch_tails:
                 graph.links.append((tail, merge_index))
+                graph.link_port_labels[(tail, merge_index)] = port_label
             last_index = merge_index
             _track_attr_index(attr_last_index, segment.merge.attr_name, merge_index)
             continue
@@ -505,6 +611,75 @@ def build_computation_graph(
         if isinstance(segment, SideFeedSegment):
             consumer = segment.consumer
             port_label = _consumer_port_label(segment.sides)
+
+            if is_gated_norm_module(consumer):
+                norm_index = _add_node(
+                    graph,
+                    key=f"sidefeed:{segment_index}:{consumer.attr_name}:norm",
+                    block=consumer,
+                    label="RMSNorm",
+                )
+                if last_index is not None:
+                    graph.links.append((last_index, norm_index))
+                elif input_index is not None:
+                    graph.links.append((input_index, norm_index))
+
+                combine_index = _add_node(
+                    graph,
+                    key=f"sidefeed:{segment_index}:{consumer.attr_name}:mul",
+                    label="×",
+                    sublabel="× gate",
+                    synthetic=SYNTHETIC_COMBINE,
+                )
+                graph.links.append((norm_index, combine_index))
+
+                activation = gated_norm_activation(consumer)
+                for side in segment.sides:
+                    if side.source_kind == "forward_input":
+                        if input_index is not None:
+                            _link_forward_input(graph, input_index, combine_index, dashed=True)
+                        continue
+                    source_attr = side.source_chain[-1] if side.source_chain else None
+                    if source_attr is None:
+                        continue
+                    source_index = attr_last_index.get(source_attr)
+                    if source_index is None:
+                        producer = segment.side_producer_nodes.get(source_attr)
+                        if producer is None:
+                            continue
+                        source_index = _add_side_producer_index(
+                            graph,
+                            producer,
+                            segment_index=segment_index,
+                            source_attr=source_attr,
+                            port_label=side.port_label,
+                            port_style="inline",
+                            input_index=input_index,
+                            attr_last_index=attr_last_index,
+                        )
+                    if source_index is None:
+                        continue
+                    gate_index = source_index
+                    producer = segment.side_producer_nodes.get(source_attr)
+                    if (
+                        activation
+                        and producer is not None
+                        and not side_producer_has_activation(producer)
+                    ):
+                        gate_index = _add_node(
+                            graph,
+                            key=f"sidefeed:{segment_index}:{consumer.attr_name}:gate_act",
+                            label=activation,
+                            sublabel=None,
+                            synthetic=SYNTHETIC_GATE_ACTIVATION,
+                        )
+                        _append_side_producer_link(graph, source_index=source_index, target_index=gate_index)
+                    _append_side_producer_link(graph, source_index=gate_index, target_index=combine_index)
+
+                last_index = combine_index
+                _track_attr_index(attr_last_index, consumer.attr_name, combine_index)
+                continue
+
             if is_method_wrapper(consumer):
                 consumer_index = _add_method_wrapper_node(
                     graph,
@@ -539,9 +714,22 @@ def build_computation_graph(
                     continue
                 source_index = attr_last_index.get(source_attr)
                 if source_index is None:
-                    continue
-                graph.links.append((source_index, consumer_index))
-                graph.dashed_links.add((source_index, consumer_index))
+                    producer = segment.side_producer_nodes.get(source_attr)
+                    if producer is None:
+                        continue
+                    source_index = _add_side_producer_index(
+                        graph,
+                        producer,
+                        segment_index=segment_index,
+                        source_attr=source_attr,
+                        port_label=side.port_label,
+                        port_style="inline",
+                        input_index=input_index,
+                        attr_last_index=attr_last_index,
+                    )
+                    if source_index is None:
+                        continue
+                _append_side_producer_link(graph, source_index=source_index, target_index=consumer_index)
             last_index = consumer_index
             _track_attr_index(attr_last_index, consumer.attr_name, consumer_index)
             continue
@@ -769,6 +957,72 @@ def _node_content_right(pos: LayoutPosition) -> float:
     return pos.cx + pos.width / 2
 
 
+MIN_HORIZONTAL_BLOCK_GAP = 0.14
+
+
+def _resolve_horizontal_overlaps(
+    positions: list[LayoutPosition],
+    layers: list[list[int]],
+    *,
+    min_gap: float = MIN_HORIZONTAL_BLOCK_GAP,
+) -> None:
+    """Separate nodes in the same layer so boxes and port labels do not overlap."""
+    for layer_indices in layers:
+        if len(layer_indices) < 2:
+            continue
+        layer_positions = sorted((positions[index] for index in layer_indices), key=lambda pos: pos.cx)
+        for index in range(1, len(layer_positions)):
+            left = layer_positions[index - 1]
+            right = layer_positions[index]
+            overlap = _node_content_right(left) + min_gap - _node_content_left(right)
+            if overlap > 0:
+                right.cx += overlap
+
+
+def _fanout_branch_index(spec: GraphNodeSpec) -> int | None:
+    """Extract fan-out branch index from node keys like fan0-2:q_proj:0."""
+    match = re.match(r"fan\d+-(\d+):", spec.key)
+    return int(match.group(1)) if match else None
+
+
+def _order_fanout_branch_positions(positions: list[LayoutPosition]) -> None:
+    """Reorder fan-out layer nodes left-to-right by branch index to reduce wire crossings."""
+    layer_groups: dict[float, list[LayoutPosition]] = {}
+    for pos in positions:
+        branch_index = _fanout_branch_index(pos.spec)
+        if branch_index is None:
+            continue
+        layer_groups.setdefault(pos.top_y, []).append(pos)
+
+    for layer_positions in layer_groups.values():
+        if len(layer_positions) < 2:
+            continue
+        ordered = sorted(layer_positions, key=lambda pos: _fanout_branch_index(pos.spec) or 0)
+        left = min(pos.cx - pos.width / 2 for pos in ordered)
+        right = max(pos.cx + pos.width / 2 for pos in ordered)
+        span = max(right - left, sum(pos.width for pos in ordered) + MIN_HORIZONTAL_BLOCK_GAP * (len(ordered) - 1))
+        cursor = left + span / 2 - sum(pos.width for pos in ordered) / 2 - MIN_HORIZONTAL_BLOCK_GAP * (len(ordered) - 1) / 2
+        for pos in ordered:
+            pos.cx = cursor + pos.width / 2
+            cursor += pos.width + MIN_HORIZONTAL_BLOCK_GAP
+
+
+def _resolve_layout_overlaps(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_vertical_gap: float = DETAIL_LAYER_GAP,
+    min_horizontal_gap: float = MIN_HORIZONTAL_BLOCK_GAP,
+) -> None:
+    """Resolve horizontal and vertical box overlaps after Sugiyama placement."""
+    if not positions:
+        return
+    layers = _topological_layers(graph)
+    _resolve_horizontal_overlaps(positions, layers, min_gap=min_horizontal_gap)
+    _resolve_vertical_overlaps(positions, min_gap=min_vertical_gap)
+    _resolve_horizontal_overlaps(positions, layers, min_gap=min_horizontal_gap)
+
+
 def _center_positions_horizontally(positions: list[LayoutPosition], cx: float) -> None:
     """Shift nodes so diagram content (boxes + port labels) is centered on cx."""
     if not positions:
@@ -825,7 +1079,7 @@ def layout_computation_graph(
         links=links,
         size=(canvas_w, canvas_h),
         layer_separation=layer_separation,
-        node_separation=36.0,
+        node_separation=48.0,
         orientation="top-to-bottom",
     )
     layout.run()
@@ -857,8 +1111,12 @@ def layout_computation_graph(
             )
         )
 
-    _assign_layered_vertical_positions(positions, _topological_layers(graph), top_y=top_y)
+    layers = _topological_layers(graph)
+    _assign_layered_vertical_positions(positions, layers, top_y=top_y)
+    _order_fanout_branch_positions(positions)
+    _resolve_layout_overlaps(positions, graph)
     _center_positions_horizontally(positions, cx)
+    _resolve_layout_overlaps(positions, graph)
 
     return positions, graph.links
 
@@ -874,12 +1132,45 @@ def _estimate_graph_height(graph: ComputationGraph) -> float:
     return content + gaps + DETAIL_TOP_INSET + DETAIL_BOTTOM_INSET
 
 
-def _resolve_vertical_overlaps(positions: list[LayoutPosition], *, min_gap: float = DETAIL_LAYER_GAP) -> None:
-    """Push nodes down so rendered boxes do not overlap vertically."""
-    ordered = sorted(positions, key=lambda pos: pos.top_y, reverse=True)
-    for index in range(1, len(ordered)):
-        above = ordered[index - 1]
-        current = ordered[index]
-        allowed_top = above.bottom - min_gap
-        if current.top_y > allowed_top:
-            current.top_y = allowed_top
+def _boxes_overlap_horizontally(
+    left: LayoutPosition,
+    right: LayoutPosition,
+    *,
+    min_gap: float,
+) -> bool:
+    return (
+        _node_content_right(left) + min_gap > _node_content_left(right)
+        and _node_content_right(right) + min_gap > _node_content_left(left)
+    )
+
+
+def _boxes_overlap_vertically(
+    above: LayoutPosition,
+    below: LayoutPosition,
+    *,
+    min_gap: float,
+) -> bool:
+    return below.top_y > above.bottom - min_gap
+
+
+def _resolve_vertical_overlaps(
+    positions: list[LayoutPosition],
+    *,
+    min_gap: float = DETAIL_LAYER_GAP,
+    layer_y_epsilon: float = 1e-6,
+) -> None:
+    """Push lower nodes down when they overlap a higher node horizontally."""
+    changed = True
+    while changed:
+        changed = False
+        ordered = sorted(positions, key=lambda pos: pos.top_y, reverse=True)
+        for above_index, above in enumerate(ordered):
+            for below in ordered[above_index + 1 :]:
+                if abs(above.top_y - below.top_y) <= layer_y_epsilon:
+                    continue
+                if not _boxes_overlap_horizontally(above, below, min_gap=min_gap):
+                    continue
+                allowed_top = above.bottom - min_gap
+                if below.top_y > allowed_top:
+                    below.top_y = allowed_top
+                    changed = True

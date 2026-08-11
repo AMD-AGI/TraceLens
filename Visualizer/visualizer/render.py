@@ -233,6 +233,17 @@ class _RenderAnchor:
 
 
 @dataclass
+class DetailDrawPlan:
+    """Pre-rendered box/text descriptors measured before connectors are drawn."""
+
+    input_sublabel: str | None
+    node_draws: list[tuple[Node, dict[str, object]]] = field(default_factory=list)
+    combine_ops: list[tuple[float, float, str, str | None]] = field(default_factory=list)
+    branch_labels: list[tuple[str, float, float, str, str]] = field(default_factory=list)
+    label_obstacles: list[_RenderAnchor] = field(default_factory=list)
+
+
+@dataclass
 class DiagramLayout:
     nodes: list[Node] = field(default_factory=list)
     height: float = 13.0
@@ -859,13 +870,19 @@ def _text_size_in_axes(
     fontweight: str = "bold",
     va: str = "bottom",
 ) -> tuple[float, float]:
-    fig = ax.figure
-    if fig.canvas.get_renderer() is None:
-        fig.canvas.draw()
-    tmp = ax.text(0, 0, text, ha="left", va=va, fontsize=fontsize, fontweight=fontweight, alpha=0.0)
-    bb = tmp.get_window_extent(fig.canvas.get_renderer()).transformed(ax.transData.inverted())
-    tmp.remove()
-    return bb.width, bb.height
+    from visualizer.text_measure import measure_text_bounds
+
+    bounds = measure_text_bounds(
+        ax,
+        text,
+        0.0,
+        0.0,
+        fontsize=fontsize,
+        fontweight=fontweight,
+        va=va,
+        ha="left",
+    )
+    return bounds.width, bounds.height
 
 
 def _text_width_in_axes(ax, text: str, *, fontsize: float) -> float:
@@ -873,12 +890,10 @@ def _text_width_in_axes(ax, text: str, *, fontsize: float) -> float:
 
 
 def _box_label_width(ax, text: str, *, fontsize: float, sublabel: str | None = None, sub_fontsize: float | None = None) -> float:
-    title_w = max(_text_width_in_axes(ax, line, fontsize=fontsize) for line in text.split("\n"))
-    if not sublabel:
-        return box_width_for_text_width(title_w)
-    sub_fs = sub_fontsize if sub_fontsize is not None else max(6.5, fontsize - 1.5)
-    sub_w = max(_text_width_in_axes(ax, line, fontsize=sub_fs) for line in sublabel.split("\n"))
-    return box_width_for_text_width(max(title_w, sub_w))
+    from visualizer.text_measure import box_label_size
+
+    width, _height = box_label_size(ax, text, sublabel, fontsize=fontsize, sub_fontsize=sub_fontsize)
+    return width
 
 
 def _repeat_label_bbox(
@@ -1712,6 +1727,24 @@ def _inline_dashed_port_connector_points(
     return [(source.cx, y_start), (source.cx, bus_y), (entry_x, bus_y), (entry_x, entry_y)]
 
 
+def _labeled_merge_connector_points(
+    source: _RenderAnchor,
+    target: _RenderAnchor,
+    entry_x: float,
+    *,
+    gap: float = 0.04,
+    bus_y: float | None = None,
+) -> list[tuple[float, float]]:
+    """Route a fan-in branch into a labeled port on the merge node top edge."""
+    y_start = source.bottom - gap
+    entry_y = target.top + gap
+    if bus_y is None:
+        bus_y = (y_start + entry_y) / 2
+    if abs(source.cx - entry_x) < 0.06:
+        return [(source.cx, y_start), (source.cx, entry_y)]
+    return [(source.cx, y_start), (source.cx, bus_y), (entry_x, bus_y), (entry_x, entry_y)]
+
+
 def _top_entry_combine_connector_points(
     source: _RenderAnchor,
     target_cx: float,
@@ -1971,63 +2004,27 @@ def _render_inline_linear_frames(
             fontsize=6.4,
             color=COLORS["muted"],
         )
+        if frame.sublabel:
+            ax.text(
+                frame_left + 0.02,
+                max_top + pad + INLINE_FRAME_LABEL_GAP - 0.11,
+                frame.sublabel,
+                ha="left",
+                va="bottom",
+                fontsize=5.6,
+                color=COLORS["muted"],
+                style="italic",
+            )
 
 
-def _render_laid_out_computation_graph(
-    layout: DiagramLayout,
-    ax,
-    root: BlockNode,
+def _build_detail_draw_plan(
+    positions: list[LayoutPosition],
+    graph,
     *,
-    cx: float,
-    top_y: float,
-    block_w: float,
-    input_sublabel: str | None = None,
-    prefix_steps: list[BlockNode] | None = None,
-    inline_linear_frames: bool = True,
-    draw_section_frame: bool = True,
-    root_frame_label: str | None = None,
-    include_input: bool = True,
-) -> tuple[float, float, _RenderAnchor | None]:
-    """Lay out a computation graph with graph-layout and draw it."""
-    graph = build_computation_graph(root, prefix_steps=prefix_steps, include_input=include_input)
-    if root_frame_label:
-        add_root_pipeline_frame(graph, root, label=root_frame_label)
-    est_h = _estimate_graph_height(graph)
-    positions, links = layout_computation_graph(
-        graph,
-        cx=cx,
-        top_y=top_y,
-        block_w=block_w,
-        block_h=est_h,
-    )
-    _resize_input_nodes(positions, input_sublabel)
-    if positions:
-        _center_positions_horizontally(positions, cx)
-    if not positions:
-        return top_y - est_h, cx + block_w / 2, None
-
-    frame_left, frame_right, frame_bottom, frame_top = _detail_content_bounds(positions)
-    frame_w = frame_right - frame_left
-    frame_h = frame_top - frame_bottom
-    block_patch = FancyBboxPatch(
-        (frame_left, frame_bottom),
-        frame_w,
-        frame_h,
-        boxstyle="round,pad=0.01,rounding_size=0.10",
-        linewidth=2.0,
-        edgecolor=COLORS["detail_border"],
-        facecolor=COLORS["detail_fill"],
-        zorder=0,
-    )
-    if draw_section_frame:
-        ax.add_patch(block_patch)
-    _render_inline_linear_frames(ax, graph, positions, enabled=inline_linear_frames)
-
-    anchors: dict[int, _RenderAnchor] = {}
-    node_draws: list[tuple[Node, dict[str, object]]] = []
-    combine_ops: list[tuple[float, float, str, str | None]] = []
-    branch_labels: list[tuple[str, float, float, str, str]] = []
-    label_obstacles: list[_RenderAnchor] = []
+    input_sublabel: str | None,
+) -> DetailDrawPlan:
+    """Build node/label draw descriptors without painting (for measurement + validation)."""
+    plan = DetailDrawPlan(input_sublabel=input_sublabel)
 
     for index, pos in enumerate(positions):
         spec = pos.spec
@@ -2045,8 +2042,7 @@ def _render_laid_out_computation_graph(
                 sublabel=input_sublabel,
                 fontsize=7.2,
             )
-            node_draws.append((input_leaf, {}))
-            anchors[index] = _anchor_from_node(input_leaf)
+            plan.node_draws.append((input_leaf, {}))
             continue
 
         if spec.synthetic == SYNTHETIC_HIDDEN:
@@ -2061,20 +2057,18 @@ def _render_laid_out_computation_graph(
                 text_color=COLORS["residual"],
                 fontsize=6.5,
             )
-            node_draws.append(
+            plan.node_draws.append(
                 (
                     hidden_leaf,
                     {"edgecolor": COLORS["residual"], "linestyle": "dashed"},
                 )
             )
-            anchors[index] = _anchor_from_node(hidden_leaf)
             continue
 
         if _is_combine_synthetic(spec.synthetic):
             center_y = pos.top_y - pos.height / 2
             symbol = spec.label or "×"
-            combine_ops.append((pos.cx, center_y, symbol, spec.sublabel))
-            anchors[index] = _merge_anchor(pos.cx, center_y)
+            plan.combine_ops.append((pos.cx, center_y, symbol, spec.sublabel))
             continue
 
         block = spec.block
@@ -2091,14 +2085,14 @@ def _render_laid_out_computation_graph(
                 sublabel=attr,
                 fontsize=7.4,
             )
-            node_draws.append(
+            plan.node_draws.append(
                 (
                     leaf,
                     {"edgecolor": COLORS["detail_border"], "linestyle": "dashed"},
                 )
             )
             if spec.port_label and spec.port_style == "inline":
-                branch_labels.append(
+                plan.branch_labels.append(
                     (
                         spec.port_label,
                         pos.cx,
@@ -2107,7 +2101,6 @@ def _render_laid_out_computation_graph(
                         "bottom",
                     )
                 )
-            anchors[index] = _anchor_from_node(leaf)
             continue
 
         display_label = spec.label
@@ -2121,7 +2114,7 @@ def _render_laid_out_computation_graph(
             else:
                 label_x = pos.cx - pos.width / 2 - 0.10
                 label_y = pos.top_y - pos.height / 2
-                branch_labels.append(
+                plan.branch_labels.append(
                     (
                         spec.port_label,
                         label_x,
@@ -2130,7 +2123,7 @@ def _render_laid_out_computation_graph(
                         "center",
                     )
                 )
-                label_obstacles.append(
+                plan.label_obstacles.append(
                     _RenderAnchor(
                         cx=label_x - 0.18,
                         top=label_y + 0.10,
@@ -2155,8 +2148,91 @@ def _render_laid_out_computation_graph(
             sublabel=sublabel,
             fontsize=7.6,
         )
-        node_draws.append((leaf, {}))
-        anchors[index] = _anchor_from_node(leaf)
+        plan.node_draws.append((leaf, {}))
+
+    return plan
+
+
+def _anchors_from_detail_plan(
+    positions: list[LayoutPosition],
+    plan: DetailDrawPlan,
+) -> dict[int, _RenderAnchor]:
+    """Build connector anchors from a validated draw plan."""
+    anchors: dict[int, _RenderAnchor] = {}
+    draw_index = 0
+    for index, pos in enumerate(positions):
+        spec = pos.spec
+        if _is_combine_synthetic(spec.synthetic):
+            center_y = pos.top_y - pos.height / 2
+            anchors[index] = _merge_anchor(pos.cx, center_y)
+            continue
+        if draw_index < len(plan.node_draws):
+            anchors[index] = _anchor_from_node(plan.node_draws[draw_index][0])
+            draw_index += 1
+    return anchors
+
+
+def _render_laid_out_computation_graph(
+    layout: DiagramLayout,
+    ax,
+    root: BlockNode,
+    *,
+    cx: float,
+    top_y: float,
+    block_w: float,
+    input_sublabel: str | None = None,
+    prefix_steps: list[BlockNode] | None = None,
+    inline_linear_frames: bool = True,
+    draw_section_frame: bool = True,
+    root_frame_label: str | None = None,
+    include_input: bool = True,
+) -> tuple[float, float, _RenderAnchor | None]:
+    """Lay out a computation graph with graph-layout and draw it."""
+    from visualizer.render_validate import finalize_detail_layout
+
+    graph = build_computation_graph(root, prefix_steps=prefix_steps, include_input=include_input)
+    if root_frame_label:
+        add_root_pipeline_frame(graph, root, label=root_frame_label)
+    est_h = _estimate_graph_height(graph)
+    positions, links = layout_computation_graph(
+        graph,
+        cx=cx,
+        top_y=top_y,
+        block_w=block_w,
+        block_h=est_h,
+    )
+    if not positions:
+        return top_y - est_h, cx + block_w / 2, None
+
+    plan = finalize_detail_layout(
+        ax,
+        graph,
+        positions,
+        input_sublabel=input_sublabel,
+        cx=cx,
+        top_y=top_y,
+        detail_fill=COLORS["detail_fill"],
+    )
+    anchors = _anchors_from_detail_plan(positions, plan)
+
+    frame_left, frame_right, frame_bottom, frame_top = _detail_content_bounds(positions)
+    frame_w = frame_right - frame_left
+    frame_h = frame_top - frame_bottom
+    block_patch = FancyBboxPatch(
+        (frame_left, frame_bottom),
+        frame_w,
+        frame_h,
+        boxstyle="round,pad=0.01,rounding_size=0.10",
+        linewidth=2.0,
+        edgecolor=COLORS["detail_border"],
+        facecolor=COLORS["detail_fill"],
+        zorder=0,
+    )
+    if draw_section_frame:
+        ax.add_patch(block_patch)
+    _render_inline_linear_frames(ax, graph, positions, enabled=inline_linear_frames)
+
+    label_obstacles = list(plan.label_obstacles)
 
     input_index = next(
         (index for index, spec in enumerate(graph.nodes) if spec.synthetic == SYNTHETIC_INPUT),
@@ -2210,12 +2286,51 @@ def _render_laid_out_computation_graph(
             route_obstacles,
         )
 
+    merge_entry_x: dict[tuple[int, int], float] = {}
+    merge_link_bus: dict[tuple[int, int], float] = {}
+    for tgt, link_group in incoming.items():
+        labeled_links = [
+            (src, tgt) for src, tgt in link_group if (src, tgt) in graph.link_port_labels
+        ]
+        if not labeled_links:
+            continue
+        target_pos = positions[tgt]
+        target_anchor = anchors.get(tgt)
+        if target_anchor is None:
+            continue
+        sorted_links = sorted(labeled_links, key=lambda link: positions[link[0]].cx)
+        inner_w = max(target_pos.width * 0.72, 0.35 * len(sorted_links))
+        for index, link in enumerate(sorted_links):
+            merge_entry_x[link] = target_pos.cx - inner_w / 2 + (index + 1) * inner_w / (len(sorted_links) + 1)
+        base_bus = target_bus.get(tgt)
+        if base_bus is not None and len(sorted_links) >= 2:
+            for index, link in enumerate(sorted_links):
+                merge_link_bus[link] = base_bus - index * 0.07
+
+    merge_link_labels: list[tuple[str, float, float]] = []
+
     for src, tgt in links:
         source = anchors.get(src)
         target = anchors.get(tgt)
         if source is None or target is None:
             continue
-        linestyle = "dashed" if (src, tgt) in graph.dashed_links else "solid"
+        link_key = (src, tgt)
+        port_label = graph.link_port_labels.get(link_key)
+        if port_label and link_key in merge_entry_x:
+            entry_x = merge_entry_x[link_key]
+            bus_y = merge_link_bus.get(link_key)
+            points = _labeled_merge_connector_points(
+                source,
+                target,
+                entry_x,
+                bus_y=bus_y,
+            )
+            linestyle = "dashed" if link_key in graph.dashed_links else "solid"
+            connector_color = COLORS["residual"] if linestyle == "dashed" else None
+            _draw_path(ax, points, color=connector_color, linestyle=linestyle)
+            merge_link_labels.append((port_label, entry_x, target.top + 0.05))
+            continue
+        linestyle = "dashed" if link_key in graph.dashed_links else "solid"
         route_obstacles = [
             anchor for node_index, anchor in anchors.items() if node_index not in {src, tgt}
         ] + label_obstacles
@@ -2260,15 +2375,18 @@ def _render_laid_out_computation_graph(
             bus_y=bus_y,
         )
 
-    for leaf, draw_kwargs in node_draws:
+    for leaf, draw_kwargs in plan.node_draws:
         layout.add(leaf)
         _draw_box(ax, leaf, **draw_kwargs)
 
-    for op_x, op_y, symbol, op_sublabel in combine_ops:
+    for op_x, op_y, symbol, op_sublabel in plan.combine_ops:
         _draw_combine_op(ax, op_x, op_y, symbol, sublabel=op_sublabel)
 
-    for label, x, y, ha, va in branch_labels:
+    for label, x, y, ha, va in plan.branch_labels:
         _draw_floating_port_label(ax, label, x, y, ha=ha, va=va)
+
+    for label, x, y in merge_link_labels:
+        _draw_floating_port_label(ax, label, x, y, ha="center", va="bottom")
 
     input_anchor: _RenderAnchor | None = None
     for index, pos in enumerate(positions):

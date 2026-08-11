@@ -55,12 +55,17 @@ def block_sublabel(block: BlockNode | None) -> str | None:
     """Build the secondary text shown inside a block."""
     if block is None:
         return None
+    from visualizer.block_tree import block_purpose
+
     lines: list[str] = []
-    if block.class_name and block.class_name != block.label:
+    purpose = block_purpose(block)
+    if purpose:
+        lines.append(purpose)
+    elif block.class_name and block.class_name != block.label:
         lines.append(block.class_name)
-    if block.details:
+    elif block.details:
         lines.append(block.details[0])
-    return "\n".join(lines) if lines else None
+    return lines[0] if len(lines) == 1 else "\n".join(lines) if lines else None
 
 
 def estimate_block_size(
@@ -88,7 +93,7 @@ def estimate_block_size(
         text_w = max(text_w, len(line) * char_w_sub)
 
     width = max(min_box_width(), box_width_for_text_width(text_w))
-    if label == "SituAndMul":
+    if label == "SituAndMul" or label == "Gated multiply":
         width += BLOCK_PAD_X
     if sub_lines:
         return width, two_line_box_height()
