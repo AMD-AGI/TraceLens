@@ -147,11 +147,11 @@ index 0000000..7bf6424
 +
 +
 +def build_step_span_name(
-+    forward_batch: ForwardBatch, roofline_annotations: bool = False
++    forward_batch: ForwardBatch, detailed_annotations: bool = False
 +) -> str:
 +    """Build the profile-trace span name for one forward step.
 +
-+    When ``roofline_annotations`` is set (only while a roofline-annotated
++    When ``detailed_annotations`` is set (only while a roofline-annotated
 +    profile is active), the roofline aggregates are folded into the label via
 +    :func:`build_roofline_suffix`.
 +    """
@@ -163,7 +163,7 @@ index 0000000..7bf6424
 +    else:
 +        base = f"step[{mode.name} bs={bs}"
 +
-+    if roofline_annotations:
++    if detailed_annotations:
 +        suffix = build_roofline_suffix(forward_batch)
 +        if suffix:
 +            base = f"{base} {suffix}"
