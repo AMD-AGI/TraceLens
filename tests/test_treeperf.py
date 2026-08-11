@@ -719,43 +719,24 @@ def test_tree_perf_analyzer_live_gpu_profile(tmp_path):
     assert len(analyzer.get_kernel_launchers()) >= 1
 
 
-@pytest.mark.gpu
 def test_build_nn_module_latency_tree():
-    _require_cuda_torch()
-    corr = 100
-    events = [
-        _make_gpu_event("py1", 0, 500, "python_function", "nn.Module: Net", pid=100),
-        _make_gpu_event(
-            "py2", 10, 400, "python_function", "nn.Module: Net.sub", pid=100
-        ),
-        _make_gpu_event(
-            "cpu", 20, 50, "cpu_op", "aten::mm", pid=100, args={"correlation": corr}
-        ),
-        _make_gpu_event(
-            "rt",
-            25,
-            5,
-            "cuda_runtime",
-            "hipLaunchKernel",
-            pid=100,
-            args={"correlation": corr},
-        ),
-        _make_gpu_event(
-            "kern",
-            100,
-            80,
-            "kernel",
-            "gemm",
-            pid=0,
-            tid=7,
-            args={"correlation": corr, "stream": 7},
-        ),
-        _mk_ac2g(corr, pid=0, tid=7, ts=100, phase="s"),
-        _mk_ac2g(corr, pid=0, tid=7, ts=100, phase="f"),
-    ]
-    tree = TraceToTree(events)
-    tree.build_tree(add_python_func=True)
-    analyzer = TreePerfAnalyzer(tree, add_python_func=True, rebuild_tree=False)
-    root = next(e for e in tree.events if e["name"] == "nn.Module: Net")
+    trace_path = os.path.join(
+        os.path.dirname(__file__),
+        "traces/inference/sglang_prefilldecode/"
+        "sglang_Qwen3-8B_prefilldecode.json.gz",
+    )
+    analyzer = TreePerfAnalyzer.from_file(trace_path, add_python_func=True)
+    tree = analyzer.tree
+    root = next(e for e in tree.events if e.get("name") == "nn.Module: Qwen3Model_0")
+
     analyzer.build_nn_module_latency_tree(root)
-    assert root["GPU Time"] == 80
+    children = [tree.get_UID2event(uid) for uid in tree.get_nn_module_children(root)]
+
+    assert (
+        sum(
+            child["name"].startswith("nn.Module: Qwen3DecoderLayer_")
+            for child in children
+        )
+        == 36
+    )
+    assert root["GPU Time"] == pytest.approx(492163.76953125)
