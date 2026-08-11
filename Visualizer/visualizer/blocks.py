@@ -70,6 +70,38 @@ def collect_norm_module_pairs(
     return pairs
 
 
+def input_source_label(component: BlockComponent) -> str:
+    """Return the AST-derived diagram label for an upstream module."""
+    return component.label
+
+
+def input_sources_from_forward_sequence(
+    components: list[BlockComponent],
+    forward_sequence: list[str],
+) -> dict[str, str]:
+    """Map compute module attr names to the immediate forward predecessor from AST."""
+    attr_to_component = {comp.attr_name: comp for comp in components}
+    attr_to_order = {comp.attr_name: comp.forward_order for comp in components}
+    order_to_forward_index: dict[int, int] = {}
+    for index, attr in enumerate(forward_sequence):
+        forward_order = attr_to_order.get(attr)
+        if forward_order is not None:
+            order_to_forward_index[forward_order] = index
+
+    sources: dict[str, str] = {}
+    for comp in components:
+        if comp.role == "norm" or comp.forward_order is None:
+            continue
+        forward_index = order_to_forward_index.get(comp.forward_order)
+        if forward_index is None or forward_index == 0:
+            continue
+        upstream = attr_to_component.get(forward_sequence[forward_index - 1])
+        if upstream is None:
+            continue
+        sources[comp.attr_name] = input_source_label(upstream)
+    return sources
+
+
 def upstream_input_sources(components: list[BlockComponent]) -> dict[str, str]:
     """Map compute module attr names to the nearest upstream operator in forward order."""
     ordered = ordered_components(components)
@@ -84,11 +116,8 @@ def upstream_input_sources(components: list[BlockComponent]) -> dict[str, str]:
         ]
         if not upstream_candidates:
             continue
-        upstream_order = max(candidate.forward_order for candidate in upstream_candidates)
-        upstream_at_order = [
-            candidate for candidate in upstream_candidates if candidate.forward_order == upstream_order
-        ]
-        sources[comp.attr_name] = upstream_at_order[-1].attr_name
+        upstream = max(upstream_candidates, key=lambda candidate: candidate.forward_order)
+        sources[comp.attr_name] = input_source_label(upstream)
     return sources
 
 

@@ -31,7 +31,7 @@ from visualizer.ast_analyze import (
     _label_for,
 )
 from visualizer.basic_ops import BasicOpFilter, introspect_is_modeling_operation, resolve_is_basic
-from visualizer.blocks import BlockComponent, upstream_input_sources
+from visualizer.blocks import BlockComponent, input_sources_from_forward_sequence, upstream_input_sources
 
 _SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "getattr"})
 
@@ -1421,8 +1421,14 @@ def build_block_node(
     )
 
 
-def _input_sources_for_components(components: list[BlockComponent]) -> dict[str, str]:
+def _input_sources_for_components(
+    components: list[BlockComponent],
+    *,
+    forward_sequence: list[str] | None = None,
+) -> dict[str, str]:
     """Map compute module attr names to the upstream operator that feeds them."""
+    if forward_sequence:
+        return input_sources_from_forward_sequence(components, forward_sequence)
     return upstream_input_sources(components)
 
 
@@ -1551,7 +1557,11 @@ def build_decoder_block_trees(
         if decoder is not None
         else list(components)
     )
-    input_sources = _input_sources_for_components(detail_components)
+    forward_sequence = list(decoder.forward_calls) if decoder is not None else None
+    input_sources = _input_sources_for_components(
+        detail_components,
+        forward_sequence=forward_sequence,
+    )
 
     ordered = sorted(
         detail_components,

@@ -14,7 +14,7 @@ from matplotlib.patches import Circle, FancyBboxPatch
 from visualizer.blocks import BlockComponent
 from visualizer.ast_analyze import displays_as_linear
 from visualizer.basic_ops import BasicOpFilter
-from visualizer.blocks import BlockComponent, collect_norm_module_pairs, upstream_input_sources
+from visualizer.blocks import BlockComponent, collect_norm_module_pairs, input_sources_from_forward_sequence, upstream_input_sources
 from visualizer.block_tree import (
     BlockNode,
     _is_composite_block,
@@ -905,7 +905,10 @@ def _spine_box_height(component: BlockComponent) -> float:
 
 def _module_input_labels(spec: ArchitectureSpec) -> dict[str, str]:
     """Map compute module attr names to the upstream operator that feeds them in the outer block."""
-    return upstream_input_sources(_ordered_block_components(spec))
+    components = _ordered_block_components(spec)
+    if spec.forward_sequence:
+        return input_sources_from_forward_sequence(components, spec.forward_sequence)
+    return upstream_input_sources(components)
 
 
 def _block_frame_header_height(repeat_label: str | None = None) -> float:

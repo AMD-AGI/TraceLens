@@ -1620,6 +1620,65 @@ def _layout_fork_join_branch(
             side_pos.cx = min_side_cx
 
 
+def _ensure_synthetic_input_clears_consumers(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float | None = None,
+) -> None:
+    """Keep the synthetic input at least one detail layer gap above every direct consumer."""
+    gap = DETAIL_LAYER_GAP if min_gap is None else max(min_gap, DETAIL_LAYER_GAP)
+    input_index = next(
+        (index for index, pos in enumerate(positions) if pos.spec.synthetic == SYNTHETIC_INPUT),
+        None,
+    )
+    if input_index is None:
+        return
+    targets = [target for source, target in graph.links if source == input_index]
+    if not targets:
+        return
+    input_pos = positions[input_index]
+    required_bottom = max(positions[target].top_y for target in targets) + gap
+    if input_pos.bottom < required_bottom:
+        input_pos.top_y += required_bottom - input_pos.bottom
+
+
+def _compact_synthetic_input_spacing(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float | None = None,
+    elements: list[MeasuredElement] | None = None,
+) -> None:
+    """Place the synthetic input one standard gap above its downstream nodes and frame captions."""
+    gap = DETAIL_LAYER_GAP if min_gap is None else max(min_gap, DETAIL_LAYER_GAP)
+    input_index = next(
+        (index for index, pos in enumerate(positions) if pos.spec.synthetic == SYNTHETIC_INPUT),
+        None,
+    )
+    if input_index is None:
+        return
+    targets = [target for source, target in graph.links if source == input_index]
+    if not targets:
+        return
+    highest_top = max(positions[target].top_y for target in targets)
+    input_pos = positions[input_index]
+    desired_bottom = highest_top + gap
+    if elements:
+        input_left = input_pos.cx - input_pos.width / 2
+        input_right = input_pos.cx + input_pos.width / 2
+        caption_tops = [
+            element.bounds.top
+            for element in elements
+            if element.kind in {"inline_frame", "frame_label", "frame_sublabel"}
+            and element.bounds.right + gap > input_left
+            and element.bounds.left - gap < input_right
+        ]
+        if caption_tops:
+            desired_bottom = max(desired_bottom, max(caption_tops) + gap)
+    input_pos.top_y += desired_bottom - input_pos.bottom
+
+
 def _ensure_input_above_fork_join_clusters(
     positions: list[LayoutPosition],
     graph: ComputationGraph,

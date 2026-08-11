@@ -20,10 +20,11 @@ from visualizer.computation_graph import (
     SYNTHETIC_COMBINE,
     SYNTHETIC_HIDDEN,
     SYNTHETIC_INPUT,
+    _compact_synthetic_input_spacing,
+    _ensure_synthetic_input_clears_consumers,
     _fanout_branch_index,
     _layout_fork_join_branches,
     _resolve_layout_overlaps,
-    _ensure_input_above_fork_join_clusters,
     stack_inline_frame_positions,
     _center_align_vertical_chains,
 )
@@ -1132,6 +1133,24 @@ def _forbidden_max_right(
     return min(region.left for region in forbidden_regions) - min_gap - INLINE_FRAME_PAD
 
 
+def _anchor_detail_layout_to_top_y(
+    positions: list[LayoutPosition],
+    *,
+    top_y: float,
+) -> None:
+    """Shift diagram content so its visual top aligns with the section ``top_y`` anchor."""
+    from visualizer.render import _detail_content_extents
+
+    if not positions:
+        return
+    _left, _right, _bottom, max_top = _detail_content_extents(positions)
+    shift = top_y - max_top
+    if abs(shift) <= 1e-6:
+        return
+    for pos in positions:
+        pos.top_y += shift
+
+
 def _finalize_spine_aligned_plan(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
@@ -1300,11 +1319,15 @@ def finalize_detail_layout(
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
     _layout_fork_join_branches(positions, graph)
-    _ensure_input_above_fork_join_clusters(positions, graph, min_gap=VALIDATE_MIN_GAP)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
-    _ensure_input_above_inline_frames(positions, elements, min_gap=VALIDATE_MIN_GAP)
+    _compact_synthetic_input_spacing(
+        positions,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+        elements=elements,
+    )
     _separate_parallel_tiles_from_inline_frames(
         positions,
         elements,
@@ -1312,6 +1335,16 @@ def finalize_detail_layout(
         min_gap=VALIDATE_MIN_GAP,
     )
     _layout_fork_join_branches(positions, graph)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    _compact_synthetic_input_spacing(
+        positions,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+        elements=elements,
+    )
+    _anchor_detail_layout_to_top_y(positions, top_y=top_y)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
@@ -1328,6 +1361,18 @@ def finalize_detail_layout(
     )
     _layout_fork_join_branches(positions, graph)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    _compact_synthetic_input_spacing(
+        positions,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+        elements=elements,
+    )
+    _anchor_detail_layout_to_top_y(positions, top_y=top_y)
+    _ensure_synthetic_input_clears_consumers(positions, graph)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
     validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden).raise_if_invalid()
     return plan

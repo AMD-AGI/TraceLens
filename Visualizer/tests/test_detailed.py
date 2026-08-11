@@ -95,13 +95,38 @@ def test_upstream_input_sources_pair_conditional_variants():
     from visualizer.blocks import BlockComponent, upstream_input_sources
 
     components = [
+        BlockComponent("input_layernorm", "RMSNorm", "norm", "RMSNorm", forward_order=0),
+        BlockComponent("self_attn", "KimiMLAAttention", "attention", "MLA", forward_order=1),
         BlockComponent("post_attention_layernorm", "RMSNorm", "norm", "RMSNorm", forward_order=2),
         BlockComponent("block_sparse_moe", "KimiSparseMoeBlock", "moe", "KimiSparseMoeBlock", forward_order=3),
         BlockComponent("mlp", "KimiMLP", "ffn", "KimiMLP", forward_order=3),
     ]
     sources = upstream_input_sources(components)
-    assert sources["block_sparse_moe"] == "post_attention_layernorm"
-    assert sources["mlp"] == "post_attention_layernorm"
+    assert sources["self_attn"] == "RMSNorm"
+    assert sources["block_sparse_moe"] == "RMSNorm"
+    assert sources["mlp"] == "RMSNorm"
+
+
+def test_input_source_uses_ast_operation_label_not_attr_name():
+    from visualizer.blocks import BlockComponent, input_sources_from_forward_sequence
+
+    components = [
+        BlockComponent("input_layernorm", "KimiRMSNorm", "norm", "RMSNorm", forward_order=0),
+        BlockComponent("self_attn", "KimiMLAAttention", "attention", "MLA", forward_order=1),
+        BlockComponent("post_attention_layernorm", "KimiRMSNorm", "norm", "RMSNorm", forward_order=2),
+        BlockComponent("block_sparse_moe", "KimiSparseMoeBlock", "moe", "KimiSparseMoeBlock", forward_order=3),
+    ]
+    forward_sequence = [
+        "input_layernorm",
+        "self_attn",
+        "post_attention_layernorm",
+        "block_sparse_moe",
+    ]
+    sources = input_sources_from_forward_sequence(components, forward_sequence)
+    assert sources["self_attn"] == "RMSNorm"
+    assert sources["block_sparse_moe"] == "RMSNorm"
+    assert "layernorm" not in sources["self_attn"].lower()
+    assert "layernorm" not in sources["block_sparse_moe"].lower()
 
 
 def test_build_decoder_block_trees_for_custom_model():
@@ -1849,8 +1874,12 @@ def test_infer_kimi_layer_variants():
     assert any(title.startswith("KimiMLP") for title in titles)
     mlp_tree = next(tree for title, tree in spec.detailed_block_trees if title.startswith("KimiMLP"))
     moe_tree = next(tree for title, tree in spec.detailed_block_trees if title.startswith("KimiSparseMoeBlock"))
-    assert mlp_tree.input_source == "post_attention_layernorm"
-    assert moe_tree.input_source == "post_attention_layernorm"
+    kda_tree = next(tree for title, tree in spec.detailed_block_trees if title.startswith("KDA"))
+    mla_tree = next(tree for title, tree in spec.detailed_block_trees if title.startswith("MLA"))
+    assert kda_tree.input_source == "RMSNorm"
+    assert mla_tree.input_source == "RMSNorm"
+    assert mlp_tree.input_source == "RMSNorm"
+    assert moe_tree.input_source == "RMSNorm"
 
 
 def test_kimi_ffn_spine_label_uses_class_names():
@@ -2411,6 +2440,30 @@ def test_moe_finalize_keeps_combine_gap_tight():
     )
 
 
+def _assert_input_clears_direct_consumers(positions, graph, *, min_gap: float | None = None) -> None:
+    from visualizer.computation_graph import DETAIL_LAYER_GAP, SYNTHETIC_INPUT, _node_content_left, _node_content_right
+
+    gap = DETAIL_LAYER_GAP if min_gap is None else min_gap
+    input_index = next(
+        index for index, pos in enumerate(positions) if pos.spec.synthetic == SYNTHETIC_INPUT
+    )
+    input_pos = positions[input_index]
+    targets = [target for source, target in graph.links if source == input_index]
+    assert targets, "Synthetic input should feed at least one downstream node"
+    for target in targets:
+        consumer = positions[target]
+        clearance = input_pos.bottom - consumer.top_y
+        assert clearance >= gap - 1e-6, (
+            f"Input overlaps consumer {consumer.spec.label!r}: clearance {clearance:.4f} < {gap:.4f}"
+        )
+        horizontal_overlap = (
+            _node_content_left(input_pos) + gap <= _node_content_right(consumer)
+            and _node_content_left(consumer) + gap <= _node_content_right(input_pos)
+        )
+        if horizontal_overlap:
+            assert clearance >= gap - 1e-6
+
+
 def _assert_no_layout_overlaps(positions, *, min_gap: float = 0.08) -> None:
     from visualizer.computation_graph import _node_content_left, _node_content_right
 
@@ -2424,6 +2477,84 @@ def _assert_no_layout_overlaps(positions, *, min_gap: float = 0.08) -> None:
                 raise AssertionError(
                     f"Overlapping nodes: {left.spec.label!r} and {right.spec.label!r}"
                 )
+
+
+def test_kimi_detail_sections_input_sources_and_spacing(tmp_path: Path):
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.computation_graph import (
+        DETAIL_LAYER_GAP,
+        SYNTHETIC_INPUT,
+        _estimate_graph_height,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.extract import load_architecture
+    from visualizer.render import COLORS, _detail_sections_to_render, _format_input_source_sublabel
+    from visualizer.render_validate import finalize_detail_layout
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    spec = load_architecture(
+        "moonshotai/Kimi-K3",
+        code_path=code_path,
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"]),
+    )
+    expected_sources = {
+        "KDA (self_attn)": "RMSNorm",
+        "MLA (self_attn)": "RMSNorm",
+        "KimiMLP": "RMSNorm",
+        "KimiSparseMoeBlock": "RMSNorm",
+    }
+    for title, tree, sublabel in _detail_sections_to_render(spec):
+        for prefix, source in expected_sources.items():
+            if title.startswith(prefix):
+                assert tree.input_source == source, title
+                assert sublabel == _format_input_source_sublabel(source), title
+
+    fig, ax = plt.subplots(figsize=(16, 13))
+    fig.canvas.draw()
+    try:
+        for title, tree, input_sublabel in _detail_sections_to_render(spec):
+            if not any(title.startswith(prefix) for prefix in expected_sources):
+                continue
+            graph = build_computation_graph(tree, basic_ops=spec.basic_ops)
+            measure_graph_node_sizes(ax, graph, input_sublabel=input_sublabel)
+            positions, _ = layout_computation_graph(
+                graph,
+                cx=3.5,
+                top_y=10.0,
+                block_w=18.0,
+                block_h=_estimate_graph_height(graph),
+                content_left=0.6,
+            )
+            finalize_detail_layout(
+                ax,
+                graph,
+                positions,
+                input_sublabel=input_sublabel,
+                cx=3.5,
+                top_y=10.0,
+                detail_fill=COLORS["detail_fill"],
+                min_left=0.6,
+            )
+            _assert_input_clears_direct_consumers(positions, graph, min_gap=DETAIL_LAYER_GAP)
+            input_index = next(
+                index for index, node in enumerate(graph.nodes) if node.synthetic == SYNTHETIC_INPUT
+            )
+            consumers = [positions[target] for source, target in graph.links if source == input_index]
+            _assert_no_layout_overlaps([positions[input_index], *consumers], min_gap=DETAIL_LAYER_GAP / 2)
+    finally:
+        plt.close(fig)
 
 
 def test_kda_attention_merge_links_are_unlabeled():
