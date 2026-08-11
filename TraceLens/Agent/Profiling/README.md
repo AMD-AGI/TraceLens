@@ -54,7 +54,7 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 
 2. **Provide if prompted:**
    - Target node, conda env name, conda install path
-   - Whether the Docker image is already patched, or a vLLM version tag / SGLang GPU type to build a patched image
+   - Whether the Docker image is already patched, or a vLLM version tag / SGLang GPU type to build a patched image (nothing to build on vLLM v0.26.0+)
    - Profiling mode: targeted steady-state window (recommended) vs full benchmark
 
 3. **Results:**
@@ -134,6 +134,8 @@ The **Magpie Benchmark + Profiling** skill coordinates the entire trace-collecti
 | **SGLang** (`framework: sglang`) | `examples/custom_workflows/inference_analysis/build_docker_sglang.sh` (`--sglang-version`, `--gpu-type`) | `benchmark_serving.py` `start_step`/`num_steps` patch + `benchmark_lib.sh` `num_prompts` patch |
 
 The skill parses the `case` blocks of these scripts at runtime to discover currently supported tags.
+
+For vLLM, the two profiler options the workflow relies on — `--profiler-config.capture_torch_profiler` (graph-capture traces) and `--profiler-config.detailed_trace_annotation` (roofline annotations) — come from a TraceLens patch on **v0.14-v0.25** and from upstream vLLM on **v0.26.0 and later** ([vllm-project/vllm#37524](https://github.com/vllm-project/vllm/pull/37524)). A patched image is therefore only needed for **v0.14-v0.25**; on **v0.26.0 and later** a stock upstream image works unchanged, since this workflow never needs TraceLens inside the container — the server only writes traces, and all analysis runs on the host against the mounted output directory. The server flags are identical either way. `capture_torch_profiler` is a boolean, and traces always land in `<torch_profiler_dir>/capture_traces`.
 
 ### Profiling Modes
 

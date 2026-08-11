@@ -16,8 +16,6 @@ class CustomCollective:
     category = "CustomCollective"
     bwd_category = None
 
-    pass
-
 
 class aiter_fused_allreduce_rmsnorm(CustomCollective):
     """

@@ -28,6 +28,7 @@ Options:
                            - 0.5.14 / v0514 : sglang_roofline_patches/sglang_0_5_14/
                            - 0.5.15 / v0515 : sglang_roofline_patches/sglang_0_5_15/
                            - 0.5.16 / v0516 : sglang_roofline_patches/sglang_0_5_16/
+                           - 0.5.17 / v0517 : sglang_roofline_patches/sglang_0_5_17/
   --gpu-type <type>        mi300 | mi350 | mi355 (default: mi350)
   --base-image <image>     Override the default base image
   -h, --help               Show this help
@@ -50,6 +51,8 @@ Base images:
   0.5.15 MI355X : lmsysorg/sglang:v0.5.15-rocm720-mi35x
   0.5.16 MI300X : lmsysorg/sglang:v0.5.16-rocm720-mi30x
   0.5.16 MI355X : lmsysorg/sglang:v0.5.16-rocm720-mi35x
+  0.5.17 MI300X : lmsysorg/sglang:v0.5.17-rocm720-mi30x
+  0.5.17 MI355X : lmsysorg/sglang:v0.5.17-rocm720-mi35x
 
 Note:
   On SGLang 0.5.13 and 0.5.14 the kernel-shape wrapping is incompatible with the
@@ -152,6 +155,9 @@ normalize_version() {
         0.5.16|v0516|0516|5.16)
             echo "0.5.16"
             ;;
+        0.5.17|v0517|0517|5.17)
+            echo "0.5.17"
+            ;;
         *)
             echo ""
             ;;
@@ -160,7 +166,7 @@ normalize_version() {
 
 SGLANG_VERSION="$(normalize_version "${SGLANG_VERSION}")"
 if [ -z "${SGLANG_VERSION}" ]; then
-    echo "Error: unsupported --sglang-version. Use 0.5.9, 0.5.11, 0.5.12, 0.5.13, 0.5.14, 0.5.15, or 0.5.16."
+    echo "Error: unsupported --sglang-version. Use 0.5.9, 0.5.11, 0.5.12, 0.5.13, 0.5.14, 0.5.15, 0.5.16, or 0.5.17."
     exit 1
 fi
 
@@ -209,6 +215,12 @@ resolve_base_image() {
             ;;
         0.5.16:mi350|0.5.16:mi355)
             echo "lmsysorg/sglang:v0.5.16-rocm720-mi35x"
+            ;;
+        0.5.17:mi300)
+            echo "lmsysorg/sglang:v0.5.17-rocm720-mi30x"
+            ;;
+        0.5.17:mi350|0.5.17:mi355)
+            echo "lmsysorg/sglang:v0.5.17-rocm720-mi35x"
             ;;
         *)
             echo ""
