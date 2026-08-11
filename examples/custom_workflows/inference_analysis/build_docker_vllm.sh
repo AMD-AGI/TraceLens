@@ -10,8 +10,13 @@ set -e
 usage() {
     echo "Usage: $0 <vllm-version> <path-to-TraceLens> [--base-image <image>] [docker build args...]"
     echo ""
-    echo "  vllm-version    One of: v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24 (shorthand for v0.14.0, v0.15.0, v0.16.0, v0.17.0, v0.18.0, v0.19.0, v0.20.0, v0.21.0, v0.22.0, v0.23.0, v0.24.0)"
+    echo "  vllm-version    One of: v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25 (shorthand for v0.14.0 ... v0.25.0)"
     echo "  --base-image    Override the default base Docker image for the selected vllm version"
+    echo ""
+    echo "  Each version applies the matching vllm_patches/config_vllm_*.patch, which adds the"
+    echo "  profiler_config.capture_torch_profiler and profiler_config.detailed_trace_annotation"
+    echo "  options. vLLM v0.26.0 and later ship both options upstream, so they need no image"
+    echo "  from this script - run a stock upstream image and analyse the traces on the host."
     echo ""
     echo "Examples:"
     echo "  $0 v14 /home/user/TraceLens -t tracelens-vllm"
@@ -72,9 +77,16 @@ case "${VLLM_VERSION}" in
         BASE_IMAGE="vllm/vllm-openai-rocm:v0.24.0"
         PATCH_FILE="config_vllm_v0.24.0.patch"
         ;;
+    v25)
+        BASE_IMAGE="vllm/vllm-openai-rocm:v0.25.0"
+        PATCH_FILE="config_vllm_v0.25.0.patch"
+        ;;
     *)
         echo "Error: unsupported vllm version '${VLLM_VERSION}'"
-        echo "Supported versions: v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24"
+        echo "Supported versions: v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25"
+        echo ""
+        echo "vLLM v0.26.0 and later ship capture_torch_profiler and detailed_trace_annotation"
+        echo "upstream, so no patched image is needed: run a stock upstream image."
         exit 1
         ;;
 esac
@@ -102,8 +114,8 @@ if [ -n "${CUSTOM_BASE_IMAGE}" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCH_PATH="examples/custom_workflows/inference_analysis/vllm_patches/${PATCH_FILE}"
 
+PATCH_PATH="examples/custom_workflows/inference_analysis/vllm_patches/${PATCH_FILE}"
 if [ ! -f "${TRACELENS_REPO}/${PATCH_PATH}" ]; then
     echo "Error: patch file not found: ${TRACELENS_REPO}/${PATCH_PATH}"
     exit 1
