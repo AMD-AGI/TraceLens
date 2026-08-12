@@ -261,18 +261,12 @@ def test_merge_real_two_rank_trace():
         ]
     ).merge()
     by_rank = {
-        rank: [
-            event for event in merged if event.get("args", {}).get("rank") == rank
-        ]
+        rank: [event for event in merged if event.get("args", {}).get("rank") == rank]
         for rank in (0, 1)
     }
     assert all(by_rank.values())
     rank_pids = [
-        {
-            event["pid"]
-            for event in by_rank[rank]
-            if isinstance(event.get("pid"), int)
-        }
+        {event["pid"] for event in by_rank[rank] if isinstance(event.get("pid"), int)}
         for rank in (0, 1)
     ]
     assert rank_pids[0].isdisjoint(rank_pids[1])
@@ -286,9 +280,7 @@ def test_merge_real_two_rank_trace():
     ]
     assert rank_correlations[0].isdisjoint(rank_correlations[1])
     labels = {
-        event["args"]["name"]
-        for event in merged
-        if event.get("name") == "process_name"
+        event["args"]["name"] for event in merged if event.get("name") == "process_name"
     }
     assert labels >= {
         "RANK 0 - CPU",

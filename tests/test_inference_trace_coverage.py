@@ -77,9 +77,7 @@ def test_merge_capture_trace_integration(dirpath, trace_gz, capture_folder):
     if not os.path.isfile(metadata):
         pytest.skip("no execution_details.json")
     trace_path = os.path.join(dirpath, trace_gz)
-    merged = merge_capture_trace_into_graph(
-        capture_folder, metadata, trace_path
-    )
+    merged = merge_capture_trace_into_graph(capture_folder, metadata, trace_path)
     assert len(merged.events) > 0
 
 

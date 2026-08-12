@@ -47,7 +47,9 @@ from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
     generate_collective_report,
 )
 from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
-from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import apply_pseudo_op_extensions
+from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
+    apply_pseudo_op_extensions,
+)
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
@@ -55,9 +57,12 @@ from TraceLens.util import RocprofParser
 
 from tests.test_agent_coverage import _StubAnalyzer, _StubTree, _kernel_event
 from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
-from tests.test_perfmodel_coverage import _ARCH, _gemm_event
-from tests.test_reporting_coverage import _build_synthetic_trace, _mk_ac2g, _mk_event
-from tests.test_treeperf_coverage import _build_analyzer, _make_gpu_event, _mk_pytorch_trace
+from tests.test_reporting_coverage import _mk_ac2g, _mk_event
+from tests.test_treeperf_coverage import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
 
 ROCprof_FILE = os.path.join(os.path.dirname(__file__), "rocprof/908_results.json.gz")
 JAX_PB = os.path.join(
@@ -87,15 +92,24 @@ def _jax_llama_trace_events(block0_hint: str = "te_layernorm_forward"):
         + block0_hint
     )
     events = [
-        {"ph": "M", "name": "process_name", "pid": 1, "args": {"name": "/device:GPU:0"}},
-        {"ph": "M", "name": "thread_name", "pid": 1, "tid": 10, "args": {"name": "Stream"}},
+        {
+            "ph": "M",
+            "name": "process_name",
+            "pid": 1,
+            "args": {"name": "/device:GPU:0"},
+        },
+        {
+            "ph": "M",
+            "name": "thread_name",
+            "pid": 1,
+            "tid": 10,
+            "args": {"name": "Stream"},
+        },
     ]
     ts = 1000.0
     for tok in range(2):
         for block in range(2):
-            p = base_path.format(block=block).replace(
-                "block_0", f"block_{block}"
-            )
+            p = base_path.format(block=block).replace("block_0", f"block_{block}")
             if block == 0 and tok == 0:
                 p = base_path.format(block=0)
             events.append(
@@ -185,7 +199,9 @@ class TestCompareTracesJaxLlama:
         assert per_layer > 0
         assert "attn_core" in stage_avg
 
-        ev = Event(1, 10, 0, 10, "loop_multiply_fusion", {"hlo_op": "loop_multiply_fusion"})
+        ev = Event(
+            1, 10, 0, 10, "loop_multiply_fusion", {"hlo_op": "loop_multiply_fusion"}
+        )
         assert is_loop_multiply_fusion(ev)
         assert classify_stage_base(ev) == "other"
         assert top_stats_by_key(stream, lambda e: e.name, 3)
@@ -243,20 +259,22 @@ class TestCollectiveReportErrors:
     def test_collective_trace_pattern_and_all2allv(self, tmp_path):
         for rank in (0, 1):
             events = {
-                "traceEvents": [{
-                    "ph": "X",
-                    "cat": "kernel",
-                    "name": "ncclKernel_AllReduce",
-                    "pid": rank,
-                    "tid": 3,
-                    "ts": 1000,
-                    "dur": 40,
-                    "args": {
-                        "External id": 10,
-                        "Collective name": "allreduce",
-                        "stream": 3,
-                    },
-                }]
+                "traceEvents": [
+                    {
+                        "ph": "X",
+                        "cat": "kernel",
+                        "name": "ncclKernel_AllReduce",
+                        "pid": rank,
+                        "tid": 3,
+                        "ts": 1000,
+                        "dur": 40,
+                        "args": {
+                            "External id": 10,
+                            "Collective name": "allreduce",
+                            "stream": 3,
+                        },
+                    }
+                ]
             }
             (tmp_path / f"trace_{rank}_step.json").write_text(json.dumps(events))
         dfs = generate_collective_report(
@@ -271,7 +289,9 @@ class TestCollectiveReportErrors:
 
     def test_gpus_per_node_invalid(self, tmp_path):
         for rank in (0,):
-            (tmp_path / f"rank{rank}_trace.json").write_text(json.dumps({"traceEvents": []}))
+            (tmp_path / f"rank{rank}_trace.json").write_text(
+                json.dumps({"traceEvents": []})
+            )
         with pytest.raises(ValueError, match="gpus_per_node"):
             generate_collective_report(
                 trace_dir=str(tmp_path),
@@ -297,7 +317,9 @@ class TestRocprofAnalysisDeep:
         assert _categorize_kernel("Cijk_gemm") == "GEMM"
 
     def test_rocprof_main(self, tmp_path):
-        mod = importlib.import_module("TraceLens.Reporting.generate_perf_report_rocprof")
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_rocprof"
+        )
         out = tmp_path / "roc.xlsx"
         old_argv = sys.argv
         sys.argv = [
@@ -425,13 +447,15 @@ class TestOrchestratorComparativeFusion:
 
         csv_dir = tmp_path / "trace1_csvs"
         csv_dir.mkdir()
-        pd.DataFrame({
-            "name": ["Cijk_A", "ew_add", "Cijk_A", "ew_add"],
-            "source": ["trace1", "trace1", "trace2", "trace2"],
-            "lowest_common_ancestor_id": [100, 100, 100, 100],
-            "kernel_time": [5000.0, 3000.0, 4000.0, 2500.0],
-            "gpu_op_uid": [10, 11, 10, 11],
-        }).to_csv(csv_dir / "diff_stats.csv", index=False)
+        pd.DataFrame(
+            {
+                "name": ["Cijk_A", "ew_add", "Cijk_A", "ew_add"],
+                "source": ["trace1", "trace1", "trace2", "trace2"],
+                "lowest_common_ancestor_id": [100, 100, 100, 100],
+                "kernel_time": [5000.0, 3000.0, 4000.0, 2500.0],
+                "gpu_op_uid": [10, 11, 10, 11],
+            }
+        ).to_csv(csv_dir / "diff_stats.csv", index=False)
 
         cands = _extract_comparative_fusion_candidates(str(csv_dir), analyzer, tree)
         assert isinstance(cands, list)
@@ -532,11 +556,36 @@ class TestTreePerfRemaining:
         events = [
             _make_gpu_event("nn", 0, 500, "python_function", "nn.Module: Net", pid=100),
             _make_gpu_event(
-                "cpu1", 20, 80, "cpu_op", "aten::mm", pid=100,
-                args={"Input Dims": [[32, 64], [64, 128]], "Input type": ["fp16", "fp16"]},
+                "cpu1",
+                20,
+                80,
+                "cpu_op",
+                "aten::mm",
+                pid=100,
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["fp16", "fp16"],
+                },
             ),
-            _make_gpu_event("rt1", 25, 5, "cuda_runtime", "hipLaunchKernel", pid=100, args={"correlation": corr}),
-            _make_gpu_event("k1", 50, 40, "kernel", "Cijk_gemm", pid=0, tid=7, args={"correlation": corr, "stream": 7}),
+            _make_gpu_event(
+                "rt1",
+                25,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                pid=100,
+                args={"correlation": corr},
+            ),
+            _make_gpu_event(
+                "k1",
+                50,
+                40,
+                "kernel",
+                "Cijk_gemm",
+                pid=0,
+                tid=7,
+                args={"correlation": corr, "stream": 7},
+            ),
             _mk_ac2g(corr, 0, 7, 50, "s"),
             _mk_ac2g(corr, 0, 7, 90, "f"),
         ]
@@ -561,7 +610,10 @@ class TestTreePerfRemaining:
                 "operands": ["bf16[4,8]{1,0}"],
             },
         }
-        assert JaxTreePerfAnalyzer.get_event_perf_model_name(te_bwd) == "jax_te_fused_attn_bwd"
+        assert (
+            JaxTreePerfAnalyzer.get_event_perf_model_name(te_bwd)
+            == "jax_te_fused_attn_bwd"
+        )
         te_fwd = {
             "gpu_kernel_op_cat": "GEMM",
             "metadata": {
@@ -569,13 +621,21 @@ class TestTreePerfRemaining:
                 "operands": ["bf16[4,8]{1,0}"],
             },
         }
-        assert JaxTreePerfAnalyzer.get_event_perf_model_name(te_fwd) == "jax_te_fused_attn"
+        assert (
+            JaxTreePerfAnalyzer.get_event_perf_model_name(te_fwd) == "jax_te_fused_attn"
+        )
         meta = JaxTreePerfAnalyzer.get_event_metadata(te_fwd)
         assert isinstance(meta, dict)
 
     def test_jax_kernel_launchers_with_metadata_filter(self):
         event = _make_gpu_event(
-            "k1", 0, 100, "kernel", "Cijk_gemm", pid=1, tid=1,
+            "k1",
+            0,
+            100,
+            "kernel",
+            "Cijk_gemm",
+            pid=1,
+            tid=1,
             args={"correlation": 1, "stream": 1},
         )
         event["metadata"] = {"metadata": "special_tag_here"}

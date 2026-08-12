@@ -19,7 +19,9 @@ from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 
-def _make_gpu_event(uid, ts, dur, cat="kernel", name="kernel", pid=100, tid=100, args=None):
+def _make_gpu_event(
+    uid, ts, dur, cat="kernel", name="kernel", pid=100, tid=100, args=None
+):
     event = {
         "ph": "X",
         "UID": uid,
@@ -53,7 +55,9 @@ def _mk_ac2g(corr_id, pid, tid, ts, phase):
 def _build_analyzer(events, add_python_func=False, **kwargs):
     tree = TraceToTree(deepcopy(events), prune_nongpu_paths=False)
     tree.build_tree(add_python_func=add_python_func)
-    return TreePerfAnalyzer(tree, add_python_func=add_python_func, rebuild_tree=False, **kwargs)
+    return TreePerfAnalyzer(
+        tree, add_python_func=add_python_func, rebuild_tree=False, **kwargs
+    )
 
 
 class TestTreePerfCoverageExtended:
@@ -66,7 +70,10 @@ class TestTreePerfCoverageExtended:
                 100,
                 "cpu_op",
                 "aten::mm",
-                args={"Input Dims": [[32, 64], [64, 128]], "Input type": ["fp16", "fp16"]},
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["fp16", "fp16"],
+                },
             ),
             _make_gpu_event(
                 "rt",
@@ -113,7 +120,10 @@ class TestTreePerfCoverageExtended:
                 100,
                 "cpu_op",
                 "aten::linear",
-                args={"Input Dims": [[32, 64], [64, 128]], "Input type": ["fp16", "fp16"]},
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["fp16", "fp16"],
+                },
             ),
             _make_gpu_event(
                 "rt",
@@ -137,7 +147,9 @@ class TestTreePerfCoverageExtended:
             _mk_ac2g(corr, 0, 7, 1100, "f"),
         ]
         analyzer = _build_analyzer(events, add_python_func=True)
-        nn_evt = next(e for e in analyzer.tree.events if e["name"].startswith("nn.Module"))
+        nn_evt = next(
+            e for e in analyzer.tree.events if e["name"].startswith("nn.Module")
+        )
         cpu_evt = next(e for e in analyzer.tree.events if e["name"] == "aten::linear")
         kernel_evt = next(e for e in analyzer.tree.events if e["cat"] == "kernel")
 
@@ -145,7 +157,9 @@ class TestTreePerfCoverageExtended:
         cpu_evt["parent"] = nn_evt["UID"]
         nn_evt["gpu_events"] = [kernel_evt["UID"]]
 
-        df = analyzer.get_df_kernels(nn_module_detail=True, cpu_op_detail=True, launcher_detail=True)
+        df = analyzer.get_df_kernels(
+            nn_module_detail=True, cpu_op_detail=True, launcher_detail=True
+        )
         assert not df.empty
         assert "Parent nn.Module" in df.columns
         assert df.iloc[0]["Parent nn.Module"].startswith("nn.Module")
@@ -166,7 +180,10 @@ class TestTreePerfCoverageExtended:
                 100,
                 "cpu_op",
                 "aten::mm",
-                args={"Input Dims": [[32, 64], [64, 128]], "Input type": ["fp16", "fp16"]},
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["fp16", "fp16"],
+                },
             ),
             _make_gpu_event(
                 "rt1",
@@ -194,7 +211,10 @@ class TestTreePerfCoverageExtended:
                 100,
                 "cpu_op",
                 "aten::mm_backward",
-                args={"Input Dims": [[32, 64], [64, 128]], "Input type": ["fp16", "fp16"]},
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["fp16", "fp16"],
+                },
             ),
             _make_gpu_event(
                 "rt2",
@@ -219,7 +239,9 @@ class TestTreePerfCoverageExtended:
         ]
         analyzer = _build_analyzer(events)
         fwd_evt = next(e for e in analyzer.tree.events if e["name"] == "aten::mm")
-        bwd_evt = next(e for e in analyzer.tree.events if e["name"] == "aten::mm_backward")
+        bwd_evt = next(
+            e for e in analyzer.tree.events if e["name"] == "aten::mm_backward"
+        )
         fwd_evt["bwd_events"] = [bwd_evt["UID"]]
         bwd_evt["fwd_event"] = fwd_evt["UID"]
 

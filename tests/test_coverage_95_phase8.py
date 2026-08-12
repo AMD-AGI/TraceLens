@@ -17,7 +17,9 @@ import pytest
 
 from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
 from TraceLens.PerfModel import perf_model
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import classify_graph_capture_trace
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    classify_graph_capture_trace,
+)
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 from tests.test_conv_backward_bytes import _conv_bias_fwd_event
@@ -38,7 +40,9 @@ class TestAnalysisUtilsPhase8:
 
     def test_calculate_time_metrics_no_kernel_time(self):
         ops = pd.DataFrame({"name": ["aten::mm"], "operation_count": [3]})
-        summary = au.calculate_time_metrics(ops, {"gpu_utilization": {"total_time_ms": 10}})
+        summary = au.calculate_time_metrics(
+            ops, {"gpu_utilization": {"total_time_ms": 10}}
+        )
         assert summary["total_time_ms"] == 0
 
     def test_calculate_efficiency_with_validation(self):
@@ -48,25 +52,27 @@ class TestAnalysisUtilsPhase8:
     def test_build_operation_metrics(self, tmp_path):
         cat_dir = tmp_path / "category_data"
         cat_dir.mkdir()
-        manifest = {
-            "platform": "MI300X",
-            "gpu_utilization": {"total_time_ms": 100.0},
-        }
         (cat_dir / "gemm_metrics.json").write_text("{}")
-        ops = pd.DataFrame({
-            "name": ["aten::mm"],
-            "Kernel Time (µs)_sum": [50000.0],
-            "TFLOPS/s_mean": [10.0],
-            "TB/s_mean": [0.5],
-            "FLOPS/Byte": [1.0],
-            "Roofline Bound": ["COMPUTE_BOUND"],
-            "Compute Spec": ["matrix_fp16"],
-            "kernel_details_summary": ["[{'name': 'Cijk_a'}]"],
-            "call_stack_full": ["['aten::mm']"],
-        })
+        ops = pd.DataFrame(
+            {
+                "name": ["aten::mm"],
+                "Kernel Time (µs)_sum": [50000.0],
+                "TFLOPS/s_mean": [10.0],
+                "TB/s_mean": [0.5],
+                "FLOPS/Byte": [1.0],
+                "Roofline Bound": ["COMPUTE_BOUND"],
+                "Compute Spec": ["matrix_fp16"],
+                "kernel_details_summary": ["[{'name': 'Cijk_a'}]"],
+                "call_stack_full": ["['aten::mm']"],
+            }
+        )
         metrics = au.build_operation_metrics(
             ops,
-            {"gpu_utilization": {"total_time_ms": 100.0}, "peak_hbm_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_fp16": 100.0}},
+            {
+                "gpu_utilization": {"total_time_ms": 100.0},
+                "peak_hbm_bw_tbs": 5.3,
+                "max_achievable_tflops": {"matrix_fp16": 100.0},
+            },
             {},
             comparison_scope="standalone",
         )
@@ -83,7 +89,12 @@ class TestPerfModelPhase8:
             "args": {
                 "Input Dims": input_dims,
                 "Input type": ["c10::Float8_e4m3fn"] * 19,
-                "Concrete Inputs": [""] * 4 + ["1"] + [""] * 4 + ["1"] + [""] * 4 + [""],
+                "Concrete Inputs": [""] * 4
+                + ["1"]
+                + [""] * 4
+                + ["1"]
+                + [""] * 4
+                + [""],
             }
         }
         model = perf_model.tex_ts_te_gemm_ts(event)
@@ -122,9 +133,12 @@ class TestPerfModelPhase8:
         assert model.flops() > 0
 
     def test_conv_bytes_bwd_none(self):
-        assert perf_model.CONV.bytes_bwd_func(
-            (2, 3, 8, 8), (4, 3, 3, 3), (2, 4, 6, 6), True, None
-        ) is None
+        assert (
+            perf_model.CONV.bytes_bwd_func(
+                (2, 3, 8, 8), (4, 3, 3, 3), (2, 4, 6, 6), True, None
+            )
+            is None
+        )
 
     def test_conv_bias_relu_forward(self):
         perf_model.ConvBiasReLU_.fwd_pass_cache.clear()
@@ -155,34 +169,38 @@ class TestTreePerfPhase8:
             include_call_stack=True,
         )
         if not launchers.empty:
-            TreePerfAnalyzer.get_df_kernel_launchers_unique_args(launchers, include_pct=True)
+            TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
+                launchers, include_pct=True
+            )
 
 
 class TestInferenceZipPhase8:
     def test_classify_graph_capture_json_gz(self, tmp_path):
         capture_dir = tmp_path / "cap"
         capture_dir.mkdir()
-        events = {"traceEvents": [
-            _mk_event(
-                "cpu_op",
-                "vllm/v1/worker/gpu_model_runner.py(1): _dummy_run",
-                1000,
-                50,
-                1,
-                1,
-                {},
-            ),
-            _mk_event("cuda_runtime", "cudaStreamBeginCapture", 1100, 10, 1, 1, {}),
-            _mk_event(
-                "cpu_op",
-                "aten::mm",
-                1200,
-                20,
-                1,
-                1,
-                {"Input Dims": [[4, 8], [8, 16]]},
-            ),
-        ]}
+        events = {
+            "traceEvents": [
+                _mk_event(
+                    "cpu_op",
+                    "vllm/v1/worker/gpu_model_runner.py(1): _dummy_run",
+                    1000,
+                    50,
+                    1,
+                    1,
+                    {},
+                ),
+                _mk_event("cuda_runtime", "cudaStreamBeginCapture", 1100, 10, 1, 1, {}),
+                _mk_event(
+                    "cpu_op",
+                    "aten::mm",
+                    1200,
+                    20,
+                    1,
+                    1,
+                    {"Input Dims": [[4, 8], [8, 16]]},
+                ),
+            ]
+        }
         gz_path = capture_dir / "graph_capture_rank_0.json.gz"
         with gzip.open(gz_path, "wt", encoding="utf-8") as f:
             json.dump(events, f)

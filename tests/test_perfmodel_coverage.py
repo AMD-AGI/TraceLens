@@ -13,7 +13,6 @@ coverage config).
 
 from __future__ import annotations
 
-import os
 import sys
 from math import prod
 from unittest.mock import MagicMock, patch
@@ -75,7 +74,6 @@ from TraceLens.PerfModel.extensions.perf_model_extensions import (
 from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
     aiter_add_rmsnorm,
     aiter_rmsnorm,
-    aiter_rmsnorm2d_fwd_with_add_ck,
     aiter_rmsnorm2d_fwd_with_dynamicquant_ck,
     aiter_rmsnorm_quant,
     vllm_rocm_aiter_rmsnorm_fp8_group_quant,
@@ -106,8 +104,14 @@ _GDN_ANNOTATION = (
     "_generation_64(sq64sk131072sqsq64sqsk131072)"
 )
 _VLLM_ATTN_ANNOTATION = "(128_256_512_1024_2048_3072_4096_64)"
-_ARCH = {"name": "mi300x", "freq_mhz": 2200, "num_cus": 304, "gemm_units_per_cu": 4,
-         "mem_bw_gbps": 5300, "l1_bw_gbps": 100}
+_ARCH = {
+    "name": "mi300x",
+    "freq_mhz": 2200,
+    "num_cus": 304,
+    "gemm_units_per_cu": 4,
+    "mem_bw_gbps": 5300,
+    "l1_bw_gbps": 100,
+}
 
 
 def _gemm_event(name, a_shape, b_shape, dtypes=None, strides=None, kernel_names=None):
@@ -148,8 +152,17 @@ def _norm_event(op_shape, channels, training=True, affine=True, has_bias=True):
             "Input Dims": [op_shape, (channels,), weight, bias],
             "Input type": ["c10::BFloat16"] * 4,
             "Input Strides": [(channels, 1), (1,), (1,), (1,)],
-            "Concrete Inputs": ["", str(list(op_shape[1:])), "", "", "", str(training),
-                                "0.1", "1e-5", "True"],
+            "Concrete Inputs": [
+                "",
+                str(list(op_shape[1:])),
+                "",
+                "",
+                "",
+                str(training),
+                "0.1",
+                "1e-5",
+                "True",
+            ],
         }
     }
 
@@ -281,7 +294,9 @@ class TestGemmBaseCoverage:
         mock_helper_cls.get_hardware.return_value = MagicMock(N_CU=304)
         mock_helper_cls.return_value.get_simulation_time.return_value = 99.0
         with patch.dict(sys.modules, {"origami": mock_origami}):
-            with patch("TraceLens.PerfModel.origami_helper.OrigamiHelper", mock_helper_cls):
+            with patch(
+                "TraceLens.PerfModel.origami_helper.OrigamiHelper", mock_helper_cls
+            ):
                 t, _ = perf_model.GEMM.get_simulation_time_func(
                     _ARCH, 4, 8, 16, 1, "bf16", enable_origami=True, force_to_l1=True
                 )
@@ -334,8 +349,9 @@ class TestGemmVariantsCoverage:
         assert model.get_maf_type() == "matrix"
 
     def test_aten_mm_mixed_dtype_warns(self):
-        event = _gemm_event("aten::mm", (4, 8), (8, 16),
-                            dtypes=["c10::BFloat16", "c10::Half"])
+        event = _gemm_event(
+            "aten::mm", (4, 8), (8, 16), dtypes=["c10::BFloat16", "c10::Half"]
+        )
         model = perf_model.aten_mm(event)
         with pytest.warns(UserWarning):
             assert model.bytes() > 0
@@ -344,7 +360,11 @@ class TestGemmVariantsCoverage:
         event = {
             "args": {
                 "Input Dims": [[4, 8], [8, 16], [16]],
-                "Input type": ["c10::Float8_e4m3fn", "c10::Float8_e4m3fn", "c10::BFloat16"],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                ],
             }
         }
         model = perf_model.aten_scaled_mm(event)
@@ -385,7 +405,12 @@ class TestGemmVariantsCoverage:
             "args": {
                 "Input Dims": input_dims,
                 "Input type": ["c10::Float8_e4m3fn"] * 19,
-                "Concrete Inputs": [""] * 4 + ["0"] + [""] * 4 + ["1"] + [""] * 4 + [""],
+                "Concrete Inputs": [""] * 4
+                + ["0"]
+                + [""] * 4
+                + ["1"]
+                + [""] * 4
+                + [""],
             }
         }
         model = perf_model.tex_ts_te_gemm_ts(event)
@@ -393,8 +418,9 @@ class TestGemmVariantsCoverage:
         assert model.bytes() > 0
 
     def test_tev2_pseudo_gemm_dtype_mismatch_raises(self):
-        event = _gemm_event("tev2", (4, 8), (8, 16),
-                            dtypes=["c10::BFloat16", "c10::Half"])
+        event = _gemm_event(
+            "tev2", (4, 8), (8, 16), dtypes=["c10::BFloat16", "c10::Half"]
+        )
         model = perf_model.tev2_pseudo_gemm(event)
         with pytest.raises(ValueError):
             model.bytes()
@@ -419,11 +445,24 @@ class TestConvCoverage:
     def _conv_event(self, transposed=False):
         return {
             "args": {
-                "Input Dims": [(2, 3, 8, 8), (4, 3, 3, 3), (4,) if not transposed else None][:2 if transposed else 3],
+                "Input Dims": [
+                    (2, 3, 8, 8),
+                    (4, 3, 3, 3),
+                    (4,) if not transposed else None,
+                ][: 2 if transposed else 3],
                 "Input type": ["c10::BFloat16", "c10::BFloat16", "c10::BFloat16"],
                 "Input Strides": [(192, 64, 8, 1), (27, 9, 3, 1), (1,)],
-                "Concrete Inputs": ["", "", "", "(1,1)", "(0,0)", "(1,1)",
-                                    str(transposed), "(0,0)", "1"],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "(1,1)",
+                    "(0,0)",
+                    "(1,1)",
+                    str(transposed),
+                    "(0,0)",
+                    "1",
+                ],
             }
         }
 
@@ -446,7 +485,18 @@ class TestConvCoverage:
             "args": {
                 "Input Dims": [(2, 4, 6, 6), (2, 3, 8, 8), (4, 3, 3, 3), (4,)],
                 "Input type": ["c10::BFloat16"] * 4,
-                "Concrete Inputs": ["", "", "", "", "(1,1)", "(0,0)", "(1,1)", "False", "(0,0)", "1"],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "(1,1)",
+                    "(0,0)",
+                    "(1,1)",
+                    "False",
+                    "(0,0)",
+                    "1",
+                ],
             }
         }
         model = perf_model.aten_conv_bwd(event)
@@ -476,20 +526,27 @@ class TestSoftmaxAndSdpaCoverage:
         "cls,concrete",
         [
             (perf_model.flash_attention, ["", "", "", "0.0", "", "True"]),
-            (perf_model.aten__scaled_dot_product_cudnn_attention,
-             ["", "", "", "", "0.0", "True", "False"]),
-            (perf_model.aten__scaled_dot_product_efficient_attention,
-             ["", "", "", "", "0.0", "False", "False"]),
-            (perf_model.aten__scaled_dot_product_flash_attention,
-             ["", "", "", "0.0", "True", "False"]),
-            (perf_model.aiter__flash_attn_forward,
-             ["", "", "", "0.0", "0.125", "True"]),
+            (
+                perf_model.aten__scaled_dot_product_cudnn_attention,
+                ["", "", "", "", "0.0", "True", "False"],
+            ),
+            (
+                perf_model.aten__scaled_dot_product_efficient_attention,
+                ["", "", "", "", "0.0", "False", "False"],
+            ),
+            (
+                perf_model.aten__scaled_dot_product_flash_attention,
+                ["", "", "", "0.0", "True", "False"],
+            ),
+            (
+                perf_model.aiter__flash_attn_forward,
+                ["", "", "", "0.0", "0.125", "True"],
+            ),
         ],
     )
     def test_sdpa_fwd_variants(self, cls, concrete):
         q = [2, 64, 8, 64]
-        event = _sdpa_event(cls, q, q, q, concrete,
-                            strides=[(32768, 512, 64, 1)] * 3)
+        event = _sdpa_event(cls, q, q, q, concrete, strides=[(32768, 512, 64, 1)] * 3)
         model = cls(event)
         assert model.flops() > 0
         assert model.bytes() > 0
@@ -497,11 +554,29 @@ class TestSoftmaxAndSdpaCoverage:
     def test_flash_attention_varlen_forward(self):
         event = {
             "args": {
-                "Input Dims": [[128, 8, 64], [128, 8, 64], [128, 8, 64],
-                               [5], [5], [], []],
+                "Input Dims": [
+                    [128, 8, 64],
+                    [128, 8, 64],
+                    [128, 8, 64],
+                    [5],
+                    [5],
+                    [],
+                    [],
+                ],
                 "Input type": ["c10::BFloat16"] * 3,
                 "Input Strides": [[512, 64, 1]] * 3,
-                "Concrete Inputs": ["", "", "", "", "", "64", "64", "0.0", "0.125", "True"],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "64",
+                    "64",
+                    "0.0",
+                    "0.125",
+                    "True",
+                ],
             }
         }
         model = perf_model.flash_attention_varlen_forward(event)
@@ -532,7 +607,10 @@ class TestSoftmaxAndSdpaCoverage:
         assert model.bytes() > 0
 
     def test_vllm_unified_attention_bad_annotation(self):
-        event = {"annotation": "NA", "args": {"Input Dims": [[1, 1, 1], [1, 1, 1], (), [1, 1, 1]]}}
+        event = {
+            "annotation": "NA",
+            "args": {"Input Dims": [[1, 1, 1], [1, 1, 1], (), [1, 1, 1]]},
+        }
         with pytest.raises(NotImplementedError):
             perf_model.vllm_unified_attention_with_output(event)
 
@@ -596,7 +674,11 @@ class TestElementwiseReduceCoverage:
     def test_aten_reduce_cumsum(self):
         event = {
             "name": "aten::cumsum",
-            "args": {"Input Dims": [(4, 256)], "Input type": ["c10::BFloat16"], "Concrete Inputs": ["", 1]},
+            "args": {
+                "Input Dims": [(4, 256)],
+                "Input type": ["c10::BFloat16"],
+                "Concrete Inputs": ["", 1],
+            },
         }
         model = perf_model.aten_reduce(event)
         assert model.param_details["num_output_elems"] == 4 * 256
@@ -614,11 +696,22 @@ class TestNormalizationCoverage:
         event = {
             "name": "aten::native_batch_norm_backward",
             "args": {
-                "Input Dims": [None, (8, 16, 32, 32), (16,), (16,), (16,), (16,), (16,), ()],
+                "Input Dims": [
+                    None,
+                    (8, 16, 32, 32),
+                    (16,),
+                    (16,),
+                    (16,),
+                    (16,),
+                    (16,),
+                    (),
+                ],
                 "Input type": ["c10::BFloat16"] * 7 + ["Scalar"],
-                "Input Strides": [(), (16384, 1024, 32, 1), (1,)] * 2 + [(1,)] * 3 + [()],
+                "Input Strides": [(), (16384, 1024, 32, 1), (1,)] * 2
+                + [(1,)] * 3
+                + [()],
                 "Concrete Inputs": ["", "", "", "", "", "", "", "True"],
-            }
+            },
         }
         model = perf_model.BatchNormBwd(event)
         assert model.flops() > 0
@@ -627,7 +720,16 @@ class TestNormalizationCoverage:
         event = {
             "name": "aten::cudnn_batch_norm_backward",
             "args": {
-                "Input Dims": [(8, 16, 32, 32), (8, 16, 32, 32), (16,), (16,), (16,), (16,), (16,), ()],
+                "Input Dims": [
+                    (8, 16, 32, 32),
+                    (8, 16, 32, 32),
+                    (16,),
+                    (16,),
+                    (16,),
+                    (16,),
+                    (16,),
+                    (),
+                ],
                 "Input type": ["c10::BFloat16"] * 7 + ["Scalar"],
                 "Input Strides": [(16384, 1024, 32, 1)] * 2 + [(1,)] * 5 + [()],
                 "Concrete Inputs": ["", "", "", "", "", "", "", "1e-5"],
@@ -642,16 +744,37 @@ class TestNormalizationCoverage:
         assert fwd.flops() > 0
         bwd_event = {
             "args": {
-                "Input Dims": [None, (4, 512), (512,), (512,), (512,), (512,), (4, 512), ()],
+                "Input Dims": [
+                    None,
+                    (4, 512),
+                    (512,),
+                    (512,),
+                    (512,),
+                    (512,),
+                    (4, 512),
+                    (),
+                ],
                 "Input type": ["c10::BFloat16"] * 6 + ["Scalar"],
-                "Input Strides": [(), (512, 1), (1,)] * 2 + [(512, 1), (512, 1), (512, 1), ()],
-                "Concrete Inputs": ["", "", "[512]", "", "", "", "", "[True, True, True]"],
+                "Input Strides": [(), (512, 1), (1,)] * 2
+                + [(512, 1), (512, 1), (512, 1), ()],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "[512]",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "[True, True, True]",
+                ],
             }
         }
         bwd = perf_model.LayerNormBwd(bwd_event)
         assert bwd.flops() > 0
 
-    @pytest.mark.parametrize("cls", [perf_model.GroupNorm, perf_model.InstanceNorm, perf_model.RMSNorm])
+    @pytest.mark.parametrize(
+        "cls", [perf_model.GroupNorm, perf_model.InstanceNorm, perf_model.RMSNorm]
+    )
     def test_other_norms_fwd(self, cls):
         event = _norm_event((4, 8, 32, 32), 8)
         model = cls(event)
@@ -728,7 +851,16 @@ class TestMiscPerfModelCoverage:
                 "Output Dims": [[2, 4, 6, 6]],
                 "Filter Shape": [4, 3, 3, 3],
                 "Input type": ["bf16", "bf16"],
-                "Concrete Inputs": ["", "", "(1,1)", "(0,0)", "(1,1)", "False", "(0,0)", "1"],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "(1,1)",
+                    "(0,0)",
+                    "(1,1)",
+                    "False",
+                    "(0,0)",
+                    "1",
+                ],
             }
         }
         c = perf_model.jax_conv(conv_event)
@@ -794,8 +926,12 @@ class TestPerfModelExtensionsCoverage:
         event = {
             "args": {
                 "Input Dims": [[64, 128], [256, 64], [64, 4], [256, 4]],
-                "Input type": ["c10::BFloat16", "c10::Float4_e2m1fn_x2",
-                               "c10::Float", "c10::Float"],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float4_e2m1fn_x2",
+                    "c10::Float",
+                    "c10::Float",
+                ],
             }
         }
         model = gemm_afp4wfp4(event)
@@ -809,80 +945,116 @@ class TestPerfModelExtensionsCoverage:
                 "Input Strides": [(256, 1), (1,), (), (), (), ()],
             }
         }
-        for cls in (fused_flatten_mxfp4_quant, sglang_quant_dynamic_mxfp4_quant,
-                    aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,
-                    aiter_dynamic_per_group_scaled_quant_fp4):
+        for cls in (
+            fused_flatten_mxfp4_quant,
+            sglang_quant_dynamic_mxfp4_quant,
+            aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,
+            aiter_dynamic_per_group_scaled_quant_fp4,
+        ):
             model = cls(base_event)
             assert model.flops() > 0
             assert model.bytes() > 0
 
     def test_mhc_ops(self):
-        post = mhc_post({
-            "args": {
-                "Input Dims": [(4, 2, 128), (4, 128)],
-                "Input type": ["c10::BFloat16", "c10::BFloat16"],
+        post = mhc_post(
+            {
+                "args": {
+                    "Input Dims": [(4, 2, 128), (4, 128)],
+                    "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                }
             }
-        })
+        )
         assert post.flops() > 0
-        pre = mhc_pre_gemm_sqrsum({
-            "args": {
-                "Input Dims": [(2, 4, 8), (2, 4), (4, 2, 128), (8, 256)],
-                "Input type": ["float", "float", "c10::BFloat16", "float"],
+        pre = mhc_pre_gemm_sqrsum(
+            {
+                "args": {
+                    "Input Dims": [(2, 4, 8), (2, 4), (4, 2, 128), (8, 256)],
+                    "Input type": ["float", "float", "c10::BFloat16", "float"],
+                }
             }
-        })
+        )
         assert pre.flops() == 2 * 4 * 8 * 256
-        fuse = mhc_pre_big_fuse_rmsnorm({
-            "args": {
-                "Input Dims": [
-                    (4, 2, 1), (4, 2, 2), (4, 128), (2, 4, 8), (2, 4),
-                    (4, 128), (8,), (),
-                ],
-                "Input type": ["float"] * 8,
+        fuse = mhc_pre_big_fuse_rmsnorm(
+            {
+                "args": {
+                    "Input Dims": [
+                        (4, 2, 1),
+                        (4, 2, 2),
+                        (4, 128),
+                        (2, 4, 8),
+                        (2, 4),
+                        (4, 128),
+                        (8,),
+                        (),
+                    ],
+                    "Input type": ["float"] * 8,
+                }
             }
-        })
+        )
         assert fuse.bytes() > 0
-        fused = mhc_fused_post_pre_gemm_sqrsum({
-            "args": {
-                "Input Dims": [
-                    (2, 4, 8), (2, 4), (4, 2, 128), (4, 128), (4, 2, 128),
-                    (4, 2, 1), (4, 2, 2), (8, 256),
-                ],
-                "Input type": ["float"] * 8,
+        fused = mhc_fused_post_pre_gemm_sqrsum(
+            {
+                "args": {
+                    "Input Dims": [
+                        (2, 4, 8),
+                        (2, 4),
+                        (4, 2, 128),
+                        (4, 128),
+                        (4, 2, 128),
+                        (4, 2, 1),
+                        (4, 2, 2),
+                        (8, 256),
+                    ],
+                    "Input type": ["float"] * 8,
+                }
             }
-        })
+        )
         assert fused.flops() > 0
-        topk = topk_softplus({
-            "args": {
-                "Input Dims": [(4, 2), (4, 2), (4, 8)],
-                "Input type": ["c10::Float", "c10::Int", "c10::BFloat16"],
+        topk = topk_softplus(
+            {
+                "args": {
+                    "Input Dims": [(4, 2), (4, 2), (4, 8)],
+                    "Input type": ["c10::Float", "c10::Int", "c10::BFloat16"],
+                }
             }
-        })
+        )
         assert topk.flops() > 0
 
     def test_misc_extension_ops(self):
-        rope = aiter_rope_cached_positions_2c_fwd_impl({
-            "args": {
-                "Input Dims": [
-                    (2, 128, 8, 64), (2, 128, 1, 64), (2, 128, 8, 64), (2, 128, 1, 64),
-                    (2048, 1, 1, 64), (2048, 1, 1, 64), (2, 128),
-                ],
-                "Input type": ["c10::BFloat16"] * 7,
+        rope = aiter_rope_cached_positions_2c_fwd_impl(
+            {
+                "args": {
+                    "Input Dims": [
+                        (2, 128, 8, 64),
+                        (2, 128, 1, 64),
+                        (2, 128, 8, 64),
+                        (2, 128, 1, 64),
+                        (2048, 1, 1, 64),
+                        (2048, 1, 1, 64),
+                        (2, 128),
+                    ],
+                    "Input type": ["c10::BFloat16"] * 7,
+                }
             }
-        })
+        )
         assert rope.flops() > 0
-        store = sglang_store_cache({
-            "args": {
-                "Input Dims": [(4, 512), (4, 512), (4,)],
-                "Input type": ["c10::BFloat16", "c10::BFloat16", "Scalar"],
+        store = sglang_store_cache(
+            {
+                "args": {
+                    "Input Dims": [(4, 512), (4, 512), (4,)],
+                    "Input type": ["c10::BFloat16", "c10::BFloat16", "Scalar"],
+                }
             }
-        })
+        )
         assert store.bytes() > 0
-        sample = mixed_sample_outer_exponential({
-            "args": {
-                "Input Dims": [(4, 8), (4, 8), ()],
-                "Input type": ["c10::Float", "c10::Float", "Scalar"],
+        sample = mixed_sample_outer_exponential(
+            {
+                "args": {
+                    "Input Dims": [(4, 8), (4, 8), ()],
+                    "Input type": ["c10::Float", "c10::Float", "Scalar"],
+                }
             }
-        })
+        )
         assert sample.flops() > 0
 
 
@@ -1023,22 +1195,29 @@ class TestMoeExtensionsCoverage:
         }
         assert moe_gptq_awq_up(gptq_event).flops() > 0
         assert moe_gptq_awq_down(gptq_event).bytes() > 0
-        grouped = moe_triton_invoke_grouped_gemm({
-            "args": {
-                "Input Dims": [
-                    [64, 2048],
-                    [128, 1536, 2048],
-                    (),
-                    [512, 1536],
-                    (),
-                    (),
-                    (),
-                    (),
-                    [64, 4],
-                ],
-                "Input type": ["c10::BFloat16", "c10::Float8_e4m3fn", "", "c10::BFloat16"],
+        grouped = moe_triton_invoke_grouped_gemm(
+            {
+                "args": {
+                    "Input Dims": [
+                        [64, 2048],
+                        [128, 1536, 2048],
+                        (),
+                        [512, 1536],
+                        (),
+                        (),
+                        (),
+                        (),
+                        [64, 4],
+                    ],
+                    "Input type": [
+                        "c10::BFloat16",
+                        "c10::Float8_e4m3fn",
+                        "",
+                        "c10::BFloat16",
+                    ],
+                }
             }
-        })
+        )
         assert grouped.flops() > 0
 
     def test_sglang_fused_append_shared_experts(self):
@@ -1071,8 +1250,14 @@ class TestRmsNormExtensionsCoverage:
         event = {
             "args": {
                 "Input Dims": [(4, 512), (4, 512), (4, 1), (512,), (), ()],
-                "Input type": ["c10::Float8_e4m3fn", "c10::BFloat16",
-                               "c10::Float", "c10::BFloat16", "Scalar", "Scalar"],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "c10::Float",
+                    "c10::BFloat16",
+                    "Scalar",
+                    "Scalar",
+                ],
                 "Input Strides": [(512, 1), (512, 1), (1, 1), (1,), (), ()],
             }
         }
@@ -1083,8 +1268,13 @@ class TestRmsNormExtensionsCoverage:
         event = {
             "args": {
                 "Input Dims": [(), (4, 256), (4, 256), (512,), ()],
-                "Input type": ["Scalar", "c10::BFloat16", "c10::Float8_e4m3fn",
-                               "c10::BFloat16", "Scalar"],
+                "Input type": [
+                    "Scalar",
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "Scalar",
+                ],
                 "Input Strides": [(), (256, 1), (256, 1), (1,), ()],
                 "Concrete Inputs": ["", "", "", "", "", "128"],
             }
@@ -1101,7 +1291,10 @@ class TestRmsNormExtensionsCoverage:
                 "Input Strides": [(256, 1), (1,), (), (128, 1), (1,), (), (256, 1)],
             }
         }
-        from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import fused_rms_mxfp4_quant
+        from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
+            fused_rms_mxfp4_quant,
+        )
+
         model = fused_rms_mxfp4_quant(event)
         assert model.has_x2 is True
         assert model.has_res1 is True
@@ -1121,7 +1314,9 @@ class TestRmsNormExtensionsCoverage:
             "args": {
                 "Input Dims": dims,
                 "Input type": ["c10::BFloat16"] * len(dims),
-                "Input Strides": [(512, 1), (1,)] + [(512, 1)] * len(extra_dims) + [(), ()],
+                "Input Strides": [(512, 1), (1,)]
+                + [(512, 1)] * len(extra_dims)
+                + [(), ()],
                 "Concrete Inputs": [""] * concrete_idx + ["128"] + [""],
             }
         }
@@ -1156,9 +1351,15 @@ class TestAttentionExtensionsCoverage:
 
     @pytest.mark.parametrize(
         "cls",
-        [mha_varlen_fwd, aiter_fmha_v3_varlen_fwd, aiter_mha_batch_prefill,
-         mla_decode_fwd, pseudo_mla_prefill_fwd, mla_tilelang_sparse_fwd,
-         vllm_unified_mla_attention_with_output],
+        [
+            mha_varlen_fwd,
+            aiter_fmha_v3_varlen_fwd,
+            aiter_mha_batch_prefill,
+            mla_decode_fwd,
+            pseudo_mla_prefill_fwd,
+            mla_tilelang_sparse_fwd,
+            vllm_unified_mla_attention_with_output,
+        ],
     )
     def test_inference_attention_subclasses(self, cls):
         model = cls(self._attn_event())
@@ -1171,9 +1372,20 @@ class TestAttentionExtensionsCoverage:
         event = {
             "annotation": _GDN_ANNOTATION,
             "args": {
-                "Input Dims": [(), (), [64, 8, 64], [128, 16, 1, 64], [128, 16, 1, 128]],
-                "Input type": ["Scalar", "Scalar", "c10::BFloat16",
-                               "c10::BFloat16", "c10::BFloat16"],
+                "Input Dims": [
+                    (),
+                    (),
+                    [64, 8, 64],
+                    [128, 16, 1, 64],
+                    [128, 16, 1, 128],
+                ],
+                "Input type": [
+                    "Scalar",
+                    "Scalar",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                ],
             },
         }
         model = aiter_paged_attention_ragged(event)
@@ -1199,8 +1411,11 @@ class TestAttentionExtensionsCoverage:
                 "v4_model_name": "DeepSeek-V4-Flash",
             },
         }
-        for cls in (pseudo_v4_paged_decode_swa, pseudo_v4_paged_decode_csa,
-                    pseudo_v4_paged_decode_hca):
+        for cls in (
+            pseudo_v4_paged_decode_swa,
+            pseudo_v4_paged_decode_csa,
+            pseudo_v4_paged_decode_hca,
+        ):
             model = cls(base)
             assert model.flops() > 0
 
@@ -1208,7 +1423,12 @@ class TestAttentionExtensionsCoverage:
         event = {
             "annotation": _GDN_ANNOTATION,
             "args": {
-                "Input Dims": [[64, 8, 64], [64, 8, 64], [64, 8, 128], [128, 16, 1, 64]],
+                "Input Dims": [
+                    [64, 8, 64],
+                    [64, 8, 64],
+                    [64, 8, 128],
+                    [128, 16, 1, 64],
+                ],
                 "Input type": ["c10::BFloat16"] * 4,
             },
         }
@@ -1232,7 +1452,9 @@ class TestTritonCompiledCoverage:
     }
 
     def test_parse_kernel_name_fallback_without_registry(self):
-        with patch("TraceLens.PerfModel.triton_compiled_perf_model._ALL_KNOWN_OPS", set()):
+        with patch(
+            "TraceLens.PerfModel.triton_compiled_perf_model._ALL_KNOWN_OPS", set()
+        ):
             ops = _parse_kernel_name("triton_poi_fused_add_mul_0")
             assert ops == ["aten.add", "aten.mul"]
 
@@ -1358,9 +1580,7 @@ class TestSdpaExtendedCoverage:
             "get_simulation_time_func",
             return_value=(1.0, "cmd"),
         ):
-            with patch.object(
-                perf_model.Softmax, "get_time", return_value=0.5
-            ):
+            with patch.object(perf_model.Softmax, "get_time", return_value=0.5):
                 t = perf_model.SDPA.get_simulation_time_func(
                     self._ARCH,
                     "bf16",
@@ -1473,7 +1693,13 @@ class TestGroupedGemmAndPrimusCoverage:
                     [8],
                     [8],
                 ],
-                "Input type": ["c10::BFloat16", "c10::Float8_e4m3fn", "c10::Float", "c10::Int", "c10::Int"],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float",
+                    "c10::Int",
+                    "c10::Int",
+                ],
             }
         }
         model = perf_model.primus_turbo_grouped_gemm(event)
@@ -1492,7 +1718,11 @@ class TestGroupedGemmAndPrimusCoverage:
         mxfp4_event = {
             "args": {
                 "Input Dims": [(4, 256), (4, 128), (128,)],
-                "Input type": ["c10::BFloat16", "c10::Float4_e2m1fn_x2", "c10::BFloat16"],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float4_e2m1fn_x2",
+                    "c10::BFloat16",
+                ],
                 "Input Strides": [(256, 1), (128, 1), (1,)],
             }
         }
@@ -1529,12 +1759,8 @@ class TestGemmSimulatorExtendedCoverage:
         perf_model.GEMM.cache_gemm_results.clear()
         with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
             run.return_value = MagicMock(stdout="Time=10.0\n", stderr="")
-            t1, _ = perf_model.GEMM.get_simulation_time_func(
-                _ARCH, 4, 8, 16, 1, "bf16"
-            )
-            t2, _ = perf_model.GEMM.get_simulation_time_func(
-                _ARCH, 4, 8, 16, 1, "bf16"
-            )
+            t1, _ = perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
+            t2, _ = perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
         assert t1 == t2 == 10.0
         run.assert_called_once()
 

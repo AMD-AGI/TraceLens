@@ -11,7 +11,6 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Dict, List
 
-import pytest
 
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
@@ -54,13 +53,45 @@ def _build_tree(events: List[Dict], add_python_func: bool = False) -> TraceToTre
 
 class TestTraceToTreeTraversal:
     def test_traverse_subtree_with_bwd_events(self, capsys):
-        fwd = _mk_event("cpu_op", "_Linear", ts=100, dur=50, pid=1, tid=1, args={"Sequence number": 1})
-        bwd = _mk_event("cpu_op", "_LinearBackward", ts=200, dur=60, pid=1, tid=1, args={"Sequence number": 1})
+        fwd = _mk_event(
+            "cpu_op",
+            "_Linear",
+            ts=100,
+            dur=50,
+            pid=1,
+            tid=1,
+            args={"Sequence number": 1},
+        )
+        bwd = _mk_event(
+            "cpu_op",
+            "_LinearBackward",
+            ts=200,
+            dur=60,
+            pid=1,
+            tid=1,
+            args={"Sequence number": 1},
+        )
         corr = 77
         events = [
             fwd,
-            _mk_event("cuda_runtime", "hipLaunchKernel", ts=110, dur=5, pid=1, tid=1, args={"correlation": corr}),
-            _mk_event("kernel", "gemm_k", ts=120, dur=20, pid=0, tid=7, args={"correlation": corr, "stream": 7}),
+            _mk_event(
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=110,
+                dur=5,
+                pid=1,
+                tid=1,
+                args={"correlation": corr},
+            ),
+            _mk_event(
+                "kernel",
+                "gemm_k",
+                ts=120,
+                dur=20,
+                pid=0,
+                tid=7,
+                args={"correlation": corr, "stream": 7},
+            ),
             _mk_ac2g(corr, pid=0, tid=7, ts=120, phase="s"),
             _mk_ac2g(corr, pid=0, tid=7, ts=120, phase="f"),
             bwd,
@@ -77,8 +108,24 @@ class TestTraceToTreeTraversal:
 
     def test_traverse_parents_and_get_callstack_with_filter(self):
         events = [
-            _mk_event("cpu_op", "root_op", ts=0, dur=100, pid=1, tid=1, args={"Sequence number": 0}),
-            _mk_event("cpu_op", "child_op", ts=10, dur=20, pid=1, tid=1, args={"Sequence number": 1}),
+            _mk_event(
+                "cpu_op",
+                "root_op",
+                ts=0,
+                dur=100,
+                pid=1,
+                tid=1,
+                args={"Sequence number": 0},
+            ),
+            _mk_event(
+                "cpu_op",
+                "child_op",
+                ts=10,
+                dur=20,
+                pid=1,
+                tid=1,
+                args={"Sequence number": 1},
+            ),
         ]
         tree = _build_tree(events)
         child = next(e for e in tree.events if e["name"] == "child_op")
@@ -91,7 +138,9 @@ class TestTraceToTreeTraversal:
         assert any("root_op" in f for f in frames)
 
     def test_traverse_parents_follow_fwd_link(self):
-        fwd = _mk_event("cpu_op", "fwd_op", ts=0, dur=50, pid=1, tid=1, args={"Sequence number": 0})
+        fwd = _mk_event(
+            "cpu_op", "fwd_op", ts=0, dur=50, pid=1, tid=1, args={"Sequence number": 0}
+        )
         wrapper = _mk_event(
             "cpu_op",
             "autograd::evaluate_function: fwd_op",
@@ -101,7 +150,15 @@ class TestTraceToTreeTraversal:
             tid=1,
             args={"Sequence number": 0},
         )
-        bwd = _mk_event("cpu_op", "bwd_op", ts=100, dur=50, pid=1, tid=1, args={"Sequence number": 0})
+        bwd = _mk_event(
+            "cpu_op",
+            "bwd_op",
+            ts=100,
+            dur=50,
+            pid=1,
+            tid=1,
+            args={"Sequence number": 0},
+        )
         tree = _build_tree([fwd, wrapper, bwd])
         fwd_evt = next(e for e in tree.events if e["name"] == "fwd_op")
         wrapper_evt = next(e for e in tree.events if e["name"].startswith("autograd"))
@@ -147,9 +204,33 @@ class TestTraceToTreeTraversal:
 
     def test_traverse_subtree_prune_non_gpu(self, capsys):
         events = [
-            _mk_event("cpu_op", "parent", ts=0, dur=100, pid=1, tid=1, args={"Sequence number": 0}),
-            _mk_event("cpu_op", "gpu_child", ts=10, dur=20, pid=1, tid=1, args={"Sequence number": 1}),
-            _mk_event("cpu_op", "non_gpu_child", ts=30, dur=20, pid=1, tid=1, args={"Sequence number": 2}),
+            _mk_event(
+                "cpu_op",
+                "parent",
+                ts=0,
+                dur=100,
+                pid=1,
+                tid=1,
+                args={"Sequence number": 0},
+            ),
+            _mk_event(
+                "cpu_op",
+                "gpu_child",
+                ts=10,
+                dur=20,
+                pid=1,
+                tid=1,
+                args={"Sequence number": 1},
+            ),
+            _mk_event(
+                "cpu_op",
+                "non_gpu_child",
+                ts=30,
+                dur=20,
+                pid=1,
+                tid=1,
+                args={"Sequence number": 2},
+            ),
         ]
         tree = _build_tree(events)
         parent = next(e for e in tree.events if e["name"] == "parent")

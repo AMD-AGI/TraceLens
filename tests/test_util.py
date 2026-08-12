@@ -255,8 +255,10 @@ def test_suppress_native_hlo_logs_filters_hlo_instruction_noise(monkeypatch):
     assert any(b"kept message" in w for w in writes)
     assert not any(b"hlo_instruction.cc" in w for w in writes)
 
+
 def test_get_operands_falls_back_to_comma_split():
     assert JaxProfileProcessor.get_operands("(%arg0,%arg1)") == ["%arg0", "%arg1"]
+
 
 def test_get_dict_fp8_gemm_type():
     line = (
@@ -268,6 +270,7 @@ def test_get_dict_fp8_gemm_type():
     assert parsed["type"] == "fp8"
     assert parsed["computation"] == "gemm"
 
+
 def test_get_dict_operand_type_mismatch_raises():
     line = (
         "%gemm.1 = f32[128,256]{1,0} custom-call(bf16[128,512]{1,0} %arg0, "
@@ -275,6 +278,7 @@ def test_get_dict_operand_type_mismatch_raises():
     )
     with pytest.raises(Exception, match="Input operand type mismatch"):
         JaxProfileProcessor.get_dict({}, line)
+
 
 def test_process_xla_file(tmp_path):
     hlo_path = tmp_path / "module.hlo.txt"
@@ -289,10 +293,12 @@ def test_process_xla_file(tmp_path):
     assert "%x" in hlo_ops
     assert "%y" in hlo_ops
 
+
 def test_resolve_operand_references_skips_non_list_operands():
     hlo_ops = {"%x": {"output": "f32[1]{0}", "operands": "not-a-list"}}
     JaxProfileProcessor._resolve_operand_references(hlo_ops)
     assert hlo_ops["%x"]["operands"] == "not-a-list"
+
 
 def test_resolve_operand_references_warns_on_unresolved(caplog):
     hlo_ops = {"%user": {"output": "f32[1]{0}", "operands": ["%missing"]}}
@@ -300,12 +306,14 @@ def test_resolve_operand_references_warns_on_unresolved(caplog):
     assert hlo_ops["%user"]["operands"] == ["%missing"]
     assert "Unable to resolve HLO operand reference" in caplog.text
 
+
 def test_collective_start_keys_prefers_done_when_no_start():
     module_ops = {
         "%all-to-all-done": {"output": "f32[1]{0}"},
     }
     keys = JaxProfileProcessor._collective_start_keys(module_ops, "all-to-all")
     assert keys == ["%all-to-all-done"]
+
 
 def test_build_collective_hlo_aliases_multiple_start_keys():
     module_ops = {
@@ -320,6 +328,7 @@ def test_build_collective_hlo_aliases_multiple_start_keys():
     assert aliases["%reduce-scatter.1"] == "%reduce-scatter-start.1"
     assert aliases["%reduce-scatter.2"] == "%reduce-scatter-start.1"
 
+
 def test_build_collective_hlo_aliases_skips_existing_and_non_numbered():
     module_ops = {
         "%all-gather-start": {"output": "f32[8,128]{1,0}"},
@@ -331,12 +340,14 @@ def test_build_collective_hlo_aliases_skips_existing_and_non_numbered():
     )
     assert aliases == {}
 
+
 def test_build_collective_hlo_aliases_no_start_keys():
     aliases = JaxProfileProcessor.build_collective_hlo_aliases(
         {},
         ["reduce-scatter.0"],
     )
     assert aliases == {}
+
 
 def test_resolve_hlo_op_key_collective_numbered_fallback():
     module_ops = {"%all-gather-start": {"output": "f32[8,128]{1,0}"}}
@@ -345,6 +356,7 @@ def test_resolve_hlo_op_key_collective_numbered_fallback():
         == "%all-gather-start"
     )
 
+
 def test_get_operand_type_fusion_prefix_and_none():
     hlo_ops = {
         "%arg": {"output": "s8[4,8]{1,0}"},
@@ -352,6 +364,7 @@ def test_get_operand_type_fusion_prefix_and_none():
     }
     assert JaxProfileProcessor.get_operand_type(hlo_ops, "fusion,%typed") == "bf16"
     assert JaxProfileProcessor.get_operand_type(hlo_ops, "%arg") is None
+
 
 def test_process_gemm_ops_simple_f32():
     hlo_ops = {
@@ -373,6 +386,7 @@ def test_process_gemm_ops_simple_f32():
         "Type": "f32",
         "Computation": "gemm",
     }
+
 
 def test_process_gemm_ops_tuple_output_and_operand_lookup():
     hlo_ops = {
@@ -398,6 +412,7 @@ def test_process_gemm_ops_tuple_output_and_operand_lookup():
     assert gemm_dict["%gemm.0"]["Type"] == "fp8"
     assert gemm_dict["%gemm.0"]["K"] == 512
 
+
 def test_process_gemm_ops_missing_backend_config_raises():
     hlo_ops = {
         "%gemm.0": {
@@ -409,6 +424,7 @@ def test_process_gemm_ops_missing_backend_config_raises():
     }
     with pytest.raises(ValueError, match="Gemm backend config"):
         JaxProfileProcessor.process_gemm_ops(hlo_ops)
+
 
 def test_process_gemm_ops_batch_and_c_order():
     backend = (
@@ -427,6 +443,7 @@ def test_process_gemm_ops_batch_and_c_order():
     gemm_dict = JaxProfileProcessor.process_gemm_ops(hlo_ops)
     assert gemm_dict["%gemm.0"]["Batch"] == 2
     assert gemm_dict["%gemm.0"]["K"] == 512
+
 
 def test_process_gemm_ops_beta_bias_and_invalid_cases():
     bias_backend = (
@@ -482,6 +499,7 @@ def test_process_gemm_ops_beta_bias_and_invalid_cases():
                 }
             }
         )
+
 
 def test_process_gemm_ops_additional_error_paths(capsys):
     with pytest.raises(ValueError, match="tensor size is more than 3"):
@@ -539,6 +557,7 @@ def test_process_gemm_ops_additional_error_paths(capsys):
     )
     assert "onLy two operands found" in capsys.readouterr().out
 
+
 def test_process_gemm_ops_skips_missing_hlo_operand_reference():
     hlo_ops = {
         "%gemm.8": {
@@ -552,6 +571,7 @@ def test_process_gemm_ops_skips_missing_hlo_operand_reference():
     gemm_dict = JaxProfileProcessor.process_gemm_ops(hlo_ops)
     assert gemm_dict["%gemm.8"]["K"] == 512
 
+
 def test_process_gemm_ops_non_tuple_output_assigns_raw_output():
     hlo_ops = {
         "%gemm.9": {
@@ -564,6 +584,7 @@ def test_process_gemm_ops_non_tuple_output_assigns_raw_output():
     }
     with pytest.raises(TypeError):
         JaxProfileProcessor.process_gemm_ops(hlo_ops)
+
 
 def test_process_protobuf_file(mock_suppress, mock_glob, tmp_path):
     pb_path = tmp_path / "plugin.xplane.pb"
@@ -585,6 +606,7 @@ def test_process_protobuf_file(mock_suppress, mock_glob, tmp_path):
 
     assert "%x" in hlo_ops
 
+
 def test_process_protobuf_file_no_hlo_match(mock_suppress, mock_glob, tmp_path, caplog):
     pb_path = tmp_path / "plugin.xplane.pb"
     pb_path.write_bytes(b"pb")
@@ -595,6 +617,7 @@ def test_process_protobuf_file_no_hlo_match(mock_suppress, mock_glob, tmp_path, 
     with patch.dict(sys.modules, modules):
         assert JaxProfileProcessor.process_protobuf_file(str(pb_path), "main_jax") == {}
     assert "No matching hlo_filenames" in caplog.text
+
 
 def test_process_protobuf_file_multiple_hlo_files(
     mock_suppress, mock_glob, tmp_path, caplog
@@ -616,6 +639,7 @@ def test_process_protobuf_file_multiple_hlo_files(
 
     assert "%x" in hlo_ops
     assert "Multiple matching hlo_filenames" in caplog.text
+
 
 def test_process_protobuf_file_triggers_tool_names(mock_suppress, mock_glob, tmp_path):
     pb_path = tmp_path / "plugin.xplane.pb"
@@ -658,6 +682,7 @@ def test_process_protobuf_file_triggers_tool_names(mock_suppress, mock_glob, tmp
     assert calls["tool_names"] == 1
     assert calls["tool_data"] == 1
     assert "%x" in hlo_ops
+
 
 def test_process_protobuf_file_tensorboard_fallback(
     mock_suppress, mock_glob, tmp_path, monkeypatch
@@ -702,12 +727,14 @@ def test_process_protobuf_file_tensorboard_fallback(
 
     assert "%x" in hlo_ops
 
+
 def test_dataloader_load_json(tmp_path):
     payload = {"traceEvents": [{"name": "kernel"}]}
     trace_path = tmp_path / "trace.json"
     trace_path.write_text(json.dumps(payload))
 
     assert DataLoader.load_data(str(trace_path)) == payload
+
 
 def test_dataloader_load_json_gz(tmp_path):
     payload = {"key": "value"}
@@ -716,6 +743,7 @@ def test_dataloader_load_json_gz(tmp_path):
         json.dump(payload, handle)
 
     assert DataLoader.load_data(str(trace_path)) == payload
+
 
 def test_dataloader_save_preprocessed_json(tmp_path):
     payload = {"events": [1, 2, 3]}
@@ -726,9 +754,11 @@ def test_dataloader_save_preprocessed_json(tmp_path):
 
     assert json.loads(trace_path.read_text()) == payload
 
+
 def test_dataloader_unknown_file_type():
     with pytest.raises(ValueError, match="Unknown file type"):
         DataLoader.load_data("/tmp/not-a-trace.xyz")
+
 
 def test_dataloader_load_pb(mock_suppress, tmp_path):
     payload = {"traceEvents": []}
@@ -736,14 +766,13 @@ def test_dataloader_load_pb(mock_suppress, tmp_path):
     trace_path.write_bytes(b"pb")
 
     mock_suppress.return_value = contextlib.nullcontext()
-    modules = _install_mock_xprof_convert(
-        (json.dumps(payload).encode("utf-8"), None)
-    )
+    modules = _install_mock_xprof_convert((json.dumps(payload).encode("utf-8"), None))
 
     with patch.dict(sys.modules, modules):
         result = DataLoader.load_data(str(trace_path))
 
     assert result == payload
+
 
 def test_dataloader_load_pb_none_raises(mock_suppress, tmp_path):
     trace_path = tmp_path / "trace.pb"
@@ -754,6 +783,7 @@ def test_dataloader_load_pb_none_raises(mock_suppress, tmp_path):
     with patch.dict(sys.modules, modules):
         with pytest.raises(RuntimeError, match="returned None"):
             DataLoader.load_data(str(trace_path))
+
 
 def test_dataloader_tensorboard_fallback(mock_suppress, tmp_path, monkeypatch):
     payload = {"traceEvents": []}
@@ -790,6 +820,7 @@ def test_dataloader_tensorboard_fallback(mock_suppress, tmp_path, monkeypatch):
     ):
         assert DataLoader.load_data(str(trace_path)) == payload
 
+
 def test_dataloader_orjson_fallback(tmp_path, monkeypatch):
     payload = {"value": 42}
     trace_path = tmp_path / "trace.json"
@@ -805,6 +836,7 @@ def test_dataloader_orjson_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr("builtins.__import__", fake_import)
     assert DataLoader.load_data(str(trace_path)) == payload
 
+
 def test_trace_event_utils_metadata_helpers():
     events = [
         _metadata_event(1, None, MF.ProcessName, "host"),
@@ -815,6 +847,7 @@ def test_trace_event_utils_metadata_helpers():
     assert metadata[1][None][MF.ProcessName] == "host"
     assert len(rest) == 1
     assert TraceEventUtils.default_categorizer(rest[0]) == "kernel"
+
 
 def test_trace_event_utils_get_event_category_branches(
     thread_name, event_name, expected
@@ -833,6 +866,7 @@ def test_trace_event_utils_get_event_category_branches(
     category = TraceEventUtils.get_event_category(metadata, events[-1])
     assert category == expected
 
+
 def test_trace_event_utils_get_event_category_metadata_and_unknown():
     metadata_event = {
         TK.Phase: TP.Metadata,
@@ -847,6 +881,7 @@ def test_trace_event_utils_get_event_category_metadata_and_unknown():
         == "Unknown"
     )
 
+
 def test_trace_event_utils_split_events_by_pid_tid():
     events = [
         _metadata_event(1, None, MF.ProcessName, "host"),
@@ -857,6 +892,7 @@ def test_trace_event_utils_split_events_by_pid_tid():
     grouped = TraceEventUtils.split_events_by_pid_tid(events)
     assert len(grouped[1][2]) == 2
     assert len(grouped[1][3]) == 1
+
 
 def test_trace_event_utils_find_threads_and_end_times():
     metadata = {
@@ -885,6 +921,7 @@ def test_trace_event_utils_find_threads_and_end_times():
     assert events[0][TK.TimeEnd] == 125
     assert events[1][TK.TimeEnd] == 55
 
+
 def test_trace_event_utils_communication_helpers():
     default_regexes = TraceEventUtils.get_communication_regexes()
     assert len(default_regexes) >= 2
@@ -906,9 +943,11 @@ def test_trace_event_utils_communication_helpers():
     assert TraceEventUtils.is_communication_string("ncclAllReduce") is True
     assert TraceEventUtils.is_communication_string("cross_device_reduce_0") is True
 
+
 def test_trace_event_utils_rocm_legacy_memory(name, matcher, expected):
     assert matcher(name) is expected
     assert matcher("") is False
+
 
 def test_rocprof_parser_synthetic_data(tmp_path):
     payload = _minimal_rocprof_data()
@@ -936,11 +975,13 @@ def test_rocprof_parser_synthetic_data(tmp_path):
     assert metadata["pid"] == 1234
     assert metadata["hostname"] == "testhost"
 
+
 def test_rocprof_parser_invalid_file(tmp_path):
     trace_path = tmp_path / "not_rocprof.json"
     trace_path.write_text(json.dumps({"other": []}))
     with pytest.raises(ValueError, match="Not a valid rocprofv3 file"):
         RocprofParser.load_rocprof_data(str(trace_path))
+
 
 def test_pftrace_parser_load_and_validate(tmp_path):
     events = [{"ph": "X", "name": "kernel"}]
@@ -954,6 +995,7 @@ def test_pftrace_parser_load_and_validate(tmp_path):
     with gzip.open(gz_path, "wt", encoding="utf-8") as handle:
         json.dump({"traceEvents": events}, handle)
     assert PftraceParser.load_pftrace_data(str(gz_path))["traceEvents"] == events
+
 
 def test_pftrace_parser_validation_errors(tmp_path):
     with pytest.raises(ValueError, match="expects .json or .json.gz"):

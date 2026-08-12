@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import importlib
 import os
 import sys
 from unittest.mock import patch
@@ -36,9 +35,12 @@ from tests.test_perfmodel_coverage import _ARCH, _moe_unfused_event
 from tests.test_treeperf_coverage import _build_analyzer, _make_gpu_event, _mk_ac2g
 
 NORM_TRACE = os.path.join(
-    os.path.dirname(__file__), "traces/perf_model/normalization/normalization_layer_test.json.gz"
+    os.path.dirname(__file__),
+    "traces/perf_model/normalization/normalization_layer_test.json.gz",
 )
-RESNET_TRACE = os.path.join(os.path.dirname(__file__), "traces/mi300/resnet_act_checkpoint.json.gz")
+RESNET_TRACE = os.path.join(
+    os.path.dirname(__file__), "traces/mi300/resnet_act_checkpoint.json.gz"
+)
 
 
 def _conv_fwd_event(input_shape, filter_shape):
@@ -55,7 +57,15 @@ def _conv_fwd_event(input_shape, filter_shape):
             "Input type": ["c10::BFloat16", "c10::BFloat16"],
             "Input Strides": [[1] * len(input_shape), [1] * len(filter_shape)],
             "Concrete Inputs": [
-                "", "", "", stride, padding, dilation, "False", out_pad, "1",
+                "",
+                "",
+                "",
+                stride,
+                padding,
+                dilation,
+                "False",
+                out_pad,
+                "1",
             ],
         }
     }
@@ -66,7 +76,12 @@ def _conv_bwd_event(input_shape, filter_shape):
     if nd == 1:
         stride, padding, dilation, out_pad = "[1]", "[0]", "[1]", "[0]"
     elif nd == 3:
-        stride, padding, dilation, out_pad = "[1, 1, 1]", "[0, 0, 0]", "[1, 1, 1]", "[0, 0, 0]"
+        stride, padding, dilation, out_pad = (
+            "[1, 1, 1]",
+            "[0, 0, 0]",
+            "[1, 1, 1]",
+            "[0, 0, 0]",
+        )
     else:
         stride, padding, dilation, out_pad = "[1, 1]", "[0, 0]", "[1, 1]", "[0, 0]"
     grad_out = list(input_shape)
@@ -80,8 +95,17 @@ def _conv_bwd_event(input_shape, filter_shape):
             "Input type": ["c10::BFloat16"] * 3,
             "Input Strides": [[1] * len(input_shape)] * 3,
             "Concrete Inputs": [
-                "", "", "", "[0]", stride, padding, dilation,
-                "False", out_pad, "1", "[True, True, False]",
+                "",
+                "",
+                "",
+                "[0]",
+                stride,
+                padding,
+                dilation,
+                "False",
+                out_pad,
+                "1",
+                "[True, True, False]",
             ],
         }
     }
@@ -128,34 +152,40 @@ class TestPerfModelPhase11:
         assert model.bytes() is None
 
     def test_gemm_strides_and_bwd_not_implemented(self):
-        vllm = perf_model.vllm_gemm_with_dynamic_quant({
-            "args": {
-                "Input Dims": [[128, 64], [256, 32]],
-                "Input type": ["c10::Float4_e2m1fn_x2", "c10::Float4_e2m1fn_x2"],
-                "Input Strides": [[8192, 64, 1], [16384, 64, 1]],
+        vllm = perf_model.vllm_gemm_with_dynamic_quant(
+            {
+                "args": {
+                    "Input Dims": [[128, 64], [256, 32]],
+                    "Input type": ["c10::Float4_e2m1fn_x2", "c10::Float4_e2m1fn_x2"],
+                    "Input Strides": [[8192, 64, 1], [16384, 64, 1]],
+                }
             }
-        })
+        )
         assert vllm.bytes() > 0
 
-        tex = perf_model.tex_ts_te_gemm_ts({
-            "args": {
-                "Input Dims": [[64, 128]] * 6 + [[128, 64]] * 6 + [[]],
-                "Input type": ["c10::BFloat16"] * 19,
-                "Input Strides": [[8192, 128, 1]] * 6 + [[16384, 64, 1]] * 6,
-                "Concrete Inputs": [""] * 14 + [""],
+        tex = perf_model.tex_ts_te_gemm_ts(
+            {
+                "args": {
+                    "Input Dims": [[64, 128]] * 6 + [[128, 64]] * 6 + [[]],
+                    "Input type": ["c10::BFloat16"] * 19,
+                    "Input Strides": [[8192, 128, 1]] * 6 + [[16384, 64, 1]] * 6,
+                    "Concrete Inputs": [""] * 14 + [""],
+                }
             }
-        })
+        )
         assert tex.bytes() > 0
         with pytest.raises(NotImplementedError):
             tex.bytes_bwd()
 
-        tev2 = perf_model.tev2_pseudo_gemm({
-            "args": {
-                "Input Dims": [[32, 64], [64, 128]],
-                "Input type": ["c10::BFloat16", "c10::BFloat16"],
-                "Input Strides": [[2048, 64, 1], [8192, 128, 1]],
+        tev2 = perf_model.tev2_pseudo_gemm(
+            {
+                "args": {
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                    "Input Strides": [[2048, 64, 1], [8192, 128, 1]],
+                }
             }
-        })
+        )
         assert tev2.flops() > 0
 
     def test_conv_ndims_and_mixed_dtype(self):
@@ -171,10 +201,16 @@ class TestPerfModelPhase11:
 
         bwd1d = perf_model.aten_conv_bwd(_conv_bwd_event((2, 3, 32), (4, 3, 5)))
         assert bwd1d.param_details["convNd"] == "conv1d"
-        bwd3d = perf_model.aten_conv_bwd(_conv_bwd_event((2, 3, 8, 8, 8), (4, 3, 3, 3, 3)))
+        bwd3d = perf_model.aten_conv_bwd(
+            _conv_bwd_event((2, 3, 8, 8, 8), (4, 3, 3, 3, 3))
+        )
         assert bwd3d.param_details["convNd"] == "conv3d"
         mixed_bwd = _conv_bwd_event((2, 3, 8, 8), (4, 3, 3, 3))
-        mixed_bwd["args"]["Input type"] = ["c10::BFloat16", "c10::BFloat16", "c10::Half"]
+        mixed_bwd["args"]["Input type"] = [
+            "c10::BFloat16",
+            "c10::BFloat16",
+            "c10::Half",
+        ]
         with pytest.raises(ValueError, match="different"):
             perf_model.aten_conv_bwd(mixed_bwd).bytes()
 
@@ -247,27 +283,38 @@ class TestPerfModelPhase11:
             side_effect=[(1.0, "qkt"), (None, None)],
         ):
             t = perf_model.SDPA.get_simulation_time_func(
-                _ARCH, "fp16", None, "c10::Half", 1000,
-                1, 8, 64, 64, 32, fa=True,
+                _ARCH,
+                "fp16",
+                None,
+                "c10::Half",
+                1000,
+                1,
+                8,
+                64,
+                64,
+                32,
+                fa=True,
             )
             assert t is None
 
         fa_bwd = perf_model.flash_attention_backward(_flash_bwd_event())
         assert fa_bwd.bytes() > 0
 
-        aiter_bwd = perf_model.aiter__mha_bwd({
-            "args": {
-                "Input Dims": [
-                    [2, 128, 8, 64],
-                    [2, 128, 8, 64],
-                    [2, 128, 8, 64],
-                    [2, 128, 8, 64],
-                    [2, 128, 8],
-                ],
-                "Input type": ["c10::BFloat16"] * 5,
-                "Concrete Inputs": [""] * 7 + ["0.0", "1.0", "False"],
+        aiter_bwd = perf_model.aiter__mha_bwd(
+            {
+                "args": {
+                    "Input Dims": [
+                        [2, 128, 8, 64],
+                        [2, 128, 8, 64],
+                        [2, 128, 8, 64],
+                        [2, 128, 8, 64],
+                        [2, 128, 8],
+                    ],
+                    "Input type": ["c10::BFloat16"] * 5,
+                    "Concrete Inputs": [""] * 7 + ["0.0", "1.0", "False"],
+                }
             }
-        })
+        )
         assert aiter_bwd.bytes() > 0
 
     def test_aten_reduce_grouped_gemm_primus(self):
@@ -306,12 +353,14 @@ class TestPerfModelPhase11:
         assert gg.flops_bwd() > 0
         assert gg.bytes_bwd() > 0
 
-        impl = perf_model.primus_turbo_grouped_gemm({
-            "args": {
-                "Input Dims": [[128, 64], [4, 64, 32]],
-                "Input type": ["c10::BFloat16", "c10::BFloat16"],
+        impl = perf_model.primus_turbo_grouped_gemm(
+            {
+                "args": {
+                    "Input Dims": [[128, 64], [4, 64, 32]],
+                    "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                }
             }
-        })
+        )
         assert impl.flops() > 0
         assert perf_model.primus_turbo_grouped_gemm._extract_impl_dims([]) is None
         assert perf_model.primus_turbo_grouped_gemm._extract_zipped_dims(
@@ -321,83 +370,102 @@ class TestPerfModelPhase11:
         with pytest.raises(ValueError):
             perf_model.primus_turbo_grouped_gemm({"args": {"Input Dims": [[1]]}})
 
-        var_k = perf_model.primus_turbo_grouped_gemm_variable_k({
-            "args": {
-                "Input Dims": [[128, 64], [128, 32]],
-                "Input type": ["c10::BFloat16", "c10::BFloat16"],
+        var_k = perf_model.primus_turbo_grouped_gemm_variable_k(
+            {
+                "args": {
+                    "Input Dims": [[128, 64], [128, 32]],
+                    "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                }
             }
-        })
+        )
         assert var_k.bytes() > 0
-        zipped = perf_model.primus_turbo_grouped_gemm_variable_k({
-            "args": {
-                "Input Dims": [
-                    [(64, 32), (64, 48)],
-                    [(32, 16), (48, 16)],
-                ],
-                "Input type": ["c10::BFloat16", "c10::BFloat16"],
+        zipped = perf_model.primus_turbo_grouped_gemm_variable_k(
+            {
+                "args": {
+                    "Input Dims": [
+                        [(64, 32), (64, 48)],
+                        [(32, 16), (48, 16)],
+                    ],
+                    "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                }
             }
-        })
+        )
         assert zipped.flops() > 0
-        assert perf_model.primus_turbo_grouped_gemm_variable_k._extract_zipped_pairs(
-            [[(1, 2)], [(3, 4)]]
-        ) is None
+        assert (
+            perf_model.primus_turbo_grouped_gemm_variable_k._extract_zipped_pairs(
+                [[(1, 2)], [(3, 4)]]
+            )
+            is None
+        )
 
     def test_jax_norm_rope_cross_entropy_mamba(self):
-        jax_attn = perf_model.jax_te_fused_attn({
-            "args": {
-                "Input Dims": [[2, 128, 8, 64], [2, 128, 8, 64], [2, 128, 8, 64]],
-                "Input type": ["bf16", "bf16", "bf16"],
-                "Concrete Inputs": ["[False]"],
+        jax_attn = perf_model.jax_te_fused_attn(
+            {
+                "args": {
+                    "Input Dims": [[2, 128, 8, 64], [2, 128, 8, 64], [2, 128, 8, 64]],
+                    "Input type": ["bf16", "bf16", "bf16"],
+                    "Concrete Inputs": ["[False]"],
+                }
             }
-        })
+        )
         assert jax_attn.bytes_bwd() > 0
 
-        jax_conv1d = perf_model.jax_conv({
-            "args": {
-                "Input Dims": [[2, 3, 32], [4, 3, 5]],
-                "Output Dims": [[2, 4, 28]],
-                "Filter Shape": [4, 3, 5],
-                "Input type": ["bf16", "bf16"],
+        jax_conv1d = perf_model.jax_conv(
+            {
+                "args": {
+                    "Input Dims": [[2, 3, 32], [4, 3, 5]],
+                    "Output Dims": [[2, 4, 28]],
+                    "Filter Shape": [4, 3, 5],
+                    "Input type": ["bf16", "bf16"],
+                }
             }
-        })
+        )
         assert jax_conv1d.param_details["convNd"] == "conv1d"
-        jax_conv3d = perf_model.jax_conv({
-            "args": {
-                "Input Dims": [[2, 3, 8, 8, 8], [4, 3, 3, 3, 3]],
-                "Output Dims": [[2, 4, 6, 6, 6]],
-                "Filter Shape": [4, 3, 3, 3, 3],
-                "Input type": ["bf16", "bf16"],
+        jax_conv3d = perf_model.jax_conv(
+            {
+                "args": {
+                    "Input Dims": [[2, 3, 8, 8, 8], [4, 3, 3, 3, 3]],
+                    "Output Dims": [[2, 4, 6, 6, 6]],
+                    "Filter Shape": [4, 3, 3, 3, 3],
+                    "Input type": ["bf16", "bf16"],
+                }
             }
-        })
+        )
         assert jax_conv3d.bytes_bwd() > 0
 
         with pytest.raises(NotImplementedError):
             perf_model.InstanceNormBwd({"args": {}}).flops()
 
-        ce = perf_model.cross_entropy_fwd({
-            "args": {
-                "Input Dims": [[4, 1, 8192], [4, 1]],
-                "Input type": ["invalid_dtype_xyz"],
+        ce = perf_model.cross_entropy_fwd(
+            {
+                "args": {
+                    "Input Dims": [[4, 1, 8192], [4, 1]],
+                    "Input type": ["invalid_dtype_xyz"],
+                }
             }
-        })
+        )
         ce.bpe = None
         assert ce.bytes() is None
 
-        rope = perf_model.fused_rope_fwd({
-            "args": {
-                "Input Dims": [[128, 2, 8, 64], [128, 1, 1, 64]],
-                "Input type": ["bad_rope_dtype"],
+        rope = perf_model.fused_rope_fwd(
+            {
+                "args": {
+                    "Input Dims": [[128, 2, 8, 64], [128, 1, 1, 64]],
+                    "Input type": ["bad_rope_dtype"],
+                }
             }
-        })
+        )
         rope.bpe = None
         assert rope.bytes() is None
 
-        conv = perf_model.causal_conv1d_fwd({
-            "args": {
-                "Input Dims": [[2, 128, 64], [128, 4]],
-                "Input type": ["unknown_conv_dtype"],
+        conv = perf_model.causal_conv1d_fwd(
+            {
+                "args": {
+                    "Input Dims": [[2, 128, 64], [128, 4]],
+                    "Input type": ["unknown_conv_dtype"],
+                }
             }
-        })
+        )
         conv.bpe = None
         assert conv.bytes() is None
 
@@ -405,38 +473,42 @@ class TestPerfModelPhase11:
         assert mamba._param_bpe([], 0, 2) == 2
 
     def test_quantize_mxfp4_and_aiter_gemm_strides(self):
-        mx = perf_model.primus_turbo_quantize_mxfp4_dual({
-            "args": {
-                "Input Dims": [[128, 256]],
-                "Input type": ["bad_mx_dtype"],
-                "Input Strides": [[32768, 256, 1]],
+        mx = perf_model.primus_turbo_quantize_mxfp4_dual(
+            {
+                "args": {
+                    "Input Dims": [[128, 256]],
+                    "Input type": ["bad_mx_dtype"],
+                    "Input Strides": [[32768, 256, 1]],
+                }
             }
-        })
+        )
         mx.bpe_in = None
         assert mx.bytes() is None
 
-        aiter = perf_model.aiter_gemm_a4w4({
-            "args": {
-                "Input Dims": [
-                    [64, 32],
-                    [128, 32],
-                    [64, 2],
-                    [128, 2],
-                    (),
-                    (),
-                    (),
-                    (),
-                    (),
-                ],
-                "Input type": [
-                    "c10::Float4_e2m1fn_x2",
-                    "c10::Float4_e2m1fn_x2",
-                    "c10::Float8_e8m0fnu",
-                    "c10::Float8_e8m0fnu",
-                ],
-                "Input Strides": [[2048, 32, 1], [4096, 32, 1]],
+        aiter = perf_model.aiter_gemm_a4w4(
+            {
+                "args": {
+                    "Input Dims": [
+                        [64, 32],
+                        [128, 32],
+                        [64, 2],
+                        [128, 2],
+                        (),
+                        (),
+                        (),
+                        (),
+                        (),
+                    ],
+                    "Input type": [
+                        "c10::Float4_e2m1fn_x2",
+                        "c10::Float4_e2m1fn_x2",
+                        "c10::Float8_e8m0fnu",
+                        "c10::Float8_e8m0fnu",
+                    ],
+                    "Input Strides": [[2048, 32, 1], [4096, 32, 1]],
+                }
             }
-        })
+        )
         assert aiter.bytes() > 0
 
 
@@ -445,24 +517,27 @@ class TestMoeExtensionsPhase11:
         up = moe_ext.moe_triton_unfused_up(_moe_unfused_event())
         assert up.get_compute_precision() in (None, "fp8", "bf16", "fp16")
 
-        assert moe_ext.UnfusedMoE_Up.bytes_func(
-            32, 4096, 14336, 8, 2, False, 2, None, 2
-        ) is None
+        assert (
+            moe_ext.UnfusedMoE_Up.bytes_func(32, 4096, 14336, 8, 2, False, 2, None, 2)
+            is None
+        )
 
-        down = moe_ext.moe_aiter_unfused_down({
-            "args": {
-                "Input Dims": [
-                    [32, 2, 7168],
-                    [8, 4096, 896],
-                    [32, 4096],
-                ],
-                "Input type": [
-                    "c10::BFloat16",
-                    "c10::Float8_e4m3fn",
-                    "c10::BFloat16",
-                ],
+        down = moe_ext.moe_aiter_unfused_down(
+            {
+                "args": {
+                    "Input Dims": [
+                        [32, 2, 7168],
+                        [8, 4096, 896],
+                        [32, 4096],
+                    ],
+                    "Input type": [
+                        "c10::BFloat16",
+                        "c10::Float8_e4m3fn",
+                        "c10::BFloat16",
+                    ],
+                }
             }
-        })
+        )
         assert down.bytes() > 0
         with pytest.raises(NotImplementedError):
             down.flops_bwd()
@@ -472,16 +547,53 @@ class TestTreePerfPhase11:
     def test_build_df_perf_metrics_exception_paths(self):
         corr = 300
         events = [
-            _make_gpu_event("cpu_ok", 1000, 50, "cpu_op", "aten::mm",
-                            args={"Input Dims": [[32, 64], [64, 128]], "Input type": ["fp16", "fp16"]}),
-            _make_gpu_event("cpu_bad", 1100, 50, "cpu_op", "aten::unknown_op_xyz",
-                            args={"Input Dims": [[2, 2]], "Input type": ["fp16"]}),
-            _make_gpu_event("cpu_boom", 1200, 50, "cpu_op", "aten::explode_op",
-                            args={"Input Dims": [[2, 2]], "Input type": ["fp16"]}),
-            _make_gpu_event("rt", 1010, 5, "cuda_runtime", "hipLaunchKernel", args={"correlation": corr}),
-            _make_gpu_event("k", 1050, 40, "kernel", "gemm_k", pid=0, tid=7,
-                            args={"correlation": corr, "stream": 7}),
-            _mk_ac2g(corr, 0, 7, 1050, "s"), _mk_ac2g(corr, 0, 7, 1090, "f"),
+            _make_gpu_event(
+                "cpu_ok",
+                1000,
+                50,
+                "cpu_op",
+                "aten::mm",
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["fp16", "fp16"],
+                },
+            ),
+            _make_gpu_event(
+                "cpu_bad",
+                1100,
+                50,
+                "cpu_op",
+                "aten::unknown_op_xyz",
+                args={"Input Dims": [[2, 2]], "Input type": ["fp16"]},
+            ),
+            _make_gpu_event(
+                "cpu_boom",
+                1200,
+                50,
+                "cpu_op",
+                "aten::explode_op",
+                args={"Input Dims": [[2, 2]], "Input type": ["fp16"]},
+            ),
+            _make_gpu_event(
+                "rt",
+                1010,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                args={"correlation": corr},
+            ),
+            _make_gpu_event(
+                "k",
+                1050,
+                40,
+                "kernel",
+                "gemm_k",
+                pid=0,
+                tid=7,
+                args={"correlation": corr, "stream": 7},
+            ),
+            _mk_ac2g(corr, 0, 7, 1050, "s"),
+            _mk_ac2g(corr, 0, 7, 1090, "f"),
         ]
         analyzer = _build_analyzer(events)
         df = analyzer.build_df_perf_metrics(
@@ -523,8 +635,18 @@ class TestOrchestratorPhase11:
             "gpu_events": [10, 11],
         }
         parent = {"name": "nn.Module: Block_0", "_category": "aten", "UID": 100}
-        child1 = {"name": "aten::mm", "_category": "aten", "gpu_events": [20], "parent": 100}
-        child2 = {"name": "aten::add", "_category": "aten", "gpu_events": [21], "parent": 100}
+        child1 = {
+            "name": "aten::mm",
+            "_category": "aten",
+            "gpu_events": [20],
+            "parent": 100,
+        }
+        child2 = {
+            "name": "aten::add",
+            "_category": "aten",
+            "gpu_events": [21],
+            "parent": 100,
+        }
         mod_dup = {
             "name": "nn.Module: MLP_1",
             "_category": "aten",
@@ -538,13 +660,18 @@ class TestOrchestratorPhase11:
 
         csv_dir = tmp_path / "csv"
         csv_dir.mkdir()
-        pd.DataFrame({
-            "kernel_details_summary": ["[{'name': 'Cijk_gemm_a'}]", "[{'name': 'Cijk_gemm_b'}]"],
-            "op category": ["GEMM", "GEMM"],
-            "Data Moved (MB)": [10.0, 8.0],
-            "perf_params": ["{}", "{}"],
-            "Input Dims": ["[[2,3]]", "[[2,3]]"],
-        }).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
+        pd.DataFrame(
+            {
+                "kernel_details_summary": [
+                    "[{'name': 'Cijk_gemm_a'}]",
+                    "[{'name': 'Cijk_gemm_b'}]",
+                ],
+                "op category": ["GEMM", "GEMM"],
+                "Data Moved (MB)": [10.0, 8.0],
+                "perf_params": ["{}", "{}"],
+                "Input Dims": ["[[2,3]]", "[[2,3]]"],
+            }
+        ).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
 
         cands = _extract_standalone_fusion_candidates(analyzer, tree, str(csv_dir))
         assert isinstance(cands, list)
@@ -569,10 +696,14 @@ class TestOrchestratorPhase11:
         old_argv = sys.argv
         sys.argv = [
             "orchestrator_prepare",
-            "--trace-path", NORM_TRACE,
-            "--platform", "MI300X",
-            "--output-dir", out,
-            "--comparison-scope", "standalone",
+            "--trace-path",
+            NORM_TRACE,
+            "--platform",
+            "MI300X",
+            "--output-dir",
+            out,
+            "--comparison-scope",
+            "standalone",
         ]
         try:
             with pytest.raises(SystemExit) as exc:
@@ -589,17 +720,21 @@ class TestOrchestratorPhase11:
         csv_dir = os.path.join(out, "perf_report_csvs")
         rows = []
         for i in range(8):
-            rows.append({
-                "name": f"aten::op_{i}",
-                "op category": "GEMM",
-                "Kernel Time (µs)_sum": float(100 + i),
-                "total_duration_us": 60000.0,
-                "kernel_details_summary": f"[{{'name': 'k{i}'}}]",
-                "Data Moved (MB)": 1.0,
-                "perf_params": "{}",
-                "Input Dims": "[[2,3]]",
-            })
-        pd.DataFrame(rows).to_csv(os.path.join(csv_dir, "unified_perf_summary.csv"), index=False)
+            rows.append(
+                {
+                    "name": f"aten::op_{i}",
+                    "op category": "GEMM",
+                    "Kernel Time (µs)_sum": float(100 + i),
+                    "total_duration_us": 60000.0,
+                    "kernel_details_summary": f"[{{'name': 'k{i}'}}]",
+                    "Data Moved (MB)": 1.0,
+                    "perf_params": "{}",
+                    "Input Dims": "[[2,3]]",
+                }
+            )
+        pd.DataFrame(rows).to_csv(
+            os.path.join(csv_dir, "unified_perf_summary.csv"), index=False
+        )
         pd.DataFrame({"name": ["aten::op_0"], "op category": ["GEMM"]}).to_csv(
             os.path.join(csv_dir, "ops_summary.csv"), index=False
         )
@@ -608,7 +743,12 @@ class TestOrchestratorPhase11:
             @classmethod
             def from_file(cls, *args, **kwargs):
                 k = _kernel_event(0, "k0", dur=100)
-                mod = {"name": "aten::mm", "_category": "aten", "gpu_events": [0], "ts": 0}
+                mod = {
+                    "name": "aten::mm",
+                    "_category": "aten",
+                    "gpu_events": [0],
+                    "ts": 0,
+                }
                 tree = _StubTree([mod, k], {0: k})
                 return _StubAnalyzer(tree)
 
@@ -616,9 +756,12 @@ class TestOrchestratorPhase11:
         old_argv = sys.argv
         sys.argv = [
             "orchestrator_prepare",
-            "--trace-path", NORM_TRACE,
-            "--platform", "MI300X",
-            "--output-dir", out,
+            "--trace-path",
+            NORM_TRACE,
+            "--platform",
+            "MI300X",
+            "--output-dir",
+            out,
         ]
         try:
             op.main()

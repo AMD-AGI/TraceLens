@@ -16,7 +16,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -35,7 +34,6 @@ from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
 from TraceLens.Reporting.generate_perf_report_pytorch import (
     _find_entry_point,
     _is_wrapper_frame,
-    add_truncated_kernel_details,
     apply_extension as apply_extension_pytorch,
     generate_perf_report_pytorch,
     get_dfs_short_kernels as get_dfs_short_kernels_pytorch,
@@ -196,15 +194,19 @@ class _MockShortKernelAnalyzer:
     def __init__(self, gpu_only=False, kernels=None, total_time_ms=1.0):
         self.gpu_only = gpu_only
         self.total_time_ms = total_time_ms
-        self._kernels = kernels if kernels is not None else pd.DataFrame(
-            {
-                "Kernel duration (µs)": [5.0, 8.0, 50.0],
-                "Kernel name": ["k_short_a", "k_short_b", "k_long"],
-                "Parent cpu_op": ["aten::mm"] * 3,
-                "Input dims": ["[[32, 64]]"] * 3,
-                "Input strides": [""] * 3,
-                "Concrete Inputs": [""] * 3,
-            }
+        self._kernels = (
+            kernels
+            if kernels is not None
+            else pd.DataFrame(
+                {
+                    "Kernel duration (µs)": [5.0, 8.0, 50.0],
+                    "Kernel name": ["k_short_a", "k_short_b", "k_long"],
+                    "Parent cpu_op": ["aten::mm"] * 3,
+                    "Input dims": ["[[32, 64]]"] * 3,
+                    "Input strides": [""] * 3,
+                    "Concrete Inputs": [""] * 3,
+                }
+            )
         )
 
     def get_df_kernels(self):
@@ -379,16 +381,12 @@ def test_pytorch_get_dfs_short_kernels_with_data():
 
 def test_inference_apply_extension_op_category(tmp_path):
     ext_path = tmp_path / "ext.py"
-    ext_path.write_text(
-        textwrap.dedent(
-            """
+    ext_path.write_text(textwrap.dedent("""
             def tree_postprocess_extension(tree):
                 tree.events[0]["ext_applied"] = True
 
             op_category_extension = {"custom::op": "Other"}
-            """
-        )
-    )
+            """))
     tree = SimpleNamespace(events=[{}], label_non_gpu_paths=lambda: None)
     analyzer = SimpleNamespace(
         tree=tree,
@@ -411,16 +409,12 @@ def test_inference_apply_extension_invalid_perf_model(tmp_path):
 
 def test_pytorch_apply_extension_valid_perf_model(tmp_path):
     ext_path = tmp_path / "ext.py"
-    ext_path.write_text(
-        textwrap.dedent(
-            """
+    ext_path.write_text(textwrap.dedent("""
             class DummyGemm:
                 category = "GEMM"
 
             perf_model_extension = {"aten::mm": DummyGemm}
-            """
-        )
-    )
+            """))
     analyzer = SimpleNamespace(
         tree=SimpleNamespace(events=[], label_non_gpu_paths=lambda: None),
         op_to_perf_model_class_map={},
@@ -498,16 +492,12 @@ def test_inference_report_synthetic_with_flags(tmp_path):
 def test_inference_report_with_extension_additional_dfs(tmp_path):
     trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)])
     ext_path = tmp_path / "extra.py"
-    ext_path.write_text(
-        textwrap.dedent(
-            """
+    ext_path.write_text(textwrap.dedent("""
             import pandas as pd
 
             def get_additional_dataframes_extension(tree):
                 return {"custom_extra": pd.DataFrame({"value": [42]})}
-            """
-        )
-    )
+            """))
     result = generate_inference_report(
         profile_json_path=trace,
         output_csvs_dir=str(tmp_path / "csvs"),
@@ -662,7 +652,9 @@ def test_generate_perf_report_genesis_with_pftrace(
     pftrace = capture / "kernel_trace" / "kernel_results.pftrace"
     pftrace.write_bytes(b"\x00")
     mock_pftrace_to_json.return_value = capture / "pf.json"
-    mock_hip_activity.return_value = {"hip_summary": pd.DataFrame({"api": ["hipMalloc"]})}
+    mock_hip_activity.return_value = {
+        "hip_summary": pd.DataFrame({"api": ["hipMalloc"]})
+    }
     mock_memory_copy.return_value = {
         "memory_copy_by_copy_bytes": pd.DataFrame({"copy_bytes": [1024], "count": [1]})
     }
@@ -717,7 +709,9 @@ def test_build_kernel_summary_df_for_name():
         Event(gpu=0, name="gemm_1", dur_ns=1000, ts_ns=0),
         Event(gpu=0, name="gemm_2", dur_ns=2000, ts_ns=0),
     ]
-    df = build_kernel_summary_df_for_name(events, baseline_total_ns=3000, merge_names=True)
+    df = build_kernel_summary_df_for_name(
+        events, baseline_total_ns=3000, merge_names=True
+    )
     assert len(df) == 1
     assert df.iloc[0]["Instances"] == 2
 
@@ -725,8 +719,24 @@ def test_build_kernel_summary_df_for_name():
 @pytest.mark.parametrize("group", ["name", "name+stream", "name+op", "name+stream+op"])
 def test_build_hip_summary_df_groups(group):
     hip_events = [
-        HIPEvent(name="hipMalloc", dur_ns=100, ts_ns=0, pid=1, tid=1, stream_id=1, operation=2),
-        HIPEvent(name="hipMalloc", dur_ns=200, ts_ns=0, pid=1, tid=1, stream_id=1, operation=2),
+        HIPEvent(
+            name="hipMalloc",
+            dur_ns=100,
+            ts_ns=0,
+            pid=1,
+            tid=1,
+            stream_id=1,
+            operation=2,
+        ),
+        HIPEvent(
+            name="hipMalloc",
+            dur_ns=200,
+            ts_ns=0,
+            pid=1,
+            tid=1,
+            stream_id=1,
+            operation=2,
+        ),
     ]
     df = build_hip_summary_df(hip_events, group=group)
     assert not df.empty
@@ -835,7 +845,9 @@ def test_collective_report_main_cli(tmp_path):
     trace = _make_trace(0, 2)
     (tmp_path / "rank0_trace.json").write_text(json.dumps(trace))
     out = tmp_path / "nccl_cli.xlsx"
-    from TraceLens.Reporting import generate_multi_rank_collective_report_pytorch as coll_mod
+    from TraceLens.Reporting import (
+        generate_multi_rank_collective_report_pytorch as coll_mod,
+    )
 
     old_argv = sys.argv
     sys.argv = [

@@ -24,7 +24,10 @@ sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, ANALYSIS_DIR)
 
 from TraceLens.Agent.Analysis.utils import plot_utils
-from TraceLens.Agent.Analysis.utils.classify_kernels import classify_all, main as classify_main
+from TraceLens.Agent.Analysis.utils.classify_kernels import (
+    classify_all,
+    main as classify_main,
+)
 from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
     _extract_comparative_fusion_candidates,
     _extract_standalone_fusion_candidates,
@@ -52,7 +55,6 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
     validate_report,
     validate_subagent_outputs,
 )
-
 
 # ----- Fixtures -----
 
@@ -229,9 +231,7 @@ def test_validate_findings_file_p_item_count_mismatch(tmp_path):
     (tmp_path / "category_data" / "gemm_metrics.json").write_text("{}")
     passed, errors = validate_findings_file(str(fp), "compute")
     assert not passed
-    assert any(
-        "P-item count" in e or "headings but" in e for e in errors
-    )
+    assert any("P-item count" in e or "headings but" in e for e in errors)
 
 
 def test_validate_findings_file_system_pass(tmp_path):
@@ -256,11 +256,7 @@ def test_metrics_json_for_findings_and_empty_category(tmp_path):
 
 
 def test_scan_args_cells_and_load_valid_args(tmp_path):
-    text = (
-        "| Operation | Args | Time |\n"
-        "|---|---|---|\n"
-        "| op | M=2,N=3 | 1 |\n"
-    )
+    text = "| Operation | Args | Time |\n" "|---|---|---|\n" "| op | M=2,N=3 | 1 |\n"
     cells = list(_scan_args_cells(text))
     assert cells == [(3, "M=2,N=3")]
     (tmp_path / "gemm_metrics.json").write_text(
@@ -353,7 +349,9 @@ def test_validate_compute_data_kernel_name_mismatch(tmp_path):
 
 
 def test_check_priority_consistency_unreadable_json(tmp_path):
-    from TraceLens.Agent.Analysis.utils.validation_utils import _check_priority_consistency
+    from TraceLens.Agent.Analysis.utils.validation_utils import (
+        _check_priority_consistency,
+    )
 
     (tmp_path / "priority_data.json").write_text("{not json")
     result = _check_priority_consistency(str(tmp_path), {})
@@ -545,7 +543,11 @@ def test_validate_report_no_exec_table(tmp_path):
     content = _full_report()
     exec_start = content.find("## Executive Summary")
     exec_end = content.find("## Compute Kernel Optimizations")
-    content = content[:exec_start] + "## Executive Summary\n\nNo table here.\n\n" + content[exec_end:]
+    content = (
+        content[:exec_start]
+        + "## Executive Summary\n\nNo table here.\n\n"
+        + content[exec_end:]
+    )
     _write(str(tmp_path / "analysis.md"), content)
     (tmp_path / "priority_data.json").write_text(
         json.dumps({"findings": [], "priorities": []})
@@ -581,7 +583,10 @@ def test_validate_report_kf_impact_standalone(tmp_path):
     good = "**Impact**: impact_score: 1.5 (perf-model coverage 2/3 kernels)"
     bad = "**Impact**: impact_score: 1.5"
     content = _full_report(extra_kf_impact=good)
-    assert _validate_report_comparison_scope_diffs(content, str(tmp_path), "standalone") == []
+    assert (
+        _validate_report_comparison_scope_diffs(content, str(tmp_path), "standalone")
+        == []
+    )
     content_bad = _full_report(extra_kf_impact=bad)
     errs = _validate_report_comparison_scope_diffs(
         content_bad, str(tmp_path), "standalone"
@@ -593,7 +598,10 @@ def test_validate_report_kf_impact_comparative(tmp_path):
     good = "**Impact**: impact_score: 1.5"
     bad_paren = "**Impact**: impact_score: 1.5 (perf-model coverage 2/3 kernels)"
     content = _full_report(extra_kf_impact=good)
-    assert _validate_report_comparison_scope_diffs(content, str(tmp_path), "comparative") == []
+    assert (
+        _validate_report_comparison_scope_diffs(content, str(tmp_path), "comparative")
+        == []
+    )
     content_bad = _full_report(extra_kf_impact=bad_paren)
     errs = _validate_report_comparison_scope_diffs(
         content_bad, str(tmp_path), "comparative"
@@ -645,7 +653,9 @@ def test_marker_validator_detail_estimate_sentinel(tmp_path):
     )
     fp = tmp_path / "gemm_findings.md"
     _write(str(fp), text)
-    errors = MarkerValidator._check_detail_estimate_per_candidate(text, "gemm_findings.md")
+    errors = MarkerValidator._check_detail_estimate_per_candidate(
+        text, "gemm_findings.md"
+    )
     assert errors == []
 
 
@@ -705,7 +715,9 @@ def test_load_findings(capsys, output_dir_with_manifest):
     os.makedirs(os.path.join(out, "category_findings"))
     os.makedirs(os.path.join(out, "system_findings"))
     _write(os.path.join(out, "category_findings", "gemm_findings.md"), "ok")
-    _write(os.path.join(out, "system_findings", "cpu_idle_findings.md"), "Status: ERROR")
+    _write(
+        os.path.join(out, "system_findings", "cpu_idle_findings.md"), "Status: ERROR"
+    )
     _write(os.path.join(out, "system_findings", "multi_kernel_findings.md"), "ok")
     manifest = json.loads(
         open(os.path.join(out, "category_data", "category_manifest.json")).read()
@@ -1037,7 +1049,9 @@ def test_extract_comparative_missing_inputs(tmp_path):
 
 
 def _write_minimal_orchestrator_csvs(base, comparative=False):
-    t1 = os.path.join(base, "perf_report_trace1_csvs" if comparative else "perf_report_csvs")
+    t1 = os.path.join(
+        base, "perf_report_trace1_csvs" if comparative else "perf_report_csvs"
+    )
     os.makedirs(t1)
     pd.DataFrame(
         {

@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from types import ModuleType
 
@@ -34,9 +33,7 @@ _TK = TraceEventUtils.TraceKeys
 
 
 class TestKernelNameParserFull:
-    ROCM = (
-        "Custom_Cijk_Alik_Bljk_BBS_BH_Bias_AS_SAV_UserArgs_MT64x16x64_MI16x16x1_SN"
-    )
+    ROCM = "Custom_Cijk_Alik_Bljk_BBS_BH_Bias_AS_SAV_UserArgs_MT64x16x64_MI16x16x1_SN"
     CUDA = "nvjet_tst_tst_TN"
 
     def test_rocm_gemm_parse(self):
@@ -139,18 +136,28 @@ class TestCategoryAnalysisHelpers:
         assert out["transpose_time_ms"] == pytest.approx(0.5)
 
     def test_triton_classifiers(self):
-        assert triton_analysis.classify_triton_operation("triton_poi_add", None)[
-            "kernel_type"
-        ] == "pointwise"
-        assert triton_analysis.classify_triton_operation("triton_red_sum", None)[
-            "kernel_type"
-        ] == "reduction"
-        assert triton_analysis.classify_triton_operation("triton_per_mm", None)[
-            "kernel_type"
-        ] == "persistent"
-        assert triton_analysis.classify_triton_operation("other", None)[
-            "kernel_type"
-        ] == "other"
+        assert (
+            triton_analysis.classify_triton_operation("triton_poi_add", None)[
+                "kernel_type"
+            ]
+            == "pointwise"
+        )
+        assert (
+            triton_analysis.classify_triton_operation("triton_red_sum", None)[
+                "kernel_type"
+            ]
+            == "reduction"
+        )
+        assert (
+            triton_analysis.classify_triton_operation("triton_per_mm", None)[
+                "kernel_type"
+            ]
+            == "persistent"
+        )
+        assert (
+            triton_analysis.classify_triton_operation("other", None)["kernel_type"]
+            == "other"
+        )
         out = triton_analysis.extract_category_specific(
             pd.DataFrame(
                 {

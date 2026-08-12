@@ -11,7 +11,6 @@ from __future__ import annotations
 import importlib
 import json
 import os
-import subprocess
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -27,7 +26,9 @@ from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
 from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import generate_perf_report_pytorch
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch as generate_inference_report,
 )
@@ -40,19 +41,29 @@ from tests.test_agent_coverage import (
     _write_minimal_orchestrator_csvs,
 )
 from tests.test_mamba_ssd import _mamba_event
-from tests.test_perfmodel_coverage import _ARCH, _GDN_ANNOTATION, _moe_unfused_event, _norm_event
+from tests.test_perfmodel_coverage import (
+    _ARCH,
+    _GDN_ANNOTATION,
+    _moe_unfused_event,
+    _norm_event,
+)
 from tests.test_reporting_coverage import (
     _build_synthetic_trace,
     _create_genesis_capture,
     _write_trace,
 )
-from tests.test_treeperf_coverage import _build_analyzer, _make_gpu_event, _mk_pytorch_trace
+from tests.test_treeperf_coverage import (
+    _build_analyzer,
+    _mk_pytorch_trace,
+)
 
 TESTS_DIR = os.path.dirname(__file__)
 TRACES_ROOT = os.path.join(TESTS_DIR, "traces")
 INFERENCE_ROOT = os.path.join(TRACES_ROOT, "inference")
 ROCprof_FILE = os.path.join(TESTS_DIR, "rocprof/908_results.json.gz")
-NORM_TRACE = os.path.join(TRACES_ROOT, "perf_model/normalization/normalization_layer_test.json.gz")
+NORM_TRACE = os.path.join(
+    TRACES_ROOT, "perf_model/normalization/normalization_layer_test.json.gz"
+)
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Found .* events with failed performance metric.*:UserWarning",
@@ -153,7 +164,9 @@ class TestPerfModelPush95Coverage:
             ("arch['name']", {"M": 4, "N": 8, "K": 16, "B": 1, "dtype": "bf16"}),
         ],
     )
-    def test_gemm_simulator_missing_inputs(self, monkeypatch, tmp_path, missing, kwargs):
+    def test_gemm_simulator_missing_inputs(
+        self, monkeypatch, tmp_path, missing, kwargs
+    ):
         sim = tmp_path / "run_gemm.py"
         sim.write_text("# stub\n")
         monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
@@ -282,9 +295,20 @@ class TestPerfModelPush95Coverage:
                             (),
                         ],
                         "Input type": ["c10::BFloat16"] * 7 + ["Scalar"],
-                        "Input Strides": [(), (8192, 1024, 32, 1), (1,)] * 2 + [(8192, 1024, 32, 1)] * 2 + [(), ()],
+                        "Input Strides": [(), (8192, 1024, 32, 1), (1,)] * 2
+                        + [(8192, 1024, 32, 1)] * 2
+                        + [(), ()],
                         "Concrete Inputs": [
-                            "", "", "", "", "", "", "", "8", "8", "[True, True]",
+                            "",
+                            "",
+                            "",
+                            "",
+                            "",
+                            "",
+                            "",
+                            "8",
+                            "8",
+                            "[True, True]",
                         ],
                     }
                 },
@@ -311,55 +335,76 @@ class TestPerfModelPush95Coverage:
         assert mamba.flops() > 0
         assert mamba.bytes() > 0
 
-        ce = perf_model.cross_entropy_fwd({
-            "args": {
-                "Input Dims": [[4, 32000], [4]],
-                "Input type": ["c10::BFloat16", "long int"],
+        ce = perf_model.cross_entropy_fwd(
+            {
+                "args": {
+                    "Input Dims": [[4, 32000], [4]],
+                    "Input type": ["c10::BFloat16", "long int"],
+                }
             }
-        })
+        )
         assert ce.flops() > 0
         assert ce.get_compute_precision() is not None
 
-        conv = perf_model.causal_conv1d_fwd({
-            "args": {
-                "Input Dims": [[2, 128, 512], [128, 4], [128]],
-                "Input type": ["c10::BFloat16"] * 3,
+        conv = perf_model.causal_conv1d_fwd(
+            {
+                "args": {
+                    "Input Dims": [[2, 128, 512], [128, 4], [128]],
+                    "Input type": ["c10::BFloat16"] * 3,
+                }
             }
-        })
+        )
         assert conv.bytes() > 0
 
-        empty_comm = perf_model.moe_dispatch({"args": {"Input Dims": [[]], "Input type": []}})
+        empty_comm = perf_model.moe_dispatch(
+            {"args": {"Input Dims": [[]], "Input type": []}}
+        )
         assert empty_comm.bytes() is None
         assert empty_comm.flops_bwd() == 0
 
     def test_jax_gemm_and_conv(self):
-        gemm = perf_model.jax_gemm({
-            "args": {
-                "Batch": 2,
-                "M": 4,
-                "N": 8,
-                "K": 16,
-                "Beta": 1,
-                "Type": "bf16",
+        gemm = perf_model.jax_gemm(
+            {
+                "args": {
+                    "Batch": 2,
+                    "M": 4,
+                    "N": 8,
+                    "K": 16,
+                    "Beta": 1,
+                    "Type": "bf16",
+                }
             }
-        })
+        )
         assert gemm.flops() > 0
-        conv = perf_model.jax_conv({
-            "args": {
-                "Input Dims": [[2, 3, 8, 8], [4, 3, 3, 3]],
-                "Output Dims": [[2, 4, 6, 6]],
-                "Filter Shape": [4, 3, 3, 3],
-                "Input type": ["bf16", "bf16"],
-                "Concrete Inputs": ["", "", "(1,1)", "(0,0)", "(1,1)", "False", "(0,0)", "1"],
+        conv = perf_model.jax_conv(
+            {
+                "args": {
+                    "Input Dims": [[2, 3, 8, 8], [4, 3, 3, 3]],
+                    "Output Dims": [[2, 4, 6, 6]],
+                    "Filter Shape": [4, 3, 3, 3],
+                    "Input type": ["bf16", "bf16"],
+                    "Concrete Inputs": [
+                        "",
+                        "",
+                        "(1,1)",
+                        "(0,0)",
+                        "(1,1)",
+                        "False",
+                        "(0,0)",
+                        "1",
+                    ],
+                }
             }
-        })
+        )
         assert conv.flops_bwd() > 0
 
     def test_hipblaslt_gemm_fp8_fp4(self):
         from tests.test_primus_fp8_gemm_quantize import _fp8_gemm_event
         from tests.test_primus_mxfp4_gemm_quantize import _fp4_gemm_event
 
-        fp8 = perf_model.hipblaslt_gemm_fp8(_fp8_gemm_event((128, 64), (256, 64), trans_b=True))
+        fp8 = perf_model.hipblaslt_gemm_fp8(
+            _fp8_gemm_event((128, 64), (256, 64), trans_b=True)
+        )
         assert fp8.flops() > 0
         assert fp8.bytes() > 0
         with pytest.raises(NotImplementedError):
@@ -507,7 +552,10 @@ class TestMoeExtensionsPush95Coverage:
     )
     def test_moe_bytes_and_bwd_raises(self, factory, event):
         if event is None:
-            if factory in (moe_ext.moe_triton_unfused_up, moe_ext.moe_triton_unfused_down):
+            if factory in (
+                moe_ext.moe_triton_unfused_up,
+                moe_ext.moe_triton_unfused_down,
+            ):
                 evt = _moe_unfused_event(kernel_name="moe_fp8_up_kernel")
             elif factory is moe_ext.moe_aiter_unfused_up:
                 evt = {
@@ -589,14 +637,22 @@ class TestOrchestratorPush95Coverage:
                 None: {"op_category": "GEMM", "data_in_mb": 2.0, "data_out_mb": 2.0},
             },
             "softmax_kernel": {
-                None: {"op_category": "SDPA_fwd", "data_in_mb": 0.5, "data_out_mb": 0.5},
+                None: {
+                    "op_category": "SDPA_fwd",
+                    "data_in_mb": 0.5,
+                    "data_out_mb": 0.5,
+                },
             },
         }
         kernels = [
             {"name": "Cijk_QK", "type": "GEMM", "dur_us": 100},
             {"name": "softmax_kernel", "type": "SDPA", "dur_us": 50},
             {"name": "Cijk_PV", "type": "GEMM", "dur_us": 120},
-            {"name": "vectorized_elementwise_kernel", "type": "Elementwise", "dur_us": 10},
+            {
+                "name": "vectorized_elementwise_kernel",
+                "type": "Elementwise",
+                "dur_us": 10,
+            },
         ]
         core = _extract_attention_core(kernels, perf_lookup)
         assert core is not None
@@ -632,17 +688,19 @@ class TestOrchestratorPush95Coverage:
 
         csv_dir = tmp_path / "csv"
         csv_dir.mkdir()
-        pd.DataFrame({
-            "kernel_details_summary": [
-                "[{'name': 'Cijk_QK_gemm'}]",
-                "[{'name': 'softmax_warp_forward'}]",
-                "[{'name': 'Cijk_PV_gemm'}]",
-            ],
-            "op category": ["GEMM", "SDPA_fwd", "GEMM"],
-            "Data Moved (MB)": [10.0, 2.0, 8.0],
-            "perf_params": ["{'M':2}", "{}", "{'M':2}"],
-            "Input Dims": ["[[2,8,128,64]]", "[[2,8,128,64]]", "[[2,8,128,64]]"],
-        }).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
+        pd.DataFrame(
+            {
+                "kernel_details_summary": [
+                    "[{'name': 'Cijk_QK_gemm'}]",
+                    "[{'name': 'softmax_warp_forward'}]",
+                    "[{'name': 'Cijk_PV_gemm'}]",
+                ],
+                "op category": ["GEMM", "SDPA_fwd", "GEMM"],
+                "Data Moved (MB)": [10.0, 2.0, 8.0],
+                "perf_params": ["{'M':2}", "{}", "{'M':2}"],
+                "Input Dims": ["[[2,8,128,64]]", "[[2,8,128,64]]", "[[2,8,128,64]]"],
+            }
+        ).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
 
         cands = _extract_standalone_fusion_candidates(analyzer, tree, str(csv_dir))
         assert isinstance(cands, list)
@@ -657,32 +715,54 @@ class TestOrchestratorPush95Coverage:
         analyzer = _StubAnalyzer(tree)
         csv_dir = tmp_path / "csv2"
         csv_dir.mkdir()
-        pd.DataFrame({
-            "kernel_details_summary": ["[{'name': 'Cijk_a'}]"],
-            "op category": ["GEMM"],
-            "Data Moved (MB)": [1.0],
-            "perf_params": ["{}"],
-            "Input Dims": ["[[1,1]]"],
-        }).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
+        pd.DataFrame(
+            {
+                "kernel_details_summary": ["[{'name': 'Cijk_a'}]"],
+                "op category": ["GEMM"],
+                "Data Moved (MB)": [1.0],
+                "perf_params": ["{}"],
+                "Input Dims": ["[[1,1]]"],
+            }
+        ).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
         cands = _extract_standalone_fusion_candidates(analyzer, tree, str(csv_dir))
         assert isinstance(cands, list)
 
     def test_comparative_duplicate_base_accumulation(self, tmp_path):
         csv_dir = tmp_path / "trace1_csvs"
         csv_dir.mkdir()
-        pd.DataFrame({
-            "name": ["Cijk_A", "Cijk_B"],
-            "source": ["trace1", "trace1"],
-            "lowest_common_ancestor_id": [100, 100],
-            "kernel_time": [5000.0, 3000.0],
-            "gpu_op_uid": [10, 11],
-        }).to_csv(csv_dir / "diff_stats.csv", index=False)
+        pd.DataFrame(
+            {
+                "name": ["Cijk_A", "Cijk_B"],
+                "source": ["trace1", "trace1"],
+                "lowest_common_ancestor_id": [100, 100],
+                "kernel_time": [5000.0, 3000.0],
+                "gpu_op_uid": [10, 11],
+            }
+        ).to_csv(csv_dir / "diff_stats.csv", index=False)
         uid_map = {
-            10: {"name": "Cijk_A", "dur": 5000, "_category": "kernel", "gpu_events": []},
-            11: {"name": "Cijk_B", "dur": 3000, "_category": "kernel", "gpu_events": []},
+            10: {
+                "name": "Cijk_A",
+                "dur": 5000,
+                "_category": "kernel",
+                "gpu_events": [],
+            },
+            11: {
+                "name": "Cijk_B",
+                "dur": 3000,
+                "_category": "kernel",
+                "gpu_events": [],
+            },
         }
-        mod_a = {"name": "nn.Module: Attn_0", "_category": "aten", "gpu_events": [10, 11]}
-        mod_b = {"name": "nn.Module: Attn_1", "_category": "aten", "gpu_events": [10, 11]}
+        mod_a = {
+            "name": "nn.Module: Attn_0",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
+        mod_b = {
+            "name": "nn.Module: Attn_1",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
         tree = _StubTree([mod_a, mod_b], uid_map)
         analyzer = _StubAnalyzer(tree)
         cands = _extract_comparative_fusion_candidates(str(csv_dir), analyzer, tree)
@@ -694,28 +774,38 @@ class TestOrchestratorPush95Coverage:
         out = str(tmp_path)
         csv_dir = os.path.join(out, "perf_report_csvs")
         os.makedirs(csv_dir)
-        pd.DataFrame({
-            "type": ["total_time", "computation_time", "idle_time"],
-            "time ms": [1000.0, 900.0, 100.0],
-            "percent": [100.0, 90.0, 10.0],
-        }).to_csv(os.path.join(csv_dir, "gpu_timeline.csv"), index=False)
-        pd.DataFrame({
-            "name": ["aten::mm"],
-            "Kernel Time (µs)_sum": [800000.0],
-            "op category": ["GEMM"],
-        }).to_csv(os.path.join(csv_dir, "ops_summary.csv"), index=False)
-        pd.DataFrame({
-            "name": ["aten::mm"],
-            "op category": ["GEMM"],
-            "Kernel Time (µs)": [800.0],
-        }).to_csv(os.path.join(csv_dir, "unified_perf_summary.csv"), index=False)
+        pd.DataFrame(
+            {
+                "type": ["total_time", "computation_time", "idle_time"],
+                "time ms": [1000.0, 900.0, 100.0],
+                "percent": [100.0, 90.0, 10.0],
+            }
+        ).to_csv(os.path.join(csv_dir, "gpu_timeline.csv"), index=False)
+        pd.DataFrame(
+            {
+                "name": ["aten::mm"],
+                "Kernel Time (µs)_sum": [800000.0],
+                "op category": ["GEMM"],
+            }
+        ).to_csv(os.path.join(csv_dir, "ops_summary.csv"), index=False)
+        pd.DataFrame(
+            {
+                "name": ["aten::mm"],
+                "op category": ["GEMM"],
+                "Kernel Time (µs)": [800.0],
+            }
+        ).to_csv(os.path.join(csv_dir, "unified_perf_summary.csv"), index=False)
         pd.DataFrame({"name": ["aten::mm"], "op category": ["GEMM"]}).to_csv(
             os.path.join(csv_dir, "ops_summary_by_category.csv"), index=False
         )
 
         k1 = _kernel_event(10, "Cijk_a")
         k2 = _kernel_event(11, "ew_add")
-        module = {"name": "nn.Module: MLP_0", "_category": "aten", "gpu_events": [10, 11]}
+        module = {
+            "name": "nn.Module: MLP_0",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
         tree = _StubTree([module], {10: k1, 11: k2})
         analyzer = _StubAnalyzer(tree)
 
@@ -725,14 +815,19 @@ class TestOrchestratorPush95Coverage:
                 return analyzer
 
         monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
-        monkeypatch.setattr(op, "_extract_standalone_fusion_candidates", lambda *a, **k: [])
+        monkeypatch.setattr(
+            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
+        )
 
         old_argv = sys.argv
         sys.argv = [
             "orchestrator_prepare",
-            "--trace-path", "/fake/trace.json",
-            "--platform", "MI300X",
-            "--output-dir", out,
+            "--trace-path",
+            "/fake/trace.json",
+            "--platform",
+            "MI300X",
+            "--output-dir",
+            out,
         ]
         try:
             op.main()
@@ -776,7 +871,9 @@ class TestReportingPush95Coverage:
         result = generate_inference_report(**kwargs)
         assert "gpu_timeline" in result
 
-    @pytest.mark.skipif(not os.path.isfile(NORM_TRACE), reason="normalization trace missing")
+    @pytest.mark.skipif(
+        not os.path.isfile(NORM_TRACE), reason="normalization trace missing"
+    )
     def test_normalization_trace_pytorch_report(self, tmp_path):
         generate_perf_report_pytorch(
             profile_json_path=NORM_TRACE,
@@ -806,7 +903,9 @@ class TestReportingPush95Coverage:
             collective_analysis=False,
         )
         cmp_xlsx = tmp_path / "comparison.xlsx"
-        mod = importlib.import_module("TraceLens.Reporting.compare_perf_reports_pytorch")
+        mod = importlib.import_module(
+            "TraceLens.Reporting.compare_perf_reports_pytorch"
+        )
         old_argv = sys.argv
         sys.argv = [
             "compare_perf_reports_pytorch",
@@ -827,10 +926,14 @@ class TestReportingPush95Coverage:
             sys.argv = old_argv
         assert cmp_xlsx.exists()
 
-    @pytest.mark.skipif(not os.path.isfile(ROCprof_FILE), reason="rocprof fixture missing")
+    @pytest.mark.skipif(
+        not os.path.isfile(ROCprof_FILE), reason="rocprof fixture missing"
+    )
     def test_rocprof_report_cli(self, tmp_path):
         out = tmp_path / "roc.xlsx"
-        mod = importlib.import_module("TraceLens.Reporting.generate_perf_report_rocprof")
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_rocprof"
+        )
         old_argv = sys.argv
         sys.argv = [
             "generate_perf_report_rocprof",
@@ -849,7 +952,9 @@ class TestReportingPush95Coverage:
     def test_genesis_report_cli(self, tmp_path):
         capture = _create_genesis_capture(tmp_path)
         out = tmp_path / "gen_out"
-        mod = importlib.import_module("TraceLens.Reporting.generate_perf_report_genesis")
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_genesis"
+        )
         old_argv = sys.argv
         sys.argv = [
             "generate_perf_report_genesis",
@@ -865,19 +970,21 @@ class TestReportingPush95Coverage:
         assert (out / "genesis_perf_report.xlsx").exists()
 
     def test_perf_extensions_rope_and_quant(self):
-        rope = pext.fused_qk_rope_concat_and_cache_mla({
-            "args": {
-                "Input Dims": [
-                    (2, 8, 512),
-                    (2, 8, 64),
-                    (2, 1, 512),
-                    (2, 1, 64),
-                    (128, 1, 1, 576),
-                    (2, 128),
-                ],
-                "Input type": ["c10::BFloat16"] * 5 + ["c10::Float8_e4m3fn"],
+        rope = pext.fused_qk_rope_concat_and_cache_mla(
+            {
+                "args": {
+                    "Input Dims": [
+                        (2, 8, 512),
+                        (2, 8, 64),
+                        (2, 1, 512),
+                        (2, 1, 64),
+                        (128, 1, 1, 576),
+                        (2, 128),
+                    ],
+                    "Input type": ["c10::BFloat16"] * 5 + ["c10::Float8_e4m3fn"],
+                }
             }
-        })
+        )
         assert rope.flops() > 0
 
         silu = {
@@ -893,12 +1000,20 @@ class TestReportingPush95Coverage:
 class TestTreePerfSyntheticPush95:
     def test_bwd_perf_and_launcher_summaries(self):
         analyzer = _build_analyzer(_mk_pytorch_trace())
-        launchers = analyzer.get_df_kernel_launchers(include_args=True, include_kernel_details=True)
+        launchers = analyzer.get_df_kernel_launchers(
+            include_args=True, include_kernel_details=True
+        )
         assert isinstance(launchers, pd.DataFrame)
         if not launchers.empty:
-            by_cat = TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category(launchers)
+            by_cat = TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category(
+                launchers
+            )
             assert isinstance(by_cat, pd.DataFrame)
-            by_mod = TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category_module(launchers)
+            by_mod = (
+                TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category_module(
+                    launchers
+                )
+            )
             assert isinstance(by_mod, pd.DataFrame)
 
 
@@ -976,7 +1091,9 @@ class TestPush95Phase2:
                 return analyzer
 
         monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
-        monkeypatch.setattr(op, "_extract_standalone_fusion_candidates", lambda *a, **k: [])
+        monkeypatch.setattr(
+            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
+        )
 
         old_argv = sys.argv
         sys.argv = [
@@ -1002,6 +1119,7 @@ class TestPush95Phase2:
         monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         perf_model.GEMM._origami_import_error_printed = False
         import builtins
+
         real_import = builtins.__import__
 
         def fake_import(name, *args, **kwargs):
@@ -1022,7 +1140,11 @@ class TestPush95Phase2:
         _write_minimal_orchestrator_csvs(out, comparative=True)
         k1 = _kernel_event(10, "Cijk_a")
         k2 = _kernel_event(11, "ew_add")
-        module = {"name": "nn.Module: MLP_0", "_category": "aten", "gpu_events": [10, 11]}
+        module = {
+            "name": "nn.Module: MLP_0",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
         tree = _StubTree([module], {10: k1, 11: k2})
         analyzer = _StubAnalyzer(tree)
 
@@ -1032,8 +1154,12 @@ class TestPush95Phase2:
                 return analyzer
 
         monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
-        monkeypatch.setattr(op, "_extract_comparative_fusion_candidates", lambda *a, **k: [])
-        monkeypatch.setattr(op, "_extract_standalone_fusion_candidates", lambda *a, **k: [])
+        monkeypatch.setattr(
+            op, "_extract_comparative_fusion_candidates", lambda *a, **k: []
+        )
+        monkeypatch.setattr(
+            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
+        )
 
         old_argv = sys.argv
         sys.argv = [
@@ -1051,19 +1177,25 @@ class TestPush95Phase2:
             op.main()
         finally:
             sys.argv = old_argv
-        assert os.path.isfile(os.path.join(out, "metadata", "trace2_gpu_utilization.json"))
+        assert os.path.isfile(
+            os.path.join(out, "metadata", "trace2_gpu_utilization.json")
+        )
 
     def test_analysis_utils_and_kernel_fusion(self, tmp_path):
         from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-        from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
+        from TraceLens.Agent.Analysis.category_analyses import (
+            kernel_fusion_analysis as kfa,
+        )
 
-        row = pd.Series({
-            "FLOPS/Byte": 0.5,
-            "TFLOPS/s_mean": 10.0,
-            "TB/s_mean": 0.5,
-            "Roofline Bound": "MEMORY_BOUND",
-            "Compute Spec": "vector_fp32",
-        })
+        row = pd.Series(
+            {
+                "FLOPS/Byte": 0.5,
+                "TFLOPS/s_mean": 10.0,
+                "TB/s_mean": 0.5,
+                "Roofline Bound": "MEMORY_BOUND",
+                "Compute Spec": "vector_fp32",
+            }
+        )
         eff = au.calculate_efficiency(
             row, peak_maf_or_maf_dict={"vector_fp32": 100.0}, peak_hbm_bw=5300
         )
@@ -1071,9 +1203,9 @@ class TestPush95Phase2:
 
         fusion_dir = tmp_path / "category_data"
         fusion_dir.mkdir()
-        (fusion_dir / "kernel_fusion_metrics.json").write_text(json.dumps({
-            "high_confidence_kernel_map": {"gemm_a": "fused_a"}
-        }))
+        (fusion_dir / "kernel_fusion_metrics.json").write_text(
+            json.dumps({"high_confidence_kernel_map": {"gemm_a": "fused_a"}})
+        )
         assert au._load_fusion_map(str(tmp_path))["gemm_a"] == "fused_a"
 
         ops = [{"kernel_names": ["a", "b"], "base_name": "Block", "instance_count": 2}]
@@ -1099,18 +1231,29 @@ class TestPush95Phase2:
         assert (tmp_path / "pf_csv" / "category_summary.csv").exists()
 
         for rank in (0, 1):
-            (tmp_path / f"rank{rank}_trace.json").write_text(json.dumps({
-                "traceEvents": [{
-                    "ph": "X", "cat": "kernel", "name": "ncclKernel_AllReduce",
-                    "pid": rank, "tid": 3, "ts": 1000 + rank, "dur": 40,
-                    "args": {
-                        "External id": 10 + rank,
-                        "Collective name": "allreduce",
-                        "stream": 3,
-                        "collective_id": rank,
-                    },
-                }]
-            }))
+            (tmp_path / f"rank{rank}_trace.json").write_text(
+                json.dumps(
+                    {
+                        "traceEvents": [
+                            {
+                                "ph": "X",
+                                "cat": "kernel",
+                                "name": "ncclKernel_AllReduce",
+                                "pid": rank,
+                                "tid": 3,
+                                "ts": 1000 + rank,
+                                "dur": 40,
+                                "args": {
+                                    "External id": 10 + rank,
+                                    "Collective name": "allreduce",
+                                    "stream": 3,
+                                    "collective_id": rank,
+                                },
+                            }
+                        ]
+                    }
+                )
+            )
         dfs = generate_collective_report(
             trace_dir=str(tmp_path),
             world_size=2,
@@ -1123,11 +1266,21 @@ class TestPush95Phase2:
 
     def test_inference_report_all_flags(self, tmp_path):
         trace = tmp_path / "trace.json"
-        trace.write_text(json.dumps(_build_synthetic_trace([
-            ("aten::mm", "gemm_kernel", 100),
-            ("aten::add", "vectorized_elementwise_kernel", 20),
-            ("aten::_scaled_dot_product_flash_attention", "flash_fwd_kernel", 80),
-        ])))
+        trace.write_text(
+            json.dumps(
+                _build_synthetic_trace(
+                    [
+                        ("aten::mm", "gemm_kernel", 100),
+                        ("aten::add", "vectorized_elementwise_kernel", 20),
+                        (
+                            "aten::_scaled_dot_product_flash_attention",
+                            "flash_fwd_kernel",
+                            80,
+                        ),
+                    ]
+                )
+            )
+        )
         result = generate_inference_report(
             profile_json_path=str(trace),
             output_csvs_dir=str(tmp_path / "inf"),
@@ -1148,7 +1301,9 @@ class TestPush95Phase2:
         assert "gpu_timeline" in result
 
     def test_attention_extensions_remaining(self):
-        from TraceLens.PerfModel.extensions import attention_perf_model_extensions as aext
+        from TraceLens.PerfModel.extensions import (
+            attention_perf_model_extensions as aext,
+        )
 
         base = {
             "annotation": _GDN_ANNOTATION,
@@ -1172,74 +1327,112 @@ class TestPush95Phase3:
         from TraceLens.Reporting import tracediff_comparison_extension as tde
 
         assert tde.tracediff_perf_summary_from_diff_stats(pd.DataFrame()).empty
-        diff = pd.DataFrame({
-            "source": ["trace1", "trace2"],
-            "lowest_common_ancestor_id": [1, 1],
-            "lowest_common_ancestor_name": ["aten::mm", "aten::mm"],
-            "cpu_op_name": ["aten::mm", "aten::add"],
-            "busy_time": [100.0, 80.0],
-            "name": ["k1", "k2"],
-            "gpu_op_uid": [10, 20],
-            "nn_module_stack": ["[]", "[]"],
-            "nn_module_parent": ["", ""],
-            "Input Dims": ["[[2,3]]", "[[2,3]]"],
-            "Input type": ["['fp16']", "['fp16']"],
-            "Input Strides": ["[]", "[]"],
-            "Concrete Inputs": ["", ""],
-        })
+        diff = pd.DataFrame(
+            {
+                "source": ["trace1", "trace2"],
+                "lowest_common_ancestor_id": [1, 1],
+                "lowest_common_ancestor_name": ["aten::mm", "aten::mm"],
+                "cpu_op_name": ["aten::mm", "aten::add"],
+                "busy_time": [100.0, 80.0],
+                "name": ["k1", "k2"],
+                "gpu_op_uid": [10, 20],
+                "nn_module_stack": ["[]", "[]"],
+                "nn_module_parent": ["", ""],
+                "Input Dims": ["[[2,3]]", "[[2,3]]"],
+                "Input type": ["['fp16']", "['fp16']"],
+                "Input Strides": ["[]", "[]"],
+                "Concrete Inputs": ["", ""],
+            }
+        )
         summary = tde.tracediff_perf_summary_from_diff_stats(diff)
         assert not summary.empty
 
-        multi = pd.DataFrame({
-            "source": ["trace1", "trace1"],
-            "lowest_common_ancestor_id": [2, 2],
-            "lowest_common_ancestor_name": ["block", "block"],
-            "cpu_op_name": ["aten::mm", "aten::relu"],
-            "busy_time": [50.0, 30.0],
-            "name": ["k1", "k2"],
-            "gpu_op_uid": [1, 2],
-            "nn_module_stack": ["[]", "[]"],
-            "nn_module_parent": ["", ""],
-            "Input Dims": ["[[2,3]]", "[[2,3]]"],
-            "Input type": ["['fp16']", "['fp16']"],
-            "Input Strides": ["[]", "[]"],
-            "Concrete Inputs": ["", ""],
-        })
-        assert " | " in tde.tracediff_perf_summary_from_diff_stats(multi).iloc[0]["name"]
+        multi = pd.DataFrame(
+            {
+                "source": ["trace1", "trace1"],
+                "lowest_common_ancestor_id": [2, 2],
+                "lowest_common_ancestor_name": ["block", "block"],
+                "cpu_op_name": ["aten::mm", "aten::relu"],
+                "busy_time": [50.0, 30.0],
+                "name": ["k1", "k2"],
+                "gpu_op_uid": [1, 2],
+                "nn_module_stack": ["[]", "[]"],
+                "nn_module_parent": ["", ""],
+                "Input Dims": ["[[2,3]]", "[[2,3]]"],
+                "Input type": ["['fp16']", "['fp16']"],
+                "Input Strides": ["[]", "[]"],
+                "Concrete Inputs": ["", ""],
+            }
+        )
+        assert (
+            " | " in tde.tracediff_perf_summary_from_diff_stats(multi).iloc[0]["name"]
+        )
 
     def test_kernel_fusion_impact_pipeline(self, tmp_path):
-        from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
+        from TraceLens.Agent.Analysis.category_analyses import (
+            kernel_fusion_analysis as kfa,
+        )
 
         csv_dir = tmp_path / "perf_report_csvs"
         csv_dir.mkdir()
-        pd.DataFrame({
-            "kernel_details_summary": ["[{'name': 'Cijk_a'}]", "[{'name': 'ew_add'}]"],
-            "op category": ["GEMM", "elementwise"],
-            "Data Moved (MB)": [10.0, 2.0],
-            "perf_params": ["{'M':2}", "{}"],
-            "Input Dims": ["[[2,3]]", "[[4,4]]"],
-        }).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
+        pd.DataFrame(
+            {
+                "kernel_details_summary": [
+                    "[{'name': 'Cijk_a'}]",
+                    "[{'name': 'ew_add'}]",
+                ],
+                "op category": ["GEMM", "elementwise"],
+                "Data Moved (MB)": [10.0, 2.0],
+                "perf_params": ["{'M':2}", "{}"],
+                "Input Dims": ["[[2,3]]", "[[4,4]]"],
+            }
+        ).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
 
         cat_dir = tmp_path / "category_data"
         cat_dir.mkdir()
-        (cat_dir / "category_manifest.json").write_text(json.dumps({
-            "platform": "MI300X",
-            "gpu_utilization": {"total_time_ms": 1000.0},
-        }))
-        (cat_dir / "fusion_candidates.json").write_text(json.dumps([
-            {
-                "module_name": "nn.Module: Block",
-                "kernels": [
-                    {"name": "Cijk_a", "type": "GEMM", "dur_us": 100, "data_in_mb": 10.0},
-                    {"name": "ew_add", "type": "Elementwise Add", "dur_us": 20, "data_in_mb": 2.0},
-                ],
-                "instance_count": 1,
-            }
-        ]))
-        (cat_dir / "arch_config.json").write_text(json.dumps({
-            "peak_hbm_bw_tbs": 5.3,
-            "max_achievable_tflops": {"matrix_bf16": 1000.0, "vector_fp32": 100.0},
-        }))
+        (cat_dir / "category_manifest.json").write_text(
+            json.dumps(
+                {
+                    "platform": "MI300X",
+                    "gpu_utilization": {"total_time_ms": 1000.0},
+                }
+            )
+        )
+        (cat_dir / "fusion_candidates.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "module_name": "nn.Module: Block",
+                        "kernels": [
+                            {
+                                "name": "Cijk_a",
+                                "type": "GEMM",
+                                "dur_us": 100,
+                                "data_in_mb": 10.0,
+                            },
+                            {
+                                "name": "ew_add",
+                                "type": "Elementwise Add",
+                                "dur_us": 20,
+                                "data_in_mb": 2.0,
+                            },
+                        ],
+                        "instance_count": 1,
+                    }
+                ]
+            )
+        )
+        (cat_dir / "arch_config.json").write_text(
+            json.dumps(
+                {
+                    "peak_hbm_bw_tbs": 5.3,
+                    "max_achievable_tflops": {
+                        "matrix_bf16": 1000.0,
+                        "vector_fp32": 100.0,
+                    },
+                }
+            )
+        )
 
         candidates, manifest, csv_path = kfa.load_fusion_data(str(tmp_path))
         lookup = kfa.build_kernel_perf_lookup(csv_path)
@@ -1329,13 +1522,20 @@ class TestPush95Phase3:
         input_dims[0] = [128, 64]
         input_dims[5] = [256, 64]
         input_dims[10] = [128, 256]
-        tex = perf_model.tex_ts_te_gemm_ts({
-            "args": {
-                "Input Dims": input_dims,
-                "Input type": ["c10::Float8_e4m3fn"] * 19,
-                "Concrete Inputs": [""] * 4 + ["1"] + [""] * 4 + ["1"] + [""] * 4 + ["bias"],
+        tex = perf_model.tex_ts_te_gemm_ts(
+            {
+                "args": {
+                    "Input Dims": input_dims,
+                    "Input type": ["c10::Float8_e4m3fn"] * 19,
+                    "Concrete Inputs": [""] * 4
+                    + ["1"]
+                    + [""] * 4
+                    + ["1"]
+                    + [""] * 4
+                    + ["bias"],
+                }
             }
-        })
+        )
         assert tex.flops() > 0
         with pytest.raises(NotImplementedError):
             tex.flops_bwd()
@@ -1359,25 +1559,31 @@ class TestPush95Phase4:
         out = str(tmp_path)
         csv_dir = os.path.join(out, "perf_report_csvs")
         os.makedirs(csv_dir)
-        pd.DataFrame({
-            "type": ["total_time", "computation_time", "idle_time"],
-            "time ms": [1000.0, 900.0, 100.0],
-            "percent": [100.0, 90.0, 10.0],
-        }).to_csv(os.path.join(csv_dir, "gpu_timeline.csv"), index=False)
-        pd.DataFrame({
-            "name": ["aten::mm"],
-            "total_direct_kernel_time_ms": [800.0],
-            "op category": ["GEMM"],
-        }).to_csv(os.path.join(csv_dir, "ops_summary.csv"), index=False)
-        pd.DataFrame({
-            "name": ["aten::mm"],
-            "op category": ["GEMM"],
-            "Kernel Time (µs)_sum": [800000.0],
-            "kernel_details_summary": ["[{'name': 'Cijk_a'}]"],
-            "Data Moved (MB)": [10.0],
-            "perf_params": ["{}"],
-            "Input Dims": ["[[2,3]]"],
-        }).to_csv(os.path.join(csv_dir, "unified_perf_summary.csv"), index=False)
+        pd.DataFrame(
+            {
+                "type": ["total_time", "computation_time", "idle_time"],
+                "time ms": [1000.0, 900.0, 100.0],
+                "percent": [100.0, 90.0, 10.0],
+            }
+        ).to_csv(os.path.join(csv_dir, "gpu_timeline.csv"), index=False)
+        pd.DataFrame(
+            {
+                "name": ["aten::mm"],
+                "total_direct_kernel_time_ms": [800.0],
+                "op category": ["GEMM"],
+            }
+        ).to_csv(os.path.join(csv_dir, "ops_summary.csv"), index=False)
+        pd.DataFrame(
+            {
+                "name": ["aten::mm"],
+                "op category": ["GEMM"],
+                "Kernel Time (µs)_sum": [800000.0],
+                "kernel_details_summary": ["[{'name': 'Cijk_a'}]"],
+                "Data Moved (MB)": [10.0],
+                "perf_params": ["{}"],
+                "Input Dims": ["[[2,3]]"],
+            }
+        ).to_csv(os.path.join(csv_dir, "unified_perf_summary.csv"), index=False)
         pd.DataFrame({"name": ["aten::mm"], "op category": ["GEMM"]}).to_csv(
             os.path.join(csv_dir, "ops_summary_by_category.csv"), index=False
         )
@@ -1424,13 +1630,15 @@ class TestPush95Phase4:
         out = str(tmp_path)
         _write_minimal_orchestrator_csvs(out, comparative=True)
         t1_csv = os.path.join(out, "perf_report_trace1_csvs")
-        pd.DataFrame({
-            "name": ["Cijk_A", "ew_add"],
-            "source": ["trace1", "trace1"],
-            "lowest_common_ancestor_id": [100, 100],
-            "kernel_time": [5000.0, 3000.0],
-            "gpu_op_uid": [10, 11],
-        }).to_csv(os.path.join(t1_csv, "diff_stats.csv"), index=False)
+        pd.DataFrame(
+            {
+                "name": ["Cijk_A", "ew_add"],
+                "source": ["trace1", "trace1"],
+                "lowest_common_ancestor_id": [100, 100],
+                "kernel_time": [5000.0, 3000.0],
+                "gpu_op_uid": [10, 11],
+            }
+        ).to_csv(os.path.join(t1_csv, "diff_stats.csv"), index=False)
 
         k1 = _kernel_event(10, "Cijk_A", dur=500)
         k2 = _kernel_event(11, "ew_add", dur=300)
@@ -1523,7 +1731,11 @@ class TestPush95Phase4:
         )
         assert isinstance(perf, pd.DataFrame)
         if analyzer.add_python_func:
-            nn = [e for e in analyzer.tree.events if str(e.get("name", "")).startswith("nn.Module")]
+            nn = [
+                e
+                for e in analyzer.tree.events
+                if str(e.get("name", "")).startswith("nn.Module")
+            ]
             if nn:
                 analyzer.build_nn_module_latency_tree(nn[0])
 
@@ -1547,4 +1759,3 @@ class TestPush95Phase5:
         assert _categorize_kernel("conv2d_fwd") == "Convolution"
         assert _categorize_kernel("layer_norm") == "Normalization"
         assert _categorize_kernel("flash_attn") == "Attention"
-

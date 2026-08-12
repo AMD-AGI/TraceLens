@@ -16,9 +16,6 @@ import sys
 import pytest
 
 from tests.test_reporting_coverage import (
-    KERNEL_TRACE_CSV,
-    _build_synthetic_trace,
-    _create_genesis_capture,
     _minimal_pftrace_events,
     _write_trace,
 )
@@ -88,7 +85,11 @@ def test_collective_report_main_trace_glob(tmp_path):
                     "tid": 3,
                     "ts": 1000,
                     "dur": 40,
-                    "args": {"External id": rank, "Collective name": "allreduce", "stream": 3},
+                    "args": {
+                        "External id": rank,
+                        "Collective name": "allreduce",
+                        "stream": 3,
+                    },
                 }
             ]
         }
@@ -133,7 +134,6 @@ def test_pftrace_hip_activity_main(tmp_path):
     finally:
         sys.argv = old_argv
     assert md.exists()
-
 
 
 @pytest.mark.skipif(

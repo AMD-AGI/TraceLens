@@ -12,7 +12,6 @@ import importlib
 import json
 import os
 import sys
-import tempfile
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -26,7 +25,9 @@ from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
 from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
 from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
-from TraceLens.Reporting.generate_perf_report_pytorch import generate_perf_report_pytorch
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch as generate_inference_report,
 )
@@ -52,12 +53,11 @@ from tests.test_agent_coverage import (
 from tests.test_conv_backward_bytes import _conv_bias_bwd_event
 from tests.test_perfmodel_coverage import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
 from tests.test_reporting_coverage import (
-    _build_synthetic_trace,
     _create_genesis_capture,
     _minimal_pftrace_events,
     _write_trace,
 )
-from tests.test_treeperf_coverage import _build_analyzer, _mk_pytorch_trace
+from tests.test_treeperf_coverage import _build_analyzer
 
 INFERENCE_ROOT = os.path.join(os.path.dirname(__file__), "traces/inference")
 ROCprof_FILE = os.path.join(os.path.dirname(__file__), "rocprof/908_results.json.gz")
@@ -79,7 +79,11 @@ def _discover_inference_cases():
         dirpath = os.path.join(INFERENCE_ROOT, entry)
         if not os.path.isdir(dirpath):
             continue
-        gz = [f for f in os.listdir(dirpath) if f.endswith(".json.gz") and "graph" in f.lower()]
+        gz = [
+            f
+            for f in os.listdir(dirpath)
+            if f.endswith(".json.gz") and "graph" in f.lower()
+        ]
         if not gz:
             gz = [f for f in os.listdir(dirpath) if f.endswith(".json.gz")]
         if not gz:
@@ -173,7 +177,9 @@ class TestPerfModelPush95:
         monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
         perf_model.GEMM.cache_gemm_results.clear()
         with pytest.raises(AssertionError, match="Invalid inputs"):
-            perf_model.GEMM.get_simulation_time_func({"name": "mi300x"}, None, 8, 16, 1, "bf16")
+            perf_model.GEMM.get_simulation_time_func(
+                {"name": "mi300x"}, None, 8, 16, 1, "bf16"
+            )
 
     def test_gemm_simulator_force_to_l1_and_scaled_cus(self, monkeypatch, tmp_path):
         sim = tmp_path / "run_gemm.py"
@@ -205,7 +211,15 @@ class TestPerfModelPush95:
                 "Input Dims": [[2, 4, 8, 8, 8], [8, 4, 3, 3, 3]],
                 "Input type": ["c10::BFloat16", "c10::BFloat16"],
                 "Concrete Inputs": [
-                    "", "", "", "(1,1,1)", "(0,0,0)", "(1,1,1)", "False", "(0,0,0)", "1"
+                    "",
+                    "",
+                    "",
+                    "(1,1,1)",
+                    "(0,0,0)",
+                    "(1,1,1)",
+                    "False",
+                    "(0,0,0)",
+                    "1",
                 ],
             }
         }
@@ -216,7 +230,15 @@ class TestPerfModelPush95:
                 "Input Dims": [[2, 3, 8, 8], [4, 3, 3, 3]],
                 "Input type": ["c10::BFloat16", "c10::Half"],
                 "Concrete Inputs": [
-                    "", "", "", "(1,1)", "(0,0)", "(1,1)", "False", "(0,0)", "1"
+                    "",
+                    "",
+                    "",
+                    "(1,1)",
+                    "(0,0)",
+                    "(1,1)",
+                    "False",
+                    "(0,0)",
+                    "1",
                 ],
             }
         }
@@ -273,7 +295,9 @@ class TestPerfModelPush95:
 
     def test_vllm_gemm_missing_input_type(self):
         with pytest.raises(ValueError, match="missing A,B dtypes"):
-            perf_model.vllm_gemm_with_dynamic_quant({"args": {"Input Dims": [[4, 8], [16, 4]]}})
+            perf_model.vllm_gemm_with_dynamic_quant(
+                {"args": {"Input Dims": [[4, 8], [16, 4]]}}
+            )
 
     def test_tex_ts_te_gemm_transposed(self):
         input_dims = [()] * 19
@@ -284,7 +308,12 @@ class TestPerfModelPush95:
             "args": {
                 "Input Dims": input_dims,
                 "Input type": ["c10::Float8_e4m3fn"] * 19,
-                "Concrete Inputs": [""] * 4 + ["1"] + [""] * 4 + ["1"] + [""] * 4 + [""],
+                "Concrete Inputs": [""] * 4
+                + ["1"]
+                + [""] * 4
+                + ["1"]
+                + [""] * 4
+                + [""],
             }
         }
         model = perf_model.tex_ts_te_gemm_ts(event)
@@ -295,7 +324,12 @@ class TestMoeExtensionsPush95:
     def test_blockscale_missing_topk_raises(self):
         event = {
             "args": {
-                "Input Dims": [[32, 4096], [32, 4096], [8, 14336, 4096], [8, 4096, 7168]],
+                "Input Dims": [
+                    [32, 4096],
+                    [32, 4096],
+                    [8, 14336, 4096],
+                    [8, 4096, 7168],
+                ],
                 "Input type": ["c10::BFloat16", "c10::Float8_e4m3fn"] * 2,
                 "Concrete Inputs": [""] * 8,
             }
@@ -316,8 +350,12 @@ class TestMoeExtensionsPush95:
             moe_ext.moe_triton_unfused_up(event)
 
     def test_triton_unfused_fp4_and_fp8_kernels(self):
-        up = moe_ext.moe_triton_unfused_up(_moe_unfused_event(kernel_name="moe_mxfp4_up_kernel"))
-        down = moe_ext.moe_triton_unfused_down(_moe_unfused_event(kernel_name="moe_fp8_down_kernel"))
+        up = moe_ext.moe_triton_unfused_up(
+            _moe_unfused_event(kernel_name="moe_mxfp4_up_kernel")
+        )
+        down = moe_ext.moe_triton_unfused_down(
+            _moe_unfused_event(kernel_name="moe_fp8_down_kernel")
+        )
         assert up.get_compute_precision() in ("fp4", "fp8", "bf16", None)
         assert down.bytes() > 0
         with pytest.raises(NotImplementedError):
@@ -338,13 +376,27 @@ class TestAttentionRmsnormPush95:
             assert mla.flops() is None
         else:
             assert mla.flops() > 0
-        paged = attn_ext.aiter_paged_attention_ragged({
-            "annotation": _GDN_ANNOTATION,
-            "args": {
-                "Input Dims": [(), (), [64, 8, 64], [128, 16, 1, 64], [128, 16, 1, 128]],
-                "Input type": ["Scalar", "Scalar", "c10::BFloat16", "c10::BFloat16", "c10::BFloat16"],
-            },
-        })
+        paged = attn_ext.aiter_paged_attention_ragged(
+            {
+                "annotation": _GDN_ANNOTATION,
+                "args": {
+                    "Input Dims": [
+                        (),
+                        (),
+                        [64, 8, 64],
+                        [128, 16, 1, 64],
+                        [128, 16, 1, 128],
+                    ],
+                    "Input type": [
+                        "Scalar",
+                        "Scalar",
+                        "c10::BFloat16",
+                        "c10::BFloat16",
+                        "c10::BFloat16",
+                    ],
+                },
+            }
+        )
         assert paged.param_details["d_h_v"] == 128
 
     def test_rmsnorm_extension_variants(self):
@@ -375,11 +427,17 @@ class TestAttentionRmsnormPush95:
 class TestCaptureMergePush95:
     def test_load_capture_folder_skips_invalid(self, tmp_path):
         meta = tmp_path / "execution_details.json"
-        meta.write_text(json.dumps([
-            {"file": "missing.json.gz", "batch_size": "bad", "mode": "FULL"},
-            {"file": "ok.json.gz", "batch_size": 32, "mode": "FULL"},
-        ]))
-        (tmp_path / "ok.json.gz").write_bytes(b"\x1f\x8b")  # invalid gzip; load may skip
+        meta.write_text(
+            json.dumps(
+                [
+                    {"file": "missing.json.gz", "batch_size": "bad", "mode": "FULL"},
+                    {"file": "ok.json.gz", "batch_size": 32, "mode": "FULL"},
+                ]
+            )
+        )
+        (tmp_path / "ok.json.gz").write_bytes(
+            b"\x1f\x8b"
+        )  # invalid gzip; load may skip
         result, batch_sizes = load_capture_folder(str(tmp_path), str(meta))
         assert isinstance(result, dict)
         assert 32 in batch_sizes or batch_sizes == []
@@ -432,31 +490,44 @@ class TestOrchestratorPush95:
     def test_comparative_empty_uid_lookup(self, tmp_path, capsys):
         csv_dir = tmp_path / "csv2"
         csv_dir.mkdir()
-        pd.DataFrame({
-            "lowest_common_ancestor_id": [1],
-            "name": ["k"],
-            "source": ["trace2"],
-        }).to_csv(csv_dir / "diff_stats.csv", index=False)
+        pd.DataFrame(
+            {
+                "lowest_common_ancestor_id": [1],
+                "name": ["k"],
+                "source": ["trace2"],
+            }
+        ).to_csv(csv_dir / "diff_stats.csv", index=False)
         tree = _StubTree([], {})
         analyzer = _StubAnalyzer(tree)
-        assert _extract_comparative_fusion_candidates(str(csv_dir), analyzer, tree) == []
+        assert (
+            _extract_comparative_fusion_candidates(str(csv_dir), analyzer, tree) == []
+        )
         assert "No trace1 kernel UIDs" in capsys.readouterr().out
 
     def test_standalone_gemm_norm_only_skipped(self, tmp_path):
         k1 = _kernel_event(10, "Cijk_gemm_a")
         k2 = _kernel_event(11, "rmsnorm2d")
-        mod = {"name": "nn.Module: Block_0", "_category": "aten", "gpu_events": [10, 11]}
+        mod = {
+            "name": "nn.Module: Block_0",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
         tree = _StubTree([mod], {10: k1, 11: k2})
         analyzer = _StubAnalyzer(tree)
         csv_dir = tmp_path / "standalone_csv"
         csv_dir.mkdir()
-        pd.DataFrame({
-            "kernel_details_summary": ["[{'name': 'Cijk_gemm_a'}]", "[{'name': 'rmsnorm2d'}]"],
-            "op category": ["GEMM", "NORM_fwd"],
-            "Data Moved (MB)": [1.0, 1.0],
-            "perf_params": ["{}", "{}"],
-            "Input Dims": ["[[2,3]]", "[[2,3]]"],
-        }).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
+        pd.DataFrame(
+            {
+                "kernel_details_summary": [
+                    "[{'name': 'Cijk_gemm_a'}]",
+                    "[{'name': 'rmsnorm2d'}]",
+                ],
+                "op category": ["GEMM", "NORM_fwd"],
+                "Data Moved (MB)": [1.0, 1.0],
+                "perf_params": ["{}", "{}"],
+                "Input Dims": ["[[2,3]]", "[[2,3]]"],
+            }
+        ).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
         cands = _extract_standalone_fusion_candidates(analyzer, tree, str(csv_dir))
         assert isinstance(cands, list)
 
@@ -471,16 +542,26 @@ class TestTreePerfPush95:
         corr = 801
         events = [
             {
-                "ph": "X", "UID": "bwd", "ts": 2000, "dur": 100,
-                "cat": "cpu_op", "name": "aten::unknown_bwd_op",
-                "pid": 100, "tid": 100,
+                "ph": "X",
+                "UID": "bwd",
+                "ts": 2000,
+                "dur": 100,
+                "cat": "cpu_op",
+                "name": "aten::unknown_bwd_op",
+                "pid": 100,
+                "tid": 100,
                 "args": {"Input Dims": [[32, 64]], "Input type": ["fp16"]},
                 "gpu_events": ["k1"],
             },
             {
-                "ph": "X", "UID": "k1", "ts": 2050, "dur": 50,
-                "cat": "kernel", "name": "custom_kernel",
-                "pid": 0, "tid": 7,
+                "ph": "X",
+                "UID": "k1",
+                "ts": 2050,
+                "dur": 50,
+                "cat": "kernel",
+                "name": "custom_kernel",
+                "pid": 0,
+                "tid": 7,
                 "args": {"correlation": corr, "stream": 7},
             },
         ]
@@ -493,13 +574,15 @@ class TestTreePerfPush95:
         assert isinstance(df, pd.DataFrame)
 
     def test_jax_analyses_hlo_op_fallback_categorization(self):
-        events = [{
-            "name": "__amd_rocclr_fillBufferAligned.kd",
-            "dur": 100,
-            "pid": 1,
-            "tid": 1,
-            "args": {"hlo_op": "te_fused_attn_backward_ffi.12"},
-        }]
+        events = [
+            {
+                "name": "__amd_rocclr_fillBufferAligned.kd",
+                "dur": 100,
+                "pid": 1,
+                "tid": 1,
+                "args": {"hlo_op": "te_fused_attn_backward_ffi.12"},
+            }
+        ]
         cat, _ = JaxAnalyses.breakdown_compute_events(events, group_by_gpu=True)
         assert 1 in cat
 
@@ -514,12 +597,16 @@ class TestReportingCliPush95:
         if not os.path.isfile(ROCprof_FILE):
             pytest.skip("rocprof fixture missing")
         out = tmp_path / "roc.xlsx"
-        mod = importlib.import_module("TraceLens.Reporting.generate_perf_report_rocprof")
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_rocprof"
+        )
         old_argv = sys.argv
         sys.argv = [
             "generate_perf_report_rocprof",
-            "--profile_json_path", ROCprof_FILE,
-            "--output_xlsx_path", str(out),
+            "--profile_json_path",
+            ROCprof_FILE,
+            "--output_xlsx_path",
+            str(out),
             "--short_kernel_study",
         ]
         try:
@@ -531,12 +618,16 @@ class TestReportingCliPush95:
     def test_pftrace_hip_api_main(self, tmp_path):
         trace_path = tmp_path / "trace.json"
         trace_path.write_text(json.dumps({"traceEvents": _minimal_pftrace_events()}))
-        mod = importlib.import_module("TraceLens.Reporting.generate_perf_report_pftrace_hip_api")
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_pftrace_hip_api"
+        )
         old_argv = sys.argv
         sys.argv = [
             "generate_perf_report_pftrace_hip_api",
-            "--trace_path", str(trace_path),
-            "--output_csvs_dir", str(tmp_path / "hip_api_csv"),
+            "--trace_path",
+            str(trace_path),
+            "--output_csvs_dir",
+            str(tmp_path / "hip_api_csv"),
             "--include_nonlaunch_apis",
         ]
         try:
@@ -556,8 +647,10 @@ class TestReportingCliPush95:
         old_argv = sys.argv
         sys.argv = [
             "generate_perf_report_pftrace_memory_copy",
-            "--trace_path", str(trace_path),
-            "--output_csvs_dir", str(tmp_path / "mem_csv"),
+            "--trace_path",
+            str(trace_path),
+            "--output_csvs_dir",
+            str(tmp_path / "mem_csv"),
         ]
         try:
             mod.main()
@@ -583,12 +676,16 @@ class TestReportingCliPush95:
     def test_genesis_main(self, tmp_path):
         capture = _create_genesis_capture(tmp_path)
         out = tmp_path / "gen_out"
-        mod = importlib.import_module("TraceLens.Reporting.generate_perf_report_genesis")
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_genesis"
+        )
         old_argv = sys.argv
         sys.argv = [
             "generate_perf_report_genesis",
-            "--capture-dir", str(capture),
-            "--output-dir", str(out),
+            "--capture-dir",
+            str(capture),
+            "--output-dir",
+            str(out),
         ]
         try:
             mod.main()
@@ -614,14 +711,22 @@ class TestReportingCliPush95:
             collective_analysis=False,
         )
         cmp_xlsx = tmp_path / "comparison.xlsx"
-        mod = importlib.import_module("TraceLens.Reporting.compare_perf_reports_pytorch")
+        mod = importlib.import_module(
+            "TraceLens.Reporting.compare_perf_reports_pytorch"
+        )
         old_argv = sys.argv
         sys.argv = [
             "compare_perf_reports_pytorch",
-            str(out1), str(out2),
-            "-o", str(cmp_xlsx),
-            "--names", "a", "b",
-            "--sheets", "gpu_timeline", "ops_summary",
+            str(out1),
+            str(out2),
+            "-o",
+            str(cmp_xlsx),
+            "--names",
+            "a",
+            "b",
+            "--sheets",
+            "gpu_timeline",
+            "ops_summary",
         ]
         try:
             mod.main()
@@ -634,13 +739,18 @@ class TestReportingCliPush95:
             tmp_path,
             [("aten::mm", "gemm_kernel", 100), ("aten::add", "add_kernel", 20)],
         )
-        mod = importlib.import_module("TraceLens.Reporting.generate_perf_report_pytorch")
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_pytorch"
+        )
         old_argv = sys.argv
         sys.argv = [
             "generate_perf_report_pytorch",
-            "--profile_json_path", trace,
-            "--output_csvs_dir", str(tmp_path / "py_ext"),
-            "--output_xlsx_path", str(tmp_path / "py_ext.xlsx"),
+            "--profile_json_path",
+            trace,
+            "--output_csvs_dir",
+            str(tmp_path / "py_ext"),
+            "--output_xlsx_path",
+            str(tmp_path / "py_ext.xlsx"),
             "--enable_kernel_summary",
             "--short_kernel_study",
             "--include_overlap_info",
@@ -661,16 +771,28 @@ class TestCoveragePush95Phase2:
     def test_comparative_fusion_full_path(self, tmp_path):
         csv_dir = tmp_path / "trace1_csvs"
         csv_dir.mkdir()
-        pd.DataFrame({
-            "name": ["Cijk_A", "Cijk_B", "some_op"],
-            "source": ["trace1", "trace1", "trace2"],
-            "lowest_common_ancestor_id": [100, 100, 100],
-            "kernel_time": [5000.0, 3000.0, 1000.0],
-            "gpu_op_uid": [10, 11, None],
-        }).to_csv(csv_dir / "diff_stats.csv", index=False)
+        pd.DataFrame(
+            {
+                "name": ["Cijk_A", "Cijk_B", "some_op"],
+                "source": ["trace1", "trace1", "trace2"],
+                "lowest_common_ancestor_id": [100, 100, 100],
+                "kernel_time": [5000.0, 3000.0, 1000.0],
+                "gpu_op_uid": [10, 11, None],
+            }
+        ).to_csv(csv_dir / "diff_stats.csv", index=False)
         uid_map = {
-            10: {"name": "Cijk_A", "dur": 5000, "_category": "kernel", "gpu_events": []},
-            11: {"name": "Cijk_B", "dur": 3000, "_category": "kernel", "gpu_events": []},
+            10: {
+                "name": "Cijk_A",
+                "dur": 5000,
+                "_category": "kernel",
+                "gpu_events": [],
+            },
+            11: {
+                "name": "Cijk_B",
+                "dur": 3000,
+                "_category": "kernel",
+                "gpu_events": [],
+            },
         }
         module = {
             "name": "nn.Module: Attn_0",
@@ -717,44 +839,65 @@ class TestCoveragePush95Phase2:
         assert code == 1
 
     def test_norm_and_mamba_perf_models(self):
-        import gzip
         from tests.test_mamba_ssd import _mamba_event
 
         mamba = perf_model.mamba_ssd_fwd(_mamba_event())
         assert mamba.flops() > 0
         assert mamba.bytes() > 0
-        dispatch = perf_model.moe_dispatch({
-            "args": {
-                "Input Dims": [[32, 4096], [32, 8]],
-                "Input type": ["c10::BFloat16", "c10::Int"],
+        dispatch = perf_model.moe_dispatch(
+            {
+                "args": {
+                    "Input Dims": [[32, 4096], [32, 8]],
+                    "Input type": ["c10::BFloat16", "c10::Int"],
+                }
             }
-        })
+        )
         assert dispatch.bytes() > 0
-        combine = perf_model.moe_combine({
-            "args": {
-                "Input Dims": [[32, 4096], [32, 4096]],
-                "Input type": ["c10::BFloat16", "c10::BFloat16"],
+        combine = perf_model.moe_combine(
+            {
+                "args": {
+                    "Input Dims": [[32, 4096], [32, 4096]],
+                    "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                }
             }
-        })
+        )
         assert combine.bytes() >= 0
 
     def test_moe_ck_and_gptq_extended(self):
         ck1 = {
             "args": {
                 "Input Dims": [
-                    [32, 512], [8, 7168, 512], [8, 4096, 896],
-                    [], [], [], [32, 2, 7168],
+                    [32, 512],
+                    [8, 7168, 512],
+                    [8, 4096, 896],
+                    [],
+                    [],
+                    [],
+                    [32, 2, 7168],
                 ],
-                "Input type": ["c10::BFloat16", "c10::Float8_e4m3fn", "c10::Float8_e4m3fn"],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                ],
             }
         }
         ck2 = {
             "args": {
                 "Input Dims": [
-                    [32, 2, 7168], [8, 7168, 512], [8, 4096, 896],
-                    [], [], [], [32, 4096],
+                    [32, 2, 7168],
+                    [8, 7168, 512],
+                    [8, 4096, 896],
+                    [],
+                    [],
+                    [],
+                    [32, 4096],
                 ],
-                "Input type": ["c10::BFloat16", "c10::Float8_e4m3fn", "c10::Float8_e4m3fn"],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                ],
             }
         }
         assert moe_ext.moe_aiter_ck_stage1(ck1).bytes() > 0
@@ -788,13 +931,15 @@ class TestCoveragePush95Phase2:
     def test_analysis_utils_efficiency_and_fusion(self, tmp_path):
         from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
 
-        row = pd.Series({
-            "FLOPS/Byte": 10.0,
-            "TFLOPS/s_mean": 100.0,
-            "TB/s_mean": 1.0,
-            "Roofline Bound": "COMPUTE_BOUND",
-            "Compute Spec": "matrix_bf16",
-        })
+        row = pd.Series(
+            {
+                "FLOPS/Byte": 10.0,
+                "TFLOPS/s_mean": 100.0,
+                "TB/s_mean": 1.0,
+                "Roofline Bound": "COMPUTE_BOUND",
+                "Compute Spec": "matrix_bf16",
+            }
+        )
         result = au.calculate_efficiency(
             row, peak_maf_or_maf_dict={"matrix_bf16": 1000}, peak_hbm_bw=5300
         )
@@ -802,27 +947,37 @@ class TestCoveragePush95Phase2:
 
         fusion_dir = tmp_path / "category_data"
         fusion_dir.mkdir()
-        (fusion_dir / "kernel_fusion_metrics.json").write_text(json.dumps({
-            "high_confidence_kernel_map": {"gemm_kernel": "fused_gemm"}
-        }))
+        (fusion_dir / "kernel_fusion_metrics.json").write_text(
+            json.dumps({"high_confidence_kernel_map": {"gemm_kernel": "fused_gemm"}})
+        )
         assert au._load_fusion_map(str(tmp_path))["gemm_kernel"] == "fused_gemm"
-        assert au._match_fusion_op("{'name': 'gemm_kernel'}", {"gemm_kernel": "fused"}) == "fused"
+        assert (
+            au._match_fusion_op("{'name': 'gemm_kernel'}", {"gemm_kernel": "fused"})
+            == "fused"
+        )
 
     def test_compare_traces_jax_llama_helpers(self, tmp_path):
         import gzip
         from TraceLens.Reporting.compare_traces_jax_llama import (
             infer_params,
             load_trace,
-            summarize_one,
         )
         from tests.test_compare_traces_jax_llama import _make_synthetic_trace_events
 
         path = tmp_path / "t1.json.gz"
         with gzip.open(path, "wt", encoding="utf-8") as f:
             json.dump({"traceEvents": _make_synthetic_trace_events()}, f)
-        trace = load_trace(str(path))
+        load_trace(str(path))
         evs = [
-            type("E", (), {"name": "ln_fwd_tuned_kernel<Kernel_traits<float, 4096u,", "dur": 5.0, "args": {}})(),
+            type(
+                "E",
+                (),
+                {
+                    "name": "ln_fwd_tuned_kernel<Kernel_traits<float, 4096u,",
+                    "dur": 5.0,
+                    "args": {},
+                },
+            )(),
             type("E", (), {"name": "flash_fprop_hd128", "dur": 5.0, "args": {}})(),
         ]
         d_model, head_dim, gsu = infer_params(evs)
@@ -832,10 +987,16 @@ class TestCoveragePush95Phase2:
     def test_rocprof_analyzer_synthetic(self):
         from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
 
-        kernels = [{
-            "name": "gemm_kernel", "ts": 1000, "dur": 50,
-            "grid": (1, 1, 1), "block": (256, 1, 1), "stream": 0,
-        }]
+        kernels = [
+            {
+                "name": "gemm_kernel",
+                "ts": 1000,
+                "dur": 50,
+                "grid": (1, 1, 1),
+                "block": (256, 1, 1),
+                "stream": 0,
+            }
+        ]
         memory = [{"name": "MemcpyHtoD", "ts": 900, "dur": 10, "bytes": 1024}]
         api = [{"name": "hipLaunchKernel", "ts": 990, "dur": 5, "correlation": 1}]
         analyzer = RocprofAnalyzer(kernels, memory, api, {})
@@ -845,13 +1006,28 @@ class TestCoveragePush95Phase2:
 
     def test_collective_report_main(self, tmp_path):
         for rank in (0, 1):
-            (tmp_path / f"trace_rank_{rank}.json").write_text(json.dumps({
-                "traceEvents": [{
-                    "ph": "X", "cat": "kernel", "name": "ncclKernel_AllReduce",
-                    "pid": rank, "tid": 3, "ts": 1000, "dur": 40,
-                    "args": {"External id": rank, "Collective name": "allreduce", "stream": 3},
-                }]
-            }))
+            (tmp_path / f"trace_rank_{rank}.json").write_text(
+                json.dumps(
+                    {
+                        "traceEvents": [
+                            {
+                                "ph": "X",
+                                "cat": "kernel",
+                                "name": "ncclKernel_AllReduce",
+                                "pid": rank,
+                                "tid": 3,
+                                "ts": 1000,
+                                "dur": 40,
+                                "args": {
+                                    "External id": rank,
+                                    "Collective name": "allreduce",
+                                    "stream": 3,
+                                },
+                            }
+                        ]
+                    }
+                )
+            )
         out = tmp_path / "coll.xlsx"
         mod = importlib.import_module(
             "TraceLens.Reporting.generate_multi_rank_collective_report_pytorch"
@@ -859,9 +1035,12 @@ class TestCoveragePush95Phase2:
         old_argv = sys.argv
         sys.argv = [
             "generate_multi_rank_collective_report_pytorch",
-            "--trace_glob", str(tmp_path / "trace_rank_*.json"),
-            "--world_size", "2",
-            "--output_xlsx_path", str(out),
+            "--trace_glob",
+            str(tmp_path / "trace_rank_*.json"),
+            "--world_size",
+            "2",
+            "--output_xlsx_path",
+            str(out),
         ]
         try:
             mod.main()
@@ -876,7 +1055,11 @@ class TestCoveragePush95Phase2:
         _write_minimal_orchestrator_csvs(out, comparative=True)
         k1 = _kernel_event(10, "Cijk_a")
         k2 = _kernel_event(11, "ew_add")
-        module = {"name": "nn.Module: MLP_0", "_category": "aten", "gpu_events": [10, 11]}
+        module = {
+            "name": "nn.Module: MLP_0",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
         tree = _StubTree([module], {10: k1, 11: k2})
         analyzer = _StubAnalyzer(tree)
 
@@ -886,16 +1069,24 @@ class TestCoveragePush95Phase2:
                 return analyzer
 
         monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
-        monkeypatch.setattr(op, "_extract_comparative_fusion_candidates", lambda *a, **k: [])
-        monkeypatch.setattr(op, "_extract_standalone_fusion_candidates", lambda *a, **k: [])
+        monkeypatch.setattr(
+            op, "_extract_comparative_fusion_candidates", lambda *a, **k: []
+        )
+        monkeypatch.setattr(
+            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
+        )
 
         old_argv = sys.argv
         sys.argv = [
             "orchestrator_prepare",
-            "--trace-path", "/fake/trace.json",
-            "--platform", "MI300X",
-            "--output-dir", out,
-            "--comparison-scope", "comparative",
+            "--trace-path",
+            "/fake/trace.json",
+            "--platform",
+            "MI300X",
+            "--output-dir",
+            out,
+            "--comparison-scope",
+            "comparative",
         ]
         try:
             op.main()
@@ -956,7 +1147,12 @@ class TestCoveragePush95Phase3:
         blockscale = {
             "args": {
                 "Input Dims": [[128, 256], [512, 256], [512, 4], [512, 4]],
-                "Input type": ["c10::Float8_e4m3fn", "c10::Float8_e4m3fn", "c10::Float", "c10::Float"],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float",
+                    "c10::Float",
+                ],
             }
         }
         assert pext.gemm_a8w8_blockscale(blockscale).bytes() > 0
@@ -1005,23 +1201,31 @@ class TestCoveragePush95Phase3:
         assert pext.aiter_fused_qk_rope_cat_and_cache_mla(rope_mla).bytes() > 0
 
     def test_attention_extension_variants(self):
-        from TraceLens.PerfModel.extensions import attention_perf_model_extensions as aext
+        from TraceLens.PerfModel.extensions import (
+            attention_perf_model_extensions as aext,
+        )
 
         for cls, event in [
-            (aext.pseudo_v4_paged_decode_csa, {
-                "annotation": "(128_256_512_1024_2048_3072_4096_64)",
-                "args": {
-                    "Input Dims": [[64, 8, 64], [64, 8, 64], [64, 8, 128]],
-                    "Input type": ["c10::BFloat16"] * 3,
+            (
+                aext.pseudo_v4_paged_decode_csa,
+                {
+                    "annotation": "(128_256_512_1024_2048_3072_4096_64)",
+                    "args": {
+                        "Input Dims": [[64, 8, 64], [64, 8, 64], [64, 8, 128]],
+                        "Input type": ["c10::BFloat16"] * 3,
+                    },
                 },
-            }),
-            (aext.vllm_unified_mla_attention_with_output, {
-                "annotation": "(128_256_512_1024_2048_3072_4096_64)",
-                "args": {
-                    "Input Dims": [[64, 8, 64], [64, 8, 64], [64, 8, 128]],
-                    "Input type": ["c10::BFloat16"] * 3,
+            ),
+            (
+                aext.vllm_unified_mla_attention_with_output,
+                {
+                    "annotation": "(128_256_512_1024_2048_3072_4096_64)",
+                    "args": {
+                        "Input Dims": [[64, 8, 64], [64, 8, 64], [64, 8, 128]],
+                        "Input type": ["c10::BFloat16"] * 3,
+                    },
                 },
-            }),
+            ),
         ]:
             model = cls(event)
             if model.param_details.get("_no_perf"):
@@ -1030,22 +1234,34 @@ class TestCoveragePush95Phase3:
                 assert model.flops() > 0
 
     def test_kernel_fusion_and_tracediff_helpers(self, tmp_path):
-        from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
+        from TraceLens.Agent.Analysis.category_analyses import (
+            kernel_fusion_analysis as kfa,
+        )
         from TraceLens.Reporting import tracediff_comparison_extension as tde
 
         ops = [
-            {"kernel_names": ["Cijk_a", "ew_add"], "base_name": "Block", "instance_count": 1},
-            {"kernel_names": ["Cijk_a", "ew_add"], "base_name": "Block", "instance_count": 1},
+            {
+                "kernel_names": ["Cijk_a", "ew_add"],
+                "base_name": "Block",
+                "instance_count": 1,
+            },
+            {
+                "kernel_names": ["Cijk_a", "ew_add"],
+                "base_name": "Block",
+                "instance_count": 1,
+            },
         ]
         filtered = kfa._filter_and_dedup(ops)
         assert len(filtered) == 1
 
         df = pd.DataFrame({"name": ["aten::mm"], "Kernel Time (µs)_mean": [100.0]})
-        diff = pd.DataFrame({
-            "name": ["aten::mm"],
-            "kernel_time_delta_pct": [10.0],
-            "lowest_common_ancestor_id": [1],
-        })
+        diff = pd.DataFrame(
+            {
+                "name": ["aten::mm"],
+                "kernel_time_delta_pct": [10.0],
+                "lowest_common_ancestor_id": [1],
+            }
+        )
         report = {"unified_perf_summary": df}
         tde.enrich_perf_report_dict_inplace(report, diff)
         assert "unified_perf_summary" in report
@@ -1056,7 +1272,9 @@ class TestCoveragePush95Phase3:
         from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
         trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)])
-        assert ru.detect_gpus_per_node(trace) is None or isinstance(ru.detect_gpus_per_node(trace), int)
+        assert ru.detect_gpus_per_node(trace) is None or isinstance(
+            ru.detect_gpus_per_node(trace), int
+        )
         tree = TraceToTree([])
         tree.build_tree()
         por.apply_pseudo_op_extensions(tree, verbose=False)
@@ -1064,15 +1282,33 @@ class TestCoveragePush95Phase3:
 
     @pytest.mark.skipif(not os.path.isfile(JAX_PB), reason="JAX xplane fixture missing")
     def test_jax_gemm_performance_from_pb(self):
-        df = JaxAnalyses.gemm_performance_from_pb(self.JAX_PB, module_name="jit_forward_3d_conv")
+        df = JaxAnalyses.gemm_performance_from_pb(
+            self.JAX_PB, module_name="jit_forward_3d_conv"
+        )
         assert isinstance(df, pd.DataFrame)
 
     def test_trace_to_tree_edge_helpers(self):
         from TraceLens.Trace2Tree import trace_to_tree as ttt
 
         events = [
-            {"ph": "X", "name": "aten::mm", "cat": "cpu_op", "ts": 0, "dur": 10, "pid": 1, "tid": 1},
-            {"ph": "X", "name": "gemm", "cat": "kernel", "ts": 20, "dur": 5, "pid": 0, "tid": 7},
+            {
+                "ph": "X",
+                "name": "aten::mm",
+                "cat": "cpu_op",
+                "ts": 0,
+                "dur": 10,
+                "pid": 1,
+                "tid": 1,
+            },
+            {
+                "ph": "X",
+                "name": "gemm",
+                "cat": "kernel",
+                "ts": 20,
+                "dur": 5,
+                "pid": 0,
+                "tid": 7,
+            },
         ]
         tree = ttt.TraceToTree(events)
         tree.build_tree(add_python_func=True)
@@ -1084,9 +1320,13 @@ class TestCoveragePush95Phase3:
         if not os.path.isfile(GPU_ONLY_TRACE):
             pytest.skip("gpu_only trace missing")
         analyzer = TreePerfAnalyzer.from_file(GPU_ONLY_TRACE, rebuild_tree=True)
-        launchers = analyzer.get_df_kernel_launchers(include_args=True, include_kernel_details=True)
+        launchers = analyzer.get_df_kernel_launchers(
+            include_args=True, include_kernel_details=True
+        )
         assert not launchers.empty
-        unique = TreePerfAnalyzer.get_df_kernel_launchers_unique_args(launchers, include_pct=True)
+        unique = TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
+            launchers, include_pct=True
+        )
         assert not unique.empty
         summarized = TreePerfAnalyzer.summarize_df_unified_perf_table(
             analyzer.build_df_unified_perf_table(include_nccl=False),

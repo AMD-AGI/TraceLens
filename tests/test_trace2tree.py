@@ -26,12 +26,10 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _stream_of,
     align_streams,
     append_subtree_to_event,
-    build_execution_graph_root_map,
     capture_has_kernel_names,
     find_capture_roots,
     find_closest_batch_size,
     find_execution_details,
-    finalize_non_gpu_paths,
     get_subtree_events,
     is_multistream,
     make_connections,
@@ -876,9 +874,11 @@ class TestJaxTraceToTree:
         tree = JaxTraceToTree(
             events,
             compute_end_times=True,
-            event_to_category=lambda e: "kernel"
-            if "/device:GPU" in e.get("process", {}).get("process_name", "")
-            else "cpu_op",
+            event_to_category=lambda e: (
+                "kernel"
+                if "/device:GPU" in e.get("process", {}).get("process_name", "")
+                else "cpu_op"
+            ),
         )
         assert tree.linking_key == "correlation_id"
         tree.add_gpu_ops_to_tree()

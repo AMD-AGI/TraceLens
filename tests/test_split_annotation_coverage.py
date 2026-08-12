@@ -141,8 +141,25 @@ def test_find_iteration_roots_generic_fallback(capsys):
                     "dur": 20,
                     "args": {"correlation": corr, "stream": 7},
                 },
-                {"ph": "s", "id": corr, "pid": 0, "tid": 7, "ts": base_ts + 50, "cat": "ac2g", "name": "ac2g"},
-                {"ph": "f", "id": corr, "pid": 0, "tid": 7, "ts": base_ts + 70, "cat": "ac2g", "name": "ac2g", "bp": "e"},
+                {
+                    "ph": "s",
+                    "id": corr,
+                    "pid": 0,
+                    "tid": 7,
+                    "ts": base_ts + 50,
+                    "cat": "ac2g",
+                    "name": "ac2g",
+                },
+                {
+                    "ph": "f",
+                    "id": corr,
+                    "pid": 0,
+                    "tid": 7,
+                    "ts": base_ts + 70,
+                    "cat": "ac2g",
+                    "name": "ac2g",
+                    "bp": "e",
+                },
             ]
         )
         corr += 1
@@ -428,7 +445,9 @@ def test_main_divide_phases(tmp_path):
     finally:
         sys.argv = old_argv
 
-    assert os.path.isdir(out_dir / "prefilldecodemix") or os.path.isdir(out_dir / "decode_only")
+    assert os.path.isdir(out_dir / "prefilldecodemix") or os.path.isdir(
+        out_dir / "decode_only"
+    )
 
 
 def test_main_explicit_iteration_range(tmp_path):
@@ -491,4 +510,7 @@ def test_main_dummy_runs_and_steady_state_message(tmp_path, capsys):
     finally:
         sys.argv = old_argv
 
-    assert "finding steady state without annotations not supported" in capsys.readouterr().out
+    assert (
+        "finding steady state without annotations not supported"
+        in capsys.readouterr().out
+    )

@@ -12,7 +12,6 @@ from copy import deepcopy
 from typing import Dict, List
 from unittest import mock
 
-import pytest
 
 from TraceLens.Trace2Tree.extensions.mla_decode_pseudo_ops import (
     MLA_DECODE_FWD_PATTERN,
@@ -29,7 +28,9 @@ from TraceLens.Trace2Tree.extensions.mla_prefill_pseudo_ops import (
     _find_prefill_cpu_op_child,
     create_pseudo_ops_mla_prefill,
 )
-from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import apply_pseudo_op_extensions
+from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
+    apply_pseudo_op_extensions,
+)
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
 
@@ -172,7 +173,14 @@ class TestMlaDecodePseudoOps:
             },
         )
         events = [py_func, stage1]
-        _add_gpu_chain(events, stage1, corr=50, kernel_name="mla_decode_k", ts_launch=120, ts_kernel=140)
+        _add_gpu_chain(
+            events,
+            stage1,
+            corr=50,
+            kernel_name="mla_decode_k",
+            ts_launch=120,
+            ts_kernel=140,
+        )
         tree = _build_tree(events)
         _wire_mla_decode_hierarchy(tree)
 
@@ -288,7 +296,12 @@ class TestMlaPrefillPseudoOps:
         )
         events = [py_func, cpu_op]
         _add_gpu_chain(
-            events, cpu_op, corr=60, kernel_name="mla_prefill_k", ts_launch=120, ts_kernel=140
+            events,
+            cpu_op,
+            corr=60,
+            kernel_name="mla_prefill_k",
+            ts_launch=120,
+            ts_kernel=140,
         )
         tree = _build_tree(events)
         _wire_mla_prefill_hierarchy(tree)
@@ -400,7 +413,9 @@ class TestPseudoOpsRegistryMla:
             args={"Input Dims": [[8, 64]], "Sequence number": 1},
         )
         events = [py_func, stage1]
-        _add_gpu_chain(events, stage1, corr=70, kernel_name="mla_k", ts_launch=120, ts_kernel=140)
+        _add_gpu_chain(
+            events, stage1, corr=70, kernel_name="mla_k", ts_launch=120, ts_kernel=140
+        )
         tree = _build_tree(events)
         _wire_mla_decode_hierarchy(tree)
 
@@ -431,7 +446,12 @@ class TestPseudoOpsRegistryMla:
         )
         events = [py_func, cpu_op]
         _add_gpu_chain(
-            events, cpu_op, corr=71, kernel_name="prefill_k", ts_launch=120, ts_kernel=140
+            events,
+            cpu_op,
+            corr=71,
+            kernel_name="prefill_k",
+            ts_launch=120,
+            ts_kernel=140,
         )
         tree = _build_tree(events)
         _wire_mla_prefill_hierarchy(tree)

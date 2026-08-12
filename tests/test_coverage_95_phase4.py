@@ -14,7 +14,6 @@ import json
 import os
 import sys
 from copy import deepcopy
-from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -26,7 +25,9 @@ from TraceLens.PerfModel.extensions import (
     perf_model_extensions as pext,
     rmsnorm_perf_model_extensions as rms_ext,
 )
-from TraceLens.Reporting.generate_perf_report_pytorch import generate_perf_report_pytorch
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch as generate_inference_report,
 )
@@ -45,14 +46,22 @@ from tests.test_conv_backward_bytes import (
 )
 from tests.test_dit_fused_ln_modulate import _fused_ln_fwd_event
 from tests.test_mamba_ssd import _mamba_event
-from tests.test_perfmodel_coverage import _ARCH, _GDN_ANNOTATION, _gemm_event, _norm_event
+from tests.test_perfmodel_coverage import (
+    _ARCH,
+    _GDN_ANNOTATION,
+    _gemm_event,
+    _norm_event,
+)
 from tests.test_reporting_coverage import (
-    _build_synthetic_trace,
     _create_genesis_capture,
     _minimal_pftrace_events,
     _write_trace,
 )
-from tests.test_treeperf_coverage import _build_analyzer, _make_gpu_event, _mk_pytorch_trace
+from tests.test_treeperf_coverage import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
 
 TESTS_DIR = os.path.dirname(__file__)
 TRACES_ROOT = os.path.join(TESTS_DIR, "traces")
@@ -86,7 +95,11 @@ _MOE_EVT = {
 def _try_model(cls, events):
     for event in events:
         try:
-            model = cls(event, arch=_ARCH) if "arch" in inspect.signature(cls.__init__).parameters else cls(event)
+            model = (
+                cls(event, arch=_ARCH)
+                if "arch" in inspect.signature(cls.__init__).parameters
+                else cls(event)
+            )
         except TypeError:
             try:
                 model = cls(event)
@@ -94,7 +107,14 @@ def _try_model(cls, events):
                 continue
         except Exception:
             continue
-        for meth in ("flops", "bytes", "flops_bwd", "bytes_bwd", "get_compute_precision", "get_maf_type"):
+        for meth in (
+            "flops",
+            "bytes",
+            "flops_bwd",
+            "bytes_bwd",
+            "get_compute_precision",
+            "get_maf_type",
+        ):
             if hasattr(model, meth):
                 try:
                     getattr(model, meth)()
@@ -155,31 +175,38 @@ class TestPerfModelBulkSweep:
 
 class TestKernelFusionMain:
     def test_kernel_fusion_standalone_main(self, tmp_path):
-        from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
+        from TraceLens.Agent.Analysis.category_analyses import (
+            kernel_fusion_analysis as kfa,
+        )
 
         out = str(tmp_path)
         _write_minimal_orchestrator_csvs(out, comparative=False)
         cat_dir = os.path.join(out, "category_data")
         os.makedirs(cat_dir, exist_ok=True)
-        candidates = [{
-            "module_name": "nn.Module: MLP_0",
-            "base_name": "MLP",
-            "instance_count": 1,
-            "kernel_count": 2,
-            "total_kernel_time_us": 800000.0,
-            "kernels": [
-                {"name": "Cijk_a", "type": "GEMM", "dur_us": 500000},
-                {"name": "ew_add", "type": "elementwise", "dur_us": 300000},
-            ],
-        }]
+        candidates = [
+            {
+                "module_name": "nn.Module: MLP_0",
+                "base_name": "MLP",
+                "instance_count": 1,
+                "kernel_count": 2,
+                "total_kernel_time_us": 800000.0,
+                "kernels": [
+                    {"name": "Cijk_a", "type": "GEMM", "dur_us": 500000},
+                    {"name": "ew_add", "type": "elementwise", "dur_us": 300000},
+                ],
+            }
+        ]
         with open(os.path.join(cat_dir, "fusion_candidates.json"), "w") as f:
             json.dump(candidates, f)
         with open(os.path.join(cat_dir, "category_manifest.json"), "w") as f:
-            json.dump({
-                "platform": "MI300X",
-                "comparison_scope": "standalone",
-                "gpu_utilization": {"total_time_ms": 1000.0},
-            }, f)
+            json.dump(
+                {
+                    "platform": "MI300X",
+                    "comparison_scope": "standalone",
+                    "gpu_utilization": {"total_time_ms": 1000.0},
+                },
+                f,
+            )
         meta_dir = os.path.join(out, "metadata")
         os.makedirs(meta_dir)
         json.dump(
@@ -244,7 +271,9 @@ class TestReportingCliPhase4:
 
     def test_genesis_report_main(self, tmp_path):
         capture = _create_genesis_capture(tmp_path)
-        mod = importlib.import_module("TraceLens.Reporting.generate_perf_report_genesis")
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_genesis"
+        )
         out = tmp_path / "gen_out"
         old_argv = sys.argv
         sys.argv = [
@@ -260,9 +289,13 @@ class TestReportingCliPhase4:
             sys.argv = old_argv
         assert (out / "genesis_perf_report.xlsx").exists()
 
-    @pytest.mark.skipif(not os.path.isfile(ROCprof_FILE), reason="rocprof fixture missing")
+    @pytest.mark.skipif(
+        not os.path.isfile(ROCprof_FILE), reason="rocprof fixture missing"
+    )
     def test_rocprof_report_function(self, tmp_path):
-        from TraceLens.Reporting.generate_perf_report_rocprof import generate_perf_report_rocprof
+        from TraceLens.Reporting.generate_perf_report_rocprof import (
+            generate_perf_report_rocprof,
+        )
 
         generate_perf_report_rocprof(
             profile_json_path=ROCprof_FILE,
@@ -290,7 +323,9 @@ class TestReportingCliPhase4:
             output_xlsx_path=str(x2),
             kernel_summary=True,
         )
-        mod = importlib.import_module("TraceLens.Reporting.compare_perf_reports_pytorch")
+        mod = importlib.import_module(
+            "TraceLens.Reporting.compare_perf_reports_pytorch"
+        )
         out = tmp_path / "cmp.xlsx"
         old_argv = sys.argv
         sys.argv = [
@@ -395,13 +430,15 @@ class TestOrchestratorPhase4:
         out = str(tmp_path)
         _write_minimal_orchestrator_csvs(out, comparative=True)
         csv_dir = os.path.join(out, "perf_report_trace1_csvs")
-        pd.DataFrame({
-            "name": ["Cijk_A", "ew_add"],
-            "source": ["trace1", "trace1"],
-            "lowest_common_ancestor_id": [100, 100],
-            "kernel_time": [5000.0, 3000.0],
-            "gpu_op_uid": [10, 11],
-        }).to_csv(os.path.join(csv_dir, "diff_stats.csv"), index=False)
+        pd.DataFrame(
+            {
+                "name": ["Cijk_A", "ew_add"],
+                "source": ["trace1", "trace1"],
+                "lowest_common_ancestor_id": [100, 100],
+                "kernel_time": [5000.0, 3000.0],
+                "gpu_op_uid": [10, 11],
+            }
+        ).to_csv(os.path.join(csv_dir, "diff_stats.csv"), index=False)
 
         k1 = _kernel_event(10, "Cijk_A", dur=500)
         k2 = _kernel_event(11, "ew_add", dur=300)

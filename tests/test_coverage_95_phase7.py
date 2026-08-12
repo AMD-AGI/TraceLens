@@ -12,7 +12,6 @@ import importlib
 import json
 import os
 import sys
-from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -20,19 +19,28 @@ import pytest
 from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
 from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
 from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
-from TraceLens.Reporting.compare_perf_reports_pytorch import generate_compare_perf_reports_pytorch
+from TraceLens.Reporting.compare_perf_reports_pytorch import (
+    generate_compare_perf_reports_pytorch,
+)
 from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
     generate_collective_report,
 )
 from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
-from TraceLens.Reporting.tracediff_comparison_extension import tracediff_perf_summary_from_diff_stats
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
+from TraceLens.Reporting.tracediff_comparison_extension import (
+    tracediff_perf_summary_from_diff_stats,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
 from TraceLens.TraceDiff.trace_diff import TraceDiff
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 from tests.test_coverage_95_final import _jax_llama_trace_events, _write_gz_trace
-from tests.test_reporting_coverage import _minimal_pftrace_events, _mk_event, _write_trace
-from tests.test_treeperf_coverage import _build_analyzer, _make_gpu_event, _mk_ac2g
+from tests.test_reporting_coverage import (
+    _minimal_pftrace_events,
+    _mk_event,
+    _write_trace,
+)
 
 INFERENCE_ROOT = os.path.join(os.path.dirname(__file__), "traces/inference")
 COMPARE_DIR = os.path.join(os.path.dirname(__file__), "traces/compare_test_ops")
@@ -59,13 +67,15 @@ class TestTraceDiffPhase7:
 
 class TestAnalysisUtilsPhase7:
     def test_efficiency_and_fusion_branches(self, tmp_path):
-        row = pd.Series({
-            "FLOPS/Byte": 2.0,
-            "TFLOPS/s_mean": 50.0,
-            "TB/s_mean": 0.1,
-            "Roofline Bound": "COMPUTE_BOUND",
-            "Compute Spec": "matrix_fp16",
-        })
+        row = pd.Series(
+            {
+                "FLOPS/Byte": 2.0,
+                "TFLOPS/s_mean": 50.0,
+                "TB/s_mean": 0.1,
+                "Roofline Bound": "COMPUTE_BOUND",
+                "Compute Spec": "matrix_fp16",
+            }
+        )
         eff = au.calculate_efficiency(
             row, peak_maf_or_maf_dict={"matrix_fp16": 100.0}, peak_hbm_bw=5300
         )
@@ -73,24 +83,32 @@ class TestAnalysisUtilsPhase7:
 
         cat_dir = tmp_path / "category_data"
         cat_dir.mkdir()
-        (cat_dir / "kernel_fusion_metrics.json").write_text(json.dumps({
-            "impact_estimates": [{
-                "candidate_id": "c1",
-                "impact_score": 5.0,
-                "impact_score_low": 3.0,
-                "impact_score_high": 8.0,
-                "confidence": "high",
-            }]
-        }))
+        (cat_dir / "kernel_fusion_metrics.json").write_text(
+            json.dumps(
+                {
+                    "impact_estimates": [
+                        {
+                            "candidate_id": "c1",
+                            "impact_score": 5.0,
+                            "impact_score_low": 3.0,
+                            "impact_score_high": 8.0,
+                            "confidence": "high",
+                        }
+                    ]
+                }
+            )
+        )
         loaded = au._load_fusion_map(str(tmp_path))
         assert isinstance(loaded, dict)
 
-        ops = [{
-            "kernel_names": ["a", "b"],
-            "base_name": "Block",
-            "instance_count": 3,
-            "kernel_type_signature": ["GEMM", "elementwise"],
-        }]
+        ops = [
+            {
+                "kernel_names": ["a", "b"],
+                "base_name": "Block",
+                "instance_count": 3,
+                "kernel_type_signature": ["GEMM", "elementwise"],
+            }
+        ]
         assert len(kfa._filter_and_dedup(ops)) >= 1
 
 
@@ -106,18 +124,22 @@ class TestJaxLlamaPhase7:
         assert d_model == 4096
         stream = [e for e in evs if e.tid == evs[0].tid]
         starts = jax_cmp.token_start_times(stream, "te_layernorm_forward")
-        stage_avg, stage_share, per_layer, per_token, notes = jax_cmp.compute_stage_table(
-            stream, starts, (0, 0), (0, 1)
+        stage_avg, stage_share, per_layer, per_token, notes = (
+            jax_cmp.compute_stage_table(stream, starts, (0, 0), (0, 1))
         )
         assert per_layer > 0
         assert jax_cmp.is_loop_multiply_fusion(
-            jax_cmp.Event(1, 10, 0, 10, "loop_multiply_fusion", {"hlo_op": "loop_multiply_fusion"})
+            jax_cmp.Event(
+                1, 10, 0, 10, "loop_multiply_fusion", {"hlo_op": "loop_multiply_fusion"}
+            )
         )
 
 
 class TestReportingPhase7:
     def test_compare_perf_reports_all_sheets(self, tmp_path):
-        from TraceLens.Reporting.generate_perf_report_pytorch import generate_perf_report_pytorch
+        from TraceLens.Reporting.generate_perf_report_pytorch import (
+            generate_perf_report_pytorch,
+        )
 
         t1 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "t1.json")
         t2 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 120)], "t2.json")
@@ -150,21 +172,23 @@ class TestReportingPhase7:
         assert isinstance(analyser.get_df_hip_summary(), pd.DataFrame)
 
     def test_tracediff_extension_multi_kernel_row(self):
-        diff = pd.DataFrame({
-            "source": ["trace1", "trace1"],
-            "lowest_common_ancestor_id": [5, 5],
-            "lowest_common_ancestor_name": ["aten::mm", "aten::mm"],
-            "cpu_op_name": ["aten::mm", "aten::add"],
-            "busy_time": [100.0, 50.0],
-            "name": ["k1", "k2"],
-            "gpu_op_uid": [1, 2],
-            "nn_module_stack": ["[]", "[]"],
-            "nn_module_parent": ["", ""],
-            "Input Dims": ["[[2,3]]", "[[2,3]]"],
-            "Input type": ["['fp16']", "['fp16']"],
-            "Input Strides": ["[]", "[]"],
-            "Concrete Inputs": ["", ""],
-        })
+        diff = pd.DataFrame(
+            {
+                "source": ["trace1", "trace1"],
+                "lowest_common_ancestor_id": [5, 5],
+                "lowest_common_ancestor_name": ["aten::mm", "aten::mm"],
+                "cpu_op_name": ["aten::mm", "aten::add"],
+                "busy_time": [100.0, 50.0],
+                "name": ["k1", "k2"],
+                "gpu_op_uid": [1, 2],
+                "nn_module_stack": ["[]", "[]"],
+                "nn_module_parent": ["", ""],
+                "Input Dims": ["[[2,3]]", "[[2,3]]"],
+                "Input type": ["['fp16']", "['fp16']"],
+                "Input Strides": ["[]", "[]"],
+                "Concrete Inputs": ["", ""],
+            }
+        )
         summary = tracediff_perf_summary_from_diff_stats(diff)
         assert " | " in summary.iloc[0]["name"]
 
@@ -185,18 +209,29 @@ class TestReportingPhase7:
 
     def test_collective_report_strict_and_heatmap(self, tmp_path):
         for rank in (0, 1):
-            (tmp_path / f"rank{rank}_trace.json").write_text(json.dumps({
-                "traceEvents": [{
-                    "ph": "X", "cat": "kernel", "name": "ncclKernel_AllReduce",
-                    "pid": rank, "tid": 3, "ts": 1000 + rank, "dur": 40,
-                    "args": {
-                        "External id": 10 + rank,
-                        "Collective name": "allreduce",
-                        "stream": 3,
-                        "collective_id": rank,
-                    },
-                }]
-            }))
+            (tmp_path / f"rank{rank}_trace.json").write_text(
+                json.dumps(
+                    {
+                        "traceEvents": [
+                            {
+                                "ph": "X",
+                                "cat": "kernel",
+                                "name": "ncclKernel_AllReduce",
+                                "pid": rank,
+                                "tid": 3,
+                                "ts": 1000 + rank,
+                                "dur": 40,
+                                "args": {
+                                    "External id": 10 + rank,
+                                    "Collective name": "allreduce",
+                                    "stream": 3,
+                                    "collective_id": rank,
+                                },
+                            }
+                        ]
+                    }
+                )
+            )
         dfs = generate_collective_report(
             trace_dir=str(tmp_path),
             world_size=2,

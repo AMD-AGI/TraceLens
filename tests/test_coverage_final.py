@@ -9,16 +9,11 @@
 from __future__ import annotations
 
 import gzip
-import inspect
 import json
 import os
 import sys
-import zipfile
-from copy import deepcopy
-from math import prod
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -29,7 +24,9 @@ from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
 from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import generate_perf_report_pytorch
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     add_truncated_kernel_details as add_truncated_inference,
     generate_perf_report_pytorch as generate_inference_report,
@@ -41,7 +38,6 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     capture_has_kernel_names,
     get_subtree_events,
     is_multistream,
-    merge_capture_trace_into_graph,
     verify_subtree_events,
 )
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
@@ -59,9 +55,13 @@ from tests.test_conv_backward_bytes import (
     _conv_bias_relu_bwd_event,
     _conv_bias_relu_fwd_event,
 )
-from tests.test_perfmodel_coverage import _ARCH, _gemm_event, _norm_event
+from tests.test_perfmodel_coverage import _ARCH, _gemm_event
 from tests.test_reporting_coverage import _build_synthetic_trace, _mk_ac2g, _mk_event
-from tests.test_treeperf_coverage import _build_analyzer, _make_gpu_event, _mk_pytorch_trace
+from tests.test_treeperf_coverage import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:get_df_kernel_launchers_summary_by_shape is deprecated.*:UserWarning",
@@ -96,13 +96,20 @@ class TestPerfModelFinalCoverage:
     @pytest.mark.parametrize(
         "cls,fwd_factory,bwd_cls,bwd_factory",
         [
-            (perf_model.aten_mm, lambda: _gemm_event("aten::mm", (4, 8), (8, 16)), None, None),
+            (
+                perf_model.aten_mm,
+                lambda: _gemm_event("aten::mm", (4, 8), (8, 16)),
+                None,
+                None,
+            ),
             (perf_model.aten_addmm, None, None, None),
             (perf_model.aten_bmm, None, None, None),
             (perf_model.aten_baddbmm, None, None, None),
         ],
     )
-    def test_gemm_backward_not_implemented(self, cls, fwd_factory, bwd_cls, bwd_factory):
+    def test_gemm_backward_not_implemented(
+        self, cls, fwd_factory, bwd_cls, bwd_factory
+    ):
         if cls is perf_model.aten_addmm:
             event = {
                 "args": {
@@ -181,7 +188,14 @@ class TestPerfModelFinalCoverage:
             with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
                 run.return_value = MagicMock(stdout="Time=5.5\n", stderr="")
                 t, cmd = perf_model.GEMM.get_simulation_time_func(
-                    _ARCH, 4, 8, 16, None, "bf16", python_path="/usr/bin/python3", num_cus=64
+                    _ARCH,
+                    4,
+                    8,
+                    16,
+                    None,
+                    "bf16",
+                    python_path="/usr/bin/python3",
+                    num_cus=64,
                 )
             assert t == 5.5
             assert "/usr/bin/python3" in cmd
@@ -189,7 +203,9 @@ class TestPerfModelFinalCoverage:
             perf_model.GEMM.cache_gemm_results.clear()
 
     def test_aten_reduce_edge_cases(self):
-        empty = perf_model.aten_reduce({"name": "aten::sum", "args": {"Input Dims": [None]}})
+        empty = perf_model.aten_reduce(
+            {"name": "aten::sum", "args": {"Input Dims": [None]}}
+        )
         assert empty.param_details["num_input_elems"] == 0
 
         mean_evt = {
@@ -366,7 +382,12 @@ class TestMoeExtensionsFinal:
                         (),
                         [64, 4],
                     ],
-                    "Input type": ["c10::BFloat16", "c10::Float8_e4m3fn", "", "c10::BFloat16"],
+                    "Input type": [
+                        "c10::BFloat16",
+                        "c10::Float8_e4m3fn",
+                        "",
+                        "c10::BFloat16",
+                    ],
                 }
             }
         elif event == "GPTQ":
@@ -389,16 +410,22 @@ class TestMoeExtensionsFinal:
     def test_moe_triton_unfused_and_sglang(self):
         from tests.test_perfmodel_coverage import _moe_unfused_event
 
-        up = moe_ext.moe_triton_unfused_up(_moe_unfused_event(kernel_name="moe_mxfp4_up_kernel"))
-        down = moe_ext.moe_triton_unfused_down(_moe_unfused_event(kernel_name="moe_fp8_down_kernel"))
+        up = moe_ext.moe_triton_unfused_up(
+            _moe_unfused_event(kernel_name="moe_mxfp4_up_kernel")
+        )
+        down = moe_ext.moe_triton_unfused_down(
+            _moe_unfused_event(kernel_name="moe_fp8_down_kernel")
+        )
         assert up.bytes() > 0
         assert down.bytes() > 0
-        sgl = moe_ext.sglang_fused_append_shared_experts({
-            "args": {
-                "Input Dims": [(32, 4096), (32, 4096), (32, 4096)],
-                "Input type": ["c10::BFloat16"] * 3,
+        sgl = moe_ext.sglang_fused_append_shared_experts(
+            {
+                "args": {
+                    "Input Dims": [(32, 4096), (32, 4096), (32, 4096)],
+                    "Input type": ["c10::BFloat16"] * 3,
+                }
             }
-        })
+        )
         assert sgl.bytes() > 0
 
     def test_moe_flydsl_gptq_grouped(self):
@@ -440,103 +467,143 @@ class TestMoeExtensionsFinal:
                     (),
                     [64, 4],
                 ],
-                "Input type": ["c10::BFloat16", "c10::Float8_e4m3fn", "", "c10::BFloat16"],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "",
+                    "c10::BFloat16",
+                ],
             }
         }
         assert moe_ext.moe_triton_invoke_grouped_gemm(grouped).bytes() > 0
 
     def test_biased_topk_and_sort_scatter_precision(self):
-        topk = moe_ext.BiasedGroupedTopk({
-            "args": {
-                "Input Dims": [(32, 256), (256,), (32, 8), (32, 8)],
-                "Input type": ["c10::Float"] * 3 + ["c10::Int"],
+        topk = moe_ext.BiasedGroupedTopk(
+            {
+                "args": {
+                    "Input Dims": [(32, 256), (256,), (32, 8), (32, 8)],
+                    "Input type": ["c10::Float"] * 3 + ["c10::Int"],
+                }
             }
-        })
+        )
         assert topk.flops() > 0
-        sort = moe_ext.MoeSortScatterGather({
-            "args": {
-                "Input Dims": [(32, 4096), (32, 2), (32, 4096)],
-                "Input type": ["c10::BFloat16", "c10::Int", "c10::BFloat16"],
+        sort = moe_ext.MoeSortScatterGather(
+            {
+                "args": {
+                    "Input Dims": [(32, 4096), (32, 2), (32, 4096)],
+                    "Input type": ["c10::BFloat16", "c10::Int", "c10::BFloat16"],
+                }
             }
-        })
+        )
         assert sort.bytes() > 0
 
 
 class TestPerfExtensionsFinal:
     def test_mhc_and_sampling_bytes(self):
-        fused = pext.mhc_fused_post_pre_gemm_sqrsum({
-            "args": {
-                "Input Dims": [
-                    (2, 4, 8), (2, 4), (4, 2, 128), (4, 128), (4, 2, 128),
-                    (4, 2, 1), (4, 2, 2), (8, 256),
-                ],
-                "Input type": ["float"] * 8,
+        fused = pext.mhc_fused_post_pre_gemm_sqrsum(
+            {
+                "args": {
+                    "Input Dims": [
+                        (2, 4, 8),
+                        (2, 4),
+                        (4, 2, 128),
+                        (4, 128),
+                        (4, 2, 128),
+                        (4, 2, 1),
+                        (4, 2, 2),
+                        (8, 256),
+                    ],
+                    "Input type": ["float"] * 8,
+                }
             }
-        })
+        )
         assert fused.bytes() > 0
         assert fused.get_maf_type() == "matrix"
 
-        topk = pext.topk_softplus({
-            "args": {
-                "Input Dims": [(4, 2), (4, 2), (4, 8)],
-                "Input type": ["c10::Float", "c10::Int", "c10::BFloat16"],
+        topk = pext.topk_softplus(
+            {
+                "args": {
+                    "Input Dims": [(4, 2), (4, 2), (4, 8)],
+                    "Input type": ["c10::Float", "c10::Int", "c10::BFloat16"],
+                }
             }
-        })
+        )
         assert topk.bytes() > 0
 
-        sample = pext.mixed_sample_outer_exponential({
-            "args": {
-                "Input Dims": [(), (4, 32000), (4, 32000)],
-                "Input type": ["Scalar", "float", "float"],
+        sample = pext.mixed_sample_outer_exponential(
+            {
+                "args": {
+                    "Input Dims": [(), (4, 32000), (4, 32000)],
+                    "Input type": ["Scalar", "float", "float"],
+                }
             }
-        })
+        )
         assert sample.flops() > 0
         assert sample.get_maf_type() == "vector"
 
     def test_fused_qk_rope_and_batched_gemm_bytes(self):
-        rope = pext.fused_qk_rope_concat_and_cache_mla({
-            "args": {
-                "Input Dims": [
-                    (2, 8, 512), (2, 8, 64), (2, 1, 512), (2, 1, 64), (128, 1, 1, 576),
-                ],
-                "Input type": ["c10::BFloat16"] * 4 + ["c10::Float8_e4m3fn"],
+        rope = pext.fused_qk_rope_concat_and_cache_mla(
+            {
+                "args": {
+                    "Input Dims": [
+                        (2, 8, 512),
+                        (2, 8, 64),
+                        (2, 1, 512),
+                        (2, 1, 64),
+                        (128, 1, 1, 576),
+                    ],
+                    "Input type": ["c10::BFloat16"] * 4 + ["c10::Float8_e4m3fn"],
+                }
             }
-        })
+        )
         assert rope.bytes() > 0
 
-        fp4 = pext.batched_gemm_a16wfp4({
-            "args": {
-                "Input Dims": [[2, 4, 128], [2, 256, 64], [2, 256, 4]],
-                "Input type": ["c10::BFloat16", "unsigned char", "c10::Float"],
+        fp4 = pext.batched_gemm_a16wfp4(
+            {
+                "args": {
+                    "Input Dims": [[2, 4, 128], [2, 256, 64], [2, 256, 4]],
+                    "Input type": ["c10::BFloat16", "unsigned char", "c10::Float"],
+                }
             }
-        })
+        )
         assert fp4.bytes() > 0
 
-        post = pext.mhc_post({
-            "args": {
-                "Input Dims": [(4, 2, 128), (4, 128)],
-                "Input type": ["c10::BFloat16", "c10::BFloat16"],
+        post = pext.mhc_post(
+            {
+                "args": {
+                    "Input Dims": [(4, 2, 128), (4, 128)],
+                    "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                }
             }
-        })
+        )
         assert post.bytes() > 0
 
-        pre = pext.mhc_pre_gemm_sqrsum({
-            "args": {
-                "Input Dims": [(2, 4, 8), (2, 4), (4, 2, 128), (8, 256)],
-                "Input type": ["float", "float", "c10::BFloat16", "float"],
+        pre = pext.mhc_pre_gemm_sqrsum(
+            {
+                "args": {
+                    "Input Dims": [(2, 4, 8), (2, 4), (4, 2, 128), (8, 256)],
+                    "Input type": ["float", "float", "c10::BFloat16", "float"],
+                }
             }
-        })
+        )
         assert pre.bytes() > 0
 
-        rope2 = pext.aiter_rope_cached_positions_2c_fwd_impl({
-            "args": {
-                "Input Dims": [
-                    (2, 128, 8, 64), (2, 128, 1, 64), (2, 128, 8, 64),
-                    (2, 128, 1, 64), (2048, 1, 1, 64), (2048, 1, 1, 64), (2, 128),
-                ],
-                "Input type": ["c10::BFloat16"] * 7,
+        rope2 = pext.aiter_rope_cached_positions_2c_fwd_impl(
+            {
+                "args": {
+                    "Input Dims": [
+                        (2, 128, 8, 64),
+                        (2, 128, 1, 64),
+                        (2, 128, 8, 64),
+                        (2, 128, 1, 64),
+                        (2048, 1, 1, 64),
+                        (2048, 1, 1, 64),
+                        (2, 128),
+                    ],
+                    "Input type": ["c10::BFloat16"] * 7,
+                }
             }
-        })
+        )
         assert rope2.bytes() > 0
 
 
@@ -549,10 +616,23 @@ class TestTreePerfFinalCoverage:
     def _nn_module_trace(self):
         corr1, corr2 = 200, 201
         return [
-            _make_gpu_event("py_root", 0, 500, "python_function", "nn.Module: Block_0", pid=100),
-            _make_gpu_event("py_child", 10, 400, "python_function", "nn.Module: Block_0.linear", pid=100),
             _make_gpu_event(
-                "cpu1", 20, 80, "cpu_op", "aten::mm",
+                "py_root", 0, 500, "python_function", "nn.Module: Block_0", pid=100
+            ),
+            _make_gpu_event(
+                "py_child",
+                10,
+                400,
+                "python_function",
+                "nn.Module: Block_0.linear",
+                pid=100,
+            ),
+            _make_gpu_event(
+                "cpu1",
+                20,
+                80,
+                "cpu_op",
+                "aten::mm",
                 pid=100,
                 args={
                     "Input Dims": [[32, 64], [64, 128]],
@@ -560,19 +640,57 @@ class TestTreePerfFinalCoverage:
                     "Input Strides": [[128, 1], [128, 1]],
                 },
             ),
-            _make_gpu_event("rt1", 25, 5, "cuda_runtime", "hipLaunchKernel", pid=100, args={"correlation": corr1}),
-            _make_gpu_event("k1", 50, 40, "kernel", "Cijk_gemm", pid=0, tid=7, args={"correlation": corr1, "stream": 7}),
+            _make_gpu_event(
+                "rt1",
+                25,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                pid=100,
+                args={"correlation": corr1},
+            ),
+            _make_gpu_event(
+                "k1",
+                50,
+                40,
+                "kernel",
+                "Cijk_gemm",
+                pid=0,
+                tid=7,
+                args={"correlation": corr1, "stream": 7},
+            ),
             _mk_ac2g(corr1, 0, 7, 50, "s"),
             _mk_ac2g(corr1, 0, 7, 90, "f"),
             _make_gpu_event(
-                "cpu2", 120, 80, "cpu_op", "aten::add",
+                "cpu2",
+                120,
+                80,
+                "cpu_op",
+                "aten::add",
                 pid=100,
-                args={"Input Dims": [[32, 128], [32, 128]], "Input type": ["c10::BFloat16"] * 2},
+                args={
+                    "Input Dims": [[32, 128], [32, 128]],
+                    "Input type": ["c10::BFloat16"] * 2,
+                },
             ),
-            _make_gpu_event("rt2", 125, 5, "cuda_runtime", "hipLaunchKernel", pid=100, args={"correlation": corr2}),
             _make_gpu_event(
-                "k2", 150, 20, "kernel", "vectorized_elementwise_kernel",
-                pid=0, tid=7, args={"correlation": corr2, "stream": 7},
+                "rt2",
+                125,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                pid=100,
+                args={"correlation": corr2},
+            ),
+            _make_gpu_event(
+                "k2",
+                150,
+                20,
+                "kernel",
+                "vectorized_elementwise_kernel",
+                pid=0,
+                tid=7,
+                args={"correlation": corr2, "stream": 7},
             ),
             _mk_ac2g(corr2, 0, 7, 150, "s"),
             _mk_ac2g(corr2, 0, 7, 170, "f"),
@@ -654,7 +772,9 @@ class TestTreePerfFinalCoverage:
         df_raw["Pct Origami"] = [50.0]
         df_raw["Non-Data-Mov TFLOPS/s"] = [0.8]
         df_raw["Non-Data-Mov Kernel Time (µs)"] = [5.0]
-        summary = analyzer.summarize_df_perf_metrics(df_raw, agg_metrics=["mean", "std"])
+        summary = analyzer.summarize_df_perf_metrics(
+            df_raw, agg_metrics=["mean", "std"]
+        )
         assert isinstance(summary, pd.DataFrame)
 
     def test_collect_unified_perf_events_with_python_stack(self):
@@ -665,16 +785,72 @@ class TestTreePerfFinalCoverage:
     def test_build_df_bwd_linked_metrics(self):
         corr_fwd, corr_bwd = 800, 801
         events = [
-            _make_gpu_event("fwd", 1000, 100, "cpu_op", "aten::mm", pid=100,
-                            args={"Input Dims": [[32, 64], [64, 128]], "Input type": ["fp16", "fp16"]}),
-            _make_gpu_event("rt1", 1010, 5, "cuda_runtime", "hipLaunchKernel", pid=100, args={"correlation": corr_fwd}),
-            _make_gpu_event("k1", 1050, 50, "kernel", "gemm_fwd", pid=0, tid=7, args={"correlation": corr_fwd, "stream": 7}),
-            _mk_ac2g(corr_fwd, 0, 7, 1050, "s"), _mk_ac2g(corr_fwd, 0, 7, 1100, "f"),
-            _make_gpu_event("bwd", 2000, 100, "cpu_op", "aten::mm_backward", pid=100,
-                            args={"Input Dims": [[32, 64], [64, 128]], "Input type": ["fp16", "fp16"]}),
-            _make_gpu_event("rt2", 2010, 5, "cuda_runtime", "hipLaunchKernel", pid=100, args={"correlation": corr_bwd}),
-            _make_gpu_event("k2", 2050, 60, "kernel", "gemm_bwd", pid=0, tid=7, args={"correlation": corr_bwd, "stream": 7}),
-            _mk_ac2g(corr_bwd, 0, 7, 2050, "s"), _mk_ac2g(corr_bwd, 0, 7, 2110, "f"),
+            _make_gpu_event(
+                "fwd",
+                1000,
+                100,
+                "cpu_op",
+                "aten::mm",
+                pid=100,
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["fp16", "fp16"],
+                },
+            ),
+            _make_gpu_event(
+                "rt1",
+                1010,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                pid=100,
+                args={"correlation": corr_fwd},
+            ),
+            _make_gpu_event(
+                "k1",
+                1050,
+                50,
+                "kernel",
+                "gemm_fwd",
+                pid=0,
+                tid=7,
+                args={"correlation": corr_fwd, "stream": 7},
+            ),
+            _mk_ac2g(corr_fwd, 0, 7, 1050, "s"),
+            _mk_ac2g(corr_fwd, 0, 7, 1100, "f"),
+            _make_gpu_event(
+                "bwd",
+                2000,
+                100,
+                "cpu_op",
+                "aten::mm_backward",
+                pid=100,
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["fp16", "fp16"],
+                },
+            ),
+            _make_gpu_event(
+                "rt2",
+                2010,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                pid=100,
+                args={"correlation": corr_bwd},
+            ),
+            _make_gpu_event(
+                "k2",
+                2050,
+                60,
+                "kernel",
+                "gemm_bwd",
+                pid=0,
+                tid=7,
+                args={"correlation": corr_bwd, "stream": 7},
+            ),
+            _mk_ac2g(corr_bwd, 0, 7, 2050, "s"),
+            _mk_ac2g(corr_bwd, 0, 7, 2110, "f"),
         ]
         analyzer = _build_analyzer(events)
         fwd = next(e for e in analyzer.tree.events if e["name"] == "aten::mm")
@@ -686,7 +862,9 @@ class TestTreePerfFinalCoverage:
 
     def test_build_nn_module_latency_tree_cpu(self):
         analyzer = _build_analyzer(self._nn_module_trace(), add_python_func=True)
-        root = next(e for e in analyzer.tree.events if e["name"] == "nn.Module: Block_0")
+        root = next(
+            e for e in analyzer.tree.events if e["name"] == "nn.Module: Block_0"
+        )
         analyzer.build_nn_module_latency_tree(root)
         assert "GPU Time" in root
         assert root["GPU Time"] > 0
@@ -727,7 +905,9 @@ class TestOrchestratorPrepareFinal:
             "parent": 99,
         }
         uid_map = {10: k1, 11: k2, 12: k3, 99: parent}
-        tree = _StubTree([mod1, mod2, parent, child_op], uid_map, parent_map={id(child_op): parent})
+        tree = _StubTree(
+            [mod1, mod2, parent, child_op], uid_map, parent_map={id(child_op): parent}
+        )
         unified = [
             {"name": "aten::mm", "gpu_events": [10], "parent": 99},
             {"name": "aten::relu", "gpu_events": [11], "parent": 99},
@@ -767,11 +947,29 @@ class TestOrchestratorPrepareFinal:
         ).to_csv(csv_dir / "diff_stats.csv", index=False)
 
         uid_map = {
-            10: {"name": "Cijk_A", "dur": 5000, "_category": "kernel", "gpu_events": []},
-            11: {"name": "Cijk_B", "dur": 3000, "_category": "kernel", "gpu_events": []},
+            10: {
+                "name": "Cijk_A",
+                "dur": 5000,
+                "_category": "kernel",
+                "gpu_events": [],
+            },
+            11: {
+                "name": "Cijk_B",
+                "dur": 3000,
+                "_category": "kernel",
+                "gpu_events": [],
+            },
         }
-        mod_a = {"name": "nn.Module: Attn_0", "_category": "aten", "gpu_events": [10, 11]}
-        mod_b = {"name": "nn.Module: Attn_1", "_category": "aten", "gpu_events": [10, 11]}
+        mod_a = {
+            "name": "nn.Module: Attn_0",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
+        mod_b = {
+            "name": "nn.Module: Attn_1",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
         tree = _StubTree([mod_a, mod_b], uid_map)
         analyzer = _StubAnalyzer(tree)
         cands = _extract_comparative_fusion_candidates(str(csv_dir), analyzer, tree)
@@ -789,7 +987,15 @@ class TestReportingFinalCoverage:
         trace = _write_trace(tmp_path, specs)
         data = json.loads(open(trace).read())
         data["traceEvents"].append(
-            _mk_event("cuda_runtime", "hipGraphLaunch", 2000, 10, 100, 100, {"correlation": 999})
+            _mk_event(
+                "cuda_runtime",
+                "hipGraphLaunch",
+                2000,
+                10,
+                100,
+                100,
+                {"correlation": 999},
+            )
         )
         path = tmp_path / "graph_trace.json"
         path.write_text(json.dumps(data))
@@ -804,20 +1010,68 @@ class TestReportingFinalCoverage:
     def test_inference_bwd_and_overlap_sheets(self, tmp_path):
         corr_fwd, corr_bwd = 300, 301
         events = [
-            _mk_event("cpu_op", "aten::mm", 1000, 100, 100, 100, {
-                "Input Dims": [[32, 64], [64, 128]],
-                "Input type": ["float", "float"],
-            }),
-            _mk_event("cuda_runtime", "hipLaunchKernel", 1010, 5, 100, 100, {"correlation": corr_fwd}),
-            _mk_event("kernel", "gemm_fwd", 1050, 80, 0, 7, {"correlation": corr_fwd, "stream": 7}),
+            _mk_event(
+                "cpu_op",
+                "aten::mm",
+                1000,
+                100,
+                100,
+                100,
+                {
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["float", "float"],
+                },
+            ),
+            _mk_event(
+                "cuda_runtime",
+                "hipLaunchKernel",
+                1010,
+                5,
+                100,
+                100,
+                {"correlation": corr_fwd},
+            ),
+            _mk_event(
+                "kernel",
+                "gemm_fwd",
+                1050,
+                80,
+                0,
+                7,
+                {"correlation": corr_fwd, "stream": 7},
+            ),
             _mk_ac2g(corr_fwd, 0, 7, 1050, "s"),
             _mk_ac2g(corr_fwd, 0, 7, 1130, "f"),
-            _mk_event("cpu_op", "aten::mm_backward", 2000, 100, 100, 100, {
-                "Input Dims": [[32, 64], [64, 128]],
-                "Input type": ["float", "float"],
-            }),
-            _mk_event("cuda_runtime", "hipLaunchKernel", 2010, 5, 100, 100, {"correlation": corr_bwd}),
-            _mk_event("kernel", "gemm_bwd", 2050, 60, 0, 7, {"correlation": corr_bwd, "stream": 7}),
+            _mk_event(
+                "cpu_op",
+                "aten::mm_backward",
+                2000,
+                100,
+                100,
+                100,
+                {
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["float", "float"],
+                },
+            ),
+            _mk_event(
+                "cuda_runtime",
+                "hipLaunchKernel",
+                2010,
+                5,
+                100,
+                100,
+                {"correlation": corr_bwd},
+            ),
+            _mk_event(
+                "kernel",
+                "gemm_bwd",
+                2050,
+                60,
+                0,
+                7,
+                {"correlation": corr_bwd, "stream": 7},
+            ),
             _mk_ac2g(corr_bwd, 0, 7, 2050, "s"),
             _mk_ac2g(corr_bwd, 0, 7, 2110, "f"),
         ]
@@ -837,11 +1091,15 @@ class TestReportingFinalCoverage:
     def test_sanity_check_kernel_details_summary_column(self):
         events = [{"name": "k_a", "cat": "kernel"}]
         tl = pd.DataFrame({"type": ["computation_time"], "time ms": [0.1]})
-        kl = pd.DataFrame({
-            "total_direct_kernel_time": [100.0],
-            "kernel_details_summary": [[{"name": "k_a", "count": 1}]],
-        })
-        up = pd.DataFrame({"Kernel Time (µs)": [100.0], "kernel_details_summary": [[{"name": "k_a"}]]})
+        kl = pd.DataFrame(
+            {
+                "total_direct_kernel_time": [100.0],
+                "kernel_details_summary": [[{"name": "k_a", "count": 1}]],
+            }
+        )
+        up = pd.DataFrame(
+            {"Kernel Time (µs)": [100.0], "kernel_details_summary": [[{"name": "k_a"}]]}
+        )
         result = perf_report_sanity_check(events, tl, kl, up)
         assert result["kl_count_pass"]
 
@@ -902,10 +1160,26 @@ class TestCaptureMergeFinal:
         assert len(cap) == 2
 
     def test_get_subtree_events_filters(self):
-        tree = TraceToTree([
-            {"ph": "X", "name": "root", "ts": 0, "dur": 100, "cat": "cpu_op", "args": {}},
-            {"ph": "X", "name": "hipLaunchKernel", "ts": 10, "dur": 5, "cat": "cuda_runtime", "args": {}},
-        ])
+        tree = TraceToTree(
+            [
+                {
+                    "ph": "X",
+                    "name": "root",
+                    "ts": 0,
+                    "dur": 100,
+                    "cat": "cpu_op",
+                    "args": {},
+                },
+                {
+                    "ph": "X",
+                    "name": "hipLaunchKernel",
+                    "ts": 10,
+                    "dur": 5,
+                    "cat": "cuda_runtime",
+                    "args": {},
+                },
+            ]
+        )
         tree.build_tree()
         root = tree.events[0]
         all_ev, filt = get_subtree_events(
@@ -918,12 +1192,34 @@ class TestCaptureMergeFinal:
         from TraceLens.Trace2Tree import trace_capture_merge_experimental as tcm
 
         tcm._capture_tree_cache.clear()
-        events = {"traceEvents": [
-            {"ph": "X", "name": "StreamBeginCapture", "cat": "cuda_runtime", "ts": 0, "dur": 1, "args": {}},
-            {"ph": "X", "name": "StreamEndCapture", "cat": "cuda_runtime", "ts": 10, "dur": 1, "args": {}},
-            {"ph": "X", "name": "hipLaunchKernel", "cat": "cuda_runtime", "ts": 20, "dur": 5,
-             "args": {"kernel": "k1"}},
-        ]}
+        events = {
+            "traceEvents": [
+                {
+                    "ph": "X",
+                    "name": "StreamBeginCapture",
+                    "cat": "cuda_runtime",
+                    "ts": 0,
+                    "dur": 1,
+                    "args": {},
+                },
+                {
+                    "ph": "X",
+                    "name": "StreamEndCapture",
+                    "cat": "cuda_runtime",
+                    "ts": 10,
+                    "dur": 1,
+                    "args": {},
+                },
+                {
+                    "ph": "X",
+                    "name": "hipLaunchKernel",
+                    "cat": "cuda_runtime",
+                    "ts": 20,
+                    "dur": 5,
+                    "args": {"kernel": "k1"},
+                },
+            ]
+        }
         trace_path = tmp_path / "cap.json"
         trace_path.write_text(json.dumps(events))
         key = ("test_key", str(trace_path))
@@ -953,7 +1249,19 @@ class TestPerfModelDeepCoverage2:
                     [4],
                 ],
                 "Input type": ["c10::BFloat16"] * 4,
-                "Concrete Inputs": ["", "", "", "", "(1,1)", "(0,0)", "(1,1)", "False", "(0,0)", "1", "[True, True, False]"],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "(1,1)",
+                    "(0,0)",
+                    "(1,1)",
+                    "False",
+                    "(0,0)",
+                    "1",
+                    "[True, True, False]",
+                ],
             }
         }
         model = perf_model.aten_conv_bwd(event)
@@ -993,19 +1301,23 @@ class TestPerfModelDeepCoverage2:
             perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
 
     def test_fused_rope_and_cross_entropy_precision(self):
-        rope = perf_model.fused_rope_fwd({
-            "args": {
-                "Input Dims": [[128, 2, 8, 64], [128, 1, 1, 64]],
-                "Input type": ["c10::BFloat16", "c10::BFloat16"],
+        rope = perf_model.fused_rope_fwd(
+            {
+                "args": {
+                    "Input Dims": [[128, 2, 8, 64], [128, 1, 1, 64]],
+                    "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                }
             }
-        })
+        )
         assert rope.get_compute_precision() == "bf16"
-        ce = perf_model.cross_entropy_fwd({
-            "args": {
-                "Input Dims": [[4, 1, 32000], [4, 1]],
-                "Input type": ["c10::BFloat16", "long int"],
+        ce = perf_model.cross_entropy_fwd(
+            {
+                "args": {
+                    "Input Dims": [[4, 1, 32000], [4, 1]],
+                    "Input type": ["c10::BFloat16", "long int"],
+                }
             }
-        })
+        )
         assert ce.get_compute_precision() is not None
 
 
@@ -1017,7 +1329,11 @@ class TestOrchestratorMainExtended:
         _write_minimal_orchestrator_csvs(out, comparative=False)
         k1 = _kernel_event(10, "Cijk_a")
         k2 = _kernel_event(11, "ew_add")
-        module = {"name": "nn.Module: MLP_0", "_category": "aten", "gpu_events": [10, 11]}
+        module = {
+            "name": "nn.Module: MLP_0",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
         tree = _StubTree([module], {10: k1, 11: k2})
         analyzer = _StubAnalyzer(tree)
 
@@ -1027,14 +1343,19 @@ class TestOrchestratorMainExtended:
                 return analyzer
 
         monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
-        monkeypatch.setattr(op, "_extract_standalone_fusion_candidates", lambda *a, **k: [])
+        monkeypatch.setattr(
+            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
+        )
 
         old_argv = sys.argv
         sys.argv = [
             "orchestrator_prepare",
-            "--trace-path", "/fake/trace.json",
-            "--platform", "MI300X",
-            "--output-dir", out,
+            "--trace-path",
+            "/fake/trace.json",
+            "--platform",
+            "MI300X",
+            "--output-dir",
+            out,
             "--disable_pseudo_ops",
         ]
         try:
@@ -1049,10 +1370,13 @@ class TestOrchestratorMainExtended:
 
 class TestReportingExtended:
     def test_inference_report_topk_and_roofline(self, tmp_path):
-        trace = _write_trace(tmp_path, [
-            ("aten::mm", "gemm_kernel", 100),
-            ("aten::add", "add_kernel", 15),
-        ])
+        trace = _write_trace(
+            tmp_path,
+            [
+                ("aten::mm", "gemm_kernel", 100),
+                ("aten::add", "add_kernel", 15),
+            ],
+        )
         result = generate_inference_report(
             profile_json_path=trace,
             output_csvs_dir=str(tmp_path / "topk_out"),
@@ -1078,8 +1402,14 @@ class TestReportingExtended:
             output_csvs_dir=str(tmp_path / "ext_out"),
             output_xlsx_path=str(tmp_path / "ext.xlsx"),
             extension_file=str(ext),
-            gpu_arch={"name": "mi300x", "freq_mhz": 2200, "num_cus": 304,
-                      "gemm_units_per_cu": 4, "mem_bw_gbps": 5300, "l1_bw_gbps": 100},
+            gpu_arch={
+                "name": "mi300x",
+                "freq_mhz": 2200,
+                "num_cus": 304,
+                "gemm_units_per_cu": 4,
+                "mem_bw_gbps": 5300,
+                "l1_bw_gbps": 100,
+            },
             include_call_stack=True,
         )
         assert (tmp_path / "ext_out" / "gpu_timeline.csv").exists()

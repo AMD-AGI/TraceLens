@@ -67,7 +67,13 @@ def _allreduce_event(name_dims=(4, 7168)):
     return {
         "args": {
             "Input Dims": [(), name_dims, name_dims, (), ()],
-            "Input type": ["Scalar", "c10::BFloat16", "c10::BFloat16", "Scalar", "Scalar"],
+            "Input type": [
+                "Scalar",
+                "c10::BFloat16",
+                "c10::BFloat16",
+                "Scalar",
+                "Scalar",
+            ],
             "Input Strides": [(), (7168, 1), (7168, 1), (), ()],
         }
     }
@@ -147,7 +153,11 @@ class TestTreePerfInitKwargs:
                 self.event = event
 
         kwargs = tree_perf._perf_model_init_kwargs(
-            SimpleModel, event={"name": "op"}, arch={}, python_path=None, enable_origami=True
+            SimpleModel,
+            event={"name": "op"},
+            arch={},
+            python_path=None,
+            enable_origami=True,
         )
         assert kwargs["event"]["name"] == "op"
         assert "enable_origami" not in kwargs

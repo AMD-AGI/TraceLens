@@ -19,7 +19,9 @@ from TraceLens.NcclAnalyser.nccl_analyser import (
 )
 
 
-def _nccl_kernel(name="ncclKernel_AllReduce", external_id=42, ts=100, dur=10, **extra_args):
+def _nccl_kernel(
+    name="ncclKernel_AllReduce", external_id=42, ts=100, dur=10, **extra_args
+):
     args = {
         "External id": external_id,
         "Collective name": "allreduce",
@@ -79,7 +81,9 @@ def test_parse_split_sizes_syntax_error():
 
 def test_build_df_implicit_sync_empty_df(tmp_path):
     path = tmp_path / "rank0.json"
-    _write_trace(path, [{"ph": "X", "cat": "cpu_op", "name": "x", "ts": 1, "dur": 1, "args": {}}])
+    _write_trace(
+        path, [{"ph": "X", "cat": "cpu_op", "name": "x", "ts": 1, "dur": 1, "args": {}}]
+    )
     analyser = NcclAnalyser([str(path)], world_size=1)
     df = analyser.build_df_nccl_implicit_sync_cat()
     assert df.empty
@@ -144,7 +148,9 @@ def test_build_df_straggler_summary(tmp_path):
     analyser = _build_analyser(
         tmp_path,
         2,
-        lambda rank: _nccl_kernel(external_id=400 + rank, ts=4000 + rank * 5, dur=30 + rank),
+        lambda rank: _nccl_kernel(
+            external_id=400 + rank, ts=4000 + rank * 5, dur=30 + rank
+        ),
     )
     analyser.build_df_long()
     analyser.build_df_nccl_implicit_sync_cat(strict_metadata_check=False)
@@ -155,7 +161,9 @@ def test_build_df_straggler_summary(tmp_path):
 
 def test_build_df_straggler_summary_empty_when_no_implicit_sync(tmp_path):
     path = tmp_path / "rank0.json"
-    _write_trace(path, [{"ph": "X", "cat": "cpu_op", "name": "x", "ts": 1, "dur": 1, "args": {}}])
+    _write_trace(
+        path, [{"ph": "X", "cat": "cpu_op", "name": "x", "ts": 1, "dur": 1, "args": {}}]
+    )
     analyser = NcclAnalyser([str(path)], world_size=1)
     assert analyser.build_df_straggler_summary().empty
 
@@ -243,5 +251,7 @@ def test_all2allv_summary_metadata_mismatch_warns(tmp_path):
     analyser = NcclAnalyser(filepaths, world_size)
     analyser.build_df_long()
     with pytest.warns(UserWarning, match="Metadata mismatch"):
-        df = analyser.build_df_nccl_all2allv(detailed=False, strict_metadata_check=False)
+        df = analyser.build_df_nccl_all2allv(
+            detailed=False, strict_metadata_check=False
+        )
     assert df is not None

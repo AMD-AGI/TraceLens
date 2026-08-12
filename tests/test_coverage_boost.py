@@ -8,19 +8,15 @@
 
 from __future__ import annotations
 
-import gzip
 import json
 import os
-import sys
 
 import pandas as pd
 import pytest
 
 from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import perf_model_extensions as ext
 from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
     BiasedGroupedTopk,
-    MoeSortScatterGather,
     moe_aiter_fused_1stage,
     moe_aiter_unfused_down,
     moe_aiter_unfused_up,
@@ -33,22 +29,9 @@ from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
 from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
     generate_collective_report,
 )
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch as generate_inference_report,
 )
-from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
-    generate_perf_report_pftrace_hip_activity,
-)
-from TraceLens.Reporting.generate_perf_report_pftrace_hip_api import (
-    generate_perf_report_pftrace_hip_api,
-)
-from TraceLens.Reporting.generate_perf_report_rocprof import (
-    generate_perf_report_rocprof,
-)
-from TraceLens.Reporting.generate_perf_report_jax import generate_perf_report_jax
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 from tests.test_conv_backward_bytes import (
@@ -58,12 +41,13 @@ from tests.test_conv_backward_bytes import (
     _conv_bias_relu_fwd_event,
 )
 from tests.test_dit_fused_ln_modulate import (
-    _fused_ln_bwd_event,
     _fused_ln_fwd_event,
 )
 from tests.test_evoformer_attention_ops import _event as _evoformer_event
-from tests.test_reporting_coverage import _build_synthetic_trace, _minimal_pftrace_events
-from tests.test_treeperf import GPU_ONLY_TRACE, _build_analyzer, _mk_pytorch_trace
+from tests.test_reporting_coverage import (
+    _build_synthetic_trace,
+)
+from tests.test_treeperf import GPU_ONLY_TRACE
 
 
 def _write_trace(tmp_path, specs, name="trace.json"):
@@ -76,7 +60,12 @@ class TestPerfModelConvAndNormBoost:
     @pytest.mark.parametrize(
         "cls,fwd_factory,bwd_cls,bwd_factory",
         [
-            (perf_model.ConvBias_, _conv_bias_fwd_event, perf_model.ConvBias_Backward, _conv_bias_bwd_event),
+            (
+                perf_model.ConvBias_,
+                _conv_bias_fwd_event,
+                perf_model.ConvBias_Backward,
+                _conv_bias_bwd_event,
+            ),
             (
                 perf_model.ConvBiasReLU_,
                 _conv_bias_relu_fwd_event,
@@ -116,8 +105,23 @@ class TestPerfModelConvAndNormBoost:
         assert model.flops() > 0
         gg_event = {
             "args": {
-                "Input Dims": [[4, 128], [8, 256, 128], [8, 256], [8], [8], [8], [8], [8], [4, 4]],
-                "Input type": ["c10::BFloat16", "c10::Float8_e4m3fn", "c10::Float", "c10::Int"]
+                "Input Dims": [
+                    [4, 128],
+                    [8, 256, 128],
+                    [8, 256],
+                    [8],
+                    [8],
+                    [8],
+                    [8],
+                    [8],
+                    [4, 4],
+                ],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float",
+                    "c10::Int",
+                ]
                 + ["c10::Int"] * 5,
             }
         }
@@ -224,7 +228,12 @@ class TestMoeExtensionsBoost:
                     (),
                     [64, 4],
                 ],
-                "Input type": ["c10::BFloat16", "c10::Float8_e4m3fn", "", "c10::BFloat16"],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "",
+                    "c10::BFloat16",
+                ],
             }
         }
         assert moe_triton_invoke_grouped_gemm(grouped).flops() > 0
@@ -234,7 +243,12 @@ class TestMoeExtensionsBoost:
             {
                 "args": {
                     "Input Dims": [(32, 256), (256,), (32, 8), (32, 8)],
-                    "Input type": ["c10::Float", "c10::Float", "c10::Float", "c10::Int"],
+                    "Input type": [
+                        "c10::Float",
+                        "c10::Float",
+                        "c10::Float",
+                        "c10::Int",
+                    ],
                 }
             }
         )
@@ -299,7 +313,10 @@ class TestReportingCliBoost:
 
     @pytest.mark.skipif(
         not os.path.exists(
-            os.path.join(os.path.dirname(__file__), "traces/mi210/gpu_only_trace/gpu_only_trace.json.gz")
+            os.path.join(
+                os.path.dirname(__file__),
+                "traces/mi210/gpu_only_trace/gpu_only_trace.json.gz",
+            )
         ),
         reason="gpu_only trace fixture missing",
     )
@@ -325,7 +342,16 @@ class TestPerfModelExtensionsBoost:
                 "Output Dims": [[2, 4, 6, 6]],
                 "Filter Shape": [4, 3, 3, 3],
                 "Input type": ["bf16", "bf16"],
-                "Concrete Inputs": ["", "", "(1,1)", "(0,0)", "(1,1)", "False", "(0,0)", "1"],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "(1,1)",
+                    "(0,0)",
+                    "(1,1)",
+                    "False",
+                    "(0,0)",
+                    "1",
+                ],
             }
         }
         model = perf_model.jax_conv(conv_event)

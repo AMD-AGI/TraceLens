@@ -44,7 +44,9 @@ def _sweep_treeperf_analyzer(analyzer: TreePerfAnalyzer) -> None:
         TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category(launchers)
         TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category_module(launchers)
         TreePerfAnalyzer.get_df_kernel_launchers_summary_module(launchers)
-        TreePerfAnalyzer.get_df_kernel_launchers_unique_args(launchers, include_pct=True)
+        TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
+            launchers, include_pct=True
+        )
         for name in launchers["name"].unique()[:3]:
             TreePerfAnalyzer.get_df_kernel_launchers_summary_by_shape(launchers, name)
     unified = analyzer.build_df_unified_perf_table(include_nccl=True)
@@ -115,12 +117,26 @@ class TestPerfModelExhaustiveSweep:
                 "Input Dims": [[2, 3, 8, 8], [4, 3, 3, 3]],
                 "Output Dims": [[2, 4, 6, 6]],
                 "Input type": ["c10::BFloat16", "c10::BFloat16"],
-                "Concrete Inputs": ["", "", "(1,1)", "(0,0)", "(1,1)", "False", "(0,0)", "1"],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "(1,1)",
+                    "(0,0)",
+                    "(1,1)",
+                    "False",
+                    "(0,0)",
+                    "1",
+                ],
             }
         },
         {
             "args": {
-                "Batch": 2, "M": 4, "N": 8, "K": 16, "Beta": 1, "Type": "bf16",
+                "Batch": 2,
+                "M": 4,
+                "N": 8,
+                "K": 16,
+                "Beta": 1,
+                "Type": "bf16",
             }
         },
         {
@@ -147,7 +163,16 @@ class TestPerfModelExhaustiveSweep:
                 "Input Dims": [[2, 4, 32], [8, 4, 3]],
                 "Output Dims": [[2, 8, 30]],
                 "Input type": ["c10::BFloat16", "c10::BFloat16"],
-                "Concrete Inputs": ["", "", "(1,)", "(0,)", "(1,)", "False", "(0,)", "1"],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "(1,)",
+                    "(0,)",
+                    "(1,)",
+                    "False",
+                    "(0,)",
+                    "1",
+                ],
             }
         },
         {
@@ -155,7 +180,7 @@ class TestPerfModelExhaustiveSweep:
             "args": {
                 "Input Dims": [[128, 8, 64]] * 4,
                 "Input type": ["c10::BFloat16"] * 4,
-            }
+            },
         },
     ]
 
@@ -174,9 +199,15 @@ class TestPerfModelExhaustiveSweep:
                 except Exception:
                     continue
                 for meth in (
-                    "flops", "bytes", "flops_bwd", "bytes_bwd",
-                    "get_compute_precision", "get_maf_type", "get_time",
-                    "get_simulation_time", "get_simulation_time_func",
+                    "flops",
+                    "bytes",
+                    "flops_bwd",
+                    "bytes_bwd",
+                    "get_compute_precision",
+                    "get_maf_type",
+                    "get_time",
+                    "get_simulation_time",
+                    "get_simulation_time_func",
                 ):
                     if hasattr(obj, meth):
                         try:
@@ -187,7 +218,12 @@ class TestPerfModelExhaustiveSweep:
                                 fn()
                             else:
                                 fn()
-                        except (NotImplementedError, TypeError, ValueError, AssertionError):
+                        except (
+                            NotImplementedError,
+                            TypeError,
+                            ValueError,
+                            AssertionError,
+                        ):
                             pass
                         except Exception:
                             pass

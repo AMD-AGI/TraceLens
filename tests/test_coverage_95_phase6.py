@@ -8,12 +8,9 @@
 
 from __future__ import annotations
 
-import gzip
-import importlib
 import json
 import os
 import sys
-import zipfile
 from unittest.mock import patch
 
 import pandas as pd
@@ -24,7 +21,9 @@ from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
 )
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.Reporting.generate_perf_report_pytorch import generate_perf_report_pytorch
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     classify_graph_capture_trace,
 )
@@ -41,12 +40,16 @@ from tests.test_agent_coverage import (
 from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
 from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
 from tests.test_perfmodel_coverage import _ARCH, _gemm_event, _moe_unfused_event
-from tests.test_reporting_coverage import _build_synthetic_trace, _mk_event, _write_trace
+from tests.test_reporting_coverage import (
+    _mk_event,
+    _write_trace,
+)
 from tests.test_treeperf_coverage import _build_analyzer, _make_gpu_event, _mk_ac2g
 
 ROCprof_FILE = os.path.join(os.path.dirname(__file__), "rocprof/908_results.json.gz")
 NORM_TRACE = os.path.join(
-    os.path.dirname(__file__), "traces/perf_model/normalization/normalization_layer_test.json.gz"
+    os.path.dirname(__file__),
+    "traces/perf_model/normalization/normalization_layer_test.json.gz",
 )
 INFERENCE_ROOT = os.path.join(os.path.dirname(__file__), "traces/inference")
 
@@ -64,7 +67,10 @@ class TestOrchestratorPhase6:
                 "op category": ["GEMM", ""],
                 "Kernel Time (µs)_sum": [1000.0, 500.0],
                 "total_duration_us": [60000.0, 1000.0],
-                "kernel_details_summary": ["[{'name': 'Cijk_a'}]", "[{'name': 'ew_add'}]"],
+                "kernel_details_summary": [
+                    "[{'name': 'Cijk_a'}]",
+                    "[{'name': 'ew_add'}]",
+                ],
                 "Data Moved (MB)": [10.0, 1.0],
                 "perf_params": ["{}", "{}"],
                 "Input Dims": ["[[2,3]]", "[[2,3]]"],
@@ -227,7 +233,6 @@ class TestOrchestratorPhase6:
             }
         ).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
         cands = _extract_standalone_fusion_candidates(analyzer, tree, str(csv_dir))
-        enriched = [c for c in cands if any(k.get("data_in_mb") for k in c.get("kernels", []))]
         assert isinstance(cands, list)
 
 
@@ -249,7 +254,9 @@ class TestRocprofPhase6:
     def test_categorize_kernel_branches(self, name, expected):
         assert _categorize_kernel(name) == expected
 
-    @pytest.mark.skipif(not os.path.isfile(ROCprof_FILE), reason="rocprof fixture missing")
+    @pytest.mark.skipif(
+        not os.path.isfile(ROCprof_FILE), reason="rocprof fixture missing"
+    )
     def test_rocprof_analyzer_all_dataframes(self):
         data = RocprofParser.load_rocprof_data(ROCprof_FILE)
         kernels = RocprofParser.extract_kernel_events(data)
@@ -268,7 +275,13 @@ class TestRocprofPhase6:
 class TestPerfModelPhase6:
     def test_conv_bias_bwd_empty_dims(self):
         perf_model.ConvBias_.fwd_pass_cache.clear()
-        evt = {"args": {"Input Dims": [], "Input type": ["c10::BFloat16"], "Sequence number": 42}}
+        evt = {
+            "args": {
+                "Input Dims": [],
+                "Input type": ["c10::BFloat16"],
+                "Sequence number": 42,
+            }
+        }
         details = perf_model.ConvBias_Backward.get_param_details(evt)
         assert details["input_shape"] is None
 
@@ -280,7 +293,10 @@ class TestPerfModelPhase6:
         assert bwd.flops_bwd() > 0
 
     def test_conv1d_bytes_func_none(self):
-        assert perf_model.CONV.bytes_func((2, 4, 32), (8, 4, 3), (2, 8, 30), False, None) is None
+        assert (
+            perf_model.CONV.bytes_func((2, 4, 32), (8, 4, 3), (2, 8, 30), False, None)
+            is None
+        )
 
     def test_tev2_pseudo_gemm_and_grouped_gemm(self):
         event = _gemm_event("tev2::pseudo_gemm", (4, 8), (8, 16))
@@ -341,8 +357,13 @@ class TestMoeExtensionsPhase6:
         assert model.bytes() > 0
 
     def test_unfused_moe_bytes_none_bpe(self):
-        assert moe_ext.UnfusedMoE_Up.bytes_func(8, 4096, 14336, 8, 2, True, None, 2, 2) is None
-        up = moe_ext.moe_triton_unfused_up(_moe_unfused_event(kernel_name="moe_fp8_up_kernel"))
+        assert (
+            moe_ext.UnfusedMoE_Up.bytes_func(8, 4096, 14336, 8, 2, True, None, 2, 2)
+            is None
+        )
+        up = moe_ext.moe_triton_unfused_up(
+            _moe_unfused_event(kernel_name="moe_fp8_up_kernel")
+        )
         assert up.bytes() > 0
 
     def test_moe_auxiliary_classes(self):
@@ -451,7 +472,11 @@ class TestTreePerfPhase6:
             _mk_ac2g(corr_bwd, 0, 7, 2110, "f"),
         ]
         analyzer = _build_analyzer(events)
-        fwd = next(e for e in analyzer.tree.events if "custom_op" in e["name"] and "backward" not in e["name"])
+        fwd = next(
+            e
+            for e in analyzer.tree.events
+            if "custom_op" in e["name"] and "backward" not in e["name"]
+        )
         bwd = next(e for e in analyzer.tree.events if "backward" in e["name"])
         fwd["bwd_events"] = [bwd["UID"]]
         bwd["fwd_event"] = fwd["UID"]
@@ -557,9 +582,7 @@ class TestReportingPhase6:
 
         case = os.path.join(INFERENCE_ROOT, "vllm_decode_full")
         trace = next(
-            os.path.join(case, f)
-            for f in os.listdir(case)
-            if f.endswith(".json.gz")
+            os.path.join(case, f) for f in os.listdir(case) if f.endswith(".json.gz")
         )
         gen_inf(
             profile_json_path=trace,
@@ -573,7 +596,9 @@ class TestReportingPhase6:
 
 class TestKernelFusionMainPhase6:
     def test_kernel_fusion_main_end_to_end(self, tmp_path):
-        from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
+        from TraceLens.Agent.Analysis.category_analyses import (
+            kernel_fusion_analysis as kfa,
+        )
 
         out = str(tmp_path)
         _write_minimal_orchestrator_csvs(out, comparative=False)

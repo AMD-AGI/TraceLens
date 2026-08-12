@@ -11,9 +11,6 @@ from __future__ import annotations
 import gzip
 import json
 import os
-import sys
-from copy import deepcopy
-from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -24,7 +21,6 @@ from TraceLens.Reporting.compare_traces_jax_llama import (
     compute_stage_table,
     extract_gpu_events,
     load_trace,
-    summarize_one,
 )
 from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
@@ -35,9 +31,13 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
-from tests.test_perfmodel_coverage import _norm_event
 from tests.test_reporting_coverage import _minimal_pftrace_events, _write_trace
-from tests.test_treeperf_coverage import _build_analyzer, _make_gpu_event, _mk_ac2g, _mk_pytorch_trace
+from tests.test_treeperf_coverage import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_ac2g,
+    _mk_pytorch_trace,
+)
 
 INFERENCE_ROOT = os.path.join(os.path.dirname(__file__), "traces/inference")
 
@@ -45,10 +45,20 @@ INFERENCE_ROOT = os.path.join(os.path.dirname(__file__), "traces/inference")
 class TestCompareTracesEdgeCases:
     def test_extract_gpu_events_partial_pid_match(self, tmp_path):
         events = [
-            {"ph": "M", "name": "process_name", "pid": 1, "args": {"name": "prefix/device:GPU:0/suffix"}},
             {
-                "ph": "X", "pid": 1, "tid": 10, "ts": 100, "dur": 50,
-                "name": "k", "args": {},
+                "ph": "M",
+                "name": "process_name",
+                "pid": 1,
+                "args": {"name": "prefix/device:GPU:0/suffix"},
+            },
+            {
+                "ph": "X",
+                "pid": 1,
+                "tid": 10,
+                "ts": 100,
+                "dur": 50,
+                "name": "k",
+                "args": {},
             },
         ]
         path = tmp_path / "t.json.gz"
@@ -88,8 +98,14 @@ class TestPerfModelNormAndConvDeep:
             "name": "aten::miopen_batch_norm_backward",
             "args": {
                 "Input Dims": [
-                    (8, 16, 32, 32), (8, 16, 32, 32), (16,), (16,),
-                    (16,), (16,), (16,), (),
+                    (8, 16, 32, 32),
+                    (8, 16, 32, 32),
+                    (16,),
+                    (16,),
+                    (16,),
+                    (16,),
+                    (16,),
+                    (),
                 ],
                 "Input type": ["float"] * 7 + ["Scalar"],
                 "Input Strides": [(16384, 1024, 32, 1)] * 2 + [(1,)] * 5 + [()],
@@ -104,12 +120,31 @@ class TestPerfModelNormAndConvDeep:
         event = {
             "args": {
                 "Input Dims": [
-                    None, (4, 8, 32, 32), (8,), (8,), (8,), (8,),
-                    (4, 8, 32, 32), (),
+                    None,
+                    (4, 8, 32, 32),
+                    (8,),
+                    (8,),
+                    (8,),
+                    (8,),
+                    (4, 8, 32, 32),
+                    (),
                 ],
                 "Input type": ["c10::BFloat16"] * 7 + ["Scalar"],
-                "Input Strides": [(), (8192, 1024, 32, 1), (1,)] * 2 + [(8192, 1024, 32, 1)] * 2 + [(), ()],
-                "Concrete Inputs": ["", "", "", "", "", "", "", "8", "8", "[True, True]"],
+                "Input Strides": [(), (8192, 1024, 32, 1), (1,)] * 2
+                + [(8192, 1024, 32, 1)] * 2
+                + [(), ()],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "8",
+                    "8",
+                    "[True, True]",
+                ],
             }
         }
         model = perf_model.GroupNormBwd(event)
@@ -126,24 +161,76 @@ class TestTreePerfDeepPaths:
     def test_kernel_launchers_all_options(self):
         corr1, corr2 = 300, 301
         events = [
-            _make_gpu_event("py", 0, 500, "python_function", "nn.Module: Block", pid=100),
             _make_gpu_event(
-                "cpu1", 20, 80, "cpu_op", "aten::mm", pid=100,
+                "py", 0, 500, "python_function", "nn.Module: Block", pid=100
+            ),
+            _make_gpu_event(
+                "cpu1",
+                20,
+                80,
+                "cpu_op",
+                "aten::mm",
+                pid=100,
                 args={
                     "Input Dims": [[32, 64], [64, 128]],
                     "Input type": ["c10::BFloat16", "c10::BFloat16"],
                     "Input Strides": [[128, 1], [128, 1]],
                 },
             ),
-            _make_gpu_event("rt1", 25, 5, "cuda_runtime", "hipLaunchKernel", pid=100, args={"correlation": corr1}),
-            _make_gpu_event("k1", 50, 40, "kernel", "Cijk_gemm", pid=0, tid=7, args={"correlation": corr1, "stream": 7}),
-            _mk_ac2g(corr1, 0, 7, 50, "s"), _mk_ac2g(corr1, 0, 7, 90, "f"),
-            _make_gpu_event("cpu2", 120, 80, "cpu_op", "aten::add", pid=100,
-                            args={"Input Dims": [[32, 128], [32, 128]], "Input type": ["c10::BFloat16"] * 2}),
-            _make_gpu_event("rt2", 125, 5, "cuda_runtime", "hipLaunchKernel", pid=100, args={"correlation": corr2}),
-            _make_gpu_event("k2", 150, 20, "kernel", "vectorized_elementwise_kernel", pid=0, tid=7,
-                            args={"correlation": corr2, "stream": 7}),
-            _mk_ac2g(corr2, 0, 7, 150, "s"), _mk_ac2g(corr2, 0, 7, 170, "f"),
+            _make_gpu_event(
+                "rt1",
+                25,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                pid=100,
+                args={"correlation": corr1},
+            ),
+            _make_gpu_event(
+                "k1",
+                50,
+                40,
+                "kernel",
+                "Cijk_gemm",
+                pid=0,
+                tid=7,
+                args={"correlation": corr1, "stream": 7},
+            ),
+            _mk_ac2g(corr1, 0, 7, 50, "s"),
+            _mk_ac2g(corr1, 0, 7, 90, "f"),
+            _make_gpu_event(
+                "cpu2",
+                120,
+                80,
+                "cpu_op",
+                "aten::add",
+                pid=100,
+                args={
+                    "Input Dims": [[32, 128], [32, 128]],
+                    "Input type": ["c10::BFloat16"] * 2,
+                },
+            ),
+            _make_gpu_event(
+                "rt2",
+                125,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                pid=100,
+                args={"correlation": corr2},
+            ),
+            _make_gpu_event(
+                "k2",
+                150,
+                20,
+                "kernel",
+                "vectorized_elementwise_kernel",
+                pid=0,
+                tid=7,
+                args={"correlation": corr2, "stream": 7},
+            ),
+            _mk_ac2g(corr2, 0, 7, 150, "s"),
+            _mk_ac2g(corr2, 0, 7, 170, "f"),
         ]
         analyzer = _build_analyzer(events, add_python_func=True)
         df = analyzer.get_df_kernel_launchers(
@@ -177,7 +264,9 @@ class TestCaptureMergeDeep:
         assert find_execution_details(root) == "128"
 
     @pytest.mark.skipif(
-        not os.path.isdir(os.path.join(INFERENCE_ROOT, "sglang_decode", "capture_traces")),
+        not os.path.isdir(
+            os.path.join(INFERENCE_ROOT, "sglang_decode", "capture_traces")
+        ),
         reason="capture fixture missing",
     )
     def test_merge_capture_full_inference_fixture(self):
@@ -198,11 +287,14 @@ class TestReportingInferenceSheets:
             generate_perf_report_pytorch as gen_inf,
         )
 
-        trace = _write_trace(tmp_path, [
-            ("aten::mm", "gemm_kernel", 100),
-            ("aten::add", "vectorized_elementwise_kernel", 20),
-            ("aten::native_layer_norm", "layer_norm_kernel", 30),
-        ])
+        trace = _write_trace(
+            tmp_path,
+            [
+                ("aten::mm", "gemm_kernel", 100),
+                ("aten::add", "vectorized_elementwise_kernel", 20),
+                ("aten::native_layer_norm", "layer_norm_kernel", 30),
+            ],
+        )
         gen_inf(
             profile_json_path=trace,
             output_csvs_dir=str(tmp_path / "out"),

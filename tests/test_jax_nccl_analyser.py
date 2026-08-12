@@ -367,7 +367,11 @@ def test_jax_build_df_long_from_node_trace_data(jax_analyser):
                 "pid": 1,
                 "ts": 100,
                 "dur": 50,
-                "args": {"hlo_op": "all-reduce", "hlo_module": "m", "correlation_id": 7},
+                "args": {
+                    "hlo_op": "all-reduce",
+                    "hlo_module": "m",
+                    "correlation_id": 7,
+                },
                 "process": {"process_name": "gpu0"},
             },
             1: None,
@@ -478,7 +482,9 @@ def test_jax_bandwidth_calculation_edge_cases(mock_print, jax_analyser):
             "data(bytes)",
         ]
     )
-    result = jax_analyser._calculate_collective_bandwidth_from_df(empty_df, "all-reduce")
+    result = jax_analyser._calculate_collective_bandwidth_from_df(
+        empty_df, "all-reduce"
+    )
     assert result[0] == []
 
     mismatch_df = pd.DataFrame(
@@ -504,7 +510,9 @@ def test_jax_bandwidth_calculation_edge_cases(mock_print, jax_analyser):
     "collective_name",
     ["reduce-scatter", "all-to-all", "collective-permute", "unknown-op"],
 )
-def test_jax_bandwidth_for_collective_variants(mock_print, jax_analyser, collective_name):
+def test_jax_bandwidth_for_collective_variants(
+    mock_print, jax_analyser, collective_name
+):
     rows = [
         _make_collective_row(
             gpu_rank=0,
@@ -645,9 +653,7 @@ def test_jax_bandwidth_more_edge_cases(mock_print, jax_analyser):
     assert len(bw) == 1
 
     invalid_slice_df = pd.DataFrame(
-        [
-            _make_collective_row(gpu_rank=0, replica_groups=[[]], replica_string="{{}}")
-        ]
+        [_make_collective_row(gpu_rank=0, replica_groups=[[]], replica_string="{{}}")]
     )
     _, _, _, _, slice_info = jax_analyser._calculate_collective_bandwidth_from_df(
         invalid_slice_df, "all-reduce"

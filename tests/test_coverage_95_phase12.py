@@ -34,7 +34,8 @@ RESNET_TRACE = os.path.join(
     os.path.dirname(__file__), "traces/mi300/resnet_act_checkpoint.json.gz"
 )
 NORM_TRACE = os.path.join(
-    os.path.dirname(__file__), "traces/perf_model/normalization/normalization_layer_test.json.gz"
+    os.path.dirname(__file__),
+    "traces/perf_model/normalization/normalization_layer_test.json.gz",
 )
 
 TIMESFORMER1 = os.path.join(
@@ -49,14 +50,16 @@ TIMESFORMER2 = os.path.join(
 
 class TestTreePerfPhase12:
     def test_reorder_cols_and_kernel_stats_edges(self):
-        df = pd.DataFrame({
-            "name": ["a"],
-            "direct_mean": [1.0],
-            "subtree_mean": [2.0],
-            "direct_std": [0.1],
-            "subtree_std": [0.2],
-            "other_col": [3],
-        })
+        df = pd.DataFrame(
+            {
+                "name": ["a"],
+                "direct_mean": [1.0],
+                "subtree_mean": [2.0],
+                "direct_std": [0.1],
+                "subtree_std": [0.2],
+                "other_col": [3],
+            }
+        )
         out = TreePerfAnalyzer._reorder_cols_direct_subtree_pairs(
             df, "direct", "subtree"
         )
@@ -76,14 +79,35 @@ class TestTreePerfPhase12:
     def test_kernel_launchers_execute_parent_chain(self):
         corr = 400
         events = [
-            _make_gpu_event("conv", 1000, 80, "cpu_op", "aten::convolution",
-                            args={"Input Dims": [[[2, 3, 8, 8], [4, 3, 3, 3]]]}),
+            _make_gpu_event(
+                "conv",
+                1000,
+                80,
+                "cpu_op",
+                "aten::convolution",
+                args={"Input Dims": [[[2, 3, 8, 8], [4, 3, 3, 3]]]},
+            ),
             _make_gpu_event("exec", 1010, 10, "cpu_op", "execute"),
-            _make_gpu_event("rt", 1020, 5, "cuda_runtime", "hipLaunchKernel",
-                            args={"correlation": corr}),
-            _make_gpu_event("k", 1030, 50, "kernel", "conv_k", pid=0, tid=7,
-                            args={"correlation": corr, "stream": 7}),
-            _mk_ac2g(corr, 0, 7, 1030, "s"), _mk_ac2g(corr, 0, 7, 1080, "f"),
+            _make_gpu_event(
+                "rt",
+                1020,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                args={"correlation": corr},
+            ),
+            _make_gpu_event(
+                "k",
+                1030,
+                50,
+                "kernel",
+                "conv_k",
+                pid=0,
+                tid=7,
+                args={"correlation": corr, "stream": 7},
+            ),
+            _mk_ac2g(corr, 0, 7, 1030, "s"),
+            _mk_ac2g(corr, 0, 7, 1080, "f"),
         ]
         analyzer = _build_analyzer(events)
         conv = next(e for e in analyzer.tree.events if e["name"] == "aten::convolution")
@@ -95,26 +119,85 @@ class TestTreePerfPhase12:
     def test_unified_bwd_sole_exception_fallback(self):
         corr_f, corr_b = 500, 501
         events = [
-            _make_gpu_event("cpu_f", 1000, 100, "cpu_op", "aten::mm",
-                            args={"Input Dims": [[32, 64], [64, 128]], "Input type": ["fp16", "fp16"]}),
-            _make_gpu_event("rt_f", 1010, 5, "cuda_runtime", "hipLaunchKernel", args={"correlation": corr_f}),
-            _make_gpu_event("k_f", 1050, 50, "kernel", "gemm_fwd", pid=0, tid=7,
-                            args={"correlation": corr_f, "stream": 7}),
-            _mk_ac2g(corr_f, 0, 7, 1050, "s"), _mk_ac2g(corr_f, 0, 7, 1100, "f"),
-            _make_gpu_event("cpu_b", 2000, 100, "cpu_op", "aten::mm",
-                            args={"Input Dims": [[32, 64], [64, 128], [32, 128]],
-                                  "Input type": ["fp16", "fp16", "fp16"]}),
-            _make_gpu_event("rt_b", 2010, 5, "cuda_runtime", "hipLaunchKernel", args={"correlation": corr_b}),
-            _make_gpu_event("k_b", 2050, 60, "kernel", "gemm_bwd", pid=0, tid=7,
-                            args={"correlation": corr_b, "stream": 7}),
-            _mk_ac2g(corr_b, 0, 7, 2050, "s"), _mk_ac2g(corr_b, 0, 7, 2110, "f"),
+            _make_gpu_event(
+                "cpu_f",
+                1000,
+                100,
+                "cpu_op",
+                "aten::mm",
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["fp16", "fp16"],
+                },
+            ),
+            _make_gpu_event(
+                "rt_f",
+                1010,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                args={"correlation": corr_f},
+            ),
+            _make_gpu_event(
+                "k_f",
+                1050,
+                50,
+                "kernel",
+                "gemm_fwd",
+                pid=0,
+                tid=7,
+                args={"correlation": corr_f, "stream": 7},
+            ),
+            _mk_ac2g(corr_f, 0, 7, 1050, "s"),
+            _mk_ac2g(corr_f, 0, 7, 1100, "f"),
+            _make_gpu_event(
+                "cpu_b",
+                2000,
+                100,
+                "cpu_op",
+                "aten::mm",
+                args={
+                    "Input Dims": [[32, 64], [64, 128], [32, 128]],
+                    "Input type": ["fp16", "fp16", "fp16"],
+                },
+            ),
+            _make_gpu_event(
+                "rt_b",
+                2010,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                args={"correlation": corr_b},
+            ),
+            _make_gpu_event(
+                "k_b",
+                2050,
+                60,
+                "kernel",
+                "gemm_bwd",
+                pid=0,
+                tid=7,
+                args={"correlation": corr_b, "stream": 7},
+            ),
+            _mk_ac2g(corr_b, 0, 7, 2050, "s"),
+            _mk_ac2g(corr_b, 0, 7, 2110, "f"),
         ]
         analyzer = _build_analyzer(events)
-        fwd = next(e for e in analyzer.tree.events if e["name"] == "aten::mm" and e["ts"] == 1000)
-        bwd = next(e for e in analyzer.tree.events if e["name"] == "aten::mm" and e["ts"] == 2000)
+        fwd = next(
+            e
+            for e in analyzer.tree.events
+            if e["name"] == "aten::mm" and e["ts"] == 1000
+        )
+        bwd = next(
+            e
+            for e in analyzer.tree.events
+            if e["name"] == "aten::mm" and e["ts"] == 2000
+        )
         fwd["bwd_events"] = [bwd["UID"]]
         bwd["fwd_event"] = fwd["UID"]
-        bwd["gpu_events"] = [next(e["UID"] for e in analyzer.tree.events if e["name"] == "gemm_bwd")]
+        bwd["gpu_events"] = [
+            next(e["UID"] for e in analyzer.tree.events if e["name"] == "gemm_bwd")
+        ]
 
         real = analyzer.compute_perf_metrics
 
@@ -125,7 +208,8 @@ class TestTreePerfPhase12:
 
         with patch.object(analyzer, "compute_perf_metrics", side_effect=boom):
             df = analyzer.build_df_unified_perf_table(
-                events=[bwd], include_perf_metrics=True,
+                events=[bwd],
+                include_perf_metrics=True,
             )
         assert isinstance(df, pd.DataFrame)
 
@@ -147,7 +231,8 @@ class TestTreePerfPhase12:
                 )
             except ValueError:
                 TreePerfAnalyzer.summarize_df_unified_perf_table(
-                    unified, include_pct=True,
+                    unified,
+                    include_pct=True,
                 )
         launchers = analyzer.get_df_kernel_launchers(
             include_args=True,
@@ -155,30 +240,49 @@ class TestTreePerfPhase12:
         )
         if not launchers.empty:
             TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
-                launchers, include_pct=True, group_by_parent_module=True,
+                launchers,
+                include_pct=True,
+                group_by_parent_module=True,
             )
 
 
 class TestPerfModelPhase12:
     def test_conv_unknown_dim_and_vllm_attention(self):
         with pytest.raises(ValueError, match="Unknown convolution"):
-            perf_model.aten_conv({
-                "args": {
-                    "Input Dims": [[2], [4]],
-                    "Input type": ["c10::BFloat16", "c10::BFloat16"],
-                    "Concrete Inputs": ["", "", "", "(1)", "(0)", "(1)", "False", "(0)", "1"],
+            perf_model.aten_conv(
+                {
+                    "args": {
+                        "Input Dims": [[2], [4]],
+                        "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                        "Concrete Inputs": [
+                            "",
+                            "",
+                            "",
+                            "(1)",
+                            "(0)",
+                            "(1)",
+                            "False",
+                            "(0)",
+                            "1",
+                        ],
+                    }
                 }
-            })
+            )
 
-        attn = perf_model.vllm_unified_attention_with_output({
-            "annotation": "(prefill_128_64_8_0_0_0_0)",
-            "args": {
-                "Input Dims": [
-                    [128, 8, 64], [128, 8, 64], [128, 8, 64], [128, 8, 64],
-                ],
-                "Input type": ["c10::BFloat16"] * 4,
-            },
-        })
+        attn = perf_model.vllm_unified_attention_with_output(
+            {
+                "annotation": "(prefill_128_64_8_0_0_0_0)",
+                "args": {
+                    "Input Dims": [
+                        [128, 8, 64],
+                        [128, 8, 64],
+                        [128, 8, 64],
+                        [128, 8, 64],
+                    ],
+                    "Input type": ["c10::BFloat16"] * 4,
+                },
+            }
+        )
         attn.param_details["sum_ctx_tokens"] = 0
         with pytest.raises(NotImplementedError):
             attn.flops()
@@ -208,13 +312,15 @@ class TestOrchestratorPhase12:
     def test_comparative_fusion_multi_kernel_module(self, tmp_path):
         csv_dir = tmp_path / "t1"
         csv_dir.mkdir()
-        pd.DataFrame({
-            "name": ["Cijk_A", "Cijk_B"],
-            "source": ["trace1", "trace1"],
-            "lowest_common_ancestor_id": [100, 100],
-            "kernel_time": [5000.0, 3000.0],
-            "gpu_op_uid": [10, 11],
-        }).to_csv(csv_dir / "diff_stats.csv", index=False)
+        pd.DataFrame(
+            {
+                "name": ["Cijk_A", "Cijk_B"],
+                "source": ["trace1", "trace1"],
+                "lowest_common_ancestor_id": [100, 100],
+                "kernel_time": [5000.0, 3000.0],
+                "gpu_op_uid": [10, 11],
+            }
+        ).to_csv(csv_dir / "diff_stats.csv", index=False)
 
         k1 = _kernel_event(10, "Cijk_A", dur=500)
         k2 = _kernel_event(11, "Cijk_B", dur=300)
@@ -239,11 +345,21 @@ class TestReportingPhase12:
     def test_classify_graph_capture_json_gz(self, tmp_path):
         capture_dir = tmp_path / "captures"
         capture_dir.mkdir()
-        trace = {"traceEvents": [
-            {"ph": "X", "cat": "user_annotation",
-             "name": "graph_capture: batch=4 mode=FULL",
-             "ts": 1000, "dur": 100, "pid": 1, "tid": 1, "args": {}},
-        ], "schemaVersion": 1}
+        trace = {
+            "traceEvents": [
+                {
+                    "ph": "X",
+                    "cat": "user_annotation",
+                    "name": "graph_capture: batch=4 mode=FULL",
+                    "ts": 1000,
+                    "dur": 100,
+                    "pid": 1,
+                    "tid": 1,
+                    "args": {},
+                },
+            ],
+            "schemaVersion": 1,
+        }
         gz_path = capture_dir / "graph_capture_rank_0.json.gz"
         with gzip.open(gz_path, "wt") as f:
             json.dump(trace, f)
@@ -284,7 +400,9 @@ class TestOrchestratorPhase12B:
         )
 
         k = _kernel_event(0, "k0", dur=100)
-        evts = tree_events or [{"name": "aten::mm", "_category": "aten", "gpu_events": [0], "ts": 0}]
+        evts = tree_events or [
+            {"name": "aten::mm", "_category": "aten", "gpu_events": [0], "ts": 0}
+        ]
         tree = _StubTree(evts + [k], {0: k})
         analyzer = _StubAnalyzer(tree)
 
@@ -297,9 +415,12 @@ class TestOrchestratorPhase12B:
         old_argv = sys.argv
         sys.argv = [
             "orchestrator_prepare",
-            "--trace-path", RESNET_TRACE if os.path.isfile(RESNET_TRACE) else NORM_TRACE,
-            "--platform", "MI300X",
-            "--output-dir", out,
+            "--trace-path",
+            RESNET_TRACE if os.path.isfile(RESNET_TRACE) else NORM_TRACE,
+            "--platform",
+            "MI300X",
+            "--output-dir",
+            out,
         ]
         try:
             op.main()
@@ -310,16 +431,18 @@ class TestOrchestratorPhase12B:
     def test_bottleneck_nlargest_and_empty_category(self, tmp_path, monkeypatch):
         rows = []
         for i in range(20):
-            rows.append({
-                "name": f"aten::op_{i}",
-                "op category": "GEMM" if i > 0 else "",
-                "Kernel Time (µs)_sum": 100.0,
-                "total_duration_us": 60000.0,
-                "kernel_details_summary": f"[{{'name': 'k{i}'}}]",
-                "Data Moved (MB)": 1.0,
-                "perf_params": "{}",
-                "Input Dims": "[[2,3]]",
-            })
+            rows.append(
+                {
+                    "name": f"aten::op_{i}",
+                    "op category": "GEMM" if i > 0 else "",
+                    "Kernel Time (µs)_sum": 100.0,
+                    "total_duration_us": 60000.0,
+                    "kernel_details_summary": f"[{{'name': 'k{i}'}}]",
+                    "Data Moved (MB)": 1.0,
+                    "perf_params": "{}",
+                    "Input Dims": "[[2,3]]",
+                }
+            )
         out = self._run_orch(tmp_path, monkeypatch, rows)
         assert os.path.isfile(os.path.join(out, "category_data", "gemm_ops.csv"))
 
@@ -330,24 +453,33 @@ class TestOrchestratorPhase12B:
             raise RuntimeError("overlap boom")
 
         monkeypatch.setattr(GPUEventAnalyser, "compute_metrics_dict", boom)
-        rows = [{
-            "name": "aten::mm",
-            "op category": "GEMM",
-            "Kernel Time (µs)_sum": 1000.0,
-            "total_duration_us": 60000.0,
-            "kernel_details_summary": "[{'name': 'k0'}]",
-            "Data Moved (MB)": 1.0,
-            "perf_params": "{}",
-            "Input Dims": "[[2,3]]",
-        }]
+        rows = [
+            {
+                "name": "aten::mm",
+                "op category": "GEMM",
+                "Kernel Time (µs)_sum": 1000.0,
+                "total_duration_us": 60000.0,
+                "kernel_details_summary": "[{'name': 'k0'}]",
+                "Data Moved (MB)": 1.0,
+                "perf_params": "{}",
+                "Input Dims": "[[2,3]]",
+            }
+        ]
         out = self._run_orch(
             tmp_path,
             monkeypatch,
             rows,
-            tree_events=[{
-                "name": "gemm_kernel", "dur": 100, "ts": 1000, "UID": 0,
-                "_category": "kernel", "cat": "kernel", "args": {"stream": 0},
-            }],
+            tree_events=[
+                {
+                    "name": "gemm_kernel",
+                    "dur": 100,
+                    "ts": 1000,
+                    "UID": 0,
+                    "_category": "kernel",
+                    "cat": "kernel",
+                    "args": {"stream": 0},
+                }
+            ],
         )
         data = json.loads(
             open(os.path.join(out, "category_data", "multi_kernel_data.json")).read()
@@ -355,16 +487,18 @@ class TestOrchestratorPhase12B:
         assert "overlap_analysis" in data
 
     def test_sync_bottleneck_detection(self, tmp_path, monkeypatch):
-        rows = [{
-            "name": "aten::slow_sync",
-            "op category": "GEMM",
-            "Kernel Time (µs)_sum": 100.0,
-            "total_duration_us": 5000000.0,
-            "kernel_details_summary": "[{'name': 'k0'}]",
-            "Data Moved (MB)": 1.0,
-            "perf_params": "{}",
-            "Input Dims": "[[2,3]]",
-        }]
+        rows = [
+            {
+                "name": "aten::slow_sync",
+                "op category": "GEMM",
+                "Kernel Time (µs)_sum": 100.0,
+                "total_duration_us": 5000000.0,
+                "kernel_details_summary": "[{'name': 'k0'}]",
+                "Data Moved (MB)": 1.0,
+                "perf_params": "{}",
+                "Input Dims": "[[2,3]]",
+            }
+        ]
         out = self._run_orch(tmp_path, monkeypatch, rows)
         meta_dir = os.path.join(out, "metadata")
         gemm_meta = os.path.join(meta_dir, "gemm_metadata.json")
@@ -374,16 +508,27 @@ class TestOrchestratorPhase12B:
 class TestPerfModelPhase12B:
     def test_remaining_conv_and_reduce_edges(self):
         with pytest.raises(ValueError, match="Unknown convolution"):
-            perf_model.aten_conv_bwd({
-                "args": {
-                    "Input Dims": [[2], [2], [4]],
-                    "Input type": ["c10::BFloat16"] * 3,
-                    "Concrete Inputs": [
-                        "", "", "", "[0]", "[1]", "[0]", "[1]",
-                        "False", "[0]", "1", "[True, True, False]",
-                    ],
+            perf_model.aten_conv_bwd(
+                {
+                    "args": {
+                        "Input Dims": [[2], [2], [4]],
+                        "Input type": ["c10::BFloat16"] * 3,
+                        "Concrete Inputs": [
+                            "",
+                            "",
+                            "",
+                            "[0]",
+                            "[1]",
+                            "[0]",
+                            "[1]",
+                            "False",
+                            "[0]",
+                            "1",
+                            "[True, True, False]",
+                        ],
+                    }
                 }
-            })
+            )
 
         evt = {
             "name": "aten::sum",
@@ -397,9 +542,9 @@ class TestPerfModelPhase12B:
         assert perf_model.aten_reduce(evt).flops() > 0
 
         with pytest.raises(ValueError, match="could not parse"):
-            perf_model.primus_turbo_grouped_gemm_variable_k({
-                "args": {"Input Dims": [[1, 2, 3]], "Input type": ["c10::BFloat16"]}
-            })
+            perf_model.primus_turbo_grouped_gemm_variable_k(
+                {"args": {"Input Dims": [[1, 2, 3]], "Input type": ["c10::BFloat16"]}}
+            )
 
 
 class TestReportingPhase12B:
@@ -437,14 +582,45 @@ class TestTreePerfCollectPhase12:
     def test_is_leaf_cpu_op_via_descendant_kernel(self):
         corr = 600
         events = [
-            _make_gpu_event("parent", 1000, 50, "cpu_op", "aten::wrapper",
-                            args={"Input Dims": [[2, 2]]}),
-            _make_gpu_event("leaf", 1010, 30, "cpu_op", "aten::mm",
-                            args={"Input Dims": [[32, 64], [64, 128]], "Input type": ["fp16", "fp16"]}),
-            _make_gpu_event("rt", 1020, 5, "cuda_runtime", "hipLaunchKernel", args={"correlation": corr}),
-            _make_gpu_event("k", 1030, 40, "kernel", "gemm_k", pid=0, tid=7,
-                            args={"correlation": corr, "stream": 7}),
-            _mk_ac2g(corr, 0, 7, 1030, "s"), _mk_ac2g(corr, 0, 7, 1070, "f"),
+            _make_gpu_event(
+                "parent",
+                1000,
+                50,
+                "cpu_op",
+                "aten::wrapper",
+                args={"Input Dims": [[2, 2]]},
+            ),
+            _make_gpu_event(
+                "leaf",
+                1010,
+                30,
+                "cpu_op",
+                "aten::mm",
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["fp16", "fp16"],
+                },
+            ),
+            _make_gpu_event(
+                "rt",
+                1020,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                args={"correlation": corr},
+            ),
+            _make_gpu_event(
+                "k",
+                1030,
+                40,
+                "kernel",
+                "gemm_k",
+                pid=0,
+                tid=7,
+                args={"correlation": corr, "stream": 7},
+            ),
+            _mk_ac2g(corr, 0, 7, 1030, "s"),
+            _mk_ac2g(corr, 0, 7, 1070, "f"),
         ]
         analyzer = _build_analyzer(events)
         wrapper = next(e for e in analyzer.tree.events if e["name"] == "aten::wrapper")

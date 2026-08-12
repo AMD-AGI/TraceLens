@@ -206,6 +206,7 @@ def test_get_node_rank_protobuf_mapping_missing_folder():
     assert mapping == {}
     assert world_size == 0
 
+
 def test_get_node_rank_protobuf_mapping_finds_nested_logs(tmp_path):
     nested = tmp_path / "workers"
     nested.mkdir()
@@ -218,6 +219,7 @@ def test_get_node_rank_protobuf_mapping_finds_nested_logs(tmp_path):
     assert world_size == 2
     assert mapping["1"] == str(pb_file)
 
+
 def test_get_node_rank_protobuf_mapping_warns_on_nnodes_mismatch(tmp_path, capsys):
     (tmp_path / "a.log").write_text("NODE_RANK=0\nhostname=node0\nnnodes=4\n")
     (tmp_path / "b.log").write_text("NODE_RANK=1\nhostname=node1\nnnodes=4\n")
@@ -228,11 +230,13 @@ def test_get_node_rank_protobuf_mapping_warns_on_nnodes_mismatch(tmp_path, capsy
     captured = capsys.readouterr().out
     assert "NODE_RANK count" in captured
 
+
 def test_get_node_rank_protobuf_mapping_warns_on_unmapped_pb(tmp_path, capsys):
     (tmp_path / "node9.xplane.pb").write_text("pb")
     get_node_rank_protobuf_mapping(str(tmp_path))
     captured = capsys.readouterr().out
     assert "no corresponding NODE_RANK" in captured
+
 
 def test_parse_log_file_for_node_rank_from_filename(tmp_path, monkeypatch):
     import importlib
@@ -250,6 +254,7 @@ def test_parse_log_file_for_node_rank_from_filename(tmp_path, monkeypatch):
     assert node_name == "worker"
     assert nnodes is None
 
+
 def test_parse_log_file_for_node_rank_uses_path_when_hostname_missing(tmp_path):
     log_file = tmp_path / "nodeC.log"
     log_file.write_text("NODE_RANK=5\n", encoding="utf-8")
@@ -258,10 +263,12 @@ def test_parse_log_file_for_node_rank_uses_path_when_hostname_missing(tmp_path):
     assert node_name == "nodeC"
     assert nnodes is None
 
+
 def test_parse_log_file_for_node_rank_handles_read_error(tmp_path):
     missing = tmp_path / "missing.log"
     node_rank, node_name, nnodes = parse_log_file_for_node_rank(missing)
     assert (node_rank, node_name, nnodes) == (None, None, None)
+
 
 def test_nccl_analyser_load_trace_data_multiprocessing(tmp_path):
     world_size = 2
@@ -271,8 +278,11 @@ def test_nccl_analyser_load_trace_data_multiprocessing(tmp_path):
         _write_trace(path, [_nccl_kernel(external_id=100 + rank, ts=1000 + rank)])
         filepaths.append(str(path))
 
-    analyser = NcclAnalyser(filepaths, world_size, use_multiprocessing=True, max_workers=2)
+    analyser = NcclAnalyser(
+        filepaths, world_size, use_multiprocessing=True, max_workers=2
+    )
     assert len(analyser.rank2trace_data) == world_size
+
 
 def test_nccl_analyser_build_df_long_with_process_group_metadata(tmp_path):
     world_size = 2
@@ -304,12 +314,26 @@ def test_nccl_analyser_build_df_long_with_process_group_metadata(tmp_path):
     assert df_long["collective_id"].str.startswith("default_pg_").all()
     assert df_long["In msg size (MB)"].notna().all()
 
+
 def test_nccl_analyser_build_df_long_empty_trace(tmp_path):
     path = tmp_path / "rank0.json"
-    _write_trace(path, [{"ph": "X", "cat": "cpu_op", "name": "ignored", "ts": 1, "dur": 1, "args": {}}])
+    _write_trace(
+        path,
+        [
+            {
+                "ph": "X",
+                "cat": "cpu_op",
+                "name": "ignored",
+                "ts": 1,
+                "dur": 1,
+                "args": {},
+            }
+        ],
+    )
     analyser = NcclAnalyser([str(path)], world_size=1)
     df_long = analyser.build_df_long()
     assert df_long.empty
+
 
 def test_nccl_analyser_build_df_summary_long(tmp_path):
     world_size = 2
@@ -340,6 +364,7 @@ def test_nccl_analyser_build_df_summary_long(tmp_path):
     assert not summary.empty
     assert "dur_sum" in summary.columns
     assert "operation_count" in summary.columns
+
 
 def test_nccl_analyser_instance_filter_fn():
     event = _nccl_kernel()
