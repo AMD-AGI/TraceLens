@@ -4334,23 +4334,15 @@ class TestPerfModelPush95Coverage:
     def test_gemm_origami_mock_path(self, monkeypatch):
         monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         perf_model.GEMM.cache_gemm_results.clear()
-        mock_hw = MagicMock()
-        mock_helper = MagicMock()
-        mock_helper.get_simulation_time.return_value = 7.5
         mock_origami = MagicMock()
-        dtype_t = MagicMock()
-        dtype_t.BFloat16 = "bf16"
-        dtype_t.Float = "fp32"
-        dtype_t.Half = "fp16"
-        dtype_t.Double = "fp64"
-        dtype_t.Float8_fnuz = "fp8"
-        mock_origami.data_type_t = dtype_t
+        mock_origami.data_type_t.BFloat16 = "bf16_dtype"
+        mock_helper_cls = MagicMock()
+        mock_helper_cls.get_hardware.return_value = MagicMock(N_CU=64)
+        mock_helper_cls.return_value.get_simulation_time.return_value = 7.5
         with patch.dict(sys.modules, {"origami": mock_origami}):
             with patch(
-                "TraceLens.PerfModel.origami_helper.OrigamiHelper"
-            ) as helper_cls:
-                helper_cls.get_hardware.return_value = mock_hw
-                helper_cls.return_value = mock_helper
+                "TraceLens.PerfModel.origami_helper.OrigamiHelper", mock_helper_cls
+            ):
                 t, cmd = perf_model.GEMM.get_simulation_time_func(
                     _ARCH,
                     4,
@@ -4364,7 +4356,7 @@ class TestPerfModelPush95Coverage:
                 )
         assert t == 7.5
         assert "Origami" in cmd
-        helper_cls.assert_called_once()
+        mock_helper_cls.assert_called_once()
 
     def test_gemm_origami_unsupported_dtype(self, monkeypatch):
         monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
