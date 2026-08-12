@@ -32,7 +32,10 @@ CLASS_ROUTES = [
     (r"Nccl|nccl", "test_nccl_analyser.py"),
     (r"PseudoOp|MLA|TraceToTree|Trace2Tree", "test_pseudo_ops_extension.py"),
     (r"TraceDiff|Tracediff|tracediff", "test_tracediff.py"),
-    (r"SplitAnnotation|split_inference|CaptureMerge|GraphCapture", "test_split_inference_trace_annotation.py"),
+    (
+        r"SplitAnnotation|split_inference|CaptureMerge|GraphCapture",
+        "test_split_inference_trace_annotation.py",
+    ),
     (r"CompareTraces|JaxLlama", "test_compare_traces_jax_llama.py"),
     (r"ComparePerf", "test_compare_perf_reports.py"),
     (r"Rocprof|rocprof", "test_rocprof_perf_report.py"),
@@ -40,10 +43,22 @@ CLASS_ROUTES = [
     (r"Collective|MultiRank", "test_multi_rank_collective_report.py"),
     (r"Inference|GraphMode", "test_inference_perf_report.py"),
     (r"Genesis|genesis", "test_genesis.py"),
-    (r"Category|Arch|Convolution|Elementwise|Gemm|Norm|Reduce|TritonAnalysis", "test_analysis_agent_category_utils.py"),
-    (r"Orchestrator|Agent|Validation|PlotUtils|ReportUtils|Classify|KernelFusion|Prepare|Fusion", "test_analysis_agent_utils.py"),
-    (r"PerfModel|Moe|Attention|RmsNorm|Triton|KernelName|Conv|Softmax|Sdpa|CustomCollective|Bulk", "test_perfmodel_extensions.py"),
-    (r"TreePerf|JaxTree|GPUEvent|Subtree|KernelLauncher|JaxAnalyses", "test_treeperf.py"),
+    (
+        r"Category|Arch|Convolution|Elementwise|Gemm|Norm|Reduce|TritonAnalysis",
+        "test_analysis_agent_category_utils.py",
+    ),
+    (
+        r"Orchestrator|Agent|Validation|PlotUtils|ReportUtils|Classify|KernelFusion|Prepare|Fusion",
+        "test_analysis_agent_utils.py",
+    ),
+    (
+        r"PerfModel|Moe|Attention|RmsNorm|Triton|KernelName|Conv|Softmax|Sdpa|CustomCollective|Bulk",
+        "test_perfmodel_extensions.py",
+    ),
+    (
+        r"TreePerf|JaxTree|GPUEvent|Subtree|KernelLauncher|JaxAnalyses",
+        "test_treeperf.py",
+    ),
     (r"Reporting|PytorchReport|Pytorch|Reporting|Cli", "test_reporting_utils.py"),
     (r"Util|RocprofParser|TraceEvent", "test_util.py"),
     (r"JAX|Jax", "test_jax_perf_report.py"),
@@ -52,19 +67,43 @@ CLASS_ROUTES = [
 CATCH_ALL_CLASS = re.compile(r"TestCoveragePush95Phase|TestCoverage.*Phase\d+$")
 
 METHOD_ROUTES = [
-    (r"orchestrator|fusion_candidates|_StubTree|_StubAnalyzer|classify_kernels|validation_utils|plot_utils|report_utils|kernel_fusion|MarkerValidator|validate_findings|validate_report", "test_analysis_agent_utils.py"),
-    (r"perf_model|moe_ext|attn_ext|rms_ext|pext\.|TritonCompiled|kernel_name_parser|custom_collectives|InferenceAttention|moe_aiter|gemm_a", "test_perfmodel_extensions.py"),
-    (r"TreePerf|GPUEvent|JaxTree|JaxAnalyses|summarize_df|get_kernel_launchers|build_df_unified", "test_treeperf.py"),
-    (r"generate_inference|capture_merge|merge_capture|align_streams|verify_subtree|load_capture|find_closest_batch|execution_details", "test_inference_perf_report.py"),
-    (r"generate_perf_report_pytorch[^_]|generate_perf_report_genesis|compare_perf_reports|reporting_utils", "test_reporting_utils.py"),
-    (r"pftrace|HIPActivity|HIPEvent|build_hip_summary", "test_pftrace_hip_activity_report.py"),
+    (
+        r"orchestrator|fusion_candidates|_StubTree|_StubAnalyzer|classify_kernels|validation_utils|plot_utils|report_utils|kernel_fusion|MarkerValidator|validate_findings|validate_report",
+        "test_analysis_agent_utils.py",
+    ),
+    (
+        r"perf_model|moe_ext|attn_ext|rms_ext|pext\.|TritonCompiled|kernel_name_parser|custom_collectives|InferenceAttention|moe_aiter|gemm_a",
+        "test_perfmodel_extensions.py",
+    ),
+    (
+        r"TreePerf|GPUEvent|JaxTree|JaxAnalyses|summarize_df|get_kernel_launchers|build_df_unified",
+        "test_treeperf.py",
+    ),
+    (
+        r"generate_inference|capture_merge|merge_capture|align_streams|verify_subtree|load_capture|find_closest_batch|execution_details",
+        "test_inference_perf_report.py",
+    ),
+    (
+        r"generate_perf_report_pytorch[^_]|generate_perf_report_genesis|compare_perf_reports|reporting_utils",
+        "test_reporting_utils.py",
+    ),
+    (
+        r"pftrace|HIPActivity|HIPEvent|build_hip_summary",
+        "test_pftrace_hip_activity_report.py",
+    ),
     (r"genesis|Genesis", "test_genesis.py"),
     (r"rocprof|Rocprof", "test_rocprof_perf_report.py"),
     (r"compare_traces_jax|jax_llama", "test_compare_traces_jax_llama.py"),
     (r"TraceDiff|trace_diff|tracediff", "test_tracediff.py"),
     (r"TraceToTree|trace_to_tree|pseudo_ops|JaxTraceToTree", "test_trace2tree.py"),
-    (r"split_inference|annotation_utils|inference_iteration", "test_split_inference_trace_annotation.py"),
-    (r"analysis_utils|arch_utils|CategoryAnalysis|convolution_analysis|elementwise_analysis", "test_analysis_agent_category_utils.py"),
+    (
+        r"split_inference|annotation_utils|inference_iteration",
+        "test_split_inference_trace_annotation.py",
+    ),
+    (
+        r"analysis_utils|arch_utils|CategoryAnalysis|convolution_analysis|elementwise_analysis",
+        "test_analysis_agent_category_utils.py",
+    ),
     (r"NcclAnalyser|nccl_analyser", "test_nccl_analyser.py"),
     (r"RocprofParser|TraceEventUtils", "test_util.py"),
     (r"generate_perf_report_jax|JaxAnalyses", "test_jax_perf_report.py"),
@@ -72,11 +111,23 @@ METHOD_ROUTES = [
 ]
 
 IMPORT_REPLACEMENTS = [
-    (r"from tests\.test_treeperf_coverage import", "from tests.fixtures.treeperf import"),
-    (r"from tests\.test_reporting_coverage import", "from tests.fixtures.reporting import"),
+    (
+        r"from tests\.test_treeperf_coverage import",
+        "from tests.fixtures.treeperf import",
+    ),
+    (
+        r"from tests\.test_reporting_coverage import",
+        "from tests.fixtures.reporting import",
+    ),
     (r"from tests\.test_agent_coverage import", "from tests.fixtures.agent import"),
-    (r"from tests\.test_perfmodel_coverage import", "from tests.fixtures.perfmodel import"),
-    (r"from tests\.test_coverage_95_final import", "from tests.fixtures.reporting import"),
+    (
+        r"from tests\.test_perfmodel_coverage import",
+        "from tests.fixtures.perfmodel import",
+    ),
+    (
+        r"from tests\.test_coverage_95_final import",
+        "from tests.fixtures.reporting import",
+    ),
     (r"from tests\.test_push95_coverage import", "from tests.fixtures.traces import"),
 ]
 
@@ -125,7 +176,9 @@ def collect_test_names(block: str) -> list[str]:
     return names
 
 
-def append_block(target_path: str, source_file: str, block: str, seen: set[str]) -> bool:
+def append_block(
+    target_path: str, source_file: str, block: str, seen: set[str]
+) -> bool:
     block = rewrite_imports(strip_header(block))
     names = collect_test_names(block)
     if not names:
@@ -169,20 +222,28 @@ def migrate_split_file(source: str, seen: set[str]) -> None:
         if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
             if CATCH_ALL_CLASS.search(node.name):
                 for item in node.body:
-                    if isinstance(item, ast.FunctionDef) and item.name.startswith("test_"):
+                    if isinstance(item, ast.FunctionDef) and item.name.startswith(
+                        "test_"
+                    ):
                         method_src = get_node_source(lines, item)
                         target = route_method(method_src) or route_method(
                             imports_block + method_src
                         )
                         if not target:
-                            print(f"WARN unrouted method {source}::{node.name}.{item.name}")
+                            print(
+                                f"WARN unrouted method {source}::{node.name}.{item.name}"
+                            )
                             target = "test_reporting_utils.py"
                         dedented = []
                         for line in lines[item.lineno - 1 : item.end_lineno]:
-                            dedented.append(line[4:] if line.startswith("    ") else line)
+                            dedented.append(
+                                line[4:] if line.startswith("    ") else line
+                            )
                         block = imports_block + "\n\n" + "".join(dedented)
                         label = f"{source}::{node.name}.{item.name}"
-                        if append_block(os.path.join(TESTS_DIR, target), label, block, seen):
+                        if append_block(
+                            os.path.join(TESTS_DIR, target), label, block, seen
+                        ):
                             print(f"  method -> {target}: {item.name}")
             else:
                 target = route_class(node.name)
@@ -310,7 +371,9 @@ def _sweep_treeperf_analyzer(analyzer):
             }:
                 extra.append(get_node_source(lines, node))
         if extra:
-            with open(os.path.join(fixtures_dir, "reporting.py"), "a", encoding="utf-8") as f:
+            with open(
+                os.path.join(fixtures_dir, "reporting.py"), "a", encoding="utf-8"
+            ) as f:
                 f.write("\n\n# --- from test_coverage_95_final ---\n")
                 f.write("".join(extra))
 
@@ -377,7 +440,9 @@ def _discover_inference_cases():
         cases.append(pytest.param(dirpath, gz[0], id=entry))
     return cases
 '''
-    open(os.path.join(fixtures_dir, "traces.py"), "w", encoding="utf-8").write(traces_src)
+    open(os.path.join(fixtures_dir, "traces.py"), "w", encoding="utf-8").write(
+        traces_src
+    )
     open(os.path.join(fixtures_dir, "__init__.py"), "w", encoding="utf-8").write(
         '"""Shared pytest helpers for TraceLens tests."""\n'
     )
@@ -412,15 +477,22 @@ def inject_trace_imports() -> None:
         changed = False
         for chunk in parts[1:]:
             header_line, _, body = chunk.partition("\n")
-            used = {n for n in TRACE_NAMES if re.search(r"\b" + re.escape(n) + r"\b", body)}
+            used = {
+                n for n in TRACE_NAMES if re.search(r"\b" + re.escape(n) + r"\b", body)
+            }
             if used and "from tests.fixtures.traces import" not in body:
-                imp = "from tests.fixtures.traces import " + ", ".join(sorted(used)) + "\n"
+                imp = (
+                    "from tests.fixtures.traces import "
+                    + ", ".join(sorted(used))
+                    + "\n"
+                )
                 body = imp + body
                 changed = True
             new_parts.append(header_line + "\n" + body)
         if changed:
             open(path, "w", encoding="utf-8").write(
-                new_parts[0] + "".join("\n# --- migrated from " + c for c in new_parts[1:])
+                new_parts[0]
+                + "".join("\n# --- migrated from " + c for c in new_parts[1:])
             )
             print(f"injected trace imports: {fn}")
 

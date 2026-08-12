@@ -210,58 +210,14 @@ def test_jax_perf_report_csv_regression(
 
 
 # --- migrated from test_coverage_95_final.py ---
-import gzip
 import importlib
-import json
 import os
 import sys
-from copy import deepcopy
 from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-)
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.Reporting import reporting_utils as ru
-from TraceLens.Reporting.compare_traces_jax_llama import (
-    Event,
-    Summary,
-    classify_stage_base,
-    compute_stage_table,
-    emit_report,
-    extract_gpu_events,
-    infer_params,
-    is_loop_multiply_fusion,
-    load_trace,
-    mk_stats,
-    percentile,
-    summarize_one,
-    token_start_times,
-    top_stats_by_key,
-)
-from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
-    _resolve_trace_files_glob,
-    generate_collective_report,
-)
-from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
-from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
-    apply_pseudo_op_extensions,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
-from TraceLens.util import RocprofParser
-from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer
 from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
-from tests.fixtures.reporting import _mk_ac2g, _mk_event
-from tests.fixtures.treeperf import (
-    _build_analyzer,
-    _make_gpu_event,
-    _mk_pytorch_trace,
-)
 
 
 class TestJaxAnalysisMain:
@@ -319,58 +275,14 @@ class TestJaxAnalysisMain:
 
 # --- migrated from test_coverage_95_final.py ---
 from tests.fixtures.traces import JAX_PB
-import gzip
 import importlib
-import json
 import os
 import sys
-from copy import deepcopy
 from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-)
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.Reporting import reporting_utils as ru
-from TraceLens.Reporting.compare_traces_jax_llama import (
-    Event,
-    Summary,
-    classify_stage_base,
-    compute_stage_table,
-    emit_report,
-    extract_gpu_events,
-    infer_params,
-    is_loop_multiply_fusion,
-    load_trace,
-    mk_stats,
-    percentile,
-    summarize_one,
-    token_start_times,
-    top_stats_by_key,
-)
-from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
-    _resolve_trace_files_glob,
-    generate_collective_report,
-)
-from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
-from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
-    apply_pseudo_op_extensions,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
-from TraceLens.util import RocprofParser
-from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer
 from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
-from tests.fixtures.reporting import _mk_ac2g, _mk_event
-from tests.fixtures.treeperf import (
-    _build_analyzer,
-    _make_gpu_event,
-    _mk_pytorch_trace,
-)
 
 
 class TestJaxFromFile:
@@ -385,10 +297,7 @@ class TestJaxFromFile:
 import os
 import pandas as pd
 import pytest
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
 from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
 
 
@@ -404,14 +313,9 @@ class TestJaxComparePhase13:
 
 # --- migrated from test_reporting_cli_coverage.py ---
 import importlib
-import json
 import os
 import sys
 import pytest
-from tests.fixtures.reporting import (
-    _minimal_pftrace_events,
-    _write_trace,
-)
 
 
 def test_jax_report_main(tmp_path):

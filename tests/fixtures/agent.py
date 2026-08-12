@@ -6,50 +6,18 @@
 
 """Shared test helpers migrated from test_agent_coverage.py."""
 
-import json
 import os
-import subprocess
-import sys
 import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils import plot_utils
-from TraceLens.Agent.Analysis.utils.classify_kernels import (
-    classify_all,
-    main as classify_main,
-)
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-)
-from TraceLens.Agent.Analysis.utils.report_utils import (
-    load_findings,
-    load_manifest,
-    load_manifest_categories,
-    prepare_model_identification_data,
-    generate_priority_data,
-)
-from TraceLens.Agent.Analysis.utils.validation_utils import (
-    MarkerValidator,
-    _category_findings_empty,
-    _check_coverage,
-    _check_time_sanity,
-    _extract_detailed_analysis_subsection,
-    _load_valid_args,
-    _metrics_json_for_findings,
-    _scan_args_cells,
-    _validate_report_args_column,
-    _validate_report_comparison_scope_diffs,
-    _validate_report_reasoning_candidates,
-    validate_findings_file,
-    validate_report,
-    validate_subagent_outputs,
-)
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
+
+
 def _write(path, text):
     with open(path, "w") as f:
         f.write(text)
+
+
 def _valid_compute_findings(rank=1, row=None):
     row = row or (
         "| aten::mm | M=2,N=3 | path/to/launch | mm_kernel | "
@@ -73,6 +41,8 @@ def _valid_compute_findings(rank=1, row=None):
         "<!-- impact-begin kind=detail_estimate low=1.0 high=3.0 -->\n"
         "<!-- impact-end -->\n"
     )
+
+
 def _valid_system_findings():
     return (
         "## Recommendations\n\n"
@@ -86,6 +56,8 @@ def _valid_system_findings():
         "<!-- impact-begin kind=detail_estimate low=1.0 high=3.0 -->\n"
         "<!-- impact-end -->\n"
     )
+
+
 def _full_report(extra_kf_impact=""):
     kf = "## Kernel Fusion Opportunities (Experimental)\n\n"
     if extra_kf_impact:
@@ -141,6 +113,8 @@ System detail.
 
 Reference material.
 """
+
+
 class _StubTree:
     def __init__(self, events, uid_map, parent_map=None):
         self.events = events
@@ -152,6 +126,8 @@ class _StubTree:
 
     def get_parent_event(self, ev):
         return self._parent_map.get(id(ev))
+
+
 class _StubAnalyzer:
     def __init__(self, tree, unified_events=None):
         self.tree = tree
@@ -162,8 +138,12 @@ class _StubAnalyzer:
 
     def collect_unified_perf_events(self):
         return self._unified
+
+
 def _kernel_event(uid, name, dur=1000):
     return {"name": name, "dur": dur, "_category": "kernel", "gpu_events": []}
+
+
 def _write_minimal_orchestrator_csvs(base, comparative=False):
     t1 = os.path.join(
         base, "perf_report_trace1_csvs" if comparative else "perf_report_csvs"

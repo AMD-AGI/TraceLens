@@ -151,12 +151,8 @@ if __name__ == "__main__":
 import importlib
 import json
 import sys
-import types
-from copy import deepcopy
-from typing import Dict, List
 from unittest.mock import patch
 import pandas as pd
-from TraceLens.Agent.Analysis.utils import arch_utils
 from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
     _write_markdown_report,
     generate_perf_report_pftrace_hip_activity,
@@ -165,26 +161,8 @@ from TraceLens.Reporting.pftrace_hip_activity_analysis import (
     PftraceHipActivityAnalyzer,
     classify,
 )
-from TraceLens.Reporting.tracediff_comparison_extension import (
-    tracediff_perf_summary_from_diff_stats,
-)
-from TraceLens.Trace2Tree.extensions.moe_aiter_pseudo_ops import (
-    _create_pseudo_op_moe_fused_aiter,
-    _has_cpu_op_descendant,
-    create_pseudo_ops_moe_fused_aiter,
-)
-from TraceLens.Trace2Tree.extensions.moe_flydsl_pseudo_ops import (
-    FUSED_MOE_PARENT,
-    create_pseudo_ops_moe_flydsl,
-)
-from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
-    _create_pseudo_op_moe_gptq_awq,
-    create_pseudo_ops_moe_gptq_awq,
-)
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from tests.fixtures.reporting import _full_pftrace_events, _write_trace
-from tests.test_trace2tree import _add_gpu_chain, _mk_event
-from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
+from tests.test_trace2tree import _mk_event
 
 
 class TestPftraceClassifyAndReportPhase10:
@@ -289,32 +267,12 @@ class TestPftraceClassifyAndReportPhase10:
 
 
 # --- migrated from test_coverage_95_phase5.py ---
-import gzip
 import json
 import os
 import pandas as pd
 import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.Reporting.compare_traces_jax_llama import (
-    compute_stage_table,
-    extract_gpu_events,
-    load_trace,
-)
 from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    find_closest_batch_size,
-    find_execution_details,
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
 from tests.fixtures.reporting import _minimal_pftrace_events, _write_trace
-from tests.fixtures.treeperf import (
-    _build_analyzer,
-    _make_gpu_event,
-    _mk_ac2g,
-    _mk_pytorch_trace,
-)
 
 
 class TestPftraceHipActivityDeep:
@@ -332,18 +290,10 @@ class TestPftraceHipActivityDeep:
 
 
 # --- migrated from test_coverage_95_phase8.py ---
-import gzip
 import json
 import os
 import pandas as pd
 import pytest
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.PerfModel import perf_model
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    classify_graph_capture_trace,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.test_conv_backward_bytes import _conv_bias_fwd_event
 from tests.fixtures.reporting import _mk_event
 
 
@@ -391,12 +341,12 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from TraceLens.PerfModel import perf_model
 from TraceLens.Reporting import pftrace_utils
-from TraceLens.TraceDiff.trace_diff import TraceDiff
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
-from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
-from tests.fixtures.reporting import _minimal_pftrace_events, _rich_pftrace_events, _write_trace
+from tests.fixtures.reporting import (
+    _minimal_pftrace_events,
+    _rich_pftrace_events,
+    _write_trace,
+)
 from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
     _write_markdown_report,
     generate_perf_report_pftrace_hip_activity,

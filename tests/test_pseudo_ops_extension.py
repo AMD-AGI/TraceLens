@@ -1373,57 +1373,19 @@ class TestPseudoOpsRegistryMla:
 
 
 # --- migrated from test_coverage_95_final.py ---
-import gzip
-import importlib
 import json
 import os
 import sys
 from copy import deepcopy
-from unittest.mock import MagicMock, patch
-import pandas as pd
 import pytest
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-)
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.Reporting import reporting_utils as ru
-from TraceLens.Reporting.compare_traces_jax_llama import (
-    Event,
-    Summary,
-    classify_stage_base,
-    compute_stage_table,
-    emit_report,
-    extract_gpu_events,
-    infer_params,
-    is_loop_multiply_fusion,
-    load_trace,
-    mk_stats,
-    percentile,
-    summarize_one,
-    token_start_times,
-    top_stats_by_key,
-)
-from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
-    _resolve_trace_files_glob,
-    generate_collective_report,
-)
-from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
 from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
     apply_pseudo_op_extensions,
 )
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
-from TraceLens.util import RocprofParser
-from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
-from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from tests.fixtures.reporting import _mk_ac2g, _mk_event
 from tests.fixtures.treeperf import (
-    _build_analyzer,
     _make_gpu_event,
-    _mk_pytorch_trace,
 )
 
 
@@ -1470,26 +1432,10 @@ class TestPseudoOpsRegistryFull:
 
 
 # --- migrated from test_coverage_95_phase10.py ---
-import importlib
 import json
 import sys
-import types
 from copy import deepcopy
 from typing import Dict, List
-from unittest.mock import patch
-import pandas as pd
-from TraceLens.Agent.Analysis.utils import arch_utils
-from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
-    _write_markdown_report,
-    generate_perf_report_pftrace_hip_activity,
-)
-from TraceLens.Reporting.pftrace_hip_activity_analysis import (
-    PftraceHipActivityAnalyzer,
-    classify,
-)
-from TraceLens.Reporting.tracediff_comparison_extension import (
-    tracediff_perf_summary_from_diff_stats,
-)
 from TraceLens.Trace2Tree.extensions.moe_aiter_pseudo_ops import (
     _create_pseudo_op_moe_fused_aiter,
     _has_cpu_op_descendant,
@@ -1504,9 +1450,8 @@ from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
     create_pseudo_ops_moe_gptq_awq,
 )
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from tests.fixtures.reporting import _write_trace
 from tests.test_trace2tree import _add_gpu_chain, _mk_event
-from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
+from tests.fixtures.treeperf import _make_gpu_event, _mk_ac2g
 
 
 class TestMoePseudoOpsFullPhase10:
@@ -1645,24 +1590,12 @@ class TestMoePseudoOpsFullPhase10:
 
 # --- migrated from test_coverage_95_phase12.py ---
 from tests.fixtures.traces import NORM_TRACE
-import gzip
 import json
 import os
 import sys
-from unittest.mock import patch
-import pandas as pd
 import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-)
-from TraceLens.PerfModel import perf_model
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    classify_graph_capture_trace,
-    generate_perf_report_pytorch,
-)
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
-from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
+from tests.fixtures.treeperf import _make_gpu_event, _mk_ac2g
 
 
 class TestTraceToTreePhase12:
@@ -1683,56 +1616,18 @@ class TestTraceToTreePhase12:
 
 # --- migrated from test_coverage_95_phase4.py ---
 from tests.fixtures.traces import TRACES_ROOT
-import importlib
-import inspect
 import json
 import os
 import sys
 from copy import deepcopy
-import pandas as pd
 import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import (
-    attention_perf_model_extensions as attn_ext,
-    moe_perf_model_extensions as moe_ext,
-    perf_model_extensions as pext,
-    rmsnorm_perf_model_extensions as rms_ext,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch as generate_inference_report,
 )
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
-from tests.test_conv_backward_bytes import (
-    _conv_bias_bwd_event,
-    _conv_bias_fwd_event,
-)
-from tests.test_dit_fused_ln_modulate import _fused_ln_fwd_event
-from tests.test_mamba_ssd import _mamba_event
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _GDN_ANNOTATION,
-    _gemm_event,
-    _norm_event,
-)
-from tests.fixtures.reporting import (
-    _create_genesis_capture,
-    _minimal_pftrace_events,
-    _write_trace,
-)
 from tests.fixtures.treeperf import (
-    _build_analyzer,
     _make_gpu_event,
-    _mk_pytorch_trace,
 )
 
 

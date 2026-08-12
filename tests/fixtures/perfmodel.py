@@ -7,86 +7,6 @@
 """Shared test helpers migrated from test_perfmodel_coverage.py."""
 
 from __future__ import annotations
-import sys
-from math import prod
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
-    InferenceAttention,
-    aiter_fmha_v3_varlen_fwd,
-    aiter_mha_batch_prefill,
-    aiter_paged_attention_ragged,
-    mha_varlen_fwd,
-    mla_decode_fwd,
-    mla_tilelang_sparse_fwd,
-    pa_decode_gluon,
-    pa_sparse_prefill_opus_fwd,
-    pseudo_mla_prefill_fwd,
-    pseudo_v4_paged_decode_csa,
-    pseudo_v4_paged_decode_hca,
-    pseudo_v4_paged_decode_swa,
-    vllm_unified_mla_attention_with_output,
-)
-from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
-    moe_aiter_ck_stage1,
-    moe_aiter_ck_stage2,
-    moe_aiter_fused_blockscale,
-    moe_aiter_unfused_down,
-    moe_aiter_unfused_up,
-    moe_flydsl_stage1,
-    moe_flydsl_stage2,
-    moe_gptq_awq_down,
-    moe_gptq_awq_up,
-    moe_triton_invoke_grouped_gemm,
-    moe_triton_unfused_down,
-    moe_triton_unfused_up,
-    sglang_fused_append_shared_experts,
-)
-from TraceLens.PerfModel.extensions.perf_model_extensions import (
-    aiter_dynamic_per_group_scaled_quant_fp4,
-    aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,
-    aiter_rope_cached_positions_2c_fwd_impl,
-    batched_gemm_a16wfp4,
-    batched_gemm_a8w8,
-    fused_flatten_mxfp4_quant,
-    gemm_a16w16,
-    gemm_a16w16_asm,
-    gemm_afp4wfp4,
-    mhc_fused_post_pre_gemm_sqrsum,
-    mhc_post,
-    mhc_pre_big_fuse_rmsnorm,
-    mhc_pre_gemm_sqrsum,
-    mixed_sample_outer_exponential,
-    sglang_quant_dynamic_mxfp4_quant,
-    sglang_store_cache,
-    topk_softplus,
-    vllm_rocm_unquantized_gemm,
-)
-from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
-    aiter_add_rmsnorm,
-    aiter_rmsnorm,
-    aiter_rmsnorm2d_fwd_with_dynamicquant_ck,
-    aiter_rmsnorm_quant,
-    vllm_rocm_aiter_rmsnorm_fp8_group_quant,
-    vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant,
-    vllm_rocm_aiter_triton_add_rmsnorm_pad,
-)
-from TraceLens.PerfModel.kernel_name_parser import parse_rocm_gemm
-from TraceLens.PerfModel.triton_compiled_perf_model import (
-    TritonCompiledPerfModel,
-    _lookup,
-    _meta_from_trace_args,
-    _parse_kernel_name,
-    _parse_wrapper,
-)
-from TraceLens.PerfModel.utils import (
-    add_simulation_time_columns,
-    name2bpe,
-    parse_bool,
-    simulation_dtype_map,
-    torch_dtype_map,
-)
 
 ROCM_GEMM = (
     "Custom_Cijk_Alik_Bljk_BBS_BH_Bias_HAS_SAV_UserArgs_MT64x16x64_MI16x16x1_SN_LDSB0"
@@ -104,6 +24,8 @@ _ARCH = {
     "mem_bw_gbps": 5300,
     "l1_bw_gbps": 100,
 }
+
+
 def _gemm_event(name, a_shape, b_shape, dtypes=None, strides=None, kernel_names=None):
     dtypes = dtypes or ["c10::BFloat16", "c10::BFloat16"]
     event = {
@@ -118,6 +40,8 @@ def _gemm_event(name, a_shape, b_shape, dtypes=None, strides=None, kernel_names=
     if kernel_names:
         event["kernel_names"] = kernel_names
     return event
+
+
 def _sdpa_event(cls, q, k, v, concrete, strides=None, bhnd=(0, 2, 1, 3)):
     event = {
         "name": cls.__name__,
@@ -130,6 +54,8 @@ def _sdpa_event(cls, q, k, v, concrete, strides=None, bhnd=(0, 2, 1, 3)):
     if strides:
         event["args"]["Input Strides"] = strides
     return event
+
+
 def _norm_event(op_shape, channels, training=True, affine=True, has_bias=True):
     weight = (channels,) if affine else None
     bias = (channels,) if has_bias and affine else None
@@ -151,6 +77,8 @@ def _norm_event(op_shape, channels, training=True, affine=True, has_bias=True):
             ],
         }
     }
+
+
 def _moe_unfused_event(gated=True, kernel_name="moe_fp8_gemm_kernel"):
     return {
         "args": {

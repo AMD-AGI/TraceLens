@@ -9,47 +9,9 @@
 from __future__ import annotations
 import gzip
 import json
-import os
-import textwrap
 from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
 import pandas as pd
 import pytest
-from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
-    find_trace_files,
-    generate_collective_report,
-)
-from TraceLens.Reporting.generate_perf_report_genesis import (
-    _cleanup_work_dir,
-    generate_perf_report_genesis,
-)
-from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
-    _write_markdown_report,
-    generate_perf_report_pftrace_hip_activity,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    _find_entry_point,
-    _is_wrapper_frame,
-    apply_extension as apply_extension_pytorch,
-    generate_perf_report_pytorch,
-    get_dfs_short_kernels as get_dfs_short_kernels_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    add_truncated_kernel_details as add_truncated_kernel_details_inference,
-    apply_extension as apply_extension_inference,
-    classify_graph_capture_trace,
-    generate_perf_report_pytorch as generate_inference_report,
-    get_dfs_short_kernels as get_dfs_short_kernels_inference,
-    perf_report_sanity_check,
-)
-from TraceLens.Reporting.pftrace_hip_activity_analysis import (
-    Event,
-    HIPEvent,
-    build_hip_summary_df,
-    build_kernel_summary_df_for_name,
-)
-from TraceLens.Reporting.pftrace_utils import ensure_trace_json
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Source column .* not found.*:UserWarning",
@@ -64,6 +26,8 @@ KERNEL_TRACE_CSV = """\
 "KERNEL_DISPATCH","Agent 2",1,0,70,2,16,"kernel_step_1_c532_0_kernel_6_range_for",119670,172352210061004,172352210062686,0,0,4,4,16,1,1,1,1,1,1
 "KERNEL_DISPATCH","Agent 2",1,0,70,3,31,"func_broad_phase_c402_0_kernel_3_range_for",119696,172352210143326,172352210149335,0,0,16,0,32,512,1,1,512,1,1
 """
+
+
 def _mk_event(cat, name, ts, dur, pid, tid, args=None):
     return {
         "ph": "X",
@@ -75,6 +39,8 @@ def _mk_event(cat, name, ts, dur, pid, tid, args=None):
         "dur": dur,
         "args": args or {},
     }
+
+
 def _mk_ac2g(corr_id, pid, tid, ts, phase):
     evt = {
         "ph": phase,
@@ -88,6 +54,8 @@ def _mk_ac2g(corr_id, pid, tid, ts, phase):
     if phase == "f":
         evt["bp"] = "e"
     return evt
+
+
 def _build_synthetic_trace(kernel_specs):
     events = []
     ts = 1000
@@ -138,10 +106,14 @@ def _build_synthetic_trace(kernel_specs):
         corr_id += 1
 
     return {"traceEvents": events}
+
+
 def _write_trace(tmp_path: Path, specs, name="trace.json") -> str:
     path = tmp_path / name
     path.write_text(json.dumps(_build_synthetic_trace(specs)))
     return str(path)
+
+
 def _create_genesis_capture(tmp_path: Path) -> Path:
     capture = tmp_path / "capture"
     kernel_trace = capture / "kernel_trace"
@@ -149,6 +121,8 @@ def _create_genesis_capture(tmp_path: Path) -> Path:
     (kernel_trace / "kernel_kernel_trace.csv").write_text(KERNEL_TRACE_CSV)
     (capture / "run.log").write_text("wall_time=4.00s\n")
     return capture
+
+
 def _minimal_pftrace_events():
     return [
         {
@@ -407,6 +381,8 @@ def _full_pftrace_events():
             },
         },
     ]
+
+
 class _MockShortKernelAnalyzer:
     def __init__(self, gpu_only=False, kernels=None, total_time_ms=1.0):
         self.gpu_only = gpu_only
@@ -428,6 +404,8 @@ class _MockShortKernelAnalyzer:
 
     def get_df_kernels(self):
         return self._kernels
+
+
 def _make_trace(rank, n_collectives):
     events = []
     base_ts = 1_000_000 + rank * 50
@@ -459,6 +437,8 @@ def _write_gz_trace(tmp_path, events, name="trace.json.gz"):
     with gzip.open(path, "wt", encoding="utf-8") as f:
         json.dump({"traceEvents": events}, f)
     return str(path)
+
+
 def _jax_llama_trace_events(block0_hint: str = "te_layernorm_forward"):
     """Minimal JAX LLaMA-style Chrome trace for compare_traces_jax_llama helpers."""
     base_path = (

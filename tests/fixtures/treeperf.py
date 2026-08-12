@@ -7,13 +7,11 @@
 """Shared test helpers migrated from test_treeperf_coverage.py."""
 
 from __future__ import annotations
-import gzip
-import json
 from copy import deepcopy
 import pandas as pd
-import pytest
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+
 
 def _make_gpu_event(
     uid, ts, dur, cat="kernel", name="kernel", pid=100, tid=100, args=None
@@ -31,6 +29,8 @@ def _make_gpu_event(
     if args is not None:
         event["args"] = args
     return event
+
+
 def _mk_ac2g(corr_id, pid, tid, ts, phase):
     evt = {
         "ph": phase,
@@ -44,6 +44,8 @@ def _mk_ac2g(corr_id, pid, tid, ts, phase):
     if phase == "f":
         evt["bp"] = "e"
     return evt
+
+
 def _build_analyzer(events, add_python_func=False, **kwargs):
     tree = TraceToTree(deepcopy(events), prune_nongpu_paths=False)
     tree.build_tree(add_python_func=add_python_func)
@@ -51,19 +53,36 @@ def _build_analyzer(events, add_python_func=False, **kwargs):
         tree, add_python_func=add_python_func, rebuild_tree=False, **kwargs
     )
 
+
 def _mk_pytorch_trace():
     corr = 100
     return [
         _make_gpu_event(
-            "cpu", 1000, 100, "cpu_op", "aten::mm", pid=100,
+            "cpu",
+            1000,
+            100,
+            "cpu_op",
+            "aten::mm",
+            pid=100,
             args={"Input Dims": [[32, 64], [64, 128]], "Input type": ["fp16", "fp16"]},
         ),
         _make_gpu_event(
-            "rt", 1010, 5, "cuda_runtime", "hipLaunchKernel", pid=100,
+            "rt",
+            1010,
+            5,
+            "cuda_runtime",
+            "hipLaunchKernel",
+            pid=100,
             args={"correlation": corr},
         ),
         _make_gpu_event(
-            "kern", 1050, 50, "kernel", "gemm_kernel", pid=0, tid=7,
+            "kern",
+            1050,
+            50,
+            "kernel",
+            "gemm_kernel",
+            pid=0,
+            tid=7,
             args={"correlation": corr, "stream": 7},
         ),
         _mk_ac2g(corr, 0, 7, 1050, "s"),
@@ -86,12 +105,16 @@ def _sweep_treeperf_analyzer(analyzer):
     if not launchers.empty:
         TreePerfAnalyzer.get_df_kernel_launchers_summary(launchers)
         TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category(launchers)
-        TreePerfAnalyzer.get_df_kernel_launchers_unique_args(launchers, include_pct=True)
+        TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
+            launchers, include_pct=True
+        )
     unified = analyzer.build_df_unified_perf_table(include_nccl=True)
     if not unified.empty:
         try:
             TreePerfAnalyzer.summarize_df_unified_perf_table(
-                unified, include_pct=True, tree=analyzer.tree,
+                unified,
+                include_pct=True,
+                tree=analyzer.tree,
                 agg_metrics=["mean", "median", "max", "min", "std", "sum", "count"],
             )
         except (ValueError, KeyError):

@@ -1149,10 +1149,6 @@ import os
 import pandas as pd
 import pytest
 from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
 
 
 class TestAnalysisUtilsPhase13:
@@ -1174,7 +1170,6 @@ class TestAnalysisUtilsPhase13:
 
 
 # --- migrated from test_coverage_95_phase7.py ---
-import importlib
 import json
 import os
 import sys
@@ -1182,28 +1177,6 @@ import pandas as pd
 import pytest
 from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
 from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
-from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
-from TraceLens.Reporting.compare_perf_reports_pytorch import (
-    generate_compare_perf_reports_pytorch,
-)
-from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
-    generate_collective_report,
-)
-from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
-from TraceLens.Reporting.tracediff_comparison_extension import (
-    tracediff_perf_summary_from_diff_stats,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TraceDiff.trace_diff import TraceDiff
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
-from tests.fixtures.reporting import (
-    _minimal_pftrace_events,
-    _mk_event,
-    _write_trace,
-)
 
 
 class TestAnalysisUtilsPhase7:
@@ -1260,13 +1233,6 @@ import os
 import pandas as pd
 import pytest
 from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.PerfModel import perf_model
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    classify_graph_capture_trace,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.test_conv_backward_bytes import _conv_bias_fwd_event
-from tests.fixtures.reporting import _mk_event
 
 
 class TestAnalysisUtilsPhase8:
