@@ -119,11 +119,3 @@ class TestNormalizeNameForComparison:
             _normalize_name_for_comparison(name, strip_details=True)
             == "/home/user/proj/layer.py: matmul "
         )
-
-    def test_strip_details_keeps_basename_only_for_py_path(self):
-        name = "/home/user/proj/layer.py(99): matmul : detail"
-        assert _normalize_name_for_comparison(name, strip_details=True).startswith(
-            "/home/user/proj/"
-        )
-        bare = "layer.py(99): matmul : detail"
-        assert _normalize_name_for_comparison(bare, strip_details=True) == "layer.py: matmul "

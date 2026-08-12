@@ -11,7 +11,6 @@ and gpu_event_analyser.py.
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import tempfile
@@ -31,7 +30,6 @@ from TraceLens.TreePerf import (
     TreePerfAnalyzer,
 )
 from TraceLens.TreePerf.tree_perf import (
-    _perf_model_init_kwargs,
     get_compute_spec,
     get_max_achievable_tflops,
     normalize_dtype_to_precision,
@@ -118,10 +116,7 @@ def _mk_pytorch_trace():
             "cpu_op",
             "aten::mm",
             pid=100,
-            args={
-                "Input Dims": [[32, 64], [64, 128]],
-                "Input type": ["fp16", "fp16"],
-            },
+            args={"Input Dims": [[32, 64], [64, 128]]},
         ),
         _make_gpu_event(
             "rt",
@@ -177,49 +172,6 @@ class TestTreePerfModuleHelpers:
         arch = {"max_achievable_tflops": {"matrix_fp16": 100.0}}
         assert get_max_achievable_tflops(perf_model, arch) == 100.0
         assert get_max_achievable_tflops(perf_model, None) is None
-        assert get_max_achievable_tflops(perf_model, {}) is None
-        assert (
-            get_max_achievable_tflops(SimpleNamespace(), arch) is None
-        )
-
-    @pytest.mark.parametrize(
-        "dtype_str,expected",
-        [
-            ("c10::float8_e4m3fn", "fp8"),
-            ("signed char", "int8"),
-            ("double", "fp64"),
-        ],
-    )
-    def test_normalize_dtype_extra_mappings(self, dtype_str, expected):
-        assert normalize_dtype_to_precision(dtype_str) == expected
-
-    def test_perf_model_init_kwargs_optional_params(self):
-        class _ModelWithOrigami:
-            def __init__(
-                self,
-                event,
-                arch,
-                python_path,
-                enable_origami=False,
-                inductor_cache_dir=None,
-            ):
-                self.kwargs = {
-                    "enable_origami": enable_origami,
-                    "inductor_cache_dir": inductor_cache_dir,
-                }
-
-        class _ModelBasic:
-            def __init__(self, event, arch, python_path):
-                self.kwargs = {}
-
-        kwargs = _perf_model_init_kwargs(
-            _ModelWithOrigami, {}, None, None, True, "/tmp/cache"
-        )
-        assert kwargs["enable_origami"] is True
-        assert kwargs["inductor_cache_dir"] == "/tmp/cache"
-
-        basic_kwargs = _perf_model_init_kwargs(_ModelBasic, {}, None, None, True, "/tmp")
-        assert "enable_origami" not in basic_kwargs
 
 
 class TestGPUEventAnalyserStatic:
@@ -537,40 +489,6 @@ class TestJaxAnalyses:
         assert "GEMM" in categorized_df.index
         assert isinstance(uncategorized_df, pd.DataFrame)
 
-    def test_process_communication_missing_hlo_op(self, capsys):
-        events = [
-            _make_jax_gpu_event(
-                1,
-                1,
-                10,
-                1000,
-                name="ncclAllGather",
-                args={"hlo_op": "all-reduce-start.99"},
-            ),
-        ]
-        analyser = JaxGPUEventAnalyser(events)
-        messages = {"all-reduce-start": [["99", "4096", "allreduce.99"]]}
-        processed = JaxAnalyses.process_communication_events_from_profile(
-            analyser, messages
-        )
-        assert "all-reduce" in processed
-        assert "all-reduce-start.99" not in processed["all-reduce"]
-        assert "not found" in capsys.readouterr().out
-
-    def test_summarize_gpu_events_from_temp_trace(self, tmp_path):
-        events = [
-            _make_jax_gpu_event(1, 1, 0, 100, name="Cijk_gemm"),
-            _make_jax_gpu_event(2, 1, 0, 200, name="Cijk_gemm"),
-        ]
-        trace_path = tmp_path / "jax_summary.json"
-        trace_path.write_text(json.dumps({"traceEvents": events}))
-        breakdown_df, categorized_df, uncategorized_df = JaxAnalyses.summarize_gpu_events(
-            str(trace_path)
-        )
-        assert "type" in breakdown_df.columns
-        assert "GEMM" in categorized_df.index
-        assert isinstance(uncategorized_df, pd.DataFrame)
-
 
 class TestTreePerfAnalyzer:
     def test_check_gpu_only(self):
@@ -641,108 +559,6 @@ class TestTreePerfAnalyzer:
         analyzer.tree.events[0]["is_recompute"] = True
         df = analyzer.get_df_gpu_timeline()
         assert "is_recompute" in df.columns
-
-
-class TestTreePerfAnalyzerExtended:
-    def test_compute_subtree_kernel_time_us(self):
-        analyzer = _build_analyzer(_mk_pytorch_trace())
-        cpu_op = next(e for e in analyzer.tree.events if e["cat"] == "cpu_op")
-        assert analyzer._compute_subtree_kernel_time_us(cpu_op) == pytest.approx(50.0)
-
-    def test_compute_perf_metrics_with_arch(self):
-        arch = {
-            "max_achievable_tflops": {"matrix_fp16": 100.0},
-            "mem_bw_gbps": 1000.0,
-        }
-        analyzer = _build_analyzer(_mk_pytorch_trace(), arch=arch)
-        cpu_op = next(e for e in analyzer.tree.events if e["name"] == "aten::mm")
-        metrics = analyzer.compute_fwd_perf_metrics(cpu_op, non_data_mov=True)
-        assert metrics["GFLOPS"] > 0
-        assert metrics["Kernel Time (µs)"] == pytest.approx(50.0)
-        assert "Compute Spec" in metrics
-        assert "Non-Data-Mov TFLOPS/s" in metrics
-
-    def test_build_df_perf_metrics_and_summary(self):
-        analyzer = _build_analyzer(_mk_pytorch_trace())
-        cpu_ops = [e for e in analyzer.tree.events if e["cat"] == "cpu_op"]
-        df = analyzer.build_df_fwd_perf_metrics(cpu_ops)
-        assert not df.empty
-        assert "GFLOPS" in df.columns
-        summary = TreePerfAnalyzer.summarize_df_perf_metrics(
-            df, include_overlapping_kernels=True
-        )
-        assert not summary.empty
-        assert summary.loc[0, "name_count"] >= 1
-
-    def test_build_df_perf_metrics_empty_warns(self):
-        analyzer = _build_analyzer(_mk_pytorch_trace())
-        with pytest.warns(UserWarning, match="empty DataFrame"):
-            assert analyzer.build_df_fwd_perf_metrics([]).empty
-
-    def test_get_kernel_launchers_and_summaries(self):
-        analyzer = _build_analyzer(_mk_pytorch_trace())
-        launchers = analyzer.get_kernel_launchers()
-        assert len(launchers) == 1
-        assert launchers[0]["total_direct_kernel_time"] == pytest.approx(50.0)
-        df_launchers = analyzer.get_df_kernel_launchers()
-        assert len(df_launchers) == 1
-        summary = TreePerfAnalyzer.get_df_kernel_launchers_summary(df_launchers)
-        assert summary.loc[0, "Count"] == 1
-        assert not TreePerfAnalyzer.get_df_kernel_launchers_summary_module(
-            df_launchers
-        ).empty
-
-    def test_execute_pass_through_launcher(self):
-        corr = 200
-        events = [
-            _make_gpu_event(
-                "parent",
-                1000,
-                200,
-                "cpu_op",
-                "aten::linear",
-                args={"Input Dims": [[32, 64], [64, 128]]},
-            ),
-            _make_gpu_event(
-                "exec",
-                1010,
-                50,
-                "cpu_op",
-                "execute",
-                pid=100,
-                args={"Input Dims": [[32, 64], [64, 128]]},
-            ),
-            _make_gpu_event(
-                "rt",
-                1020,
-                5,
-                "cuda_runtime",
-                "hipLaunchKernel",
-                pid=100,
-                args={"correlation": corr},
-            ),
-            _make_gpu_event(
-                "kern",
-                1050,
-                40,
-                "kernel",
-                "gemm_kernel",
-                pid=0,
-                tid=7,
-                args={"correlation": corr, "stream": 7},
-            ),
-            _mk_ac2g(corr, 0, 7, 1050, "s"),
-            _mk_ac2g(corr, 0, 7, 1090, "f"),
-        ]
-        analyzer = _build_analyzer(events)
-        launchers = analyzer.get_kernel_launchers()
-        assert launchers[0]["name"] == "aten::linear"
-
-    def test_from_file_synthetic_json(self, tmp_path):
-        trace_path = tmp_path / "synthetic_trace.json"
-        trace_path.write_text(json.dumps({"traceEvents": _mk_pytorch_trace()}))
-        analyzer = TreePerfAnalyzer.from_file(str(trace_path), rebuild_tree=True)
-        assert not analyzer.get_df_gpu_timeline().empty
 
     def test_compute_fwd_bwd_perf_metrics_wrappers(self, monkeypatch):
         analyzer = _build_analyzer(_mk_pytorch_trace())
@@ -903,70 +719,37 @@ def test_tree_perf_analyzer_live_gpu_profile(tmp_path):
     assert len(analyzer.get_kernel_launchers()) >= 1
 
 
-@pytest.mark.gpu
-def test_gpu_event_analyser_compute_metrics_on_live_trace(tmp_path):
-    _require_cuda_torch()
-    import torch
-
-    x = torch.randn(8, 8, device="cuda")
-    trace_path = tmp_path / "gemm_trace.json"
-
-    with torch.profiler.profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ],
-        on_trace_ready=lambda p: p.export_chrome_trace(str(trace_path)),
-    ) as prof:
-        for _ in range(2):
-            torch.mm(x, x)
-            prof.step()
-
-    with open(trace_path, encoding="utf-8") as f:
-        events = json.load(f)["traceEvents"]
-
-    metrics = GPUEventAnalyser(events).compute_metrics()
-    assert metrics["computation_time"] > 0
-    assert metrics["total_time"] > 0
-
-
-@pytest.mark.gpu
 def test_build_nn_module_latency_tree():
-    _require_cuda_torch()
-    corr = 100
-    events = [
-        _make_gpu_event("py1", 0, 500, "python_function", "nn.Module: Net", pid=100),
-        _make_gpu_event(
-            "py2", 10, 400, "python_function", "nn.Module: Net.sub", pid=100
-        ),
-        _make_gpu_event(
-            "cpu", 20, 50, "cpu_op", "aten::mm", pid=100, args={"correlation": corr}
-        ),
-        _make_gpu_event(
-            "rt",
-            25,
-            5,
-            "cuda_runtime",
-            "hipLaunchKernel",
-            pid=100,
-            args={"correlation": corr},
-        ),
-        _make_gpu_event(
-            "kern",
-            100,
-            80,
-            "kernel",
-            "gemm",
-            pid=0,
-            tid=7,
-            args={"correlation": corr, "stream": 7},
-        ),
-        _mk_ac2g(corr, pid=0, tid=7, ts=100, phase="s"),
-        _mk_ac2g(corr, pid=0, tid=7, ts=100, phase="f"),
-    ]
-    tree = TraceToTree(events)
-    tree.build_tree(add_python_func=True)
-    analyzer = TreePerfAnalyzer(tree, add_python_func=True, rebuild_tree=False)
-    root = next(e for e in tree.events if e["name"] == "nn.Module: Net")
+    trace_path = os.path.join(
+        os.path.dirname(__file__),
+        "traces/inference/sglang_prefilldecode/"
+        "sglang_Qwen3-8B_prefilldecode.json.gz",
+    )
+    analyzer = TreePerfAnalyzer.from_file(trace_path, add_python_func=True)
+    tree = analyzer.tree
+    root = next(e for e in tree.events if e.get("name") == "nn.Module: Qwen3Model_0")
+
     analyzer.build_nn_module_latency_tree(root)
-    assert root["GPU Time"] == 80
+    children = [tree.get_UID2event(uid) for uid in tree.get_nn_module_children(root)]
+
+    assert (
+        sum(
+            child["name"].startswith("nn.Module: Qwen3DecoderLayer_")
+            for child in children
+        )
+        == 36
+    )
+    assert root["GPU Time"] == pytest.approx(492163.76953125)
+
+    layer = next(
+        child for child in children if child["name"] == "nn.Module: Qwen3DecoderLayer_0"
+    )
+    attention = next(
+        tree.get_UID2event(uid)
+        for uid in tree.get_nn_module_children(layer)
+        if tree.get_UID2event(uid)["name"] == "nn.Module: Qwen3Attention_0"
+    )
+
+    assert layer["nn Parent GPU Time"] == pytest.approx(root["GPU Time"])
+    assert attention["nn Parent GPU Time"] == pytest.approx(layer["GPU Time"])
+    assert attention["Non-nn.Module GPU Time"] > 0

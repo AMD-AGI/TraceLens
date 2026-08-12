@@ -315,12 +315,17 @@ def test_compute_output_path_for_single_step_block(tmp_path):
         start_idx=0,
         end_idx=1,
         roots=[_root(VLLM_PREFILLDECODE)],
-        details=[{"name": VLLM_PREFILLDECODE, "batch_size": 129, "num_requests": 5}],
+        details=[
+            {
+                "name": VLLM_PREFILLDECODE,
+                "context_requests": 3,
+                "generation_requests": 2,
+                "batch_size": 129,
+                "num_requests": 5,
+            }
+        ],
     )
     path = compute_output_path(
         str(tmp_path), PHASE_PREFILLDECODE, "label", "traceB", block
     )
-    assert (
-        os.path.basename(path)
-        == "label_prefill_0_prefilldecode_0_decode_0_bs129_conc5_traceB.json.gz"
-    )
+    assert "prefill_0_prefilldecode_1_decode_0_bs129_conc5" in os.path.basename(path)

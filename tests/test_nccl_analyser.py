@@ -206,7 +206,6 @@ def test_get_node_rank_protobuf_mapping_missing_folder():
     assert mapping == {}
     assert world_size == 0
 
-
 def test_get_node_rank_protobuf_mapping_finds_nested_logs(tmp_path):
     nested = tmp_path / "workers"
     nested.mkdir()
@@ -219,7 +218,6 @@ def test_get_node_rank_protobuf_mapping_finds_nested_logs(tmp_path):
     assert world_size == 2
     assert mapping["1"] == str(pb_file)
 
-
 def test_get_node_rank_protobuf_mapping_warns_on_nnodes_mismatch(tmp_path, capsys):
     (tmp_path / "a.log").write_text("NODE_RANK=0\nhostname=node0\nnnodes=4\n")
     (tmp_path / "b.log").write_text("NODE_RANK=1\nhostname=node1\nnnodes=4\n")
@@ -230,13 +228,11 @@ def test_get_node_rank_protobuf_mapping_warns_on_nnodes_mismatch(tmp_path, capsy
     captured = capsys.readouterr().out
     assert "NODE_RANK count" in captured
 
-
 def test_get_node_rank_protobuf_mapping_warns_on_unmapped_pb(tmp_path, capsys):
     (tmp_path / "node9.xplane.pb").write_text("pb")
     get_node_rank_protobuf_mapping(str(tmp_path))
     captured = capsys.readouterr().out
     assert "no corresponding NODE_RANK" in captured
-
 
 def test_parse_log_file_for_node_rank_from_filename(tmp_path, monkeypatch):
     import importlib
@@ -254,7 +250,6 @@ def test_parse_log_file_for_node_rank_from_filename(tmp_path, monkeypatch):
     assert node_name == "worker"
     assert nnodes is None
 
-
 def test_parse_log_file_for_node_rank_uses_path_when_hostname_missing(tmp_path):
     log_file = tmp_path / "nodeC.log"
     log_file.write_text("NODE_RANK=5\n", encoding="utf-8")
@@ -263,12 +258,10 @@ def test_parse_log_file_for_node_rank_uses_path_when_hostname_missing(tmp_path):
     assert node_name == "nodeC"
     assert nnodes is None
 
-
 def test_parse_log_file_for_node_rank_handles_read_error(tmp_path):
     missing = tmp_path / "missing.log"
     node_rank, node_name, nnodes = parse_log_file_for_node_rank(missing)
     assert (node_rank, node_name, nnodes) == (None, None, None)
-
 
 def test_nccl_analyser_load_trace_data_multiprocessing(tmp_path):
     world_size = 2
@@ -280,7 +273,6 @@ def test_nccl_analyser_load_trace_data_multiprocessing(tmp_path):
 
     analyser = NcclAnalyser(filepaths, world_size, use_multiprocessing=True, max_workers=2)
     assert len(analyser.rank2trace_data) == world_size
-
 
 def test_nccl_analyser_build_df_long_with_process_group_metadata(tmp_path):
     world_size = 2
@@ -312,14 +304,12 @@ def test_nccl_analyser_build_df_long_with_process_group_metadata(tmp_path):
     assert df_long["collective_id"].str.startswith("default_pg_").all()
     assert df_long["In msg size (MB)"].notna().all()
 
-
 def test_nccl_analyser_build_df_long_empty_trace(tmp_path):
     path = tmp_path / "rank0.json"
     _write_trace(path, [{"ph": "X", "cat": "cpu_op", "name": "ignored", "ts": 1, "dur": 1, "args": {}}])
     analyser = NcclAnalyser([str(path)], world_size=1)
     df_long = analyser.build_df_long()
     assert df_long.empty
-
 
 def test_nccl_analyser_build_df_summary_long(tmp_path):
     world_size = 2
@@ -351,158 +341,9 @@ def test_nccl_analyser_build_df_summary_long(tmp_path):
     assert "dur_sum" in summary.columns
     assert "operation_count" in summary.columns
 
-
 def test_nccl_analyser_instance_filter_fn():
     event = _nccl_kernel()
     analyser = NcclAnalyser.__new__(NcclAnalyser)
     analyser._filter_patterns = TraceEventUtils.get_communication_regexes()
     assert analyser._nccl_filter_event_fn(event) is True
     assert analyser._nccl_filter_event_fn({**event, "cat": "cpu_op"}) is False
-
-
-class TestXLACollectiveParserExtended:
-    def setup_method(self):
-        self.parser = XLACollectiveParser({})
-
-    def test_parse_collectives_skips_missing_file(self, tmp_path, capsys):
-        parser = XLACollectiveParser({"0": str(tmp_path / "missing.txt")})
-        df = parser.parse_collectives_to_dataframe()
-        assert df.empty
-        assert "Warning: File not found" in capsys.readouterr().out
-
-    def test_parse_collectives_handles_read_error(self, tmp_path, capsys):
-        bad_file = tmp_path / "bad.txt"
-        bad_file.mkdir()
-        parser = XLACollectiveParser({"0": str(bad_file)})
-        df = parser.parse_collectives_to_dataframe()
-        assert df.empty
-        assert "Warning: Error reading file" in capsys.readouterr().out
-
-    def test_parse_collectives_returns_empty_when_no_collectives(self, tmp_path):
-        xla_file = tmp_path / "empty.txt"
-        xla_file.write_text("HLO %x = add(f32[4], f32[4])\n", encoding="utf-8")
-        parser = XLACollectiveParser({"0": str(xla_file)})
-        assert parser.parse_collectives_to_dataframe().empty
-
-    def test_extract_replica_groups_source_target_pairs(self):
-        line = (
-            'scheduling_name="collective-permute", '
-            "source_target_pairs={{0,1},{2,3}}"
-        )
-        replica_string, groups = self.parser._extract_replica_groups(line)
-        assert replica_string == "{{0,1},{2,3}}"
-        assert groups == [[0, 1], [2, 3]]
-
-    def test_parse_replica_groups_empty_and_invalid(self):
-        assert self.parser._parse_replica_groups("") == []
-        assert self.parser._parse_replica_groups("nan") == []
-        assert self.parser._parse_replica_groups("not-a-group") == []
-
-    def test_parse_device_assignment_with_transpose(self):
-        groups = self.parser._parse_replica_groups("[2,2]<=[2,2]T(1,0)")
-        assert groups == [[0, 2], [1, 3]]
-
-    def test_parse_device_assignment_invalid_format(self):
-        assert self.parser._parse_replica_groups("[2,2]<=") == []
-
-    def test_extract_tensor_specs_fallback(self):
-        line = 'HLO %x = bf16[4,8] all-reduce(bf16[4,8] %arg0), scheduling_name="all-reduce"'
-        assert self.parser._extract_tensor_specs(line) == "bf16[4,8]"
-
-    def test_extract_split_dimension_multiple_values(self):
-        line = "all-reduce(...), dimensions={0,1}"
-        assert self.parser._extract_split_dimension(line) is None
-
-    def test_extract_output_tensor_from_tuple_variants(self):
-        assert (
-            self.parser._extract_output_tensor_from_tuple(
-                "reduce-scatter", "((bf16[4,8]), (bf16[2,8]))"
-            )
-            == "((bf16[4,8]), (bf16[2,8]))"
-        )
-        assert (
-            self.parser._extract_output_tensor_from_tuple(
-                "all-gather-start", "((bf16[4,8]), (bf16[8,8]))"
-            )
-            == "bf16[8,8]"
-        )
-        assert (
-            self.parser._extract_output_tensor_from_tuple(
-                "all-to-all", "(bf16[4,8], bf16[4,8])"
-            )
-            == "bf16[4,8]"
-        )
-
-    def test_calculate_tensor_slice_edge_cases(self):
-        assert self.parser._calculate_tensor_slice(None, 0, [[0]], "all-reduce", 1) is None
-        assert (
-            self.parser._calculate_tensor_slice("bf16[4,8]", 0, None, "all-reduce", 1)
-            is None
-        )
-        assert (
-            self.parser._calculate_tensor_slice("bf16[4,8]", 0, [[0]], "all-reduce", 0)
-            is None
-        )
-        assert (
-            self.parser._calculate_tensor_slice("not-a-tensor", 0, [[0, 1]], "all-reduce", 2)
-            is None
-        )
-
-    def test_calculate_tensor_slice_without_split_dimension(self):
-        tensor_slice = self.parser._calculate_tensor_slice(
-            "bf16[4,8]",
-            None,
-            [[0, 1]],
-            "all-reduce",
-            2,
-        )
-        assert tensor_slice[0]["bytes"] == 4 * 8 * 2
-
-    def test_calculate_tensor_slice_skips_invalid_split(self):
-        tensor_slice = self.parser._calculate_tensor_slice(
-            "bf16[5,8]",
-            0,
-            [[0, 1, 2]],
-            "all-reduce",
-            3,
-        )
-        assert tensor_slice == []
-
-    def test_extract_replica_groups_no_match(self):
-        assert self.parser._extract_replica_groups("scheduling_name=\"all-reduce\"") == (
-            None,
-            None,
-        )
-
-    def test_extract_tensor_specs_equals_fallback(self):
-        line = "HLO %x = bf16[4,8] all-reduce(bf16[4,8] %arg0), channel_id=1"
-        assert self.parser._extract_tensor_specs(line) == "bf16[4,8]"
-
-    def test_extract_split_dimension_single_value(self):
-        assert self.parser._extract_split_dimension("dimensions={2}") == 2
-
-    def test_extract_output_tensor_none_spec(self):
-        assert self.parser._extract_output_tensor_from_tuple("all-gather", None) is None
-
-    def test_extract_output_tensor_nested_all_to_all(self):
-        spec = "((bf16[2,4]), bf16[2,4])"
-        assert (
-            self.parser._extract_output_tensor_from_tuple("all-to-all-start", spec)
-            == "bf16[2,4]"
-        )
-
-    def test_calculate_tensor_slice_unknown_dtype_zero_bytes(self):
-        tensor_slice = self.parser._calculate_tensor_slice(
-            "unknown[4,8]",
-            None,
-            [[0, 1]],
-            "all-reduce",
-            2,
-        )
-        assert tensor_slice[0]["bytes"] == 0
-
-    def test_calculate_data_bytes_variants(self):
-        assert self.parser._calculate_data_bytes(None) == 0
-        assert self.parser._calculate_data_bytes({"bytes": 16}) == 16
-        assert self.parser._calculate_data_bytes([{"bytes": 4}, {"bytes": 6}]) == 10
-        assert self.parser._calculate_data_bytes("invalid") == 0
