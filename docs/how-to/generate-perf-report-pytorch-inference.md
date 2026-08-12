@@ -87,6 +87,12 @@ image and patch file automatically:
 | `v22` | `vllm/vllm-openai-rocm:v0.22.0` | v0.22.0 | `config_vllm_v0.22.0.patch` |
 | `v23` | `vllm/vllm-openai-rocm:v0.23.0` | v0.23.0 | `config_vllm_v0.23.0.patch` |
 | `v24` | `vllm/vllm-openai-rocm:v0.24.0` | v0.24.0 | `config_vllm_v0.24.0.patch` |
+| `v25` | `vllm/vllm-openai-rocm:v0.25.0` | v0.25.0 | `config_vllm_v0.25.0.patch` |
+
+```{note}
+The profiler options these patches add
+([vllm-project/vllm#37524](https://github.com/vllm-project/vllm/pull/37524)) were merged into upstream vLLM and ship in **v0.26.0 and later**, so those versions need no patched image at all.
+```
 
 ```bash
 bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
@@ -126,6 +132,8 @@ the SGLang version (`--sglang-version`, default `0.5.9`), and the GPU type
 | `0.5.15` | MI350/MI355 | `lmsysorg/sglang:v0.5.15-rocm720-mi35x` |
 | `0.5.16` | MI300 | `lmsysorg/sglang:v0.5.16-rocm720-mi30x` |
 | `0.5.16` | MI350/MI355 | `lmsysorg/sglang:v0.5.16-rocm720-mi35x` |
+| `0.5.17` | MI300 | `lmsysorg/sglang:v0.5.17-rocm720-mi30x` |
+| `0.5.17` | MI350/MI355 | `lmsysorg/sglang:v0.5.17-rocm720-mi35x` |
 
 On SGLang **0.5.13 / 0.5.14**, kernel-shape wrapping is incompatible with the
 EAGLE/MTP speculative *overlap* decode, so the speculative patches disable capture
@@ -210,12 +218,14 @@ To apply them:
 
 #### Trace collection flags
 
-**vLLM.** The `config_vllm_v*.patch` patches (available for v0.14-v0.24) add two
-`ProfilerConfig` flags. Pass them as server arguments:
+**vLLM.** Two `ProfilerConfig` flags control graph-capture tracing and roofline
+annotations. They are added by the `config_vllm_v*.patch` patches on **v0.14-v0.25**
+and are built into upstream vLLM from **v0.26.0** onwards. Pass them as server
+arguments:
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--profiler-config.capture_torch_profiler_dir DIR` | `str` | `""` | Directory where a profiler trace of the HIP/CUDA-graph capture phase is saved (rank 0 only). Requires `--profiler-config.profiler torch`. Leave empty to disable graph-capture profiling. |
+| `--profiler-config.capture_torch_profiler` | `bool` | `False` | When `True`, a profiler trace of the HIP/CUDA-graph capture phase is written (rank 0 only) to a `capture_traces` subdirectory of `--profiler-config.torch_profiler_dir`. Requires `--profiler-config.profiler torch`. |
 | `--profiler-config.detailed_trace_annotation` | `bool` | `False` | When `True`, execution-step annotations include roofline metrics (`sk`, `sqsq`, `sqsk`) for context and generation requests. When `False`, annotations record only request and token counts. Enable for full roofline analysis. |
 
 Example - enable both flags alongside a steady-state window profile:
@@ -223,7 +233,7 @@ Example - enable both flags alongside a steady-state window profile:
 ```bash
 --profiler-config.profiler torch \
 --profiler-config.torch_profiler_dir /workspace/torch_trace \
---profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces \
+--profiler-config.capture_torch_profiler True \
 --profiler-config.detailed_trace_annotation True \
 --profiler-config.delay_iterations 5402 \
 --profiler-config.max_iterations 256 \
@@ -231,8 +241,16 @@ Example - enable both flags alongside a steady-state window profile:
 ```
 
 ```{note}
-`capture_torch_profiler_dir` is only available when `--profiler-config.profiler torch`
-is set. The capture trace is written once at server startup during HIP/CUDA-graph
+`capture_torch_profiler` is a boolean switch, not a path: the capture directory is
+always `<torch_profiler_dir>/capture_traces`. Earlier TraceLens releases exposed
+this as `capture_torch_profiler_dir DIR`, which took the destination directory
+explicitly; that name no longer exists in any patch or in upstream vLLM, so update
+older command lines to the boolean form. The flag is only available when
+`--profiler-config.profiler torch` is set.
+```
+
+```{note}
+The capture trace is written once at server startup during HIP/CUDA-graph
 construction; the steady-state replay trace is written to `torch_profiler_dir`
 during the benchmark. Pass both paths to the report generator using
 `--capture_folder` and `--profile_json_path` respectively.
@@ -242,14 +260,14 @@ during the benchmark. Pass both paths to the report generator using
 
 1. Pass `shape_discovery=True` to enable shape discovery and registration for
    operations not covered by the default SGLang profile.
-2. Pass `roofline_annotations=True` to annotate the trace with the detailed
+2. Pass `detailed_annotations=True` to annotate the trace with the detailed
    information used for roofline analysis.
 3. To profile the graph-capture phase, pass the `--enable-profile-cuda-graph`
    server argument at startup. This saves one trace file per batch size but misses
    shape information for some operations; add
    `--enable-shape-discovery-for-cuda-graph-profile` for more diverse coverage.
 4. On SGLang **0.5.13 and later**, writing the per-batch-size graph-capture trace
-   files to disk is opt-in via the `SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE=1`
+   files to disk is opt-in via the `SGLANG_GRAPH_BATCH_CAPTURE=1`
    environment variable (default off). Set it *in addition to*
    `--enable-profile-cuda-graph`; without it the capture profiler still runs (for
    the summary tables and memory snapshot) but no per-batch-size trace is written to
@@ -260,7 +278,7 @@ during the benchmark. Pass both paths to the report generator using
 On SGLang 0.5.13 / 0.5.14 the graph-capture shape profiling is intentionally
 disabled for the EAGLE/MTP speculative graphs (and, on 0.5.14, the target-verify
 graph) to avoid a GPU fault in the speculative overlap decode, so
-`SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE` only yields capture traces for the
+`SGLANG_GRAPH_BATCH_CAPTURE` only yields capture traces for the
 non-speculative graphs there. Full MTP graph-capture profiling works on 0.5.15+.
 ```
 

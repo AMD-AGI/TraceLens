@@ -5,8 +5,8 @@
 *                            @AMD-AGI/tracelens-code-owners
 # Stricter paths — leads must approve
 
-# TraceLens package changes require Adeem or Gabe review
-/TraceLens/                   @ajassani @gabeweisz
+# TraceLens package changes require Adeem, Gabe, Deval, or Tharun review
+/TraceLens/                   @ajassani @gabeweisz @devalshahamd @tsrikris
 
 # Agent code and evals require area owner review
 /TraceLens/Agent/             @tsrikris

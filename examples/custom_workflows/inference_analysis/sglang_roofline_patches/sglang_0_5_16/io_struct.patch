@@ -9,7 +9,7 @@ index fa359c5483..e952bf677c 100644
 +    # Whether to enable shape discovery (Triton / FlashInfer kernel metadata)
 +    shape_discovery: bool = False
 +    # Add iteration-level annotations (KV / request aggregates) for roofline-style analysis
-+    roofline_annotations: bool = False
++    detailed_annotations: bool = False
  
  
  class ProfileReqOutput(BaseReq, kw_only=True):

@@ -46,7 +46,7 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
         dir_info = by_direction.get(direction, {})
         count = dir_info.get("count", 0)
         dir_time_ms = dir_info.get("total_time_us", 0) / 1000
-        dir_pct = (dir_time_ms / total_time_ms) * 100 if total_time_ms > 0 else 0
+        dir_pct = (dir_time_ms / total_time_ms) * 100
 
         if count == 0:
             continue

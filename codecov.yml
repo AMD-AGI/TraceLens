@@ -1,0 +1,75 @@
+###############################################################################
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+# Codecov configuration for TraceLens.
+# Fail PRs when overall project coverage or patch coverage drops vs the base branch.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 0%
+        base: auto
+        informational: false
+    patch:
+      default:
+        target: auto
+        base: auto
+        informational: false
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+  require_base: true
+  require_head: true
+  hide_project_coverage: false
+  show_carryforward_flags: true
+
+github_checks:
+  annotations: true
+
+flags:
+  unit:
+    paths:
+      - TraceLens/
+    carryforward: false
+  gpu:
+    paths:
+      - TraceLens/EventReplay/
+      - TraceLens/PerfModel/benchmarking/
+    carryforward: true
+
+comment:
+  show_carryforward_flags: true
+
+flags:
+  unit:
+    paths:
+      - TraceLens/
+    carryforward: false
+  gpu:
+    paths:
+      - TraceLens/EventReplay/
+      - TraceLens/PerfModel/benchmarking/
+    carryforward: true
+
+comment:
+  show_carryforward_flags: true
+
+flags:
+  unit:
+    paths:
+      - TraceLens/
+    carryforward: false
+  gpu:
+    paths:
+      - TraceLens/EventReplay/
+      - TraceLens/PerfModel/benchmarking/
+    carryforward: true
+
+fixes:
+  - "/__w/TraceLens/TraceLens/::"

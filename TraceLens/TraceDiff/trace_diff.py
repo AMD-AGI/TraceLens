@@ -12,13 +12,10 @@ import pandas as pd
 
 from ..Trace2Tree.trace_to_tree import TraceToTree
 from ..TreePerf.gpu_event_analyser import GPUEventAnalyser
+from ..util import TraceEventUtils
 from .util import (
     _CATEGORY,
-    _DUR,
-    _GRAPH_LAUNCH_NAMES,
-    _KERNEL_DISPATCH_CATEGORIES,
     _NAME,
-    _TRACELENS_DEBUG,
     _UID,
     _get_name_node,
     _get_node_arg,
@@ -27,6 +24,11 @@ from .util import (
     _normalize_name_for_comparison,
     _sort_by_ts,
 )
+
+_TRACELENS_DEBUG = os.environ.get("TRACELENS_DEBUG", "0") == "1"
+_GRAPH_LAUNCH_NAMES = ["hipGraphLaunch", "cudaGraphLaunch"]
+_KERNEL_DISPATCH_CATEGORIES = ("cuda_runtime", "cuda_driver")
+_DUR = TraceEventUtils.TraceKeys.Duration
 
 
 def _gpu_path_child_names_at_bfs_levels(uid, uid2node, max_depth):
@@ -692,8 +694,6 @@ class TraceDiff:
                     if deeper:
                         uid2 = collapsed
                         children2 = deeper
-            node1 = baseline_uid2node.get(uid1)
-            node2 = variant_uid2node.get(uid2)
 
             # --- Phase 2: Alignment on original children ---
             any_cr = any(

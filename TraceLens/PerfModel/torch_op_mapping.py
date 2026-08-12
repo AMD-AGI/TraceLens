@@ -364,6 +364,12 @@ reduce_ops = [
     "aten::amax",
 ]
 
+upsample_ops = [
+    "aten::upsample_nearest1d",
+    "aten::upsample_nearest2d",
+    "aten::upsample_nearest3d",
+]
+
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
 for op in binary_elemwise_ops:
@@ -372,6 +378,8 @@ for op_name, op_class in norm_ops.items():
     op_to_perf_model_class_map[op_name] = op_class
 for op in reduce_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_reduce
+for op in upsample_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_upsample_nearest
 
 # ---------------------------------------------------------------------------
 # Pattern-based matchers for perf models with generated kernel names.

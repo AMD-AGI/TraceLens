@@ -313,8 +313,7 @@ def update_subtree_uids_and_timestamps(
     # Update timestamps
     original_start_ts = subtree_events[0]["ts"]
     ts_offset = new_start_ts - original_start_ts
-    # for event in subtree_filtered_events:
-    #    event[UID]=uid_mapping[event[UID]]
+    # UID remapping handled when rebuilding the merged capture subtree.
     for event in subtree_events:
         event["ts"] += ts_offset
         event["ts"] = new_start_ts
