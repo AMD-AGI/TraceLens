@@ -657,16 +657,26 @@ class TestGemmBaseCoverage:
         mock_origami = MagicMock()
         mock_origami.data_type_t.BFloat16 = "bf16_dtype"
         mock_helper_cls = MagicMock()
-        mock_helper_cls.get_hardware.return_value = MagicMock(N_CU=304)
+        mock_helper_cls.get_hardware.return_value = MagicMock(N_CU=64)
         mock_helper_cls.return_value.get_simulation_time.return_value = 99.0
         with patch.dict(sys.modules, {"origami": mock_origami}):
             with patch(
                 "TraceLens.PerfModel.origami_helper.OrigamiHelper", mock_helper_cls
             ):
-                t, _ = perf_model.GEMM.get_simulation_time_func(
-                    _ARCH, 4, 8, 16, 1, "bf16", enable_origami=True, force_to_l1=True
+                t, cmd = perf_model.GEMM.get_simulation_time_func(
+                    _ARCH,
+                    4,
+                    8,
+                    16,
+                    1,
+                    "bf16",
+                    enable_origami=True,
+                    force_to_l1=True,
+                    num_cus=64,
                 )
         assert t == 99.0
+        assert "Origami" in cmd
+        mock_helper_cls.assert_called_once()
 
     def test_origami_unsupported_dtype(self, monkeypatch):
         monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
@@ -4330,33 +4340,6 @@ class TestPerfModelPush95Coverage:
             with pytest.raises(AssertionError, match="Failed to simulate"):
                 perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
         perf_model.GEMM.cache_gemm_results.clear()
-
-    def test_gemm_origami_mock_path(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
-        perf_model.GEMM.cache_gemm_results.clear()
-        mock_origami = MagicMock()
-        mock_origami.data_type_t.BFloat16 = "bf16_dtype"
-        mock_helper_cls = MagicMock()
-        mock_helper_cls.get_hardware.return_value = MagicMock(N_CU=64)
-        mock_helper_cls.return_value.get_simulation_time.return_value = 7.5
-        with patch.dict(sys.modules, {"origami": mock_origami}):
-            with patch(
-                "TraceLens.PerfModel.origami_helper.OrigamiHelper", mock_helper_cls
-            ):
-                t, cmd = perf_model.GEMM.get_simulation_time_func(
-                    _ARCH,
-                    4,
-                    8,
-                    16,
-                    1,
-                    "bf16",
-                    num_cus=64,
-                    force_to_l1=True,
-                    enable_origami=True,
-                )
-        assert t == 7.5
-        assert "Origami" in cmd
-        mock_helper_cls.assert_called_once()
 
     def test_gemm_origami_unsupported_dtype(self, monkeypatch):
         monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
