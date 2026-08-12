@@ -114,12 +114,14 @@ def _add_gpu_chain(
     kernel_name: str,
     ts_launch: float,
     ts_kernel: float,
+    kernel_dur: float = 20.0,
 ) -> None:
     pid = cpu_op["pid"]
     tid = cpu_op["tid"]
+    if cpu_op not in events:
+        events.append(cpu_op)
     events.extend(
         [
-            cpu_op,
             _mk_event(
                 "cuda_runtime",
                 "hipLaunchKernel",
@@ -133,7 +135,7 @@ def _add_gpu_chain(
                 "kernel",
                 kernel_name,
                 ts=ts_kernel,
-                dur=20,
+                dur=kernel_dur,
                 pid=0,
                 tid=7,
                 args={"correlation": corr, "stream": 7},

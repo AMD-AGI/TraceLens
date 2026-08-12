@@ -22,8 +22,7 @@ from TraceLens.TraceDiff.trace_diff import TraceDiff
 from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
 from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
 from tests.test_reporting_coverage import _minimal_pftrace_events, _write_trace
-from tests.test_tracediff import TraceDiff as _TD  # noqa: F401 — ensure module loaded
-from tests.test_tracediff import _add_gpu_chain, _build_tree, _mk_event
+from tests.test_trace2tree import _add_gpu_chain, _build_tree, _mk_event
 
 ROCprof_FILE = os.path.join(os.path.dirname(__file__), "rocprof/908_results.json.gz")
 

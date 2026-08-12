@@ -1,17 +1,26 @@
 ###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
 """Unit tests for TraceLens.util helpers."""
 
+import contextlib
+import gzip
+import json
 import os
+import sys
+import types
+from unittest.mock import patch
 
 import pytest
 
 from TraceLens.util import (
+    DataLoader,
     JaxProfileProcessor,
+    PftraceParser,
+    RocprofParser,
     TraceEventUtils,
     suppress_native_hlo_logs,
 )
@@ -21,6 +30,36 @@ TP = TraceEventUtils.TracePhases
 MF = TraceEventUtils.MetadataFields
 AN = TraceEventUtils.ArgNames
 JST = TraceEventUtils.JaxSpecialThreads
+
+_GEMM_BACKEND = (
+    'backend_config={"gemm_backend_config":{"epilogue":"DEFAULT","beta":0,'
+    '"lhs_contracting_dimensions":["1"],"rhs_contracting_dimensions":["0"]}}'
+)
+
+
+def _install_mock_xprof_convert(return_value):
+    mock_mod = types.ModuleType("xprof.convert.raw_to_tool_data")
+
+    def xspace_to_tool_data(*args, **kwargs):
+        return return_value
+
+    def xspace_to_tool_names(*args, **kwargs):
+        return None
+
+    mock_mod.xspace_to_tool_data = xspace_to_tool_data
+    mock_mod.xspace_to_tool_names = xspace_to_tool_names
+
+    fake_convert = types.ModuleType("xprof.convert")
+    fake_convert.raw_to_tool_data = mock_mod
+
+    fake_xprof = types.ModuleType("xprof")
+    fake_xprof.convert = fake_convert
+
+    return {
+        "xprof": fake_xprof,
+        "xprof.convert": fake_convert,
+        "xprof.convert.raw_to_tool_data": mock_mod,
+    }
 
 
 def test_suppress_native_hlo_logs_filters_noise(monkeypatch):
@@ -61,6 +100,27 @@ def test_suppress_native_hlo_logs_disabled_when_verbose(monkeypatch):
     assert any(fd == 2 and b"INT_MAX" in data for fd, data in writes)
 
 
+def test_suppress_native_hlo_logs_filters_hlo_instruction_noise(monkeypatch):
+    monkeypatch.delenv("TRACELENS_VERBOSE_NATIVE_LOGS", raising=False)
+    writes = []
+    real_write = os.write
+
+    def capture_write(fd, data):
+        if fd == 2:
+            writes.append(data)
+            return len(data)
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", capture_write)
+
+    with suppress_native_hlo_logs():
+        real_write(2, b"hlo_instruction.cc: noisy line\n")
+        real_write(2, b"kept message\n")
+
+    assert any(b"kept message" in w for w in writes)
+    assert not any(b"hlo_instruction.cc" in w for w in writes)
+
+
 @pytest.mark.parametrize(
     "line,expected",
     [
@@ -84,6 +144,10 @@ def test_get_operands_extracts_typed_tensor_tokens():
     assert result == ["f32[128,256]{1,0}", "f32[256,512]{1,0}"]
 
 
+def test_get_operands_falls_back_to_comma_split():
+    assert JaxProfileProcessor.get_operands("(%arg0,%arg1)") == ["%arg0", "%arg1"]
+
+
 def test_get_dict_parses_metadata_backend_config_and_custom_call():
     line = (
         "%gemm.1 = f32[128,256]{1,0} custom-call(f32[128,256]{1,0} %arg0, "
@@ -103,6 +167,26 @@ def test_get_dict_parses_metadata_backend_config_and_custom_call():
     assert "metadata=" in parsed["metadata"]
     assert "backend_config=" in parsed["backend_config"]
     assert "custom_call_target=" in parsed["custom_call_target"]
+
+
+def test_get_dict_fp8_gemm_type():
+    line = (
+        "%gemm.1 = f8e5m2[128,256]{1,0} custom-call(f8e5m2[128,512]{1,0} %arg0, "
+        'f8e5m2[512,256]{1,0} %arg1), custom_call_target="cublasLt_f8"'
+    )
+    key, parsed = JaxProfileProcessor.get_dict({}, line)
+    assert key == "%gemm.1"
+    assert parsed["type"] == "fp8"
+    assert parsed["computation"] == "gemm"
+
+
+def test_get_dict_operand_type_mismatch_raises():
+    line = (
+        "%gemm.1 = f32[128,256]{1,0} custom-call(bf16[128,512]{1,0} %arg0, "
+        'f32[512,256]{1,0} %arg1), custom_call_target="cublasLt"'
+    )
+    with pytest.raises(Exception, match="Input operand type mismatch"):
+        JaxProfileProcessor.get_dict({}, line)
 
 
 def test_get_dict_parses_replica_groups():
@@ -127,159 +211,6 @@ def test_process_line_skips_unparseable_lines():
     assert "%x" in hlo_ops
 
 
-def test_resolve_operand_references_substitutes_output_types():
-    hlo_ops = {
-        "%src": {"output": "bf16[128,256]{1,0}", "operands": []},
-        "%user": {"output": "bf16[128,256]{1,0}", "operands": ["%src"]},
-    }
-    JaxProfileProcessor._resolve_operand_references(hlo_ops)
-    assert hlo_ops["%user"]["operands"] == ["bf16[128,256]{1,0}"]
-
-
-def test_normalize_hlo_op_key_adds_percent_prefix():
-    assert JaxProfileProcessor._normalize_hlo_op_key("gemm.1") == "%gemm.1"
-    assert JaxProfileProcessor._normalize_hlo_op_key("%gemm.1") == "%gemm.1"
-
-
-def test_build_collective_hlo_aliases_maps_numbered_runtime_ops():
-    module_ops = {
-        "%reduce-scatter-start": {"output": "f32[8,128]{1,0}"},
-    }
-    aliases = JaxProfileProcessor.build_collective_hlo_aliases(
-        module_ops, ["reduce-scatter.12"]
-    )
-    assert aliases["%reduce-scatter.12"] == "%reduce-scatter-start"
-
-
-def test_resolve_hlo_op_key_uses_aliases_and_direct_keys():
-    module_ops = {"%gemm.0": {"output": "f32[1,1]{0}"}}
-    aliases = {"%gemm.1": "%gemm.0"}
-
-    assert JaxProfileProcessor.resolve_hlo_op_key("gemm.0", module_ops) == "%gemm.0"
-    assert (
-        JaxProfileProcessor.resolve_hlo_op_key("gemm.1", module_ops, aliases)
-        == "%gemm.0"
-    )
-    assert JaxProfileProcessor.resolve_hlo_op_key("missing", module_ops) is None
-
-
-def test_get_operand_type_from_prefix_or_lookup():
-    hlo_ops = {"%arg": {"output": "bf16[4,8]{1,0}"}}
-    assert JaxProfileProcessor.get_operand_type(hlo_ops, "bf16[4,8]{1,0}") == "bf16"
-    assert JaxProfileProcessor.get_operand_type(hlo_ops, "%arg") == "bf16"
-
-
-def test_trace_event_utils_split_by_field():
-    k1 = {"cat": "kernel", "i": 1}
-    c1 = {"cat": "cpu_op", "i": 2}
-    k2 = {"cat": "kernel", "i": 3}
-    grouped = TraceEventUtils.split_by_field([k1, c1, k2], "cat")
-    assert {key: list(val) for key, val in grouped.items()} == {
-        "kernel": [k1, k2],
-        "cpu_op": [c1],
-    }
-
-
-def _metadata_event(pid, tid, field, value):
-    arg_key = {
-        MF.ProcessName: AN.Name,
-        MF.ProcessLabels: AN.Labels,
-        MF.ProcessSort: AN.SortIndex,
-        MF.ThreadName: AN.Name,
-        MF.ThreadSort: AN.SortIndex,
-    }[field]
-    return {
-        TK.PID: pid,
-        TK.TID: tid,
-        TK.Phase: TP.Metadata,
-        TK.Name: field,
-        TK.Args: {arg_key: value},
-    }
-
-
-def test_trace_event_utils_split_event_list():
-    events = [
-        _metadata_event(1, None, MF.ProcessName, "host"),
-        _metadata_event(1, 2, MF.ThreadName, JST.XlaOps),
-        {TK.PID: 1, TK.TID: 2, TK.Phase: TP.Complete, TK.Name: "op"},
-    ]
-    metadata, rest = TraceEventUtils.split_event_list(events)
-    assert metadata[1][None][MF.ProcessName] == "host"
-    assert metadata[1][2][MF.ThreadName] == JST.XlaOps
-    assert len(rest) == 1
-
-
-def test_trace_event_utils_get_event_category():
-    events = [
-        _metadata_event(1, None, MF.ProcessName, "host"),
-        _metadata_event(1, 7, MF.ThreadName, JST.XlaOps),
-        {
-            TK.PID: 1,
-            TK.TID: 7,
-            TK.Phase: TP.Complete,
-            TK.Name: "my_op",
-        },
-    ]
-    categorizer = TraceEventUtils.prepare_event_categorizer(events)
-    assert categorizer(events[-1]) == "python function"
-
-
-def test_trace_event_utils_sort_events_by_timestamp_duration():
-    events = [
-        {TK.TimeStamp: 20, TK.Duration: 1},
-        {TK.TimeStamp: 10, TK.Duration: 5},
-        {TK.TimeStamp: 10, TK.Duration: 2},
-    ]
-    TraceEventUtils.sort_events_by_timestamp_duration(events)
-    assert [e[TK.TimeStamp] for e in events] == [10, 10, 20]
-    assert [e[TK.Duration] for e in events] == [2, 5, 1]
-
-
-def test_suppress_native_hlo_logs_filters_hlo_instruction_noise(monkeypatch):
-    monkeypatch.delenv("TRACELENS_VERBOSE_NATIVE_LOGS", raising=False)
-    writes = []
-    real_write = os.write
-
-    def capture_write(fd, data):
-        if fd == 2:
-            writes.append(data)
-            return len(data)
-        return real_write(fd, data)
-
-    monkeypatch.setattr(os, "write", capture_write)
-
-    with suppress_native_hlo_logs():
-        real_write(2, b"hlo_instruction.cc: noisy line\n")
-        real_write(2, b"kept message\n")
-
-    assert any(b"kept message" in w for w in writes)
-    assert not any(b"hlo_instruction.cc" in w for w in writes)
-
-
-def test_get_operands_falls_back_to_comma_split():
-    assert JaxProfileProcessor.get_operands("(%arg0,%arg1)") == ["%arg0", "%arg1"]
-
-
-def test_get_dict_fp8_gemm_type():
-    line = (
-        "%gemm.1 = f8e5m2[128,256]{1,0} custom-call(f8e5m2[128,512]{1,0} %arg0, "
-        'f8e5m2[512,256]{1,0} %arg1), custom_call_target="cublasLt_f8"'
-    )
-    key, parsed = JaxProfileProcessor.get_dict({}, line)
-    assert key == "%gemm.1"
-    assert parsed["type"] == "fp8"
-    assert parsed["computation"] == "gemm"
-
-
-def test_get_dict_operand_type_mismatch_raises():
-    line = (
-        "%gemm.1 = f32[128,256]{1,0} custom-call(bf16[128,512]{1,0} %arg0, "
-        'f32[512,256]{1,0} %arg1), custom_call_target="cublasLt"'
-    )
-    with pytest.raises(Exception, match="Input operand type mismatch"):
-        JaxProfileProcessor.get_dict({}, line)
-
-
 def test_process_xla_file(tmp_path):
     hlo_path = tmp_path / "module.hlo.txt"
     hlo_path.write_text(
@@ -292,6 +223,15 @@ def test_process_xla_file(tmp_path):
 
     assert "%x" in hlo_ops
     assert "%y" in hlo_ops
+
+
+def test_resolve_operand_references_substitutes_output_types():
+    hlo_ops = {
+        "%src": {"output": "bf16[128,256]{1,0}", "operands": []},
+        "%user": {"output": "bf16[128,256]{1,0}", "operands": ["%src"]},
+    }
+    JaxProfileProcessor._resolve_operand_references(hlo_ops)
+    assert hlo_ops["%user"]["operands"] == ["bf16[128,256]{1,0}"]
 
 
 def test_resolve_operand_references_skips_non_list_operands():
@@ -307,12 +247,27 @@ def test_resolve_operand_references_warns_on_unresolved(caplog):
     assert "Unable to resolve HLO operand reference" in caplog.text
 
 
+def test_normalize_hlo_op_key_adds_percent_prefix():
+    assert JaxProfileProcessor._normalize_hlo_op_key("gemm.1") == "%gemm.1"
+    assert JaxProfileProcessor._normalize_hlo_op_key("%gemm.1") == "%gemm.1"
+
+
 def test_collective_start_keys_prefers_done_when_no_start():
     module_ops = {
         "%all-to-all-done": {"output": "f32[1]{0}"},
     }
     keys = JaxProfileProcessor._collective_start_keys(module_ops, "all-to-all")
     assert keys == ["%all-to-all-done"]
+
+
+def test_build_collective_hlo_aliases_maps_numbered_runtime_ops():
+    module_ops = {
+        "%reduce-scatter-start": {"output": "f32[8,128]{1,0}"},
+    }
+    aliases = JaxProfileProcessor.build_collective_hlo_aliases(
+        module_ops, ["reduce-scatter.12"]
+    )
+    assert aliases["%reduce-scatter.12"] == "%reduce-scatter-start"
 
 
 def test_build_collective_hlo_aliases_multiple_start_keys():
@@ -349,12 +304,30 @@ def test_build_collective_hlo_aliases_no_start_keys():
     assert aliases == {}
 
 
+def test_resolve_hlo_op_key_uses_aliases_and_direct_keys():
+    module_ops = {"%gemm.0": {"output": "f32[1,1]{0}"}}
+    aliases = {"%gemm.1": "%gemm.0"}
+
+    assert JaxProfileProcessor.resolve_hlo_op_key("gemm.0", module_ops) == "%gemm.0"
+    assert (
+        JaxProfileProcessor.resolve_hlo_op_key("gemm.1", module_ops, aliases)
+        == "%gemm.0"
+    )
+    assert JaxProfileProcessor.resolve_hlo_op_key("missing", module_ops) is None
+
+
 def test_resolve_hlo_op_key_collective_numbered_fallback():
     module_ops = {"%all-gather-start": {"output": "f32[8,128]{1,0}"}}
     assert (
         JaxProfileProcessor.resolve_hlo_op_key("all-gather.5", module_ops)
         == "%all-gather-start"
     )
+
+
+def test_get_operand_type_from_prefix_or_lookup():
+    hlo_ops = {"%arg": {"output": "bf16[4,8]{1,0}"}}
+    assert JaxProfileProcessor.get_operand_type(hlo_ops, "bf16[4,8]{1,0}") == "bf16"
+    assert JaxProfileProcessor.get_operand_type(hlo_ops, "%arg") == "bf16"
 
 
 def test_get_operand_type_fusion_prefix_and_none():
@@ -586,6 +559,8 @@ def test_process_gemm_ops_non_tuple_output_assigns_raw_output():
         JaxProfileProcessor.process_gemm_ops(hlo_ops)
 
 
+@patch("TraceLens.util.glob.glob")
+@patch("TraceLens.util.suppress_native_hlo_logs")
 def test_process_protobuf_file(mock_suppress, mock_glob, tmp_path):
     pb_path = tmp_path / "plugin.xplane.pb"
     pb_path.write_bytes(b"pb")
@@ -607,6 +582,8 @@ def test_process_protobuf_file(mock_suppress, mock_glob, tmp_path):
     assert "%x" in hlo_ops
 
 
+@patch("TraceLens.util.glob.glob")
+@patch("TraceLens.util.suppress_native_hlo_logs")
 def test_process_protobuf_file_no_hlo_match(mock_suppress, mock_glob, tmp_path, caplog):
     pb_path = tmp_path / "plugin.xplane.pb"
     pb_path.write_bytes(b"pb")
@@ -619,6 +596,8 @@ def test_process_protobuf_file_no_hlo_match(mock_suppress, mock_glob, tmp_path, 
     assert "No matching hlo_filenames" in caplog.text
 
 
+@patch("TraceLens.util.glob.glob")
+@patch("TraceLens.util.suppress_native_hlo_logs")
 def test_process_protobuf_file_multiple_hlo_files(
     mock_suppress, mock_glob, tmp_path, caplog
 ):
@@ -641,6 +620,8 @@ def test_process_protobuf_file_multiple_hlo_files(
     assert "Multiple matching hlo_filenames" in caplog.text
 
 
+@patch("TraceLens.util.glob.glob")
+@patch("TraceLens.util.suppress_native_hlo_logs")
 def test_process_protobuf_file_triggers_tool_names(mock_suppress, mock_glob, tmp_path):
     pb_path = tmp_path / "plugin.xplane.pb"
     pb_path.write_bytes(b"pb")
@@ -684,6 +665,8 @@ def test_process_protobuf_file_triggers_tool_names(mock_suppress, mock_glob, tmp
     assert "%x" in hlo_ops
 
 
+@patch("TraceLens.util.glob.glob")
+@patch("TraceLens.util.suppress_native_hlo_logs")
 def test_process_protobuf_file_tensorboard_fallback(
     mock_suppress, mock_glob, tmp_path, monkeypatch
 ):
@@ -760,6 +743,7 @@ def test_dataloader_unknown_file_type():
         DataLoader.load_data("/tmp/not-a-trace.xyz")
 
 
+@patch("TraceLens.util.suppress_native_hlo_logs")
 def test_dataloader_load_pb(mock_suppress, tmp_path):
     payload = {"traceEvents": []}
     trace_path = tmp_path / "trace.pb"
@@ -774,6 +758,7 @@ def test_dataloader_load_pb(mock_suppress, tmp_path):
     assert result == payload
 
 
+@patch("TraceLens.util.suppress_native_hlo_logs")
 def test_dataloader_load_pb_none_raises(mock_suppress, tmp_path):
     trace_path = tmp_path / "trace.pb"
     trace_path.write_bytes(b"pb")
@@ -785,6 +770,7 @@ def test_dataloader_load_pb_none_raises(mock_suppress, tmp_path):
             DataLoader.load_data(str(trace_path))
 
 
+@patch("TraceLens.util.suppress_native_hlo_logs")
 def test_dataloader_tensorboard_fallback(mock_suppress, tmp_path, monkeypatch):
     payload = {"traceEvents": []}
     trace_path = tmp_path / "trace.pb"
@@ -837,6 +823,41 @@ def test_dataloader_orjson_fallback(tmp_path, monkeypatch):
     assert DataLoader.load_data(str(trace_path)) == payload
 
 
+def test_trace_event_utils_split_by_field():
+    events = [{"cat": "kernel"}, {"cat": "kernel"}, {"cat": "cpu_op"}]
+    grouped = TraceEventUtils.split_by_field(events, "cat")
+    assert set(grouped) == {"kernel", "cpu_op"}
+
+
+def _metadata_event(pid, tid, field, value):
+    arg_key = {
+        MF.ProcessName: AN.Name,
+        MF.ProcessLabels: AN.Labels,
+        MF.ProcessSort: AN.SortIndex,
+        MF.ThreadName: AN.Name,
+        MF.ThreadSort: AN.SortIndex,
+    }[field]
+    return {
+        TK.PID: pid,
+        TK.TID: tid,
+        TK.Phase: TP.Metadata,
+        TK.Name: field,
+        TK.Args: {arg_key: value},
+    }
+
+
+def test_trace_event_utils_split_event_list():
+    events = [
+        _metadata_event(1, None, MF.ProcessName, "host"),
+        _metadata_event(1, 2, MF.ThreadName, JST.XlaOps),
+        {TK.PID: 1, TK.TID: 2, TK.Phase: TP.Complete, TK.Name: "op"},
+    ]
+    metadata, rest = TraceEventUtils.split_event_list(events)
+    assert metadata[1][None][MF.ProcessName] == "host"
+    assert metadata[1][2][MF.ThreadName] == JST.XlaOps
+    assert len(rest) == 1
+
+
 def test_trace_event_utils_metadata_helpers():
     events = [
         _metadata_event(1, None, MF.ProcessName, "host"),
@@ -849,6 +870,31 @@ def test_trace_event_utils_metadata_helpers():
     assert TraceEventUtils.default_categorizer(rest[0]) == "kernel"
 
 
+def test_trace_event_utils_get_event_category():
+    events = [
+        _metadata_event(1, None, MF.ProcessName, "host"),
+        _metadata_event(1, 7, MF.ThreadName, JST.XlaOps),
+        {
+            TK.PID: 1,
+            TK.TID: 7,
+            TK.Phase: TP.Complete,
+            TK.Name: "my_op",
+        },
+    ]
+    categorizer = TraceEventUtils.prepare_event_categorizer(events)
+    assert categorizer(events[-1]) == "python function"
+
+
+@pytest.mark.parametrize(
+    "thread_name,event_name,expected",
+    [
+        (JST.FrameworkCallStack, "scope", "cpu_op"),
+        ("py_xla_worker", "compile", "cpu_op"),
+        ("Stream #7", "CopyHtoD", "memcpy"),
+        ("Stream #7", "Memset32", "memset"),
+        ("Stream #7", "my_kernel", "kernel"),
+    ],
+)
 def test_trace_event_utils_get_event_category_branches(
     thread_name, event_name, expected
 ):
@@ -892,6 +938,17 @@ def test_trace_event_utils_split_events_by_pid_tid():
     grouped = TraceEventUtils.split_events_by_pid_tid(events)
     assert len(grouped[1][2]) == 2
     assert len(grouped[1][3]) == 1
+
+
+def test_trace_event_utils_sort_events_by_timestamp_duration():
+    events = [
+        {TK.TimeStamp: 20, TK.Duration: 1},
+        {TK.TimeStamp: 10, TK.Duration: 5},
+        {TK.TimeStamp: 10, TK.Duration: 2},
+    ]
+    TraceEventUtils.sort_events_by_timestamp_duration(events)
+    assert [e[TK.TimeStamp] for e in events] == [10, 10, 20]
+    assert [e[TK.Duration] for e in events] == [2, 5, 1]
 
 
 def test_trace_event_utils_find_threads_and_end_times():
@@ -944,9 +1001,84 @@ def test_trace_event_utils_communication_helpers():
     assert TraceEventUtils.is_communication_string("cross_device_reduce_0") is True
 
 
+@pytest.mark.parametrize(
+    "name,matcher,expected",
+    [
+        ("MEMORY_COPY_HOST_TO_DEVICE", TraceEventUtils.is_rocm_legacy_memcpy, True),
+        ("__amd_rocclr_copyBuffer", TraceEventUtils.is_rocm_legacy_memcpy, True),
+        ("__amd_rocclr_fillBuffer", TraceEventUtils.is_rocm_legacy_memset, True),
+        ("regular_kernel", TraceEventUtils.is_rocm_legacy_memcpy, False),
+    ],
+)
 def test_trace_event_utils_rocm_legacy_memory(name, matcher, expected):
     assert matcher(name) is expected
     assert matcher("") is False
+
+
+def _minimal_rocprof_data():
+    return {
+        "rocprofiler-sdk-tool": [
+            {
+                "buffer_records": {
+                    "kernel_dispatch": [
+                        {
+                            "start_timestamp": 100,
+                            "end_timestamp": 250,
+                            "stream_id": {"handle": 1},
+                            "dispatch_info": {
+                                "kernel_id": 7,
+                                "grid_size": {"x": 2, "y": 1, "z": 1},
+                                "workgroup_size": {"x": 256, "y": 1, "z": 1},
+                                "dispatch_id": 42,
+                                "agent_id": {"handle": 3},
+                            },
+                            "correlation_id": {"id": 99},
+                            "thread_id": 5,
+                        }
+                    ],
+                    "memory_copy": [
+                        {
+                            "start_timestamp": 50,
+                            "end_timestamp": 80,
+                            "kind": "H2D",
+                            "operation": "copy",
+                            "stream_id": {"handle": 0},
+                        }
+                    ],
+                    "hip_api": [
+                        {
+                            "start_timestamp": 10,
+                            "end_timestamp": 20,
+                            "operation": "hipLaunchKernel",
+                            "thread_id": 2,
+                        }
+                    ],
+                    "hsa_api": [
+                        {
+                            "start_timestamp": 30,
+                            "end_timestamp": 35,
+                            "operation": "hsa_signal_wait",
+                            "thread_id": 3,
+                        }
+                    ],
+                },
+                "kernel_symbols": [
+                    {
+                        "kernel_id": 7,
+                        "truncated_kernel_name": "my_kernel",
+                    }
+                ],
+                "metadata": {
+                    "pid": 1234,
+                    "init_time": 0,
+                    "fini_time": 1000,
+                    "node": {"hostname": "testhost"},
+                    "command": ["./app"],
+                },
+                "agents": [{"id": 0}],
+            }
+        ]
+    }
 
 
 def test_rocprof_parser_synthetic_data(tmp_path):

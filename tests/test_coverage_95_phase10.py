@@ -46,7 +46,7 @@ from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
 from tests.test_reporting_coverage import _write_trace
-from tests.test_tracediff import _add_gpu_chain, _mk_event
+from tests.test_trace2tree import _add_gpu_chain, _mk_event
 from tests.test_treeperf_coverage import _build_analyzer, _make_gpu_event, _mk_ac2g
 
 
