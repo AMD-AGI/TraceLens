@@ -149,6 +149,7 @@ class CodeAnalysis:
     notes: list[str] = field(default_factory=list)
     source_files: list[str] = field(default_factory=list)
     class_registry: dict[str, ClassStructure] = field(default_factory=dict)
+    external_imports: dict[str, str] = field(default_factory=dict)
 
     def has_block_graph(self) -> bool:
         return bool(self.block_components or self.forward_sequence or self.stack_pre or self.stack_tail)

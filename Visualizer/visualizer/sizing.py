@@ -14,6 +14,7 @@ BLOCK_PAD_X = 0.04
 BLOCK_PAD_Y = 0.02
 INPUT_PAD_X = 0.015
 INPUT_PAD_Y = 0.02
+TENSOR_PORT_PAD_Y = 0.01
 FRAME_LABEL_PAD_X = 0.08
 TITLE_LINE_H = 0.145
 SUB_LINE_H = 0.125
@@ -32,12 +33,27 @@ class BoxTextLine:
     va: str = "center"
 
 
-def box_text_block_height(sublabel: str | None) -> float:
+def _scaled_title_line_h(fontsize: float) -> float:
+    return TITLE_LINE_H * (fontsize / DEFAULT_TITLE_FONT)
+
+
+def _scaled_sub_line_h(sub_fontsize: float) -> float:
+    return SUB_LINE_H * (sub_fontsize / DEFAULT_SUB_FONT)
+
+
+def box_text_block_height(
+    sublabel: str | None,
+    *,
+    title_fontsize: float = DEFAULT_TITLE_FONT,
+) -> float:
     """Nominal stacked label height used for vertical centering."""
     sub_lines = [line for line in (sublabel or "").split("\n") if line.strip()]
-    height = TITLE_LINE_H
+    title_line_h = _scaled_title_line_h(title_fontsize)
+    height = title_line_h
     if sub_lines:
-        height += LABEL_LINE_GAP + len(sub_lines) * SUB_LINE_H + max(0, len(sub_lines) - 1) * LABEL_LINE_GAP
+        sub_fontsize = max(6.5, title_fontsize - 1.5)
+        sub_line_h = _scaled_sub_line_h(sub_fontsize)
+        height += LABEL_LINE_GAP + len(sub_lines) * sub_line_h + max(0, len(sub_lines) - 1) * LABEL_LINE_GAP
     return height
 
 
@@ -55,20 +71,22 @@ def box_text_lines(
     interior_top = top_y - pad
     interior_bottom = top_y - height + pad
     interior_h = interior_top - interior_bottom
-    text_h = box_text_block_height(sublabel)
+    text_h = box_text_block_height(sublabel, title_fontsize=title_fontsize)
     text_block_top = interior_top - (interior_h - text_h) / 2
 
     sub_lines = [line for line in (sublabel or "").split("\n") if line.strip()]
     sub_fontsize = max(6.5, title_fontsize - 1.5)
-    lines = [BoxTextLine(label, text_block_top - TITLE_LINE_H / 2, title_fontsize, "bold")]
+    title_line_h = _scaled_title_line_h(title_fontsize)
+    sub_line_h = _scaled_sub_line_h(sub_fontsize)
+    lines = [BoxTextLine(label, text_block_top - title_line_h / 2, title_fontsize, "bold")]
 
     if not sub_lines:
         return lines
 
-    cursor = text_block_top - TITLE_LINE_H - LABEL_LINE_GAP - SUB_LINE_H / 2
+    cursor = text_block_top - title_line_h - LABEL_LINE_GAP - sub_line_h / 2
     for index, line in enumerate(sub_lines):
         if index > 0:
-            cursor -= SUB_LINE_H + LABEL_LINE_GAP
+            cursor -= sub_line_h + LABEL_LINE_GAP
         lines.append(BoxTextLine(line, cursor, sub_fontsize, "normal"))
     return lines
 
@@ -120,40 +138,8 @@ def min_horizontal_block_gap() -> float:
 
 
 def block_sublabel(block: BlockNode | None) -> str | None:
-    """Build the secondary text shown inside a block."""
-    if block is None:
-        return None
-    if block.role == "norm" and not block.details:
-        return None
-    if block.is_basic and not block.details:
-        return None
-    if block.class_name == "FusedRMSNormGated":
-        return None
-    if block.class_name in {"ActivationOp", "SituActivation"}:
-        return None
-    from visualizer.ast_analyze import SYNTHETIC_ATTENTION
-
-    if (block.class_name == "AttentionOp" or block.attr_name == SYNTHETIC_ATTENTION) and not any(
-        "delta rule" in detail.lower() for detail in block.details
-    ):
-        return None
-    from visualizer.block_tree import block_purpose
-    from visualizer.ast_analyze import displays_as_linear
-    from visualizer.ast_analyze import displays_as_linear
-
-    lines: list[str] = []
-    purpose = block_purpose(block)
-    if purpose:
-        lines.append(purpose)
-    elif block.class_name == "ShortConvolution":
-        return None
-    elif block.class_name and block.class_name != block.label:
-        lines.append(block.class_name)
-    elif block.details:
-        if len(block.details) > 1 and displays_as_linear(block.attr_name, block.class_name):
-            return "\n".join(line.strip() for line in block.details if line.strip())
-        lines.append(block.details[0])
-    return lines[0] if len(lines) == 1 else "\n".join(lines) if lines else None
+    """Detail tiles use a single label line; secondary in-box text is disabled."""
+    return None
 
 
 def estimate_block_size(

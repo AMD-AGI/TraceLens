@@ -10,6 +10,7 @@ from pathlib import Path
 
 from visualizer.basic_ops import COMMON_LEAF_PATTERNS, DEFAULT_BASIC_OP_PATTERNS, BasicOpFilter
 from visualizer.extract import dump_model_ast, load_architecture
+from visualizer.model_graph import build_architecture_model_graphs, save_architecture_model_graphs
 from visualizer.render import render_diagram, _fact_lines
 
 
@@ -80,6 +81,15 @@ def build_parser() -> argparse.ArgumentParser:
         dest="json_out",
         type=Path,
         help="Also write parsed architecture metadata to JSON",
+    )
+    parser.add_argument(
+        "--graph-json",
+        dest="graph_json_out",
+        type=Path,
+        help=(
+            "Write serializable model graph IR (nodes, edges, inline frames, subgraphs) "
+            "to JSON. Requires --detailed and modeling source AST inspection."
+        ),
     )
     parser.add_argument(
         "--facts",
@@ -208,6 +218,22 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"Error rendering diagram: {exc}", file=sys.stderr)
         return 1
+
+    if args.graph_json_out:
+        if not args.detailed:
+            print(
+                "Warning: --graph-json requires detailed block trees; re-run with --detailed",
+                file=sys.stderr,
+            )
+        elif not spec.detailed_block_trees:
+            print(
+                "Warning: no detailed block trees available; graph JSON not written",
+                file=sys.stderr,
+            )
+        else:
+            graph_payload = build_architecture_model_graphs(spec, basic_ops=basic_ops)
+            save_architecture_model_graphs(graph_payload, args.graph_json_out)
+            print(f"Wrote model graph: {args.graph_json_out}")
 
     if args.json_out:
         payload = {

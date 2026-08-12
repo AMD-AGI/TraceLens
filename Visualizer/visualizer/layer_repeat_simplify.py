@@ -14,7 +14,6 @@ _LOOP_LINE_RE = re.compile(
     r"^(?P<head>\d+|N) × (?P<class_name>[^(]+) \((?P<loop_var>\w+) in (?P<range_expr>.+)\)$"
 )
 
-
 def simplify_layer_repeat_lines(
     lines: list[str],
     config: dict[str, Any],
@@ -23,6 +22,54 @@ def simplify_layer_repeat_lines(
     if not config:
         return list(lines)
     return [_simplify_line(line, config) for line in lines]
+
+
+def layer_condition_matches(layer_idx: int, condition: str, config: dict[str, Any]) -> bool:
+    """Return True when a decoder __init__ branch condition matches ``layer_idx``."""
+    expr = condition.strip()
+    if expr == "else":
+        return True
+    if expr.startswith("if "):
+        expr = expr[3:].strip()
+    elif expr.startswith("elif "):
+        expr = expr[5:].strip()
+
+    expanded = _substitute_config_attrs(_expand_config_calls(expr, config), config)
+    expanded = _simplify_boolean_expr(expanded)
+    if not expanded:
+        return False
+    normalized = re.sub(r"\s+", "", expanded)
+    if normalized.lower() == "true":
+        return True
+    if normalized.lower() == "false":
+        return False
+
+    match = re.fullmatch(
+        r"\(layer_idx\+1\)in(\[[^\]]+\]|\w+_layers(?:\(\d+layers\))?)",
+        normalized,
+    )
+    if match:
+        payload = match.group(1)
+        if "_layers" in payload and not payload.startswith("["):
+            stem = payload.split("_layers", 1)[0]
+            one_based = {idx + 1 for idx in _layer_index_list(config, stem, zero_based=False)}
+            return (layer_idx + 1) in one_based
+        indices = _parse_layer_index_set(payload)
+        return (layer_idx + 1) in indices
+
+    match = re.fullmatch(r"layer_idx>=(\d+)", normalized)
+    if match:
+        return layer_idx >= int(match.group(1))
+
+    match = re.fullmatch(r"layer_idx%(\d+)==0", normalized)
+    if match:
+        return layer_idx % int(match.group(1)) == 0
+
+    match = re.fullmatch(r"\(layer_idx%(\d+)==0\)", normalized)
+    if match:
+        return layer_idx % int(match.group(1)) == 0
+
+    return False
 
 
 def _simplify_line(line: str, config: dict[str, Any]) -> str:
@@ -59,18 +106,13 @@ def _simplify_condition(expr: str, config: dict[str, Any]) -> str:
 
 def _expand_config_calls(expr: str, config: dict[str, Any]) -> str:
     expr = re.sub(
-        r"config\.is_kda_layer\(\s*layer_idx\s*\)",
-        lambda _match: _kda_layer_predicate(config),
+        r"config\.is_(\w+)_layer\(\s*layer_idx\s*\)",
+        lambda match: _layer_index_predicate(config, match.group(1)),
         expr,
     )
     expr = re.sub(
-        r"config\.is_mla\b",
-        lambda _match: "True" if _config_is_mla(config) else "False",
-        expr,
-    )
-    expr = re.sub(
-        r"config\.is_moe\b",
-        lambda _match: "True" if _config_is_moe(config) else "False",
+        r"config\.is_(\w+)\b",
+        lambda match: _config_is_named_flag(config, match.group(1)),
         expr,
     )
     expr = re.sub(
@@ -96,10 +138,91 @@ def _substitute_config_attrs(expr: str, config: dict[str, Any]) -> str:
 def _config_get(config: dict[str, Any], key: str, default: Any = None) -> Any:
     if key in config:
         return config[key]
-    nested = config.get("linear_attn_config")
-    if isinstance(nested, dict) and key in nested:
-        return nested[key]
+    for value in config.values():
+        if isinstance(value, dict) and key in value:
+            return value[key]
     return default
+
+
+def _config_containers(config: dict[str, Any]) -> list[dict[str, Any]]:
+    containers = [config]
+    for value in config.values():
+        if isinstance(value, dict):
+            containers.append(value)
+    return containers
+
+
+def _as_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _layer_index_list(
+    config: dict[str, Any],
+    stem: str,
+    *,
+    zero_based: bool = False,
+) -> list[int]:
+    """Return layer indices listed under ``{stem}_layers`` anywhere in the config tree."""
+    keys = (f"{stem}_layers", f"{stem}_layer_indices", f"{stem}_layer_ids")
+    for container in _config_containers(config):
+        for key in keys:
+            raw = container.get(key)
+            if not isinstance(raw, list):
+                continue
+            values: list[int] = []
+            for item in raw:
+                idx = _as_int(item)
+                if idx is None:
+                    continue
+                if not zero_based and idx > 0:
+                    idx -= 1
+                values.append(idx)
+            if values:
+                return sorted(set(values))
+    return []
+
+
+def _layer_index_predicate(config: dict[str, Any], stem: str) -> str:
+    layers = _layer_index_list(config, stem, zero_based=False)
+    if not layers:
+        return f"(layer_idx + 1) in {stem}_layers"
+    display_layers = [idx + 1 for idx in layers]
+    if len(display_layers) <= 12:
+        return f"(layer_idx + 1) in {_format_layer_index_set(display_layers)}"
+    return f"(layer_idx + 1) in {stem}_layers ({len(display_layers)} layers)"
+
+
+def _parse_layer_index_set(payload: str) -> set[int]:
+    """Parse ``[1, 2]`` or ``[1–5]`` style index lists (1-based)."""
+    payload = payload.strip()
+    if not payload.startswith("[") or not payload.endswith("]"):
+        return set()
+    inner = payload[1:-1].strip()
+    if not inner:
+        return set()
+    values: set[int] = set()
+    for part in inner.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if "–" in token or "-" in token:
+            sep = "–" if "–" in token else "-"
+            start_text, end_text = token.split(sep, 1)
+            start = _as_int(start_text)
+            end = _as_int(end_text)
+            if start is None or end is None:
+                continue
+            values.update(range(start, end + 1))
+            continue
+        idx = _as_int(token)
+        if idx is not None:
+            values.add(idx)
+    return values
 
 
 def _parse_default(raw: str) -> Any:
@@ -128,24 +251,21 @@ def _config_is_moe(config: dict[str, Any]) -> bool:
     return num_experts is not None
 
 
-def _kda_layer_indices(config: dict[str, Any]) -> list[int]:
-    linear_cfg = config.get("linear_attn_config")
-    if not isinstance(linear_cfg, dict):
-        return []
-    raw_layers = linear_cfg.get("kda_layers")
-    if not isinstance(raw_layers, list):
-        return []
-    return [int(layer) for layer in raw_layers if isinstance(layer, int) or str(layer).isdigit()]
+def _config_is_named_flag(config: dict[str, Any], name: str) -> str:
+    lowered = name.lower()
+    if lowered == "mla":
+        return "True" if _config_is_mla(config) else "False"
+    if lowered == "moe":
+        return "True" if _config_is_moe(config) else "False"
 
-
-def _kda_layer_predicate(config: dict[str, Any]) -> str:
-    layers = _kda_layer_indices(config)
-    if not layers:
-        return "(layer_idx + 1) in kda_layers"
-    if len(layers) <= 12:
-        formatted = _format_layer_index_set(layers)
-        return f"(layer_idx + 1) in {formatted}"
-    return f"(layer_idx + 1) in kda_layers ({len(layers)} layers)"
+    for container in _config_containers(config):
+        for key in (name, f"is_{name}", f"use_{name}", f"{name}_enabled"):
+            if key not in container:
+                continue
+            value = container[key]
+            if isinstance(value, bool):
+                return "True" if value else "False"
+    return "False"
 
 
 def _format_layer_index_set(values: list[int]) -> str:

@@ -54,7 +54,32 @@ ATTR_ROLE_HINTS: dict[str, str] = {
 
 
 SYNTHETIC_ATTENTION = "@attention"
-SYNTHETIC_FUNCTIONAL_LINEAR = "@functional_linear"
+FUNCTIONAL_SYNTHETIC_PREFIX = "@functional_"
+SYNTHETIC_FUNCTIONAL_LINEAR = f"{FUNCTIONAL_SYNTHETIC_PREFIX}linear"
+
+
+def functional_synthetic_attr(op_name: str) -> str:
+    """Synthetic attr for a torch.nn.functional call (e.g. linear -> @functional_linear)."""
+    return f"{FUNCTIONAL_SYNTHETIC_PREFIX}{op_name}"
+
+
+def is_functional_synthetic(attr_name: str) -> bool:
+    return attr_name.startswith(FUNCTIONAL_SYNTHETIC_PREFIX)
+
+
+def functional_display_label(op_name_or_attr: str) -> str:
+    """Display label for a functional op (e.g. linear -> Linear, @functional_softmax -> Softmax)."""
+    name = op_name_or_attr
+    if name.startswith(FUNCTIONAL_SYNTHETIC_PREFIX):
+        name = name[len(FUNCTIONAL_SYNTHETIC_PREFIX) :]
+    return "".join(part.capitalize() for part in name.split("_") if part)
+
+
+def first_functional_synthetic_index(forward_calls: list[str]) -> int | None:
+    for index, call in enumerate(forward_calls):
+        if is_functional_synthetic(call):
+            return index
+    return None
 SYNTHETIC_ROUTER_ACTIVATION = "@router_activation"
 SYNTHETIC_ROUTER_BIAS = "@router_bias"
 SYNTHETIC_ROUTER_GROUP = "@router_group"
@@ -85,7 +110,7 @@ _SYNTHETIC_ATTENTION_NAMES = {
     "attention_interface",
 }
 _KERNEL_MERGE_NAME_RE = re.compile(
-    r"(attention|attn|kda|recurrent|flash|sdpa|linear_attn|delta)",
+    r"(attention|attn|recurrent|flash|sdpa|linear_attn|kernel|chunk)",
     re.IGNORECASE,
 )
 _SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "getattr"})
@@ -215,8 +240,9 @@ def _extract_self_calls_ordered(node: ast.AST, out: list[str]) -> None:
         if isinstance(func, ast.Attribute) and _is_self_attr(func, func.attr):
             _append_forward_call(out, func.attr)
             return
-        if _is_functional_linear_call(func):
-            _append_forward_call(out, SYNTHETIC_FUNCTIONAL_LINEAR)
+        functional_op = _functional_call_name(func)
+        if functional_op:
+            _append_forward_call(out, functional_synthetic_attr(functional_op))
             return
 
         target = _expr_name(func)
@@ -251,22 +277,29 @@ def _extract_self_calls_ordered(node: ast.AST, out: list[str]) -> None:
         return
 
 
-def _is_functional_linear_call(func: ast.AST) -> bool:
-    """True for F.linear(...) and torch.nn.functional.linear(...)."""
-    if not isinstance(func, ast.Attribute) or func.attr != "linear":
-        return False
+def _functional_call_name(func: ast.AST) -> str | None:
+    """Return the op name for F.<op>(...) and torch.nn.functional.<op>(...)."""
+    if not isinstance(func, ast.Attribute):
+        return None
+    op_name = func.attr
     value = func.value
     if isinstance(value, ast.Name) and value.id == "F":
-        return True
+        return op_name
     if isinstance(value, ast.Attribute) and value.attr == "functional":
         base = value.value
         if isinstance(base, ast.Attribute) and base.attr == "nn":
-            return isinstance(base.value, ast.Name) and base.value.id == "torch"
-    return False
+            if isinstance(base.value, ast.Name) and base.value.id == "torch":
+                return op_name
+    return None
+
+
+def _is_functional_linear_call(func: ast.AST) -> bool:
+    """True for F.linear(...) and torch.nn.functional.linear(...)."""
+    return _functional_call_name(func) == "linear"
 
 
 def _is_moe_gate_class(class_name: str, forward_calls: list[str]) -> bool:
-    if SYNTHETIC_FUNCTIONAL_LINEAR not in forward_calls:
+    if first_functional_synthetic_index(forward_calls) is None:
         return False
     if re.search(r"Gate$", class_name):
         return True
@@ -413,10 +446,11 @@ def _router_forward_step_details(
     if not pipeline:
         return {}
 
-    linear_index = forward_calls.index(SYNTHETIC_FUNCTIONAL_LINEAR)
+    functional_index = first_functional_synthetic_index(forward_calls)
+    assert functional_index is not None
     details: dict[str, list[str]] = {}
     for offset, (step, step_details) in enumerate(pipeline, start=1):
-        forward_calls.insert(linear_index + offset, step)
+        forward_calls.insert(functional_index + offset, step)
         details[step] = step_details
     return details
 
@@ -637,10 +671,6 @@ def _label_for(role: str, class_name: str, attr_name: str) -> str:
     if displays_as_linear(attr_name, class_name):
         return "Linear"
     if role == "attention":
-        if re.search(r"Delta|KDA|LinearAttn|LinearAttention", class_name, re.I):
-            return "KDA"
-        if re.search(r"Latent|MLA", class_name, re.I):
-            return "MLA"
         if re.search(r"Gated", class_name, re.I):
             return "Gated Attention"
         if re.search(r"Sliding|Window", class_name, re.I):
@@ -690,6 +720,7 @@ class ClassStructure:
     forward_step_details: dict[str, list[str]] = field(default_factory=dict)
     side_inputs: dict[str, list[SideInputSpec]] = field(default_factory=dict)
     init_assignment_options: dict[str, list[str]] = field(default_factory=dict)
+    forward_input_name: str | None = None
 
 
 # Backwards-compatible alias used internally.
@@ -711,11 +742,13 @@ class _ModelAstVisitor(ast.NodeVisitor):
         gate_activations: dict[str, str] = {}
         forward_step_details: dict[str, list[str]] = {}
         side_inputs: dict[str, list[SideInputSpec]] = {}
+        forward_input_name: str | None = None
 
         for item in node.body:
             if isinstance(item, ast.FunctionDef) and item.name == "__init__":
                 init_assignments, init_details, init_assignment_options = _parse_init(item)
             if isinstance(item, ast.FunctionDef) and item.name == "forward":
+                forward_input_name = _primary_forward_input_name(item)
                 (
                     forward_calls,
                     norm_before,
@@ -750,6 +783,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             gate_activations=gate_activations,
             forward_step_details=forward_step_details,
             side_inputs=side_inputs,
+            forward_input_name=forward_input_name,
         )
         self.generic_visit(node)
 
@@ -982,29 +1016,6 @@ _KERNEL_PRODUCER_SKIP_KWARGS = frozenset(
 )
 
 
-def _kernel_input_label(name: str) -> str:
-    normalized = {
-        "q": "Q",
-        "query": "Q",
-        "query_states": "Q",
-        "k": "K",
-        "key": "K",
-        "key_states": "K",
-        "v": "V",
-        "value": "V",
-        "value_states": "V",
-        "g": "G",
-        "gate": "G",
-        "beta": "β",
-    }
-    lowered = name.lower()
-    if lowered in normalized:
-        return normalized[lowered]
-    if len(name) <= 4:
-        return name.upper()
-    return name
-
-
 def _is_data_movement_call(func: ast.AST) -> bool:
     name = _expr_name(func)
     if not name:
@@ -1038,7 +1049,7 @@ def _collect_kernel_producers(
             return
         chain = var_chains.get(arg.id, [])
         if chain:
-            producers[_kernel_input_label(label)] = list(chain)
+            producers[label] = list(chain)
 
     for keyword in call.keywords:
         if keyword.arg in _KERNEL_PRODUCER_SKIP_KWARGS:
@@ -1050,12 +1061,105 @@ def _collect_kernel_producers(
 
     args = call.args
     start = 1 if args and isinstance(args[0], ast.Name) and args[0].id == "self" else 0
-    positional_labels = ["Q", "K", "V"]
     for index, arg in enumerate(args[start:], start=start):
-        label = positional_labels[index - start] if (index - start) < len(positional_labels) else f"in{index - start}"
-        consider(label, arg)
+        if isinstance(arg, ast.Name):
+            consider(arg.id, arg)
+        else:
+            consider(f"in{index - start}", arg)
 
     return producers
+
+
+_KERNEL_DETAIL_SKIP_KWARGS = frozenset(
+    {
+        "initial_state",
+        "recurrent_state",
+        "output_final_state",
+        "cu_seqlens",
+        "cu_seqlens_cpu",
+        "cache",
+        "attention_mask",
+        "position_ids",
+        "past_key_values",
+        "cache_params",
+        "cp_context",
+        "chunk_indices",
+        "return_intermediate_states",
+        "disable_recompute",
+        "scale",
+        "chunk_size",
+        "state_v_first",
+    }
+)
+
+
+def _collect_external_imports(tree: ast.AST) -> dict[str, str]:
+    """Collect top-level imported names from a modeling module (including guarded imports)."""
+    bindings: dict[str, str] = {}
+
+    def register(name: str, module: str, symbol: str) -> None:
+        bindings[name] = f"{module}#{symbol}" if module else symbol
+
+    def walk_stmts(stmts: list[ast.stmt]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, ast.ImportFrom):
+                module = stmt.module or ""
+                for alias in stmt.names:
+                    if alias.name == "*":
+                        continue
+                    register(alias.asname or alias.name, module, alias.name)
+            elif isinstance(stmt, ast.Import):
+                for alias in stmt.names:
+                    name = alias.asname or alias.name
+                    register(name, alias.name, alias.name)
+            elif isinstance(stmt, ast.Try):
+                walk_stmts(stmt.body)
+                for handler in stmt.handlers:
+                    walk_stmts(handler.body)
+                walk_stmts(stmt.orelse)
+                walk_stmts(stmt.finalbody)
+
+    if isinstance(tree, ast.Module):
+        walk_stmts(tree.body)
+    return bindings
+
+
+def _enrich_kernel_import_details(
+    classes: dict[str, ClassStructure],
+    imports: dict[str, str],
+) -> None:
+    """Attach ``import:`` metadata to synthetic attention steps from modeling imports."""
+    for cls in classes.values():
+        details = cls.forward_step_details.get(SYNTHETIC_ATTENTION)
+        if not details:
+            continue
+        if any(line.startswith("import:") for line in details):
+            continue
+        kernel = kernel_name_from_step_details(details)
+        if not kernel:
+            continue
+        import_ref = imports.get(kernel)
+        if import_ref:
+            cls.forward_step_details[SYNTHETIC_ATTENTION] = [*details, f"import: {import_ref}"]
+
+
+def _kernel_call_detail_lines(call: ast.Call) -> list[str]:
+    """Capture kernel name and keyword arguments from a modeling forward call."""
+    kernel_name = _expr_name(call.func) or "kernel"
+    lines = [f"kernel: {kernel_name.split('.')[-1]}"]
+    for keyword in call.keywords:
+        if keyword.arg in _KERNEL_DETAIL_SKIP_KWARGS or keyword.arg is None:
+            continue
+        if isinstance(keyword.value, ast.Constant):
+            value = repr(keyword.value.value)
+        elif isinstance(keyword.value, ast.Name):
+            value = keyword.value.id
+        elif isinstance(keyword.value, ast.Attribute):
+            value = _expr_name(keyword.value) or ast.unparse(keyword.value)
+        else:
+            value = ast.unparse(keyword.value)
+        lines.append(f"kwarg: {keyword.arg}={value}")
+    return lines
 
 
 def _inject_kernel_merge(
@@ -1065,7 +1169,7 @@ def _inject_kernel_merge(
     attention_inputs: dict[str, list[str]],
     forward_step_details: dict[str, list[str]],
 ) -> None:
-    if any(label in attention_inputs for label in ("Q", "K", "V")):
+    if len(attention_inputs) >= 2:
         return
     for call in ast.walk(node):
         if not isinstance(call, ast.Call):
@@ -1086,8 +1190,7 @@ def _inject_kernel_merge(
         if SYNTHETIC_ATTENTION not in stmt_calls:
             stmt_calls.append(SYNTHETIC_ATTENTION)
         attention_inputs.update(producers)
-        kernel_name = _expr_name(call.func) or "kernel"
-        forward_step_details[SYNTHETIC_ATTENTION] = [f"kernel: {kernel_name.split('.')[-1]}"]
+        forward_step_details[SYNTHETIC_ATTENTION] = _kernel_call_detail_lines(call)
         return
 
 
@@ -1107,8 +1210,6 @@ def kernel_name_from_step_details(details: list[str]) -> str | None:
     return None
 
 
-_KDA_KERNEL_MARKERS = ("kda", "delta", "linear_attn", "linear_attention")
-
 _STANDARD_ATTENTION_MARKERS = (
     "sdpa",
     "scaled_dot_product",
@@ -1127,18 +1228,9 @@ _STANDARD_ATTENTION_MARKERS = (
 )
 
 
-def _is_kda_attention_kernel(kernel: str | None) -> bool:
-    if not kernel:
-        return False
-    lowered = kernel.lower()
-    return any(marker in lowered for marker in _KDA_KERNEL_MARKERS)
-
-
 def is_standard_attention_kernel(kernel: str | None) -> bool:
     """True for kernels that delegate to a common attention library (SDPA, Flash, TE, …)."""
     if not kernel:
-        return False
-    if _is_kda_attention_kernel(kernel):
         return False
     lowered = kernel.lower()
     if lowered in _SYNTHETIC_ATTENTION_NAMES:
@@ -1146,18 +1238,34 @@ def is_standard_attention_kernel(kernel: str | None) -> bool:
     return any(marker in lowered for marker in _STANDARD_ATTENTION_MARKERS)
 
 
-def is_kda_attention_step(details: list[str]) -> bool:
-    return _is_kda_attention_kernel(kernel_name_from_step_details(details))
-
-
 def is_standard_attention_step(details: list[str]) -> bool:
     return is_standard_attention_kernel(kernel_name_from_step_details(details))
 
 
+def is_kernel_pipeline_step(
+    details: list[str],
+    attention_inputs: dict[str, list[str]] | None = None,
+) -> bool:
+    """True when a synthetic attention step has an importable multi-input kernel pipeline."""
+    from visualizer.kernel_pipeline import parse_kernel_import
+
+    if not kernel_name_from_step_details(details):
+        return False
+    if parse_kernel_import(details) is None:
+        return False
+    kwarg_tensors = sum(
+        1
+        for line in details
+        if line.startswith("kwarg:")
+        and "=" in line
+        and not line.split("=", 1)[1].strip().startswith("self.")
+    )
+    inputs = attention_inputs or {}
+    return len(inputs) >= 2 or kwarg_tensors >= 2
+
+
 def attention_kernel_label(details: list[str]) -> str:
     kernel = kernel_name_from_step_details(details)
-    if _is_kda_attention_kernel(kernel):
-        return "KDA"
     if is_standard_attention_kernel(kernel):
         return "Attention"
     if kernel:
@@ -1170,19 +1278,6 @@ def attention_kernel_details(
     attention_inputs: dict[str, list[str]] | None = None,
 ) -> list[str]:
     kernel = kernel_name_from_step_details(details)
-    extra_inputs: list[str] = []
-    if attention_inputs:
-        extra_inputs = [label for label in attention_inputs if label not in {"Q", "K", "V"}]
-
-    if _is_kda_attention_kernel(kernel):
-        summary = "recurrent delta rule (not softmax QKᵀV)"
-        if kernel:
-            summary = f"{summary} · {kernel}"
-        lines = [summary]
-        if extra_inputs:
-            lines.append(f"inputs: Q,K,V,{','.join(extra_inputs)}")
-        lines.append("S ← (I−βkkᵀ)Diag(α)S + βkvᵀ")
-        return lines
 
     if kernel and kernel.lower() in _SYNTHETIC_ATTENTION_NAMES:
         return []
@@ -1207,14 +1302,13 @@ def _capture_attention_inputs(
         target = _expr_name(call.func)
         if target not in _SYNTHETIC_ATTENTION_NAMES:
             continue
-        if len(call.args) < 4:
-            continue
-        for idx, label in enumerate(["Q", "K", "V"]):
-            arg = call.args[idx + 1]
-            if isinstance(arg, ast.Name):
-                chain = var_chains.get(arg.id, [])
-                if chain:
-                    attention_inputs[label] = list(chain)
+        start = 1 if call.args and isinstance(call.args[0], ast.Name) and call.args[0].id == "self" else 0
+        for index, arg in enumerate(call.args[start:], start=start):
+            if not isinstance(arg, ast.Name):
+                continue
+            chain = var_chains.get(arg.id, [])
+            if chain:
+                attention_inputs[arg.id] = list(chain)
         return
 
 
@@ -1263,7 +1357,7 @@ def _side_port_label(
     callee: str,
 ) -> str:
     if source_kind == "forward_input":
-        return "residual"
+        return _arg_name(arg, arg_index)
     if isinstance(arg, ast.Name):
         lowered = arg.id.lower()
         if "topk" in lowered or lowered in {"topk_idx", "topk_weight", "router_logits"}:
@@ -1303,13 +1397,13 @@ def _capture_call_side_inputs(
         ):
             arg0_name = _arg_name(call.args[0], 0)
             if arg0_name not in forward_input_names:
-                key = ("residual", tuple(), "forward_input")
+                key = (arg0_name, tuple(), "forward_input")
                 if key not in seen:
                     seen.add(key)
                     specs.append(
                         SideInputSpec(
                             arg_name=arg0_name,
-                            port_label="residual",
+                            port_label=arg0_name,
                             source_chain=[],
                             source_kind="forward_input",
                         )
@@ -1364,6 +1458,55 @@ def _forward_input_names(func: ast.FunctionDef) -> set[str]:
         if arg.arg != "self":
             names.add(arg.arg)
     return names
+
+
+def _primary_forward_input_name(func: ast.FunctionDef) -> str | None:
+    """Return the first forward parameter name (typically the hidden-state tensor)."""
+    for arg in func.args.posonlyargs + func.args.args:
+        if arg.arg != "self":
+            return arg.arg
+    return None
+
+
+def kernel_kwarg_ports(details: list[str]) -> dict[str, str]:
+    """Map kwarg parameter names to variable names from modeling AST kwarg lines."""
+    ports: dict[str, str] = {}
+    for line in details:
+        if not line.startswith("kwarg:"):
+            continue
+        payload = line.split(":", 1)[1].strip()
+        if "=" not in payload:
+            continue
+        param, value = payload.split("=", 1)
+        param = param.strip()
+        value = value.strip()
+        if value and not value.startswith("self."):
+            ports[param] = value
+    return ports
+
+
+def tensor_input_label_order(
+    details: list[str],
+    attention_inputs: dict[str, list[str]],
+) -> list[str]:
+    """Order tensor input labels from kwarg AST lines, then remaining provenance keys."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for line in details:
+        if not line.startswith("kwarg:"):
+            continue
+        payload = line.split(":", 1)[1].strip()
+        if "=" not in payload:
+            continue
+        param = payload.split("=", 1)[0].strip()
+        if param in attention_inputs and param not in seen:
+            ordered.append(param)
+            seen.add(param)
+    for key in attention_inputs:
+        if key not in seen:
+            ordered.append(key)
+            seen.add(key)
+    return ordered
 
 
 def _parallel_gates_from_forward(func: ast.FunctionDef) -> list[str]:
@@ -2166,8 +2309,10 @@ def merge_class_registries(*registries: dict[str, ClassStructure]) -> dict[str, 
 def analyze_source(source: str, *, filename: str = "<model>") -> CodeAnalysis:
     """Analyze one modeling file and return extracted block structure."""
     tree = parse_python_ast(source, filename=filename)
+    external_imports = _collect_external_imports(tree)
     visitor = _ModelAstVisitor()
     visitor.visit(tree)
+    _enrich_kernel_import_details(visitor.classes, external_imports)
 
     decoder = _pick_decoder_class(visitor.classes)
     causal_lm = _pick_causal_lm_class(visitor.classes)
@@ -2175,6 +2320,7 @@ def analyze_source(source: str, *, filename: str = "<model>") -> CodeAnalysis:
     model = stack_model or _pick_model_class(visitor.classes)
     analysis = CodeAnalysis(source_files=[filename])
     analysis.class_registry = dict(visitor.classes)
+    analysis.external_imports = dict(external_imports)
 
     if model is not None:
         analysis.model_class = model.name
@@ -2260,6 +2406,7 @@ def analyze_sources(sources: dict[Path, str]) -> CodeAnalysis:
         registries.append(partial.class_registry)
         merged.source_files.extend(partial.source_files)
         merged.notes.extend(partial.notes)
+        merged.external_imports.update(partial.external_imports)
 
         if partial.decoder_class and not merged.decoder_class:
             merged.decoder_class = partial.decoder_class

@@ -328,25 +328,192 @@ def _infer_ffn_and_moe(config: dict[str, Any], spec: ArchitectureSpec) -> None:
         spec.decoder_type = "Hybrid"
         spec.layer_mix = ", ".join(f"{count} {kind}" for kind, count in counts.items())
 
-    _infer_layer_variants(config, spec)
+
+def _config_has_per_layer_typing(config: dict[str, Any]) -> bool:
+    """True when config encodes per-layer module selection beyond a flat layer_types list."""
+    if isinstance(_get(config, "layer_types", "block_types"), list):
+        return False
+    for container in [config, *([value for value in config.values() if isinstance(value, dict)])]:
+        for key, value in container.items():
+            if "layer" in key.lower() and isinstance(value, list) and value:
+                if all(_as_int(item) is not None for item in value):
+                    return True
+    return False
 
 
-def _config_kda_layer_indices(config: dict[str, Any]) -> set[int]:
-    """Return 0-based layer indices that use Kimi delta / linear attention."""
-    linear_cfg = _get(config, "linear_attn_config")
-    if not isinstance(linear_cfg, dict):
-        return set()
-    raw_layers = linear_cfg.get("kda_layers")
-    if not isinstance(raw_layers, list):
-        return set()
-    indices: set[int] = set()
-    for layer in raw_layers:
-        idx = _as_int(layer)
-        if idx is None:
+_ATTENTION_ATTRS = frozenset({"self_attn", "self_attention", "attn", "attention"})
+
+
+def _resolve_conditional_class(
+    layer_idx: int,
+    rules: list[tuple[str, str]],
+    config: dict[str, Any],
+) -> str | None:
+    from visualizer.layer_repeat_simplify import layer_condition_matches
+
+    for class_name, condition in rules:
+        if condition == "else":
             continue
-        # Kimi configs use 1-based layer indices in kda_layers.
-        indices.add(idx - 1 if idx > 0 else idx)
-    return indices
+        if layer_condition_matches(layer_idx, condition, config):
+            return class_name
+    for class_name, condition in rules:
+        if condition == "else":
+            return class_name
+    return None
+
+
+def _default_attention_class(
+    class_registry: dict | None,
+    decoder_class: str | None,
+) -> str | None:
+    if not class_registry or not decoder_class:
+        return None
+    from visualizer.ast_analyze import ClassStructure, _classify_role
+
+    decoder = class_registry.get(decoder_class)
+    if not isinstance(decoder, ClassStructure):
+        return None
+    for attr, class_name in decoder.init_assignments.items():
+        if _classify_role(attr, class_name) == "attention":
+            return class_name
+    return None
+
+
+def _resolve_ffn_for_layer(
+    layer_idx: int,
+    ffn_rules: list[tuple[str, str, str]],
+    config: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    from visualizer.layer_repeat_simplify import layer_condition_matches
+
+    for attr, class_name, condition in ffn_rules:
+        if condition != "else" and layer_condition_matches(layer_idx, condition, config):
+            return attr, class_name
+    for attr, class_name, condition in ffn_rules:
+        if condition == "else":
+            return attr, class_name
+    if _config_moe_layer(layer_idx, config):
+        for attr, class_name, _condition in ffn_rules:
+            from visualizer.ast_analyze import _classify_role
+
+            if _classify_role(attr, class_name) == "moe":
+                return attr, class_name
+        return "block_sparse_moe", None
+    for attr, class_name, _condition in ffn_rules:
+        from visualizer.ast_analyze import _classify_role
+
+        if _classify_role(attr, class_name) == "ffn":
+            return attr, class_name
+    return "mlp", None
+
+
+def _infer_layer_variants(
+    config: dict[str, Any],
+    spec: ArchitectureSpec,
+    *,
+    class_registry: dict | None = None,
+    decoder_class: str | None = None,
+) -> None:
+    """Infer per-layer decoder templates when attention or FFN type varies by depth."""
+    num_layers = spec.num_hidden_layers
+    if not num_layers:
+        return
+
+    layer_types = _get(config, "layer_types", "block_types")
+    if isinstance(layer_types, list) and layer_types:
+        return
+
+    conditionals: list[tuple[str, str, str]] = []
+    if class_registry and decoder_class:
+        from visualizer.ast_analyze import ClassStructure, _extract_decoder_layer_conditionals
+
+        decoder = class_registry.get(decoder_class)
+        if isinstance(decoder, ClassStructure):
+            conditionals = _extract_decoder_layer_conditionals(decoder)
+
+    if not conditionals and not _config_has_per_layer_typing(config):
+        return
+
+    from collections import Counter
+    from visualizer.ast_analyze import _classify_role, _label_for
+
+    attn_rules = [(cls, cond) for attr, cls, cond in conditionals if attr in _ATTENTION_ATTRS]
+    ffn_rules = [
+        (attr, cls, cond)
+        for attr, cls, cond in conditionals
+        if _classify_role(attr, cls) in {"ffn", "moe"}
+    ]
+
+    buckets: Counter[tuple[str, str | None, str, str | None, str | None]] = Counter()
+    for layer_idx in range(num_layers):
+        attn_class = (
+            _resolve_conditional_class(layer_idx, attn_rules, config)
+            if attn_rules
+            else None
+        )
+        if attn_class is None:
+            attn_class = _default_attention_class(class_registry, decoder_class)
+
+        ffn_attr, ffn_class = (
+            _resolve_ffn_for_layer(layer_idx, ffn_rules, config)
+            if ffn_rules
+            else (None, None)
+        )
+        if ffn_class is None and ffn_attr is None:
+            ffn_attr, ffn_class = (
+                ("block_sparse_moe", None)
+                if _config_moe_layer(layer_idx, config)
+                else ("mlp", None)
+            )
+
+        attn_label = _label_for("attention", attn_class or "Attention", "self_attn")
+        ffn_role = _classify_role(ffn_attr or "mlp", ffn_class or "MLP")
+        ffn_display = _label_for(ffn_role, ffn_class or "", ffn_attr or "")
+
+        buckets[(attn_label, attn_class, ffn_display, ffn_class, ffn_attr)] += 1
+
+    if len(buckets) <= 1:
+        only = next(iter(buckets.items()), None)
+        if only:
+            (attn_label, attn_class, ffn_display, _ffn_class, _ffn_attr), _count = only
+            if attn_class:
+                spec.attention_notes.append(f"Attention module: {attn_class}")
+            if len({variant.attention_label for variant in spec.layer_variants}) <= 1:
+                spec.attention_type = attn_label
+        return
+
+    variants: list[LayerVariant] = []
+    for (attn_label, attn_class, ffn_display, ffn_class, ffn_attr), count in sorted(
+        buckets.items(),
+        key=lambda item: (-item[1], item[0][0], item[0][2]),
+    ):
+        variants.append(
+            LayerVariant(
+                label=f"{attn_label} + {ffn_display}",
+                count=count,
+                attention_label=attn_label,
+                attention_class=attn_class,
+                ffn_label=ffn_display,
+                ffn_class=ffn_class,
+                ffn_attr=ffn_attr,
+            )
+        )
+
+    spec.layer_variants = variants
+    attn_labels = sorted({variant.attention_label for variant in variants})
+    if len(attn_labels) > 1:
+        spec.attention_type = "Hybrid"
+        spec.attention_notes.append(" / ".join(attn_labels))
+    elif len(attn_labels) == 1:
+        spec.attention_type = attn_labels[0]
+        if variants[0].attention_class:
+            spec.attention_notes.append(f"Attention module: {variants[0].attention_class}")
+
+    mix_parts = [f"{variant.count} {variant.label}" for variant in variants]
+    spec.layer_mix = ", ".join(mix_parts)
+    if len({variant.ffn_label for variant in variants}) > 1:
+        spec.decoder_type = "Hybrid"
+        spec.layer_notes.append("Per-layer module types from AST/config")
 
 
 def _config_moe_layer(layer_idx: int, config: dict[str, Any]) -> bool:
@@ -365,73 +532,6 @@ def _config_moe_layer(layer_idx: int, config: dict[str, Any]) -> bool:
     first_k_dense = _as_int(_get(config, "first_k_dense_replace", "num_dense_layers")) or 0
     moe_freq = _as_int(_get(config, "moe_layer_freq", "moe_layer_interval")) or 1
     return layer_idx >= first_k_dense and layer_idx % moe_freq == 0
-
-
-def _infer_layer_variants(config: dict[str, Any], spec: ArchitectureSpec) -> None:
-    """Infer per-layer decoder templates when attention or FFN type varies by depth."""
-    num_layers = spec.num_hidden_layers
-    if not num_layers:
-        return
-
-    kda_layers = _config_kda_layer_indices(config)
-    if not kda_layers and not _get(config, "linear_attn_config"):
-        return
-
-    from collections import Counter
-
-    buckets: Counter[tuple[str, str]] = Counter()
-    for layer_idx in range(num_layers):
-        attn_label = "KDA" if layer_idx in kda_layers else "MLA"
-        ffn_label = "MoE" if _config_moe_layer(layer_idx, config) else "MLP"
-        buckets[(attn_label, ffn_label)] += 1
-
-    if len(buckets) <= 1:
-        attn_label, ffn_label = next(iter(buckets))
-        if attn_label == "KDA":
-            spec.attention_type = "KDA"
-            spec.attention_notes.append("Kimi Delta Attention (linear attention)")
-        return
-
-    variants: list[LayerVariant] = []
-    attn_classes = {
-        "KDA": "KimiDeltaAttention",
-        "MLA": "KimiMLAAttention",
-    }
-    ffn_classes = {
-        "MoE": ("MoE", "KimiSparseMoeBlock", "block_sparse_moe"),
-        "MLP": ("MLP", "KimiMLP", "mlp"),
-    }
-    for (attn_label, ffn_label), count in sorted(
-        buckets.items(),
-        key=lambda item: (-item[1], item[0][0], item[0][1]),
-    ):
-        ffn_display, ffn_class, ffn_attr = ffn_classes[ffn_label]
-        variants.append(
-            LayerVariant(
-                label=f"{attn_label} + {ffn_display}",
-                count=count,
-                attention_label=attn_label,
-                attention_class=attn_classes.get(attn_label),
-                ffn_label=ffn_display,
-                ffn_class=ffn_class,
-                ffn_attr=ffn_attr,
-            )
-        )
-
-    spec.layer_variants = variants
-    attn_labels = sorted({variant.attention_label for variant in variants})
-    if len(attn_labels) > 1:
-        spec.attention_type = "Hybrid"
-        spec.attention_notes.append(" / ".join(attn_labels))
-    elif attn_labels == ["KDA"]:
-        spec.attention_type = "KDA"
-        spec.attention_notes.append("Kimi Delta Attention (linear attention)")
-
-    mix_parts = [f"{variant.count} {variant.label}" for variant in variants]
-    spec.layer_mix = ", ".join(mix_parts)
-    if len({variant.ffn_label for variant in variants}) > 1:
-        spec.decoder_type = "Hybrid"
-        spec.layer_notes.append("Per-layer types from config.layer_types")
 
 
 def _infer_norm(config: dict[str, Any], spec: ArchitectureSpec) -> None:
@@ -458,7 +558,7 @@ def _estimate_kv_cache(spec: ArchitectureSpec, config: dict[str, Any]) -> None:
     if not layers:
         return
 
-    if spec.attention_type == "MLA":
+    if spec.attention_type == "MLA" or _as_int(_get(config, "kv_lora_rank")):
         kv_lora_rank = _as_int(_get(config, "kv_lora_rank")) or 512
         kv_heads = spec.num_key_value_heads or spec.num_attention_heads or 1
         bytes_per_layer = kv_heads * kv_lora_rank * BYTES_PER_BF16
@@ -607,6 +707,13 @@ def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None
     spec.class_registry = dict(analysis.class_registry)
     spec.layer_repeat_lines = list(analysis.layer_repeat_lines)
     _rebuild_stack_components(spec, analysis)
+    if spec.raw_config and spec.num_hidden_layers:
+        _infer_layer_variants(
+            spec.raw_config,
+            spec,
+            class_registry=spec.class_registry,
+            decoder_class=spec.decoder_class,
+        )
     _finalize_layer_repeat_lines(spec)
 
     if analysis.attention_type:

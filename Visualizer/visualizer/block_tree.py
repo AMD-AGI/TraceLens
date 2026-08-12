@@ -8,7 +8,6 @@ from typing import Literal
 
 from visualizer.ast_analyze import (
     SYNTHETIC_ATTENTION,
-    SYNTHETIC_FUNCTIONAL_LINEAR,
     SYNTHETIC_GATE_ACTIVATION,
     SYNTHETIC_ROUTER_ACTIVATION,
     SYNTHETIC_ROUTER_BIAS,
@@ -24,8 +23,12 @@ from visualizer.ast_analyze import (
     attention_kernel_label,
     displays_as_linear,
     expand_conditional_block_components,
-    is_kda_attention_step,
+    functional_display_label,
+    is_functional_synthetic,
+    is_kernel_pipeline_step,
+    kernel_kwarg_ports,
     kernel_name_from_step_details,
+    tensor_input_label_order,
     _build_components,
     _classify_role,
     _label_for,
@@ -66,6 +69,8 @@ def wrapper_bullet(node: BlockNode) -> str:
 
 _SKIP_WRAPPER_COMMENT_ATTRS = frozenset({"tokenization", "embed_tokens"})
 
+_FUNCTIONAL_CALL_DETAIL_RE = re.compile(r"(?i)^(?:F\.|torch\.nn\.functional\.)[\w.]+\(\.\.\.\)$")
+
 
 def wrapper_skips_comment(node: BlockNode) -> bool:
     """True when the wrapped-module panel should omit the descriptive comment line."""
@@ -93,7 +98,7 @@ def block_purpose(node: BlockNode) -> str | None:
                 return cleaned
         return None
 
-    if node.class_name == "DeltaAttention":
+    if node.class_name == "KernelPipeline":
         return node.details[0] if node.details else None
 
     if node.class_name == "ShortConvolution":
@@ -107,6 +112,8 @@ def block_purpose(node: BlockNode) -> str | None:
     for detail in node.details:
         cleaned = detail.strip()
         if cleaned and not cleaned.startswith("method `") and not cleaned.startswith("kernel:"):
+            if _FUNCTIONAL_CALL_DETAIL_RE.match(cleaned):
+                continue
             return cleaned
 
     class_name = node.class_name or ""
@@ -123,11 +130,10 @@ def block_purpose(node: BlockNode) -> str | None:
             if detail.startswith("ports:"):
                 return detail.replace("ports:", "ports ·").strip()
         return None
-    if class_name == "DeltaUpdate" and node.details:
+    if class_name == "KernelPipeline" and node.details:
         return node.details[0]
-    if class_name == "ChunkScan" and node.details:
-        detail = node.details[0]
-        return detail.replace("kernel:", "kernel ·").strip() if detail.startswith("kernel:") else detail
+    if class_name in {"KernelOp", "KernelOutput"}:
+        return None
     if class_name == "RouterOp":
         return node.details[0] if node.details else node.label
     if class_name == "SituAndMul":
@@ -148,10 +154,6 @@ def block_purpose(node: BlockNode) -> str | None:
         return "Score and route tokens to experts"
     if role == "ffn":
         return "Position-wise feed-forward transform"
-    if class_name == "ApplyRotary" or attr == "apply_rotary":
-        return "q·cos + rotate_half(q)·sin"
-    if attr == "freqs":
-        return "cos, sin from inv_freq × position"
     if role == "embedding":
         return "Gather rows by token id"
     return None
@@ -204,8 +206,15 @@ def _is_pipeline_wrapper(node: BlockNode) -> bool:
     return node.role in {"embedding", "head"}
 
 
+def is_kernel_pipeline_tree(node: BlockNode) -> bool:
+    """True for derived kernel pipelines rendered as nested trees."""
+    return node.class_name == "KernelPipeline" and bool(node.children)
+
+
 def is_straight_line_module(node: BlockNode) -> bool:
     """True when a composite block is a simple straight-line pipeline with no branching."""
+    if is_kernel_pipeline_tree(node):
+        return False
     if not _is_composite_block(node):
         return False
     if _is_pipeline_wrapper(node):
@@ -250,8 +259,10 @@ def linear_pipeline_steps(node: BlockNode) -> list[BlockNode]:
 
 def inline_block_frame_label(block: BlockNode) -> str:
     """Display label for a dotted inline frame around an expanded sub-block."""
-    if block.class_name in {"DeltaAttention", "KimiMoEGate"}:
-        return block.label if block.class_name == "DeltaAttention" else block.class_name
+    if block.class_name in {"KernelPipeline", "KimiMoEGate"}:
+        return block.label if block.class_name == "KernelPipeline" else block.class_name
+    if block.class_name == "KernelOp" and block.children:
+        return block.label
     if block.class_name == "SituAndMul":
         return block.class_name
     return block.attr_name
@@ -394,6 +405,10 @@ class BlockNode:
     side_inputs: dict[str, list[SideInputSpec]] = field(default_factory=dict)
     input_label: str | None = None
     input_source: str | None = None
+    kernel_tensor_ports: dict[str, str] = field(default_factory=dict)
+    tensor_input_labels: list[str] = field(default_factory=list)
+    tensor_step_targets: dict[str, str] = field(default_factory=dict)
+    kernel_predecessors: list[str] = field(default_factory=list)
 
 
 PortStyle = Literal["floating", "inline"]
@@ -410,14 +425,21 @@ class Branch:
 
     @property
     def port_label(self) -> str:
-        if self.label == "KV":
-            return "K/V"
         return self.label
 
 
 @dataclass
 class SeqSegment:
     step: BlockNode
+
+
+@dataclass
+class TensorPortsSegment:
+    """Labeled tensor inputs fanning into specific steps of a linear pipeline."""
+
+    labels: list[str]
+    targets: dict[str, str]
+    steps: list[BlockNode]
 
 
 @dataclass
@@ -469,7 +491,13 @@ class ResidualAddSegment:
 
 
 ComputationSegment = (
-    SeqSegment | FanOutSegment | CombineSegment | SideFeedSegment | SideCombineSegment | ResidualAddSegment
+    SeqSegment
+    | TensorPortsSegment
+    | FanOutSegment
+    | CombineSegment
+    | SideFeedSegment
+    | SideCombineSegment
+    | ResidualAddSegment
 )
 
 
@@ -549,6 +577,7 @@ def _leaf_node(
     details: list[str] | None = None,
     basic: bool = True,
     label: str | None = None,
+    kernel_predecessors: list[str] | None = None,
 ) -> BlockNode:
     role = _classify_role(attr_name, class_name)
     return BlockNode(
@@ -559,6 +588,7 @@ def _leaf_node(
         forward_order=forward_order,
         details=list(details or []),
         is_basic=basic,
+        kernel_predecessors=list(kernel_predecessors or []),
     )
 
 
@@ -611,54 +641,113 @@ def _output_gate_details(
     return lines
 
 
-def _delta_attention_block_node(
+def _kernel_pipeline_block_nodes(
     *,
     forward_order: int | None,
     details: list[str],
     attention_inputs: dict[str, list[str]] | None = None,
     parent_class_name: str | None = None,
-) -> BlockNode:
-    """Expand KDA delta attention into an inline straight-line pipeline."""
-    kernel = kernel_name_from_step_details(details)
-    extra_inputs: list[str] = []
-    if attention_inputs:
-        extra_inputs = [label for label in attention_inputs if label not in {"Q", "K", "V"}]
-    input_ports = f"Q,K,V,{','.join(extra_inputs)}" if extra_inputs else "Q,K,V"
-    return BlockNode(
-        attr_name=SYNTHETIC_ATTENTION,
-        class_name="DeltaAttention",
-        role="attention",
-        label=parent_class_name or "DeltaAttention",
-        forward_order=forward_order,
-        details=[f"linear recurrent delta attention · {kernel or 'chunk_kda'}"],
-        is_basic=False,
-        children=[
+) -> tuple[BlockNode, BlockNode]:
+    """Expand a multi-input kernel attention step into pipeline and output sibling nodes."""
+    from visualizer.kernel_pipeline import compute_tensor_step_targets, introspect_kernel_pipeline
+
+    kernel = kernel_name_from_step_details(details) or "kernel"
+    pipeline_steps, output_steps = introspect_kernel_pipeline(details)
+    inputs = dict(attention_inputs or {})
+    tensor_ports = kernel_kwarg_ports(details)
+    ordered_labels = tensor_input_label_order(details, inputs)
+    step_targets = compute_tensor_step_targets(details, pipeline_steps)
+
+    pipeline_children: list[BlockNode] = []
+    for index, step in enumerate(pipeline_steps):
+        if len(step.children) >= 2:
+            sub_children = [
+                _leaf_node(
+                    attr_name=child.attr_name,
+                    class_name=child.class_name,
+                    forward_order=sub_index,
+                    label=child.label,
+                    details=[],
+                    basic=False,
+                )
+                for sub_index, child in enumerate(step.children)
+            ]
+            pipeline_children.append(
+                BlockNode(
+                    attr_name=step.attr_name,
+                    class_name="KernelOp",
+                    role="other",
+                    label=step.call_name,
+                    forward_order=index,
+                    details=[],
+                    is_basic=False,
+                    children=sub_children,
+                    kernel_predecessors=list(step.predecessors),
+                )
+            )
+        else:
+            pipeline_children.append(
+                _leaf_node(
+                    attr_name=step.attr_name,
+                    class_name=step.class_name,
+                    forward_order=index,
+                    label=step.call_name,
+                    details=[],
+                    basic=False,
+                    kernel_predecessors=list(step.predecessors),
+                )
+            )
+
+    if not pipeline_children:
+        pipeline_children.append(
             _leaf_node(
-                attr_name="@attn_merge",
-                class_name="AttentionMerge",
+                attr_name="@attn_pipeline_core",
+                class_name="KernelOp",
                 forward_order=0,
-                label="Merge inputs",
-                details=[f"ports: {input_ports}"],
+                label=kernel,
+                details=[f"kernel: {kernel}"],
                 basic=False,
-            ),
-            _leaf_node(
-                attr_name="@attn_delta",
-                class_name="DeltaUpdate",
-                forward_order=1,
-                label="Delta state S",
-                details=["S ← (I−βkkᵀ)Diag(α)S + βkvᵀ"],
-                basic=False,
-            ),
-            _leaf_node(
-                attr_name="@attn_chunk",
-                class_name="ChunkScan",
-                forward_order=2,
-                label="Chunk scan",
-                details=[f"kernel: {kernel or 'chunk_kda'}"],
-                basic=False,
-            ),
-        ],
+            )
+        )
+
+    pipeline_label = pipeline_children[0].label if len(pipeline_children) == 1 else f"{kernel} pipeline"
+    pipeline_node = BlockNode(
+        attr_name="@attn_pipeline",
+        class_name="KernelPipeline",
+        role="attention",
+        label=pipeline_label,
+        forward_order=forward_order,
+        details=[f"kernel pipeline · {kernel}"],
+        is_basic=False,
+        children=pipeline_children,
+        attention_inputs=inputs,
+        kernel_tensor_ports=tensor_ports,
+        tensor_input_labels=ordered_labels,
+        tensor_step_targets=step_targets,
     )
+
+    if output_steps:
+        output = output_steps[0]
+        output_node = _leaf_node(
+            attr_name="@attn_output",
+            class_name="KernelOutput",
+            forward_order=(forward_order or 0) + 1,
+            label=output.call_name,
+            details=[],
+            basic=False,
+            kernel_predecessors=list(output.predecessors),
+        )
+    else:
+        output_node = _leaf_node(
+            attr_name="@attn_output",
+            class_name="KernelOutput",
+            forward_order=(forward_order or 0) + 1,
+            label=kernel,
+            details=[f"kernel: {kernel}"],
+            basic=False,
+        )
+
+    return pipeline_node, output_node
 
 
 def _output_gate_block_node(
@@ -920,7 +1009,7 @@ def _branches_from_provenance(
     pre_merge: list[BlockNode],
     provenance: dict[str, list[str]],
 ) -> list[Branch]:
-    """Build parallel branches from named provenance chains (e.g. attention Q/K/V inputs)."""
+    """Build parallel branches from named provenance chains captured in the AST."""
     by_attr = {node.attr_name: node for node in pre_merge}
     branches: list[Branch] = []
 
@@ -934,53 +1023,42 @@ def _branches_from_provenance(
             branches.append(Branch(label=label, steps=nodes, port_style="inline"))
 
     if len(branches) >= 2:
-        return _collapse_identical_kv_branches(branches)
+        return _collapse_identical_branches(branches)
     return []
 
 
-def _collapse_identical_kv_branches(branches: list[Branch]) -> list[Branch]:
-    """Merge identical K/V module chains into one shared branch."""
-    by_label = {branch.label: branch for branch in branches}
-    if "K" not in by_label or "V" not in by_label:
-        return branches
-    if [node.attr_name for node in by_label["K"].steps] != [node.attr_name for node in by_label["V"].steps]:
-        return branches
-    collapsed = [branch for branch in branches if branch.label not in {"K", "V"}]
-    collapsed.append(Branch(label="KV", steps=by_label["K"].steps, port_style="inline"))
+def _collapse_identical_branches(branches: list[Branch]) -> list[Branch]:
+    """Merge branches that follow identical module chains."""
+    by_signature: dict[tuple[str, ...], list[Branch]] = {}
+    for branch in branches:
+        signature = tuple(node.attr_name for node in branch.steps)
+        by_signature.setdefault(signature, []).append(branch)
+
+    collapsed: list[Branch] = []
+    for group in by_signature.values():
+        if len(group) == 1:
+            collapsed.append(group[0])
+            continue
+        labels = [branch.label for branch in group]
+        merged_label = labels[0] if all(label == labels[0] for label in labels) else "/".join(labels)
+        collapsed.append(
+            Branch(label=merged_label, steps=group[0].steps, port_style=group[0].port_style)
+        )
     return collapsed
 
 
-def _partition_named_branches(pre_merge: list[BlockNode], prefix_rules: dict[str, str]) -> list[Branch]:
-    """Partition steps into labeled branches using attribute-name prefix rules."""
-    buckets: dict[str, list[BlockNode]] = {label: [] for label in prefix_rules.values()}
+def _partition_named_branches(pre_merge: list[BlockNode]) -> list[Branch]:
+    """Partition steps into labeled branches using attribute-name prefix clustering."""
+    buckets: dict[str, list[BlockNode]] = {}
     for node in pre_merge:
-        lower = node.attr_name.lower()
-        for prefixes, label in prefix_rules.items():
-            if any(lower.startswith(prefix) or lower == prefix for prefix in prefixes.split("|")):
-                buckets[label].append(node)
-                break
+        prefix = node.attr_name.split("_", 1)[0] if "_" in node.attr_name else node.attr_name
+        buckets.setdefault(prefix, []).append(node)
 
     branches: list[Branch] = []
-    if buckets.get("K") and not buckets.get("V") and buckets.get("Q"):
-        branches.append(Branch(label="Q", steps=buckets["Q"], port_style="inline"))
-        branches.append(Branch(label="KV", steps=list(buckets["K"]), port_style="inline"))
-    elif buckets.get("K") and buckets.get("V") and [n.attr_name for n in buckets["K"]] == [n.attr_name for n in buckets["V"]]:
-        if buckets.get("Q"):
-            branches.append(Branch(label="Q", steps=buckets["Q"], port_style="inline"))
-        branches.append(Branch(label="KV", steps=list(buckets["K"]), port_style="inline"))
-    else:
-        for label, nodes in buckets.items():
-            if nodes:
-                branches.append(Branch(label=label, steps=nodes, port_style="inline"))
+    for prefix, nodes in buckets.items():
+        if nodes:
+            branches.append(Branch(label=prefix, steps=nodes, port_style="inline"))
     return branches
-
-
-def _name_prefix_branch_rules() -> dict[str, str]:
-    return {
-        "q_|q_proj|query": "Q",
-        "kv_|k_|k_proj|key": "K",
-        "v_|v_proj|value": "V",
-    }
 
 
 def _parallel_side_port_label(side: BlockNode) -> str:
@@ -1050,14 +1128,37 @@ def _situ_gated_mlp_segments(node: BlockNode) -> list[ComputationSegment] | None
     ]
 
 
+def _is_attention_merge_node(child: BlockNode) -> bool:
+    if child.attr_name == SYNTHETIC_ATTENTION:
+        return True
+    if child.attr_name == "@attn_pipeline" or child.class_name == "KernelPipeline":
+        return True
+    return False
+
+
+def _tensor_ports_segment(node: BlockNode) -> TensorPortsSegment | None:
+    """Build a tensor fan-in segment when a block exposes labeled kernel ports."""
+    if not node.tensor_input_labels or not node.children:
+        return None
+    return TensorPortsSegment(
+        labels=list(node.tensor_input_labels),
+        targets=dict(node.tensor_step_targets),
+        steps=list(node.children),
+    )
+
+
 def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
     """Build generic render segments from forward-ordered block children."""
+    tensor_segment = _tensor_ports_segment(node)
+    if tensor_segment is not None:
+        return [tensor_segment]
+
     children = node.children
     if not children:
         return []
 
     merge_idx = next(
-        (i for i, child in enumerate(children) if child.attr_name == SYNTHETIC_ATTENTION),
+        (i for i, child in enumerate(children) if _is_attention_merge_node(child)),
         None,
     )
     if merge_idx is None:
@@ -1070,11 +1171,16 @@ def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
     merge_node = children[merge_idx]
     post_merge = children[merge_idx + 1 :]
 
-    branches = _branches_from_provenance(pre_merge, node.attention_inputs)
+    provenance = node.attention_inputs
+    pipeline_child = next((child for child in node.children if child.class_name == "KernelPipeline"), None)
+    if pipeline_child and pipeline_child.attention_inputs:
+        provenance = pipeline_child.attention_inputs
+
+    branches = _branches_from_provenance(pre_merge, provenance)
     if len(branches) < 2:
         branches = [
             Branch(label=branch.label, steps=branch.steps, port_style="inline")
-            for branch in _partition_named_branches(pre_merge, _name_prefix_branch_rules())
+            for branch in _partition_named_branches(pre_merge)
             if branch.steps
         ]
 
@@ -1121,6 +1227,13 @@ def _is_composite_block(node: BlockNode | None) -> bool:
     return node is not None and not node.is_basic and bool(node.children) and not is_method_wrapper(node)
 
 
+def is_basic_op_tile(block: BlockNode | None) -> bool:
+    """True when a detail tile uses the gray basic-op styling."""
+    if block is None:
+        return False
+    return block.is_basic or is_simple_modeled_tile(block)
+
+
 def is_simple_modeled_tile(node: BlockNode) -> bool:
     """Modeled op rendered as a gray tile with operation text (not a role-colored leaf)."""
     if node.is_basic or is_method_wrapper(node):
@@ -1143,6 +1256,15 @@ def tile_sublabel(block: BlockNode | None, *, in_inline_frame: bool = False) -> 
     return block_sublabel(block)
 
 
+def tile_purpose_annotation(block: BlockNode | None) -> str | None:
+    """Short purpose line rendered below a tile (outside the box).
+
+    Disabled: tile labels already name the operation; extra prose was redundant
+    or incorrect (e.g. RoPE freq/apply descriptions, router step duplicates).
+    """
+    return None
+
+
 def tile_display_labels(
     block: BlockNode | None,
     *,
@@ -1162,7 +1284,17 @@ def tile_display_labels(
     if block is not None and block.is_basic:
         return block.label, None
 
-    if block is not None and block.class_name in {"ActivationOp", "AttentionOp", "DeltaAttention"}:
+    if block is not None and block.class_name == "KernelOp":
+        from visualizer.kernel_pipeline import kernel_op_display_label
+
+        return kernel_op_display_label(block.label), None
+
+    if block is not None and block.class_name in {
+        "ActivationOp",
+        "AttentionOp",
+        "KernelPipeline",
+        "KernelOutput",
+    }:
         return block.label, None
 
     if block is None:
@@ -1196,7 +1328,7 @@ def collect_nested_diagrams(
         seen.add(block.attr_name)
         if block.input_source is None and parent_block is not None:
             block.input_source = _nested_input_source(parent_block, block)
-        ordered.append((f"{block.label} ({block.attr_name})", block))
+        ordered.append((block.label, block))
         inner = build_computation_graph(block, basic_ops=resolved_basic_ops)
         for spec in inner.nodes:
             consider(spec.block, block)
@@ -1230,12 +1362,13 @@ def build_block_node(
 
     if attr_name == SYNTHETIC_ATTENTION:
         step_details = list(details or [])
-        if is_kda_attention_step(step_details):
-            return _delta_attention_block_node(
+        if is_kernel_pipeline_step(step_details):
+            pipeline_node, _output_node = _kernel_pipeline_block_nodes(
                 forward_order=forward_order,
                 details=step_details,
                 parent_class_name=class_name,
             )
+            return pipeline_node
         return _leaf_node(
             attr_name=attr_name,
             class_name="AttentionOp",
@@ -1301,15 +1434,14 @@ def build_block_node(
         child_details = cls.forward_step_details.get(call_attr) or cls.init_details.get(call_attr, [])
 
         if call_attr == SYNTHETIC_ATTENTION:
-            if is_kda_attention_step(child_details):
-                child_nodes.append(
-                    _delta_attention_block_node(
-                        forward_order=child_order,
-                        details=child_details,
-                        attention_inputs=cls.attention_inputs,
-                        parent_class_name=class_name,
-                    )
+            if is_kernel_pipeline_step(child_details, cls.attention_inputs):
+                pipeline_node, output_node = _kernel_pipeline_block_nodes(
+                    forward_order=child_order,
+                    details=child_details,
+                    attention_inputs=cls.attention_inputs,
+                    parent_class_name=class_name,
                 )
+                child_nodes.extend([pipeline_node, output_node])
             else:
                 child_nodes.append(
                     _leaf_node(
@@ -1323,13 +1455,13 @@ def build_block_node(
                 )
             continue
 
-        if call_attr == SYNTHETIC_FUNCTIONAL_LINEAR:
+        if is_functional_synthetic(call_attr):
+            op_label = functional_display_label(call_attr)
             child_nodes.append(
                 _leaf_node(
                     attr_name=call_attr,
-                    class_name="Linear",
+                    class_name=op_label,
                     forward_order=child_order,
-                    details=["F.linear(...)"],
                 )
             )
             continue
@@ -1405,6 +1537,8 @@ def build_block_node(
         cls.side_inputs,
     )
 
+    attention_inputs = dict(cls.attention_inputs)
+
     return BlockNode(
         attr_name=attr_name,
         class_name=class_name,
@@ -1415,9 +1549,10 @@ def build_block_node(
         children=child_nodes,
         is_basic=False,
         norm_before=list(cls.norm_before),
-        attention_inputs=dict(cls.attention_inputs),
+        attention_inputs=attention_inputs,
         parallel_gates=list(cls.parallel_gates),
         side_inputs=dict(cls.side_inputs),
+        input_label=cls.forward_input_name,
     )
 
 
@@ -1446,15 +1581,13 @@ def fallback_positional_tree(positional_encoding: str) -> BlockNode:
                 role="other",
                 label="Freq computation",
                 is_basic=False,
-                details=["cos, sin from inv_freq × position"],
             ),
             BlockNode(
                 attr_name="apply_rotary",
                 class_name="ApplyRotary",
                 role="other",
-                label="Apply to Q/K",
+                label="ApplyRotary",
                 is_basic=False,
-                details=["q·cos + rotate_half(q)·sin"],
             ),
         ],
     )
@@ -1582,7 +1715,7 @@ def build_decoder_block_trees(
         if key in seen:
             continue
         seen.add(key)
-        title = f"{comp.label} ({comp.attr_name})"
+        title = comp.label
         tree = build_block_node(
             attr_name=comp.attr_name,
             class_name=comp.class_name,
@@ -1593,7 +1726,8 @@ def build_decoder_block_trees(
         )
         if is_method_wrapper(tree):
             continue
-        tree.input_label = "hidden_states"
+        cls_info = registry.get(comp.class_name)
+        tree.input_label = cls_info.forward_input_name if cls_info and cls_info.forward_input_name else "hidden_states"
         tree.input_source = input_sources.get(comp.attr_name)
         trees.append((title, tree))
 

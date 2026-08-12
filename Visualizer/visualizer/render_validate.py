@@ -20,6 +20,7 @@ from visualizer.computation_graph import (
     SYNTHETIC_COMBINE,
     SYNTHETIC_HIDDEN,
     SYNTHETIC_INPUT,
+    SYNTHETIC_TENSOR,
     _compact_synthetic_input_spacing,
     _ensure_synthetic_input_clears_consumers,
     _fanout_branch_index,
@@ -28,8 +29,8 @@ from visualizer.computation_graph import (
     stack_inline_frame_positions,
     _center_align_vertical_chains,
 )
-from visualizer.text_measure import ContentBounds, box_bounds_at, box_label_size, floating_port_label_bounds, input_box_label_size
-from visualizer.sizing import BLOCK_PAD_Y, INPUT_PAD_X, INPUT_PAD_Y, box_text_lines
+from visualizer.text_measure import ContentBounds, box_bounds_at, box_label_size, floating_port_label_bounds, input_box_label_size, tensor_port_box_label_size
+from visualizer.sizing import BLOCK_PAD_Y, box_text_lines
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
 
 DEFAULT_MIN_GAP = 0.02
 VALIDATE_MIN_GAP = 0.02
+LAYOUT_MIN_TOP_Y = 2.5
 INLINE_FRAME_SEPARATION_EPS = 1e-3
 _TILE_KINDS = frozenset({"box", "combine"})
 _OBSTACLE_KINDS = _TILE_KINDS | frozenset({"inline_frame", "frame_label", "frame_sublabel", "floating_label"})
@@ -90,6 +92,8 @@ def apply_measured_node_sizes(
     plan: DetailDrawPlan,
 ) -> None:
     """Resize layout tiles from matplotlib-measured label geometry."""
+    from visualizer.render import COLORS
+
     draw_index = 0
     for pos in positions:
         spec = pos.spec
@@ -108,6 +112,7 @@ def apply_measured_node_sizes(
                 leaf, _ = plan.node_draws[draw_index]
                 leaf.w = pos.width
                 leaf.h = pos.height
+                leaf.sublabel = plan.input_sublabel
                 leaf.x = pos.cx - pos.width / 2
                 leaf.y = pos.top_y - pos.height
                 draw_index += 1
@@ -124,10 +129,34 @@ def apply_measured_node_sizes(
                 leaf.y = pos.top_y - pos.height
                 draw_index += 1
             continue
+        if spec.synthetic == "@tensor":
+            width, height = tensor_port_box_label_size(
+                ax,
+                spec.label,
+                spec.sublabel,
+                fontsize=7.0,
+            )
+            pos.width = width
+            pos.height = height
+            if draw_index < len(plan.node_draws):
+                leaf, _ = plan.node_draws[draw_index]
+                leaf.w = pos.width
+                leaf.h = pos.height
+                leaf.sublabel = spec.sublabel
+                leaf.x = pos.cx - pos.width / 2
+                leaf.y = pos.top_y - pos.height
+                draw_index += 1
+            continue
         if draw_index >= len(plan.node_draws):
             continue
         leaf, _draw_kwargs = plan.node_draws[draw_index]
-        width, height = box_label_size(ax, leaf.label, leaf.sublabel, fontsize=leaf.fontsize)
+        width, height = box_label_size(
+            ax,
+            leaf.label,
+            leaf.sublabel,
+            fontsize=leaf.fontsize,
+            white_text_stroke_pad=leaf.facecolor != COLORS["basic_op"],
+        )
         pos.width = max(pos.width, width)
         pos.height = max(pos.height, height)
         leaf.w = pos.width
@@ -152,7 +181,9 @@ def collect_measured_elements(
         INLINE_FRAME_PAD,
         _inline_frame_label_lines,
     )
-    from visualizer.text_measure import measure_text_bounds
+    from visualizer.text_measure import TILE_ROUNDING_INSET, measure_text_bounds
+
+    tile_visual_inset = TILE_ROUNDING_INSET
 
     elements: list[MeasuredElement] = []
     frame_members = _frame_member_indices(graph)
@@ -191,6 +222,12 @@ def collect_measured_elements(
             )
         )
         pad_y = leaf.pad_y if leaf.pad_y is not None else BLOCK_PAD_Y
+        label_bounds = ContentBounds(
+            left=tile_bounds.left + tile_visual_inset,
+            right=tile_bounds.right - tile_visual_inset,
+            bottom=tile_bounds.bottom + tile_visual_inset,
+            top=tile_bounds.top - tile_visual_inset,
+        )
         for line in box_text_lines(
             pos.top_y,
             pos.height,
@@ -209,7 +246,7 @@ def collect_measured_elements(
                 va=line.va,
                 fontweight=line.fontweight,
             )
-            if not tile_bounds.contains(line_bounds, min_gap=-0.015):
+            if not label_bounds.contains(line_bounds, min_gap=0.0):
                 elements.append(
                     MeasuredElement(
                         kind="text_overflow",
@@ -235,22 +272,67 @@ def collect_measured_elements(
         frame_positions = [positions[i] for i in frame.node_indices if i < len(positions)]
         if not frame_positions:
             continue
-        min_left = min(p.cx - p.width / 2 for p in frame_positions)
-        max_right = max(p.cx + p.width / 2 for p in frame_positions)
-        min_bottom = min(p.top_y - p.height for p in frame_positions)
-        max_top = max(p.top_y for p in frame_positions)
         pad = INLINE_FRAME_PAD
-        frame_width = max_right - min_left + 2 * pad
-        label_lines = _inline_frame_label_lines(frame.label, frame_width)
-        caption_top = max_top + pad + INLINE_FRAME_LABEL_GAP
-        caption_lines = len(label_lines) + (len(frame.sublabel.split("\n")) if frame.sublabel else 0)
-        reserved_top = caption_top + 0.08 + INLINE_FRAME_LABEL_LINE_H * max(0, caption_lines - 1)
-        frame_bounds = ContentBounds(
-            left=min_left - pad,
-            right=max_right + pad,
-            bottom=min_bottom - pad,
-            top=reserved_top,
-        )
+        tile_bounds = _inline_frame_tile_bounds(frame, positions, pad=pad, graph=graph)
+        frame_width = tile_bounds.width
+        placement = plan.inline_frame_labels.get(frame.frame_id)
+        if placement is not None and placement.lines:
+            label_bounds = None
+            for line in placement.lines:
+                line_bounds = measure_text_bounds(
+                    ax,
+                    line.text,
+                    line.x,
+                    line.y,
+                    fontsize=line.fontsize,
+                    ha=line.ha,
+                    va=line.va,
+                    fontweight=line.fontweight,
+                )
+                elements.append(
+                    MeasuredElement(
+                        kind="frame_label" if line.style != "italic" else "frame_sublabel",
+                        bounds=line_bounds,
+                        label=line.text,
+                        frame_id=frame.frame_id,
+                    )
+                )
+                label_bounds = line_bounds if label_bounds is None else label_bounds.union(line_bounds)
+            frame_bounds = tile_bounds
+        else:
+            label_lines = _inline_frame_label_lines(frame.label, frame_width)
+            caption_top = tile_bounds.top + INLINE_FRAME_LABEL_GAP
+            for line_index, line in enumerate(label_lines):
+                caption = measure_text_bounds(
+                    ax,
+                    line,
+                    tile_bounds.left + 0.02,
+                    caption_top - line_index * INLINE_FRAME_LABEL_LINE_H,
+                    fontsize=6.4,
+                    ha="left",
+                    va="bottom",
+                    fontweight="normal",
+                )
+                elements.append(
+                    MeasuredElement(kind="frame_label", bounds=caption, label=line, frame_id=frame.frame_id)
+                )
+            if frame.sublabel:
+                sub_lines = [line for line in frame.sublabel.split("\n") if line.strip()]
+                for line_index, line in enumerate(sub_lines):
+                    sub = measure_text_bounds(
+                        ax,
+                        line,
+                        tile_bounds.left + 0.02,
+                        caption_top - 0.11 - line_index * 0.11,
+                        fontsize=5.6,
+                        ha="left",
+                        va="bottom",
+                        fontweight="normal",
+                    )
+                    elements.append(
+                        MeasuredElement(kind="frame_sublabel", bounds=sub, label=line, frame_id=frame.frame_id)
+                    )
+            frame_bounds = tile_bounds
         elements.append(
             MeasuredElement(
                 kind="inline_frame",
@@ -260,37 +342,6 @@ def collect_measured_elements(
                 frame_id=frame.frame_id,
             )
         )
-        caption_top = max_top + pad + INLINE_FRAME_LABEL_GAP
-        for line_index, line in enumerate(label_lines):
-            caption = measure_text_bounds(
-                ax,
-                line,
-                min_left + 0.02,
-                caption_top - line_index * INLINE_FRAME_LABEL_LINE_H,
-                fontsize=6.4,
-                ha="left",
-                va="bottom",
-                fontweight="normal",
-            )
-            elements.append(
-                MeasuredElement(kind="frame_label", bounds=caption, label=line, frame_id=frame.frame_id)
-            )
-        if frame.sublabel:
-            sub_lines = [line for line in frame.sublabel.split("\n") if line.strip()]
-            for line_index, line in enumerate(sub_lines):
-                sub = measure_text_bounds(
-                    ax,
-                    line,
-                    min_left + 0.02,
-                    caption_top - 0.11 - line_index * 0.11,
-                    fontsize=5.6,
-                    ha="left",
-                    va="bottom",
-                    fontweight="normal",
-                )
-                elements.append(
-                    MeasuredElement(kind="frame_sublabel", bounds=sub, label=line, frame_id=frame.frame_id)
-                )
 
     return elements
 
@@ -356,7 +407,7 @@ def validate_render_layout(
         if bounds.width <= 0 or bounds.height <= 0:
             report.invisible.append(f"{element.kind} {element.label!r} has zero-size bounds")
         if element.kind == "text_overflow":
-            report.invisible.append(f"text overflows tile: {element.label}")
+            report.overlaps.append(f"text overflows tile: {element.label}")
 
     overlap_obstacles = [element for element in obstacles if element.kind != "text_overflow"]
     frame_member_sets = _inline_frame_member_sets(elements)
@@ -409,6 +460,38 @@ def assert_valid_render_layout(
     validate_render_layout(elements, min_gap=min_gap).raise_if_invalid()
 
 
+def _resolve_same_row_tile_overlaps(
+    positions: list[LayoutPosition],
+    *,
+    min_gap: float,
+) -> None:
+    """Separate tiles on the same row after measured resize widened box widths."""
+    if not positions:
+        return
+    for _pass in range(max(1, len(positions))):
+        changed = False
+        rows: dict[float, list[int]] = {}
+        for index, pos in enumerate(positions):
+            rows.setdefault(round(pos.top_y, 4), []).append(index)
+        for indices in rows.values():
+            if len(indices) < 2:
+                continue
+            ordered = sorted(indices, key=lambda index: positions[index].cx)
+            for offset in range(1, len(ordered)):
+                left_index = ordered[offset - 1]
+                right_index = ordered[offset]
+                left = positions[left_index]
+                right = positions[right_index]
+                overlap = (left.cx + left.width / 2) + min_gap - (right.cx - right.width / 2)
+                if overlap <= 0:
+                    continue
+                for shift_index in ordered[offset:]:
+                    positions[shift_index].cx += overlap
+                changed = True
+        if not changed:
+            break
+
+
 def resolve_measured_overlaps(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
@@ -418,7 +501,9 @@ def resolve_measured_overlaps(
 ) -> None:
     """Push layout tiles apart after measured resize, optionally restacking layers."""
     from visualizer.computation_graph import (
+        _align_tensor_port_columns,
         _assign_layered_vertical_positions,
+        _graph_has_tensor_ports,
         _order_fanout_branch_positions,
         _topological_layers,
     )
@@ -427,12 +512,16 @@ def resolve_measured_overlaps(
         layers = _topological_layers(graph)
         _assign_layered_vertical_positions(positions, layers, top_y=top_y)
         _order_fanout_branch_positions(positions)
+    _resolve_same_row_tile_overlaps(positions, min_gap=min_gap)
     _resolve_layout_overlaps(
         positions,
         graph,
         min_horizontal_gap=min_gap,
         min_vertical_gap=min_gap * 2,
     )
+    if _graph_has_tensor_ports(graph):
+        _align_tensor_port_columns(positions, graph)
+    _resolve_same_row_tile_overlaps(positions, min_gap=min_gap)
 
 
 def _frame_member_indices(graph: ComputationGraph) -> dict[int, str]:
@@ -442,6 +531,518 @@ def _frame_member_indices(graph: ComputationGraph) -> dict[int, str]:
         for index in frame.node_indices:
             members[index] = frame.frame_id
     return members
+
+
+def _inline_frame_tile_bounds(
+    frame,
+    positions: list[LayoutPosition],
+    *,
+    pad: float,
+    graph: ComputationGraph | None = None,
+) -> ContentBounds:
+    """Bounds of the dotted frame around member tiles (excluding caption)."""
+    if graph is not None:
+        from visualizer.render import _inline_frame_draw_bounds
+
+        return _inline_frame_draw_bounds(frame, positions, graph, pad=pad)
+
+    frame_positions = [positions[index] for index in frame.node_indices if index < len(positions)]
+    if not frame_positions:
+        return ContentBounds(left=0.0, right=0.0, bottom=0.0, top=0.0)
+    min_left = min(p.cx - p.width / 2 for p in frame_positions)
+    max_right = max(p.cx + p.width / 2 for p in frame_positions)
+    min_bottom = min(p.top_y - p.height for p in frame_positions)
+    max_top = max(p.top_y for p in frame_positions)
+    return ContentBounds(
+        left=min_left - pad,
+        right=max_right + pad,
+        bottom=min_bottom - pad,
+        top=max_top + pad,
+    )
+
+
+def _stack_inline_frame_label_lines(
+    ax: Axes,
+    *,
+    label_lines: list[str],
+    sublabel_lines: list[str],
+    anchor_x: float,
+    anchor_y: float,
+    ha: str,
+    anchor_va: str = "bottom",
+) -> tuple[list, ContentBounds]:
+    """Measure stacked caption lines anchored at the top-left-style origin."""
+    from visualizer.render import (
+        INLINE_FRAME_LABEL_LINE_H,
+        InlineFrameLabelLine,
+    )
+    from visualizer.text_measure import measure_text_bounds
+
+    rendered: list[InlineFrameLabelLine] = []
+    bounds: ContentBounds | None = None
+    cursor_y = anchor_y
+    for line in label_lines:
+        line_bounds = measure_text_bounds(
+            ax,
+            line,
+            anchor_x,
+            cursor_y,
+            fontsize=6.4,
+            ha=ha,
+            va="bottom",
+            fontweight="normal",
+        )
+        rendered.append(
+            InlineFrameLabelLine(
+                text=line,
+                x=anchor_x,
+                y=cursor_y,
+                ha=ha,
+                va="bottom",
+            )
+        )
+        bounds = line_bounds if bounds is None else bounds.union(line_bounds)
+        cursor_y -= INLINE_FRAME_LABEL_LINE_H
+
+    if sublabel_lines:
+        cursor_y -= 0.03
+        for line in sublabel_lines:
+            line_bounds = measure_text_bounds(
+                ax,
+                line,
+                anchor_x,
+                cursor_y,
+                fontsize=5.6,
+                ha=ha,
+                va="bottom",
+                fontweight="normal",
+            )
+            rendered.append(
+                InlineFrameLabelLine(
+                    text=line,
+                    x=anchor_x,
+                    y=cursor_y,
+                    ha=ha,
+                    va="bottom",
+                    fontsize=5.6,
+                    style="italic",
+                )
+            )
+            bounds = line_bounds if bounds is None else bounds.union(line_bounds)
+            cursor_y -= 0.11
+
+    assert bounds is not None
+    if anchor_va == "center":
+        block_center = (bounds.top + bounds.bottom) / 2
+        dy = anchor_y - block_center
+        if abs(dy) > 1e-9:
+            shifted: list = []
+            for line in rendered:
+                shifted.append(
+                    InlineFrameLabelLine(
+                        text=line.text,
+                        x=line.x,
+                        y=line.y + dy,
+                        ha=line.ha,
+                        va=line.va,
+                        fontsize=line.fontsize,
+                        fontweight=line.fontweight,
+                        style=line.style,
+                    )
+                )
+            rendered = shifted
+            bounds = ContentBounds(
+                left=bounds.left,
+                right=bounds.right,
+                bottom=bounds.bottom + dy,
+                top=bounds.top + dy,
+            )
+    return rendered, bounds
+
+
+def _inline_frame_has_horizontal_neighbor(
+    frame,
+    tile_bounds: ContentBounds,
+    graph: ComputationGraph,
+    positions: list[LayoutPosition],
+    *,
+    pad: float,
+    side: str,
+    min_gap: float,
+) -> bool:
+    """Return True when another inline frame sits immediately to the left or right."""
+    for other in graph.inline_frames:
+        if other.frame_id == frame.frame_id:
+            continue
+        other_bounds = _inline_frame_tile_bounds(other, positions, pad=pad, graph=graph)
+        vertical = (
+            tile_bounds.bottom - min_gap < other_bounds.top
+            and other_bounds.bottom - min_gap < tile_bounds.top
+        )
+        if not vertical:
+            continue
+        if side == "left" and other_bounds.right <= tile_bounds.left + min_gap * 2:
+            return True
+        if side == "right" and other_bounds.left >= tile_bounds.right - min_gap * 2:
+            return True
+    return False
+
+
+def _label_block_overlaps(
+    bounds: ContentBounds,
+    obstacles: list[ContentBounds],
+    *,
+    min_gap: float,
+) -> bool:
+    return any(bounds.overlaps(obstacle, min_gap=min_gap) for obstacle in obstacles)
+
+
+def _caption_side_for_bounds(
+    caption_bounds: ContentBounds,
+    frame_bounds: ContentBounds,
+    *,
+    gap: float,
+) -> str:
+    """Infer whether a caption sits above or beside its inline frame."""
+    if caption_bounds.right <= frame_bounds.left + gap * 0.5:
+        return "left"
+    if caption_bounds.left >= frame_bounds.right - gap * 0.5:
+        return "right"
+    return "top"
+
+
+def _reserve_frame_caption_space(
+    positions: list[LayoutPosition],
+    plan: "DetailDrawPlan",
+    elements: list[MeasuredElement],
+    graph: ComputationGraph,
+    *,
+    min_gap: float,
+    min_left: float | None,
+) -> None:
+    """Shift inline-frame columns right when left-placed captions clip the left margin."""
+    if not plan.inline_frame_labels:
+        return
+
+    caption_bounds: dict[str, ContentBounds] = {}
+    for element in elements:
+        if element.kind not in {"frame_label", "frame_sublabel"} or not element.frame_id:
+            continue
+        caption_bounds[element.frame_id] = (
+            element.bounds
+            if element.frame_id not in caption_bounds
+            else caption_bounds[element.frame_id].union(element.bounds)
+        )
+
+    member_sets = {
+        frame.frame_id: set(frame.node_indices) for frame in graph.inline_frames
+    }
+    for frame_id, placement in plan.inline_frame_labels.items():
+        if placement.side != "left":
+            continue
+        bounds = caption_bounds.get(frame_id)
+        if bounds is None or min_left is None:
+            continue
+        if bounds.left >= min_left:
+            continue
+        shift = min_left - bounds.left + min_gap
+        indices = member_sets.get(frame_id, set())
+        if indices:
+            _shift_node_indices(positions, indices, shift)
+
+
+def _layout_inline_frame_labels(
+    ax: Axes,
+    graph: ComputationGraph,
+    positions: list[LayoutPosition],
+    plan: DetailDrawPlan,
+    elements: list[MeasuredElement],
+    *,
+    links: list[tuple[int, int]] | None = None,
+    min_gap: float,
+    min_left: float | None = None,
+) -> dict[str, object]:
+    """Place inline-frame captions to avoid tiles, other captions, and connector corridors."""
+    from visualizer.render import (
+        INLINE_FRAME_LABEL_GAP,
+        INLINE_FRAME_PAD,
+        InlineFrameLabelPlacement,
+        _inline_frame_label_lines,
+    )
+
+    if not graph.inline_frames:
+        return {}
+
+    from visualizer.computation_graph import SYNTHETIC_TENSOR
+    from visualizer.text_measure import box_bounds_at
+
+    port_obstacles = [
+        box_bounds_at(pos.cx, pos.top_y, pos.width, pos.height)
+        for pos in positions
+        if pos.spec.synthetic == SYNTHETIC_TENSOR
+    ]
+
+    placements: dict[str, InlineFrameLabelPlacement] = {}
+    placed_label_bounds: list[tuple[str, ContentBounds]] = []
+
+    ordered_frames = sorted(
+        graph.inline_frames,
+        key=lambda frame: max(
+            (positions[index].top_y for index in frame.node_indices if index < len(positions)),
+            default=0.0,
+        ),
+        reverse=True,
+    )
+
+    pad = INLINE_FRAME_PAD
+    frame_member_sets = {
+        frame.frame_id: set(frame.node_indices) for frame in graph.inline_frames
+    }
+
+    def _enclosing_frame_ids(frame_id: str, frame_members: set[int]) -> set[str]:
+        if not frame_members:
+            return set()
+        return {
+            other.frame_id
+            for other in graph.inline_frames
+            if other.frame_id != frame_id
+            and frame_members.issubset(frame_member_sets.get(other.frame_id, set()))
+        }
+
+    def _external_obstacles(frame_id: str, frame_members: set[int]) -> list[ContentBounds]:
+        enclosing = _enclosing_frame_ids(frame_id, frame_members)
+        tile_obstacles = [
+            element.bounds
+            for element in elements
+            if element.kind in {"box", "combine", "inline_frame", "floating_label"}
+            and not (element.node_index is not None and element.node_index in frame_members)
+            and not (element.kind == "inline_frame" and element.frame_id in {frame_id, *enclosing})
+            and not (
+                element.kind in {"frame_label", "frame_sublabel"}
+                and element.frame_id in enclosing
+            )
+        ]
+        return tile_obstacles + port_obstacles + [
+            bounds
+            for placed_frame_id, bounds in placed_label_bounds
+            if placed_frame_id not in enclosing
+        ]
+
+    def _side_near_frame(side: str, bounds: ContentBounds, tile_bounds: ContentBounds) -> bool:
+        label_center_y = (bounds.top + bounds.bottom) / 2
+        frame_center_y = (tile_bounds.top + tile_bounds.bottom) / 2
+        if abs(label_center_y - frame_center_y) > max(tile_bounds.height * 0.65, 0.35):
+            return False
+        if side == "left":
+            return bounds.right <= tile_bounds.left + min_gap * 0.25
+        return bounds.left >= tile_bounds.right - min_gap * 0.25
+
+    for frame in ordered_frames:
+        if not frame.node_indices:
+            continue
+        tile_bounds = _inline_frame_tile_bounds(frame, positions, pad=pad, graph=graph)
+        if tile_bounds.width <= 0:
+            continue
+
+        frame_members = frame_member_sets.get(frame.frame_id, set())
+        frame_width = tile_bounds.width
+        label_lines = _inline_frame_label_lines(frame.label, frame_width)
+        sublabel_lines = [line for line in (frame.sublabel or "").split("\n") if line.strip()]
+        obstacles = _external_obstacles(frame.frame_id, frame_members)
+        caption_obstacles = [
+            element.bounds
+            for element in elements
+            if element.kind == "box"
+            and (element.node_index is None or element.node_index not in frame_members)
+        ]
+
+        has_left_neighbor = _inline_frame_has_horizontal_neighbor(
+            frame,
+            tile_bounds,
+            graph,
+            positions,
+            pad=pad,
+            side="left",
+            min_gap=min_gap,
+        )
+        has_right_neighbor = _inline_frame_has_horizontal_neighbor(
+            frame,
+            tile_bounds,
+            graph,
+            positions,
+            pad=pad,
+            side="right",
+            min_gap=min_gap,
+        )
+
+        def _candidate_score(side: str, dx: float, dy: float, overlaps: bool) -> float:
+            side_penalty = {"top": 0.0, "left": 25.0, "right": 30.0}[side]
+            if side == "left" and has_left_neighbor:
+                side_penalty += 40.0
+            if side == "right" and has_right_neighbor:
+                side_penalty += 40.0
+            return side_penalty + abs(dx) + abs(dy) + (1000.0 if overlaps else 0.0)
+
+        best: tuple[float, list, ContentBounds, str] | None = None
+
+        top_anchor_x = tile_bounds.left + 0.02
+        top_anchor_y = tile_bounds.top + max(INLINE_FRAME_LABEL_GAP, min_gap)
+        for dy in (0.0, 0.05, 0.10, 0.15, 0.20, 0.25):
+            lines, bounds = _stack_inline_frame_label_lines(
+                ax,
+                label_lines=label_lines,
+                sublabel_lines=sublabel_lines,
+                anchor_x=top_anchor_x,
+                anchor_y=top_anchor_y + dy,
+                ha="left",
+            )
+            overlaps = _label_block_overlaps(bounds, obstacles, min_gap=min_gap)
+            near_frame = bounds.bottom >= tile_bounds.top - 0.04 and bounds.bottom <= tile_bounds.top + 0.45
+            if near_frame and not overlaps:
+                score = _candidate_score("top", 0.0, dy, False)
+                if best is None or score < best[0]:
+                    best = (score, lines, bounds, "top")
+
+        side_center_y = (tile_bounds.top + tile_bounds.bottom) / 2
+        if has_left_neighbor and not has_right_neighbor:
+            side_order = [("right", tile_bounds.right + min_gap, "left"), ("left", tile_bounds.left - min_gap, "right")]
+        else:
+            side_order = [("left", tile_bounds.left - min_gap, "right"), ("right", tile_bounds.right + min_gap, "left")]
+        for side, anchor_x, ha in side_order:
+            for dy in (0.0, 0.08, -0.08, 0.16, -0.16):
+                lines, bounds = _stack_inline_frame_label_lines(
+                    ax,
+                    label_lines=label_lines,
+                    sublabel_lines=sublabel_lines,
+                    anchor_x=anchor_x,
+                    anchor_y=side_center_y + dy,
+                    ha=ha,
+                    anchor_va="center",
+                )
+                if side == "left" and min_left is not None and bounds.left < min_left:
+                    continue
+                overlaps = _label_block_overlaps(bounds, obstacles, min_gap=min_gap)
+                if not _side_near_frame(side, bounds, tile_bounds):
+                    continue
+                if overlaps:
+                    continue
+                score = _candidate_score(side, 0.0, dy, False)
+                if best is None or score < best[0]:
+                    best = (score, lines, bounds, side)
+
+        if best is None:
+            fallback_specs = [
+                ("right", tile_bounds.right + min_gap, "left"),
+                ("left", tile_bounds.left - min_gap, "right"),
+            ]
+            lines = []
+            bounds = ContentBounds(left=0.0, right=0.0, bottom=0.0, top=0.0)
+            side = "right"
+            for side_name, anchor_x, ha in fallback_specs:
+                lines, bounds = _stack_inline_frame_label_lines(
+                    ax,
+                    label_lines=label_lines,
+                    sublabel_lines=sublabel_lines,
+                    anchor_x=anchor_x,
+                    anchor_y=side_center_y,
+                    ha=ha,
+                    anchor_va="center",
+                )
+                side = side_name
+                if side_name == "left" and min_left is not None and bounds.left < min_left:
+                    continue
+                break
+        else:
+            _, lines, bounds, side = best
+
+        if side == "top":
+            anchor_x = lines[0].x if lines else top_anchor_x
+            anchor_ha = lines[0].ha if lines else "left"
+            anchor_y = lines[0].y if lines else top_anchor_y
+            for _ in range(8):
+                if not _label_block_overlaps(bounds, caption_obstacles, min_gap=min_gap):
+                    break
+                anchor_y += 0.04
+                lines, bounds = _stack_inline_frame_label_lines(
+                    ax,
+                    label_lines=label_lines,
+                    sublabel_lines=sublabel_lines,
+                    anchor_x=anchor_x,
+                    anchor_y=anchor_y,
+                    ha=anchor_ha,
+                )
+                if bounds.bottom > tile_bounds.top + 0.5:
+                    side_name = "right" if has_left_neighbor else "left"
+                    anchor_x_fb = (
+                        tile_bounds.right + min_gap
+                        if side_name == "right"
+                        else tile_bounds.left - min_gap
+                    )
+                    ha_fb = "left" if side_name == "right" else "right"
+                    lines, bounds = _stack_inline_frame_label_lines(
+                        ax,
+                        label_lines=label_lines,
+                        sublabel_lines=sublabel_lines,
+                        anchor_x=anchor_x_fb,
+                        anchor_y=side_center_y,
+                        ha=ha_fb,
+                        anchor_va="center",
+                    )
+                    side = side_name
+                    break
+
+        placements[frame.frame_id] = InlineFrameLabelPlacement(
+            frame_id=frame.frame_id,
+            lines=lines,
+            side=side,
+        )
+        placed_label_bounds.append((frame.frame_id, bounds))
+
+    return placements
+
+
+def _apply_inline_frame_label_layout(
+    ax: Axes,
+    graph: ComputationGraph,
+    positions: list[LayoutPosition],
+    plan: DetailDrawPlan,
+    *,
+    detail_fill: str,
+    min_gap: float,
+    min_left: float | None = None,
+) -> list[MeasuredElement]:
+    """Resolve inline-frame caption positions and refresh measured elements."""
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=detail_fill)
+    plan.inline_frame_labels = _layout_inline_frame_labels(
+        ax,
+        graph,
+        positions,
+        plan,
+        elements,
+        links=list(graph.links),
+        min_gap=min_gap,
+        min_left=min_left,
+    )
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=detail_fill)
+    _reserve_frame_caption_space(
+        positions,
+        plan,
+        elements,
+        graph,
+        min_gap=min_gap,
+        min_left=min_left,
+    )
+    plan.inline_frame_labels = _layout_inline_frame_labels(
+        ax,
+        graph,
+        positions,
+        plan,
+        collect_measured_elements(ax, graph, positions, plan, detail_fill=detail_fill),
+        links=list(graph.links),
+        min_gap=min_gap,
+        min_left=min_left,
+    )
+    return collect_measured_elements(ax, graph, positions, plan, detail_fill=detail_fill)
 
 
 def _classify_layout_zones(
@@ -517,25 +1118,31 @@ def _ensure_input_above_inline_frames(
     *,
     min_gap: float,
 ) -> None:
-    """Raise the synthetic input tile so it clears inline-frame caption bands in its column."""
-    input_pos = next((pos for pos in positions if pos.spec.synthetic == SYNTHETIC_INPUT), None)
-    if input_pos is None:
-        return
-    input_left = input_pos.cx - input_pos.width / 2
-    input_right = input_pos.cx + input_pos.width / 2
+    """Raise input/tensor port tiles so they clear inline-frame caption bands in their column."""
     caption_tops = [
         element.bounds.top
         for element in elements
         if element.kind in {"inline_frame", "frame_label", "frame_sublabel"}
-        and element.bounds.right + min_gap > input_left
-        and element.bounds.left - min_gap < input_right
     ]
     if not caption_tops:
         return
-    max_caption_top = max(caption_tops)
-    min_bottom = max_caption_top + min_gap
-    if input_pos.bottom < min_bottom:
-        input_pos.top_y += min_bottom - input_pos.bottom
+    for pos in positions:
+        if pos.spec.synthetic not in {SYNTHETIC_INPUT, SYNTHETIC_TENSOR}:
+            continue
+        port_left = pos.cx - pos.width / 2
+        port_right = pos.cx + pos.width / 2
+        local_caption_tops = [
+            element.bounds.top
+            for element in elements
+            if element.kind in {"inline_frame", "frame_label", "frame_sublabel"}
+            and element.bounds.right + min_gap > port_left
+            and element.bounds.left - min_gap < port_right
+        ]
+        if not local_caption_tops:
+            continue
+        min_bottom = max(local_caption_tops) + min_gap
+        if pos.bottom < min_bottom:
+            pos.top_y += min_bottom - pos.bottom
 
 
 def _align_and_stack_inline_frames(
@@ -545,11 +1152,20 @@ def _align_and_stack_inline_frames(
     min_gap: float | None = None,
 ) -> None:
     """Keep straight-line inline frames vertically stacked on one column."""
-    from visualizer.computation_graph import _align_merge_nodes, repack_inline_frame_columns
+    from visualizer.computation_graph import (
+        _align_merge_nodes,
+        _graph_has_tensor_ports,
+        finalize_tensor_port_pipeline_layout,
+        repack_inline_frame_columns,
+    )
 
     stack_inline_frame_positions(positions, graph, min_gap=min_gap)
     _align_merge_nodes(positions, graph)
-    repack_inline_frame_columns(positions, graph)
+    if _graph_has_tensor_ports(graph):
+        finalize_tensor_port_pipeline_layout(positions, graph)
+    elif graph.inline_frames:
+        repack_inline_frame_columns(positions, graph)
+        stack_inline_frame_positions(positions, graph, min_gap=min_gap)
     _layout_fork_join_branches(positions, graph)
 
 
@@ -708,12 +1324,17 @@ def _nudge_clear_frame_caption_overlaps(
         for element in elements
         if element.kind in {"frame_label", "frame_sublabel"} and element.frame_id
     ]
+    frame_up_shifts: dict[str, float] = {}
+    frame_right_shifts: dict[str, float] = {}
+    tile_up_shifts: dict[int, float] = {}
+    tile_right_shifts: dict[int, float] = {}
 
     for caption in captions:
         caption_frame_id = caption.frame_id
         owner = frame_bounds.get(caption_frame_id or "")
         if owner is None:
             continue
+        caption_side = _caption_side_for_bounds(caption.bounds, owner, gap=min_gap)
         for element in elements:
             if element.kind not in {"box", "combine", "inline_frame"}:
                 continue
@@ -723,6 +1344,50 @@ def _nudge_clear_frame_caption_overlaps(
                 element.node_index is not None
                 and frame_members.get(element.node_index) == caption_frame_id
             ):
+                if caption.bounds.overlaps(element.bounds, min_gap=min_gap):
+                    if caption_side == "left":
+                        shift = caption.bounds.right + min_gap - element.bounds.left
+                        if shift > 0 and caption_frame_id:
+                            frame_right_shifts[caption_frame_id] = max(
+                                frame_right_shifts.get(caption_frame_id, 0.0),
+                                shift,
+                            )
+                    elif caption_frame_id:
+                        shift = element.bounds.top + min_gap - caption.bounds.bottom
+                        if shift > 0:
+                            frame_up_shifts[caption_frame_id] = max(
+                                frame_up_shifts.get(caption_frame_id, 0.0),
+                                shift,
+                            )
+                continue
+            if caption_side == "left":
+                if element.frame_id == caption_frame_id:
+                    continue
+                if not caption.bounds.overlaps(element.bounds, min_gap=min_gap):
+                    continue
+                if element.kind == "inline_frame" and element.frame_id:
+                    shift = caption.bounds.right + min_gap - element.bounds.left
+                    if shift > 0 and element.frame_id:
+                        frame_right_shifts[element.frame_id] = max(
+                            frame_right_shifts.get(element.frame_id, 0.0),
+                            shift,
+                        )
+                    continue
+                if element.bounds.left >= owner.left - min_gap:
+                    continue
+                shift = caption.bounds.right + min_gap - element.bounds.left
+                if shift > 0 and element.node_index is not None:
+                    frame_id = frame_members.get(element.node_index)
+                    if frame_id:
+                        frame_right_shifts[frame_id] = max(
+                            frame_right_shifts.get(frame_id, 0.0),
+                            shift,
+                        )
+                    else:
+                        tile_right_shifts[element.node_index] = max(
+                            tile_right_shifts.get(element.node_index, 0.0),
+                            shift,
+                        )
                 continue
             if element.bounds.left < owner.right + min_gap:
                 continue
@@ -741,11 +1406,66 @@ def _nudge_clear_frame_caption_overlaps(
                 horizontal = caption.bounds.right + min_gap - element.bounds.left
                 if horizontal >= 0:
                     horizontal = max(horizontal, min_gap)
-                    _shift_node_indices(positions, indices, horizontal)
+                    if element.kind == "inline_frame" and element.frame_id:
+                        frame_right_shifts[element.frame_id] = max(
+                            frame_right_shifts.get(element.frame_id, 0.0),
+                            horizontal,
+                        )
+                    else:
+                        for index in indices:
+                            tile_right_shifts[index] = max(
+                                tile_right_shifts.get(index, 0.0),
+                                horizontal,
+                            )
                 vertical = element.bounds.top + min_gap - caption.bounds.bottom
                 if vertical > 0:
-                    for index in indices:
-                        positions[index].top_y -= vertical
+                    if element.kind == "inline_frame" and element.frame_id:
+                        frame_up_shifts[element.frame_id] = max(
+                            frame_up_shifts.get(element.frame_id, 0.0),
+                            vertical,
+                        )
+                    else:
+                        for index in indices:
+                            tile_up_shifts[index] = max(
+                                tile_up_shifts.get(index, 0.0),
+                                vertical,
+                            )
+
+    for frame_id, shift in frame_right_shifts.items():
+        indices = member_sets.get(frame_id, set())
+        if indices:
+            _shift_node_indices(positions, indices, shift)
+    for frame_id, shift in frame_up_shifts.items():
+        for index in member_sets.get(frame_id, set()):
+            positions[index].top_y -= shift
+    for index, shift in tile_right_shifts.items():
+        positions[index].cx += shift
+    for index, shift in tile_up_shifts.items():
+        positions[index].top_y -= shift
+
+
+def _redock_tensor_ports_after_layout(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    elements: list[MeasuredElement],
+    *,
+    min_gap: float,
+) -> None:
+    """Re-seat tensor ports on their consumers after vertical layout adjustments."""
+    from visualizer.computation_graph import (
+        _dock_single_consumer_tensor_ports,
+        _graph_has_tensor_ports,
+    )
+
+    if not _graph_has_tensor_ports(graph):
+        return
+    _dock_single_consumer_tensor_ports(positions, graph)
+    _ensure_tensor_ports_clear_frame_captions(
+        positions,
+        elements,
+        graph,
+        min_gap=min_gap,
+    )
 
 
 def _repack_after_caption_nudges(
@@ -820,10 +1540,10 @@ def _separate_parallel_tiles_from_inline_frames(
         box_index = box.node_index
         if box_index is None or box_index in frame_members:
             continue
-        if box_index not in parallel_indices:
-            continue
         pos = positions[box_index]
-        if pos.spec.synthetic in {SYNTHETIC_INPUT, SYNTHETIC_HIDDEN}:
+        if pos.spec.synthetic in {SYNTHETIC_TENSOR, SYNTHETIC_INPUT, SYNTHETIC_HIDDEN}:
+            continue
+        if box_index not in parallel_indices:
             continue
         for frame in frames:
             if box_index in frame.frame_node_indices:
@@ -840,6 +1560,52 @@ def _separate_parallel_tiles_from_inline_frames(
                     pos.cx += shift
 
 
+def _separate_boxes_from_nested_inline_frames(
+    positions: list[LayoutPosition],
+    elements: list[MeasuredElement],
+    graph: ComputationGraph,
+    *,
+    min_gap: float,
+) -> None:
+    """Shift sibling tiles right when they overlap a nested inline frame in the same parent."""
+    frame_members = _frame_member_indices(graph)
+    member_sets = {
+        frame.frame_id: set(frame.node_indices) for frame in graph.inline_frames
+    }
+    frames = [
+        element
+        for element in elements
+        if element.kind == "inline_frame" and element.frame_id
+    ]
+    boxes = [
+        element
+        for element in elements
+        if element.kind == "box" and element.node_index is not None
+    ]
+    for box in boxes:
+        box_index = box.node_index
+        if box_index is None or box_index >= len(positions):
+            continue
+        parent_frame_id = frame_members.get(box_index)
+        if parent_frame_id is None:
+            continue
+        parent_members = member_sets.get(parent_frame_id, set())
+        for frame in frames:
+            nested_id = frame.frame_id
+            if nested_id is None or nested_id == parent_frame_id:
+                continue
+            nested_members = member_sets.get(nested_id, set())
+            if not nested_members or not nested_members.issubset(parent_members):
+                continue
+            if box_index in nested_members:
+                continue
+            if not box.bounds.overlaps(frame.bounds, min_gap=min_gap):
+                continue
+            shift = frame.bounds.right + min_gap - box.bounds.left
+            if shift > 0:
+                positions[box_index].cx += shift
+
+
 def _nudge_apart_remaining_tiles(
     positions: list[LayoutPosition],
     elements: list[MeasuredElement],
@@ -849,6 +1615,9 @@ def _nudge_apart_remaining_tiles(
 ) -> None:
     """Last-resort nudge for tile pairs that still intersect."""
     frame_members = _frame_member_indices(graph)
+    frame_member_sets = {
+        frame.frame_id: set(frame.node_indices) for frame in graph.inline_frames
+    }
     boxes = [
         element
         for element in elements
@@ -860,6 +1629,7 @@ def _nudge_apart_remaining_tiles(
         box_index = box.node_index
         if box_index is None or box_index >= len(positions):
             continue
+        pos = positions[box_index]
         box_frame = frame_members.get(box_index)
         for frame in frames:
             if box_frame and frame.frame_id == box_frame:
@@ -868,7 +1638,29 @@ def _nudge_apart_remaining_tiles(
                 continue
             if not box.bounds.overlaps(frame.bounds, min_gap=min_gap):
                 continue
-            pos = positions[box_index]
+            if box_frame is not None:
+                if pos.spec.synthetic == SYNTHETIC_TENSOR:
+                    targets = [target for source, target in graph.links if source == box_index]
+                    if len(targets) == 1:
+                        if box.bounds.overlaps(frame.bounds, min_gap=min_gap):
+                            shift = frame.bounds.top + min_gap - box.bounds.bottom
+                            if shift > 0:
+                                pos.top_y += shift
+                        continue
+                    shift = frame.bounds.right + min_gap - box.bounds.left
+                    if shift > 0:
+                        pos.cx += shift
+                    continue
+                members = frame_member_sets.get(box_frame, {box_index})
+                if box.bounds.left < frame.bounds.left:
+                    shift = frame.bounds.left - min_gap - box.bounds.right
+                    if shift < 0:
+                        _shift_node_indices(positions, members, shift)
+                else:
+                    shift = frame.bounds.right + min_gap - box.bounds.left
+                    if shift > 0:
+                        _shift_node_indices(positions, members, shift)
+                continue
             if _fanout_branch_index(pos.spec) is not None:
                 shift = frame.bounds.left - min_gap - box.bounds.right
                 if shift < 0:
@@ -919,7 +1711,10 @@ def _nudge_apart_remaining_tiles(
                 continue
             overlap = left.bounds.right + min_gap - right.bounds.left
             if overlap > 0:
-                positions[right_index_id].cx += overlap
+                shift_indices = {right_index_id}
+                if right_frame is not None:
+                    shift_indices = frame_member_sets.get(right_frame, shift_indices)
+                _shift_node_indices(positions, shift_indices, overlap)
 
 
 def _content_horizontal_extent(elements: list[MeasuredElement]) -> tuple[float, float]:
@@ -952,6 +1747,7 @@ def measure_detail_tree_content_width(
     from visualizer.basic_ops import BasicOpFilter
     from visualizer.computation_graph import (
         _estimate_graph_height,
+        _minimum_graph_layout_width,
         build_computation_graph,
         layout_computation_graph,
         measure_graph_node_sizes,
@@ -967,12 +1763,15 @@ def measure_detail_tree_content_width(
         prefix_steps=prefix_steps,
         basic_ops=basic_ops or BasicOpFilter.for_detailed(),
     )
-    import matplotlib.pyplot as plt
+    min_required_width = _minimum_graph_layout_width(graph) + 0.12
+    layout_block_w = max(layout_block_w, min_required_width)
+    from visualizer.text_measure import ensure_diagram_measure_axes
 
-    measure_fig, measure_ax = plt.subplots(figsize=(MEASURE_CANVAS_WIDTH, 13))
-    measure_fig.canvas.draw()
+    ensure_diagram_measure_axes(ax)
+    positions = None
+    finalized_ok = False
     try:
-        measure_graph_node_sizes(measure_ax, graph, input_sublabel=input_sublabel)
+        measure_graph_node_sizes(ax, graph, input_sublabel=None)
         positions, _ = layout_computation_graph(
             graph,
             cx=cx,
@@ -982,7 +1781,7 @@ def measure_detail_tree_content_width(
             content_left=min_left,
         )
         finalize_detail_layout(
-            measure_ax,
+            ax,
             graph,
             positions,
             input_sublabel=input_sublabel,
@@ -992,14 +1791,20 @@ def measure_detail_tree_content_width(
             min_left=min_left,
             forbidden_regions=None,
         )
+        finalized_ok = True
     except LayoutValidationError:
         pass
     finally:
         from visualizer.render import _detail_content_bounds
 
-        frame_left, frame_right, _frame_bottom, _frame_top = _detail_content_bounds(positions)
-        width = max(1.2, frame_right - frame_left + 0.05)
-        plt.close(measure_fig)
+        fallback_width = max(1.2, min_required_width + 0.05)
+        if not finalized_ok or positions is None:
+            width = fallback_width
+        else:
+            frame_left, frame_right, _frame_bottom, _frame_top = _detail_content_bounds(positions)
+            width = max(1.2, frame_right - frame_left + 0.05)
+            if width > max(25.0, min_required_width * 3):
+                width = fallback_width
         return width
 
 
@@ -1097,6 +1902,23 @@ def _shift_positions(positions: list[LayoutPosition], delta_x: float) -> None:
         pos.cx += delta_x
 
 
+def _pack_tensor_port_pipeline_layout(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_left: float | None,
+) -> None:
+    """Repack kernel pipeline frames and realign modeling tensor ports after horizontal nudges."""
+    from visualizer.computation_graph import (
+        _graph_has_tensor_ports,
+        finalize_tensor_port_pipeline_layout,
+    )
+
+    if not _graph_has_tensor_ports(graph):
+        return
+    finalize_tensor_port_pipeline_layout(positions, graph, min_left=min_left)
+
+
 def _clamp_content_horizontal(
     positions: list[LayoutPosition],
     elements: list[MeasuredElement],
@@ -1116,7 +1938,7 @@ def _clamp_content_horizontal(
     shift = 0.0
     if max_right is not None and content_right > max_right:
         shift -= content_right - max_right
-    if min_left is not None and content_left + shift < min_left:
+    if min_left is not None:
         shift += min_left - (content_left + shift)
     _shift_positions(positions, shift)
 
@@ -1163,7 +1985,41 @@ def _finalize_spine_aligned_plan(
 
     _align_merge_nodes(positions, graph)
     _center_align_vertical_chains(positions, graph)
+    from visualizer.computation_graph import _align_tensor_port_merge_nodes, _graph_has_tensor_ports
+
+    if _graph_has_tensor_ports(graph):
+        _align_tensor_port_merge_nodes(positions, graph)
     return _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+
+
+def _ensure_tensor_ports_clear_frame_captions(
+    positions: list[LayoutPosition],
+    elements: list[MeasuredElement],
+    graph: ComputationGraph,
+    *,
+    min_gap: float,
+) -> None:
+    """Raise tensor ports when they overlap inline-frame caption text."""
+    from visualizer.text_measure import box_bounds_at
+
+    port_indices = [
+        index for index, spec in enumerate(graph.nodes) if spec.synthetic == SYNTHETIC_TENSOR
+    ]
+    if not port_indices:
+        return
+    captions = [element for element in elements if element.kind == "frame_label"]
+    if not captions:
+        return
+    for port_index in port_indices:
+        pos = positions[port_index]
+        port_bounds = box_bounds_at(pos.cx, pos.top_y, pos.width, pos.height)
+        for caption in captions:
+            if not port_bounds.overlaps(caption.bounds, min_gap=min_gap):
+                continue
+            shift = caption.bounds.top + min_gap - port_bounds.bottom
+            if shift > 0:
+                pos.top_y += shift
+                port_bounds = box_bounds_at(pos.cx, pos.top_y, pos.width, pos.height)
 
 
 def finalize_detail_layout(
@@ -1188,6 +2044,7 @@ def finalize_detail_layout(
     from visualizer.render import COLORS, _build_detail_draw_plan, _resize_input_nodes
 
     fill = detail_fill or COLORS["detail_fill"]
+    layout_top_y = max(top_y, LAYOUT_MIN_TOP_Y)
     forbidden = list(forbidden_regions or [])
     max_right = _forbidden_max_right(forbidden, min_gap=min_gap)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
@@ -1201,7 +2058,7 @@ def finalize_detail_layout(
             resolve_measured_overlaps(
                 positions,
                 graph,
-                top_y=top_y,
+                top_y=layout_top_y,
                 min_gap=MIN_HORIZONTAL_BLOCK_GAP,
             )
             _align_and_stack_inline_frames(positions, graph)
@@ -1242,6 +2099,8 @@ def finalize_detail_layout(
             graph,
             min_gap=VALIDATE_MIN_GAP,
         )
+        plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+        elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
         report = validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden)
         if report.ok:
             break
@@ -1256,7 +2115,7 @@ def finalize_detail_layout(
             resolve_measured_overlaps(
                 positions,
                 graph,
-                top_y=top_y,
+                top_y=layout_top_y,
                 min_gap=MIN_HORIZONTAL_BLOCK_GAP,
             )
             _align_and_stack_inline_frames(positions, graph)
@@ -1287,7 +2146,7 @@ def finalize_detail_layout(
         resolve_measured_overlaps(
             positions,
             graph,
-            top_y=top_y,
+            top_y=layout_top_y,
             min_gap=MIN_HORIZONTAL_BLOCK_GAP,
         )
         _align_and_stack_inline_frames(positions, graph)
@@ -1315,6 +2174,12 @@ def finalize_detail_layout(
         elements,
         min_gap=VALIDATE_MIN_GAP,
     )
+    _separate_boxes_from_nested_inline_frames(
+        positions,
+        elements,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+    )
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
@@ -1347,6 +2212,8 @@ def finalize_detail_layout(
     _anchor_detail_layout_to_top_y(positions, top_y=top_y)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
+    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
     _separate_parallel_tiles_from_inline_frames(
         positions,
@@ -1354,7 +2221,39 @@ def finalize_detail_layout(
         graph,
         min_gap=VALIDATE_MIN_GAP,
     )
-    validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden).raise_if_invalid()
+    elements = _apply_inline_frame_label_layout(
+        ax,
+        graph,
+        positions,
+        plan,
+        detail_fill=fill,
+        min_gap=VALIDATE_MIN_GAP,
+        min_left=min_left,
+    )
+    _separate_overlapping_inline_frames(
+        positions,
+        graph,
+        elements,
+        min_gap=VALIDATE_MIN_GAP,
+    )
+    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    if positions:
+        _align_and_stack_inline_frames(positions, graph)
+        _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    _separate_parallel_tiles_from_inline_frames(
+        positions,
+        elements,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+    )
+    _nudge_apart_remaining_tiles(positions, elements, graph, min_gap=VALIDATE_MIN_GAP)
+    if positions:
+        _align_and_stack_inline_frames(positions, graph)
     plan = _finalize_spine_aligned_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     _layout_fork_join_branches(positions, graph)
@@ -1379,6 +2278,127 @@ def finalize_detail_layout(
     _ensure_synthetic_input_clears_consumers(positions, graph)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
+    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+    elements = _apply_inline_frame_label_layout(
+        ax,
+        graph,
+        positions,
+        plan,
+        detail_fill=fill,
+        min_gap=VALIDATE_MIN_GAP,
+        min_left=min_left,
+    )
+    _separate_overlapping_inline_frames(
+        positions,
+        graph,
+        elements,
+        min_gap=VALIDATE_MIN_GAP,
+    )
+    _pack_tensor_port_pipeline_layout(positions, graph, min_left=min_left)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    _clamp_content_horizontal(
+        positions,
+        elements,
+        min_left=min_left,
+        max_right=max_right,
+    )
+    _pack_tensor_port_pipeline_layout(positions, graph, min_left=min_left)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    _separate_parallel_tiles_from_inline_frames(
+        positions,
+        elements,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+    )
+    _separate_overlapping_inline_frames(
+        positions,
+        graph,
+        elements,
+        min_gap=VALIDATE_MIN_GAP,
+    )
+    _nudge_apart_remaining_tiles(positions, elements, graph, min_gap=VALIDATE_MIN_GAP)
+    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = _apply_inline_frame_label_layout(
+        ax,
+        graph,
+        positions,
+        plan,
+        detail_fill=fill,
+        min_gap=VALIDATE_MIN_GAP,
+        min_left=min_left,
+    )
+    _ensure_tensor_ports_clear_frame_captions(
+        positions,
+        elements,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+    )
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    for _ in range(4):
+        elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+        _nudge_clear_frame_caption_overlaps(positions, graph, elements, min_gap=VALIDATE_MIN_GAP)
+        _ensure_tensor_ports_clear_frame_captions(
+            positions,
+            elements,
+            graph,
+            min_gap=VALIDATE_MIN_GAP,
+        )
+        _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+        plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+        enforce_text_fit_node_sizes(ax, positions, plan)
+        elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+        frame_caption_overlaps = [
+            line
+            for line in validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden).overlaps
+            if "frame_label" in line or "frame_sublabel" in line
+        ]
+        if not frame_caption_overlaps:
+            break
+    elements = _apply_inline_frame_label_layout(
+        ax,
+        graph,
+        positions,
+        plan,
+        detail_fill=fill,
+        min_gap=VALIDATE_MIN_GAP,
+        min_left=min_left,
+    )
+    for _ in range(4):
+        elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+        _nudge_clear_frame_caption_overlaps(positions, graph, elements, min_gap=VALIDATE_MIN_GAP)
+        elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+        frame_caption_overlaps = [
+            line
+            for line in validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden).overlaps
+            if "frame_label" in line or "frame_sublabel" in line
+        ]
+        if not frame_caption_overlaps:
+            break
+    _layout_fork_join_branches(positions, graph)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    _redock_tensor_ports_after_layout(positions, graph, elements, min_gap=VALIDATE_MIN_GAP)
+    from visualizer.shrinkwrap import shrinkwrap_detail_layout
+
+    shrinkwrap_detail_layout(positions, graph, min_gap=VALIDATE_MIN_GAP)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = _apply_inline_frame_label_layout(
+        ax,
+        graph,
+        positions,
+        plan,
+        detail_fill=fill,
+        min_gap=VALIDATE_MIN_GAP,
+        min_left=min_left,
+    )
     validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden).raise_if_invalid()
     return plan

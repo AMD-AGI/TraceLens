@@ -25,10 +25,10 @@ COMMON_LEAF_PATTERNS: tuple[str, ...] = (
 _MODELING_CLASS_PATTERNS: tuple[str, ...] = (
     r"(?i)ShortConv",
     r"(?i)OutputGate",
-    r"(?i)DeltaAttention",
+    r"(?i)KernelPipeline",
     r"(?i)AttentionMerge",
-    r"(?i)DeltaUpdate",
-    r"(?i)ChunkScan",
+    r"(?i)KernelOp",
+    r"(?i)KernelOutput",
     r"(?i)AttentionOp",
     r"(?i)ActivationOp",
     r"(?i)RouterOp",
@@ -57,7 +57,8 @@ _OUTPUT_GATE_ATTR_PATTERNS: tuple[str, ...] = (
     r"(?i)_gate$",
 )
 
-_SYNTHETIC_BASIC_EXCEPTIONS = frozenset({"@functional_linear"})
+def _is_functional_synthetic_basic(attr_name: str) -> bool:
+    return attr_name.startswith("@functional_")
 
 
 class BasicOpFilter:
@@ -133,8 +134,6 @@ def _detail_implies_modeling(details: list[str] | None) -> bool:
             return True
         if lowered.startswith("ports:"):
             return True
-        if "delta attention" in lowered or "chunk_kda" in lowered or "recurrent_kda" in lowered:
-            return True
         if line.startswith("method `"):
             return False
     return False
@@ -155,7 +154,7 @@ def introspect_is_modeling_operation(
     if parallel_gate or router_synthetic:
         return True
     if attr_name.startswith("@"):
-        return attr_name not in _SYNTHETIC_BASIC_EXCEPTIONS
+        return not _is_functional_synthetic_basic(attr_name)
     if _matches_any(class_name, _MODELING_CLASS_PATTERNS):
         return True
     if _matches_any(attr_name, _MODELING_ATTR_PATTERNS):
@@ -170,7 +169,7 @@ def introspect_is_modeling_operation(
         return True
     # Imported modules referenced in __init__ but not parsed (e.g. fla ShortConvolution).
     if class_name and re.search(
-        r"(?i)Conv|Gate|Attention|Merge|Scan|Delta|Router|NormGated|Recurrent|Kernel",
+        r"(?i)Conv|Gate|Attention|Merge|Scan|Router|NormGated|Recurrent|Kernel",
         class_name,
     ):
         if not re.match(r"(?i)^Linear$|^Embedding$|^Identity$|^Dropout$", class_name):
@@ -234,11 +233,8 @@ _DETAIL_OPERATION_LABELS = _BASIC_DETAIL_LABELS | frozenset(
         "ReLU",
         "Relu",
         "Attention",
-        "Merge inputs",
-        "Delta state S",
-        "Chunk scan",
-        "Freq computation",
-        "Apply to Q/K",
+        "L2Norm",
+        "Output o",
         "Token Embedding",
         "Embedding",
         "×",
@@ -259,8 +255,9 @@ _DETAIL_OPERATION_CLASSES = frozenset(
         "ActivationOp",
         "AttentionOp",
         "AttentionMerge",
-        "DeltaUpdate",
-        "ChunkScan",
+        "KernelPipeline",
+        "KernelOp",
+        "KernelOutput",
         "ShortConvolution",
         "RotaryEmbedding",
         "ApplyRotary",
@@ -281,7 +278,7 @@ def keep_detail_graph_node(
     """Return True when a graph node spec should be kept in basic-only detail mode."""
     if not basic_only:
         return True
-    if synthetic in {"@input", "@hidden_states"}:
+    if synthetic in {"@input", "@hidden_states", "@tensor"}:
         return True
     if synthetic is not None:
         return label in _DETAIL_COMBINE_LABELS
