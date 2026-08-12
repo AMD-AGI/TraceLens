@@ -246,15 +246,13 @@ class TestXLACollectiveParser:
         assert self.parser._extract_tensor_specs(line) == "bf16[2,4]{1,0}"
 
     def test_extract_split_dimension_single(self):
-        line = 'HLO %x = bf16[4,8]{1,0} all-reduce(...), dimensions={0}'
+        line = "HLO %x = bf16[4,8]{1,0} all-reduce(...), dimensions={0}"
         assert self.parser._extract_split_dimension(line) == 0
 
     def test_output_tensor_tuple_variants(self):
         parser = self.parser
         assert (
-            parser._extract_output_tensor_from_tuple(
-                "reduce-scatter", "bf16[2,4]{1,0}"
-            )
+            parser._extract_output_tensor_from_tuple("reduce-scatter", "bf16[2,4]{1,0}")
             == "bf16[2,4]{1,0}"
         )
         nested = "((bf16[2,4]{1,0}), (bf16[8,4]{1,0}))"
@@ -268,7 +266,9 @@ class TestXLACollectiveParser:
 
     def test_calculate_tensor_slice_edge_cases(self):
         parser = self.parser
-        assert parser._calculate_tensor_slice(None, 0, [[0, 1]], "all-reduce", 2) is None
+        assert (
+            parser._calculate_tensor_slice(None, 0, [[0, 1]], "all-reduce", 2) is None
+        )
         assert (
             parser._calculate_tensor_slice("bf16[4,8]{1,0}", 0, [], "all-reduce", 0)
             is None

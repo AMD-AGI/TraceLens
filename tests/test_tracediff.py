@@ -1105,7 +1105,9 @@ class TestTraceDiffSyntheticCoverage:
             _mk_event("cpu_op", "aten::extra", ts=200, dur=100, pid=1, tid=1),
         ]
         _add_gpu_chain(events1, events1[0], 100, "k_mm", ts_launch=10, ts_kernel=50)
-        _add_gpu_chain(events1, events1[1], 101, "k_extra", ts_launch=210, ts_kernel=250)
+        _add_gpu_chain(
+            events1, events1[1], 101, "k_extra", ts_launch=210, ts_kernel=250
+        )
         events2 = [_mk_event("cpu_op", "aten::mm", ts=0, dur=100, pid=1, tid=1)]
         _add_gpu_chain(events2, events2[0], 100, "k_mm", ts_launch=10, ts_kernel=50)
         td = TraceDiff(_build_tree(events1), _build_tree(events2))
@@ -1121,7 +1123,9 @@ class TestTraceDiffSyntheticCoverage:
             _mk_event("cpu_op", "aten::extra", ts=200, dur=100, pid=1, tid=1),
         ]
         _add_gpu_chain(events2, events2[0], 100, "k_mm", ts_launch=10, ts_kernel=50)
-        _add_gpu_chain(events2, events2[1], 101, "k_extra", ts_launch=210, ts_kernel=250)
+        _add_gpu_chain(
+            events2, events2[1], 101, "k_extra", ts_launch=210, ts_kernel=250
+        )
         td = TraceDiff(_build_tree(events1), _build_tree(events2))
         stats = td.generate_diff_stats()
         assert isinstance(stats, pd.DataFrame)
@@ -1205,7 +1209,9 @@ class TestTraceDiffSyntheticCoverage:
             _mk_event("cpu_op", "cpu_only", ts=10, dur=80, pid=1, tid=1),
             _mk_event("cpu_op", "aten::shared", ts=100, dur=80, pid=1, tid=1),
         ]
-        _add_gpu_chain(events2, events2[2], 73, "k_shared", ts_launch=105, ts_kernel=125)
+        _add_gpu_chain(
+            events2, events2[2], 73, "k_shared", ts_launch=105, ts_kernel=125
+        )
         td = TraceDiff(_build_tree(events1), _build_tree(events2))
         assert td.merged_tree is not None
 
@@ -1289,7 +1295,18 @@ class TestTraceDiffSyntheticCoverage:
 
     def test_print_tracediff_report_files_empty_outputs(self, tmp_path, capsys):
         td = _make_tracediff()
-        td.merged_tree = ([{"merged_id": 0, "uid1": 1, "uid2": 2, "merged_type": "combined", "children": []}], [0])
+        td.merged_tree = (
+            [
+                {
+                    "merged_id": 0,
+                    "uid1": 1,
+                    "uid2": 2,
+                    "merged_type": "combined",
+                    "children": [],
+                }
+            ],
+            [0],
+        )
         td.diff_stats_df = pd.DataFrame()
         td.diff_stats_unique_args_summary_df = pd.DataFrame()
         td.cpu_op_map_trace1 = None
@@ -1424,4 +1441,8 @@ class TestTraceDiffSyntheticCoverage:
         td.get_cpu_op_to_kernels_json()
         out = capsys.readouterr().out
         assert td.cpu_op_map is not None
-        assert "No common name found" in out or "Unmatched for LCA" in out or "Renaming:" in out
+        assert (
+            "No common name found" in out
+            or "Unmatched for LCA" in out
+            or "Renaming:" in out
+        )
