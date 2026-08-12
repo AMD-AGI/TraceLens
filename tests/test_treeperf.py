@@ -172,6 +172,8 @@ class TestTreePerfModuleHelpers:
         arch = {"max_achievable_tflops": {"matrix_fp16": 100.0}}
         assert get_max_achievable_tflops(perf_model, arch) == 100.0
         assert get_max_achievable_tflops(perf_model, None) is None
+        assert get_max_achievable_tflops(perf_model, {}) is None
+        assert get_max_achievable_tflops(SimpleNamespace(), arch) is None
 
 
 class TestGPUEventAnalyserStatic:
@@ -2345,47 +2347,12 @@ class TestTreePerfSummaries:
 
 
 # --- migrated from test_push95_coverage.py ---
-import importlib
 import json
 import os
-import sys
 from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_attention_core,
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-    _is_gemm_norm_only,
-)
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
-from tests.test_mamba_ssd import _mamba_event
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _GDN_ANNOTATION,
-    _moe_unfused_event,
-    _norm_event,
-)
-from tests.fixtures.reporting import (
-    _build_synthetic_trace,
-    _create_genesis_capture,
-    _write_trace,
-)
 from tests.fixtures.traces import _discover_trace_gz_files
 from tests.fixtures.treeperf import (
     _build_analyzer,
@@ -2434,47 +2401,12 @@ def test_treeperf_from_file_full_methods(trace_path):
 
 
 # --- migrated from test_push95_coverage.py ---
-import importlib
 import json
 import os
-import sys
 from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_attention_core,
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-    _is_gemm_norm_only,
-)
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
-from tests.test_mamba_ssd import _mamba_event
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _GDN_ANNOTATION,
-    _moe_unfused_event,
-    _norm_event,
-)
-from tests.fixtures.reporting import (
-    _build_synthetic_trace,
-    _create_genesis_capture,
-    _write_trace,
-)
 from tests.fixtures.treeperf import (
     _build_analyzer,
     _mk_pytorch_trace,
@@ -2505,49 +2437,12 @@ class TestTreePerfSyntheticPush95:
 import gzip
 import json
 import os
-import sys
 from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-)
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    add_truncated_kernel_details as add_truncated_inference,
-    generate_perf_report_pytorch as generate_inference_report,
-    perf_report_sanity_check,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    _get_cached_capture_tree,
-    align_streams,
-    capture_has_kernel_names,
-    get_subtree_events,
-    is_multistream,
-    verify_subtree_events,
-)
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
-from tests.test_conv_backward_bytes import (
-    _conv_bias_bwd_event,
-    _conv_bias_fwd_event,
-    _conv_bias_relu_bwd_event,
-    _conv_bias_relu_fwd_event,
-)
-from tests.fixtures.perfmodel import _ARCH, _gemm_event
-from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
+from tests.fixtures.reporting import _mk_ac2g
 from tests.fixtures.treeperf import (
     _build_analyzer,
     _make_gpu_event,

@@ -232,6 +232,63 @@ class TestXLACollectiveParser:
             "all-to-all", "((bf16[2,4]{1,0}), (bf16[8,4]{1,0}))"
         ).startswith("bf16[8,4]")
 
+    def test_parse_replica_groups_empty_and_invalid(self):
+        assert self.parser._parse_replica_groups("") == []
+        assert self.parser._parse_replica_groups("none") == []
+        assert self.parser._parse_replica_groups("{{0,1}}") == [[0, 1]]
+        assert self.parser._parse_replica_groups("not-a-group") == []
+
+    def test_parse_device_assignment_invalid(self):
+        assert self.parser._parse_device_assignment("[2,2]<=") == []
+
+    def test_extract_tensor_specs_fallback(self):
+        line = "HLO %x = bf16[2,4]{1,0} all-reduce(bf16[2,4]{1,0} %arg0), channel_id=1"
+        assert self.parser._extract_tensor_specs(line) == "bf16[2,4]{1,0}"
+
+    def test_extract_split_dimension_single(self):
+        line = 'HLO %x = bf16[4,8]{1,0} all-reduce(...), dimensions={0}'
+        assert self.parser._extract_split_dimension(line) == 0
+
+    def test_output_tensor_tuple_variants(self):
+        parser = self.parser
+        assert (
+            parser._extract_output_tensor_from_tuple(
+                "reduce-scatter", "bf16[2,4]{1,0}"
+            )
+            == "bf16[2,4]{1,0}"
+        )
+        nested = "((bf16[2,4]{1,0}), (bf16[8,4]{1,0}))"
+        assert parser._extract_output_tensor_from_tuple(
+            "all-gather-start", nested
+        ).startswith("bf16[8,4]")
+        simple = "(bf16[2,4]{1,0}, bf16[8,4]{1,0})"
+        assert parser._extract_output_tensor_from_tuple(
+            "all-to-all", simple
+        ).startswith("bf16[8,4]")
+
+    def test_calculate_tensor_slice_edge_cases(self):
+        parser = self.parser
+        assert parser._calculate_tensor_slice(None, 0, [[0, 1]], "all-reduce", 2) is None
+        assert (
+            parser._calculate_tensor_slice("bf16[4,8]{1,0}", 0, [], "all-reduce", 0)
+            is None
+        )
+        assert (
+            parser._calculate_tensor_slice("invalid", 0, [[0, 1]], "all-reduce", 2)
+            is None
+        )
+        slices = parser._calculate_tensor_slice(
+            "bf16[8,4]{1,0}",
+            0,
+            [[0, 1]],
+            "all-reduce",
+            2,
+        )
+        assert slices and slices[0]["bytes"] > 0
+        assert parser._calculate_data_bytes({"bytes": 16}) == 16
+        assert parser._calculate_data_bytes([{"bytes": 4}, {"bytes": 8}]) == 12
+        assert parser._calculate_data_bytes("bad") == 0
+
 
 def test_extract_node_name_from_path(tmp_path):
     pb_file = tmp_path / "nodeA.xplane.pb"

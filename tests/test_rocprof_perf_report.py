@@ -424,3 +424,46 @@ def test_rocprof_analyzer_synthetic():
     assert not analyzer.get_df_gpu_timeline().empty
     assert not analyzer.get_df_kernel_summary().empty
     assert isinstance(analyzer.get_df_short_kernels(10), pd.DataFrame)
+
+
+def test_rocprof_analyzer_empty_and_short_kernel_paths():
+    from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
+
+    empty = RocprofAnalyzer([], [], [], {})
+    assert empty.get_df_kernel_summary().empty
+    assert empty.get_df_kernel_summary_by_category().empty
+    assert empty.get_df_short_kernels().empty
+    assert empty.get_df_short_kernel_histogram().empty
+    assert empty.get_df_kernel_details().empty
+
+    kernels = [
+        {
+            "name": "tiny_kernel",
+            "ts": 100,
+            "dur": 5,
+            "grid": (1, 1, 1),
+            "block": (1, 1, 1),
+            "stream": 0,
+            "dispatch_id": 1,
+            "agent_id": 0,
+            "thread_id": 0,
+        },
+        {
+            "name": "tiny_kernel",
+            "ts": 200,
+            "dur": 3,
+            "grid": (1, 1, 1),
+            "block": (1, 1, 1),
+            "stream": 0,
+            "dispatch_id": 2,
+            "agent_id": 0,
+            "thread_id": 0,
+        },
+    ]
+    analyzer = RocprofAnalyzer(kernels, [], [], {})
+    short = analyzer.get_df_short_kernels(threshold_us=10.0)
+    assert not short.empty
+    hist = analyzer.get_df_short_kernel_histogram(threshold_us=10.0, bins=5)
+    assert not hist.empty
+    details = analyzer.get_df_kernel_details(topk=1)
+    assert len(details) == 1

@@ -11,7 +11,7 @@ coverage:
   status:
     project:
       default:
-        target: 94%
+        target: 95%
         threshold: 1%
         base: auto
         informational: false
@@ -20,7 +20,7 @@ coverage:
     patch:
       default:
         target: 95%
-        base: auto
+        threshold: 1%
         informational: false
         flags:
           - unit
