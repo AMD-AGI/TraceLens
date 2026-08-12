@@ -4855,3 +4855,519 @@ class TestOrchestratorHelpersSweep:
         )
         metrics = op._gpu_utilization_metrics_from_gpu_timeline_df(tl)
         assert metrics["total_time_ms"] == 1000.0
+
+
+# --- migrated from test_push95_coverage.py ---
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_attention_core,
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+    _is_gemm_norm_only,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_mamba_ssd import _mamba_event
+from tests.fixtures.perfmodel import (
+    _ARCH,
+    _GDN_ANNOTATION,
+    _moe_unfused_event,
+    _norm_event,
+)
+from tests.fixtures.reporting import (
+    _build_synthetic_trace,
+    _create_genesis_capture,
+    _write_trace,
+)
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _mk_pytorch_trace,
+)
+
+
+class TestOrchestratorPush95Coverage:
+    def test_attention_core_narrowing(self):
+        perf_lookup = {
+            "Cijk_QK": {
+                None: {"op_category": "GEMM", "data_in_mb": 1.0, "data_out_mb": 1.0},
+            },
+            "Cijk_PV": {
+                None: {"op_category": "GEMM", "data_in_mb": 2.0, "data_out_mb": 2.0},
+            },
+            "softmax_kernel": {
+                None: {
+                    "op_category": "SDPA_fwd",
+                    "data_in_mb": 0.5,
+                    "data_out_mb": 0.5,
+                },
+            },
+        }
+        kernels = [
+            {"name": "Cijk_QK", "type": "GEMM", "dur_us": 100},
+            {"name": "softmax_kernel", "type": "SDPA", "dur_us": 50},
+            {"name": "Cijk_PV", "type": "GEMM", "dur_us": 120},
+            {
+                "name": "vectorized_elementwise_kernel",
+                "type": "Elementwise",
+                "dur_us": 10,
+            },
+        ]
+        core = _extract_attention_core(kernels, perf_lookup)
+        assert core is not None
+        assert len(core) == 3
+        assert core[1]["name"] == "softmax_kernel"
+
+    def test_gemm_norm_only_detection(self):
+        entry = {
+            "kernels": [
+                {"name": "Cijk_gemm", "type": "GEMM"},
+                {"name": "rmsnorm2d_kernel", "type": "NORM"},
+            ]
+        }
+        assert _is_gemm_norm_only(entry) is True
+
+    def test_standalone_attention_enrichment_and_duplicate_base(self, tmp_path):
+        k_qk = _kernel_event(10, "Cijk_QK_gemm", dur=500)
+        k_sm = _kernel_event(11, "softmax_warp_forward", dur=200)
+        k_pv = _kernel_event(12, "Cijk_PV_gemm", dur=400)
+        mod1 = {
+            "name": "nn.Module: Attn_0",
+            "_category": "aten",
+            "gpu_events": [10, 11, 12],
+            "args": {"Input Dims": "[[2,8,128,64]]"},
+        }
+        mod2 = {
+            "name": "nn.Module: Attn_1",
+            "_category": "aten",
+            "gpu_events": [10, 11, 12],
+        }
+        tree = _StubTree([mod1, mod2], {10: k_qk, 11: k_sm, 12: k_pv})
+        analyzer = _StubAnalyzer(tree)
+
+        csv_dir = tmp_path / "csv"
+        csv_dir.mkdir()
+        pd.DataFrame(
+            {
+                "kernel_details_summary": [
+                    "[{'name': 'Cijk_QK_gemm'}]",
+                    "[{'name': 'softmax_warp_forward'}]",
+                    "[{'name': 'Cijk_PV_gemm'}]",
+                ],
+                "op category": ["GEMM", "SDPA_fwd", "GEMM"],
+                "Data Moved (MB)": [10.0, 2.0, 8.0],
+                "perf_params": ["{'M':2}", "{}", "{'M':2}"],
+                "Input Dims": ["[[2,8,128,64]]", "[[2,8,128,64]]", "[[2,8,128,64]]"],
+            }
+        ).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
+
+        cands = _extract_standalone_fusion_candidates(analyzer, tree, str(csv_dir))
+        assert isinstance(cands, list)
+
+    def test_standalone_keyerror_on_missing_uid(self, tmp_path):
+        mod = {
+            "name": "nn.Module: Broken_0",
+            "_category": "aten",
+            "gpu_events": [10, 99],
+        }
+        tree = _StubTree([mod], {10: _kernel_event(10, "Cijk_a")})
+        analyzer = _StubAnalyzer(tree)
+        csv_dir = tmp_path / "csv2"
+        csv_dir.mkdir()
+        pd.DataFrame(
+            {
+                "kernel_details_summary": ["[{'name': 'Cijk_a'}]"],
+                "op category": ["GEMM"],
+                "Data Moved (MB)": [1.0],
+                "perf_params": ["{}"],
+                "Input Dims": ["[[1,1]]"],
+            }
+        ).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
+        cands = _extract_standalone_fusion_candidates(analyzer, tree, str(csv_dir))
+        assert isinstance(cands, list)
+
+    def test_comparative_duplicate_base_accumulation(self, tmp_path):
+        csv_dir = tmp_path / "trace1_csvs"
+        csv_dir.mkdir()
+        pd.DataFrame(
+            {
+                "name": ["Cijk_A", "Cijk_B"],
+                "source": ["trace1", "trace1"],
+                "lowest_common_ancestor_id": [100, 100],
+                "kernel_time": [5000.0, 3000.0],
+                "gpu_op_uid": [10, 11],
+            }
+        ).to_csv(csv_dir / "diff_stats.csv", index=False)
+        uid_map = {
+            10: {
+                "name": "Cijk_A",
+                "dur": 5000,
+                "_category": "kernel",
+                "gpu_events": [],
+            },
+            11: {
+                "name": "Cijk_B",
+                "dur": 3000,
+                "_category": "kernel",
+                "gpu_events": [],
+            },
+        }
+        mod_a = {
+            "name": "nn.Module: Attn_0",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
+        mod_b = {
+            "name": "nn.Module: Attn_1",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
+        tree = _StubTree([mod_a, mod_b], uid_map)
+        analyzer = _StubAnalyzer(tree)
+        cands = _extract_comparative_fusion_candidates(str(csv_dir), analyzer, tree)
+        assert isinstance(cands, list)
+
+    def test_orchestrator_main_alt_ops_summary_column(self, tmp_path, monkeypatch):
+        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
+
+        out = str(tmp_path)
+        csv_dir = os.path.join(out, "perf_report_csvs")
+        os.makedirs(csv_dir)
+        pd.DataFrame(
+            {
+                "type": ["total_time", "computation_time", "idle_time"],
+                "time ms": [1000.0, 900.0, 100.0],
+                "percent": [100.0, 90.0, 10.0],
+            }
+        ).to_csv(os.path.join(csv_dir, "gpu_timeline.csv"), index=False)
+        pd.DataFrame(
+            {
+                "name": ["aten::mm"],
+                "Kernel Time (µs)_sum": [800000.0],
+                "op category": ["GEMM"],
+            }
+        ).to_csv(os.path.join(csv_dir, "ops_summary.csv"), index=False)
+        pd.DataFrame(
+            {
+                "name": ["aten::mm"],
+                "op category": ["GEMM"],
+                "Kernel Time (µs)": [800.0],
+            }
+        ).to_csv(os.path.join(csv_dir, "unified_perf_summary.csv"), index=False)
+        pd.DataFrame({"name": ["aten::mm"], "op category": ["GEMM"]}).to_csv(
+            os.path.join(csv_dir, "ops_summary_by_category.csv"), index=False
+        )
+
+        k1 = _kernel_event(10, "Cijk_a")
+        k2 = _kernel_event(11, "ew_add")
+        module = {
+            "name": "nn.Module: MLP_0",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
+        tree = _StubTree([module], {10: k1, 11: k2})
+        analyzer = _StubAnalyzer(tree)
+
+        class _FakeTreePerfAnalyzer:
+            @classmethod
+            def from_file(cls, *args, **kwargs):
+                return analyzer
+
+        monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
+        monkeypatch.setattr(
+            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
+        )
+
+        old_argv = sys.argv
+        sys.argv = [
+            "orchestrator_prepare",
+            "--trace-path",
+            "/fake/trace.json",
+            "--platform",
+            "MI300X",
+            "--output-dir",
+            out,
+        ]
+        try:
+            op.main()
+        finally:
+            sys.argv = old_argv
+        manifest = json.loads(
+            open(os.path.join(out, "category_data", "category_manifest.json")).read()
+        )
+        assert manifest["comparison_scope"] == "standalone"
+
+
+# --- migrated from test_coverage_final.py ---
+import gzip
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    add_truncated_kernel_details as add_truncated_inference,
+    generate_perf_report_pytorch as generate_inference_report,
+    perf_report_sanity_check,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _get_cached_capture_tree,
+    align_streams,
+    capture_has_kernel_names,
+    get_subtree_events,
+    is_multistream,
+    verify_subtree_events,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import (
+    _conv_bias_bwd_event,
+    _conv_bias_fwd_event,
+    _conv_bias_relu_bwd_event,
+    _conv_bias_relu_fwd_event,
+)
+from tests.fixtures.perfmodel import _ARCH, _gemm_event
+from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestOrchestratorPrepareFinal:
+    def test_standalone_sibling_sequence_and_duplicate_base(self, tmp_path):
+        k1 = _kernel_event(10, "Cijk_gemm_a", dur=500)
+        k2 = _kernel_event(11, "vectorized_elementwise_kernel add", dur=300)
+        k3 = _kernel_event(12, "Cijk_gemm_b", dur=400)
+        parent = {
+            "name": "aten::linear",
+            "_category": "aten",
+            "gpu_events": [12],
+            "parent": None,
+            "args": {"Input Dims": "[[2,3]]"},
+        }
+        mod1 = {
+            "name": "nn.Module: MLP_0",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+            "args": {"Input Dims": "[[2,3]]"},
+        }
+        mod2 = {
+            "name": "nn.Module: MLP_1",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
+        child_op = {
+            "name": "aten::add",
+            "_category": "aten",
+            "gpu_events": [12],
+            "parent": 99,
+        }
+        uid_map = {10: k1, 11: k2, 12: k3, 99: parent}
+        tree = _StubTree(
+            [mod1, mod2, parent, child_op], uid_map, parent_map={id(child_op): parent}
+        )
+        unified = [
+            {"name": "aten::mm", "gpu_events": [10], "parent": 99},
+            {"name": "aten::relu", "gpu_events": [11], "parent": 99},
+        ]
+        analyzer = _StubAnalyzer(tree, unified_events=unified)
+
+        csv_dir = tmp_path / "csv"
+        csv_dir.mkdir()
+        pd.DataFrame(
+            {
+                "kernel_details_summary": [
+                    "[{'name': 'Cijk_gemm_a'}]",
+                    "[{'name': 'vectorized_elementwise_kernel add'}]",
+                    "[{'name': 'Cijk_gemm_b'}]",
+                ],
+                "op category": ["GEMM", "elementwise", "GEMM"],
+                "Data Moved (MB)": [10.0, 4.0, 8.0],
+                "perf_params": ["{}", "{}", "{}"],
+                "Input Dims": ["[[2,3]]", "[[4,4]]", "[[2,3]]"],
+            }
+        ).to_csv(csv_dir / "unified_perf_summary.csv", index=False)
+
+        cands = _extract_standalone_fusion_candidates(analyzer, tree, str(csv_dir))
+        assert isinstance(cands, list)
+
+    def test_comparative_duplicate_base_accumulation(self, tmp_path, capsys):
+        csv_dir = tmp_path / "trace1_csvs"
+        csv_dir.mkdir()
+        pd.DataFrame(
+            {
+                "name": ["Cijk_A", "Cijk_B"],
+                "source": ["trace1", "trace1"],
+                "lowest_common_ancestor_id": [100, 100],
+                "kernel_time": [5000.0, 3000.0],
+                "gpu_op_uid": [10, 11],
+            }
+        ).to_csv(csv_dir / "diff_stats.csv", index=False)
+
+        uid_map = {
+            10: {
+                "name": "Cijk_A",
+                "dur": 5000,
+                "_category": "kernel",
+                "gpu_events": [],
+            },
+            11: {
+                "name": "Cijk_B",
+                "dur": 3000,
+                "_category": "kernel",
+                "gpu_events": [],
+            },
+        }
+        mod_a = {
+            "name": "nn.Module: Attn_0",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
+        mod_b = {
+            "name": "nn.Module: Attn_1",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
+        tree = _StubTree([mod_a, mod_b], uid_map)
+        analyzer = _StubAnalyzer(tree)
+        cands = _extract_comparative_fusion_candidates(str(csv_dir), analyzer, tree)
+        assert isinstance(cands, list)
+
+
+# --- migrated from test_coverage_final.py ---
+import gzip
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    add_truncated_kernel_details as add_truncated_inference,
+    generate_perf_report_pytorch as generate_inference_report,
+    perf_report_sanity_check,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _get_cached_capture_tree,
+    align_streams,
+    capture_has_kernel_names,
+    get_subtree_events,
+    is_multistream,
+    verify_subtree_events,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import (
+    _conv_bias_bwd_event,
+    _conv_bias_fwd_event,
+    _conv_bias_relu_bwd_event,
+    _conv_bias_relu_fwd_event,
+)
+from tests.fixtures.perfmodel import _ARCH, _gemm_event
+from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestOrchestratorMainExtended:
+    def test_orchestrator_disable_pseudo_ops(self, tmp_path, monkeypatch):
+        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
+
+        out = str(tmp_path)
+        _write_minimal_orchestrator_csvs(out, comparative=False)
+        k1 = _kernel_event(10, "Cijk_a")
+        k2 = _kernel_event(11, "ew_add")
+        module = {
+            "name": "nn.Module: MLP_0",
+            "_category": "aten",
+            "gpu_events": [10, 11],
+        }
+        tree = _StubTree([module], {10: k1, 11: k2})
+        analyzer = _StubAnalyzer(tree)
+
+        class _FakeTreePerfAnalyzer:
+            @classmethod
+            def from_file(cls, *args, **kwargs):
+                return analyzer
+
+        monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
+        monkeypatch.setattr(
+            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
+        )
+
+        old_argv = sys.argv
+        sys.argv = [
+            "orchestrator_prepare",
+            "--trace-path",
+            "/fake/trace.json",
+            "--platform",
+            "MI300X",
+            "--output-dir",
+            out,
+            "--disable_pseudo_ops",
+        ]
+        try:
+            op.main()
+        finally:
+            sys.argv = old_argv
+        manifest = json.loads(
+            open(os.path.join(out, "category_data", "category_manifest.json")).read()
+        )
+        assert manifest["comparison_scope"] == "standalone"

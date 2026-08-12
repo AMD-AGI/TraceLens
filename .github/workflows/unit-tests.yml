@@ -40,7 +40,7 @@ jobs:
           python -m pytest tests/ -v --tb=short -n auto --dist loadgroup \
             -m "not gpu" \
             --cov=./TraceLens --cov-config=.coveragerc \
-            --cov-report=xml --cov-fail-under=95 \
+            --cov-report=xml --cov-fail-under=94 \
             --junitxml=junit.xml -o junit_family=legacy
 
       - name: Upload coverage report

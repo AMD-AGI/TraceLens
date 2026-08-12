@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Reorganize coverage-named tests into module-aligned test files."""
 
 from __future__ import annotations
@@ -10,10 +16,7 @@ import re
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 TESTS_DIR = os.path.join(REPO_ROOT, "tests")
 
-SKIP_SOURCES = {
-    "test_push95_coverage.py",
-    "test_coverage_final.py",
-}
+SKIP_SOURCES: set[str] = set()
 
 WHOLE_FILE_TARGETS = {
     "test_agent_coverage.py": "test_analysis_agent_utils.py",

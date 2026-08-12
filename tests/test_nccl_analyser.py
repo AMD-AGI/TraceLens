@@ -170,6 +170,68 @@ class TestXLACollectiveParser:
         assert df.iloc[0]["collective_name"] == "all-reduce"
         assert df.iloc[0]["node"] == "0"
 
+    def test_parse_collectives_missing_and_empty(self, tmp_path, capsys):
+        missing = XLACollectiveParser({"0": str(tmp_path / "missing.txt")})
+        assert missing.parse_collectives_to_dataframe().empty
+        assert "Warning: File not found" in capsys.readouterr().out
+
+        empty_file = tmp_path / "empty.txt"
+        empty_file.write_text("", encoding="utf-8")
+        assert (
+            XLACollectiveParser({"0": str(empty_file)})
+            .parse_collectives_to_dataframe()
+            .empty
+        )
+
+    def test_parse_collectives_read_error(self, tmp_path, monkeypatch, capsys):
+        path = tmp_path / "node.txt"
+        path.write_text("x", encoding="utf-8")
+
+        def boom(*args, **kwargs):
+            raise OSError("read failed")
+
+        monkeypatch.setattr("builtins.open", boom)
+        assert (
+            XLACollectiveParser({"0": str(path)}).parse_collectives_to_dataframe().empty
+        )
+        assert "Error reading file" in capsys.readouterr().out
+
+    def test_extract_replica_groups_source_target_pairs(self):
+        line = (
+            "HLO %x = bf16[4,8]{1,0} collective-permute(bf16[4,8]{1,0} %arg0), "
+            'source_target_pairs={{0,1},{1,0}}, scheduling_name="permute"'
+        )
+        replica_string, groups = self.parser._extract_replica_groups(line)
+        assert replica_string == "{{0,1},{1,0}}"
+        assert groups == [[0, 1], [1, 0]]
+
+    def test_parse_all_gather_and_tuple_output(self, tmp_path):
+        line = (
+            "HLO %x = ((bf16[2,4]{1,0}, bf16[8,4]{1,0})) all-gather-start"
+            "((bf16[2,4]{1,0}), (bf16[8,4]{1,0}) %arg0), "
+            'replica_groups={{0,1}}, scheduling_name="all-gather-start.1", dimensions={0}'
+        )
+        path = tmp_path / "node.txt"
+        path.write_text(line + "\n", encoding="utf-8")
+        df = XLACollectiveParser({"0": str(path)}).parse_collectives_to_dataframe()
+        assert not df.empty
+        assert df.iloc[0]["collective_name"] == "all-gather-start.1"
+
+    def test_device_assignment_with_transpose(self):
+        groups = self.parser._parse_replica_groups("[2,2]<=T(1,0)[2,2]")
+        assert groups == [[0, 2], [1, 3]]
+
+    def test_tensor_spec_and_split_dimension_helpers(self):
+        line = (
+            "HLO %x = bf16[4,8]{1,0} all-reduce(bf16[4,8]{1,0} %arg0), "
+            'dimensions={0,1}, scheduling_name="all-reduce"'
+        )
+        assert self.parser._extract_split_dimension(line) is None
+        assert "bf16[4,8]{1,0}" in self.parser._extract_tensor_specs(line)
+        assert self.parser._extract_output_tensor_from_tuple(
+            "all-to-all", "((bf16[2,4]{1,0}), (bf16[8,4]{1,0}))"
+        ).startswith("bf16[8,4]")
+
 
 def test_extract_node_name_from_path(tmp_path):
     pb_file = tmp_path / "nodeA.xplane.pb"

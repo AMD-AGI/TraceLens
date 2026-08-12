@@ -1060,6 +1060,12 @@ class TestTraceDiffPhase9:
         stats = td.get_diff_stats_df()
         assert stats is None or isinstance(stats, pd.DataFrame)
 
+    def test_diff_stats_helpers_before_report(self):
+        events = [_mk_event("cpu_op", "aten::mm", ts=0, dur=100, pid=1, tid=1)]
+        td = TraceDiff(_build_tree(events), _build_tree(events))
+        assert td.get_diff_stats_df() is None
+        assert td.get_diff_stats_summary_df() is None
+
     def test_trace_only_branch_diff_stats(self):
         events1 = [_mk_event("cpu_op", "aten::mm", ts=0, dur=100, pid=1, tid=1)]
         _add_gpu_chain(

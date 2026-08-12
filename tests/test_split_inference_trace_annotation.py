@@ -1285,3 +1285,163 @@ class TestCaptureMergeIntegration:
             assert len(merged.events) > 0
         except Exception:
             pytest.skip("synthetic capture merge not supported in this environment")
+
+
+# --- migrated from test_coverage_final.py ---
+import gzip
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    add_truncated_kernel_details as add_truncated_inference,
+    generate_perf_report_pytorch as generate_inference_report,
+    perf_report_sanity_check,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _get_cached_capture_tree,
+    align_streams,
+    capture_has_kernel_names,
+    get_subtree_events,
+    is_multistream,
+    verify_subtree_events,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import (
+    _conv_bias_bwd_event,
+    _conv_bias_fwd_event,
+    _conv_bias_relu_bwd_event,
+    _conv_bias_relu_fwd_event,
+)
+from tests.fixtures.perfmodel import _ARCH, _gemm_event
+from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestCaptureMergeFinal:
+    def test_multistream_align_and_verify(self):
+        graph = [
+            {"name": "k1", "args": {"stream": 1}},
+            {"name": "k2", "args": {"stream": 2}},
+            {"name": "k1", "args": {"stream": 1}},
+        ]
+        capture = [
+            {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+            {"name": "hipLaunchKernel", "args": {"kernel": "k2"}},
+            {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+        ]
+        assert is_multistream(graph)
+        assert capture_has_kernel_names(capture)
+        aligned = align_streams(graph, capture)
+        assert aligned is not None
+        assert len(aligned) == 3
+
+    def test_verify_subtree_greedy_alignment(self):
+        capture = [
+            {"name": "hipLaunchKernel", "args": {"kernel": "extra"}},
+            {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+            {"name": "hipLaunchKernel", "args": {"kernel": "k2"}},
+        ]
+        graph = [
+            {"name": "k1", "args": {}},
+            {"name": "k2", "args": {}},
+        ]
+        code, cap, gr = verify_subtree_events(capture, graph)
+        assert code == 2
+        assert len(cap) == 2
+
+    def test_get_subtree_events_filters(self):
+        tree = TraceToTree(
+            [
+                {
+                    "ph": "X",
+                    "name": "root",
+                    "ts": 0,
+                    "dur": 100,
+                    "cat": "cpu_op",
+                    "args": {},
+                },
+                {
+                    "ph": "X",
+                    "name": "hipLaunchKernel",
+                    "ts": 10,
+                    "dur": 5,
+                    "cat": "cuda_runtime",
+                    "args": {},
+                },
+            ]
+        )
+        tree.build_tree()
+        root = tree.events[0]
+        all_ev, filt = get_subtree_events(
+            tree, root, cat_filter=["cuda_runtime"], name_filter=["Launch"]
+        )
+        assert len(all_ev) >= 1
+        assert len(filt) >= 1
+
+    def test_capture_tree_cache(self, tmp_path):
+        from TraceLens.Trace2Tree import trace_capture_merge_experimental as tcm
+
+        tcm._capture_tree_cache.clear()
+        events = {
+            "traceEvents": [
+                {
+                    "ph": "X",
+                    "name": "StreamBeginCapture",
+                    "cat": "cuda_runtime",
+                    "ts": 0,
+                    "dur": 1,
+                    "args": {},
+                },
+                {
+                    "ph": "X",
+                    "name": "StreamEndCapture",
+                    "cat": "cuda_runtime",
+                    "ts": 10,
+                    "dur": 1,
+                    "args": {},
+                },
+                {
+                    "ph": "X",
+                    "name": "hipLaunchKernel",
+                    "cat": "cuda_runtime",
+                    "ts": 20,
+                    "dur": 5,
+                    "args": {"kernel": "k1"},
+                },
+            ]
+        }
+        trace_path = tmp_path / "cap.json"
+        trace_path.write_text(json.dumps(events))
+        key = ("test_key", str(trace_path))
+        r1 = _get_cached_capture_tree(key, str(trace_path))
+        r2 = _get_cached_capture_tree(key, str(trace_path))
+        assert r1[0] is r2[0]
+        for i in range(10):
+            p = tmp_path / f"cap{i}.json"
+            p.write_text(json.dumps(events))
+            _get_cached_capture_tree((f"k{i}", str(p)), str(p))
+        assert len(tcm._capture_tree_cache) <= tcm._CAPTURE_TREE_CACHE_MAX_SIZE

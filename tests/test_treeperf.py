@@ -2342,3 +2342,472 @@ class TestTreePerfSummaries:
         bwd_evt = next(e for e in analyzer.tree.events if "backward" in e["name"])
         df = analyzer.build_df_bwd_perf_metrics(events=[bwd_evt])
         assert isinstance(df, pd.DataFrame)
+
+
+# --- migrated from test_push95_coverage.py ---
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_attention_core,
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+    _is_gemm_norm_only,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_mamba_ssd import _mamba_event
+from tests.fixtures.perfmodel import (
+    _ARCH,
+    _GDN_ANNOTATION,
+    _moe_unfused_event,
+    _norm_event,
+)
+from tests.fixtures.reporting import (
+    _build_synthetic_trace,
+    _create_genesis_capture,
+    _write_trace,
+)
+from tests.fixtures.traces import _discover_trace_gz_files
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _mk_pytorch_trace,
+)
+
+
+@pytest.mark.parametrize("trace_path", _discover_trace_gz_files())
+def test_treeperf_from_file_full_methods(trace_path):
+    analyzer = TreePerfAnalyzer.from_file(
+        trace_path,
+        rebuild_tree=True,
+        enable_pseudo_ops=True,
+        add_python_func=True,
+    )
+    assert analyzer.tree is not None
+    gpu_only = analyzer.check_gpu_only()
+    assert gpu_only in (True, False, None)
+
+    unified = analyzer.build_df_unified_perf_table(include_nccl=False)
+    assert isinstance(unified, pd.DataFrame)
+
+    summarized = TreePerfAnalyzer.summarize_df_unified_perf_table(
+        unified, include_pct=True, tree=analyzer.tree
+    )
+    assert isinstance(summarized, pd.DataFrame)
+
+    kernels = analyzer.get_df_kernels(
+        launcher_detail=True,
+        cpu_op_detail=True,
+        nn_module_detail=analyzer.add_python_func,
+    )
+    assert isinstance(kernels, pd.DataFrame)
+
+    try:
+        timeline = analyzer.get_df_gpu_timeline(micro_idle_thresh_us=1)
+    except ValueError:
+        timeline = pd.DataFrame()
+    assert isinstance(timeline, pd.DataFrame)
+
+    launchers = analyzer.get_df_kernel_launchers(include_args=True)
+    assert isinstance(launchers, pd.DataFrame)
+    if not launchers.empty:
+        summary = TreePerfAnalyzer.get_df_kernel_launchers_summary(launchers)
+        assert isinstance(summary, pd.DataFrame)
+
+
+# --- migrated from test_push95_coverage.py ---
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_attention_core,
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+    _is_gemm_norm_only,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_mamba_ssd import _mamba_event
+from tests.fixtures.perfmodel import (
+    _ARCH,
+    _GDN_ANNOTATION,
+    _moe_unfused_event,
+    _norm_event,
+)
+from tests.fixtures.reporting import (
+    _build_synthetic_trace,
+    _create_genesis_capture,
+    _write_trace,
+)
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _mk_pytorch_trace,
+)
+
+
+class TestTreePerfSyntheticPush95:
+    def test_bwd_perf_and_launcher_summaries(self):
+        analyzer = _build_analyzer(_mk_pytorch_trace())
+        launchers = analyzer.get_df_kernel_launchers(
+            include_args=True, include_kernel_details=True
+        )
+        assert isinstance(launchers, pd.DataFrame)
+        if not launchers.empty:
+            by_cat = TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category(
+                launchers
+            )
+            assert isinstance(by_cat, pd.DataFrame)
+            by_mod = (
+                TreePerfAnalyzer.get_df_kernel_launchers_summary_by_category_module(
+                    launchers
+                )
+            )
+            assert isinstance(by_mod, pd.DataFrame)
+
+
+# --- migrated from test_coverage_final.py ---
+import gzip
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    add_truncated_kernel_details as add_truncated_inference,
+    generate_perf_report_pytorch as generate_inference_report,
+    perf_report_sanity_check,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _get_cached_capture_tree,
+    align_streams,
+    capture_has_kernel_names,
+    get_subtree_events,
+    is_multistream,
+    verify_subtree_events,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import (
+    _conv_bias_bwd_event,
+    _conv_bias_fwd_event,
+    _conv_bias_relu_bwd_event,
+    _conv_bias_relu_fwd_event,
+)
+from tests.fixtures.perfmodel import _ARCH, _gemm_event
+from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestTreePerfFinalCoverage:
+    def _nn_module_trace(self):
+        corr1, corr2 = 200, 201
+        return [
+            _make_gpu_event(
+                "py_root", 0, 500, "python_function", "nn.Module: Block_0", pid=100
+            ),
+            _make_gpu_event(
+                "py_child",
+                10,
+                400,
+                "python_function",
+                "nn.Module: Block_0.linear",
+                pid=100,
+            ),
+            _make_gpu_event(
+                "cpu1",
+                20,
+                80,
+                "cpu_op",
+                "aten::mm",
+                pid=100,
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                    "Input Strides": [[128, 1], [128, 1]],
+                },
+            ),
+            _make_gpu_event(
+                "rt1",
+                25,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                pid=100,
+                args={"correlation": corr1},
+            ),
+            _make_gpu_event(
+                "k1",
+                50,
+                40,
+                "kernel",
+                "Cijk_gemm",
+                pid=0,
+                tid=7,
+                args={"correlation": corr1, "stream": 7},
+            ),
+            _mk_ac2g(corr1, 0, 7, 50, "s"),
+            _mk_ac2g(corr1, 0, 7, 90, "f"),
+            _make_gpu_event(
+                "cpu2",
+                120,
+                80,
+                "cpu_op",
+                "aten::add",
+                pid=100,
+                args={
+                    "Input Dims": [[32, 128], [32, 128]],
+                    "Input type": ["c10::BFloat16"] * 2,
+                },
+            ),
+            _make_gpu_event(
+                "rt2",
+                125,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                pid=100,
+                args={"correlation": corr2},
+            ),
+            _make_gpu_event(
+                "k2",
+                150,
+                20,
+                "kernel",
+                "vectorized_elementwise_kernel",
+                pid=0,
+                tid=7,
+                args={"correlation": corr2, "stream": 7},
+            ),
+            _mk_ac2g(corr2, 0, 7, 150, "s"),
+            _mk_ac2g(corr2, 0, 7, 170, "f"),
+        ]
+
+    def test_kernel_launchers_extended_columns(self):
+        analyzer = _build_analyzer(self._nn_module_trace(), add_python_func=True)
+        df = analyzer.get_df_kernel_launchers(
+            include_args=True,
+            include_kernel_details=True,
+            include_call_stack=True,
+            id_cols=True,
+            include_first_occurrence_time=True,
+        )
+        assert not df.empty
+        assert "parent_module" in df.columns
+        assert "call_stack" in df.columns
+
+    def test_kernel_launchers_summary_by_shape(self):
+        analyzer = _build_analyzer(_mk_pytorch_trace())
+        launchers = analyzer.get_df_kernel_launchers(include_args=True)
+        summary = TreePerfAnalyzer.get_df_kernel_launchers_summary_by_shape(
+            launchers, "aten::mm"
+        )
+        assert not summary.empty
+        assert "Total Kernel Time (µs)" in summary.columns
+
+    def test_summarize_kernel_stats_and_unified_table(self):
+        stats = TreePerfAnalyzer._summarize_kernel_stats(
+            [
+                [{"name": "a", "dur": 10}, {"name": "b", "dur": 20}],
+                [{"name": "a", "dur": 12}, {"name": "b", "dur": 18}],
+            ],
+            agg_metrics=["mean", "median", "max", "min", "std"],
+        )
+        assert len(stats) == 2
+        with pytest.warns(UserWarning):
+            TreePerfAnalyzer._summarize_kernel_stats([[{"name": "a", "dur": 1}], []])
+
+        analyzer = _build_analyzer(_mk_pytorch_trace())
+        unified = analyzer.build_df_unified_perf_table()
+        summarized = TreePerfAnalyzer.summarize_df_unified_perf_table(
+            unified, include_pct=True, tree=analyzer.tree
+        )
+        assert isinstance(summarized, pd.DataFrame)
+
+    def test_build_df_perf_metrics_unknown_op(self):
+        events = _mk_pytorch_trace()
+        events[0]["name"] = "aten::unknown_custom_op"
+        analyzer = _build_analyzer(events)
+        df = analyzer.build_df_perf_metrics(events=[analyzer.tree.events[0]])
+        assert isinstance(df, pd.DataFrame)
+
+    def test_jax_parse_gemm_metadata_and_operands(self):
+        gemm = {
+            "gpu_kernel_op_cat": "GEMM",
+            "metadata": {
+                "custom_call_target": "cublasLt_matmul",
+                "operands": ["bf16[4,8]{1,0}", "bf16[8,16]{0,1}"],
+                "output": "bf16[4,16]{1,0}",
+                "backend_config": 'foo={"gemm_backend_config":{"beta":0}}',
+                "computation": "gemm",
+            },
+        }
+        meta = JaxTreePerfAnalyzer.parse_gemm_metadata(gemm)
+        assert meta["Beta"] == 0
+        assert len(meta["Input Dims"]) == 2
+        dims, _, _ = JaxTreePerfAnalyzer.parse_operands(gemm)
+        assert dims == ((4, 8), (8, 16))
+
+    def test_summarize_df_perf_metrics_origami_cols(self):
+        analyzer = _build_analyzer(_mk_pytorch_trace())
+        df_raw = analyzer.build_df_perf_metrics(
+            events=[e for e in analyzer.tree.events if e.get("cat") == "cpu_op"]
+        )
+        df_raw["Origami Time (µs)"] = [10.0]
+        df_raw["Origami TFLOPS/s"] = [1.0]
+        df_raw["Origami TB/s"] = [0.5]
+        df_raw["Pct Origami"] = [50.0]
+        df_raw["Non-Data-Mov TFLOPS/s"] = [0.8]
+        df_raw["Non-Data-Mov Kernel Time (µs)"] = [5.0]
+        summary = analyzer.summarize_df_perf_metrics(
+            df_raw, agg_metrics=["mean", "std"]
+        )
+        assert isinstance(summary, pd.DataFrame)
+
+    def test_collect_unified_perf_events_with_python_stack(self):
+        analyzer = _build_analyzer(self._nn_module_trace(), add_python_func=True)
+        events = analyzer.collect_unified_perf_events()
+        assert isinstance(events, list)
+
+    def test_build_df_bwd_linked_metrics(self):
+        corr_fwd, corr_bwd = 800, 801
+        events = [
+            _make_gpu_event(
+                "fwd",
+                1000,
+                100,
+                "cpu_op",
+                "aten::mm",
+                pid=100,
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["fp16", "fp16"],
+                },
+            ),
+            _make_gpu_event(
+                "rt1",
+                1010,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                pid=100,
+                args={"correlation": corr_fwd},
+            ),
+            _make_gpu_event(
+                "k1",
+                1050,
+                50,
+                "kernel",
+                "gemm_fwd",
+                pid=0,
+                tid=7,
+                args={"correlation": corr_fwd, "stream": 7},
+            ),
+            _mk_ac2g(corr_fwd, 0, 7, 1050, "s"),
+            _mk_ac2g(corr_fwd, 0, 7, 1100, "f"),
+            _make_gpu_event(
+                "bwd",
+                2000,
+                100,
+                "cpu_op",
+                "aten::mm_backward",
+                pid=100,
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["fp16", "fp16"],
+                },
+            ),
+            _make_gpu_event(
+                "rt2",
+                2010,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                pid=100,
+                args={"correlation": corr_bwd},
+            ),
+            _make_gpu_event(
+                "k2",
+                2050,
+                60,
+                "kernel",
+                "gemm_bwd",
+                pid=0,
+                tid=7,
+                args={"correlation": corr_bwd, "stream": 7},
+            ),
+            _mk_ac2g(corr_bwd, 0, 7, 2050, "s"),
+            _mk_ac2g(corr_bwd, 0, 7, 2110, "f"),
+        ]
+        analyzer = _build_analyzer(events)
+        fwd = next(e for e in analyzer.tree.events if e["name"] == "aten::mm")
+        bwd = next(e for e in analyzer.tree.events if e["name"] == "aten::mm_backward")
+        fwd["bwd_events"] = [bwd["UID"]]
+        bwd["fwd_event"] = fwd["UID"]
+        df = analyzer.build_df_unified_perf_table(events=[fwd, bwd])
+        assert len(df) >= 1
+
+    def test_build_nn_module_latency_tree_cpu(self):
+        analyzer = _build_analyzer(self._nn_module_trace(), add_python_func=True)
+        root = next(
+            e for e in analyzer.tree.events if e["name"] == "nn.Module: Block_0"
+        )
+        analyzer.build_nn_module_latency_tree(root)
+        assert "GPU Time" in root
+        assert root["GPU Time"] > 0

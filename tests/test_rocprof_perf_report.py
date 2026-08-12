@@ -304,6 +304,8 @@ from TraceLens.util import RocprofParser
 
 class TestRocprofAnalysisDeep:
     def test_full_rocprof_pipeline(self):
+        if not os.path.isfile(ROCprof_FILE):
+            pytest.skip("rocprof fixture missing")
         data = RocprofParser.load_rocprof_data(ROCprof_FILE)
         kernels = RocprofParser.extract_kernel_events(data)
         memory = RocprofParser.extract_memory_events(data)
@@ -315,6 +317,18 @@ class TestRocprofAnalysisDeep:
         assert not analyser.get_df_kernel_summary().empty
         assert isinstance(analyser.get_df_short_kernels(10), pd.DataFrame)
         assert _categorize_kernel("Cijk_gemm") == "GEMM"
+
+    def test_synthetic_rocprof_timeline_and_timestamp_conversion(self):
+        kernels = [{"ts": 1000, "dur": 500, "name": "Cijk_gemm"}]
+        memory = [{"ts": 2000, "dur": 300, "name": "MemcpyHtoD"}]
+        api = [{"ts": 500, "dur": 100, "name": "hipLaunchKernel"}]
+        metadata = {"init_time": 0, "fini_time": 5_000_000}
+        analyser = RocprofAnalyzer(kernels, memory, api, metadata)
+        analyser._convert_timestamps_to_microseconds()
+        assert kernels[0]["ts"] == 1.0
+        timeline = analyser.get_df_gpu_timeline()
+        assert not timeline.empty
+        assert analyser.get_df_kernel_summary().iloc[0]["name"] == "Cijk_gemm"
 
     def test_rocprof_main(self, tmp_path):
         mod = importlib.import_module(

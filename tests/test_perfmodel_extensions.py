@@ -4456,3 +4456,1209 @@ class TestMoeExtensionsSweep:
             }
         }
         assert moe_ext.moe_gptq_awq_down(gptq).flops() > 0
+
+
+# --- migrated from test_push95_coverage.py ---
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_attention_core,
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+    _is_gemm_norm_only,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_mamba_ssd import _mamba_event
+from tests.fixtures.perfmodel import (
+    _ARCH,
+    _GDN_ANNOTATION,
+    _moe_unfused_event,
+    _norm_event,
+)
+from tests.fixtures.reporting import (
+    _build_synthetic_trace,
+    _create_genesis_capture,
+    _write_trace,
+)
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _mk_pytorch_trace,
+)
+
+
+class TestPerfModelPush95Coverage:
+    @pytest.mark.parametrize(
+        "missing,kwargs",
+        [
+            ("M", {"M": None, "N": 8, "K": 16, "B": 1, "dtype": "bf16"}),
+            ("N", {"M": 4, "N": None, "K": 16, "B": 1, "dtype": "bf16"}),
+            ("K", {"M": 4, "N": 8, "K": None, "B": 1, "dtype": "bf16"}),
+            ("dtype", {"M": 4, "N": 8, "K": 16, "B": 1, "dtype": None}),
+            ("arch['name']", {"M": 4, "N": 8, "K": 16, "B": 1, "dtype": "bf16"}),
+        ],
+    )
+    def test_gemm_simulator_missing_inputs(
+        self, monkeypatch, tmp_path, missing, kwargs
+    ):
+        sim = tmp_path / "run_gemm.py"
+        sim.write_text("# stub\n")
+        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
+        perf_model.GEMM.cache_gemm_results.clear()
+        arch = dict(_ARCH) if "arch['name']" not in missing else {"freq_mhz": 2200}
+        with pytest.raises(AssertionError, match="Invalid inputs"):
+            perf_model.GEMM.get_simulation_time_func(arch, **kwargs)
+        perf_model.GEMM.cache_gemm_results.clear()
+
+    def test_gemm_simulator_subprocess_failure(self, monkeypatch, tmp_path):
+        sim = tmp_path / "run_gemm.py"
+        sim.write_text("# stub\n")
+        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
+        perf_model.GEMM.cache_gemm_results.clear()
+        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
+            run.return_value = MagicMock(stdout="", stderr="fail")
+            with pytest.raises(AssertionError, match="Failed to simulate"):
+                perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
+        perf_model.GEMM.cache_gemm_results.clear()
+
+    def test_gemm_origami_mock_path(self, monkeypatch):
+        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
+        perf_model.GEMM.cache_gemm_results.clear()
+        mock_hw = MagicMock()
+        mock_helper = MagicMock()
+        mock_helper.get_simulation_time.return_value = 7.5
+        mock_origami = MagicMock()
+        mock_origami.data_type_t.BFloat16 = "bf16_enum"
+        with patch.dict(sys.modules, {"origami": mock_origami}):
+            with patch(
+                "TraceLens.PerfModel.perf_model.OrigamiHelper",
+                create=True,
+            ) as helper_cls:
+                with patch(
+                    "TraceLens.PerfModel.origami_helper.OrigamiHelper",
+                    helper_cls,
+                ):
+                    helper_cls.get_hardware.return_value = mock_hw
+                    helper_cls.return_value = mock_helper
+                    t, cmd = perf_model.GEMM.get_simulation_time_func(
+                        _ARCH,
+                        4,
+                        8,
+                        16,
+                        1,
+                        "bf16",
+                        num_cus=64,
+                        force_to_l1=True,
+                        enable_origami=True,
+                    )
+        assert t == 7.5
+        assert "Origami" in cmd
+
+    def test_gemm_origami_unsupported_dtype(self, monkeypatch):
+        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
+        mock_origami = MagicMock()
+        mock_origami.data_type_t = MagicMock()
+        with patch.dict(sys.modules, {"origami": mock_origami}):
+            with patch("TraceLens.PerfModel.origami_helper.OrigamiHelper"):
+                with pytest.warns(RuntimeWarning, match="Unsupported dtype"):
+                    t, _ = perf_model.GEMM.get_simulation_time_func(
+                        _ARCH, 4, 8, 16, 1, "unknown_dtype", enable_origami=True
+                    )
+        assert t is None
+
+    def test_sdpa_simulation_via_subprocess_gemm(self, monkeypatch, tmp_path):
+        sim = tmp_path / "run_gemm.py"
+        sim.write_text("# stub\n")
+        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
+        perf_model.GEMM.cache_gemm_results.clear()
+        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
+            run.return_value = MagicMock(stdout="Time=2.0\n", stderr="")
+            with patch.object(perf_model.Softmax, "get_time", return_value=0.25):
+                t = perf_model.SDPA.get_simulation_time_func(
+                    _ARCH,
+                    "bf16",
+                    "/usr/bin/python3",
+                    "c10::BFloat16",
+                    1024,
+                    2,
+                    8,
+                    128,
+                    128,
+                    64,
+                    fa=True,
+                )
+        assert t > 0
+        perf_model.GEMM.cache_gemm_results.clear()
+
+    @pytest.mark.parametrize(
+        "cls,event",
+        [
+            (
+                perf_model.BatchNormBwd,
+                {
+                    "name": "aten::miopen_batch_norm_backward",
+                    "args": {
+                        "Input Dims": [
+                            (8, 16, 32, 32),
+                            (8, 16, 32, 32),
+                            (16,),
+                            (16,),
+                            (16,),
+                            (16,),
+                            (16,),
+                            (),
+                        ],
+                        "Input type": ["float"] * 7 + ["Scalar"],
+                        "Input Strides": [(16384, 1024, 32, 1)] * 2 + [(1,)] * 5 + [()],
+                        "Concrete Inputs": ["", "", "", "", "", "", "", "1e-5"],
+                    },
+                },
+            ),
+            (
+                perf_model.GroupNormBwd,
+                {
+                    "args": {
+                        "Input Dims": [
+                            None,
+                            (4, 8, 32, 32),
+                            (8,),
+                            (8,),
+                            (8,),
+                            (8,),
+                            (4, 8, 32, 32),
+                            (),
+                        ],
+                        "Input type": ["c10::BFloat16"] * 7 + ["Scalar"],
+                        "Input Strides": [(), (8192, 1024, 32, 1), (1,)] * 2
+                        + [(8192, 1024, 32, 1)] * 2
+                        + [(), ()],
+                        "Concrete Inputs": [
+                            "",
+                            "",
+                            "",
+                            "",
+                            "",
+                            "",
+                            "",
+                            "8",
+                            "8",
+                            "[True, True]",
+                        ],
+                    }
+                },
+            ),
+        ],
+    )
+    def test_norm_backward_variants(self, cls, event):
+        model = cls(event)
+        assert model.flops() > 0
+        assert model.bytes() > 0
+
+    def test_instance_norm_training_flag(self):
+        event = _norm_event((4, 8, 32, 32), 8, training=False)
+        event["args"]["Concrete Inputs"][5] = ""
+        model = perf_model.InstanceNorm(event)
+        assert model.is_training is False
+
+    def test_instance_norm_bwd_raises(self):
+        with pytest.raises(NotImplementedError):
+            perf_model.InstanceNormBwd.get_param_details({})
+
+    def test_mamba_cross_entropy_moe_comm(self):
+        mamba = perf_model.mamba_ssd_fwd(_mamba_event(batch=2, seqlen=128))
+        assert mamba.flops() > 0
+        assert mamba.bytes() > 0
+
+        ce = perf_model.cross_entropy_fwd(
+            {
+                "args": {
+                    "Input Dims": [[4, 32000], [4]],
+                    "Input type": ["c10::BFloat16", "long int"],
+                }
+            }
+        )
+        assert ce.flops() > 0
+        assert ce.get_compute_precision() is not None
+
+        conv = perf_model.causal_conv1d_fwd(
+            {
+                "args": {
+                    "Input Dims": [[2, 128, 512], [128, 4], [128]],
+                    "Input type": ["c10::BFloat16"] * 3,
+                }
+            }
+        )
+        assert conv.bytes() > 0
+
+        empty_comm = perf_model.moe_dispatch(
+            {"args": {"Input Dims": [[]], "Input type": []}}
+        )
+        assert empty_comm.bytes() is None
+        assert empty_comm.flops_bwd() == 0
+
+    def test_jax_gemm_and_conv(self):
+        gemm = perf_model.jax_gemm(
+            {
+                "args": {
+                    "Batch": 2,
+                    "M": 4,
+                    "N": 8,
+                    "K": 16,
+                    "Beta": 1,
+                    "Type": "bf16",
+                }
+            }
+        )
+        assert gemm.flops() > 0
+        conv = perf_model.jax_conv(
+            {
+                "args": {
+                    "Input Dims": [[2, 3, 8, 8], [4, 3, 3, 3]],
+                    "Output Dims": [[2, 4, 6, 6]],
+                    "Filter Shape": [4, 3, 3, 3],
+                    "Input type": ["bf16", "bf16"],
+                    "Concrete Inputs": [
+                        "",
+                        "",
+                        "(1,1)",
+                        "(0,0)",
+                        "(1,1)",
+                        "False",
+                        "(0,0)",
+                        "1",
+                    ],
+                }
+            }
+        )
+        assert conv.flops_bwd() > 0
+
+    def test_hipblaslt_gemm_fp8_fp4(self):
+        from tests.test_primus_fp8_gemm_quantize import _fp8_gemm_event
+        from tests.test_primus_mxfp4_gemm_quantize import _fp4_gemm_event
+
+        fp8 = perf_model.hipblaslt_gemm_fp8(
+            _fp8_gemm_event((128, 64), (256, 64), trans_b=True)
+        )
+        assert fp8.flops() > 0
+        assert fp8.bytes() > 0
+        with pytest.raises(NotImplementedError):
+            fp8.flops_bwd()
+
+        fp4 = perf_model.hipblaslt_gemm_fp4(
+            _fp4_gemm_event((128, 64), (256, 32), trans_b=True)
+        )
+        assert fp4.flops() > 0
+        assert fp4.bytes() > 0
+
+
+# --- migrated from test_push95_coverage.py ---
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_attention_core,
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+    _is_gemm_norm_only,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_mamba_ssd import _mamba_event
+from tests.fixtures.perfmodel import (
+    _ARCH,
+    _GDN_ANNOTATION,
+    _moe_unfused_event,
+    _norm_event,
+)
+from tests.fixtures.reporting import (
+    _build_synthetic_trace,
+    _create_genesis_capture,
+    _write_trace,
+)
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _mk_pytorch_trace,
+)
+
+
+class TestMoeExtensionsPush95Coverage:
+    MOE_FUSED = {
+        "args": {
+            "Input Dims": [
+                [32, 4096],
+                [8, 28672, 512],
+                [8, 4096, 7168],
+                [32, 2],
+            ],
+            "Input type": [
+                "c10::BFloat16",
+                "c10::Float8_e4m3fn",
+                "c10::Float8_e4m3fn",
+                "c10::Float32",
+            ],
+        }
+    }
+
+    MOE_BLOCKSCALE = {
+        "args": {
+            "Input Dims": [
+                [128, 256],
+                [128, 256],
+                [512, 28672, 256],
+                [512, 256, 7168],
+            ],
+            "Input type": [
+                "c10::BFloat16",
+                "c10::Float8_e4m3fn",
+                "c10::Float8_e4m3fn",
+                "c10::Float8_e4m3fn",
+            ],
+            "Concrete Inputs": [""] * 8 + ["2"],
+        }
+    }
+
+    CK1 = {
+        "args": {
+            "Input Dims": [
+                [32, 512],
+                [8, 7168, 512],
+                [8, 4096, 896],
+                [],
+                [],
+                [],
+                [32, 2, 7168],
+            ],
+            "Input type": ["c10::BFloat16", "c10::Float8_e4m3fn", "c10::Float8_e4m3fn"],
+        }
+    }
+
+    CK2 = {
+        "args": {
+            "Input Dims": [
+                [32, 2, 7168],
+                [8, 7168, 512],
+                [8, 4096, 896],
+                [],
+                [],
+                [],
+                [32, 4096],
+            ],
+            "Input type": ["c10::BFloat16", "c10::Float8_e4m3fn", "c10::Float8_e4m3fn"],
+        }
+    }
+
+    FLY = {
+        "args": {
+            "Input Dims": [
+                [32, 4096],
+                [8, 14336, 4096],
+                [8, 4096, 7168],
+                [32, 2],
+            ],
+            "Input type": [
+                "c10::BFloat16",
+                "c10::Float8_e4m3fn",
+                "c10::Float8_e4m3fn",
+            ],
+        }
+    }
+
+    GPTQ = {
+        "args": {
+            "Input Dims": [[32, 4096], [32, 2], [8, 7168, 4096]],
+            "Input type": ["c10::BFloat16", "c10::Int", "c10::BFloat16"],
+            "MoE topk": 2,
+        }
+    }
+
+    GROUPED = {
+        "args": {
+            "Input Dims": [
+                [64, 2048],
+                [128, 1536, 2048],
+                (),
+                [512, 1536],
+                (),
+                (),
+                (),
+                (),
+                [64, 4],
+            ],
+            "Input type": ["c10::BFloat16", "c10::Float8_e4m3fn", "", "c10::BFloat16"],
+        }
+    }
+
+    @pytest.mark.parametrize(
+        "factory,event",
+        [
+            (moe_ext.moe_aiter_fused_1stage, "MOE_FUSED"),
+            (moe_ext.moe_aiter_fused_blockscale, "MOE_BLOCKSCALE"),
+            (moe_ext.moe_aiter_ck_stage1, "CK1"),
+            (moe_ext.moe_aiter_ck_stage2, "CK2"),
+            (moe_ext.moe_flydsl_stage1, "FLY"),
+            (moe_ext.moe_flydsl_stage2, "FLY"),
+            (moe_ext.moe_gptq_awq_up, "GPTQ"),
+            (moe_ext.moe_gptq_awq_down, "GPTQ"),
+            (moe_ext.moe_triton_invoke_grouped_gemm, "GROUPED"),
+            (moe_ext.moe_triton_unfused_up, None),
+            (moe_ext.moe_triton_unfused_down, None),
+            (moe_ext.moe_aiter_unfused_up, None),
+            (moe_ext.moe_aiter_unfused_down, None),
+            (moe_ext.sglang_fused_append_shared_experts, None),
+            (moe_ext.BiasedGroupedTopk, None),
+            (moe_ext.MoeSortScatterGather, None),
+        ],
+    )
+    def test_moe_bytes_and_bwd_raises(self, factory, event):
+        if event is None:
+            if factory in (
+                moe_ext.moe_triton_unfused_up,
+                moe_ext.moe_triton_unfused_down,
+            ):
+                evt = _moe_unfused_event(kernel_name="moe_fp8_up_kernel")
+            elif factory is moe_ext.moe_aiter_unfused_up:
+                evt = {
+                    "args": {
+                        "Input Dims": [
+                            [32, 4096],
+                            [8, 14336, 512],
+                            [32, 2, 7168],
+                        ],
+                        "Input type": [
+                            "c10::BFloat16",
+                            "c10::Float8_e4m3fn",
+                            "c10::BFloat16",
+                        ],
+                    }
+                }
+            elif factory is moe_ext.moe_aiter_unfused_down:
+                evt = {
+                    "args": {
+                        "Input Dims": [
+                            [32, 2, 7168],
+                            [8, 4096, 896],
+                            [32, 4096],
+                        ],
+                        "Input type": [
+                            "c10::BFloat16",
+                            "c10::Float8_e4m3fn",
+                            "c10::BFloat16",
+                        ],
+                    }
+                }
+            elif factory is moe_ext.sglang_fused_append_shared_experts:
+                evt = {
+                    "args": {
+                        "Input Dims": [(32, 4096), (32, 4096), (32, 4096)],
+                        "Input type": ["c10::BFloat16"] * 3,
+                    }
+                }
+            elif factory is moe_ext.BiasedGroupedTopk:
+                evt = {
+                    "args": {
+                        "Input Dims": [(32, 256), (256,), (32, 8), (32, 8)],
+                        "Input type": ["c10::Float"] * 3 + ["c10::Int"],
+                    }
+                }
+            else:
+                evt = {
+                    "args": {
+                        "Input Dims": [(32, 4096), (32, 2), (32, 4096)],
+                        "Input type": ["c10::BFloat16", "c10::Int", "c10::BFloat16"],
+                    }
+                }
+        else:
+            evt = getattr(self, event)
+
+        model = factory(evt)
+        b = model.bytes()
+        assert b is None or b >= 0
+        if hasattr(model, "flops_bwd"):
+            with pytest.raises(NotImplementedError):
+                model.flops_bwd()
+        if hasattr(model, "bytes_bwd"):
+            with pytest.raises(NotImplementedError):
+                model.bytes_bwd()
+
+
+# --- migrated from test_coverage_final.py ---
+import gzip
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    add_truncated_kernel_details as add_truncated_inference,
+    generate_perf_report_pytorch as generate_inference_report,
+    perf_report_sanity_check,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _get_cached_capture_tree,
+    align_streams,
+    capture_has_kernel_names,
+    get_subtree_events,
+    is_multistream,
+    verify_subtree_events,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import (
+    _conv_bias_bwd_event,
+    _conv_bias_fwd_event,
+    _conv_bias_relu_bwd_event,
+    _conv_bias_relu_fwd_event,
+)
+from tests.fixtures.perfmodel import _ARCH, _gemm_event
+from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestPerfModelFinalCoverage:
+    @pytest.mark.parametrize(
+        "cls,fwd_factory,bwd_cls,bwd_factory",
+        [
+            (
+                perf_model.aten_mm,
+                lambda: _gemm_event("aten::mm", (4, 8), (8, 16)),
+                None,
+                None,
+            ),
+            (perf_model.aten_addmm, None, None, None),
+            (perf_model.aten_bmm, None, None, None),
+            (perf_model.aten_baddbmm, None, None, None),
+        ],
+    )
+    def test_gemm_backward_not_implemented(
+        self, cls, fwd_factory, bwd_cls, bwd_factory
+    ):
+        if cls is perf_model.aten_addmm:
+            event = {
+                "args": {
+                    "Input Dims": [(4, 16), (4, 8), (8, 16)],
+                    "Input type": ["c10::BFloat16"] * 3,
+                    "Input Strides": [(16, 1), (8, 1), (16, 1)],
+                }
+            }
+        elif cls is perf_model.aten_bmm:
+            event = {
+                "args": {
+                    "Input Dims": [[2, 4, 8], [2, 8, 16]],
+                    "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                    "Input Strides": [(32, 8, 1), (128, 16, 1)],
+                }
+            }
+        elif cls is perf_model.aten_baddbmm:
+            event = {
+                "args": {
+                    "Input Dims": [[2, 4, 16], [2, 4, 8], [2, 8, 16]],
+                    "Input type": ["c10::BFloat16"] * 3,
+                    "Input Strides": [(64, 16, 1), (32, 8, 1), (128, 16, 1)],
+                }
+            }
+        else:
+            event = fwd_factory()
+        model = cls(event)
+        with pytest.raises(NotImplementedError):
+            model.flops_bwd()
+        with pytest.raises(NotImplementedError):
+            model.bytes_bwd()
+
+    @pytest.mark.parametrize(
+        "cls,event",
+        [
+            (
+                perf_model.aten_addmm,
+                {
+                    "args": {
+                        "Input Dims": [(4, 16), (4, 8), (8, 16)],
+                        "Input type": ["c10::BFloat16", "c10::Half", "c10::BFloat16"],
+                    }
+                },
+            ),
+            (
+                perf_model.aten_bmm,
+                {
+                    "args": {
+                        "Input Dims": [[2, 4, 8], [2, 8, 16]],
+                        "Input type": ["c10::BFloat16", "c10::Half"],
+                    }
+                },
+            ),
+            (
+                perf_model.aten_baddbmm,
+                {
+                    "args": {
+                        "Input Dims": [[2, 4, 16], [2, 4, 8], [2, 8, 16]],
+                        "Input type": ["c10::BFloat16", "c10::Half", "c10::BFloat16"],
+                    }
+                },
+            ),
+        ],
+    )
+    def test_batched_gemm_mixed_dtype_warns(self, cls, event):
+        model = cls(event)
+        with pytest.warns(UserWarning):
+            model.bytes()
+
+    def test_gemm_simulator_with_python_path(self, monkeypatch, tmp_path):
+        sim = tmp_path / "run_gemm.py"
+        sim.write_text("# stub\n")
+        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
+        perf_model.GEMM.cache_gemm_results.clear()
+        try:
+            with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
+                run.return_value = MagicMock(stdout="Time=5.5\n", stderr="")
+                t, cmd = perf_model.GEMM.get_simulation_time_func(
+                    _ARCH,
+                    4,
+                    8,
+                    16,
+                    None,
+                    "bf16",
+                    python_path="/usr/bin/python3",
+                    num_cus=64,
+                )
+            assert t == 5.5
+            assert "/usr/bin/python3" in cmd
+        finally:
+            perf_model.GEMM.cache_gemm_results.clear()
+
+    def test_aten_reduce_edge_cases(self):
+        empty = perf_model.aten_reduce(
+            {"name": "aten::sum", "args": {"Input Dims": [None]}}
+        )
+        assert empty.param_details["num_input_elems"] == 0
+
+        mean_evt = {
+            "name": "aten::mean",
+            "args": {
+                "Input Dims": [(4, 256)],
+                "Input type": ["c10::BFloat16"],
+                "Output type": ["c10::BFloat16"],
+                "Concrete Inputs": ["", "[1]", "True"],
+            },
+        }
+        m = perf_model.aten_reduce(mean_evt)
+        assert m.flops() > 0
+        assert m.bytes() > 0
+
+        cumsum_evt = {
+            "name": "aten::cumsum",
+            "args": {
+                "Input Dims": [(8, 32)],
+                "Input type": ["c10::Float"],
+                "Concrete Inputs": ["", "[0]", "False"],
+            },
+        }
+        c = perf_model.aten_reduce(cumsum_evt)
+        assert c.param_details["num_output_elems"] == 8 * 32
+
+    def test_conv_bias_backward_with_sequence_cache(self):
+        fwd = perf_model.ConvBias_(_conv_bias_fwd_event())
+        assert fwd.flops() > 0
+        bwd_evt = _conv_bias_bwd_event()
+        bwd_evt["args"]["Sequence number"] = bwd_evt["args"].get("Sequence number", 42)
+        perf_model.ConvBias_.fwd_pass_cache[42] = fwd.param_details
+        bwd = perf_model.ConvBias_Backward(bwd_evt)
+        assert bwd.flops_bwd() > 0
+        assert bwd.bytes_bwd() > 0
+        perf_model.ConvBias_.fwd_pass_cache.pop(42, None)
+
+    def test_conv_bias_relu_backward_paths(self):
+        fwd = perf_model.ConvBiasReLU_(_conv_bias_relu_fwd_event())
+        bwd_evt = _conv_bias_relu_bwd_event()
+        seq = bwd_evt["args"].get("Sequence number", 43)
+        perf_model.ConvBiasReLU_.fwd_pass_cache[seq] = fwd.param_details
+        bwd = perf_model.ConvBiasReLU_Backward(bwd_evt)
+        assert bwd.flops_bwd() > 0
+        assert bwd.bytes_bwd() > 0
+        perf_model.ConvBiasReLU_.fwd_pass_cache.pop(seq, None)
+
+    def test_aten_scaled_mm_mixed_output_bpe(self):
+        event = {
+            "args": {
+                "Input Dims": [[4, 8], [8, 16], [4, 16]],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                ],
+            }
+        }
+        model = perf_model.aten_scaled_mm(event)
+        assert model.bytes() > 0
+
+    def test_primus_grouped_gemm_variable_k(self):
+        event = {
+            "name": "primus_turbo::grouped_gemm_variable_k_impl",
+            "args": {
+                "Input Dims": [[24576, 1408], [24576, 2048]],
+                "Input type": ["c10::BFloat16", "c10::BFloat16"],
+            },
+        }
+        g = perf_model.primus_turbo_grouped_gemm_variable_k(event)
+        assert g.flops() > 0
+        assert g.bytes() > 0
+
+
+# --- migrated from test_coverage_final.py ---
+import gzip
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    add_truncated_kernel_details as add_truncated_inference,
+    generate_perf_report_pytorch as generate_inference_report,
+    perf_report_sanity_check,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _get_cached_capture_tree,
+    align_streams,
+    capture_has_kernel_names,
+    get_subtree_events,
+    is_multistream,
+    verify_subtree_events,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import (
+    _conv_bias_bwd_event,
+    _conv_bias_fwd_event,
+    _conv_bias_relu_bwd_event,
+    _conv_bias_relu_fwd_event,
+)
+from tests.fixtures.perfmodel import _ARCH, _gemm_event
+from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestMoeExtensionsFinal:
+    MOE_BLOCKSCALE = {
+        "args": {
+            "Input Dims": [
+                [32, 4096],
+                [32, 4096],
+                [8, 14336, 4096],
+                [8, 4096, 7168],
+            ],
+            "Input type": [
+                "c10::BFloat16",
+                "c10::Float8_e4m3fn",
+                "c10::Float8_e4m3fn",
+                "c10::Float8_e4m3fn",
+            ],
+            "Concrete Inputs": [""] * 8 + ["2"],
+        }
+    }
+
+    CK_STAGE1 = {
+        "args": {
+            "Input Dims": [
+                [32, 512],
+                [8, 7168, 512],
+                [8, 4096, 896],
+                [],
+                [],
+                [],
+                [32, 2, 7168],
+            ],
+            "Input type": [
+                "c10::BFloat16",
+                "c10::Float8_e4m3fn",
+                "c10::Float8_e4m3fn",
+            ],
+        }
+    }
+
+    CK_STAGE2 = {
+        "args": {
+            "Input Dims": [
+                [32, 2, 7168],
+                [8, 7168, 512],
+                [8, 4096, 896],
+                [],
+                [],
+                [],
+                [32, 4096],
+            ],
+            "Input type": [
+                "c10::BFloat16",
+                "c10::Float8_e4m3fn",
+                "c10::Float8_e4m3fn",
+            ],
+        }
+    }
+
+    @pytest.mark.parametrize(
+        "factory,event",
+        [
+            (moe_ext.moe_aiter_fused_blockscale, "MOE_BLOCKSCALE"),
+            (moe_ext.moe_aiter_ck_stage1, "CK_STAGE1"),
+            (moe_ext.moe_aiter_ck_stage2, "CK_STAGE2"),
+        ],
+    )
+    def test_moe_bytes_and_precision(self, factory, event):
+        event_obj = getattr(self, event) if isinstance(event, str) else event
+        if event == "MOE_STD":
+            event_obj = {
+                "args": {
+                    "Input Dims": [
+                        [32, 4096],
+                        [8, 14336, 4096],
+                        [8, 4096, 7168],
+                        [32, 2],
+                    ],
+                    "Input type": [
+                        "c10::BFloat16",
+                        "c10::Float8_e4m3fn",
+                        "c10::Float8_e4m3fn",
+                    ],
+                }
+            }
+        elif event == "GROUPED":
+            event_obj = {
+                "args": {
+                    "Input Dims": [
+                        [64, 2048],
+                        [128, 1536, 2048],
+                        (),
+                        [512, 1536],
+                        (),
+                        (),
+                        (),
+                        (),
+                        [64, 4],
+                    ],
+                    "Input type": [
+                        "c10::BFloat16",
+                        "c10::Float8_e4m3fn",
+                        "",
+                        "c10::BFloat16",
+                    ],
+                }
+            }
+        elif event == "GPTQ":
+            event_obj = {
+                "args": {
+                    "Input Dims": [[32, 4096], [32, 2], [8, 7168, 4096]],
+                    "Input type": ["c10::BFloat16", "c10::Int", "c10::BFloat16"],
+                    "MoE topk": 2,
+                }
+            }
+        model = factory(event_obj)
+        b = model.bytes()
+        assert b is None or b > 0
+        prec = model.get_compute_precision()
+        assert prec in (None, "bf16", "fp8", "fp4", "fp16", "fp32")
+        if hasattr(model, "flops_bwd"):
+            with pytest.raises(NotImplementedError):
+                model.flops_bwd()
+
+    def test_moe_triton_unfused_and_sglang(self):
+        from tests.fixtures.perfmodel import _moe_unfused_event
+
+        up = moe_ext.moe_triton_unfused_up(
+            _moe_unfused_event(kernel_name="moe_mxfp4_up_kernel")
+        )
+        down = moe_ext.moe_triton_unfused_down(
+            _moe_unfused_event(kernel_name="moe_fp8_down_kernel")
+        )
+        assert up.bytes() > 0
+        assert down.bytes() > 0
+        sgl = moe_ext.sglang_fused_append_shared_experts(
+            {
+                "args": {
+                    "Input Dims": [(32, 4096), (32, 4096), (32, 4096)],
+                    "Input type": ["c10::BFloat16"] * 3,
+                }
+            }
+        )
+        assert sgl.bytes() > 0
+
+    def test_moe_flydsl_gptq_grouped(self):
+        fly = {
+            "args": {
+                "Input Dims": [
+                    [32, 4096],
+                    [8, 14336, 4096],
+                    [8, 4096, 7168],
+                    [32, 2],
+                ],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                ],
+            }
+        }
+        assert moe_ext.moe_flydsl_stage1(fly).bytes() > 0
+        assert moe_ext.moe_flydsl_stage2(fly).bytes() > 0
+        gptq = {
+            "args": {
+                "Input Dims": [[32, 4096], [32, 2], [8, 7168, 4096]],
+                "Input type": ["c10::BFloat16", "c10::Int", "c10::BFloat16"],
+                "MoE topk": 2,
+            }
+        }
+        assert moe_ext.moe_gptq_awq_up(gptq).bytes() > 0
+        grouped = {
+            "args": {
+                "Input Dims": [
+                    [64, 2048],
+                    [128, 1536, 2048],
+                    (),
+                    [512, 1536],
+                    (),
+                    (),
+                    (),
+                    (),
+                    [64, 4],
+                ],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "",
+                    "c10::BFloat16",
+                ],
+            }
+        }
+        assert moe_ext.moe_triton_invoke_grouped_gemm(grouped).bytes() > 0
+
+    def test_biased_topk_and_sort_scatter_precision(self):
+        topk = moe_ext.BiasedGroupedTopk(
+            {
+                "args": {
+                    "Input Dims": [(32, 256), (256,), (32, 8), (32, 8)],
+                    "Input type": ["c10::Float"] * 3 + ["c10::Int"],
+                }
+            }
+        )
+        assert topk.flops() > 0
+        sort = moe_ext.MoeSortScatterGather(
+            {
+                "args": {
+                    "Input Dims": [(32, 4096), (32, 2), (32, 4096)],
+                    "Input type": ["c10::BFloat16", "c10::Int", "c10::BFloat16"],
+                }
+            }
+        )
+        assert sort.bytes() > 0
+
+
+# --- migrated from test_coverage_final.py ---
+import gzip
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    add_truncated_kernel_details as add_truncated_inference,
+    generate_perf_report_pytorch as generate_inference_report,
+    perf_report_sanity_check,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _get_cached_capture_tree,
+    align_streams,
+    capture_has_kernel_names,
+    get_subtree_events,
+    is_multistream,
+    verify_subtree_events,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import (
+    _conv_bias_bwd_event,
+    _conv_bias_fwd_event,
+    _conv_bias_relu_bwd_event,
+    _conv_bias_relu_fwd_event,
+)
+from tests.fixtures.perfmodel import _ARCH, _gemm_event
+from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestPerfModelDeepCoverage2:
+    def test_aten_conv_bwd_with_bias_grad(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [2, 4, 6, 6],
+                    [2, 3, 8, 8],
+                    [4, 3, 3, 3],
+                    [4],
+                ],
+                "Input type": ["c10::BFloat16"] * 4,
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "(1,1)",
+                    "(0,0)",
+                    "(1,1)",
+                    "False",
+                    "(0,0)",
+                    "1",
+                    "[True, True, False]",
+                ],
+            }
+        }
+        model = perf_model.aten_conv_bwd(event)
+        assert model.flops_bwd() > 0
+
+    def test_extract_sdpa_configs(self):
+        cfg = perf_model.extract_sdpa_cfg(
+            q_shape=[2, 8, 128, 64],
+            k_shape=[2, 8, 128, 64],
+            v_shape=[2, 8, 128, 64],
+            bhnd_idx=(0, 1, 2, 3),
+        )
+        assert cfg["B"] == 2
+        vcfg = perf_model.extract_sdpa_varlen_cfg(
+            q_shape=[8, 128, 64],
+            k_shape=[8, 128, 64],
+            v_shape=[8, 128, 64],
+            hnd_idx=(0, 1, 2),
+        )
+        assert vcfg["B"] == 1
+
+    def test_grouped_gemm_zipped_and_impl_formats(self):
+        zipped = {
+            "name": "primus_turbo::grouped_gemm",
+            "args": {
+                "Input Dims": [[[4, 8], [5, 8]], [[8, 16], [8, 16]]],
+                "Input type": ["c10::BFloat16", "c10::BFloat16"],
+            },
+        }
+        g = perf_model.primus_turbo_grouped_gemm(zipped)
+        assert g.flops() > 0
+        assert g.get_compute_precision() == "bf16"
+
+    def test_gemm_simulator_default_batch_and_invalid_path(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(tmp_path / "missing.py"))
+        with pytest.raises(ValueError, match="does not exist"):
+            perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
+
+    def test_fused_rope_and_cross_entropy_precision(self):
+        rope = perf_model.fused_rope_fwd(
+            {
+                "args": {
+                    "Input Dims": [[128, 2, 8, 64], [128, 1, 1, 64]],
+                    "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                }
+            }
+        )
+        assert rope.get_compute_precision() == "bf16"
+        ce = perf_model.cross_entropy_fwd(
+            {
+                "args": {
+                    "Input Dims": [[4, 1, 32000], [4, 1]],
+                    "Input type": ["c10::BFloat16", "long int"],
+                }
+            }
+        )
+        assert ce.get_compute_precision() is not None
