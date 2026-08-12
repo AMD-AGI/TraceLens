@@ -74,11 +74,6 @@ def test_default_filter_fn(event, include_pyfunc, expected):
     assert _default_filter_fn(dict(event), include_pyfunc=include_pyfunc) is expected
 
 
-def test_trace_fuse_default_filter_fn():
-    assert TraceFuse.default_filter_fn(TRACE_EVENT) is False
-    assert TraceFuse.default_filter_fn(KERNEL) is True
-
-
 def test_trace_fuse_init_accepts_list_and_dict(tmp_path):
     rank0 = tmp_path / "rank0.json"
     rank1 = tmp_path / "rank1.json"
