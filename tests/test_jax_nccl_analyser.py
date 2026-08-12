@@ -205,9 +205,12 @@ if __name__ == "__main__":
 
 import pytest
 import pandas as pd
+import importlib
 from unittest.mock import MagicMock, patch
 
 from TraceLens.NcclAnalyser.jax_nccl_analyser import JaxNcclAnalyser
+
+_jax_nccl_mod = importlib.import_module("TraceLens.NcclAnalyser.jax_nccl_analyser")
 
 
 @pytest.fixture
@@ -262,12 +265,10 @@ def test_jax_nccl_event_filter(jax_analyser):
     assert jax_analyser._nccl_event_filter({"name": "gemm_kernel"}) is False
 
 
-@patch("TraceLens.NcclAnalyser.jax_nccl_analyser.JaxTraceToTree")
-@patch("TraceLens.NcclAnalyser.jax_nccl_analyser.DataLoader")
-@patch(
-    "TraceLens.NcclAnalyser.jax_nccl_analyser.TraceEventUtils.prepare_event_categorizer"
-)
-@patch("TraceLens.NcclAnalyser.jax_nccl_analyser.TraceEventUtils.split_event_list")
+@patch.object(_jax_nccl_mod, "JaxTraceToTree")
+@patch.object(_jax_nccl_mod, "DataLoader")
+@patch.object(_jax_nccl_mod.TraceEventUtils, "prepare_event_categorizer")
+@patch.object(_jax_nccl_mod.TraceEventUtils, "split_event_list")
 def test_jax_load_trace_data_extracts_nccl_events(
     mock_split, mock_categorizer, mock_loader, mock_tree_cls, tmp_path
 ):

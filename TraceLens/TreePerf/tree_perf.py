@@ -2601,7 +2601,9 @@ class TreePerfAnalyzer:
 
         for col in df_summary.columns:
             if "overlap_pct" in col:
-                df_summary[col] = df_summary[col].round(2)
+                df_summary[col] = pd.to_numeric(df_summary[col], errors="coerce").round(
+                    2
+                )
                 if col.endswith("_std") and "overlap_pct_mean" in df_summary.columns:
                     has_overlap = pd.notna(df_summary["overlap_pct_mean"])
                     df_summary.loc[has_overlap, col] = df_summary.loc[
@@ -3247,8 +3249,10 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
                         operand_list += (_operand_dim,)
                         operand_idx += (_operand_idx,)
         except Exception as e:
-            logger.debug(f"\nException occurred when parsing Event: \n\n {event} \n\
-                            Event metadata: {event['metadata']}, operands: {operands}")
+            logger.debug(
+                f"\nException occurred when parsing Event: \n\n {event} \n\
+                            Event metadata: {event['metadata']}, operands: {operands}"
+            )
             raise ValueError(
                 f"{e} Exception occurred when parsing Event operands: \n\n {operands}"
             )
