@@ -24,6 +24,38 @@ from TraceLens.Reporting.pftrace_hip_activity_analysis import (
     discover_gpus,
     extract_time_ns,
 )
+import importlib
+import sys
+from unittest.mock import patch
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    _write_markdown_report,
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
+from tests.fixtures.reporting import _minimal_pftrace_events, _write_trace
+from tests.fixtures.reporting import _mk_event
+import shutil
+import urllib.request
+from pathlib import Path
+from TraceLens.Reporting import pftrace_utils
+from tests.fixtures.reporting import (
+    _minimal_pftrace_events,
+    _rich_pftrace_events,
+    _write_trace,
+)
+from TraceLens.Reporting.pftrace_hip_activity_analysis import (
+    PftraceHipActivityAnalyzer,
+    classify,
+)
+from tests.fixtures.reporting import _full_pftrace_events, _write_trace
+from tests.test_trace2tree import _mk_event
+from TraceLens.Reporting.pftrace_hip_activity_analysis import (
+    Event,
+    PftraceHipActivityAnalyzer,
+    classify,
+    extract_time_ns,
+    rccl_overlap_two_pointer,
+)
 
 
 def _minimal_trace_events_with_agent():
@@ -148,21 +180,6 @@ if __name__ == "__main__":
 
 
 # --- migrated from test_coverage_95_phase10.py ---
-import importlib
-import json
-import sys
-from unittest.mock import patch
-import pandas as pd
-from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
-    _write_markdown_report,
-    generate_perf_report_pftrace_hip_activity,
-)
-from TraceLens.Reporting.pftrace_hip_activity_analysis import (
-    PftraceHipActivityAnalyzer,
-    classify,
-)
-from tests.fixtures.reporting import _full_pftrace_events, _write_trace
-from tests.test_trace2tree import _mk_event
 
 
 class TestPftraceClassifyAndReportPhase10:
@@ -267,12 +284,6 @@ class TestPftraceClassifyAndReportPhase10:
 
 
 # --- migrated from test_coverage_95_phase5.py ---
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
-from tests.fixtures.reporting import _minimal_pftrace_events, _write_trace
 
 
 class TestPftraceHipActivityDeep:
@@ -290,11 +301,6 @@ class TestPftraceHipActivityDeep:
 
 
 # --- migrated from test_coverage_95_phase8.py ---
-import json
-import os
-import pandas as pd
-import pytest
-from tests.fixtures.reporting import _mk_event
 
 
 class TestPftraceAndArchPhase8:
@@ -329,35 +335,6 @@ class TestPftraceAndArchPhase8:
 
 
 # --- migrated from test_coverage_95_phase9.py ---
-import importlib
-import json
-import os
-import shutil
-import sys
-import urllib.request
-from pathlib import Path
-from unittest.mock import patch
-
-import pandas as pd
-import pytest
-
-from TraceLens.Reporting import pftrace_utils
-from tests.fixtures.reporting import (
-    _minimal_pftrace_events,
-    _rich_pftrace_events,
-    _write_trace,
-)
-from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
-    _write_markdown_report,
-    generate_perf_report_pftrace_hip_activity,
-)
-from TraceLens.Reporting.pftrace_hip_activity_analysis import (
-    Event,
-    PftraceHipActivityAnalyzer,
-    classify,
-    extract_time_ns,
-    rccl_overlap_two_pointer,
-)
 
 
 class TestPftraceExtendedPhase9:
@@ -442,15 +419,6 @@ class TestPftraceExtendedPhase9:
 
 
 # --- migrated from test_reporting_cli_coverage.py ---
-import importlib
-import json
-import os
-import sys
-import pytest
-from tests.fixtures.reporting import (
-    _minimal_pftrace_events,
-    _write_trace,
-)
 
 
 def test_inference_report_main(tmp_path):
@@ -476,15 +444,6 @@ def test_inference_report_main(tmp_path):
 
 
 # --- migrated from test_reporting_cli_coverage.py ---
-import importlib
-import json
-import os
-import sys
-import pytest
-from tests.fixtures.reporting import (
-    _minimal_pftrace_events,
-    _write_trace,
-)
 
 
 def test_pftrace_hip_activity_main(tmp_path):

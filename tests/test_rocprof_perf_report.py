@@ -15,6 +15,10 @@ from TraceLens.Reporting.generate_perf_report_rocprof import (
 )
 from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
 from TraceLens.util import RocprofParser
+from tests.fixtures.traces import ROCprof_FILE
+import importlib
+import sys
+from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
 
 
 def find_test_files(ref_root):
@@ -292,14 +296,6 @@ if __name__ == "__main__":
 
 
 # --- migrated from test_coverage_95_final.py ---
-from tests.fixtures.traces import ROCprof_FILE
-import importlib
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
-from TraceLens.util import RocprofParser
 
 
 class TestRocprofAnalysisDeep:
@@ -352,13 +348,6 @@ class TestRocprofAnalysisDeep:
 
 
 # --- migrated from test_coverage_95_phase6.py ---
-from tests.fixtures.traces import ROCprof_FILE
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
-from TraceLens.util import RocprofParser
 
 
 class TestRocprofPhase6:
@@ -398,11 +387,6 @@ class TestRocprofPhase6:
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_rocprof_analyzer_synthetic ---
-import importlib
-import os
-import sys
-import pandas as pd
-import pytest
 
 
 def test_rocprof_analyzer_synthetic():

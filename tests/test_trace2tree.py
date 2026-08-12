@@ -69,6 +69,11 @@ from TraceLens.Trace2Tree.extensions.v4_paged_decode_pseudo_ops import (
     _safe_int,
     create_pseudo_ops_v4_paged_decode,
 )
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_graph_to_capture_by_group,
+    find_closest_batch_size,
+    verify_subtree_events,
+)
 
 
 def _mk_event(
@@ -1595,12 +1600,6 @@ class TestTraceToTreeTraversal:
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_trace_to_tree_edge_helpers ---
-import pytest
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    _align_graph_to_capture_by_group,
-    find_closest_batch_size,
-    verify_subtree_events,
-)
 
 
 def test_trace_to_tree_edge_helpers():

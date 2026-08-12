@@ -31,6 +31,34 @@ from example_megatron_extension import (
     te_layer_norm_fwd,
     te_layer_norm_bwd,
 )
+import json
+import pytest
+from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
+    apply_pseudo_op_extensions,
+)
+from typing import Dict, List
+from TraceLens.Trace2Tree.extensions.moe_aiter_pseudo_ops import (
+    _create_pseudo_op_moe_fused_aiter,
+    _has_cpu_op_descendant,
+    create_pseudo_ops_moe_fused_aiter,
+)
+from tests.fixtures.traces import NORM_TRACE
+from tests.fixtures.treeperf import _make_gpu_event, _mk_ac2g
+from tests.fixtures.traces import TRACES_ROOT
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from tests.fixtures.reporting import _mk_ac2g, _mk_event
+from tests.fixtures.treeperf import _make_gpu_event
+from TraceLens.Trace2Tree.extensions.moe_flydsl_pseudo_ops import (
+    FUSED_MOE_PARENT,
+    create_pseudo_ops_moe_flydsl,
+)
+from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
+    _create_pseudo_op_moe_gptq_awq,
+    create_pseudo_ops_moe_gptq_awq,
+)
+from tests.test_trace2tree import _add_gpu_chain, _mk_event
 
 
 def _mk_event(
@@ -1373,20 +1401,6 @@ class TestPseudoOpsRegistryMla:
 
 
 # --- migrated from test_coverage_95_final.py ---
-import json
-import os
-import sys
-from copy import deepcopy
-import pytest
-from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
-    apply_pseudo_op_extensions,
-)
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import _mk_ac2g, _mk_event
-from tests.fixtures.treeperf import (
-    _make_gpu_event,
-)
 
 
 class TestPseudoOpsRegistryFull:
@@ -1432,26 +1446,6 @@ class TestPseudoOpsRegistryFull:
 
 
 # --- migrated from test_coverage_95_phase10.py ---
-import json
-import sys
-from copy import deepcopy
-from typing import Dict, List
-from TraceLens.Trace2Tree.extensions.moe_aiter_pseudo_ops import (
-    _create_pseudo_op_moe_fused_aiter,
-    _has_cpu_op_descendant,
-    create_pseudo_ops_moe_fused_aiter,
-)
-from TraceLens.Trace2Tree.extensions.moe_flydsl_pseudo_ops import (
-    FUSED_MOE_PARENT,
-    create_pseudo_ops_moe_flydsl,
-)
-from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
-    _create_pseudo_op_moe_gptq_awq,
-    create_pseudo_ops_moe_gptq_awq,
-)
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from tests.test_trace2tree import _add_gpu_chain, _mk_event
-from tests.fixtures.treeperf import _make_gpu_event, _mk_ac2g
 
 
 class TestMoePseudoOpsFullPhase10:
@@ -1589,13 +1583,6 @@ class TestMoePseudoOpsFullPhase10:
 
 
 # --- migrated from test_coverage_95_phase12.py ---
-from tests.fixtures.traces import NORM_TRACE
-import json
-import os
-import sys
-import pytest
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import _make_gpu_event, _mk_ac2g
 
 
 class TestTraceToTreePhase12:
@@ -1615,20 +1602,6 @@ class TestTraceToTreePhase12:
 
 
 # --- migrated from test_coverage_95_phase4.py ---
-from tests.fixtures.traces import TRACES_ROOT
-import json
-import os
-import sys
-from copy import deepcopy
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import (
-    _make_gpu_event,
-)
 
 
 class TestTraceToTreePhase4:

@@ -24,6 +24,9 @@ from TraceLens.util import (
     TraceEventUtils,
     suppress_native_hlo_logs,
 )
+import pandas as pd
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
 
 TK = TraceEventUtils.TraceKeys
 TP = TraceEventUtils.TracePhases
@@ -1145,10 +1148,6 @@ def test_pftrace_parser_validation_errors(tmp_path):
 
 
 # --- migrated from test_coverage_95_phase13.py ---
-import os
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
 
 
 class TestAnalysisUtilsPhase13:
@@ -1170,13 +1169,6 @@ class TestAnalysisUtilsPhase13:
 
 
 # --- migrated from test_coverage_95_phase7.py ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
 
 
 class TestAnalysisUtilsPhase7:
@@ -1227,12 +1219,6 @@ class TestAnalysisUtilsPhase7:
 
 
 # --- migrated from test_coverage_95_phase8.py ---
-import gzip
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
 
 
 class TestAnalysisUtilsPhase8:

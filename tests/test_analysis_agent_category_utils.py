@@ -21,6 +21,10 @@ Covers every module under category_analyses/ plus the shared kernel classifier:
 import json
 import os
 import sys
+from copy import deepcopy
+from pathlib import Path
+from types import ModuleType
+from typing import Dict, List
 
 import pandas as pd
 import pytest
@@ -56,16 +60,13 @@ from TraceLens.Agent.Analysis.category_analyses.multi_kernel_analysis import (
     classify_overlap_severity,
     cross_validate_with_timeline,
 )
-from TraceLens.Agent.Analysis.category_analyses import multi_kernel_analysis
 from TraceLens.Agent.Analysis.category_analyses.sdpa_analysis import (
     classify_sdpa_operation,
     detect_flash_attention,
     detect_paged_attention,
+    extract_category_specific as sdpa_extract,
     parse_kernel_breakdown,
     parse_perf_params,
-)
-from TraceLens.Agent.Analysis.category_analyses.sdpa_analysis import (
-    extract_category_specific as sdpa_extract,
 )
 from TraceLens.Agent.Analysis.category_analyses.convolution_analysis import (
     extract_category_specific as conv_extract,
@@ -104,18 +105,45 @@ from TraceLens.Agent.Analysis.category_analyses.other_analysis import (
     extract_category_specific as other_extract,
 )
 from TraceLens.Agent.Analysis.category_analyses import (
+    analysis_utils as au,
     convolution_analysis,
     cpu_idle_analysis,
     elementwise_analysis,
     gemm_analysis,
     kernel_fusion_analysis,
     moe_analysis,
+    multi_kernel_analysis,
     norm_analysis,
     other_analysis,
     reduce_analysis,
     sdpa_analysis,
     triton_analysis,
 )
+from TraceLens.Agent.Analysis.utils import arch_utils
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Trace2Tree.extensions.moe_aiter_pseudo_ops import (
+    _create_pseudo_op_moe_fused_aiter,
+    is_aiter_fused_moe_kernel,
+)
+from TraceLens.Trace2Tree.extensions.moe_flydsl_pseudo_ops import (
+    FUSED_MOE_PARENT,
+    create_pseudo_ops_moe_flydsl,
+)
+from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
+    _extract_topk_from_outplace,
+    create_pseudo_ops_moe_gptq_awq,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from tests.test_conv_backward_bytes import (
+    _conv_bias_bwd_event,
+    _conv_bias_fwd_event,
+    _conv_bias_relu_bwd_event,
+    _conv_bias_relu_fwd_event,
+)
+from tests.test_dit_fused_ln_modulate import _fused_ln_fwd_event
+from tests.test_evoformer_attention_ops import _event as _evoformer_event
+from tests.test_trace2tree import _add_gpu_chain, _mk_event
 
 # ----- classify_kernel: representative rule hits -----
 
@@ -1675,21 +1703,6 @@ def test_driver_multi_kernel_main_success(tmp_path, monkeypatch):
 
 
 # --- migrated from test_coverage_95_phase14.py ---
-import json
-import sys
-from types import ModuleType
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.category_analyses import (
-    convolution_analysis,
-    elementwise_analysis,
-    gemm_analysis,
-    moe_analysis,
-    norm_analysis,
-    reduce_analysis,
-    triton_analysis,
-)
-from TraceLens.Agent.Analysis.utils import arch_utils
 
 
 class TestArchUtils:
@@ -1721,21 +1734,6 @@ class TestArchUtils:
 
 
 # --- migrated from test_coverage_95_phase14.py ---
-import json
-import sys
-from types import ModuleType
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.category_analyses import (
-    convolution_analysis,
-    elementwise_analysis,
-    gemm_analysis,
-    moe_analysis,
-    norm_analysis,
-    reduce_analysis,
-    triton_analysis,
-)
-from TraceLens.Agent.Analysis.utils import arch_utils
 
 
 class TestCategoryAnalysisHelpers:
@@ -1842,12 +1840,6 @@ class TestCategoryAnalysisHelpers:
 
 
 # --- migrated from test_coverage_95_phase5.py ---
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.PerfModel import perf_model
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
 
 
 class TestPerfModelNormAndConvDeep:
@@ -1916,34 +1908,6 @@ class TestPerfModelNormAndConvDeep:
 
 
 # --- migrated from test_coverage_95_phase9.py ---
-import json
-import os
-import sys
-from copy import deepcopy
-from pathlib import Path
-from typing import Dict, List
-
-import pandas as pd
-import pytest
-
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.Agent.Analysis.utils import arch_utils
-from TraceLens.PerfModel import perf_model
-from TraceLens.Trace2Tree.extensions.moe_aiter_pseudo_ops import (
-    _create_pseudo_op_moe_fused_aiter,
-    is_aiter_fused_moe_kernel,
-)
-from TraceLens.Trace2Tree.extensions.moe_flydsl_pseudo_ops import (
-    FUSED_MOE_PARENT,
-    create_pseudo_ops_moe_flydsl,
-)
-from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
-    _extract_topk_from_outplace,
-    create_pseudo_ops_moe_gptq_awq,
-)
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
-from tests.test_trace2tree import _add_gpu_chain, _mk_event
 
 
 def _build_moe_tree(events: List[Dict], add_python_func: bool = False) -> TraceToTree:
@@ -2069,21 +2033,6 @@ class TestArchAndMoePhase9:
 
 
 # --- migrated from test_coverage_boost.py ---
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.PerfModel import perf_model
-from tests.test_conv_backward_bytes import (
-    _conv_bias_bwd_event,
-    _conv_bias_fwd_event,
-    _conv_bias_relu_bwd_event,
-    _conv_bias_relu_fwd_event,
-)
-from tests.test_dit_fused_ln_modulate import (
-    _fused_ln_fwd_event,
-)
-from tests.test_evoformer_attention_ops import _event as _evoformer_event
 
 
 class TestPerfModelConvAndNormBoost:
@@ -2160,11 +2109,6 @@ class TestPerfModelConvAndNormBoost:
 
 
 # --- migrated from test_coverage_sweep.py ---
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
 
 
 class TestRmsNormExtensionsBytes:

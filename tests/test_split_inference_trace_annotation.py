@@ -25,6 +25,36 @@ from typing import Dict, List
 
 from TraceLens.TraceUtils import split_inference_trace_annotation as split
 from TraceLens.TraceUtils.annotation_utils import IterationAnnotation
+import sys
+import pytest
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.traces import INFERENCE_ROOT
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    find_closest_batch_size,
+    find_execution_details,
+    merge_capture_trace_into_graph,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_graph_to_capture_by_group,
+    find_closest_batch_size,
+    load_capture_folder,
+    merge_capture_trace_into_graph,
+    verify_subtree_events,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _get_cached_capture_tree,
+    align_streams,
+    capture_has_kernel_names,
+    get_subtree_events,
+    is_multistream,
+    verify_subtree_events,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
 # --------------------------------------------------------------------------- #
 # Dummy-trace builder
@@ -1010,14 +1040,6 @@ def test_main_dummy_runs_and_steady_state_message(tmp_path, capsys):
 
 
 # --- migrated from test_coverage_95_final.py ---
-import gzip
-import json
-import os
-import sys
-import pytest
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 
 class TestCaptureMergeAndMoe:
@@ -1056,9 +1078,6 @@ class TestCaptureMergeAndMoe:
 
 
 # --- migrated from test_coverage_95_phase10.py ---
-import json
-import sys
-from typing import Dict, List
 
 
 class TestSplitAnnotationDummyPhase10:
@@ -1101,17 +1120,6 @@ class TestSplitAnnotationDummyPhase10:
 
 
 # --- migrated from test_coverage_95_phase5.py ---
-from tests.fixtures.traces import INFERENCE_ROOT
-import gzip
-import json
-import os
-import pytest
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    find_closest_batch_size,
-    find_execution_details,
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 
 class TestCaptureMergeDeep:
@@ -1139,19 +1147,6 @@ class TestCaptureMergeDeep:
 
 
 # --- migrated from test_coverage_push95.py ---
-import json
-import os
-import sys
-import pytest
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    _align_graph_to_capture_by_group,
-    find_closest_batch_size,
-    load_capture_folder,
-    merge_capture_trace_into_graph,
-    verify_subtree_events,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 
 class TestCaptureMergePush95:
@@ -1203,14 +1198,6 @@ class TestCaptureMergePush95:
 
 
 # --- migrated from test_coverage_sweep.py ---
-import json
-import os
-import pytest
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 
 class TestCaptureMergeIntegration:
@@ -1288,22 +1275,6 @@ class TestCaptureMergeIntegration:
 
 
 # --- migrated from test_coverage_final.py ---
-import gzip
-import json
-import os
-import sys
-import pytest
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    _get_cached_capture_tree,
-    align_streams,
-    capture_has_kernel_names,
-    get_subtree_events,
-    is_multistream,
-    verify_subtree_events,
-)
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 
 class TestCaptureMergeFinal:

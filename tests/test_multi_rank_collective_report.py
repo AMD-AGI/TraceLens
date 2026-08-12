@@ -19,6 +19,13 @@ from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
     generate_collective_report,
     infer_world_size,
 )
+import importlib
+import json
+import sys
+from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+    _resolve_trace_files_glob,
+    generate_collective_report,
+)
 
 LLAMA_TRACE_DIR = "tests/traces/mi300/llama_70b_fsdp"
 
@@ -123,16 +130,6 @@ def test_generate_collective_report_llama_traces(tmp_path):
 
 
 # --- migrated from test_coverage_95_final.py ---
-import importlib
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
-    _resolve_trace_files_glob,
-    generate_collective_report,
-)
 
 
 class TestCollectiveReportErrors:
@@ -191,12 +188,6 @@ class TestCollectiveReportErrors:
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_collective_report_main ---
-import importlib
-import json
-import os
-import sys
-import pandas as pd
-import pytest
 
 
 def test_collective_report_main(tmp_path):
@@ -245,11 +236,6 @@ def test_collective_report_main(tmp_path):
 
 
 # --- migrated from test_reporting_cli_coverage.py ---
-import importlib
-import json
-import os
-import sys
-import pytest
 
 
 def test_collective_report_main_trace_glob(tmp_path):

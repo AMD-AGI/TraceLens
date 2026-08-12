@@ -15,6 +15,22 @@ from TraceLens.TraceDiff.trace_diff import (
     _gpu_path_child_names_at_bfs_levels,
 )
 from TraceLens.util import TraceEventUtils
+import sys
+import types
+from TraceLens.Agent.Analysis.utils import arch_utils
+from TraceLens.Reporting.tracediff_comparison_extension import (
+    tracediff_perf_summary_from_diff_stats,
+)
+from tests.fixtures.traces import TIMESFORMER1, TIMESFORMER2
+import os
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
+from TraceLens.TraceDiff import util as tracediff_util
+from tests.fixtures.traces import COMPARE_DIR
+from TraceLens.TraceDiff.trace_diff import TraceDiff
+from tests.test_trace2tree import _add_gpu_chain, _build_tree, _mk_event
+from tests.test_trace2tree import _add_gpu_chain, _mk_event
+from tests.fixtures.reporting import _mk_event
 
 _TK = TraceEventUtils.TraceKeys
 
@@ -801,15 +817,6 @@ class TestTraceDiffHelpers:
 
 
 # --- migrated from test_coverage_95_phase10.py ---
-import sys
-import types
-import pandas as pd
-from TraceLens.Agent.Analysis.utils import arch_utils
-from TraceLens.Reporting.tracediff_comparison_extension import (
-    tracediff_perf_summary_from_diff_stats,
-)
-from tests.test_trace2tree import _add_gpu_chain, _mk_event
-from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
 
 
 class TestArchTracediffTreePerfPhase10:
@@ -925,13 +932,6 @@ class TestArchTracediffTreePerfPhase10:
 
 
 # --- migrated from test_coverage_95_phase12.py ---
-from tests.fixtures.traces import TIMESFORMER1, TIMESFORMER2
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
 
 
 class TestTraceDiffPhase12:
@@ -954,12 +954,6 @@ class TestTraceDiffPhase12:
 
 
 # --- migrated from test_coverage_95_phase14.py ---
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils import arch_utils
-from TraceLens.TraceDiff import util as tracediff_util
-from TraceLens.util import TraceEventUtils
 
 
 class TestTraceDiffUtil:
@@ -998,19 +992,6 @@ class TestTraceDiffUtil:
 
 
 # --- migrated from test_coverage_95_phase7.py ---
-from tests.fixtures.traces import COMPARE_DIR
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Reporting.tracediff_comparison_extension import (
-    tracediff_perf_summary_from_diff_stats,
-)
-from TraceLens.TraceDiff.trace_diff import TraceDiff
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import (
-    _mk_event,
-)
 
 
 class TestTraceDiffPhase7:
@@ -1033,12 +1014,6 @@ class TestTraceDiffPhase7:
 
 
 # --- migrated from test_coverage_95_phase9.py ---
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.TraceDiff.trace_diff import TraceDiff
-from tests.test_trace2tree import _add_gpu_chain, _build_tree, _mk_event
 
 
 class TestTraceDiffPhase9:

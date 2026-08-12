@@ -39,6 +39,75 @@ from TraceLens.PerfModel.extensions.pseudo_ops_perf_utils import (
     get_pseudo_op_mappings as _mappings_from_utils,
 )
 from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import RMSNorm
+import inspect
+from TraceLens.PerfModel import perf_model
+from tests.fixtures.perfmodel import _ARCH, _gemm_event, _norm_event
+import sys
+from unittest.mock import MagicMock, patch
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from unittest.mock import patch
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
+from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
+from tests.test_mamba_ssd import _mamba_event
+from tests.fixtures.perfmodel import (
+    _ARCH,
+    _conv_bwd_event,
+    _conv_fwd_event,
+    _gemm_event,
+    _moe_unfused_event,
+    _norm_event,
+)
+from TraceLens.PerfModel import kernel_name_parser
+from TraceLens.PerfModel.extensions import (
+    attention_perf_model_extensions as attn_ext,
+    moe_perf_model_extensions as moe_ext,
+    perf_model_extensions as pext,
+    rmsnorm_perf_model_extensions as rms_ext,
+)
+from tests.fixtures.perfmodel import _ARCH, _gemm_event, _moe_unfused_event
+from tests.test_conv_backward_bytes import _conv_bias_fwd_event
+from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
+    BiasedGroupedTopk,
+    moe_aiter_fused_1stage,
+    moe_aiter_unfused_down,
+    moe_aiter_unfused_up,
+    moe_flydsl_stage1,
+    moe_flydsl_stage2,
+    moe_gptq_awq_down,
+    moe_gptq_awq_up,
+    moe_triton_invoke_grouped_gemm,
+)
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
+from tests.fixtures.perfmodel import _GDN, _GDN_ANNOTATION, _attn_base
+from tests.fixtures.perfmodel import _GDN_ANNOTATION
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from tests.fixtures.perfmodel import (
+    _ARCH,
+    _GDN_ANNOTATION,
+    _moe_unfused_event,
+    _norm_event,
+)
+from tests.test_conv_backward_bytes import (
+    _conv_bias_bwd_event,
+    _conv_bias_fwd_event,
+    _conv_bias_relu_bwd_event,
+    _conv_bias_relu_fwd_event,
+)
+from tests.fixtures.perfmodel import _ARCH, _gemm_event
+from tests.test_dit_fused_ln_modulate import _fused_ln_fwd_event
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _gemm_event, _norm_event
+from tests.fixtures.perfmodel import (
+    _ARCH,
+    _GDN_ANNOTATION,
+    _conv_bwd_event,
+    _conv_fwd_event,
+    _gemm_event,
+    _moe_unfused_event,
+    _norm_event,
+)
 
 _GDN_ANNOTATION = (
     "execute_64_context_0(sq0sk0sqsq0sqsk0)"
@@ -2329,10 +2398,6 @@ class TestTreePerfInitKwargs:
 
 
 # --- migrated from test_coverage_95_bulk.py ---
-import inspect
-import pytest
-from TraceLens.PerfModel import perf_model
-from tests.fixtures.perfmodel import _ARCH, _gemm_event, _norm_event
 
 
 class TestPerfModelExhaustiveSweep:
@@ -2467,11 +2532,6 @@ class TestPerfModelExhaustiveSweep:
 
 
 # --- migrated from test_coverage_95_final.py ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
 
 
 class TestPerfModelRemaining:
@@ -2530,22 +2590,6 @@ class TestPerfModelRemaining:
 
 
 # --- migrated from test_coverage_95_phase11.py ---
-import sys
-from unittest.mock import patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
-from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
-from tests.test_mamba_ssd import _mamba_event
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _conv_bwd_event,
-    _conv_fwd_event,
-    _gemm_event,
-    _moe_unfused_event,
-    _norm_event,
-)
 
 
 class _GroupedGemmNoBwdOverride(perf_model.GroupedGemm):
@@ -2928,22 +2972,6 @@ class TestPerfModelPhase11:
 
 
 # --- migrated from test_coverage_95_phase11.py ---
-import sys
-from unittest.mock import patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
-from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
-from tests.test_mamba_ssd import _mamba_event
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _conv_bwd_event,
-    _conv_fwd_event,
-    _gemm_event,
-    _moe_unfused_event,
-    _norm_event,
-)
 
 
 class TestMoeExtensionsPhase11:
@@ -2978,10 +3006,6 @@ class TestMoeExtensionsPhase11:
 
 
 # --- migrated from test_coverage_95_phase12.py ---
-import sys
-from unittest.mock import patch
-import pytest
-from TraceLens.PerfModel import perf_model
 
 
 class TestPerfModelPhase12:
@@ -3047,10 +3071,6 @@ class TestPerfModelPhase12:
 
 
 # --- migrated from test_coverage_95_phase12.py ---
-import sys
-from unittest.mock import patch
-import pytest
-from TraceLens.PerfModel import perf_model
 
 
 class TestPerfModelPhase12B:
@@ -3096,8 +3116,6 @@ class TestPerfModelPhase12B:
 
 
 # --- migrated from test_coverage_95_phase13.py ---
-import pytest
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
 
 
 class TestMoePhase13:
@@ -3128,9 +3146,6 @@ class TestMoePhase13:
 
 
 # --- migrated from test_coverage_95_phase14.py ---
-import sys
-import pytest
-from TraceLens.PerfModel import kernel_name_parser
 
 
 class TestKernelNameParserFull:
@@ -3161,39 +3176,6 @@ class TestKernelNameParserFull:
 
 
 # --- migrated from test_coverage_95_phase4.py ---
-import inspect
-import sys
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import (
-    attention_perf_model_extensions as attn_ext,
-    moe_perf_model_extensions as moe_ext,
-    perf_model_extensions as pext,
-    rmsnorm_perf_model_extensions as rms_ext,
-)
-from tests.test_conv_backward_bytes import (
-    _conv_bias_bwd_event,
-    _conv_bias_fwd_event,
-)
-from tests.test_dit_fused_ln_modulate import _fused_ln_fwd_event
-from tests.test_mamba_ssd import _mamba_event
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _GDN_ANNOTATION,
-    _gemm_event,
-    _norm_event,
-)
-from tests.test_dit_fused_ln_modulate import _fused_ln_fwd_event
-from tests.test_mamba_ssd import _mamba_event
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _GDN_ANNOTATION,
-    _conv_bwd_event,
-    _conv_fwd_event,
-    _gemm_event,
-    _moe_unfused_event,
-    _norm_event,
-)
 
 _GEMM_EVT = _gemm_event("aten::mm", (4, 8), (8, 16))
 _CONV_EVT = _conv_bias_fwd_event()
@@ -3302,14 +3284,6 @@ class TestPerfModelBulkSweep:
 
 
 # --- migrated from test_coverage_95_phase6.py ---
-import sys
-from unittest.mock import patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
-from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
-from tests.fixtures.perfmodel import _ARCH, _gemm_event, _moe_unfused_event
 
 
 class TestPerfModelPhase6:
@@ -3375,14 +3349,6 @@ class TestPerfModelPhase6:
 
 
 # --- migrated from test_coverage_95_phase6.py ---
-import sys
-from unittest.mock import patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
-from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
-from tests.fixtures.perfmodel import _ARCH, _gemm_event, _moe_unfused_event
 
 
 class TestMoeExtensionsPhase6:
@@ -3447,9 +3413,6 @@ class TestMoeExtensionsPhase6:
 
 
 # --- migrated from test_coverage_95_phase8.py ---
-import pytest
-from TraceLens.PerfModel import perf_model
-from tests.test_conv_backward_bytes import _conv_bias_fwd_event
 
 
 class TestPerfModelPhase8:
@@ -3521,11 +3484,6 @@ class TestPerfModelPhase8:
 
 
 # --- migrated from test_coverage_95_phase9.py ---
-import sys
-import pytest
-from TraceLens.PerfModel import perf_model
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
-from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
 
 
 class TestPerfModelPhase9:
@@ -3624,26 +3582,6 @@ class TestPerfModelPhase9:
 
 
 # --- migrated from test_coverage_boost.py ---
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
-    BiasedGroupedTopk,
-    moe_aiter_fused_1stage,
-    moe_aiter_unfused_down,
-    moe_aiter_unfused_up,
-    moe_flydsl_stage1,
-    moe_flydsl_stage2,
-    moe_gptq_awq_down,
-    moe_gptq_awq_up,
-    moe_triton_invoke_grouped_gemm,
-)
-from tests.test_conv_backward_bytes import (
-    _conv_bias_bwd_event,
-    _conv_bias_fwd_event,
-)
-from tests.test_dit_fused_ln_modulate import (
-    _fused_ln_fwd_event,
-)
 
 
 class TestMoeExtensionsBoost:
@@ -3773,26 +3711,6 @@ class TestMoeExtensionsBoost:
 
 
 # --- migrated from test_coverage_boost.py ---
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
-    BiasedGroupedTopk,
-    moe_aiter_fused_1stage,
-    moe_aiter_unfused_down,
-    moe_aiter_unfused_up,
-    moe_flydsl_stage1,
-    moe_flydsl_stage2,
-    moe_gptq_awq_down,
-    moe_gptq_awq_up,
-    moe_triton_invoke_grouped_gemm,
-)
-from tests.test_conv_backward_bytes import (
-    _conv_bias_bwd_event,
-    _conv_bias_fwd_event,
-)
-from tests.test_dit_fused_ln_modulate import (
-    _fused_ln_fwd_event,
-)
 
 
 class TestPerfModelExtensionsBoost:
@@ -3820,15 +3738,6 @@ class TestPerfModelExtensionsBoost:
 
 
 # --- migrated from test_coverage_push95.py ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
-from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
 
 
 class TestPerfModelPush95:
@@ -3982,15 +3891,6 @@ class TestPerfModelPush95:
 
 
 # --- migrated from test_coverage_push95.py ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
-from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
 
 
 class TestMoeExtensionsPush95:
@@ -4036,15 +3936,6 @@ class TestMoeExtensionsPush95:
 
 
 # --- migrated from test_coverage_push95.py ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
-from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
 
 
 class TestAttentionRmsnormPush95:
@@ -4105,15 +3996,6 @@ class TestAttentionRmsnormPush95:
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_norm_and_mamba_perf_models ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
-from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
 
 
 def test_norm_and_mamba_perf_models():
@@ -4143,15 +4025,6 @@ def test_norm_and_mamba_perf_models():
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_moe_ck_and_gptq_extended ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
-from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
 
 
 def test_moe_ck_and_gptq_extended():
@@ -4205,15 +4078,6 @@ def test_moe_ck_and_gptq_extended():
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_gemm_simulator_clears_cache ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
-from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
 
 
 def test_gemm_simulator_clears_cache(monkeypatch, tmp_path):
@@ -4233,15 +4097,6 @@ def test_gemm_simulator_clears_cache(monkeypatch, tmp_path):
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_untested_perf_extensions ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
-from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
 
 
 def test_untested_perf_extensions():
@@ -4305,15 +4160,6 @@ def test_untested_perf_extensions():
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_attention_extension_variants ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
-from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
 
 
 def test_attention_extension_variants():
@@ -4351,11 +4197,6 @@ def test_attention_extension_variants():
 
 
 # --- migrated from test_coverage_sweep.py ---
-import pytest
-from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
-from tests.fixtures.perfmodel import _GDN, _GDN_ANNOTATION, _attn_base
 
 
 class TestAttentionExtensionsBytes:
@@ -4401,11 +4242,6 @@ class TestAttentionExtensionsBytes:
 
 
 # --- migrated from test_coverage_sweep.py ---
-import pytest
-from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
-from tests.fixtures.perfmodel import _GDN_ANNOTATION
 
 
 class TestMoeExtensionsSweep:
@@ -4459,19 +4295,6 @@ class TestMoeExtensionsSweep:
 
 
 # --- migrated from test_push95_coverage.py ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from tests.test_mamba_ssd import _mamba_event
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _GDN_ANNOTATION,
-    _moe_unfused_event,
-    _norm_event,
-)
 
 
 class TestPerfModelPush95Coverage:
@@ -4515,31 +4338,33 @@ class TestPerfModelPush95Coverage:
         mock_helper = MagicMock()
         mock_helper.get_simulation_time.return_value = 7.5
         mock_origami = MagicMock()
-        mock_origami.data_type_t.BFloat16 = "bf16_enum"
+        dtype_t = MagicMock()
+        dtype_t.BFloat16 = "bf16"
+        dtype_t.Float = "fp32"
+        dtype_t.Half = "fp16"
+        dtype_t.Double = "fp64"
+        dtype_t.Float8_fnuz = "fp8"
+        mock_origami.data_type_t = dtype_t
         with patch.dict(sys.modules, {"origami": mock_origami}):
             with patch(
-                "TraceLens.PerfModel.perf_model.OrigamiHelper",
-                create=True,
+                "TraceLens.PerfModel.origami_helper.OrigamiHelper"
             ) as helper_cls:
-                with patch(
-                    "TraceLens.PerfModel.origami_helper.OrigamiHelper",
-                    helper_cls,
-                ):
-                    helper_cls.get_hardware.return_value = mock_hw
-                    helper_cls.return_value = mock_helper
-                    t, cmd = perf_model.GEMM.get_simulation_time_func(
-                        _ARCH,
-                        4,
-                        8,
-                        16,
-                        1,
-                        "bf16",
-                        num_cus=64,
-                        force_to_l1=True,
-                        enable_origami=True,
-                    )
+                helper_cls.get_hardware.return_value = mock_hw
+                helper_cls.return_value = mock_helper
+                t, cmd = perf_model.GEMM.get_simulation_time_func(
+                    _ARCH,
+                    4,
+                    8,
+                    16,
+                    1,
+                    "bf16",
+                    num_cus=64,
+                    force_to_l1=True,
+                    enable_origami=True,
+                )
         assert t == 7.5
         assert "Origami" in cmd
+        helper_cls.assert_called_once()
 
     def test_gemm_origami_unsupported_dtype(self, monkeypatch):
         monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
@@ -4739,19 +4564,6 @@ class TestPerfModelPush95Coverage:
 
 
 # --- migrated from test_push95_coverage.py ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from tests.test_mamba_ssd import _mamba_event
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _GDN_ANNOTATION,
-    _moe_unfused_event,
-    _norm_event,
-)
 
 
 class TestMoeExtensionsPush95Coverage:
@@ -4955,19 +4767,6 @@ class TestMoeExtensionsPush95Coverage:
 
 
 # --- migrated from test_coverage_final.py ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from tests.test_conv_backward_bytes import (
-    _conv_bias_bwd_event,
-    _conv_bias_fwd_event,
-    _conv_bias_relu_bwd_event,
-    _conv_bias_relu_fwd_event,
-)
-from tests.fixtures.perfmodel import _ARCH, _gemm_event
 
 
 class TestPerfModelFinalCoverage:
@@ -5159,19 +4958,6 @@ class TestPerfModelFinalCoverage:
 
 
 # --- migrated from test_coverage_final.py ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from tests.test_conv_backward_bytes import (
-    _conv_bias_bwd_event,
-    _conv_bias_fwd_event,
-    _conv_bias_relu_bwd_event,
-    _conv_bias_relu_fwd_event,
-)
-from tests.fixtures.perfmodel import _ARCH, _gemm_event
 
 
 class TestMoeExtensionsFinal:
@@ -5388,19 +5174,6 @@ class TestMoeExtensionsFinal:
 
 
 # --- migrated from test_coverage_final.py ---
-import sys
-from unittest.mock import MagicMock, patch
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from tests.test_conv_backward_bytes import (
-    _conv_bias_bwd_event,
-    _conv_bias_fwd_event,
-    _conv_bias_relu_bwd_event,
-    _conv_bias_relu_fwd_event,
-)
-from tests.fixtures.perfmodel import _ARCH, _gemm_event
 
 
 class TestPerfModelDeepCoverage2:

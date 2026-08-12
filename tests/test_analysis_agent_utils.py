@@ -82,6 +82,31 @@ from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
     _build_kernel_perf_lookup,
     _build_trace2_ops_summary_by_enhanced_category,
 )
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+)
+from tests.fixtures.traces import NORM_TRACE
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_standalone_fusion_candidates,
+)
+from tests.fixtures.traces import NORM_TRACE, RESNET_TRACE
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_attention_core,
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+    _is_gemm_norm_only,
+)
+from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
 
 # ----- Fixtures: minimal output dir layout for analysis_utils -----
 
@@ -3764,15 +3789,6 @@ def test_orchestrator_main_standalone_mocked(tmp_path, monkeypatch):
 
 
 # --- migrated from test_coverage_95_final.py ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-)
-from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
 
 
 class TestOrchestratorComparativeFusion:
@@ -3805,20 +3821,6 @@ class TestOrchestratorComparativeFusion:
 
 
 # --- migrated from test_coverage_95_phase11.py ---
-from tests.fixtures.traces import NORM_TRACE
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_standalone_fusion_candidates,
-)
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
 
 
 class TestOrchestratorPhase11:
@@ -3969,15 +3971,6 @@ class TestOrchestratorPhase11:
 
 
 # --- migrated from test_coverage_95_phase12.py ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-)
-from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
 
 
 class TestOrchestratorPhase12:
@@ -4014,16 +4007,6 @@ class TestOrchestratorPhase12:
 
 
 # --- migrated from test_coverage_95_phase12.py ---
-from tests.fixtures.traces import NORM_TRACE, RESNET_TRACE
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-)
-from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
 
 
 class TestOrchestratorPhase12B:
@@ -4149,17 +4132,6 @@ class TestOrchestratorPhase12B:
 
 
 # --- migrated from test_coverage_95_phase4.py ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
 
 
 class TestKernelFusionMain:
@@ -4215,17 +4187,6 @@ class TestKernelFusionMain:
 
 
 # --- migrated from test_coverage_95_phase4.py ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
 
 
 class TestOrchestratorPhase4:
@@ -4286,20 +4247,6 @@ class TestOrchestratorPhase4:
 
 
 # --- migrated from test_coverage_95_phase6.py ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_standalone_fusion_candidates,
-)
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
 
 
 class TestOrchestratorPhase6:
@@ -4485,20 +4432,6 @@ class TestOrchestratorPhase6:
 
 
 # --- migrated from test_coverage_95_phase6.py ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_standalone_fusion_candidates,
-)
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
 
 
 class TestKernelFusionMainPhase6:
@@ -4539,21 +4472,6 @@ class TestKernelFusionMainPhase6:
 
 
 # --- migrated from test_coverage_push95.py ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-)
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
 
 
 class TestOrchestratorPush95:
@@ -4612,21 +4530,6 @@ class TestOrchestratorPush95:
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_comparative_fusion_full_path ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-)
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
 
 
 def test_comparative_fusion_full_path(tmp_path):
@@ -4668,21 +4571,6 @@ def test_comparative_fusion_full_path(tmp_path):
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_analysis_utils_efficiency_and_fusion ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-)
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
 
 
 def test_analysis_utils_efficiency_and_fusion(tmp_path):
@@ -4715,21 +4603,6 @@ def test_analysis_utils_efficiency_and_fusion(tmp_path):
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_orchestrator_comparative_main ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-)
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
 
 
 def test_orchestrator_comparative_main(tmp_path, monkeypatch):
@@ -4781,21 +4654,6 @@ def test_orchestrator_comparative_main(tmp_path, monkeypatch):
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_kernel_fusion_and_tracediff_helpers ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-)
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
 
 
 def test_kernel_fusion_and_tracediff_helpers(tmp_path):
@@ -4833,10 +4691,6 @@ def test_kernel_fusion_and_tracediff_helpers(tmp_path):
 
 
 # --- migrated from test_coverage_sweep.py ---
-import json
-import os
-import pandas as pd
-import pytest
 
 
 class TestOrchestratorHelpersSweep:
@@ -4858,23 +4712,6 @@ class TestOrchestratorHelpersSweep:
 
 
 # --- migrated from test_push95_coverage.py ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_attention_core,
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-    _is_gemm_norm_only,
-)
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
 
 
 class TestOrchestratorPush95Coverage:
@@ -5090,21 +4927,6 @@ class TestOrchestratorPush95Coverage:
 
 
 # --- migrated from test_coverage_final.py ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-)
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
 
 
 class TestOrchestratorPrepareFinal:
@@ -5209,21 +5031,6 @@ class TestOrchestratorPrepareFinal:
 
 
 # --- migrated from test_coverage_final.py ---
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-)
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
 
 
 class TestOrchestratorMainExtended:

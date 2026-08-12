@@ -11,15 +11,28 @@ and gpu_event_analyser.py.
 
 from __future__ import annotations
 
+import gzip
+import json
 import math
 import os
 import tempfile
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
+from TraceLens.Reporting.pftrace_hip_activity_analysis import (
+    Event,
+    HIPEvent,
+    build_event_lists,
+    build_hip_summary_df,
+    build_kernel_summary_df_for_config,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf import (
     GPUEventAnalyser,
@@ -35,6 +48,24 @@ from TraceLens.TreePerf.tree_perf import (
     normalize_dtype_to_precision,
 )
 from TraceLens.util import TraceEventUtils
+from tests.fixtures.perfmodel import _BadPerfModel, _ExplodingPerfModel
+from tests.fixtures.reporting import _rich_pftrace_events
+from tests.fixtures.traces import (
+    INFERENCE_ROOT,
+    JAX_PB,
+    RESNET,
+    RESNET_TRACE,
+    TRACES_ROOT,
+    _discover_trace_gz_files,
+)
+from tests.fixtures.traces import RESNET_TRACE as RESNET_CKPT
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_ac2g,
+    _mk_pytorch_trace,
+    _sweep_treeperf_analyzer,
+)
 
 JAX_CONV_TRACE = os.path.join(
     os.path.dirname(__file__),
@@ -55,24 +86,6 @@ def _require_cuda_torch():
     return torch
 
 
-def _make_gpu_event(
-    uid, ts, dur, cat="kernel", name="kernel", pid=100, tid=100, args=None
-):
-    event = {
-        "ph": "X",
-        "UID": uid,
-        "ts": ts,
-        "dur": dur,
-        "cat": cat,
-        "name": name or "kernel",
-        "pid": pid,
-        "tid": tid,
-    }
-    if args is not None:
-        event["args"] = args
-    return event
-
-
 def _make_jax_gpu_event(
     pid, tid, ts, dur, name="gemm", thread_name="Stream #0", args=None
 ):
@@ -89,63 +102,6 @@ def _make_jax_gpu_event(
     if args is not None:
         event["args"] = args
     return event
-
-
-def _mk_ac2g(corr_id, pid, tid, ts, phase):
-    evt = {
-        "ph": phase,
-        "id": corr_id,
-        "pid": pid,
-        "tid": tid,
-        "ts": ts,
-        "cat": "ac2g",
-        "name": "ac2g",
-    }
-    if phase == "f":
-        evt["bp"] = "e"
-    return evt
-
-
-def _mk_pytorch_trace():
-    corr = 100
-    return [
-        _make_gpu_event(
-            "cpu",
-            1000,
-            100,
-            "cpu_op",
-            "aten::mm",
-            pid=100,
-            args={"Input Dims": [[32, 64], [64, 128]]},
-        ),
-        _make_gpu_event(
-            "rt",
-            1010,
-            5,
-            "cuda_runtime",
-            "hipLaunchKernel",
-            pid=100,
-            args={"correlation": corr},
-        ),
-        _make_gpu_event(
-            "kern",
-            1050,
-            50,
-            "kernel",
-            "gemm_kernel",
-            pid=0,
-            tid=7,
-            args={"correlation": corr, "stream": 7},
-        ),
-        _mk_ac2g(corr, 0, 7, 1050, "s"),
-        _mk_ac2g(corr, 0, 7, 1100, "f"),
-    ]
-
-
-def _build_analyzer(events, **kwargs):
-    tree = TraceToTree(deepcopy(events))
-    tree.build_tree(add_python_func=kwargs.pop("add_python_func", False))
-    return TreePerfAnalyzer(tree, add_python_func=False, rebuild_tree=False, **kwargs)
 
 
 class TestTreePerfModuleHelpers:
@@ -758,15 +714,6 @@ def test_build_nn_module_latency_tree():
 
 
 # --- migrated from test_treeperf_coverage.py ---
-import gzip
-import json
-
-from tests.fixtures.treeperf import (
-    _build_analyzer,
-    _make_gpu_event,
-    _mk_ac2g,
-    _mk_pytorch_trace,
-)
 
 
 class TestTreePerfCoverageExtended:
@@ -962,12 +909,6 @@ class TestTreePerfCoverageExtended:
 
 
 # --- migrated from test_coverage_95_bulk.py ---
-import os
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
-from tests.fixtures.traces import JAX_PB, _discover_trace_gz_files
-from tests.fixtures.treeperf import _sweep_treeperf_analyzer
 
 
 @pytest.mark.parametrize("trace_path", _discover_trace_gz_files())
@@ -993,12 +934,6 @@ def test_treeperf_full_method_sweep(trace_path):
 
 
 # --- migrated from test_coverage_95_bulk.py ---
-import os
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
-from tests.fixtures.traces import JAX_PB, _discover_trace_gz_files
-from tests.fixtures.treeperf import _sweep_treeperf_analyzer
 
 
 @pytest.mark.skipif(not os.path.isfile(JAX_PB), reason="JAX fixture missing")
@@ -1015,24 +950,6 @@ class TestJaxTreePerfSweep:
 
 
 # --- migrated from test_coverage_95_final.py ---
-import gzip
-import json
-import os
-from copy import deepcopy
-from unittest.mock import MagicMock, patch
-import pandas as pd
-import pytest
-from TraceLens.Reporting.compare_traces_jax_llama import (
-    Event,
-)
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
-from tests.fixtures.reporting import _mk_ac2g
-from tests.fixtures.treeperf import (
-    _build_analyzer,
-    _make_gpu_event,
-    _mk_pytorch_trace,
-)
 
 
 class TestTreePerfRemaining:
@@ -1171,17 +1088,6 @@ class TestTreePerfRemaining:
 
 
 # --- migrated from test_coverage_95_phase11.py ---
-from tests.fixtures.traces import RESNET_TRACE
-import os
-from unittest.mock import patch
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.perfmodel import (
-    _BadPerfModel,
-    _ExplodingPerfModel,
-)
-from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
 
 
 class TestTreePerfPhase11:
@@ -1265,15 +1171,6 @@ class TestTreePerfPhase11:
 
 
 # --- migrated from test_coverage_95_phase12.py ---
-from tests.fixtures.traces import RESNET_TRACE
-import gzip
-import json
-import os
-from unittest.mock import patch
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
 
 
 class TestTreePerfPhase12:
@@ -1475,15 +1372,6 @@ class TestTreePerfPhase12:
 
 
 # --- migrated from test_coverage_95_phase12.py ---
-from tests.fixtures.traces import RESNET_TRACE
-import gzip
-import json
-import os
-from unittest.mock import patch
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
 
 
 class TestTreePerfCollectPhase12:
@@ -1552,11 +1440,6 @@ class TestTreePerfCollectPhase12:
 
 
 # --- migrated from test_coverage_95_phase13.py ---
-from tests.fixtures.traces import RESNET
-import os
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 
 
 class TestTreePerfPhase13:
@@ -1576,19 +1459,6 @@ class TestTreePerfPhase13:
 
 
 # --- migrated from test_coverage_95_phase4.py ---
-from tests.fixtures.traces import TRACES_ROOT
-import json
-import os
-from copy import deepcopy
-import pandas as pd
-import pytest
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import (
-    _build_analyzer,
-    _make_gpu_event,
-    _mk_pytorch_trace,
-)
 
 
 class TestTreePerfPhase4:
@@ -1638,24 +1508,6 @@ class TestTreePerfPhase4:
 
 
 # --- migrated from test_coverage_95_phase5.py ---
-import gzip
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Reporting.compare_traces_jax_llama import (
-    Event,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import (
-    _build_analyzer,
-    _make_gpu_event,
-    _mk_ac2g,
-    _mk_pytorch_trace,
-)
 
 
 class TestTreePerfDeepPaths:
@@ -1759,13 +1611,6 @@ class TestTreePerfDeepPaths:
 
 
 # --- migrated from test_coverage_95_phase6.py ---
-import json
-import os
-from unittest.mock import patch
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
 
 
 class TestTreePerfPhase6:
@@ -1858,13 +1703,6 @@ class TestTreePerfPhase6:
 
 
 # --- migrated from test_coverage_95_phase8.py ---
-import gzip
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.traces import RESNET_TRACE as RESNET_CKPT
 
 
 class TestTreePerfPhase8:
@@ -1894,21 +1732,6 @@ class TestTreePerfPhase8:
 
 
 # --- migrated from test_coverage_95_phase9.py ---
-import json
-import os
-import pandas as pd
-import pytest
-from tests.fixtures.reporting import (
-    _rich_pftrace_events,
-)
-from TraceLens.Reporting.pftrace_hip_activity_analysis import (
-    Event,
-    HIPEvent,
-    build_event_lists,
-    build_hip_summary_df,
-    build_kernel_summary_df_for_config,
-)
-from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
 
 
 class TestTreePerfExtendedPhase9:
@@ -2001,18 +1824,6 @@ class TestTreePerfExtendedPhase9:
 
 
 # --- migrated from test_coverage_push95.py ---
-import json
-import os
-from unittest.mock import MagicMock, patch
-import pandas as pd
-import pytest
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TreePerf.jax_analyses import JaxAnalyses
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.traces import INFERENCE_ROOT
-from tests.fixtures.treeperf import _build_analyzer
 
 
 @pytest.mark.parametrize(
@@ -2043,17 +1854,6 @@ def test_merge_capture_into_graph_fixture(case_dir):
 
 
 # --- migrated from test_coverage_push95.py ---
-import json
-import os
-from unittest.mock import MagicMock, patch
-import pandas as pd
-import pytest
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TreePerf.jax_analyses import JaxAnalyses
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import _build_analyzer
 
 
 class TestTreePerfPush95:
@@ -2107,18 +1907,6 @@ class TestTreePerfPush95:
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_merged_graph_treeperf_extended ---
-from tests.fixtures.traces import INFERENCE_ROOT
-import json
-import os
-from unittest.mock import MagicMock, patch
-import pandas as pd
-import pytest
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TreePerf.jax_analyses import JaxAnalyses
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import _build_analyzer
 
 
 def test_merged_graph_treeperf_extended():
@@ -2139,19 +1927,6 @@ def test_merged_graph_treeperf_extended():
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_jax_gemm_performance_from_pb ---
-from tests.fixtures.traces import JAX_PB
-import json
-import os
-from unittest.mock import MagicMock, patch
-import pandas as pd
-import pytest
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TreePerf.jax_analyses import JaxAnalyses
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.traces import JAX_PB
-from tests.fixtures.treeperf import _build_analyzer
 
 
 @pytest.mark.skipif(not os.path.isfile(JAX_PB), reason="JAX fixture missing")
@@ -2161,17 +1936,6 @@ def test_jax_gemm_performance_from_pb():
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_gpu_only_treeperf_extended ---
-import json
-import os
-from unittest.mock import MagicMock, patch
-import pandas as pd
-import pytest
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TreePerf.jax_analyses import JaxAnalyses
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import _build_analyzer
 
 
 def test_gpu_only_treeperf_extended():
@@ -2197,21 +1961,6 @@ def test_gpu_only_treeperf_extended():
 
 
 # --- migrated from test_coverage_sweep.py ---
-from tests.fixtures.traces import INFERENCE_ROOT
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import _mk_ac2g
-from tests.fixtures.treeperf import (
-    _build_analyzer,
-    _make_gpu_event,
-    _mk_pytorch_trace,
-)
 
 
 class TestTreePerfFromFileCapture:
@@ -2239,20 +1988,6 @@ class TestTreePerfFromFileCapture:
 
 
 # --- migrated from test_coverage_sweep.py ---
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import _mk_ac2g
-from tests.fixtures.treeperf import (
-    _build_analyzer,
-    _make_gpu_event,
-    _mk_pytorch_trace,
-)
 
 
 class TestTreePerfSummaries:
@@ -2347,17 +2082,6 @@ class TestTreePerfSummaries:
 
 
 # --- migrated from test_push95_coverage.py ---
-import json
-import os
-from unittest.mock import MagicMock, patch
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.traces import _discover_trace_gz_files
-from tests.fixtures.treeperf import (
-    _build_analyzer,
-    _mk_pytorch_trace,
-)
 
 
 @pytest.mark.parametrize("trace_path", _discover_trace_gz_files())
@@ -2401,16 +2125,6 @@ def test_treeperf_from_file_full_methods(trace_path):
 
 
 # --- migrated from test_push95_coverage.py ---
-import json
-import os
-from unittest.mock import MagicMock, patch
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import (
-    _build_analyzer,
-    _mk_pytorch_trace,
-)
 
 
 class TestTreePerfSyntheticPush95:
@@ -2434,20 +2148,6 @@ class TestTreePerfSyntheticPush95:
 
 
 # --- migrated from test_coverage_final.py ---
-import gzip
-import json
-import os
-from unittest.mock import MagicMock, patch
-import pandas as pd
-import pytest
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
-from tests.fixtures.reporting import _mk_ac2g
-from tests.fixtures.treeperf import (
-    _build_analyzer,
-    _make_gpu_event,
-    _mk_pytorch_trace,
-)
 
 
 class TestTreePerfFinalCoverage:

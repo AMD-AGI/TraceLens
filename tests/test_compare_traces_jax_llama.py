@@ -33,6 +33,32 @@ from TraceLens.Reporting.compare_traces_jax_llama import (
     token_start_times,
     top_stats_by_key,
 )
+import importlib
+import sys
+from TraceLens.Reporting.compare_traces_jax_llama import (
+    Event,
+    Summary,
+    classify_stage_base,
+    compute_stage_table,
+    emit_report,
+    extract_gpu_events,
+    infer_params,
+    is_loop_multiply_fusion,
+    load_trace,
+    mk_stats,
+    percentile,
+    summarize_one,
+    token_start_times,
+    top_stats_by_key,
+)
+from TraceLens.Reporting.compare_traces_jax_llama import (
+    Event,
+    compute_stage_table,
+    extract_gpu_events,
+    load_trace,
+)
+from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
+from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
 
 
 def test_parse_range_valid():
@@ -318,31 +344,6 @@ def test_get_path():
 
 
 # --- migrated from test_coverage_95_final.py ---
-import gzip
-import importlib
-import json
-import sys
-import pytest
-from TraceLens.Reporting.compare_traces_jax_llama import (
-    Event,
-    Summary,
-    classify_stage_base,
-    compute_stage_table,
-    emit_report,
-    extract_gpu_events,
-    infer_params,
-    is_loop_multiply_fusion,
-    load_trace,
-    mk_stats,
-    percentile,
-    summarize_one,
-    token_start_times,
-    top_stats_by_key,
-)
-from tests.fixtures.reporting import (
-    _jax_llama_trace_events,
-    _write_gz_trace,
-)
 
 
 class TestCompareTracesJaxLlama:
@@ -414,15 +415,6 @@ class TestCompareTracesJaxLlama:
 
 
 # --- migrated from test_coverage_95_phase5.py ---
-import gzip
-import json
-import pytest
-from TraceLens.Reporting.compare_traces_jax_llama import (
-    Event,
-    compute_stage_table,
-    extract_gpu_events,
-    load_trace,
-)
 
 
 class TestCompareTracesEdgeCases:
@@ -462,12 +454,6 @@ class TestCompareTracesEdgeCases:
 
 
 # --- migrated from test_coverage_95_phase7.py ---
-import importlib
-import json
-import sys
-import pytest
-from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
-from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
 
 
 class TestJaxLlamaPhase7:
@@ -494,10 +480,6 @@ class TestJaxLlamaPhase7:
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_compare_traces_jax_llama_helpers ---
-import importlib
-import json
-import sys
-import pytest
 
 
 def test_compare_traces_jax_llama_helpers(tmp_path):

@@ -21,6 +21,83 @@ from TraceLens.Reporting.reporting_utils import (
     request_install,
     resolve_gpu_arch,
 )
+import gzip
+import importlib
+import sys
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Reporting import reporting_utils as ru
+from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+    generate_collective_report,
+)
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    _write_markdown_report,
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.treeperf import _mk_ac2g
+from tests.fixtures.traces import TIMESFORMER1, TIMESFORMER2
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    classify_graph_capture_trace,
+    generate_perf_report_pytorch,
+)
+from tests.fixtures.traces import RESNET_TRACE
+from tests.fixtures.traces import ROCprof_FILE
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from tests.fixtures.traces import INFERENCE_ROOT, NORM_TRACE
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    classify_graph_capture_trace,
+)
+from tests.fixtures.traces import INFERENCE_ROOT
+from TraceLens.Reporting.compare_perf_reports_pytorch import (
+    generate_compare_perf_reports_pytorch,
+)
+from tests.fixtures.reporting import _minimal_pftrace_events, _write_trace
+from tests.test_trace2tree import _mk_event
+from tests.fixtures.traces import NORM_TRACE, ROCprof_FILE, _discover_inference_cases
+from unittest.mock import patch
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from tests.fixtures.traces import NORM_TRACE
+from tests.fixtures.traces import TRACES_ROOT
+from tests.fixtures.reporting import _mk_ac2g, _mk_event
+from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
+from tests.fixtures.reporting import (
+    _create_genesis_capture,
+    _minimal_pftrace_events,
+    _write_trace,
+)
+from tests.fixtures.reporting import _mk_event, _write_trace
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    add_truncated_kernel_details as add_truncated_inference,
+    generate_perf_report_pytorch as generate_inference_report,
+    perf_report_sanity_check,
+)
+from TraceLens.Reporting.tracediff_comparison_extension import (
+    tracediff_perf_summary_from_diff_stats,
+)
+from tests.fixtures.reporting import _build_synthetic_trace
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.fixtures.reporting import _write_trace
+from tests.test_treeperf import GPU_ONLY_TRACE
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION
+from tests.fixtures.perfmodel import _ARCH
+from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
 
 
 def test_export_data_df_csv_and_xlsx(tmp_path):
@@ -1076,20 +1153,6 @@ def test_collective_report_main_cli(tmp_path):
 
 
 # --- migrated from test_coverage_95_final.py ---
-import gzip
-import importlib
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.Reporting import reporting_utils as ru
-from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
-    generate_collective_report,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import _mk_ac2g, _mk_event
 
 
 class TestAnalysisUtilsAndReporting:
@@ -1122,23 +1185,6 @@ class TestAnalysisUtilsAndReporting:
 
 
 # --- migrated from test_coverage_95_phase10.py ---
-import importlib
-import json
-import sys
-import pandas as pd
-from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
-    _write_markdown_report,
-    generate_perf_report_pftrace_hip_activity,
-)
-from TraceLens.Reporting.pftrace_hip_activity_analysis import (
-    PftraceHipActivityAnalyzer,
-)
-from TraceLens.Reporting.tracediff_comparison_extension import (
-    tracediff_perf_summary_from_diff_stats,
-)
-from tests.fixtures.reporting import _write_trace
-from tests.test_trace2tree import _mk_event
-from tests.fixtures.treeperf import _mk_ac2g
 
 
 class TestPytorchReportOverlapPhase10:
@@ -1170,12 +1216,6 @@ class TestPytorchReportOverlapPhase10:
 
 
 # --- migrated from test_coverage_95_phase11.py ---
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import _mk_ac2g
 
 
 class TestReportingPhase11:
@@ -1196,19 +1236,6 @@ class TestReportingPhase11:
 
 
 # --- migrated from test_coverage_95_phase12.py ---
-from tests.fixtures.traces import TIMESFORMER1, TIMESFORMER2
-import gzip
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    classify_graph_capture_trace,
-    generate_perf_report_pytorch,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import _mk_ac2g
 
 
 class TestReportingPhase12:
@@ -1258,19 +1285,6 @@ class TestReportingPhase12:
 
 
 # --- migrated from test_coverage_95_phase12.py ---
-from tests.fixtures.traces import RESNET_TRACE
-import gzip
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    classify_graph_capture_trace,
-    generate_perf_report_pytorch,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.treeperf import _mk_ac2g
 
 
 class TestReportingPhase12B:
@@ -1293,22 +1307,6 @@ class TestReportingPhase12B:
 
 
 # --- migrated from test_coverage_95_phase4.py ---
-from tests.fixtures.traces import ROCprof_FILE
-import importlib
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import (
-    _create_genesis_capture,
-    _minimal_pftrace_events,
-    _write_trace,
-)
 
 
 class TestReportingCliPhase4:
@@ -1429,21 +1427,6 @@ class TestReportingCliPhase4:
 
 
 # --- migrated from test_coverage_95_phase6.py ---
-from tests.fixtures.traces import INFERENCE_ROOT, NORM_TRACE
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    classify_graph_capture_trace,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import (
-    _mk_event,
-    _write_trace,
-)
-from tests.fixtures.treeperf import _mk_ac2g
 
 
 class TestReportingPhase6:
@@ -1557,27 +1540,6 @@ class TestReportingPhase6:
 
 
 # --- migrated from test_coverage_95_phase7.py ---
-from tests.fixtures.traces import INFERENCE_ROOT
-import importlib
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.Reporting.compare_perf_reports_pytorch import (
-    generate_compare_perf_reports_pytorch,
-)
-from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
-    generate_collective_report,
-)
-from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
-from TraceLens.Reporting.tracediff_comparison_extension import (
-    tracediff_perf_summary_from_diff_stats,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from tests.fixtures.reporting import (
     _minimal_pftrace_events,
@@ -1695,26 +1657,6 @@ class TestReportingPhase7:
 
 
 # --- migrated from test_coverage_95_phase7.py ---
-import importlib
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.Reporting.compare_perf_reports_pytorch import (
-    generate_compare_perf_reports_pytorch,
-)
-from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
-    generate_collective_report,
-)
-from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
-from TraceLens.Reporting.tracediff_comparison_extension import (
-    tracediff_perf_summary_from_diff_stats,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from tests.fixtures.reporting import (
     _minimal_pftrace_events,
@@ -1771,15 +1713,6 @@ class TestReportingCliPhase7:
 
 
 # --- migrated from test_coverage_95_phase9.py ---
-from tests.fixtures.traces import ROCprof_FILE
-import importlib
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from tests.fixtures.reporting import _minimal_pftrace_events, _write_trace
-from tests.test_trace2tree import _mk_event
 
 
 class TestReportingCliPhase9:
@@ -1892,21 +1825,6 @@ class TestReportingCliPhase9:
 
 
 # --- migrated from test_coverage_boost.py ---
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
-    generate_collective_report,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import (
-    _build_synthetic_trace,
-)
-from tests.test_treeperf import GPU_ONLY_TRACE
 
 
 class TestReportingCliBoost:
@@ -1989,28 +1907,6 @@ class TestReportingCliBoost:
 
 
 # --- migrated from test_coverage_push95.py ---
-from tests.fixtures.traces import ROCprof_FILE
-import importlib
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
-    generate_perf_report_pftrace_hip_activity,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import (
-    _create_genesis_capture,
-    _minimal_pftrace_events,
-    _write_trace,
-)
 
 
 class TestReportingCliPush95:
@@ -2184,27 +2080,6 @@ class TestReportingCliPush95:
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_reporting_utils_and_pseudo_registry ---
-import importlib
-import json
-import os
-import sys
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
-    generate_perf_report_pftrace_hip_activity,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import (
-    _create_genesis_capture,
-    _minimal_pftrace_events,
-    _write_trace,
-)
 
 
 def test_reporting_utils_and_pseudo_registry(tmp_path):
@@ -2223,15 +2098,6 @@ def test_reporting_utils_and_pseudo_registry(tmp_path):
 
 
 # --- migrated from test_reporting_cli_coverage.py ---
-import importlib
-import json
-import os
-import sys
-import pytest
-from tests.fixtures.reporting import (
-    _minimal_pftrace_events,
-    _write_trace,
-)
 
 
 def test_pytorch_report_main(tmp_path):
@@ -2265,33 +2131,6 @@ def test_pytorch_report_main(tmp_path):
 
 
 # --- migrated from test_push95_coverage.py ---
-from tests.fixtures.traces import NORM_TRACE, ROCprof_FILE, _discover_inference_cases
-import importlib
-import json
-import os
-import sys
-from unittest.mock import patch
-import pandas as pd
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _GDN_ANNOTATION,
-)
 from tests.fixtures.reporting import (
     _build_synthetic_trace,
     _create_genesis_capture,
@@ -2453,33 +2292,6 @@ class TestReportingPush95Coverage:
 
 
 # --- migrated from test_push95_coverage.py ---
-from tests.fixtures.traces import NORM_TRACE
-import importlib
-import json
-import os
-import sys
-from unittest.mock import patch
-import pandas as pd
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _GDN_ANNOTATION,
-)
 from tests.fixtures.reporting import (
     _build_synthetic_trace,
     _create_genesis_capture,
@@ -2788,33 +2600,6 @@ class TestPush95Phase2:
 
 
 # --- migrated from test_push95_coverage.py ---
-from tests.fixtures.traces import TRACES_ROOT
-import importlib
-import json
-import os
-import sys
-from unittest.mock import patch
-import pandas as pd
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _GDN_ANNOTATION,
-)
 from tests.fixtures.reporting import (
     _build_synthetic_trace,
     _create_genesis_capture,
@@ -3053,33 +2838,6 @@ class TestPush95Phase3:
 
 
 # --- migrated from test_push95_coverage.py ---
-from tests.fixtures.traces import TRACES_ROOT
-import importlib
-import json
-import os
-import sys
-from unittest.mock import patch
-import pandas as pd
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _GDN_ANNOTATION,
-)
 from tests.fixtures.traces import TESTS_DIR
 from tests.fixtures.reporting import (
     _build_synthetic_trace,
@@ -3277,32 +3035,6 @@ class TestPush95Phase4:
 
 
 # --- migrated from test_push95_coverage.py ---
-import importlib
-import json
-import os
-import sys
-from unittest.mock import patch
-import pandas as pd
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _GDN_ANNOTATION,
-)
 from tests.fixtures.reporting import (
     _build_synthetic_trace,
     _create_genesis_capture,
@@ -3327,32 +3059,6 @@ class TestPush95Phase5:
 
 
 # --- migrated from test_coverage_final.py ---
-import gzip
-import json
-import os
-import sys
-from unittest.mock import patch
-import pandas as pd
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    add_truncated_kernel_details as add_truncated_inference,
-    generate_perf_report_pytorch as generate_inference_report,
-    perf_report_sanity_check,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
-from tests.fixtures.perfmodel import _ARCH
-from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
 
 
 class TestPerfExtensionsFinal:
@@ -3465,32 +3171,6 @@ class TestPerfExtensionsFinal:
 
 
 # --- migrated from test_coverage_final.py ---
-import gzip
-import json
-import os
-import sys
-from unittest.mock import patch
-import pandas as pd
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    add_truncated_kernel_details as add_truncated_inference,
-    generate_perf_report_pytorch as generate_inference_report,
-    perf_report_sanity_check,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
-from tests.fixtures.perfmodel import _ARCH
-from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
 
 
 class TestReportingFinalCoverage:
@@ -3635,32 +3315,6 @@ class TestReportingFinalCoverage:
 
 
 # --- migrated from test_coverage_final.py ---
-import gzip
-import json
-import os
-import sys
-from unittest.mock import patch
-import pandas as pd
-import pytest
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    add_truncated_kernel_details as add_truncated_inference,
-    generate_perf_report_pytorch as generate_inference_report,
-    perf_report_sanity_check,
-)
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.agent import (
-    _StubAnalyzer,
-    _StubTree,
-    _kernel_event,
-    _write_minimal_orchestrator_csvs,
-)
-from tests.fixtures.perfmodel import _ARCH
-from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
 
 
 class TestReportingExtended:

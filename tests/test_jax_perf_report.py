@@ -35,6 +35,15 @@ from conftest import (
     read_perf_report_csv,
     update_reference_csvs,
 )
+import importlib
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer
+from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
+from tests.fixtures.traces import JAX_PB
+from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
+from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
 
 # ---------------------------------------------------------------------------
 # Test-trace discovery
@@ -210,14 +219,6 @@ def test_jax_perf_report_csv_regression(
 
 
 # --- migrated from test_coverage_95_final.py ---
-import importlib
-import os
-import sys
-from unittest.mock import MagicMock, patch
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer
-from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
 
 
 class TestJaxAnalysisMain:
@@ -274,15 +275,6 @@ class TestJaxAnalysisMain:
 
 
 # --- migrated from test_coverage_95_final.py ---
-from tests.fixtures.traces import JAX_PB
-import importlib
-import os
-import sys
-from unittest.mock import MagicMock, patch
-import pandas as pd
-import pytest
-from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer
-from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
 
 
 class TestJaxFromFile:
@@ -294,11 +286,6 @@ class TestJaxFromFile:
 
 
 # --- migrated from test_coverage_95_phase13.py ---
-import os
-import pandas as pd
-import pytest
-from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
-from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
 
 
 class TestJaxComparePhase13:
@@ -312,10 +299,6 @@ class TestJaxComparePhase13:
 
 
 # --- migrated from test_reporting_cli_coverage.py ---
-import importlib
-import os
-import sys
-import pytest
 
 
 def test_jax_report_main(tmp_path):

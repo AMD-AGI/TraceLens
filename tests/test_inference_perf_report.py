@@ -30,6 +30,27 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
 )
 
 from conftest import update_reference_csvs
+from tests.fixtures.traces import INFERENCE_ROOT
+import gzip
+import json
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    classify_graph_capture_trace,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from tests.fixtures.reporting import _write_trace
+from tests.fixtures.reporting import _mk_event
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_graph_to_capture_by_group,
+    merge_capture_trace_into_graph,
+    verify_subtree_events,
+)
+from tests.fixtures.reporting import _build_synthetic_trace
+from tests.fixtures.traces import _discover_inference_cases
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Input list of events is empty.*:UserWarning",
@@ -310,7 +331,6 @@ def test_inference_perf_report(
 
 
 # --- migrated from test_inference_trace_coverage.py ---
-from tests.fixtures.traces import INFERENCE_ROOT
 
 ###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
@@ -429,15 +449,6 @@ class TestCaptureMergeHelpers:
 
 
 # --- migrated from test_coverage_95_phase5.py ---
-import gzip
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from tests.fixtures.reporting import _write_trace
 
 
 class TestReportingInferenceSheets:
@@ -474,15 +485,6 @@ class TestReportingInferenceSheets:
 
 
 # --- migrated from test_coverage_95_phase8.py ---
-import gzip
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    classify_graph_capture_trace,
-)
-from tests.fixtures.reporting import _mk_event
 
 
 class TestInferenceZipPhase8:
@@ -521,22 +523,6 @@ class TestInferenceZipPhase8:
 
 
 # --- migrated from test_coverage_push95.py ---
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    _align_graph_to_capture_by_group,
-    merge_capture_trace_into_graph,
-    verify_subtree_events,
-)
-from tests.fixtures.reporting import (
-    _write_trace,
-)
-from tests.fixtures.traces import _discover_inference_cases
 
 
 @pytest.mark.parametrize("dirpath,trace_gz", _discover_inference_cases())
@@ -562,21 +548,6 @@ def test_inference_fixture_full_report(dirpath, trace_gz, tmp_path):
 
 
 # --- migrated from test_coverage_push95.py ---
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    _align_graph_to_capture_by_group,
-    merge_capture_trace_into_graph,
-    verify_subtree_events,
-)
-from tests.fixtures.reporting import (
-    _write_trace,
-)
 
 
 def test_inference_report_comparison_and_debug_columns(tmp_path, monkeypatch):
@@ -599,22 +570,6 @@ def test_inference_report_comparison_and_debug_columns(tmp_path, monkeypatch):
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_piecewise_capture_merge ---
-from tests.fixtures.traces import INFERENCE_ROOT
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    _align_graph_to_capture_by_group,
-    merge_capture_trace_into_graph,
-    verify_subtree_events,
-)
-from tests.fixtures.reporting import (
-    _write_trace,
-)
 
 
 def test_piecewise_capture_merge():
@@ -629,21 +584,6 @@ def test_piecewise_capture_merge():
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_align_streams_multistream_tiebreak ---
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    _align_graph_to_capture_by_group,
-    merge_capture_trace_into_graph,
-    verify_subtree_events,
-)
-from tests.fixtures.reporting import (
-    _write_trace,
-)
 
 
 def test_align_streams_multistream_tiebreak():
@@ -665,21 +605,6 @@ def test_align_streams_multistream_tiebreak():
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_verify_subtree_direct_match ---
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    _align_graph_to_capture_by_group,
-    merge_capture_trace_into_graph,
-    verify_subtree_events,
-)
-from tests.fixtures.reporting import (
-    _write_trace,
-)
 
 
 def test_verify_subtree_direct_match():
@@ -690,22 +615,6 @@ def test_verify_subtree_direct_match():
 
 
 # --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_inference_on_merged_tree ---
-from tests.fixtures.traces import INFERENCE_ROOT
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    _align_graph_to_capture_by_group,
-    merge_capture_trace_into_graph,
-    verify_subtree_events,
-)
-from tests.fixtures.reporting import (
-    _write_trace,
-)
 
 
 def test_inference_on_merged_tree(tmp_path):
@@ -730,17 +639,6 @@ def test_inference_on_merged_tree(tmp_path):
 
 
 # --- migrated from test_coverage_sweep.py ---
-import json
-import os
-import pandas as pd
-import pytest
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from tests.fixtures.reporting import _build_synthetic_trace
 
 
 class TestInferenceReportSweep:
