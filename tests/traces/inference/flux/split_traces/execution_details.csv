@@ -1,0 +1,3 @@
+idx,output_path,event_count,num_gpu_events,gpu_duration,gpu_busy_duration,phase_num_prefill,phase_num_prefilldecode,phase_num_decode,phase_avg_bs,phase_avg_conc,num_steps
+0,tests/traces/inference/xdit_run.DYi59O/split_traces/profile_trace_rank_0_annotation_iteration_0_execute_diffusion_1_256x256.json.gz,223819,5574,196402.24,169377.03,0,0,0,1,0,1
+1,tests/traces/inference/xdit_run.DYi59O/split_traces/profile_trace_rank_0_annotation_iteration_1_execute_diffusion_1_256x256.json.gz,223819,5574,189857.18,167380.87,0,0,0,1,0,1
