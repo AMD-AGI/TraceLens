@@ -740,3 +740,16 @@ def test_build_nn_module_latency_tree():
         == 36
     )
     assert root["GPU Time"] == pytest.approx(492163.76953125)
+
+    layer = next(
+        child for child in children if child["name"] == "nn.Module: Qwen3DecoderLayer_0"
+    )
+    attention = next(
+        tree.get_UID2event(uid)
+        for uid in tree.get_nn_module_children(layer)
+        if tree.get_UID2event(uid)["name"] == "nn.Module: Qwen3Attention_0"
+    )
+
+    assert layer["nn Parent GPU Time"] == pytest.approx(root["GPU Time"])
+    assert attention["nn Parent GPU Time"] == pytest.approx(layer["GPU Time"])
+    assert attention["Non-nn.Module GPU Time"] > 0
