@@ -493,3 +493,937 @@ def test_find_iteration_roots_generic_fallback():
     roots = find_iteration_roots_generic(events)
     assert roots is not None
     assert len(roots) >= 1
+
+
+# --- migrated from test_split_annotation_coverage.py ---
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+import gzip
+import json
+import os
+import sys
+import zipfile
+
+import pytest
+
+from TraceLens.TraceUtils import split_inference_trace_annotation as split
+
+VLLM_PRIMARY = (
+    "execute_{i}_context_3(sq128sk256sqsq1sqsk1)_generation_2(sq1sk300sqsq1sqsk1)"
+)
+SGLANG_DECODE = "step[DECODE bs={i}]"
+SGLANG_EXTEND = "step[EXTEND bs=2 toks={t}]"
+VLLM_BACKUP = "execute_context_3({i})_generation_2(50)"
+
+
+def _make_trace(root_names, pid=1, cpu_tid=10, gpu_tid=99):
+    events = []
+    corr = 1000
+    for i, name in enumerate(root_names):
+        base = 1_000 + i * 1_000
+        events.append(
+            {
+                "name": name,
+                "cat": "user_annotation",
+                "ph": "X",
+                "ts": base,
+                "dur": 100,
+                "tid": cpu_tid,
+                "pid": pid,
+                "args": {},
+            }
+        )
+        corrs = [corr + 3 * i + j for j in range(3)]
+        for j, c in enumerate(corrs):
+            events.append(
+                {
+                    "name": f"cpu_op_{i}_{j}",
+                    "cat": "cpu_op",
+                    "ph": "X",
+                    "ts": base + 1 + j * 5,
+                    "dur": 3,
+                    "tid": cpu_tid,
+                    "pid": pid,
+                    "args": {"correlation": c},
+                }
+            )
+        for j, c in enumerate(corrs[:2]):
+            events.append(
+                {
+                    "name": f"kernel_{i}_{j}",
+                    "cat": "kernel",
+                    "ph": "X",
+                    "ts": base + 200 + j * 5,
+                    "dur": 8,
+                    "tid": gpu_tid,
+                    "pid": pid,
+                    "args": {"correlation": c},
+                }
+            )
+    return {"traceEvents": events, "schemaVersion": 1}
+
+
+def _mixed_phase_roots(count=40):
+    """Alternating prefill-decode and decode-only annotation roots."""
+    names = []
+    for i in range(count):
+        if i % 3 == 0:
+            names.append(SGLANG_EXTEND.format(t=800))
+        else:
+            names.append(SGLANG_DECODE.format(i=20))
+    return names
+
+
+def test_get_filename_zip_raises_when_no_json(tmp_path):
+    zip_path = tmp_path / "empty.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("readme.txt", "no json here")
+    with pytest.raises(ValueError, match="No .json file found"):
+        split.get_filename(str(zip_path))
+
+
+def test_find_iteration_roots_backup_fallback(capsys):
+    names = [SGLANG_DECODE.format(i=20) for _ in range(8)]
+    trace = _make_trace(names)
+    roots = split.find_iteration_roots(trace["traceEvents"])
+    captured = capsys.readouterr().out
+    assert "falling back to backup patterns" in captured
+    assert roots is not None
+    assert len(roots) == 8
+
+
+def test_find_iteration_roots_generic_fallback(capsys):
+    events = [
+        {
+            "ph": "X",
+            "cat": "cpu_op",
+            "name": "training_loop",
+            "pid": 1,
+            "tid": 1,
+            "ts": 0,
+            "dur": 5000,
+            "args": {"Sequence number": 0},
+        }
+    ]
+    corr = 400
+    for iteration in range(2):
+        base_ts = 100 + iteration * 2000
+        op = {
+            "ph": "X",
+            "cat": "cpu_op",
+            "name": "iter_fwd",
+            "pid": 1,
+            "tid": 1,
+            "ts": base_ts,
+            "dur": 300,
+            "args": {"Sequence number": iteration, "correlation": corr},
+        }
+        events.append(op)
+        events.extend(
+            [
+                {
+                    "ph": "X",
+                    "cat": "kernel",
+                    "name": "k",
+                    "pid": 0,
+                    "tid": 7,
+                    "ts": base_ts + 50,
+                    "dur": 20,
+                    "args": {"correlation": corr, "stream": 7},
+                },
+                {
+                    "ph": "s",
+                    "id": corr,
+                    "pid": 0,
+                    "tid": 7,
+                    "ts": base_ts + 50,
+                    "cat": "ac2g",
+                    "name": "ac2g",
+                },
+                {
+                    "ph": "f",
+                    "id": corr,
+                    "pid": 0,
+                    "tid": 7,
+                    "ts": base_ts + 70,
+                    "cat": "ac2g",
+                    "name": "ac2g",
+                    "bp": "e",
+                },
+            ]
+        )
+        corr += 1
+
+    split.find_iteration_roots(events)
+    captured = capsys.readouterr().out
+    assert "trying generic call-tree traversal" in captured
+
+
+def test_find_steady_state_window_mixed_mode_with_conc_osl_r():
+    names = _mixed_phase_roots(48)
+    trace = _make_trace(names)
+    roots = split.find_iteration_roots(trace["traceEvents"])
+    regions, _ = split.identify_steady_state_regions(
+        split.iteration_details(roots), num_steps=16
+    )
+    window = split.find_steady_state_window(
+        roots,
+        num_steps=4,
+        steady_state_regions=regions,
+        mode="mixed",
+        CONC=20,
+        OSL=100.0,
+        R=1.5,
+    )
+    assert len(window) >= 1
+
+
+def test_find_steady_state_window_mixed_no_pd_candidates(capsys):
+    names = [SGLANG_DECODE.format(i=20) for _ in range(24)]
+    trace = _make_trace(names)
+    roots = split.find_iteration_roots(trace["traceEvents"])
+    window = split.find_steady_state_window(
+        roots,
+        num_steps=8,
+        steady_state_regions=[(0, len(roots))],
+        mode="mixed",
+    )
+    captured = capsys.readouterr().out
+    assert "falling back to the full candidate set" in captured or len(window) >= 1
+
+
+def test_find_steady_state_window_decode_only_no_pure_run():
+    names = [SGLANG_EXTEND.format(t=800) for _ in range(16)]
+    trace = _make_trace(names)
+    roots = split.find_iteration_roots(trace["traceEvents"])
+    window = split.find_steady_state_window(
+        roots,
+        num_steps=8,
+        steady_state_regions=[(0, len(roots))],
+        mode="decode_only",
+    )
+    assert window == []
+
+
+def test_find_steady_state_window_max_prefilldecode():
+    names = []
+    for i in range(24):
+        if i < 8:
+            names.append(SGLANG_EXTEND.format(t=800))
+        else:
+            names.append(SGLANG_DECODE.format(i=20))
+    trace = _make_trace(names)
+    roots = split.find_iteration_roots(trace["traceEvents"])
+    window = split.find_steady_state_window(
+        roots,
+        num_steps=8,
+        steady_state_regions=[(0, len(roots))],
+        mode="max_prefilldecode",
+    )
+    assert len(window) >= 1
+
+
+def test_find_steady_state_window_max_prefilldecode_empty():
+    names = [SGLANG_DECODE.format(i=20) for _ in range(16)]
+    trace = _make_trace(names)
+    roots = split.find_iteration_roots(trace["traceEvents"])
+    window = split.find_steady_state_window(
+        roots,
+        num_steps=8,
+        steady_state_regions=[(0, len(roots))],
+        mode="max_prefilldecode",
+    )
+    assert window == []
+
+
+def test_find_steady_state_window_invalid_mode():
+    names = [VLLM_PRIMARY.format(i=i) for i in range(8)]
+    trace = _make_trace(names)
+    roots = split.find_iteration_roots(trace["traceEvents"])
+    with pytest.raises(ValueError, match="Unknown mode"):
+        split.find_steady_state_window(
+            roots, num_steps=4, steady_state_regions=[(0, 8)], mode="invalid"
+        )
+
+
+def test_find_steady_state_window_conc_mismatch_warning(capsys):
+    names = [SGLANG_DECODE.format(i=5) for _ in range(16)]
+    trace = _make_trace(names)
+    roots = split.find_iteration_roots(trace["traceEvents"])
+    split.find_steady_state_window(
+        roots,
+        num_steps=8,
+        steady_state_regions=[(0, len(roots))],
+        mode="mixed",
+        CONC=999,
+    )
+    assert "expected peak concurrency" in capsys.readouterr().out
+
+
+def test_extract_and_save_empty_roots(tmp_path):
+    trace = _make_trace([VLLM_PRIMARY.format(i=0)])
+    events = trace["traceEvents"]
+    gpu_map, flow_map, meta = split.preprocess_trace(events)
+    summary = split.extract_and_save(
+        [[]],
+        events,
+        trace,
+        str(tmp_path),
+        "trace",
+        "annotation_iteration",
+        0,
+        1,
+        gpu_map,
+        flow_map,
+        meta,
+    )
+    assert summary == []
+
+
+def test_extract_phases_and_save_decode_branch(tmp_path):
+    names = []
+    for i in range(8):
+        if i % 2 == 0:
+            names.append(SGLANG_EXTEND.format(t=800))
+        else:
+            names.append(SGLANG_DECODE.format(i=20))
+    trace = _make_trace(names)
+    events = trace["traceEvents"]
+    gpu_map, flow_map, meta = split.preprocess_trace(events)
+    roots = split.find_iteration_roots(events)
+    summary = split.extract_phases_and_save(
+        [roots],
+        events,
+        trace,
+        str(tmp_path),
+        "trace",
+        "annotation_iteration",
+        0,
+        1,
+        gpu_map,
+        flow_map,
+        meta,
+    )
+    assert len(summary) >= 2
+    labels = {os.path.basename(item["output_path"]) for item in summary}
+    assert any("prefilldecode_" in name for name in labels)
+    assert any("decode_" in name for name in labels)
+
+
+def test_extract_phases_and_save_skips_non_annotation_prefix(tmp_path):
+    trace = _make_trace([VLLM_PRIMARY.format(i=0)])
+    events = trace["traceEvents"]
+    gpu_map, flow_map, meta = split.preprocess_trace(events)
+    roots = split.find_iteration_roots(events)
+    summary = split.extract_phases_and_save(
+        [[r] for r in roots],
+        events,
+        trace,
+        str(tmp_path),
+        "trace",
+        "run_iteration",
+        0,
+        1,
+        gpu_map,
+        flow_map,
+        meta,
+    )
+    assert summary == []
+
+
+def test_identify_steady_state_regions_end_and_middle():
+    details = [{"num_requests": 2} for _ in range(6)]
+    details += [{"num_requests": 20} for _ in range(20)]
+    details += [{"num_requests": 2} for _ in range(6)]
+    regions, global_max = split.identify_steady_state_regions(details, num_steps=16)
+    assert global_max == 20
+    assert len(regions) >= 1
+
+
+def test_compute_reference_pd_ratio_median_fallback(capsys):
+    iter_details = []
+    for i in range(20):
+        iter_details.append(
+            {
+                "num_requests": 20,
+                "context_requests": 3 if i < 10 else 0,
+                "generation_requests": 2 if i >= 10 else 20,
+            }
+        )
+    regions = [(0, 20)]
+    _, ref_ratio, _ = split.compute_reference_pd_ratio(regions, iter_details)
+    assert 0.0 <= ref_ratio <= 1.0
+
+
+def test_main_store_single_iteration(tmp_path):
+    names = [VLLM_PRIMARY.format(i=i) for i in range(6)]
+    trace = _make_trace(names)
+    trace_path = tmp_path / "trace.json"
+    trace_path.write_text(json.dumps(trace))
+    out_dir = tmp_path / "out"
+
+    old_argv = sys.argv
+    sys.argv = [
+        "split_inference_trace_annotation",
+        str(trace_path),
+        "-o",
+        str(out_dir),
+        "--store-single-iteration",
+        "--iterations",
+        "0:3",
+    ]
+    try:
+        split.main()
+    finally:
+        sys.argv = old_argv
+
+    assert out_dir.exists()
+    assert (out_dir / "execution_details.json").exists()
+    assert (out_dir / "execution_details.csv").exists()
+
+
+def test_main_find_steady_state(tmp_path):
+    names = _mixed_phase_roots(40)
+    trace = _make_trace(names)
+    trace_path = tmp_path / "trace.json.gz"
+    with gzip.open(trace_path, "wt", encoding="utf-8") as f:
+        json.dump(trace, f)
+    out_dir = tmp_path / "steady"
+
+    old_argv = sys.argv
+    sys.argv = [
+        "split_inference_trace_annotation",
+        str(trace_path),
+        "-o",
+        str(out_dir),
+        "--find-steady-state",
+        "--num-steps",
+        "8",
+    ]
+    try:
+        split.main()
+    finally:
+        sys.argv = old_argv
+
+    assert (out_dir / "execution_details.json").exists()
+    with open(out_dir / "execution_details.json") as f:
+        details = json.load(f)
+    labels = {os.path.basename(d["output_path"]) for d in details}
+    assert any("mixed_steady_state" in name for name in labels)
+    assert any("decode_only_steady_state" in name for name in labels)
+
+
+def test_main_divide_phases(tmp_path):
+    names = _mixed_phase_roots(24)
+    trace = _make_trace(names)
+    trace_path = tmp_path / "trace.json"
+    trace_path.write_text(json.dumps(trace))
+    out_dir = tmp_path / "phases"
+
+    old_argv = sys.argv
+    sys.argv = [
+        "split_inference_trace_annotation",
+        str(trace_path),
+        "-o",
+        str(out_dir),
+        "--divide-phases",
+        "--num-steps",
+        "12",
+    ]
+    try:
+        split.main()
+    finally:
+        sys.argv = old_argv
+
+    assert os.path.isdir(out_dir / "prefilldecodemix") or os.path.isdir(
+        out_dir / "decode_only"
+    )
+
+
+def test_main_explicit_iteration_range(tmp_path):
+    names = [VLLM_BACKUP.format(i=100 + i) for i in range(12)]
+    trace = _make_trace(names)
+    trace_path = tmp_path / "trace.json"
+    trace_path.write_text(json.dumps(trace))
+    out_dir = tmp_path / "range"
+
+    old_argv = sys.argv
+    sys.argv = [
+        "split_inference_trace_annotation",
+        str(trace_path),
+        "-o",
+        str(out_dir),
+        "--iterations",
+        "2:6",
+    ]
+    try:
+        split.main()
+    finally:
+        sys.argv = old_argv
+
+    assert out_dir.exists()
+
+
+def test_main_dummy_runs_and_steady_state_message(tmp_path, capsys):
+    dummy_name = "vllm/v1/worker/gpu_model_runner.py(99): _dummy_run"
+    trace = {
+        "traceEvents": [
+            {
+                "name": dummy_name,
+                "cat": "cpu_op",
+                "ph": "X",
+                "ts": 0,
+                "dur": 100,
+                "tid": 1,
+                "pid": 1,
+                "args": {},
+            }
+        ],
+        "schemaVersion": 1,
+    }
+    trace_path = tmp_path / "dummy_trace.json"
+    trace_path.write_text(json.dumps(trace))
+    out_dir = tmp_path / "dummy"
+
+    old_argv = sys.argv
+    sys.argv = [
+        "split_inference_trace_annotation",
+        str(trace_path),
+        "-o",
+        str(out_dir),
+        "--dummy",
+        "0:1",
+        "--find-steady-state",
+    ]
+    try:
+        split.main()
+    finally:
+        sys.argv = old_argv
+
+    assert (
+        "finding steady state without annotations not supported"
+        in capsys.readouterr().out
+    )
+
+
+# --- migrated from test_coverage_95_final.py ---
+import gzip
+import importlib
+import json
+import os
+import sys
+from copy import deepcopy
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.Reporting import reporting_utils as ru
+from TraceLens.Reporting.compare_traces_jax_llama import (
+    Event,
+    Summary,
+    classify_stage_base,
+    compute_stage_table,
+    emit_report,
+    extract_gpu_events,
+    infer_params,
+    is_loop_multiply_fusion,
+    load_trace,
+    mk_stats,
+    percentile,
+    summarize_one,
+    token_start_times,
+    top_stats_by_key,
+)
+from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+    _resolve_trace_files_glob,
+    generate_collective_report,
+)
+from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
+from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
+    apply_pseudo_op_extensions,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
+from TraceLens.util import RocprofParser
+from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
+from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
+from tests.fixtures.reporting import _mk_ac2g, _mk_event
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestCaptureMergeAndMoe:
+    def test_align_streams_multistream(self):
+        graph = [
+            {"name": "k1", "args": {"stream": 1}},
+            {"name": "k2", "args": {"stream": 2}},
+        ]
+        capture = [
+            {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+            {"name": "hipLaunchKernel", "args": {"kernel": "k2"}},
+        ]
+        aligned = align_streams(graph, capture)
+        assert aligned is not None
+        assert len(aligned) == 2
+
+    def test_moe_biased_grouped_topk(self):
+        evt = {
+            "args": {
+                "Input Dims": [(32, 256), (256,), (32, 8), (32, 8)],
+                "Input type": ["c10::Float"] * 3 + ["c10::Int"],
+            }
+        }
+        model = moe_ext.BiasedGroupedTopk(evt)
+        assert model.flops() > 0
+
+    def test_moe_sort_scatter_missing_kernel_details(self):
+        evt = {
+            "args": {
+                "Input Dims": [(32, 4096), (32, 8)],
+                "Input type": ["c10::BFloat16", "c10::Int"],
+            }
+        }
+        model = moe_ext.MoeSortScatterGather(evt)
+        assert model.bytes() is None or model.bytes() >= 0
+
+
+# --- migrated from test_coverage_95_phase10.py ---
+import importlib
+import json
+import sys
+import types
+from copy import deepcopy
+from typing import Dict, List
+from unittest.mock import patch
+import pandas as pd
+from TraceLens.Agent.Analysis.utils import arch_utils
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    _write_markdown_report,
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Reporting.pftrace_hip_activity_analysis import (
+    PftraceHipActivityAnalyzer,
+    classify,
+)
+from TraceLens.Reporting.tracediff_comparison_extension import (
+    tracediff_perf_summary_from_diff_stats,
+)
+from TraceLens.Trace2Tree.extensions.moe_aiter_pseudo_ops import (
+    _create_pseudo_op_moe_fused_aiter,
+    _has_cpu_op_descendant,
+    create_pseudo_ops_moe_fused_aiter,
+)
+from TraceLens.Trace2Tree.extensions.moe_flydsl_pseudo_ops import (
+    FUSED_MOE_PARENT,
+    create_pseudo_ops_moe_flydsl,
+)
+from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
+    _create_pseudo_op_moe_gptq_awq,
+    create_pseudo_ops_moe_gptq_awq,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from tests.fixtures.reporting import _write_trace
+from tests.test_trace2tree import _add_gpu_chain, _mk_event
+from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
+
+
+class TestSplitAnnotationDummyPhase10:
+    def test_main_dummy_store_single_iteration(self, tmp_path):
+        from TraceLens.TraceUtils import split_inference_trace_annotation as split
+
+        dummy_name = "vllm/v1/worker/gpu_model_runner.py(99): _dummy_run"
+        trace = {"traceEvents": [], "schemaVersion": 1}
+        for i in range(5):
+            trace["traceEvents"].append(
+                {
+                    "name": dummy_name,
+                    "cat": "user_annotation",
+                    "ph": "X",
+                    "ts": 1000 + i * 1000,
+                    "dur": 100,
+                    "tid": 10,
+                    "pid": 1,
+                    "args": {},
+                }
+            )
+        trace_path = tmp_path / "trace.json"
+        trace_path.write_text(json.dumps(trace))
+        out_dir = tmp_path / "out"
+        old_argv = sys.argv
+        sys.argv = [
+            "split_inference_trace_annotation",
+            str(trace_path),
+            "--output-dir",
+            str(out_dir),
+            "--dummy",
+            "1:3",
+            "--store-single-iteration",
+        ]
+        try:
+            split.main()
+        finally:
+            sys.argv = old_argv
+        assert (out_dir / "execution_details.json").exists()
+
+
+# --- migrated from test_coverage_95_phase5.py ---
+from tests.fixtures.traces import INFERENCE_ROOT
+import gzip
+import json
+import os
+import pandas as pd
+import pytest
+from TraceLens.PerfModel import perf_model
+from TraceLens.Reporting.compare_traces_jax_llama import (
+    Event,
+    compute_stage_table,
+    extract_gpu_events,
+    load_trace,
+)
+from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    find_closest_batch_size,
+    find_execution_details,
+    merge_capture_trace_into_graph,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
+from tests.fixtures.reporting import _minimal_pftrace_events, _write_trace
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_ac2g,
+    _mk_pytorch_trace,
+)
+
+
+class TestCaptureMergeDeep:
+    def test_find_closest_batch_size_and_execution_details(self):
+        assert find_closest_batch_size(128, [64, 256, 512]) == 256
+        root = {"name": "execute_128_context_3_generation_2"}
+        assert find_execution_details(root) == "128"
+
+    @pytest.mark.skipif(
+        not os.path.isdir(
+            os.path.join(INFERENCE_ROOT, "sglang_decode", "capture_traces")
+        ),
+        reason="capture fixture missing",
+    )
+    def test_merge_capture_full_inference_fixture(self):
+        case = os.path.join(INFERENCE_ROOT, "sglang_decode")
+        trace_gz = next(f for f in os.listdir(case) if f.endswith(".json.gz"))
+        graph = os.path.join(case, trace_gz)
+        capture = os.path.join(case, "capture_traces")
+        metadata = os.path.join(capture, "execution_details.json")
+        merged = merge_capture_trace_into_graph(capture, metadata, graph)
+        assert len(merged.events) > 0
+        analyzer = TreePerfAnalyzer(merged, rebuild_tree=False)
+        assert analyzer.get_df_gpu_timeline() is not None
+
+
+# --- migrated from test_coverage_push95.py ---
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_graph_to_capture_by_group,
+    find_closest_batch_size,
+    load_capture_folder,
+    merge_capture_trace_into_graph,
+    verify_subtree_events,
+)
+from TraceLens.TreePerf.jax_analyses import JaxAnalyses
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
+from tests.fixtures.reporting import (
+    _create_genesis_capture,
+    _minimal_pftrace_events,
+    _write_trace,
+)
+from tests.fixtures.treeperf import _build_analyzer
+
+
+class TestCaptureMergePush95:
+    def test_load_capture_folder_skips_invalid(self, tmp_path):
+        meta = tmp_path / "execution_details.json"
+        meta.write_text(
+            json.dumps(
+                [
+                    {"file": "missing.json.gz", "batch_size": "bad", "mode": "FULL"},
+                    {"file": "ok.json.gz", "batch_size": 32, "mode": "FULL"},
+                ]
+            )
+        )
+        (tmp_path / "ok.json.gz").write_bytes(
+            b"\x1f\x8b"
+        )  # invalid gzip; load may skip
+        result, batch_sizes = load_capture_folder(str(tmp_path), str(meta))
+        assert isinstance(result, dict)
+        assert 32 in batch_sizes or batch_sizes == []
+
+    def test_find_closest_batch_size(self):
+        assert find_closest_batch_size(30, [16, 32, 64]) == 32
+        assert find_closest_batch_size(100, [16, 32]) is None
+
+    def test_verify_subtree_group_alignment(self):
+        capture = [
+            {"name": "hipLaunchKernel", "args": {"kernel": "k2"}},
+            {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+        ]
+        graph = [
+            {"name": "k1", "args": {}},
+            {"name": "k2", "args": {}},
+        ]
+        code, cap, gr = verify_subtree_events(capture, graph)
+        assert code in (0, 3)
+
+    def test_align_graph_to_capture_by_group_success(self):
+        capture = [
+            {"name": "hipLaunchKernel", "args": {"kernel": "a"}},
+            {"name": "hipLaunchKernel", "args": {"kernel": "b"}},
+        ]
+        graph = [
+            {"name": "b", "args": {}},
+            {"name": "a", "args": {}},
+        ]
+        aligned = _align_graph_to_capture_by_group(capture, graph)
+        assert aligned is not None
+        assert [e["name"] for e in aligned] == ["a", "b"]
+
+
+# --- migrated from test_coverage_sweep.py ---
+import json
+import os
+import pandas as pd
+import pytest
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.perfmodel import _GDN_ANNOTATION
+from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestCaptureMergeIntegration:
+    def test_merge_synthetic_capture_graph(self, tmp_path):
+        graph_events = {
+            "traceEvents": [
+                {
+                    "ph": "X",
+                    "name": "hipGraphLaunch",
+                    "cat": "cuda_runtime",
+                    "ts": 0,
+                    "dur": 100,
+                    "args": {},
+                },
+                {
+                    "ph": "X",
+                    "name": "gemm_k",
+                    "cat": "kernel",
+                    "ts": 50,
+                    "dur": 40,
+                    "args": {"stream": 7},
+                },
+            ]
+        }
+        graph_path = tmp_path / "graph.json.gz"
+        import gzip
+
+        with gzip.open(graph_path, "wt") as f:
+            json.dump(graph_events, f)
+        cap_dir = tmp_path / "capture_traces"
+        cap_dir.mkdir()
+        (cap_dir / "execution_details.json").write_text(
+            json.dumps(
+                [{"batch_size": 32, "mode": "FULL", "capture_file": "cap0.json"}]
+            )
+        )
+        cap_events = {
+            "traceEvents": [
+                {
+                    "ph": "X",
+                    "name": "StreamBeginCapture",
+                    "cat": "cuda_runtime",
+                    "ts": 0,
+                    "dur": 1,
+                    "args": {},
+                },
+                {
+                    "ph": "X",
+                    "name": "StreamEndCapture",
+                    "cat": "cuda_runtime",
+                    "ts": 10,
+                    "dur": 1,
+                    "args": {},
+                },
+                {
+                    "ph": "X",
+                    "name": "hipLaunchKernel",
+                    "cat": "cuda_runtime",
+                    "ts": 20,
+                    "dur": 5,
+                    "args": {"kernel": "gemm_k"},
+                },
+            ]
+        }
+        (cap_dir / "cap0.json").write_text(json.dumps(cap_events))
+        try:
+            merged = merge_capture_trace_into_graph(
+                str(cap_dir),
+                str(cap_dir / "execution_details.json"),
+                str(graph_path),
+            )
+            assert len(merged.events) > 0
+        except Exception:
+            pytest.skip("synthetic capture merge not supported in this environment")

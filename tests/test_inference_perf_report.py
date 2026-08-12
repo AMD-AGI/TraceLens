@@ -307,3 +307,691 @@ def test_inference_perf_report(
             f"'{sheet_name}' has differences in {profile_path}:"
             f"{format_diff_details(diff_cols)}"
         )
+
+
+# --- migrated from test_inference_trace_coverage.py ---
+from tests.fixtures.traces import INFERENCE_ROOT
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+import os
+
+import pytest
+
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_capture_to_graph,
+    _align_graph_to_capture_by_group,
+    align_streams,
+    capture_has_kernel_names,
+    merge_capture_trace_into_graph,
+)
+
+INFERENCE_ROOT = os.path.join(os.path.dirname(__file__), "traces/inference")
+
+
+def _discover_cases():
+    if not os.path.isdir(INFERENCE_ROOT):
+        return []
+    cases = []
+    for entry in sorted(os.listdir(INFERENCE_ROOT)):
+        dirpath = os.path.join(INFERENCE_ROOT, entry)
+        if not os.path.isdir(dirpath):
+            continue
+        gz = [f for f in os.listdir(dirpath) if f.endswith(".json.gz")]
+        if not gz:
+            continue
+        capture = os.path.join(dirpath, "capture_traces")
+        cases.append(
+            pytest.param(
+                dirpath,
+                gz[0],
+                capture if os.path.isdir(capture) else None,
+                id=entry,
+            )
+        )
+    return cases
+
+
+@pytest.mark.parametrize("dirpath,trace_gz,capture_folder", _discover_cases())
+def test_inference_report_extended_flags(dirpath, trace_gz, capture_folder, tmp_path):
+    trace_path = os.path.join(dirpath, trace_gz)
+    out = tmp_path / "out"
+    generate_perf_report_pytorch(
+        profile_json_path=trace_path,
+        output_csvs_dir=str(out),
+        output_xlsx_path=str(tmp_path / "report.xlsx"),
+        collective_analysis=True,
+        kernel_summary=True,
+        short_kernel_study=True,
+        include_overlap_info=True,
+        group_by_parent_module=True,
+        group_by_num_kernels=True,
+        enable_pseudo_ops=True,
+        micro_idle_thresh_us=1,
+    )
+    assert (out / "gpu_timeline.csv").exists()
+
+
+@pytest.mark.parametrize("dirpath,trace_gz,capture_folder", _discover_cases())
+def test_merge_capture_trace_integration(dirpath, trace_gz, capture_folder):
+    if capture_folder is None:
+        pytest.skip("no capture traces")
+    metadata = os.path.join(capture_folder, "execution_details.json")
+    if not os.path.isfile(metadata):
+        pytest.skip("no execution_details.json")
+    trace_path = os.path.join(dirpath, trace_gz)
+    merged = merge_capture_trace_into_graph(capture_folder, metadata, trace_path)
+    assert len(merged.events) > 0
+
+
+class TestCaptureMergeHelpers:
+    def test_align_capture_to_graph_memcpy(self):
+        capture = [{"name": "cudaMemcpy", "args": {}}]
+        graph = [{"name": "MemcpyHtoD", "args": {}}]
+        aligned = _align_capture_to_graph(capture, graph)
+        assert aligned is not None
+
+    def test_align_capture_to_graph_mismatch(self):
+        capture = [{"name": "hipLaunchKernel", "args": {"kernel": "a"}}]
+        graph = [{"name": "b", "args": {}}]
+        assert _align_capture_to_graph(capture, graph) is None
+
+    def test_align_graph_to_capture_group_mismatch(self):
+        capture = [
+            {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+            {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+        ]
+        graph = [{"name": "k1", "args": {}}]
+        assert _align_graph_to_capture_by_group(capture, graph) is None
+
+    def test_align_streams_and_capture_has_names(self):
+        graph = [
+            {"name": "k1", "args": {"stream": 1}},
+            {"name": "k2", "args": {"stream": 2}},
+        ]
+        capture = [
+            {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+            {"name": "hipLaunchKernel", "args": {"kernel": "k2"}},
+        ]
+        assert capture_has_kernel_names(capture)
+        aligned = align_streams(graph, capture)
+        assert aligned is not None
+
+    def test_capture_missing_kernel_name(self):
+        capture = [{"name": "hipLaunchKernel", "args": {}}]
+        assert capture_has_kernel_names(capture) is False
+
+
+# --- migrated from test_coverage_95_phase5.py ---
+import gzip
+import json
+import os
+import pandas as pd
+import pytest
+from TraceLens.PerfModel import perf_model
+from TraceLens.Reporting.compare_traces_jax_llama import (
+    Event,
+    compute_stage_table,
+    extract_gpu_events,
+    load_trace,
+)
+from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    find_closest_batch_size,
+    find_execution_details,
+    merge_capture_trace_into_graph,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
+from tests.fixtures.reporting import _minimal_pftrace_events, _write_trace
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_ac2g,
+    _mk_pytorch_trace,
+)
+
+
+class TestReportingInferenceSheets:
+    def test_inference_all_report_variants(self, tmp_path):
+        from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+            generate_perf_report_pytorch as gen_inf,
+        )
+
+        trace = _write_trace(
+            tmp_path,
+            [
+                ("aten::mm", "gemm_kernel", 100),
+                ("aten::add", "vectorized_elementwise_kernel", 20),
+                ("aten::native_layer_norm", "layer_norm_kernel", 30),
+            ],
+        )
+        gen_inf(
+            profile_json_path=trace,
+            output_csvs_dir=str(tmp_path / "out"),
+            output_xlsx_path=str(tmp_path / "r.xlsx"),
+            collective_analysis=True,
+            enable_pseudo_ops=True,
+            kernel_summary=True,
+            short_kernel_study=True,
+            include_overlap_info=True,
+            group_by_parent_module=True,
+            group_by_num_kernels=True,
+            topk_ops=10,
+            topk_roofline_ops=5,
+            include_unlinked_kernels=True,
+            include_call_stack=True,
+        )
+        assert (tmp_path / "out" / "gpu_timeline.csv").exists()
+
+
+# --- migrated from test_coverage_95_phase8.py ---
+import gzip
+import json
+import os
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.PerfModel import perf_model
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    classify_graph_capture_trace,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.test_conv_backward_bytes import _conv_bias_fwd_event
+from tests.fixtures.reporting import _mk_event
+
+
+class TestInferenceZipPhase8:
+    def test_classify_graph_capture_json_gz(self, tmp_path):
+        capture_dir = tmp_path / "cap"
+        capture_dir.mkdir()
+        events = {
+            "traceEvents": [
+                _mk_event(
+                    "cpu_op",
+                    "vllm/v1/worker/gpu_model_runner.py(1): _dummy_run",
+                    1000,
+                    50,
+                    1,
+                    1,
+                    {},
+                ),
+                _mk_event("cuda_runtime", "cudaStreamBeginCapture", 1100, 10, 1, 1, {}),
+                _mk_event(
+                    "cpu_op",
+                    "aten::mm",
+                    1200,
+                    20,
+                    1,
+                    1,
+                    {"Input Dims": [[4, 8], [8, 16]]},
+                ),
+            ]
+        }
+        gz_path = capture_dir / "graph_capture_rank_0.json.gz"
+        with gzip.open(gz_path, "wt", encoding="utf-8") as f:
+            json.dump(events, f)
+        classify_graph_capture_trace(str(capture_dir))
+        details = json.loads((capture_dir / "execution_details.json").read_text())
+        assert details[0]["batch_size"] == 4
+
+
+# --- migrated from test_coverage_push95.py ---
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch as generate_training_report,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_graph_to_capture_by_group,
+    find_closest_batch_size,
+    load_capture_folder,
+    merge_capture_trace_into_graph,
+    verify_subtree_events,
+)
+from TraceLens.TreePerf.jax_analyses import JaxAnalyses
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
+from tests.fixtures.reporting import (
+    _create_genesis_capture,
+    _minimal_pftrace_events,
+    _write_trace,
+)
+from tests.fixtures.traces import _discover_inference_cases
+from tests.fixtures.treeperf import _build_analyzer
+
+
+@pytest.mark.parametrize("dirpath,trace_gz", _discover_inference_cases())
+def test_inference_fixture_full_report(dirpath, trace_gz, tmp_path):
+    trace_path = os.path.join(dirpath, trace_gz)
+    out = tmp_path / "csv"
+    result = generate_inference_report(
+        profile_json_path=trace_path,
+        output_csvs_dir=str(out),
+        output_xlsx_path=str(tmp_path / "report.xlsx"),
+        collective_analysis=False,
+        enable_pseudo_ops=True,
+        kernel_summary=True,
+        short_kernel_study=True,
+        group_by_parent_module=True,
+        group_by_num_kernels=True,
+        include_overlap_info=True,
+        topk_ops=10,
+        topk_roofline_ops=5,
+    )
+    assert (out / "gpu_timeline.csv").exists()
+    assert "gpu_timeline" in result
+
+
+# --- migrated from test_coverage_push95.py ---
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch as generate_training_report,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_graph_to_capture_by_group,
+    find_closest_batch_size,
+    load_capture_folder,
+    merge_capture_trace_into_graph,
+    verify_subtree_events,
+)
+from TraceLens.TreePerf.jax_analyses import JaxAnalyses
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
+from tests.fixtures.reporting import (
+    _create_genesis_capture,
+    _minimal_pftrace_events,
+    _write_trace,
+)
+from tests.fixtures.treeperf import _build_analyzer
+
+
+def test_inference_report_comparison_and_debug_columns(tmp_path, monkeypatch):
+    trace1 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "t1.json")
+    trace2 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 120)], "t2.json")
+    monkeypatch.setenv("TRACELENS_DEBUG", "1")
+    result = generate_inference_report(
+        profile_json_path=trace1,
+        comparison_json_path=trace2,
+        output_csvs_dir=str(tmp_path / "cmp_csvs"),
+        output_xlsx_path=str(tmp_path / "cmp.xlsx"),
+        include_call_stack=True,
+        group_by_parent_module=True,
+        collective_analysis=False,
+    )
+    assert "gpu_timeline" in result
+    up = result.get("unified_perf_summary")
+    if up is not None and not up.empty and "call_stack_full" in up.columns:
+        assert "entry_point" in up.columns
+
+
+# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_piecewise_capture_merge ---
+from tests.fixtures.traces import INFERENCE_ROOT
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch as generate_training_report,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_graph_to_capture_by_group,
+    find_closest_batch_size,
+    load_capture_folder,
+    merge_capture_trace_into_graph,
+    verify_subtree_events,
+)
+from TraceLens.TreePerf.jax_analyses import JaxAnalyses
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
+from tests.fixtures.reporting import (
+    _create_genesis_capture,
+    _minimal_pftrace_events,
+    _write_trace,
+)
+from tests.fixtures.treeperf import _build_analyzer
+
+
+def test_piecewise_capture_merge():
+    case_dir = os.path.join(INFERENCE_ROOT, "vllm_prefilldecode_piecewise")
+    capture = os.path.join(case_dir, "capture_traces")
+    metadata = os.path.join(capture, "execution_details.json")
+    graph = os.path.join(case_dir, "graph_execution.json.gz")
+    if not all(os.path.isfile(p) for p in (metadata, graph)):
+        pytest.skip("piecewise fixture missing")
+    merged = merge_capture_trace_into_graph(capture, metadata, graph)
+    assert len(merged.events) > 1000
+
+
+# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_align_streams_multistream_tiebreak ---
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch as generate_training_report,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_graph_to_capture_by_group,
+    find_closest_batch_size,
+    load_capture_folder,
+    merge_capture_trace_into_graph,
+    verify_subtree_events,
+)
+from TraceLens.TreePerf.jax_analyses import JaxAnalyses
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
+from tests.fixtures.reporting import (
+    _create_genesis_capture,
+    _minimal_pftrace_events,
+    _write_trace,
+)
+from tests.fixtures.treeperf import _build_analyzer
+
+
+def test_align_streams_multistream_tiebreak():
+    from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
+
+    graph = [
+        {"name": "k1", "args": {"stream": 1}},
+        {"name": "k1", "args": {"stream": 2}},
+        {"name": "k2", "args": {"stream": 1}},
+    ]
+    capture = [
+        {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+        {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+        {"name": "hipLaunchKernel", "args": {"kernel": "k2"}},
+    ]
+    aligned = align_streams(graph, capture)
+    assert aligned is not None
+    assert len(aligned) == 3
+
+
+# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_verify_subtree_direct_match ---
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch as generate_training_report,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_graph_to_capture_by_group,
+    find_closest_batch_size,
+    load_capture_folder,
+    merge_capture_trace_into_graph,
+    verify_subtree_events,
+)
+from TraceLens.TreePerf.jax_analyses import JaxAnalyses
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
+from tests.fixtures.reporting import (
+    _create_genesis_capture,
+    _minimal_pftrace_events,
+    _write_trace,
+)
+from tests.fixtures.treeperf import _build_analyzer
+
+
+def test_verify_subtree_direct_match():
+    capture = [{"name": "hipLaunchKernel", "args": {"kernel": "k1"}}]
+    graph = [{"name": "k1", "args": {}}]
+    code, cap, gr = verify_subtree_events(capture, graph)
+    assert code == 1
+
+
+# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_inference_on_merged_tree ---
+from tests.fixtures.traces import INFERENCE_ROOT
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch as generate_training_report,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_graph_to_capture_by_group,
+    find_closest_batch_size,
+    load_capture_folder,
+    merge_capture_trace_into_graph,
+    verify_subtree_events,
+)
+from TraceLens.TreePerf.jax_analyses import JaxAnalyses
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
+from tests.fixtures.reporting import (
+    _create_genesis_capture,
+    _minimal_pftrace_events,
+    _write_trace,
+)
+from tests.fixtures.treeperf import _build_analyzer
+
+
+def test_inference_on_merged_tree(tmp_path):
+    case_dir = os.path.join(INFERENCE_ROOT, "vllm_decode_full")
+    capture = os.path.join(case_dir, "capture_traces")
+    metadata = os.path.join(capture, "execution_details.json")
+    graph = os.path.join(case_dir, "graph_execution.json.gz")
+    if not all(os.path.isfile(p) for p in (metadata, graph)):
+        pytest.skip("fixture missing")
+    merged = merge_capture_trace_into_graph(capture, metadata, graph)
+    result = generate_inference_report(
+        profile_json_path=graph,
+        augmented_tree=merged,
+        output_csvs_dir=str(tmp_path / "merged_csv"),
+        output_xlsx_path=str(tmp_path / "merged.xlsx"),
+        collective_analysis=False,
+        enable_pseudo_ops=True,
+        group_by_parent_module=True,
+        kernel_summary=True,
+    )
+    assert "gpu_timeline" in result
+
+
+# --- migrated from test_coverage_sweep.py ---
+import json
+import os
+import pandas as pd
+import pytest
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.perfmodel import _GDN_ANNOTATION
+from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestInferenceReportSweep:
+    def test_full_flag_matrix(self, tmp_path):
+        trace = tmp_path / "trace.json"
+        trace.write_text(
+            json.dumps(
+                _build_synthetic_trace(
+                    [
+                        ("aten::mm", "gemm_kernel", 100),
+                        ("aten::add", "vectorized_elementwise_kernel", 20),
+                    ]
+                )
+            )
+        )
+        generate_inference_report(
+            profile_json_path=str(trace),
+            output_csvs_dir=str(tmp_path / "out"),
+            output_xlsx_path=str(tmp_path / "r.xlsx"),
+            collective_analysis=True,
+            kernel_summary=True,
+            short_kernel_study=True,
+            include_overlap_info=True,
+            group_by_parent_module=True,
+            group_by_num_kernels=True,
+            enable_pseudo_ops=False,
+            micro_idle_thresh_us=1,
+            topk_ops=10,
+            topk_roofline_ops=5,
+        )
+        assert (tmp_path / "out" / "gpu_timeline.csv").exists()

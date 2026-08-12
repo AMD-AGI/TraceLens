@@ -207,3 +207,231 @@ def test_jax_perf_report_csv_regression(
         assert (
             not diff_cols
         ), f"Sheet '{sheet}' has differences for {trace_path}:{format_diff_details(diff_cols)}"
+
+
+# --- migrated from test_coverage_95_final.py ---
+import gzip
+import importlib
+import json
+import os
+import sys
+from copy import deepcopy
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.Reporting import reporting_utils as ru
+from TraceLens.Reporting.compare_traces_jax_llama import (
+    Event,
+    Summary,
+    classify_stage_base,
+    compute_stage_table,
+    emit_report,
+    extract_gpu_events,
+    infer_params,
+    is_loop_multiply_fusion,
+    load_trace,
+    mk_stats,
+    percentile,
+    summarize_one,
+    token_start_times,
+    top_stats_by_key,
+)
+from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+    _resolve_trace_files_glob,
+    generate_collective_report,
+)
+from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
+from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
+    apply_pseudo_op_extensions,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
+from TraceLens.util import RocprofParser
+from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
+from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
+from tests.fixtures.reporting import _mk_ac2g, _mk_event
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestJaxAnalysisMain:
+    def test_jax_analysis_main(self, tmp_path):
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_jax_analysis"
+        )
+        categorized, xla_events = _mock_side_inputs()
+        gemms = pd.DataFrame({"time ms": [1.0], "percent": [1.0]}, index=["gemm1"])
+        gemms_detailed = pd.DataFrame({"name": ["gemm1"], "tflops": [1.0]})
+        with patch.object(
+            mod.JaxAnalyses,
+            "summarize_gpu_events",
+            return_value=(_sample_averages_df(), categorized, xla_events),
+        ), patch.object(
+            mod.JaxAnalyses,
+            "summarize_gpu_gemm_events_from_pb",
+            return_value=gemms,
+        ), patch.object(
+            mod.JaxAnalyses,
+            "gemm_performance_from_pb",
+            return_value=gemms_detailed,
+        ):
+            old_argv = sys.argv
+            sys.argv = [
+                "generate_perf_report_jax_analysis",
+                "--profile_xplane_pb_path",
+                "/fake/profile.xplane.pb",
+                "--output_path",
+                str(tmp_path),
+                "--output_table_formats",
+                ".csv",
+            ]
+            try:
+                mod.main()
+            finally:
+                sys.argv = old_argv
+        assert (tmp_path / "trace_analysis_results_gpu_events_averages.csv").exists()
+
+    def test_jax_analysis_permission_error(self, tmp_path, monkeypatch):
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_jax_analysis"
+        )
+        bad_path = tmp_path / "nope" / "out"
+        monkeypatch.setattr(
+            mod.Path,
+            "mkdir",
+            MagicMock(side_effect=PermissionError("denied")),
+        )
+        with pytest.raises(SystemExit):
+            mod.generate_perf_report_jax_analysis(
+                "/fake.pb", str(bad_path), "out", [".csv"]
+            )
+
+
+# --- migrated from test_coverage_95_final.py ---
+from tests.fixtures.traces import JAX_PB
+import gzip
+import importlib
+import json
+import os
+import sys
+from copy import deepcopy
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.Reporting import reporting_utils as ru
+from TraceLens.Reporting.compare_traces_jax_llama import (
+    Event,
+    Summary,
+    classify_stage_base,
+    compute_stage_table,
+    emit_report,
+    extract_gpu_events,
+    infer_params,
+    is_loop_multiply_fusion,
+    load_trace,
+    mk_stats,
+    percentile,
+    summarize_one,
+    token_start_times,
+    top_stats_by_key,
+)
+from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+    _resolve_trace_files_glob,
+    generate_collective_report,
+)
+from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
+from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
+    apply_pseudo_op_extensions,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
+from TraceLens.util import RocprofParser
+from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
+from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
+from tests.fixtures.reporting import _mk_ac2g, _mk_event
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestJaxFromFile:
+    def test_jax_analyzer_from_pb(self):
+        analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=JAX_PB)
+        assert analyzer.tree is not None
+        timeline = analyzer.get_df_gpu_timeline()
+        assert isinstance(timeline, pd.DataFrame)
+
+
+# --- migrated from test_coverage_95_phase13.py ---
+import os
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
+
+
+class TestJaxComparePhase13:
+    def test_jax_llama_helpers(self, tmp_path):
+        path = _write_gz_trace(tmp_path, _jax_llama_trace_events())
+        trace = jax_cmp.load_trace(path)
+        evs = jax_cmp.extract_gpu_events(trace, gpu_index=0)
+        assert len(evs) > 0
+        d_model, head_dim, gsu = jax_cmp.infer_params(evs)
+        assert d_model == 4096
+
+
+# --- migrated from test_reporting_cli_coverage.py ---
+import importlib
+import json
+import os
+import sys
+import pytest
+from tests.fixtures.reporting import (
+    _minimal_pftrace_events,
+    _write_trace,
+)
+
+
+def test_jax_report_main(tmp_path):
+    trace = os.path.join(
+        os.path.dirname(__file__),
+        "traces/mi300/jax_conv_minimal_legacy/chi-mi300x-013.ord.vultr.cpe.ice.amd.com.xplane.pb",
+    )
+    out = tmp_path / "jax.xlsx"
+    import TraceLens.Reporting.generate_perf_report_jax as mod
+
+    old_argv = sys.argv
+    sys.argv = [
+        "generate_perf_report_jax",
+        "--profile_path",
+        trace,
+        "--output_xlsx_path",
+        str(out),
+    ]
+    try:
+        mod.main()
+    finally:
+        sys.argv = old_argv
+    assert out.exists()

@@ -163,3 +163,2279 @@ def test_resolve_gpu_arch_json_roundtrip(tmp_path):
     path = tmp_path / "arch.json"
     path.write_text(json.dumps(arch))
     assert resolve_gpu_arch(gpu_arch_json_path=str(path)) == arch
+
+
+# --- migrated from test_reporting_coverage.py ---
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+import gzip
+import json
+import os
+import textwrap
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import pandas as pd
+import pytest
+
+from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+    find_trace_files,
+    generate_collective_report,
+)
+from TraceLens.Reporting.generate_perf_report_genesis import (
+    _cleanup_work_dir,
+    generate_perf_report_genesis,
+)
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    _write_markdown_report,
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    _find_entry_point,
+    _is_wrapper_frame,
+    apply_extension as apply_extension_pytorch,
+    generate_perf_report_pytorch,
+    get_dfs_short_kernels as get_dfs_short_kernels_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    add_truncated_kernel_details as add_truncated_kernel_details_inference,
+    apply_extension as apply_extension_inference,
+    classify_graph_capture_trace,
+    generate_perf_report_pytorch as generate_inference_report,
+    get_dfs_short_kernels as get_dfs_short_kernels_inference,
+    perf_report_sanity_check,
+)
+from TraceLens.Reporting.pftrace_hip_activity_analysis import (
+    Event,
+    HIPEvent,
+    build_hip_summary_df,
+    build_kernel_summary_df_for_name,
+)
+from TraceLens.Reporting.pftrace_utils import ensure_trace_json
+
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:Source column .* not found.*:UserWarning",
+    "ignore:There are hipgraph launches.*:UserWarning",
+    "ignore:Found .* events with failed performance metric.*:UserWarning",
+    "ignore:Input list of events is empty.*:UserWarning",
+    "ignore:dict_cat2names_extension is deprecated.*:UserWarning",
+)
+
+KERNEL_TRACE_CSV = """\
+"Kind","Agent_Id","Queue_Id","Stream_Id","Thread_Id","Dispatch_Id","Kernel_Id","Kernel_Name","Correlation_Id","Start_Timestamp","End_Timestamp","LDS_Block_Size","Scratch_Size","VGPR_Count","Accum_VGPR_Count","SGPR_Count","Workgroup_Size_X","Workgroup_Size_Y","Workgroup_Size_Z","Grid_Size_X","Grid_Size_Y","Grid_Size_Z"
+"KERNEL_DISPATCH","Agent 2",1,0,70,1,33,"__amd_rocclr_fillBufferAligned",119662,172352210005122,172352210008687,0,0,12,4,48,256,1,1,256,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,70,2,16,"kernel_step_1_c532_0_kernel_6_range_for",119670,172352210061004,172352210062686,0,0,4,4,16,1,1,1,1,1,1
+"KERNEL_DISPATCH","Agent 2",1,0,70,3,31,"func_broad_phase_c402_0_kernel_3_range_for",119696,172352210143326,172352210149335,0,0,16,0,32,512,1,1,512,1,1
+"""
+
+
+def _mk_event(cat, name, ts, dur, pid, tid, args=None):
+    return {
+        "ph": "X",
+        "cat": cat,
+        "name": name,
+        "pid": pid,
+        "tid": tid,
+        "ts": ts,
+        "dur": dur,
+        "args": args or {},
+    }
+
+
+def _mk_ac2g(corr_id, pid, tid, ts, phase):
+    evt = {
+        "ph": phase,
+        "id": corr_id,
+        "pid": pid,
+        "tid": tid,
+        "ts": ts,
+        "cat": "ac2g",
+        "name": "ac2g",
+    }
+    if phase == "f":
+        evt["bp"] = "e"
+    return evt
+
+
+def _build_synthetic_trace(kernel_specs):
+    events = []
+    ts = 1000
+    corr_id = 100
+    cpu_pid, cpu_tid = 100, 100
+    gpu_pid, gpu_tid = 0, 7
+
+    for cpu_op_name, kernel_name, kernel_dur in kernel_specs:
+        cpu_op_ts = ts
+        cpu_op_dur = 100
+        events.append(
+            _mk_event(
+                "cpu_op",
+                cpu_op_name,
+                ts=cpu_op_ts,
+                dur=cpu_op_dur,
+                pid=cpu_pid,
+                tid=cpu_tid,
+                args={"Input Dims": [[32, 64]], "Input type": ["float"]},
+            )
+        )
+        events.append(
+            _mk_event(
+                "cuda_runtime",
+                "hipLaunchKernel",
+                ts=cpu_op_ts + 10,
+                dur=5,
+                pid=cpu_pid,
+                tid=cpu_tid,
+                args={"correlation": corr_id},
+            )
+        )
+        kernel_ts = cpu_op_ts + 50
+        events.append(
+            _mk_event(
+                "kernel",
+                kernel_name,
+                ts=kernel_ts,
+                dur=kernel_dur,
+                pid=gpu_pid,
+                tid=gpu_tid,
+                args={"correlation": corr_id, "stream": 7},
+            )
+        )
+        events.append(_mk_ac2g(corr_id, gpu_pid, gpu_tid, kernel_ts, "s"))
+        events.append(_mk_ac2g(corr_id, gpu_pid, gpu_tid, kernel_ts, "f"))
+        ts += cpu_op_dur + 200
+        corr_id += 1
+
+    return {"traceEvents": events}
+
+
+def _write_trace(tmp_path: Path, specs, name="trace.json") -> str:
+    path = tmp_path / name
+    path.write_text(json.dumps(_build_synthetic_trace(specs)))
+    return str(path)
+
+
+def _create_genesis_capture(tmp_path: Path) -> Path:
+    capture = tmp_path / "capture"
+    kernel_trace = capture / "kernel_trace"
+    kernel_trace.mkdir(parents=True)
+    (kernel_trace / "kernel_kernel_trace.csv").write_text(KERNEL_TRACE_CSV)
+    (capture / "run.log").write_text("wall_time=4.00s\n")
+    return capture
+
+
+def _minimal_pftrace_events():
+    return [
+        {
+            "ph": "X",
+            "cat": "gpu_activity",
+            "name": "xla_fusion_42",
+            "pid": 0,
+            "tid": 7,
+            "ts": 1000,
+            "dur": 50000,
+            "args": {"agent": "gpu_0", "begin_ns": 1000000, "delta_ns": 50000000},
+        },
+        {
+            "ph": "X",
+            "cat": "hip_api",
+            "name": "hipLaunchKernelGGL",
+            "pid": 100,
+            "tid": 1,
+            "ts": 900,
+            "dur": 20,
+            "args": {"stream_ID": 0},
+        },
+    ]
+
+
+class _MockShortKernelAnalyzer:
+    def __init__(self, gpu_only=False, kernels=None, total_time_ms=1.0):
+        self.gpu_only = gpu_only
+        self.total_time_ms = total_time_ms
+        self._kernels = (
+            kernels
+            if kernels is not None
+            else pd.DataFrame(
+                {
+                    "Kernel duration (µs)": [5.0, 8.0, 50.0],
+                    "Kernel name": ["k_short_a", "k_short_b", "k_long"],
+                    "Parent cpu_op": ["aten::mm"] * 3,
+                    "Input dims": ["[[32, 64]]"] * 3,
+                    "Input strides": [""] * 3,
+                    "Concrete Inputs": [""] * 3,
+                }
+            )
+        )
+
+    def get_df_kernels(self):
+        return self._kernels
+
+
+# ---------------------------------------------------------------------------
+# perf_report_sanity_check (inference)
+# ---------------------------------------------------------------------------
+
+
+def test_sanity_check_include_nccl_busy_time():
+    events = [{"name": "ncclAllReduce", "cat": "kernel"}]
+    tl = pd.DataFrame({"type": ["busy_time"], "time ms": [0.05]})
+    kl = pd.DataFrame({"total_direct_kernel_time_sum": [60.0]})
+    up = pd.DataFrame({"Kernel Time (µs)_sum": [60.0]})
+    result = perf_report_sanity_check(events, tl, kl, up, include_nccl=True)
+    assert result["kl_time_pass"]
+    assert result["total_gpu_events"] == 1
+
+
+def test_sanity_check_time_mismatch():
+    events = [{"name": "k", "cat": "kernel"}]
+    tl = pd.DataFrame({"type": ["computation_time"], "time ms": [10.0]})
+    kl = pd.DataFrame({"total_direct_kernel_time_sum": [1.0]})
+    up = pd.DataFrame({"Kernel Time (µs)_sum": [1.0]})
+    result = perf_report_sanity_check(events, tl, kl, up)
+    assert not result["kl_time_pass"]
+    assert not result["up_time_pass"]
+
+
+def test_sanity_check_kernel_details_column():
+    events = [{"name": "k_a", "cat": "kernel"}]
+    tl = pd.DataFrame({"type": ["computation_time"], "time ms": [0.1]})
+    kl = pd.DataFrame(
+        {
+            "total_direct_kernel_time": [100.0],
+            "kernel_details": [[{"name": "k_a", "count": 1}]],
+        }
+    )
+    up = pd.DataFrame(
+        {
+            "Kernel Time (µs)": [100.0],
+            "kernel_details": [[{"name": "k_a", "count": 1}]],
+        }
+    )
+    result = perf_report_sanity_check(events, tl, kl, up)
+    assert result["kl_count_pass"]
+    assert result["up_count_pass"]
+
+
+def test_sanity_check_missing_kernel_details_column(capsys):
+    events = [{"name": "k", "cat": "kernel"}]
+    tl = pd.DataFrame({"type": ["computation_time"], "time ms": [0.1]})
+    kl = pd.DataFrame({"total_direct_kernel_time_sum": [100.0]})
+    up = pd.DataFrame({"Kernel Time (µs)_sum": [100.0]})
+    result = perf_report_sanity_check(events, tl, kl, up)
+    assert not result["kl_count_pass"]
+    assert "WARNING" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# classify_graph_capture_trace
+# ---------------------------------------------------------------------------
+
+
+def test_classify_skips_when_execution_details_exist(tmp_path, capsys):
+    (tmp_path / "execution_details.json").write_text("[]")
+    classify_graph_capture_trace(str(tmp_path))
+    assert "Skipping classification" in capsys.readouterr().out
+
+
+def test_classify_from_capture_annotation(tmp_path):
+    events = [
+        {
+            "name": "vllm/v1/worker/gpu_model_runner.py(10): _dummy_run",
+            "ts": 1,
+        },
+        {"name": "capture_32_FULL", "cat": "user_annotation", "ts": 2},
+    ]
+    (tmp_path / "graph.json").write_text(json.dumps({"traceEvents": events}))
+    classify_graph_capture_trace(str(tmp_path))
+    details = json.loads((tmp_path / "execution_details.json").read_text())
+    assert details[0]["batch_size"] == 32
+    assert details[0]["mode"] == "FULL"
+
+
+def test_classify_inferred_from_stream_captures(tmp_path):
+    events = [
+        {
+            "name": "vllm/v1/worker/gpu_model_runner.py(10): _dummy_run",
+            "ts": 1,
+        },
+        {"cat": "cuda_runtime", "name": "cudaStreamBeginCapture", "ts": 2},
+        {"cat": "cuda_runtime", "name": "cudaStreamBeginCapture", "ts": 3},
+        {
+            "cat": "cpu_op",
+            "name": "aten::mm",
+            "args": {"Input Dims": [[64, 128], [32, 64]]},
+        },
+    ]
+    (tmp_path / "capture.json.gz").write_bytes(
+        gzip.compress(json.dumps({"traceEvents": events}).encode())
+    )
+    classify_graph_capture_trace(str(tmp_path))
+    details = json.loads((tmp_path / "execution_details.json").read_text())
+    assert details[0]["mode"] == "PIECEWISE"
+    assert details[0]["batch_size"] == 64
+
+
+def test_classify_json_gz_roundtrip(tmp_path):
+    events = [
+        {"name": "vllm/v1/worker/gpu_model_runner.py(1): _dummy_run", "ts": 0},
+        {"cat": "cuda_runtime", "name": "cudaStreamBeginCapture", "ts": 1},
+        {"cat": "cpu_op", "name": "x", "args": {"Input Dims": [[8, 16]]}},
+    ]
+    gz_path = tmp_path / "capture.json.gz"
+    gz_path.write_bytes(gzip.compress(json.dumps({"traceEvents": events}).encode()))
+    classify_graph_capture_trace(str(tmp_path))
+    details = json.loads((tmp_path / "execution_details.json").read_text())
+    assert details[0]["batch_size"] == 8
+    assert details[0]["mode"] == "FULL"
+
+
+def test_classify_no_trace_files_exits(tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        classify_graph_capture_trace(str(tmp_path))
+    assert exc.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# get_dfs_short_kernels
+# ---------------------------------------------------------------------------
+
+
+def test_inference_get_dfs_short_kernels_with_data():
+    analyzer = _MockShortKernelAnalyzer()
+    hist, grouped = get_dfs_short_kernels_inference(analyzer, topk=1)
+    assert not hist.empty
+    assert len(grouped) == 1
+    assert "Short Kernel duration (µs) sum" in grouped.columns
+
+
+def test_inference_get_dfs_short_kernels_empty():
+    empty = pd.DataFrame(columns=["Kernel duration (µs)", "Kernel name"])
+    analyzer = _MockShortKernelAnalyzer(kernels=empty)
+    hist, grouped = get_dfs_short_kernels_inference(analyzer)
+    assert hist.empty
+    assert grouped.empty
+
+
+def test_inference_get_dfs_short_kernels_gpu_only():
+    kernels = pd.DataFrame(
+        {"Kernel duration (µs)": [3.0], "Kernel name": ["k"]},
+    )
+    analyzer = _MockShortKernelAnalyzer(gpu_only=True, kernels=kernels)
+    hist, grouped = get_dfs_short_kernels_inference(analyzer)
+    assert not hist.empty
+    assert grouped.iloc[0]["Kernel name"] == "k"
+
+
+def test_pytorch_get_dfs_short_kernels_with_data():
+    analyzer = _MockShortKernelAnalyzer()
+    hist, grouped = get_dfs_short_kernels_pytorch(analyzer, topk=2)
+    assert len(grouped) == 2
+
+
+# ---------------------------------------------------------------------------
+# apply_extension
+# ---------------------------------------------------------------------------
+
+
+def test_inference_apply_extension_op_category(tmp_path):
+    ext_path = tmp_path / "ext.py"
+    ext_path.write_text(textwrap.dedent("""
+            def tree_postprocess_extension(tree):
+                tree.events[0]["ext_applied"] = True
+
+            op_category_extension = {"custom::op": "Other"}
+            """))
+    tree = SimpleNamespace(events=[{}], label_non_gpu_paths=lambda: None)
+    analyzer = SimpleNamespace(
+        tree=tree,
+        op_to_perf_model_class_map={},
+    )
+    apply_extension_inference(analyzer, str(ext_path))
+    assert analyzer.tree.events[0]["ext_applied"]
+
+
+def test_inference_apply_extension_invalid_perf_model(tmp_path):
+    ext_path = tmp_path / "bad_ext.py"
+    ext_path.write_text("perf_model_extension = {'aten::mm': 'not_a_class'}")
+    analyzer = SimpleNamespace(
+        tree=SimpleNamespace(events=[], label_non_gpu_paths=lambda: None),
+        op_to_perf_model_class_map={},
+    )
+    with pytest.raises(ValueError, match="category attribute"):
+        apply_extension_inference(analyzer, str(ext_path))
+
+
+def test_pytorch_apply_extension_valid_perf_model(tmp_path):
+    ext_path = tmp_path / "ext.py"
+    ext_path.write_text(textwrap.dedent("""
+            class DummyGemm:
+                category = "GEMM"
+
+            perf_model_extension = {"aten::mm": DummyGemm}
+            """))
+    analyzer = SimpleNamespace(
+        tree=SimpleNamespace(events=[], label_non_gpu_paths=lambda: None),
+        op_to_perf_model_class_map={},
+    )
+    apply_extension_pytorch(analyzer, str(ext_path))
+    assert "aten::mm" in analyzer.op_to_perf_model_class_map
+
+
+# ---------------------------------------------------------------------------
+# trunc / wrapper helpers
+# ---------------------------------------------------------------------------
+
+
+def test_inference_add_truncated_kernel_details_missing_column():
+    df = pd.DataFrame({"other": [1]})
+    out = add_truncated_kernel_details_inference(df, source_col="missing")
+    assert "trunc_missing" not in out.columns
+
+
+def test_pytorch_is_wrapper_frame():
+    assert _is_wrapper_frame("torch/nn/modules/module.py(5): _call_impl")
+    assert _is_wrapper_frame("torch/_ops.py(10): wrapper_custom")
+    assert not _is_wrapper_frame("user_code.py(10): forward")
+
+
+def test_find_entry_point_stripped_suffix():
+    stack = str(["user.py(1): addmm_triton", "aten::addmm_triton"])
+    result = _find_entry_point(stack, "aten::addmm_triton_340")
+    assert result["traversal"] == "outward"
+    assert "user.py" in result["entry_point"]
+
+
+# ---------------------------------------------------------------------------
+# generate_perf_report_pytorch / inference with synthetic traces
+# ---------------------------------------------------------------------------
+
+
+def test_pytorch_report_synthetic_minimal(tmp_path):
+    trace = _write_trace(
+        tmp_path,
+        [("aten::mm", "gemm_kernel", 100), ("aten::relu", "relu_kernel", 20)],
+    )
+    out = str(tmp_path / "csvs")
+    result = generate_perf_report_pytorch(
+        profile_json_path=trace,
+        output_csvs_dir=out,
+        collective_analysis=False,
+        kernel_summary=True,
+        short_kernel_study=True,
+    )
+    assert "gpu_timeline" in result
+    assert "kernel_summary" in result
+    assert os.path.isfile(os.path.join(out, "gpu_timeline.csv"))
+
+
+def test_inference_report_synthetic_with_flags(tmp_path):
+    trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)])
+    out = str(tmp_path / "csvs")
+    xlsx = str(tmp_path / "report.xlsx")
+    result = generate_inference_report(
+        profile_json_path=trace,
+        output_csvs_dir=out,
+        output_xlsx_path=xlsx,
+        collective_analysis=False,
+        kernel_summary=True,
+        short_kernel_study=True,
+        group_by_parent_module=True,
+        group_by_num_kernels=True,
+    )
+    assert os.path.isfile(xlsx)
+    assert "short_kernel_histogram" in result
+    assert "short_kernels_summary" in result
+
+
+def test_inference_report_with_extension_additional_dfs(tmp_path):
+    trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)])
+    ext_path = tmp_path / "extra.py"
+    ext_path.write_text(textwrap.dedent("""
+            import pandas as pd
+
+            def get_additional_dataframes_extension(tree):
+                return {"custom_extra": pd.DataFrame({"value": [42]})}
+            """))
+    result = generate_inference_report(
+        profile_json_path=trace,
+        output_csvs_dir=str(tmp_path / "csvs"),
+        collective_analysis=False,
+        extension_file=str(ext_path),
+    )
+    assert "custom_extra" in result
+
+
+def test_pytorch_report_include_overlap_and_call_stack(tmp_path):
+    trace = _write_trace(
+        tmp_path,
+        [
+            ("aten::mm", "gemm_kernel", 100),
+            ("aten::add", "add_kernel", 15),
+        ],
+    )
+    result = generate_perf_report_pytorch(
+        profile_json_path=trace,
+        output_csvs_dir=str(tmp_path / "csvs"),
+        collective_analysis=False,
+        include_overlap_info=True,
+        include_call_stack=True,
+        group_by_num_kernels=True,
+    )
+    assert "unified_perf_summary" in result
+    assert "call_stack_full" in result["unified_perf_summary"].columns
+
+
+# ---------------------------------------------------------------------------
+# multi-rank collective report
+# ---------------------------------------------------------------------------
+
+
+def test_find_trace_files_empty_dir(tmp_path, capsys):
+    assert find_trace_files(str(tmp_path)) == []
+    assert "No trace files found" in capsys.readouterr().out
+
+
+def test_collective_report_trace_dir_synthetic(tmp_path):
+    for rank in range(2):
+        trace = _make_trace(rank, 3)
+        (tmp_path / f"rank{rank}_trace.json").write_text(json.dumps(trace))
+    out = str(tmp_path / "nccl_out")
+    dfs = generate_collective_report(
+        trace_dir=str(tmp_path),
+        world_size=2,
+        output_csvs_dir=out,
+        detailed_analysis=False,
+        gpus_per_node=2,
+        strict_world_size_check=False,
+    )
+    assert "nccl_summary_implicit_sync" in dfs
+    assert os.path.isfile(os.path.join(out, "nccl_summary_implicit_sync.csv"))
+
+
+def test_collective_report_trace_pattern_non_strict(tmp_path):
+    for rank in (0, 2):
+        trace = _make_trace(rank, 2)
+        (tmp_path / f"trace_rank_{rank}.json").write_text(json.dumps(trace))
+    pattern = str(tmp_path / "trace_rank_*.json")
+    dfs = generate_collective_report(
+        trace_pattern=pattern,
+        world_size=4,
+        output_csvs_dir=str(tmp_path / "out"),
+        strict_world_size_check=False,
+        detailed_analysis=True,
+    )
+    assert "nccl_long" in dfs
+
+
+def test_collective_report_xlsx_output(tmp_path):
+    trace = _make_trace(0, 2)
+    (tmp_path / "rank0_trace.json").write_text(json.dumps(trace))
+    xlsx = str(tmp_path / "report.xlsx")
+    generate_collective_report(
+        trace_dir=str(tmp_path),
+        world_size=1,
+        output_xlsx_path=xlsx,
+        strict_world_size_check=False,
+    )
+    assert os.path.isfile(xlsx)
+
+
+def _make_trace(rank, n_collectives):
+    events = []
+    base_ts = 1_000_000 + rank * 50
+    for i in range(n_collectives):
+        ts = base_ts + i * 1000 + rank * 5
+        events.append(
+            {
+                "ph": "X",
+                "cat": "kernel",
+                "name": "void rcclGenericKernel<1, false>(ncclDevKernelArgsStorage<4096ul>)",
+                "pid": rank,
+                "tid": 3,
+                "ts": ts,
+                "dur": 50,
+                "args": {
+                    "External id": 100 + i,
+                    "device": rank,
+                    "stream": 3,
+                    "correlation": 50 + i,
+                },
+            }
+        )
+    return {"traceEvents": events}
+
+
+# ---------------------------------------------------------------------------
+# genesis report
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_work_dir(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "temp.json").write_text("{}")
+    _cleanup_work_dir(work)
+    assert not work.exists()
+
+
+def test_generate_perf_report_genesis_integration(tmp_path):
+    capture = _create_genesis_capture(tmp_path)
+    out = tmp_path / "analysis"
+    reports = generate_perf_report_genesis(
+        capture_dir=str(capture),
+        output_dir=str(out),
+        short_kernel_study=False,
+        keep_work=True,
+    )
+    assert "rocprof" in reports
+    assert (out / "genesis_perf_report.xlsx").exists()
+    assert (out / "genesis_summary.md").exists()
+    assert reports["rocprof"]["kernel_summary_by_category"] is not None
+
+
+@mock.patch(
+    "TraceLens.Reporting.generate_perf_report_genesis.generate_perf_report_pftrace_memory_copy"
+)
+@mock.patch(
+    "TraceLens.Reporting.generate_perf_report_genesis.generate_perf_report_pftrace_hip_activity"
+)
+@mock.patch("TraceLens.Reporting.generate_perf_report_genesis.pftrace_to_json")
+def test_generate_perf_report_genesis_with_pftrace(
+    mock_pftrace_to_json,
+    mock_hip_activity,
+    mock_memory_copy,
+    tmp_path,
+):
+    capture = _create_genesis_capture(tmp_path)
+    pftrace = capture / "kernel_trace" / "kernel_results.pftrace"
+    pftrace.write_bytes(b"\x00")
+    mock_pftrace_to_json.return_value = capture / "pf.json"
+    mock_hip_activity.return_value = {
+        "hip_summary": pd.DataFrame({"api": ["hipMalloc"]})
+    }
+    mock_memory_copy.return_value = {
+        "memory_copy_by_copy_bytes": pd.DataFrame({"copy_bytes": [1024], "count": [1]})
+    }
+    out = tmp_path / "analysis_pf"
+    reports = generate_perf_report_genesis(
+        capture_dir=str(capture),
+        output_dir=str(out),
+        short_kernel_study=False,
+    )
+    assert "pftrace_hip_activity" in reports
+    assert "pftrace_memory_copy" in reports
+    mock_hip_activity.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# pftrace modules
+# ---------------------------------------------------------------------------
+
+
+def test_write_markdown_report(tmp_path):
+    df_cat = pd.DataFrame({"GPU ID": [0], "Category": ["xla"], "Time (ms)": [1.0]})
+    md_path = tmp_path / "report.md"
+    _write_markdown_report(
+        md_path,
+        df_category=df_cat,
+        xla_top=[("xla_fusion_1", 1_000_000, 2, 0.5)],
+        used_fav3=False,
+        agents=["gpu_0"],
+        kernel_df=pd.DataFrame({"Name": ["k1"], "Instances": [1]}),
+        hip_df=pd.DataFrame({"Name": ["hipMalloc"], "Instances": [1]}),
+    )
+    text = md_path.read_text()
+    assert "ROCm Perfetto Trace Report" in text
+    assert "xla_fusion_1" in text
+
+
+def test_ensure_trace_json_returns_json_path(tmp_path):
+    trace = tmp_path / "trace.json"
+    trace.write_text('{"traceEvents": []}')
+    assert ensure_trace_json(str(trace)) == str(trace.resolve())
+
+
+def test_ensure_trace_json_unsupported_format(tmp_path):
+    bad = tmp_path / "trace.bin"
+    bad.write_bytes(b"\x00")
+    with pytest.raises(ValueError, match="Unsupported trace format"):
+        ensure_trace_json(str(bad))
+
+
+def test_build_kernel_summary_df_for_name():
+    events = [
+        Event(gpu=0, name="gemm_1", dur_ns=1000, ts_ns=0),
+        Event(gpu=0, name="gemm_2", dur_ns=2000, ts_ns=0),
+    ]
+    df = build_kernel_summary_df_for_name(
+        events, baseline_total_ns=3000, merge_names=True
+    )
+    assert len(df) == 1
+    assert df.iloc[0]["Instances"] == 2
+
+
+@pytest.mark.parametrize("group", ["name", "name+stream", "name+op", "name+stream+op"])
+def test_build_hip_summary_df_groups(group):
+    hip_events = [
+        HIPEvent(
+            name="hipMalloc",
+            dur_ns=100,
+            ts_ns=0,
+            pid=1,
+            tid=1,
+            stream_id=1,
+            operation=2,
+        ),
+        HIPEvent(
+            name="hipMalloc",
+            dur_ns=200,
+            ts_ns=0,
+            pid=1,
+            tid=1,
+            stream_id=1,
+            operation=2,
+        ),
+    ]
+    df = build_hip_summary_df(hip_events, group=group)
+    assert not df.empty
+    assert df.iloc[0]["Instances"] == 2
+
+
+def test_pftrace_hip_activity_markdown_output(tmp_path):
+    trace_path = tmp_path / "trace.json"
+    trace_path.write_text(json.dumps({"traceEvents": _minimal_pftrace_events()}))
+    md_path = tmp_path / "out.md"
+    generate_perf_report_pftrace_hip_activity(
+        trace_path=str(trace_path),
+        output_md_path=str(md_path),
+        min_event_ns=0,
+        kernel_summary=True,
+        hip_summary=True,
+    )
+    assert md_path.exists()
+    assert "ROCm Perfetto Trace Report" in md_path.read_text()
+
+
+def test_pftrace_hip_activity_default_xlsx_path(tmp_path):
+    trace_path = tmp_path / "trace.json"
+    trace_path.write_text(json.dumps({"traceEvents": _minimal_pftrace_events()}))
+    generate_perf_report_pftrace_hip_activity(
+        trace_path=str(trace_path),
+        min_event_ns=0,
+    )
+    assert (tmp_path / "trace_pftrace_activity_report.xlsx").exists()
+
+
+# ---------------------------------------------------------------------------
+# inference report main() and extended paths
+# ---------------------------------------------------------------------------
+
+
+def test_inference_report_with_overlap_and_collective(tmp_path):
+    trace = _write_trace(
+        tmp_path,
+        [
+            ("aten::mm", "gemm_kernel", 100),
+            ("aten::add", "add_kernel", 20),
+            ("aten::relu", "relu_kernel", 15),
+        ],
+    )
+    result = generate_inference_report(
+        profile_json_path=trace,
+        output_csvs_dir=str(tmp_path / "csvs"),
+        output_xlsx_path=str(tmp_path / "report.xlsx"),
+        collective_analysis=True,
+        include_overlap_info=True,
+        kernel_summary=True,
+        short_kernel_study=True,
+    )
+    assert "gpu_timeline" in result
+    assert os.path.isfile(str(tmp_path / "report.xlsx"))
+
+
+def test_inference_report_main_cli(tmp_path):
+    import sys
+
+    trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)])
+    out_dir = tmp_path / "cli_out"
+    xlsx = tmp_path / "cli_report.xlsx"
+    from TraceLens.Reporting import generate_perf_report_pytorch_inference as inf_mod
+
+    old_argv = sys.argv
+    sys.argv = [
+        "generate_perf_report_pytorch_inference",
+        "--profile_json_path",
+        trace,
+        "--output_csvs_dir",
+        str(out_dir),
+        "--output_xlsx_path",
+        str(xlsx),
+        "--enable_kernel_summary",
+        "--short_kernel_study",
+        "--group_by_parent_module",
+    ]
+    try:
+        inf_mod.main()
+    finally:
+        sys.argv = old_argv
+    assert xlsx.exists()
+    assert (out_dir / "gpu_timeline.csv").exists()
+
+
+def test_collective_report_trace_glob(tmp_path):
+    for rank in range(2):
+        trace = _make_trace(rank, 2)
+        (tmp_path / f"custom_rank{rank}_trace.json").write_text(json.dumps(trace))
+    dfs = generate_collective_report(
+        trace_glob=str(tmp_path / "custom_rank*_trace.json"),
+        world_size=2,
+        output_csvs_dir=str(tmp_path / "glob_out"),
+        strict_world_size_check=False,
+        use_multiprocessing=False,
+        all2allv_heatmap=False,
+    )
+    assert "nccl_summary_implicit_sync" in dfs
+
+
+def test_collective_report_main_cli(tmp_path):
+    import sys
+
+    trace = _make_trace(0, 2)
+    (tmp_path / "rank0_trace.json").write_text(json.dumps(trace))
+    out = tmp_path / "nccl_cli.xlsx"
+    from TraceLens.Reporting import (
+        generate_multi_rank_collective_report_pytorch as coll_mod,
+    )
+
+    old_argv = sys.argv
+    sys.argv = [
+        "generate_multi_rank_collective_report_pytorch",
+        "--trace_dir",
+        str(tmp_path),
+        "--world_size",
+        "1",
+        "--output_xlsx_path",
+        str(out),
+    ]
+    try:
+        coll_mod.main()
+    finally:
+        sys.argv = old_argv
+    assert out.exists()
+
+
+# --- migrated from test_coverage_95_final.py ---
+import gzip
+import importlib
+import json
+import os
+import sys
+from copy import deepcopy
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.Reporting import reporting_utils as ru
+from TraceLens.Reporting.compare_traces_jax_llama import (
+    Summary,
+    classify_stage_base,
+    compute_stage_table,
+    emit_report,
+    extract_gpu_events,
+    infer_params,
+    is_loop_multiply_fusion,
+    load_trace,
+    mk_stats,
+    percentile,
+    summarize_one,
+    token_start_times,
+    top_stats_by_key,
+)
+from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+    _resolve_trace_files_glob,
+    generate_collective_report,
+)
+from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
+from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
+    apply_pseudo_op_extensions,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
+from TraceLens.util import RocprofParser
+from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
+from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
+from tests.fixtures.reporting import _mk_ac2g, _mk_event
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestAnalysisUtilsAndReporting:
+    def test_perf_report_csv_dir_comparative(self, tmp_path):
+        cat_dir = tmp_path / "category_data"
+        cat_dir.mkdir()
+        (cat_dir / "category_manifest.json").write_text(
+            json.dumps({"comparison_scope": "comparative"})
+        )
+        assert "perf_report_trace1_csvs" in au.perf_report_csv_dir(str(tmp_path))
+
+    def test_resolve_gpu_arch_and_node_span(self):
+        arch = ru.resolve_gpu_arch(
+            gpu_arch={"name": "mi300x", "freq_mhz": 2200, "num_cus": 304}
+        )
+        assert arch["name"] == "mi300x"
+        out = ru.add_node_span_columns(
+            pd.DataFrame({"rank": [0, 1], "Process Group Ranks": ["[0,1]", "[0,1]"]}),
+            gpus_per_node=2,
+            world_size=2,
+        )
+        assert "node_id" in out.columns
+
+    def test_reporting_utils_export_and_node_span(self, tmp_path):
+        from pathlib import Path
+
+        df = pd.DataFrame({"a": [1, 2]})
+        ru.export_data_df(df, Path(tmp_path), "test", output_table_format=[".csv"])
+        assert (tmp_path / "test_summary_statistics.csv").exists()
+
+
+# --- migrated from test_coverage_95_phase10.py ---
+import importlib
+import json
+import sys
+import types
+from copy import deepcopy
+from typing import Dict, List
+from unittest.mock import patch
+import pandas as pd
+from TraceLens.Agent.Analysis.utils import arch_utils
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    _write_markdown_report,
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Reporting.pftrace_hip_activity_analysis import (
+    PftraceHipActivityAnalyzer,
+    classify,
+)
+from TraceLens.Reporting.tracediff_comparison_extension import (
+    tracediff_perf_summary_from_diff_stats,
+)
+from TraceLens.Trace2Tree.extensions.moe_aiter_pseudo_ops import (
+    _create_pseudo_op_moe_fused_aiter,
+    _has_cpu_op_descendant,
+    create_pseudo_ops_moe_fused_aiter,
+)
+from TraceLens.Trace2Tree.extensions.moe_flydsl_pseudo_ops import (
+    FUSED_MOE_PARENT,
+    create_pseudo_ops_moe_flydsl,
+)
+from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
+    _create_pseudo_op_moe_gptq_awq,
+    create_pseudo_ops_moe_gptq_awq,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from tests.fixtures.reporting import _write_trace
+from tests.test_trace2tree import _add_gpu_chain, _mk_event
+from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
+
+
+class TestPytorchReportOverlapPhase10:
+    def test_pytorch_report_with_overlap_sheets(self, tmp_path):
+        from TraceLens.Reporting.generate_perf_report_pytorch import (
+            generate_perf_report_pytorch,
+        )
+
+        trace = _write_trace(
+            tmp_path,
+            [
+                ("aten::convolution", "conv_kernel", 80),
+                ("aten::convolution_backward", "conv_bwd_kernel", 70),
+                ("aten::mm", "gemm_kernel", 100),
+            ],
+            "conv.json",
+        )
+        out = tmp_path / "py_out"
+        dfs = generate_perf_report_pytorch(
+            profile_json_path=str(trace),
+            output_csvs_dir=str(out),
+            include_overlap_info=True,
+            short_kernel_study=True,
+            kernel_summary=True,
+            collective_analysis=False,
+        )
+        assert isinstance(dfs, dict)
+        assert (out / "gpu_timeline.csv").exists()
+
+
+# --- migrated from test_coverage_95_phase11.py ---
+import os
+import sys
+from unittest.mock import patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
+from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
+from tests.test_mamba_ssd import _mamba_event
+from tests.fixtures.perfmodel import _ARCH, _moe_unfused_event
+from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
+
+
+class TestReportingPhase11:
+    def test_inference_report_capture_merge(self, tmp_path):
+        from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+            generate_perf_report_pytorch,
+        )
+        from tests.fixtures.reporting import _write_trace
+
+        trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "inf.json")
+        out = tmp_path / "inf_out"
+        dfs = generate_perf_report_pytorch(
+            profile_json_path=str(trace),
+            output_csvs_dir=str(out),
+            kernel_summary=True,
+        )
+        assert isinstance(dfs, dict)
+
+
+# --- migrated from test_coverage_95_phase12.py ---
+from tests.fixtures.traces import TIMESFORMER1, TIMESFORMER2
+import gzip
+import json
+import os
+import sys
+from unittest.mock import patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    classify_graph_capture_trace,
+    generate_perf_report_pytorch,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
+from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
+
+
+class TestReportingPhase12:
+    def test_classify_graph_capture_json_gz(self, tmp_path):
+        capture_dir = tmp_path / "captures"
+        capture_dir.mkdir()
+        trace = {
+            "traceEvents": [
+                {
+                    "ph": "X",
+                    "cat": "user_annotation",
+                    "name": "graph_capture: batch=4 mode=FULL",
+                    "ts": 1000,
+                    "dur": 100,
+                    "pid": 1,
+                    "tid": 1,
+                    "args": {},
+                },
+            ],
+            "schemaVersion": 1,
+        }
+        gz_path = capture_dir / "graph_capture_rank_0.json.gz"
+        with gzip.open(gz_path, "wt") as f:
+            json.dump(trace, f)
+        classify_graph_capture_trace(str(capture_dir))
+        assert (capture_dir / "execution_details.json").exists()
+
+    @pytest.mark.skipif(
+        not (os.path.isfile(TIMESFORMER1) and os.path.isfile(TIMESFORMER2)),
+        reason="timesformer traces missing",
+    )
+    def test_inference_report_overlap_on_trace(self, tmp_path):
+        out = tmp_path / "inf_csv"
+        generate_perf_report_pytorch(
+            profile_json_path=TIMESFORMER1,
+            output_csvs_dir=str(out),
+            include_overlap_info=True,
+            kernel_summary=True,
+            short_kernel_study=True,
+            group_by_parent_module=True,
+        )
+        assert (out / "gpu_timeline.csv").exists()
+
+
+# --- migrated from test_coverage_95_phase12.py ---
+from tests.fixtures.traces import RESNET_TRACE
+import gzip
+import json
+import os
+import sys
+from unittest.mock import patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    classify_graph_capture_trace,
+    generate_perf_report_pytorch,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
+from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
+
+
+class TestReportingPhase12B:
+    @pytest.mark.skipif(not os.path.isfile(RESNET_TRACE), reason="resnet missing")
+    def test_pytorch_report_overlap_bwd(self, tmp_path):
+        from TraceLens.Reporting.generate_perf_report_pytorch import (
+            generate_perf_report_pytorch,
+        )
+
+        out = tmp_path / "pt_out"
+        dfs = generate_perf_report_pytorch(
+            profile_json_path=RESNET_TRACE,
+            output_csvs_dir=str(out),
+            include_overlap_info=True,
+            kernel_summary=True,
+            short_kernel_study=True,
+        )
+        assert isinstance(dfs, dict)
+        assert (out / "gpu_timeline.csv").exists()
+
+
+# --- migrated from test_coverage_95_phase4.py ---
+from tests.fixtures.traces import ROCprof_FILE
+import importlib
+import inspect
+import json
+import os
+import sys
+from copy import deepcopy
+import pandas as pd
+import pytest
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import (
+    attention_perf_model_extensions as attn_ext,
+    moe_perf_model_extensions as moe_ext,
+    perf_model_extensions as pext,
+    rmsnorm_perf_model_extensions as rms_ext,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch as generate_training_report,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import (
+    _conv_bias_bwd_event,
+    _conv_bias_fwd_event,
+)
+from tests.test_dit_fused_ln_modulate import _fused_ln_fwd_event
+from tests.test_mamba_ssd import _mamba_event
+from tests.fixtures.perfmodel import (
+    _ARCH,
+    _GDN_ANNOTATION,
+    _gemm_event,
+    _norm_event,
+)
+from tests.fixtures.reporting import (
+    _create_genesis_capture,
+    _minimal_pftrace_events,
+    _write_trace,
+)
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestReportingCliPhase4:
+    def test_pftrace_memory_copy_main(self, tmp_path):
+        trace_path = tmp_path / "trace.json"
+        trace_path.write_text(json.dumps({"traceEvents": _minimal_pftrace_events()}))
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_pftrace_memory_copy"
+        )
+        out_dir = tmp_path / "mem_csv"
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_pftrace_memory_copy",
+            "--trace_path",
+            str(trace_path),
+            "--output_csvs_dir",
+            str(out_dir),
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert out_dir.exists()
+
+    def test_pftrace_hip_api_main(self, tmp_path):
+        trace_path = tmp_path / "trace.json"
+        trace_path.write_text(json.dumps({"traceEvents": _minimal_pftrace_events()}))
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_pftrace_hip_api"
+        )
+        out_dir = tmp_path / "api_csv"
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_pftrace_hip_api",
+            "--trace_path",
+            str(trace_path),
+            "--output_csvs_dir",
+            str(out_dir),
+            "--include_nonlaunch_apis",
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert out_dir.exists()
+
+    def test_genesis_report_main(self, tmp_path):
+        capture = _create_genesis_capture(tmp_path)
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_genesis"
+        )
+        out = tmp_path / "gen_out"
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_genesis",
+            "--capture-dir",
+            str(capture),
+            "--output-dir",
+            str(out),
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert (out / "genesis_perf_report.xlsx").exists()
+
+    @pytest.mark.skipif(
+        not os.path.isfile(ROCprof_FILE), reason="rocprof fixture missing"
+    )
+    def test_rocprof_report_function(self, tmp_path):
+        from TraceLens.Reporting.generate_perf_report_rocprof import (
+            generate_perf_report_rocprof,
+        )
+
+        generate_perf_report_rocprof(
+            profile_json_path=ROCprof_FILE,
+            output_xlsx_path=str(tmp_path / "roc.xlsx"),
+            kernel_summary=True,
+            short_kernel_study=True,
+            kernel_details=True,
+        )
+        assert (tmp_path / "roc.xlsx").exists()
+
+    def test_compare_perf_reports_main(self, tmp_path):
+        t1 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "a.json")
+        t2 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 120)], "b.json")
+        x1 = tmp_path / "r1.xlsx"
+        x2 = tmp_path / "r2.xlsx"
+        generate_perf_report_pytorch(
+            profile_json_path=t1,
+            output_csvs_dir=str(tmp_path / "csv1"),
+            output_xlsx_path=str(x1),
+            kernel_summary=True,
+        )
+        generate_perf_report_pytorch(
+            profile_json_path=t2,
+            output_csvs_dir=str(tmp_path / "csv2"),
+            output_xlsx_path=str(x2),
+            kernel_summary=True,
+        )
+        mod = importlib.import_module(
+            "TraceLens.Reporting.compare_perf_reports_pytorch"
+        )
+        out = tmp_path / "cmp.xlsx"
+        old_argv = sys.argv
+        sys.argv = [
+            "compare_perf_reports_pytorch",
+            str(x1),
+            str(x2),
+            "-o",
+            str(out),
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert out.exists()
+
+
+# --- migrated from test_coverage_95_phase6.py ---
+from tests.fixtures.traces import INFERENCE_ROOT, NORM_TRACE
+import json
+import os
+import sys
+from unittest.mock import patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch as generate_training_report,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    classify_graph_capture_trace,
+)
+from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from TraceLens.util import RocprofParser
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
+from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
+from tests.fixtures.perfmodel import _ARCH, _gemm_event, _moe_unfused_event
+from tests.fixtures.reporting import (
+    _mk_event,
+    _write_trace,
+)
+from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
+
+
+class TestReportingPhase6:
+    @pytest.mark.skipif(not os.path.isfile(NORM_TRACE), reason="norm trace missing")
+    def test_pytorch_report_all_bwd_overlap_flags(self, tmp_path):
+        generate_perf_report_pytorch(
+            profile_json_path=NORM_TRACE,
+            output_csvs_dir=str(tmp_path / "csv"),
+            output_xlsx_path=str(tmp_path / "out.xlsx"),
+            kernel_summary=True,
+            short_kernel_study=True,
+            include_overlap_info=True,
+            group_by_num_kernels=True,
+            topk_ops=10,
+            topk_roofline_ops=5,
+            include_unlinked_kernels=True,
+            include_call_stack=True,
+            enable_pseudo_ops=True,
+        )
+        assert (tmp_path / "csv" / "gpu_timeline.csv").exists()
+
+    def test_classify_graph_capture_zip_and_dummy_run(self, tmp_path):
+        capture_dir = tmp_path / "capture"
+        capture_dir.mkdir()
+        events = {
+            "traceEvents": [
+                _mk_event(
+                    "cpu_op",
+                    "vllm/v1/worker/gpu_model_runner.py(100): _dummy_run",
+                    1000,
+                    50,
+                    1,
+                    1,
+                    {},
+                ),
+                _mk_event("cuda_runtime", "cudaStreamBeginCapture", 1100, 10, 1, 1, {}),
+                _mk_event(
+                    "cpu_op",
+                    "aten::mm",
+                    1200,
+                    20,
+                    1,
+                    1,
+                    {"Input Dims": [[8, 64], [64, 128]]},
+                ),
+            ]
+        }
+        json_path = capture_dir / "trace.json"
+        json_path.write_text(json.dumps(events))
+        classify_graph_capture_trace(str(capture_dir))
+        details = json.loads((capture_dir / "execution_details.json").read_text())
+        assert details[0]["batch_size"] == 8
+
+    def test_inference_extension_and_sanity(self, tmp_path):
+        from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+            generate_perf_report_pytorch as gen_inf,
+            perf_report_sanity_check,
+        )
+
+        trace = _write_trace(
+            tmp_path,
+            [
+                ("aten::mm", "gemm_kernel", 100),
+                ("aten::native_layer_norm", "layer_norm_kernel", 30),
+            ],
+        )
+        gen_inf(
+            profile_json_path=trace,
+            output_csvs_dir=str(tmp_path / "out"),
+            output_xlsx_path=str(tmp_path / "r.xlsx"),
+            collective_analysis=True,
+            kernel_summary=True,
+            short_kernel_study=True,
+            include_overlap_info=True,
+            group_by_parent_module=True,
+            group_by_num_kernels=True,
+            topk_ops=5,
+            include_unlinked_kernels=True,
+            micro_idle_thresh_us=0,
+        )
+        analyzer = TreePerfAnalyzer.from_file(trace)
+        sanity = perf_report_sanity_check(
+            analyzer.tree.events,
+            pd.read_csv(str(tmp_path / "out" / "gpu_timeline.csv")),
+            analyzer.get_df_kernel_launchers(),
+            analyzer.build_df_unified_perf_table(),
+        )
+        assert isinstance(sanity, dict)
+
+    @pytest.mark.skipif(
+        not os.path.isdir(os.path.join(INFERENCE_ROOT, "vllm_decode_full")),
+        reason="inference fixture missing",
+    )
+    def test_inference_real_fixture_report(self, tmp_path):
+        from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+            generate_perf_report_pytorch as gen_inf,
+        )
+
+        case = os.path.join(INFERENCE_ROOT, "vllm_decode_full")
+        trace = next(
+            os.path.join(case, f) for f in os.listdir(case) if f.endswith(".json.gz")
+        )
+        gen_inf(
+            profile_json_path=trace,
+            output_csvs_dir=str(tmp_path / "inf"),
+            output_xlsx_path=str(tmp_path / "inf.xlsx"),
+            collective_analysis=False,
+            kernel_summary=True,
+        )
+        assert (tmp_path / "inf" / "gpu_timeline.csv").exists()
+
+
+# --- migrated from test_coverage_95_phase7.py ---
+from tests.fixtures.traces import INFERENCE_ROOT
+import importlib
+import json
+import os
+import sys
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
+from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
+from TraceLens.Reporting.compare_perf_reports_pytorch import (
+    generate_compare_perf_reports_pytorch,
+)
+from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+    generate_collective_report,
+)
+from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
+from TraceLens.Reporting.tracediff_comparison_extension import (
+    tracediff_perf_summary_from_diff_stats,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
+from TraceLens.TraceDiff.trace_diff import TraceDiff
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
+from tests.fixtures.reporting import (
+    _minimal_pftrace_events,
+    _mk_event,
+    _write_trace,
+)
+
+
+class TestReportingPhase7:
+    def test_compare_perf_reports_all_sheets(self, tmp_path):
+        from TraceLens.Reporting.generate_perf_report_pytorch import (
+            generate_perf_report_pytorch,
+        )
+
+        t1 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "t1.json")
+        t2 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 120)], "t2.json")
+        d1 = tmp_path / "r1"
+        d2 = tmp_path / "r2"
+        generate_perf_report_pytorch(
+            profile_json_path=str(t1),
+            output_csvs_dir=str(d1),
+            output_xlsx_path=str(tmp_path / "r1.xlsx"),
+        )
+        generate_perf_report_pytorch(
+            profile_json_path=str(t2),
+            output_csvs_dir=str(d2),
+            output_xlsx_path=str(tmp_path / "r2.xlsx"),
+        )
+        out = tmp_path / "cmp"
+        generate_compare_perf_reports_pytorch(
+            reports=[str(d1), str(d2)],
+            output=str(tmp_path / "cmp.xlsx"),
+            sheets=["gpu_timeline", "ops_summary"],
+            output_csvs_dir=str(out),
+        )
+        assert (out / "gpu_timeline.csv").exists()
+
+    def test_pftrace_analyser_extended(self, tmp_path):
+        events = _minimal_pftrace_events()
+        analyser = PftraceHipActivityAnalyzer(events)
+        assert isinstance(analyser.get_df_category_summary(), pd.DataFrame)
+        assert isinstance(analyser.get_df_kernel_summary(), pd.DataFrame)
+        assert isinstance(analyser.get_df_hip_summary(), pd.DataFrame)
+
+    def test_tracediff_extension_multi_kernel_row(self):
+        diff = pd.DataFrame(
+            {
+                "source": ["trace1", "trace1"],
+                "lowest_common_ancestor_id": [5, 5],
+                "lowest_common_ancestor_name": ["aten::mm", "aten::mm"],
+                "cpu_op_name": ["aten::mm", "aten::add"],
+                "busy_time": [100.0, 50.0],
+                "name": ["k1", "k2"],
+                "gpu_op_uid": [1, 2],
+                "nn_module_stack": ["[]", "[]"],
+                "nn_module_parent": ["", ""],
+                "Input Dims": ["[[2,3]]", "[[2,3]]"],
+                "Input type": ["['fp16']", "['fp16']"],
+                "Input Strides": ["[]", "[]"],
+                "Concrete Inputs": ["", ""],
+            }
+        )
+        summary = tracediff_perf_summary_from_diff_stats(diff)
+        assert " | " in summary.iloc[0]["name"]
+
+    @pytest.mark.skipif(
+        not os.path.isdir(os.path.join(INFERENCE_ROOT, "sglang_decode")),
+        reason="inference fixture missing",
+    )
+    def test_capture_merge_inference_fixture(self):
+        case = os.path.join(INFERENCE_ROOT, "sglang_decode")
+        trace_gz = next(f for f in os.listdir(case) if f.endswith(".json.gz"))
+        graph = os.path.join(case, trace_gz)
+        capture = os.path.join(case, "capture_traces")
+        metadata = os.path.join(capture, "execution_details.json")
+        merged = merge_capture_trace_into_graph(capture, metadata, graph)
+        analyzer = TreePerfAnalyzer(merged, rebuild_tree=False, enable_pseudo_ops=True)
+        unified = analyzer.build_df_unified_perf_table(include_nccl=False)
+        assert isinstance(unified, pd.DataFrame)
+
+    def test_collective_report_strict_and_heatmap(self, tmp_path):
+        for rank in (0, 1):
+            (tmp_path / f"rank{rank}_trace.json").write_text(
+                json.dumps(
+                    {
+                        "traceEvents": [
+                            {
+                                "ph": "X",
+                                "cat": "kernel",
+                                "name": "ncclKernel_AllReduce",
+                                "pid": rank,
+                                "tid": 3,
+                                "ts": 1000 + rank,
+                                "dur": 40,
+                                "args": {
+                                    "External id": 10 + rank,
+                                    "Collective name": "allreduce",
+                                    "stream": 3,
+                                    "collective_id": rank,
+                                },
+                            }
+                        ]
+                    }
+                )
+            )
+        dfs = generate_collective_report(
+            trace_dir=str(tmp_path),
+            world_size=2,
+            output_csvs_dir=str(tmp_path / "coll"),
+            use_multiprocessing=False,
+            strict_world_size_check=False,
+            all2allv_heatmap=True,
+        )
+        assert isinstance(dfs, dict)
+
+
+# --- migrated from test_coverage_95_phase7.py ---
+import importlib
+import json
+import os
+import sys
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
+from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
+from TraceLens.Reporting.compare_perf_reports_pytorch import (
+    generate_compare_perf_reports_pytorch,
+)
+from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+    generate_collective_report,
+)
+from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
+from TraceLens.Reporting.tracediff_comparison_extension import (
+    tracediff_perf_summary_from_diff_stats,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
+from TraceLens.TraceDiff.trace_diff import TraceDiff
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
+from tests.fixtures.reporting import (
+    _minimal_pftrace_events,
+    _mk_event,
+    _write_trace,
+)
+
+
+class TestReportingCliPhase7:
+    def test_pftrace_hip_activity_main(self, tmp_path):
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_pftrace_hip_activity"
+        )
+        trace_path = tmp_path / "pf.json"
+        trace_path.write_text(json.dumps({"traceEvents": _minimal_pftrace_events()}))
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_pftrace_hip_activity",
+            "--trace_path",
+            str(trace_path),
+            "--output_csvs_dir",
+            str(tmp_path / "csv"),
+            "--merge_kernels",
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert (tmp_path / "csv" / "category_summary.csv").exists()
+
+    def test_pftrace_memory_copy_main(self, tmp_path):
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_pftrace_memory_copy"
+        )
+        events = [
+            _mk_event("gpu_memcpy", "MemcpyHtoD", 1000, 20, 0, 1, {"bytes": 4096}),
+            _mk_event("gpu_memcpy", "MemcpyDtoH", 1100, 15, 0, 1, {"bytes": 2048}),
+        ]
+        trace_path = tmp_path / "pf.json"
+        trace_path.write_text(json.dumps({"traceEvents": events}))
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_pftrace_memory_copy",
+            "--trace_path",
+            str(trace_path),
+            "--output_csvs_dir",
+            str(tmp_path / "csv"),
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert (tmp_path / "csv" / "memory_copy_by_copy_bytes.csv").exists()
+
+
+# --- migrated from test_coverage_95_phase9.py ---
+from tests.fixtures.traces import ROCprof_FILE
+import importlib
+import json
+import os
+import sys
+import pandas as pd
+import pytest
+from TraceLens.PerfModel import perf_model
+from TraceLens.TraceDiff.trace_diff import TraceDiff
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
+from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
+from tests.fixtures.reporting import _minimal_pftrace_events, _write_trace
+from tests.test_trace2tree import _add_gpu_chain, _build_tree, _mk_event
+
+
+class TestReportingCliPhase9:
+    def test_generate_perf_report_pytorch_main(self, tmp_path):
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_pytorch"
+        )
+        trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)])
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_pytorch",
+            "--profile_json_path",
+            trace,
+            "--output_csvs_dir",
+            str(tmp_path / "csv"),
+            "--output_xlsx_path",
+            str(tmp_path / "out.xlsx"),
+            "--enable_kernel_summary",
+            "--disable_coll_analysis",
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert (tmp_path / "csv" / "gpu_timeline.csv").exists()
+
+    def test_generate_perf_report_inference_main(self, tmp_path):
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_pytorch_inference"
+        )
+        trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "inf.json")
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_pytorch_inference",
+            "--profile_json_path",
+            trace,
+            "--output_csvs_dir",
+            str(tmp_path / "csv"),
+            "--output_xlsx_path",
+            str(tmp_path / "out.xlsx"),
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert (tmp_path / "csv" / "gpu_timeline.csv").exists()
+
+    @pytest.mark.skipif(
+        not os.path.isfile(ROCprof_FILE), reason="rocprof fixture missing"
+    )
+    def test_generate_multi_rank_collective_main(self, tmp_path):
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_multi_rank_collective_report_pytorch"
+        )
+        for rank in (0, 1):
+            (tmp_path / f"rank{rank}_trace.json").write_text(
+                json.dumps(
+                    {
+                        "traceEvents": [
+                            {
+                                "ph": "X",
+                                "cat": "kernel",
+                                "name": "ncclKernel_AllReduce",
+                                "pid": rank,
+                                "tid": 3,
+                                "ts": 1000,
+                                "dur": 40,
+                                "args": {"External id": 10, "stream": 3},
+                            }
+                        ]
+                    }
+                )
+            )
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_multi_rank_collective_report_pytorch",
+            "--trace_dir",
+            str(tmp_path),
+            "--world_size",
+            "2",
+            "--output_csvs_dir",
+            str(tmp_path / "coll"),
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert os.path.isdir(tmp_path / "coll")
+
+    def test_pftrace_hip_api_main(self, tmp_path):
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_pftrace_hip_api"
+        )
+        trace_path = tmp_path / "pf.json"
+        trace_path.write_text(json.dumps({"traceEvents": _minimal_pftrace_events()}))
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_pftrace_hip_api",
+            "--trace_path",
+            str(trace_path),
+            "--output_csvs_dir",
+            str(tmp_path / "csv"),
+        ]
+        try:
+            mod.main()
+        except SystemExit:
+            pass
+        finally:
+            sys.argv = old_argv
+
+
+# --- migrated from test_coverage_boost.py ---
+import json
+import os
+import pandas as pd
+import pytest
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
+    BiasedGroupedTopk,
+    moe_aiter_fused_1stage,
+    moe_aiter_unfused_down,
+    moe_aiter_unfused_up,
+    moe_flydsl_stage1,
+    moe_flydsl_stage2,
+    moe_gptq_awq_down,
+    moe_gptq_awq_up,
+    moe_triton_invoke_grouped_gemm,
+)
+from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+    generate_collective_report,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.test_conv_backward_bytes import (
+    _conv_bias_bwd_event,
+    _conv_bias_fwd_event,
+    _conv_bias_relu_bwd_event,
+    _conv_bias_relu_fwd_event,
+)
+from tests.test_dit_fused_ln_modulate import (
+    _fused_ln_fwd_event,
+)
+from tests.test_evoformer_attention_ops import _event as _evoformer_event
+from tests.fixtures.reporting import (
+    _build_synthetic_trace,
+)
+from tests.test_treeperf import GPU_ONLY_TRACE
+
+
+class TestReportingCliBoost:
+    def test_inference_report_all_sheets(self, tmp_path):
+        trace = _write_trace(
+            tmp_path,
+            [
+                ("aten::mm", "gemm_kernel", 100),
+                ("aten::add", "add_kernel", 15),
+                ("aten::relu", "relu_kernel", 10),
+            ],
+        )
+        result = generate_inference_report(
+            profile_json_path=trace,
+            output_csvs_dir=str(tmp_path / "inf_csvs"),
+            output_xlsx_path=str(tmp_path / "inf.xlsx"),
+            collective_analysis=False,
+            kernel_summary=True,
+            short_kernel_study=True,
+            include_overlap_info=True,
+            group_by_parent_module=True,
+            group_by_num_kernels=True,
+            micro_idle_thresh_us=5,
+        )
+        assert "ops_summary" in result or "gpu_timeline" in result
+
+    def test_collective_report_multiprocessing(self, tmp_path):
+        for rank in range(2):
+            events = {
+                "traceEvents": [
+                    {
+                        "ph": "X",
+                        "cat": "kernel",
+                        "name": "ncclKernel_AllReduce",
+                        "pid": rank,
+                        "tid": 3,
+                        "ts": 1000 + rank,
+                        "dur": 50,
+                        "args": {
+                            "External id": 10 + rank,
+                            "Collective name": "allreduce",
+                            "stream": 3,
+                        },
+                    }
+                ]
+            }
+            (tmp_path / f"rank{rank}_trace.json").write_text(json.dumps(events))
+        dfs = generate_collective_report(
+            trace_dir=str(tmp_path),
+            world_size=2,
+            output_csvs_dir=str(tmp_path / "mp_out"),
+            use_multiprocessing=True,
+            max_workers=2,
+            strict_world_size_check=False,
+            all2allv_heatmap=False,
+        )
+        assert "nccl_summary_implicit_sync" in dfs
+
+    @pytest.mark.skipif(
+        not os.path.exists(
+            os.path.join(
+                os.path.dirname(__file__),
+                "traces/mi210/gpu_only_trace/gpu_only_trace.json.gz",
+            )
+        ),
+        reason="gpu_only trace fixture missing",
+    )
+    def test_treeperf_gpu_only_extended(self):
+        analyzer = TreePerfAnalyzer.from_file(GPU_ONLY_TRACE, rebuild_tree=True)
+        launchers = analyzer.get_df_kernel_launchers(include_args=True)
+        assert not launchers.empty
+        summary = TreePerfAnalyzer.get_df_kernel_launchers_summary(launchers)
+        assert not summary.empty
+        unique = TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
+            launchers, include_pct=True
+        )
+        assert not unique.empty
+        unified = analyzer.build_df_unified_perf_table(include_nccl=False)
+        assert isinstance(unified, pd.DataFrame)
+
+
+# --- migrated from test_coverage_push95.py ---
+from tests.fixtures.traces import ROCprof_FILE
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch as generate_training_report,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_graph_to_capture_by_group,
+    find_closest_batch_size,
+    load_capture_folder,
+    merge_capture_trace_into_graph,
+    verify_subtree_events,
+)
+from TraceLens.TreePerf.jax_analyses import JaxAnalyses
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
+from tests.fixtures.reporting import (
+    _create_genesis_capture,
+    _minimal_pftrace_events,
+    _write_trace,
+)
+from tests.fixtures.treeperf import _build_analyzer
+
+
+class TestReportingCliPush95:
+    def test_rocprof_main(self, tmp_path):
+        if not os.path.isfile(ROCprof_FILE):
+            pytest.skip("rocprof fixture missing")
+        out = tmp_path / "roc.xlsx"
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_rocprof"
+        )
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_rocprof",
+            "--profile_json_path",
+            ROCprof_FILE,
+            "--output_xlsx_path",
+            str(out),
+            "--short_kernel_study",
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert out.exists()
+
+    def test_pftrace_hip_api_main(self, tmp_path):
+        trace_path = tmp_path / "trace.json"
+        trace_path.write_text(json.dumps({"traceEvents": _minimal_pftrace_events()}))
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_pftrace_hip_api"
+        )
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_pftrace_hip_api",
+            "--trace_path",
+            str(trace_path),
+            "--output_csvs_dir",
+            str(tmp_path / "hip_api_csv"),
+            "--include_nonlaunch_apis",
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert (tmp_path / "hip_api_csv" / "api_kernel_summary.csv").exists()
+
+    def test_pftrace_memory_copy_main(self, tmp_path):
+        from tests.test_pftrace_memory_copy_report import _make_memory_copy_events
+
+        trace_path = tmp_path / "trace.json"
+        trace_path.write_text(json.dumps({"traceEvents": _make_memory_copy_events()}))
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_pftrace_memory_copy"
+        )
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_pftrace_memory_copy",
+            "--trace_path",
+            str(trace_path),
+            "--output_csvs_dir",
+            str(tmp_path / "mem_csv"),
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert any(f.endswith(".csv") for f in os.listdir(tmp_path / "mem_csv"))
+
+    def test_pftrace_hip_activity_csv_and_default_xlsx(self, tmp_path):
+        trace_path = tmp_path / "trace.json"
+        trace_path.write_text(json.dumps({"traceEvents": _minimal_pftrace_events()}))
+        csv_dir = tmp_path / "pf_csv"
+        dfs = generate_perf_report_pftrace_hip_activity(
+            trace_path=str(trace_path),
+            output_csvs_dir=str(csv_dir),
+            merge_kernels=True,
+            kernel_summary_baseline="compute",
+            hip_summary_group="name+stream",
+            min_event_ns=1000,
+        )
+        assert (csv_dir / "category_summary.csv").exists()
+        assert "category_summary" in dfs
+
+    def test_genesis_main(self, tmp_path):
+        capture = _create_genesis_capture(tmp_path)
+        out = tmp_path / "gen_out"
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_genesis"
+        )
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_genesis",
+            "--capture-dir",
+            str(capture),
+            "--output-dir",
+            str(out),
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert (out / "genesis_perf_report.xlsx").exists()
+
+    def test_compare_reports_main(self, tmp_path):
+        r1 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "r1.json")
+        r2 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 110)], "r2.json")
+        out1 = tmp_path / "rep1"
+        out2 = tmp_path / "rep2"
+        generate_perf_report_pytorch(
+            profile_json_path=r1,
+            output_csvs_dir=str(out1),
+            output_xlsx_path=str(tmp_path / "r1.xlsx"),
+            collective_analysis=False,
+        )
+        generate_perf_report_pytorch(
+            profile_json_path=r2,
+            output_csvs_dir=str(out2),
+            output_xlsx_path=str(tmp_path / "r2.xlsx"),
+            collective_analysis=False,
+        )
+        cmp_xlsx = tmp_path / "comparison.xlsx"
+        mod = importlib.import_module(
+            "TraceLens.Reporting.compare_perf_reports_pytorch"
+        )
+        old_argv = sys.argv
+        sys.argv = [
+            "compare_perf_reports_pytorch",
+            str(out1),
+            str(out2),
+            "-o",
+            str(cmp_xlsx),
+            "--names",
+            "a",
+            "b",
+            "--sheets",
+            "gpu_timeline",
+            "ops_summary",
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert cmp_xlsx.exists()
+
+    def test_pytorch_report_main_extended(self, tmp_path):
+        trace = _write_trace(
+            tmp_path,
+            [("aten::mm", "gemm_kernel", 100), ("aten::add", "add_kernel", 20)],
+        )
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_pytorch"
+        )
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_pytorch",
+            "--profile_json_path",
+            trace,
+            "--output_csvs_dir",
+            str(tmp_path / "py_ext"),
+            "--output_xlsx_path",
+            str(tmp_path / "py_ext.xlsx"),
+            "--enable_kernel_summary",
+            "--short_kernel_study",
+            "--include_overlap_info",
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert (tmp_path / "py_ext" / "gpu_timeline.csv").exists()
+
+
+# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_reporting_utils_and_pseudo_registry ---
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch as generate_training_report,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_graph_to_capture_by_group,
+    find_closest_batch_size,
+    load_capture_folder,
+    merge_capture_trace_into_graph,
+    verify_subtree_events,
+)
+from TraceLens.TreePerf.jax_analyses import JaxAnalyses
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
+from tests.fixtures.reporting import (
+    _create_genesis_capture,
+    _minimal_pftrace_events,
+    _write_trace,
+)
+from tests.fixtures.treeperf import _build_analyzer
+
+
+def test_reporting_utils_and_pseudo_registry(tmp_path):
+    from TraceLens.Reporting import reporting_utils as ru
+    from TraceLens.Trace2Tree.extensions import pseudo_ops_registry as por
+    from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+
+    trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)])
+    assert ru.detect_gpus_per_node(trace) is None or isinstance(
+        ru.detect_gpus_per_node(trace), int
+    )
+    tree = TraceToTree([])
+    tree.build_tree()
+    por.apply_pseudo_op_extensions(tree, verbose=False)
+    assert tree is not None
+
+
+# --- migrated from test_reporting_cli_coverage.py ---
+import importlib
+import json
+import os
+import sys
+import pytest
+from tests.fixtures.reporting import (
+    _minimal_pftrace_events,
+    _write_trace,
+)
+
+
+def test_pytorch_report_main(tmp_path):
+    trace = _write_trace(
+        tmp_path,
+        [("aten::mm", "gemm_kernel", 100), ("aten::add", "add_kernel", 15)],
+    )
+    out_dir = tmp_path / "py_csvs"
+    xlsx = tmp_path / "py.xlsx"
+    mod = importlib.import_module("TraceLens.Reporting.generate_perf_report_pytorch")
+
+    old_argv = sys.argv
+    sys.argv = [
+        "generate_perf_report_pytorch",
+        "--profile_json_path",
+        trace,
+        "--output_csvs_dir",
+        str(out_dir),
+        "--output_xlsx_path",
+        str(xlsx),
+        "--enable_kernel_summary",
+        "--short_kernel_study",
+        "--disable_coll_analysis",
+        "--group_by_num_kernels",
+    ]
+    try:
+        mod.main()
+    finally:
+        sys.argv = old_argv
+    assert xlsx.exists()

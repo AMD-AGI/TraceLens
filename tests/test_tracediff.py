@@ -798,3 +798,351 @@ class TestTraceDiffHelpers:
             ops, children1, children2, uid2node, uid2node
         )
         assert result == ops
+
+
+# --- migrated from test_coverage_95_phase10.py ---
+import importlib
+import json
+import sys
+import types
+from copy import deepcopy
+from typing import Dict, List
+from unittest.mock import patch
+import pandas as pd
+from TraceLens.Agent.Analysis.utils import arch_utils
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    _write_markdown_report,
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Reporting.pftrace_hip_activity_analysis import (
+    PftraceHipActivityAnalyzer,
+    classify,
+)
+from TraceLens.Reporting.tracediff_comparison_extension import (
+    tracediff_perf_summary_from_diff_stats,
+)
+from TraceLens.Trace2Tree.extensions.moe_aiter_pseudo_ops import (
+    _create_pseudo_op_moe_fused_aiter,
+    _has_cpu_op_descendant,
+    create_pseudo_ops_moe_fused_aiter,
+)
+from TraceLens.Trace2Tree.extensions.moe_flydsl_pseudo_ops import (
+    FUSED_MOE_PARENT,
+    create_pseudo_ops_moe_flydsl,
+)
+from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
+    _create_pseudo_op_moe_gptq_awq,
+    create_pseudo_ops_moe_gptq_awq,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from tests.fixtures.reporting import _write_trace
+from tests.test_trace2tree import _add_gpu_chain, _mk_event
+from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
+
+
+class TestArchTracediffTreePerfPhase10:
+    def test_arch_utils_missing_ext_dir(self, tmp_path, monkeypatch):
+        pkg_root = tmp_path / "pkg_no_arch"
+        pkg_root.mkdir()
+        init_py = pkg_root / "__init__.py"
+        init_py.write_text("")
+        pkg = types.ModuleType("pkg_no_arch_ext")
+        pkg.__file__ = str(init_py)
+        monkeypatch.setitem(sys.modules, "pkg_no_arch_ext", pkg)
+        monkeypatch.setenv("TL_EXTENSION", "pkg_no_arch_ext")
+        assert isinstance(arch_utils._collect_arch_jsons(), dict)
+
+    def test_tracediff_summary_trace2_only_ops(self):
+        diff = pd.DataFrame(
+            {
+                "source": ["trace2", "trace2"],
+                "lowest_common_ancestor_id": [1, 1],
+                "lowest_common_ancestor_name": ["aten::mm", "aten::mm"],
+                "cpu_op_name": ["aten::add", "aten::mul"],
+                "busy_time": [10.0, 20.0],
+                "name": ["k1", "k2"],
+                "gpu_op_uid": [1, 2],
+                "nn_module_stack": ["[]", "[]"],
+                "nn_module_parent": ["", ""],
+                "Input Dims": ["[[2,3]]", "[[2,3]]"],
+                "Input type": ["['fp16']", "['fp16']"],
+                "Input Strides": ["[]", "[]"],
+                "Concrete Inputs": ["", ""],
+            }
+        )
+        summary = tracediff_perf_summary_from_diff_stats(diff)
+        assert " | " in summary.iloc[0]["name"]
+
+    def test_unified_perf_bwd_linked(self):
+        corr_fwd, corr_bwd = 200, 201
+        events = [
+            _make_gpu_event(
+                "cpu_f",
+                1000,
+                100,
+                "cpu_op",
+                "aten::mm",
+                args={
+                    "Input Dims": [[32, 64], [64, 128]],
+                    "Input type": ["fp16", "fp16"],
+                },
+            ),
+            _make_gpu_event(
+                "rt_f",
+                1010,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                args={"correlation": corr_fwd},
+            ),
+            _make_gpu_event(
+                "k_f",
+                1050,
+                50,
+                "kernel",
+                "gemm_fwd",
+                pid=0,
+                tid=7,
+                args={"correlation": corr_fwd, "stream": 7},
+            ),
+            _mk_ac2g(corr_fwd, 0, 7, 1050, "s"),
+            _mk_ac2g(corr_fwd, 0, 7, 1100, "f"),
+            _make_gpu_event(
+                "cpu_b",
+                2000,
+                100,
+                "cpu_op",
+                "aten::mm_backward",
+                args={
+                    "Input Dims": [[32, 64], [64, 128], [32, 128]],
+                    "Input type": ["fp16", "fp16", "fp16"],
+                },
+            ),
+            _make_gpu_event(
+                "rt_b",
+                2010,
+                5,
+                "cuda_runtime",
+                "hipLaunchKernel",
+                args={"correlation": corr_bwd},
+            ),
+            _make_gpu_event(
+                "k_b",
+                2050,
+                60,
+                "kernel",
+                "gemm_bwd",
+                pid=0,
+                tid=7,
+                args={"correlation": corr_bwd, "stream": 7},
+            ),
+            _mk_ac2g(corr_bwd, 0, 7, 2050, "s"),
+            _mk_ac2g(corr_bwd, 0, 7, 2110, "f"),
+        ]
+        analyzer = _build_analyzer(events)
+        fwd = next(e for e in analyzer.tree.events if e["name"] == "aten::mm")
+        bwd = next(e for e in analyzer.tree.events if e["name"] == "aten::mm_backward")
+        fwd["bwd_events"] = [bwd["UID"]]
+        bwd["fwd_event"] = fwd["UID"]
+        df = analyzer.build_df_unified_perf_table(
+            events=[fwd, bwd],
+            include_perf_metrics=True,
+            include_nccl=False,
+        )
+        assert isinstance(df, pd.DataFrame)
+
+
+# --- migrated from test_coverage_95_phase12.py ---
+from tests.fixtures.traces import TIMESFORMER1, TIMESFORMER2
+import gzip
+import json
+import os
+import sys
+from unittest.mock import patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    classify_graph_capture_trace,
+    generate_perf_report_pytorch,
+)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
+from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
+
+
+class TestTraceDiffPhase12:
+    @pytest.mark.skipif(
+        not (os.path.isfile(TIMESFORMER1) and os.path.isfile(TIMESFORMER2)),
+        reason="timesformer traces missing",
+    )
+    def test_tracediff_prune_and_diff_stats(self, tmp_path):
+        from TraceLens.TraceDiff.trace_diff import TraceDiff
+
+        pa1 = TreePerfAnalyzer.from_file(TIMESFORMER1)
+        pa2 = TreePerfAnalyzer.from_file(TIMESFORMER2)
+        td = TraceDiff(pa1.tree, pa2.tree)
+        td.merge_trees()
+        stats = td.generate_diff_stats()
+        assert isinstance(stats, pd.DataFrame)
+        out_txt = tmp_path / "merged.txt"
+        td.print_merged_tree(str(out_txt), prune_non_gpu=True)
+        assert out_txt.exists()
+
+
+# --- migrated from test_coverage_95_phase14.py ---
+import json
+import sys
+from types import ModuleType
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.category_analyses import (
+    convolution_analysis,
+    elementwise_analysis,
+    gemm_analysis,
+    moe_analysis,
+    norm_analysis,
+    reduce_analysis,
+    triton_analysis,
+)
+from TraceLens.Agent.Analysis.utils import arch_utils
+from TraceLens.PerfModel import kernel_name_parser
+from TraceLens.TraceDiff import util as tracediff_util
+from TraceLens.util import TraceEventUtils
+
+
+class TestTraceDiffUtil:
+    def test_sort_and_name_helpers(self):
+        nodes = [
+            {_TK.UID: 2, _TK.TimeStamp: 20, _TK.Name: "b"},
+            {_TK.UID: 1, _TK.TimeStamp: 10, _TK.Name: "a"},
+        ]
+        assert tracediff_util._sort_by_ts(nodes) == [1, 2]
+        assert tracediff_util._get_name_node(nodes[0]) == "b"
+        assert tracediff_util._get_name_node(None) is None
+        assert tracediff_util._list_to_tuple([1, [2, 3]]) == (1, (2, 3))
+        node = {"args": {"Input Dims": [[1, 2]]}}
+        assert tracediff_util._get_node_arg(node, "Input Dims") == ((1, 2),)
+        assert tracediff_util._get_node_arg(node, "missing") == ""
+
+    def test_gpu_path_and_kernel(self):
+        node = {
+            _TK.Name: "op",
+            _TK.Category: "cpu_op",
+            "non_gpu_path": False,
+        }
+        assert tracediff_util._is_gpu_path(node) is True
+        assert tracediff_util._is_kernel({_TK.Category: "kernel"}) is True
+        assert tracediff_util._is_kernel({_TK.Category: "cpu_op"}) is False
+        assert tracediff_util._is_gpu_path(None) is False
+        assert tracediff_util._is_gpu_path({"non_gpu_path": True}) is False
+
+    def test_normalize_name_for_comparison(self):
+        raw = "/path/to/model.py(42): forward 0xabc123"
+        norm = tracediff_util._normalize_name_for_comparison(raw)
+        assert "0xXXXX" in norm
+        assert ".py:" in norm
+        launch = tracediff_util._normalize_name_for_comparison("hipModuleLaunchKernel")
+        assert launch == "__kernel_launch__"
+
+
+# --- migrated from test_coverage_95_phase7.py ---
+from tests.fixtures.traces import COMPARE_DIR
+import importlib
+import json
+import os
+import sys
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
+from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
+from TraceLens.Reporting.compare_perf_reports_pytorch import (
+    generate_compare_perf_reports_pytorch,
+)
+from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+    generate_collective_report,
+)
+from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
+from TraceLens.Reporting.tracediff_comparison_extension import (
+    tracediff_perf_summary_from_diff_stats,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    merge_capture_trace_into_graph,
+)
+from TraceLens.TraceDiff.trace_diff import TraceDiff
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
+from tests.fixtures.reporting import (
+    _minimal_pftrace_events,
+    _mk_event,
+    _write_trace,
+)
+
+
+class TestTraceDiffPhase7:
+    @pytest.mark.skipif(
+        not os.path.isdir(COMPARE_DIR),
+        reason="compare traces missing",
+    )
+    def test_trace_diff_from_compare_traces(self):
+        from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+
+        t1 = os.path.join(COMPARE_DIR, "256thread", "perf_28ch_rank0.json.gz")
+        t2 = os.path.join(COMPARE_DIR, "512thread", "perf_28ch_rank0.json.gz")
+        if not (os.path.isfile(t1) and os.path.isfile(t2)):
+            pytest.skip("compare gz missing")
+        tree1 = TraceToTree.from_file(t1, rebuild_tree=True, enable_pseudo_ops=True)
+        tree2 = TraceToTree.from_file(t2, rebuild_tree=True, enable_pseudo_ops=True)
+        diff = TraceDiff(tree1, tree2)
+        stats = diff.get_diff_stats()
+        assert isinstance(stats, pd.DataFrame)
+
+
+# --- migrated from test_coverage_95_phase9.py ---
+import importlib
+import json
+import os
+import sys
+import pandas as pd
+import pytest
+from TraceLens.PerfModel import perf_model
+from TraceLens.TraceDiff.trace_diff import TraceDiff
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
+from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
+from tests.fixtures.reporting import _minimal_pftrace_events, _write_trace
+from tests.test_trace2tree import _add_gpu_chain, _build_tree, _mk_event
+
+
+class TestTraceDiffPhase9:
+    def test_single_side_gpu_child_collapse_merge(self):
+        events1 = [
+            _mk_event("cpu_op", "aten::outer", ts=0, dur=100, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::inner", ts=10, dur=100, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events1, events1[1], 100, "gemm_v1", ts_launch=20, ts_kernel=60)
+        events2 = [
+            _mk_event("cpu_op", "aten::outer", ts=0, dur=100, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::inner_a", ts=10, dur=50, pid=1, tid=1),
+            _mk_event("cpu_op", "aten::inner_b", ts=60, dur=50, pid=1, tid=1),
+        ]
+        _add_gpu_chain(events2, events2[1], 200, "gemm_v2a", ts_launch=20, ts_kernel=40)
+        _add_gpu_chain(events2, events2[2], 201, "gemm_v2b", ts_launch=70, ts_kernel=40)
+        td = TraceDiff(_build_tree(events1), _build_tree(events2))
+        td.generate_tracediff_report()
+        stats = td.get_diff_stats_df()
+        assert stats is None or isinstance(stats, pd.DataFrame)
+
+    def test_trace_only_branch_diff_stats(self):
+        events1 = [_mk_event("cpu_op", "aten::mm", ts=0, dur=100, pid=1, tid=1)]
+        _add_gpu_chain(
+            events1, events1[0], 100, "gemm_only_t1", ts_launch=10, ts_kernel=50
+        )
+        events2 = [_mk_event("cpu_op", "aten::add", ts=0, dur=100, pid=1, tid=1)]
+        td = TraceDiff(_build_tree(events1), _build_tree(events2))
+        td.generate_tracediff_report()
+        stats = td.get_diff_stats_df()
+        assert stats is None or isinstance(stats, pd.DataFrame)

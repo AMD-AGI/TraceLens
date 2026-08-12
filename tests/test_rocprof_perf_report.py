@@ -289,3 +289,239 @@ class TestGeneratePerfReport:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# --- migrated from test_coverage_95_final.py ---
+from tests.fixtures.traces import ROCprof_FILE
+import gzip
+import importlib
+import json
+import os
+import sys
+from copy import deepcopy
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.Reporting import reporting_utils as ru
+from TraceLens.Reporting.compare_traces_jax_llama import (
+    Event,
+    Summary,
+    classify_stage_base,
+    compute_stage_table,
+    emit_report,
+    extract_gpu_events,
+    infer_params,
+    is_loop_multiply_fusion,
+    load_trace,
+    mk_stats,
+    percentile,
+    summarize_one,
+    token_start_times,
+    top_stats_by_key,
+)
+from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+    _resolve_trace_files_glob,
+    generate_collective_report,
+)
+from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
+from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
+    apply_pseudo_op_extensions,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer, TreePerfAnalyzer
+from TraceLens.util import RocprofParser
+from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
+from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
+from tests.fixtures.reporting import _mk_ac2g, _mk_event
+from tests.fixtures.treeperf import (
+    _build_analyzer,
+    _make_gpu_event,
+    _mk_pytorch_trace,
+)
+
+
+class TestRocprofAnalysisDeep:
+    def test_full_rocprof_pipeline(self):
+        data = RocprofParser.load_rocprof_data(ROCprof_FILE)
+        kernels = RocprofParser.extract_kernel_events(data)
+        memory = RocprofParser.extract_memory_events(data)
+        api = RocprofParser.extract_api_events(data)
+        metadata = RocprofParser.get_metadata(data)
+        analyser = RocprofAnalyzer(kernels, memory, api, metadata)
+        timeline = analyser.get_df_gpu_timeline()
+        assert not timeline.empty
+        assert not analyser.get_df_kernel_summary().empty
+        assert isinstance(analyser.get_df_short_kernels(10), pd.DataFrame)
+        assert _categorize_kernel("Cijk_gemm") == "GEMM"
+
+    def test_rocprof_main(self, tmp_path):
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_rocprof"
+        )
+        out = tmp_path / "roc.xlsx"
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_rocprof",
+            "--profile_json_path",
+            ROCprof_FILE,
+            "--output_xlsx_path",
+            str(out),
+            "--short_kernel_study",
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert out.exists()
+
+
+# --- migrated from test_coverage_95_phase6.py ---
+from tests.fixtures.traces import ROCprof_FILE
+import json
+import os
+import sys
+from unittest.mock import patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    classify_graph_capture_trace,
+)
+from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from TraceLens.util import RocprofParser
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
+from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
+from tests.fixtures.perfmodel import _ARCH, _gemm_event, _moe_unfused_event
+from tests.fixtures.reporting import (
+    _mk_event,
+    _write_trace,
+)
+from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
+
+
+class TestRocprofPhase6:
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            ("Cijk_gemm", "GEMM"),
+            ("vectorized_elementwise_kernel", "Elementwise"),
+            ("reduce_kernel_sum", "Reduction"),
+            ("conv2d_fwd", "Convolution"),
+            ("layer_norm_kernel", "Normalization"),
+            ("flash_attn_fwd", "Attention"),
+            ("MemcpyDtoD", "Memory"),
+            ("ncclBroadcast", "COMM"),
+            ("unknown_xyz", "Other"),
+        ],
+    )
+    def test_categorize_kernel_branches(self, name, expected):
+        assert _categorize_kernel(name) == expected
+
+    @pytest.mark.skipif(
+        not os.path.isfile(ROCprof_FILE), reason="rocprof fixture missing"
+    )
+    def test_rocprof_analyzer_all_dataframes(self):
+        data = RocprofParser.load_rocprof_data(ROCprof_FILE)
+        kernels = RocprofParser.extract_kernel_events(data)
+        memory = RocprofParser.extract_memory_events(data)
+        api = RocprofParser.extract_api_events(data)
+        metadata = RocprofParser.get_metadata(data)
+        analyser = RocprofAnalyzer(kernels, memory, api, metadata)
+        assert not analyser.get_df_gpu_timeline().empty
+        assert not analyser.get_df_kernel_summary().empty
+        assert isinstance(analyser.get_df_kernel_details(), pd.DataFrame)
+        assert isinstance(analyser.get_df_short_kernels(5), pd.DataFrame)
+        assert isinstance(analyser.get_df_short_kernel_histogram(), pd.DataFrame)
+        assert isinstance(analyser.get_df_kernel_summary_by_category(), pd.DataFrame)
+
+
+# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_rocprof_analyzer_synthetic ---
+import importlib
+import json
+import os
+import sys
+from unittest.mock import MagicMock, patch
+import pandas as pd
+import pytest
+from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _extract_comparative_fusion_candidates,
+    _extract_standalone_fusion_candidates,
+)
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as generate_inference_report,
+)
+from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    generate_perf_report_pftrace_hip_activity,
+)
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_graph_to_capture_by_group,
+    find_closest_batch_size,
+    load_capture_folder,
+    merge_capture_trace_into_graph,
+    verify_subtree_events,
+)
+from TraceLens.TreePerf.jax_analyses import JaxAnalyses
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.agent import (
+    _StubAnalyzer,
+    _StubTree,
+    _kernel_event,
+    _write_minimal_orchestrator_csvs,
+)
+from tests.test_conv_backward_bytes import _conv_bias_bwd_event
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
+from tests.fixtures.reporting import (
+    _create_genesis_capture,
+    _minimal_pftrace_events,
+    _write_trace,
+)
+from tests.fixtures.treeperf import _build_analyzer
+
+
+def test_rocprof_analyzer_synthetic():
+    from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
+
+    kernels = [
+        {
+            "name": "gemm_kernel",
+            "ts": 1000,
+            "dur": 50,
+            "grid": (1, 1, 1),
+            "block": (256, 1, 1),
+            "stream": 0,
+        }
+    ]
+    memory = [{"name": "MemcpyHtoD", "ts": 900, "dur": 10, "bytes": 1024}]
+    api = [{"name": "hipLaunchKernel", "ts": 990, "dur": 5, "correlation": 1}]
+    analyzer = RocprofAnalyzer(kernels, memory, api, {})
+    assert not analyzer.get_df_gpu_timeline().empty
+    assert not analyzer.get_df_kernel_summary().empty
+    assert isinstance(analyzer.get_df_short_kernels(10), pd.DataFrame)
