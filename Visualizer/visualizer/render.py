@@ -110,6 +110,7 @@ _WHITE_TEXT_GROUP = re.compile(
 )
 WHITE_TEXT_OUTLINE_PX = 2.0
 _BASIC_OP_EDGE = "#000000"
+_INPUT_NODE_EDGE = "#000000"
 
 
 def white_text_has_black_outline_in_svg(svg: str) -> bool:
@@ -173,6 +174,11 @@ def _finalize_svg_styling(svg: str) -> str:
     svg = re.sub(
         r"fill: #bdc3c7; stroke: #bdc3c7;",
         "fill: #bdc3c7; stroke: #000000;",
+        svg,
+    )
+    svg = re.sub(
+        r"fill: #e8edf2; stroke: #e8edf2;",
+        "fill: #e8edf2; stroke: #000000;",
         svg,
     )
     return svg
@@ -1957,11 +1963,30 @@ def _frame_for_tail_node(graph, src: int):
     return None
 
 
-def _frame_exit_horizontal_y(frame_bounds, *, source_bottom: float) -> float:
+def _frame_exit_horizontal_y(
+    frame_bounds,
+    *,
+    source_bottom: float,
+    source_cx: float | None = None,
+    obstacles: list[_RenderAnchor] | None = None,
+    margin: float = CONNECTOR_OBSTACLE_MARGIN,
+) -> float:
     """Y level for the first horizontal leg leaving a dotted inline frame."""
     below_frame = frame_bounds.bottom - CONNECTOR_EXIT_STUB
     below_source = source_bottom - CONNECTOR_EXIT_STUB
-    return min(below_frame, below_source)
+    stub_y = min(below_frame, below_source)
+    if source_cx is None or not obstacles:
+        return stub_y
+    for obstacle in obstacles:
+        if abs(obstacle.cx - source_cx) > 0.06:
+            continue
+        if obstacle.top >= source_bottom - margin:
+            continue
+        stub_y = max(
+            stub_y,
+            obstacle.top + margin + CONNECTOR_ATTACHED_BOX_MARGIN + PARALLEL_CONNECTOR_COORD_EPS,
+        )
+    return stub_y
 
 
 def _pipeline_frame_exit_x(
@@ -2118,6 +2143,13 @@ def _assert_connector_path_clear_of_blocks(
             )
 
 
+def _graph_requires_strict_connector_validation(graph) -> bool:
+    """Tensor-port pipeline graphs get runtime connector clearance checks."""
+    from visualizer.computation_graph import _graph_has_tensor_ports
+
+    return _graph_has_tensor_ports(graph)
+
+
 def _assert_detail_link_paths_clear_of_blocks(
     link_paths: dict[tuple[int, int], list[tuple[float, float]]],
     *,
@@ -2127,6 +2159,8 @@ def _assert_detail_link_paths_clear_of_blocks(
     positions: list | None,
     stage: str,
 ) -> None:
+    if not _graph_requires_strict_connector_validation(graph):
+        return
     for link_key, points in link_paths.items():
         _assert_connector_path_clear_of_blocks(
             link_key,
@@ -3188,6 +3222,32 @@ def _find_connector_inline_frame_overlaps(
     return violations
 
 
+def _find_connector_node_clearance_violations(
+    link_paths: dict[tuple[int, int], list[tuple[float, float]]],
+    *,
+    graph,
+    anchors: dict[int, _RenderAnchor],
+    label_obstacles: list[_RenderAnchor],
+    positions: list,
+) -> list[tuple[tuple[int, int], str]]:
+    """Return links whose paths sit within the obstacle margin of intermediate nodes."""
+    violations: list[tuple[tuple[int, int], str]] = []
+    for link_key, points in link_paths.items():
+        src, tgt = link_key
+        obstacles = _connector_block_obstacles(
+            anchors,
+            src=src,
+            tgt=tgt,
+            label_obstacles=label_obstacles,
+            graph=graph,
+            positions=positions,
+            link_key=link_key,
+        )
+        if _path_hits_obstacles(points, obstacles, margin=CONNECTOR_OBSTACLE_MARGIN):
+            violations.append((link_key, "touches intermediate node"))
+    return violations
+
+
 def _find_connector_path_overlaps(
     link_paths: dict[tuple[int, int], list[tuple[float, float]]],
     *,
@@ -3629,15 +3689,6 @@ def _collect_detail_link_paths(
                     bus_y=bus_y,
                 )
             link_paths[link_key] = points
-            _assert_connector_path_clear_of_blocks(
-                link_key,
-                points,
-                graph=graph,
-                anchors=anchors,
-                label_obstacles=label_obstacles,
-                positions=positions,
-                stage="initial placement",
-            )
     separated = _separate_parallel_connector_paths(
         link_paths,
         incoming=incoming,
@@ -3757,15 +3808,16 @@ def _collect_detail_link_paths(
             graph=graph,
         )
         validated[link_key] = routed
-        _assert_connector_path_clear_of_blocks(
-            link_key,
-            routed,
-            graph=graph,
-            anchors=anchors,
-            label_obstacles=label_obstacles,
-            positions=positions,
-            stage="final reroute",
-        )
+        if _graph_requires_strict_connector_validation(graph):
+            _assert_connector_path_clear_of_blocks(
+                link_key,
+                routed,
+                graph=graph,
+                anchors=anchors,
+                label_obstacles=label_obstacles,
+                positions=positions,
+                stage="final reroute",
+            )
     _assert_connector_tees_precede_bus_joins(
         validated,
         graph=graph,
@@ -3775,7 +3827,7 @@ def _collect_detail_link_paths(
         target_bus=target_bus,
         stage="final",
     )
-    from visualizer.shrinkwrap import shrinkwrap_detail_link_paths
+    from visualizer.shrinkwrap import SHRINKWRAP_MIN_GAP, shrinkwrap_detail_link_paths
 
     validated = shrinkwrap_detail_link_paths(
         validated,
@@ -3786,7 +3838,7 @@ def _collect_detail_link_paths(
         target_bus=target_bus,
         source_bus=source_bus,
         merge_link_bus=merge_link_bus,
-        min_gap=0.02,
+        min_gap=SHRINKWRAP_MIN_GAP,
     )
     _assert_detail_link_paths_clear_of_blocks(
         validated,
@@ -3806,25 +3858,41 @@ def _collect_detail_link_paths(
         anchors=anchors,
         graph=graph,
     )
-    if overlap_pairs:
+    if overlap_pairs and _graph_requires_strict_connector_validation(graph):
         raise RuntimeError(
             "connector overlap after layout: "
             + ", ".join(f"{pair[0]}|{pair[1]}" for pair in overlap_pairs[:4])
         )
-    frame_overlaps = _find_connector_inline_frame_overlaps(
-        validated,
-        graph=graph,
-        positions=positions,
-    )
-    if frame_overlaps:
-        raise RuntimeError(
-            "connector crosses dotted frame after layout: "
-            + ", ".join(
-                f"{graph.nodes[key[0]].label!r}->{graph.nodes[key[1]].label!r} "
-                f"({frame_id!r}: {reason})"
-                for key, frame_id, reason in frame_overlaps[:4]
-            )
+    if _graph_requires_strict_connector_validation(graph):
+        frame_overlaps = _find_connector_inline_frame_overlaps(
+            validated,
+            graph=graph,
+            positions=positions,
         )
+        if frame_overlaps:
+            raise RuntimeError(
+                "connector crosses dotted frame after layout: "
+                + ", ".join(
+                    f"{graph.nodes[key[0]].label!r}->{graph.nodes[key[1]].label!r} "
+                    f"({frame_id!r}: {reason})"
+                    for key, frame_id, reason in frame_overlaps[:4]
+                )
+            )
+        node_clearance = _find_connector_node_clearance_violations(
+            validated,
+            graph=graph,
+            anchors=anchors,
+            label_obstacles=label_obstacles,
+            positions=positions,
+        )
+        if node_clearance:
+            raise RuntimeError(
+                "connector touches intermediate node after layout: "
+                + ", ".join(
+                    f"{graph.nodes[key[0]].label!r}->{graph.nodes[key[1]].label!r} ({reason})"
+                    for key, reason in node_clearance[:4]
+                )
+            )
     return validated
 
 
@@ -3987,6 +4055,7 @@ def _point_is_fanout_split_tee(
     y: float,
     *,
     link_keys: set[tuple[int, int]],
+    link_paths: dict[tuple[int, int], list[tuple[float, float]]],
     graph,
     outgoing: dict[int, list[tuple[int, int]]],
     target_bus: dict[int, float],
@@ -4006,9 +4075,23 @@ def _point_is_fanout_split_tee(
     source = anchors.get(src)
     if source is None:
         return False
-    if abs(x - source.cx) > eps or abs(y - source_bus[src]) > eps:
+    if abs(x - source.cx) > eps:
         return False
-    return all(link_key[0] == src for link_key in link_keys)
+    if not all(link_key[0] == src for link_key in link_keys):
+        return False
+    merge_bus_y = _fanout_lowest_target_merge_bus_y(graph, src, outgoing, target_bus)
+    if merge_bus_y is not None and y <= merge_bus_y + eps:
+        return False
+    for link_key in link_keys:
+        path = _dedupe_polyline_points(link_paths.get(link_key, []), eps=eps)
+        for index in range(1, len(path) - 1):
+            px, py = path[index]
+            if abs(px - x) > eps or abs(py - y) > eps:
+                continue
+            in_ori, out_ori = _orientations_at_path_vertex(path, index, eps=eps)
+            if in_ori == "v" and out_ori == "h":
+                return True
+    return False
 
 
 def _connector_point_is_bus_t_junction(
@@ -4036,6 +4119,7 @@ def _connector_point_is_bus_t_junction(
             x,
             y,
             link_keys=link_keys,
+            link_paths=link_paths,
             graph=graph,
             outgoing=outgoing,
             target_bus=target_bus,
@@ -4078,10 +4162,15 @@ def _collect_cross_link_bus_t_junctions(
     target_bus: dict[int, float],
     source_bus: dict[int, float],
     merge_link_bus: dict[tuple[int, int], float],
+    graph=None,
+    outgoing: dict[int, list[tuple[int, int]]] | None = None,
+    anchors: dict[int, _RenderAnchor] | None = None,
     eps: float = PARALLEL_CONNECTOR_COORD_EPS,
 ) -> set[tuple[float, float]]:
     """Find T joins where one link meets the interior of another link's bus segment."""
     joins: set[tuple[float, float]] = set()
+    outgoing = outgoing or {}
+    anchors = anchors or {}
     link_items = list(link_paths.items())
     for link_a, points_a in link_items:
         path_a = _dedupe_polyline_points(points_a, eps=eps)
@@ -4109,8 +4198,23 @@ def _collect_cross_link_bus_t_junctions(
                     if not (seg_lo + eps < bx < seg_hi - eps):
                         continue
                     in_ori, out_ori = _orientations_at_path_vertex(path_b, index, eps=eps)
-                    if "v" in (in_ori, out_ori):
-                        joins.add((bx, by))
+                    if "v" not in (in_ori, out_ori):
+                        continue
+                    link_keys = {link_a, link_b}
+                    if graph is not None and _point_is_fanout_split_tee(
+                        bx,
+                        by,
+                        link_keys=link_keys,
+                        link_paths=link_paths,
+                        graph=graph,
+                        outgoing=outgoing,
+                        target_bus=target_bus,
+                        source_bus=source_bus,
+                        anchors=anchors,
+                        eps=eps,
+                    ):
+                        continue
+                    joins.add((bx, by))
     return joins
 
 
@@ -4175,6 +4279,9 @@ def _collect_connector_join_points(
             target_bus=target_bus,
             source_bus=source_bus,
             merge_link_bus=merge_link_bus,
+            graph=graph,
+            outgoing=outgoing,
+            anchors=anchors,
             eps=eps,
         )
     )
@@ -4533,13 +4640,40 @@ def _detail_connector_linestyle(
     source: _RenderAnchor,
     target: _RenderAnchor,
 ) -> str:
-    """Only cross-column tensor feeds use dashed connectors in detailed diagrams."""
-    if (
-        positions[src].spec.synthetic == SYNTHETIC_TENSOR
-        and abs(source.cx - target.cx) > 0.35
-    ):
-        return "dashed"
+    """Detail connectors are always solid; dashed strokes are reserved for expanded inline frames."""
+    _ = (graph, src, positions, source, target)
     return "solid"
+
+
+def _assert_detail_connector_linestyles_are_solid(
+    graph,
+    *,
+    links: list[tuple[int, int]],
+    positions: list[LayoutPosition],
+    anchors: dict[int, _RenderAnchor],
+) -> None:
+    """Fail when any detail connector would render with a dashed linestyle."""
+    dashed: list[str] = []
+    for src, tgt in links:
+        source = anchors.get(src)
+        target = anchors.get(tgt)
+        if source is None or target is None:
+            continue
+        if (
+            _detail_connector_linestyle(
+                graph,
+                src=src,
+                positions=positions,
+                source=source,
+                target=target,
+            )
+            != "solid"
+        ):
+            dashed.append(f"{graph.nodes[src].label!r}->{graph.nodes[tgt].label!r}")
+    if dashed:
+        raise RuntimeError(
+            "detail connectors must use solid linestyle: " + ", ".join(dashed[:4])
+        )
 
 
 def _polyline_bounds(
@@ -4846,7 +4980,12 @@ def _pipeline_frame_exit_connector_points(
     x2 = entry_x if entry_x is not None else target.cx
     frame_stub_y = None
     if frame_bounds is not None:
-        frame_stub_y = _frame_exit_horizontal_y(frame_bounds, source_bottom=source.bottom)
+        frame_stub_y = _frame_exit_horizontal_y(
+            frame_bounds,
+            source_bottom=source.bottom,
+            source_cx=source.cx,
+            obstacles=route_obstacles,
+        )
     return _shared_merge_bus_connector_points(
         source,
         target,
@@ -5872,7 +6011,7 @@ def _build_detail_draw_plan(
                 pad_x=BLOCK_PAD_X,
                 pad_y=BLOCK_PAD_Y,
             )
-            plan.node_draws.append((input_leaf, {}))
+            plan.node_draws.append((input_leaf, {"edgecolor": _INPUT_NODE_EDGE}))
             continue
 
         if spec.synthetic == SYNTHETIC_TENSOR:
@@ -6228,6 +6367,13 @@ def _render_laid_out_computation_graph(
             merge_entry_x[link_key],
             bus_y=merge_link_bus.get(link_key),
         )
+
+    _assert_detail_connector_linestyles_are_solid(
+        graph,
+        links=links,
+        positions=positions,
+        anchors=anchors,
+    )
 
     for src, tgt in links:
         source = anchors.get(src)

@@ -2386,9 +2386,11 @@ def finalize_detail_layout(
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
     _redock_tensor_ports_after_layout(positions, graph, elements, min_gap=VALIDATE_MIN_GAP)
+    from visualizer.computation_graph import _graph_has_tensor_ports
     from visualizer.shrinkwrap import shrinkwrap_detail_layout
 
-    shrinkwrap_detail_layout(positions, graph, min_gap=VALIDATE_MIN_GAP)
+    if _graph_has_tensor_ports(graph):
+        shrinkwrap_detail_layout(positions, graph, min_gap=VALIDATE_MIN_GAP)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = _apply_inline_frame_label_layout(

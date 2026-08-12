@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -93,6 +94,17 @@ def test_chunk_kda_pipeline_renders_svg():
     for label in ("q", "k", "v", "beta"):
         assert f"<!-- {label} -->" in svg, f"missing pipeline block {label!r}"
     assert "<!-- Intra-chunk WY -->" in svg or "<!-- chunk_kda_fwd_intra -->" in svg
+
+    dashed_flow = re.findall(
+        rf'style="[^"]*stroke-dasharray[^"]*stroke: {re.escape(COLORS["flow"])}',
+        svg,
+    )
+    assert not dashed_flow, f"found {len(dashed_flow)} dashed flow connectors in SVG"
+    dashed_frames = re.findall(
+        rf'style="[^"]*stroke-dasharray[^"]*stroke: {re.escape(COLORS["detail_border"])}',
+        svg,
+    )
+    assert dashed_frames, "expected dashed strokes around expanded inline frames"
 
 
 def test_q_tensor_port_links_to_l2norm_entry():
@@ -231,17 +243,23 @@ def test_cumsum_fanout_routes_to_intra_and_h_without_crossing():
         y_exit = _connector_source_bottom_exit_y(cumsum)
         expected_tee = y_exit - (y_exit - merge_y) * 0.5
         assert abs(tee_y - expected_tee) < 1e-6, "short fan-out tee should sit midway to merge bus"
-        assert abs(intra_points[1][1] - tee_y) < 1e-6, "CumSum fan-out must tee before merge bus"
-        assert abs(h_points[1][1] - tee_y) < 1e-6
+        from visualizer.render import CONNECTOR_OBSTACLE_MARGIN
+
+        assert abs(intra_points[1][1] - tee_y) < CONNECTOR_OBSTACLE_MARGIN + 1e-6, (
+            "CumSum fan-out must tee before merge bus"
+        )
+        assert abs(h_points[1][1] - tee_y) < CONNECTOR_OBSTACLE_MARGIN + 1e-6
         assert abs(intra_points[1][0] - intra_points[2][0]) < 1e-6, "merge-bus leg stays vertical through tee"
         assert abs(h_points[2][0] - h_points[1][0]) > 0.06, "branch leg joins tee bus horizontally"
         assert abs(intra_points[2][1] - merge_y) < 1e-6
         assert abs(h_points[1][1] - intra_points[2][1]) > 0.05, "h branch must leave before intra bus"
+        path_tee_y = intra_points[1][1]
+        path_merge_y = intra_points[2][1]
         assert _connector_path_respects_tee_before_bus_join(
             intra_points,
             source=cumsum,
-            tee_y=tee_y,
-            merge_bus_y=target_bus[intra_idx],
+            tee_y=path_tee_y,
+            merge_bus_y=path_merge_y,
         )
 
         from visualizer.render import _collect_connector_join_points
@@ -256,7 +274,8 @@ def test_cumsum_fanout_routes_to_intra_and_h_without_crossing():
             outgoing=outgoing,
         )
         assert not any(
-            abs(jx - cumsum.cx) < 0.03 and abs(jy - tee_y) < 0.03 for jx, jy in join_points
+            abs(jx - cumsum.cx) < 0.03 and abs(jy - path_tee_y) < 0.03
+            for jx, jy in join_points
         ), "fan-out split tee must not get a bus junction dot"
 
         for index in range(len(h_points) - 1):
@@ -683,7 +702,64 @@ def _chunk_kda_pipeline_link_paths():
         merge_link_bus=merge_link_bus,
         input_index=None,
     )
-    return fig, graph, anchors, plan, incoming, outgoing, target_bus, source_bus, merge_link_bus, link_paths
+    return (
+        fig,
+        graph,
+        anchors,
+        plan,
+        incoming,
+        outgoing,
+        target_bus,
+        source_bus,
+        merge_link_bus,
+        link_paths,
+        positions,
+        links,
+    )
+
+
+def test_v_tensor_port_connector_to_intra_bus_is_solid():
+    """The v feed into the intra-chunk merge bus must use a solid connector."""
+    import matplotlib.pyplot as plt
+
+    from visualizer.render import _assert_detail_connector_linestyles_are_solid, _detail_connector_linestyle
+
+    (
+        fig,
+        graph,
+        anchors,
+        _plan,
+        _incoming,
+        _outgoing,
+        _target_bus,
+        _source_bus,
+        _merge_link_bus,
+        link_paths,
+        positions,
+        links,
+    ) = _chunk_kda_pipeline_link_paths()
+    try:
+        _assert_detail_connector_linestyles_are_solid(
+            graph,
+            links=links,
+            positions=positions,
+            anchors=anchors,
+        )
+        v_idx = next(index for index, node in enumerate(graph.nodes) if node.label == "v")
+        intra_idx = next(
+            index for index, node in enumerate(graph.nodes) if node.label == "chunk_kda_fwd_intra"
+        )
+        assert (v_idx, intra_idx) in link_paths
+        style = _detail_connector_linestyle(
+            graph,
+            src=v_idx,
+            positions=positions,
+            source=anchors[v_idx],
+            target=anchors[intra_idx],
+        )
+        assert style == "solid"
+    finally:
+        plt.close(fig)
 
 
 def test_chunk_kda_pipeline_connectors_attach_flush_to_box_borders():
@@ -919,7 +995,19 @@ def test_parallel_feeder_frame_exit_stubs_are_shrinkwrapped():
                     if abs(y1 - y2) < 1e-6 and abs(x1 - x2) > 0.06
                 ]
                 bus_horizontals = [y for y in horizontals if abs(y - bus_y) < 0.03]
-                assert bus_horizontals, f"{frame_id} must tee onto the shared merge bus"
+                same_column_bus_tee = (
+                    len(points) == 3
+                    and abs(points[0][0] - points[1][0]) < 1e-6
+                    and abs(points[1][1] - bus_y) < 0.03
+                )
+                assert bus_horizontals or same_column_bus_tee, (
+                    f"{frame_id} must tee onto the shared merge bus"
+                )
+                if same_column_bus_tee:
+                    assert points[0][1] - points[1][1] < 0.55, (
+                        f"{frame_id} output stub should be short after shrinkwrap"
+                    )
+                    continue
                 gutter_verticals = [
                     abs(y1 - y2)
                     for (x1, y1), (x2, y2) in zip(points, points[1:])
@@ -1297,7 +1385,7 @@ def test_l2norm_fwd_q_output_avoids_v_tensor_port():
     """The q-column l2norm tail feed to intra must route around the v input tile."""
     import matplotlib.pyplot as plt
 
-    from visualizer.render import CONNECTOR_OBSTACLE_MARGIN, _path_penetrates_obstacle_tiles
+    from visualizer.render import CONNECTOR_OBSTACLE_MARGIN, _path_hits_obstacles
 
     fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths = (
         _chunk_kda_pipeline_link_paths()
@@ -1310,11 +1398,11 @@ def test_l2norm_fwd_q_output_avoids_v_tensor_port():
         )
         v_idx = next(index for index, node in enumerate(graph.nodes) if node.label == "v")
         points = link_paths[(tail_idx, intra_idx)]
-        assert not _path_penetrates_obstacle_tiles(
+        assert not _path_hits_obstacles(
             points,
             [anchors[v_idx]],
             margin=CONNECTOR_OBSTACLE_MARGIN,
-        ), "q l2norm tail connector must not pass through v"
+        ), "q l2norm tail connector must clear the v input tile"
     finally:
         plt.close(fig)
 

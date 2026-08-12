@@ -3035,25 +3035,30 @@ def _max_frame_exit_downward_shift(
     frame,
     source: int,
     *,
-    min_gap: float = 0.02,
+    min_gap: float | None = None,
 ) -> float:
     """Maximum downward shift before frame-exit corridors or same-column tiles are hit."""
-    from visualizer.render import CONNECTOR_EXIT_STUB, _frame_exit_horizontal_y, _inline_frame_draw_bounds
+    from visualizer.render import (
+        CONNECTOR_EXIT_STUB,
+        CONNECTOR_OBSTACLE_MARGIN,
+        _frame_exit_horizontal_y,
+        _inline_frame_draw_bounds,
+    )
+
+    if min_gap is None:
+        min_gap = CONNECTOR_OBSTACLE_MARGIN
 
     max_shift = _max_inline_frame_downward_shift(graph, positions, frame, min_gap=min_gap)
     bounds = _inline_frame_draw_bounds(frame, positions, graph)
     source_pos = positions[source]
     exit_y = _frame_exit_horizontal_y(bounds, source_bottom=source_pos.bottom)
-    y_exit = source_pos.bottom + min_gap
 
     for index, pos in enumerate(positions):
         if index in frame.node_indices or pos.spec.synthetic == SYNTHETIC_HIDDEN:
             continue
         if abs(pos.cx - source_pos.cx) > 0.06:
             continue
-        if pos.top_y >= exit_y - min_gap:
-            continue
-        if pos.bottom >= y_exit - min_gap:
+        if pos.top_y >= source_pos.bottom - min_gap:
             continue
         allowed = exit_y - (pos.top_y + min_gap)
         max_shift = min(max_shift, allowed)
@@ -3086,10 +3091,12 @@ def _compact_parallel_feeder_frame_exit_stubs(
     if not _graph_has_tensor_ports(graph):
         return
 
+    from visualizer.render import CONNECTOR_OBSTACLE_MARGIN
+
     incoming = _build_incoming_links(graph, node_count=len(positions))
     frame_tails = _inline_frame_tail_indices(graph)
-    corridor_eps = 0.02
-    min_gap = 0.02
+    corridor_eps = CONNECTOR_OBSTACLE_MARGIN / 3
+    min_gap = CONNECTOR_OBSTACLE_MARGIN
 
     for target, sources in incoming.items():
         tail_sources = [source for source in sources if source in frame_tails]
@@ -3183,6 +3190,17 @@ def _dock_single_consumer_tensor_ports(
         target_index = targets[0]
         target_pos = positions[target_index]
         port_pos = positions[index]
+
+        frame_tails = _inline_frame_tail_indices(graph)
+        shared_column_tail = any(
+            tgt == target_index
+            for src, tgt in graph.links
+            if src in frame_tails and abs(positions[src].cx - target_pos.cx) <= 0.06
+        )
+        if shared_column_tail:
+            port_pos.cx = _node_content_left(target_pos) - side_gap - port_pos.width / 2
+            port_pos.top_y = target_pos.top_y + row_gap + port_pos.height
+            continue
 
         frame_id = _inline_frame_id_for_node(graph, target_index)
         if frame_id is not None:

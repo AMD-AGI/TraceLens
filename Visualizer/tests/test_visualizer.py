@@ -315,7 +315,7 @@ def test_junction_dot_fits_rejects_box_overlap():
     )
 
 
-def test_detail_connector_linestyle_only_dashes_cross_column_tensor_ports():
+def test_detail_connector_linestyle_is_always_solid():
     from visualizer.computation_graph import (
         ComputationGraph,
         GraphNodeSpec,
@@ -333,7 +333,7 @@ def test_detail_connector_linestyle_only_dashes_cross_column_tensor_ports():
     ]
     source = _RenderAnchor(cx=0.5, top=10.0, bottom=9.6, left=0.25, right=0.75)
     target = _RenderAnchor(cx=2.0, top=8.0, bottom=7.6, left=1.75, right=2.25)
-    assert _detail_connector_linestyle(graph, src=0, positions=positions, source=source, target=target) == "dashed"
+    assert _detail_connector_linestyle(graph, src=0, positions=positions, source=source, target=target) == "solid"
 
     near_target = _RenderAnchor(cx=2.05, top=10.0, bottom=9.6, left=1.8, right=2.3)
     assert _detail_connector_linestyle(graph, src=0, positions=positions, source=near_target, target=target) == "solid"

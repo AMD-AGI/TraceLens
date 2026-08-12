@@ -22,7 +22,7 @@ from visualizer.render import (
     _path_hits_obstacles,
 )
 
-SHRINKWRAP_MIN_GAP = 0.02
+SHRINKWRAP_MIN_GAP = CONNECTOR_OBSTACLE_MARGIN
 
 
 def shrinkwrap_detail_layout(
