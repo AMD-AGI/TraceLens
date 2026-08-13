@@ -753,9 +753,17 @@ def merge_capture_trace_into_graph(
         if len(capture_roots) == 1:
             pairs = [(capture_roots[0], g) for g in graph_roots]
             data = [capture_root_data[0]] * len(graph_roots)
-        else:
-            pairs = list(zip(capture_roots, graph_roots))
-            data = capture_root_data
+        else: 
+            if len(capture_roots) == len(graph_roots):
+                pairs = list(zip(capture_roots, graph_roots))
+                data = capture_root_data
+            else:
+                print(
+                    "Warning: number of capture roots ({}) does not match number of graph roots ({}), merging may be incorrect".format(
+                        len(capture_roots), len(graph_roots)
+                    )
+                )
+                continue
 
         print(
             "Found {} capture roots and {} graph roots".format(
