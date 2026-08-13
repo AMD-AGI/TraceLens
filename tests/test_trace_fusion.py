@@ -6,12 +6,8 @@
 
 """Unit tests for TraceLens.TraceFusion."""
 
-import gzip
-import json
+import gzip, json, pytest
 from pathlib import Path
-
-import pytest
-
 from TraceLens.TraceFusion.trace_fuse import (
     TraceFuse,
     _default_filter_fn,
@@ -261,18 +257,12 @@ def test_merge_real_two_rank_trace():
         ]
     ).merge()
     by_rank = {
-        rank: [
-            event for event in merged if event.get("args", {}).get("rank") == rank
-        ]
+        rank: [event for event in merged if event.get("args", {}).get("rank") == rank]
         for rank in (0, 1)
     }
     assert all(by_rank.values())
     rank_pids = [
-        {
-            event["pid"]
-            for event in by_rank[rank]
-            if isinstance(event.get("pid"), int)
-        }
+        {event["pid"] for event in by_rank[rank] if isinstance(event.get("pid"), int)}
         for rank in (0, 1)
     ]
     assert rank_pids[0].isdisjoint(rank_pids[1])
@@ -286,9 +276,7 @@ def test_merge_real_two_rank_trace():
     ]
     assert rank_correlations[0].isdisjoint(rank_correlations[1])
     labels = {
-        event["args"]["name"]
-        for event in merged
-        if event.get("name") == "process_name"
+        event["args"]["name"] for event in merged if event.get("name") == "process_name"
     }
     assert labels >= {
         "RANK 0 - CPU",
@@ -296,3 +284,62 @@ def test_merge_real_two_rank_trace():
         "RANK 1 - CPU",
         "RANK 1 - GPU",
     }
+
+
+def test_process_single_rank_skips_process_metadata_events(tmp_path):
+    trace_path = tmp_path / "rank0.json"
+    metadata_events = [
+        {"name": name, "ph": "M", "pid": 1, "tid": 0, "args": {}}
+        for name in ("process_name", "process_sort_index", "process_labels")
+    ]
+    _write_trace(trace_path, metadata_events + [CUDA_LAUNCH, KERNEL])
+
+    fuser = TraceFuse([str(trace_path)])
+    _, events = _process_single_rank(
+        rank=0,
+        filepath=str(trace_path),
+        filter_fn=None,
+        include_pyfunc=False,
+        offset_multiplier=fuser.offset_multiplier,
+        linking_key=fuser.linking_key,
+    )
+    assert len(events) == 2
+    assert all(event.get("ph") != "M" for event in events)
+
+
+def test_process_single_rank_adds_args_when_missing(tmp_path):
+    init_path = tmp_path / "init.json"
+    _write_trace(init_path, [CUDA_LAUNCH, KERNEL])
+    fuser = TraceFuse([str(init_path)])
+
+    trace_path = tmp_path / "no_args.json"
+    event_without_args = {
+        "name": "cpu_op",
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 1,
+        "ts": 1,
+        "dur": 1,
+    }
+    _write_trace(trace_path, [event_without_args])
+    _, events = _process_single_rank(
+        rank=1,
+        filepath=str(trace_path),
+        filter_fn=None,
+        include_pyfunc=False,
+        offset_multiplier=fuser.offset_multiplier,
+        linking_key=fuser.linking_key,
+    )
+    assert events[0]["args"]["rank"] == 1
+
+
+def test_generate_rank_metadata_skips_metadata_and_non_int_pid():
+    merged = [
+        {"ph": "M", "pid": 10, "args": {"name": "process_name"}},
+        {"ph": "X", "pid": "not-an-int", "cat": "cpu_op", "args": {"rank": 0}},
+        {"ph": "X", "pid": 11, "cat": "kernel", "args": {"rank": 0}},
+    ]
+    fuser = TraceFuse.__new__(TraceFuse)
+    metadata = fuser._generate_rank_metadata(merged)
+    assert len(metadata) == 2
+    assert metadata[0]["args"]["name"] == "RANK 0 - GPU"

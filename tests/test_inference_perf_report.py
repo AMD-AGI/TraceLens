@@ -11,25 +11,26 @@
 #   - Optionally capture_traces/ (graph capture mode)
 #   - Optionally gpu_arch.json
 
-import os
-
-import numpy as np
-import pandas as pd
-import pytest
-import ast
-import re
+import os, numpy as np, pandas as pd, pytest, ast, re, gzip, json
 from pandas.api.types import is_float_dtype
-
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch,
     classify_graph_capture_trace,
+    generate_perf_report_pytorch,
+    generate_perf_report_pytorch as gen_inf,
+    generate_perf_report_pytorch as generate_inference_report,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
+    _align_capture_to_graph,
+    _align_graph_to_capture_by_group,
     _capture_tree_cache,
+    align_streams,
+    capture_has_kernel_names,
+    merge_capture_trace_into_graph,
+    verify_subtree_events,
 )
-
 from conftest import update_reference_csvs
+from tests.fixtures.traces import INFERENCE_ROOT, _discover_inference_cases
+from tests.fixtures.reporting import _build_synthetic_trace, _mk_event, _write_trace
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Input list of events is empty.*:UserWarning",
@@ -307,3 +308,292 @@ def test_inference_perf_report(
             f"'{sheet_name}' has differences in {profile_path}:"
             f"{format_diff_details(diff_cols)}"
         )
+
+
+INFERENCE_ROOT = os.path.join(os.path.dirname(__file__), "traces/inference")
+
+
+def _discover_cases():
+    if not os.path.isdir(INFERENCE_ROOT):
+        return []
+    cases = []
+    for entry in sorted(os.listdir(INFERENCE_ROOT)):
+        dirpath = os.path.join(INFERENCE_ROOT, entry)
+        if not os.path.isdir(dirpath):
+            continue
+        gz = [f for f in os.listdir(dirpath) if f.endswith(".json.gz")]
+        if not gz:
+            continue
+        capture = os.path.join(dirpath, "capture_traces")
+        cases.append(
+            pytest.param(
+                dirpath,
+                gz[0],
+                capture if os.path.isdir(capture) else None,
+                id=entry,
+            )
+        )
+    return cases
+
+
+@pytest.mark.parametrize("dirpath,trace_gz,capture_folder", _discover_cases())
+def test_inference_report_extended_flags(dirpath, trace_gz, capture_folder, tmp_path):
+    trace_path = os.path.join(dirpath, trace_gz)
+    out = tmp_path / "out"
+    generate_perf_report_pytorch(
+        profile_json_path=trace_path,
+        output_csvs_dir=str(out),
+        output_xlsx_path=str(tmp_path / "report.xlsx"),
+        collective_analysis=True,
+        kernel_summary=True,
+        short_kernel_study=True,
+        include_overlap_info=True,
+        group_by_parent_module=True,
+        group_by_num_kernels=True,
+        enable_pseudo_ops=True,
+        micro_idle_thresh_us=1,
+    )
+    assert (out / "gpu_timeline.csv").exists()
+
+
+@pytest.mark.parametrize("dirpath,trace_gz,capture_folder", _discover_cases())
+def test_merge_capture_trace_integration(dirpath, trace_gz, capture_folder):
+    if capture_folder is None:
+        pytest.skip("no capture traces")
+    metadata = os.path.join(capture_folder, "execution_details.json")
+    if not os.path.isfile(metadata):
+        pytest.skip("no execution_details.json")
+    trace_path = os.path.join(dirpath, trace_gz)
+    merged = merge_capture_trace_into_graph(capture_folder, metadata, trace_path)
+    assert len(merged.events) > 0
+
+
+class TestCaptureMergeHelpers:
+    def test_align_capture_to_graph_memcpy(self):
+        capture = [{"name": "cudaMemcpy", "args": {}}]
+        graph = [{"name": "MemcpyHtoD", "args": {}}]
+        aligned = _align_capture_to_graph(capture, graph)
+        assert aligned is not None
+
+    def test_align_capture_to_graph_mismatch(self):
+        capture = [{"name": "hipLaunchKernel", "args": {"kernel": "a"}}]
+        graph = [{"name": "b", "args": {}}]
+        assert _align_capture_to_graph(capture, graph) is None
+
+    def test_align_graph_to_capture_group_mismatch(self):
+        capture = [
+            {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+            {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+        ]
+        graph = [{"name": "k1", "args": {}}]
+        assert _align_graph_to_capture_by_group(capture, graph) is None
+
+    def test_align_streams_and_capture_has_names(self):
+        graph = [
+            {"name": "k1", "args": {"stream": 1}},
+            {"name": "k2", "args": {"stream": 2}},
+        ]
+        capture = [
+            {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+            {"name": "hipLaunchKernel", "args": {"kernel": "k2"}},
+        ]
+        assert capture_has_kernel_names(capture)
+        aligned = align_streams(graph, capture)
+        assert aligned is not None
+
+    def test_capture_missing_kernel_name(self):
+        capture = [{"name": "hipLaunchKernel", "args": {}}]
+        assert capture_has_kernel_names(capture) is False
+
+
+class TestReportingInferenceSheets:
+    def test_inference_all_report_variants(self, tmp_path):
+
+        trace = _write_trace(
+            tmp_path,
+            [
+                ("aten::mm", "gemm_kernel", 100),
+                ("aten::add", "vectorized_elementwise_kernel", 20),
+                ("aten::native_layer_norm", "layer_norm_kernel", 30),
+            ],
+        )
+        gen_inf(
+            profile_json_path=trace,
+            output_csvs_dir=str(tmp_path / "out"),
+            output_xlsx_path=str(tmp_path / "r.xlsx"),
+            collective_analysis=True,
+            enable_pseudo_ops=True,
+            kernel_summary=True,
+            short_kernel_study=True,
+            include_overlap_info=True,
+            group_by_parent_module=True,
+            group_by_num_kernels=True,
+            topk_ops=10,
+            topk_roofline_ops=5,
+            include_unlinked_kernels=True,
+            include_call_stack=True,
+        )
+        assert (tmp_path / "out" / "gpu_timeline.csv").exists()
+
+
+class TestInferenceZipPhase8:
+    def test_classify_graph_capture_json_gz(self, tmp_path):
+        capture_dir = tmp_path / "cap"
+        capture_dir.mkdir()
+        events = {
+            "traceEvents": [
+                _mk_event(
+                    "cpu_op",
+                    "vllm/v1/worker/gpu_model_runner.py(1): _dummy_run",
+                    1000,
+                    50,
+                    1,
+                    1,
+                    {},
+                ),
+                _mk_event("cuda_runtime", "cudaStreamBeginCapture", 1100, 10, 1, 1, {}),
+                _mk_event(
+                    "cpu_op",
+                    "aten::mm",
+                    1200,
+                    20,
+                    1,
+                    1,
+                    {"Input Dims": [[4, 8], [8, 16]]},
+                ),
+            ]
+        }
+        gz_path = capture_dir / "graph_capture_rank_0.json.gz"
+        with gzip.open(gz_path, "wt", encoding="utf-8") as f:
+            json.dump(events, f)
+        classify_graph_capture_trace(str(capture_dir))
+        details = json.loads((capture_dir / "execution_details.json").read_text())
+        assert details[0]["batch_size"] == 4
+
+
+@pytest.mark.parametrize("dirpath,trace_gz", _discover_inference_cases())
+def test_inference_fixture_full_report(dirpath, trace_gz, tmp_path):
+    trace_path = os.path.join(dirpath, trace_gz)
+    out = tmp_path / "csv"
+    result = generate_inference_report(
+        profile_json_path=trace_path,
+        output_csvs_dir=str(out),
+        output_xlsx_path=str(tmp_path / "report.xlsx"),
+        collective_analysis=False,
+        enable_pseudo_ops=True,
+        kernel_summary=True,
+        short_kernel_study=True,
+        group_by_parent_module=True,
+        group_by_num_kernels=True,
+        include_overlap_info=True,
+        topk_ops=10,
+        topk_roofline_ops=5,
+    )
+    assert (out / "gpu_timeline.csv").exists()
+    assert "gpu_timeline" in result
+
+
+def test_inference_report_comparison_and_debug_columns(tmp_path, monkeypatch):
+    trace1 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "t1.json")
+    trace2 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 120)], "t2.json")
+    monkeypatch.setenv("TRACELENS_DEBUG", "1")
+    result = generate_inference_report(
+        profile_json_path=trace1,
+        comparison_json_path=trace2,
+        output_csvs_dir=str(tmp_path / "cmp_csvs"),
+        output_xlsx_path=str(tmp_path / "cmp.xlsx"),
+        include_call_stack=True,
+        group_by_parent_module=True,
+        collective_analysis=False,
+    )
+    assert "gpu_timeline" in result
+    up = result.get("unified_perf_summary")
+    if up is not None and not up.empty and "call_stack_full" in up.columns:
+        assert "entry_point" in up.columns
+
+
+def test_piecewise_capture_merge():
+    case_dir = os.path.join(INFERENCE_ROOT, "vllm_prefilldecode_piecewise")
+    capture = os.path.join(case_dir, "capture_traces")
+    metadata = os.path.join(capture, "execution_details.json")
+    graph = os.path.join(case_dir, "graph_execution.json.gz")
+    if not all(os.path.isfile(p) for p in (metadata, graph)):
+        pytest.skip("piecewise fixture missing")
+    merged = merge_capture_trace_into_graph(capture, metadata, graph)
+    assert len(merged.events) > 1000
+
+
+def test_align_streams_multistream_tiebreak():
+
+    graph = [
+        {"name": "k1", "args": {"stream": 1}},
+        {"name": "k1", "args": {"stream": 2}},
+        {"name": "k2", "args": {"stream": 1}},
+    ]
+    capture = [
+        {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+        {"name": "hipLaunchKernel", "args": {"kernel": "k1"}},
+        {"name": "hipLaunchKernel", "args": {"kernel": "k2"}},
+    ]
+    aligned = align_streams(graph, capture)
+    assert aligned is not None
+    assert len(aligned) == 3
+
+
+def test_verify_subtree_direct_match():
+    capture = [{"name": "hipLaunchKernel", "args": {"kernel": "k1"}}]
+    graph = [{"name": "k1", "args": {}}]
+    code, cap, gr = verify_subtree_events(capture, graph)
+    assert code == 1
+
+
+def test_inference_on_merged_tree(tmp_path):
+    case_dir = os.path.join(INFERENCE_ROOT, "vllm_decode_full")
+    capture = os.path.join(case_dir, "capture_traces")
+    metadata = os.path.join(capture, "execution_details.json")
+    graph = os.path.join(case_dir, "graph_execution.json.gz")
+    if not all(os.path.isfile(p) for p in (metadata, graph)):
+        pytest.skip("fixture missing")
+    merged = merge_capture_trace_into_graph(capture, metadata, graph)
+    result = generate_inference_report(
+        profile_json_path=graph,
+        augmented_tree=merged,
+        output_csvs_dir=str(tmp_path / "merged_csv"),
+        output_xlsx_path=str(tmp_path / "merged.xlsx"),
+        collective_analysis=False,
+        enable_pseudo_ops=True,
+        group_by_parent_module=True,
+        kernel_summary=True,
+    )
+    assert "gpu_timeline" in result
+
+
+class TestInferenceReportSweep:
+    def test_full_flag_matrix(self, tmp_path):
+        trace = tmp_path / "trace.json"
+        trace.write_text(
+            json.dumps(
+                _build_synthetic_trace(
+                    [
+                        ("aten::mm", "gemm_kernel", 100),
+                        ("aten::add", "vectorized_elementwise_kernel", 20),
+                    ]
+                )
+            )
+        )
+        generate_inference_report(
+            profile_json_path=str(trace),
+            output_csvs_dir=str(tmp_path / "out"),
+            output_xlsx_path=str(tmp_path / "r.xlsx"),
+            collective_analysis=True,
+            kernel_summary=True,
+            short_kernel_study=True,
+            include_overlap_info=True,
+            group_by_parent_module=True,
+            group_by_num_kernels=True,
+            enable_pseudo_ops=False,
+            micro_idle_thresh_us=1,
+            topk_ops=10,
+            topk_roofline_ops=5,
+        )
+        assert (tmp_path / "out" / "gpu_timeline.csv").exists()

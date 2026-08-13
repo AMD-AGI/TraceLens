@@ -12,13 +12,9 @@ lazily and skipped unless a GPU runtime is available.
 
 from __future__ import annotations
 
-import importlib.util
-import json
+import importlib.util, json, pytest
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
-
 from TraceLens.PerfModel.benchmarking.microbench_utils import (
     _int_metric,
     check_gpu_idle,
@@ -41,21 +37,18 @@ def _require_cuda_gpu():
 
 def _import_microbench():
     _require_torch()
-    from TraceLens.PerfModel.benchmarking import microbench as mb
 
     return mb
 
 
 def _import_microbench_rocprof():
     _require_torch()
-    from TraceLens.PerfModel.benchmarking import microbench_rocprof as rp
 
     return rp
 
 
 def _import_fp4fp6_helpers():
     _require_torch()
-    from TraceLens.PerfModel.benchmarking import fp4fp6_helpers as fp
 
     return fp
 
