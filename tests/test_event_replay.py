@@ -5,11 +5,11 @@
 ###############################################################################
 
 import time, pandas as pd, argparse, json, subprocess, pytest, os
-from torch.profiler import ProfilerActivity, profile
-from TraceLens import EventReplay, EventReplayer, GPUEventAnalyser, TreePerfAnalyzer
 
 torch = pytest.importorskip("torch")
 torchvision_models = pytest.importorskip("torchvision").models
+from torch.profiler import ProfilerActivity, profile
+from TraceLens import EventReplay, EventReplayer, GPUEventAnalyser, TreePerfAnalyzer
 
 
 def profile_resnet(path=None):
