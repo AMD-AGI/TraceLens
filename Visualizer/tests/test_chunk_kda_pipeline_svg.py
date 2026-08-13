@@ -203,7 +203,7 @@ def test_cumsum_fanout_routes_to_intra_and_h_without_crossing():
         _segment_orientation,
     )
 
-    fig, graph, anchors, _plan, incoming, outgoing, target_bus, source_bus, _merge_link_bus, link_paths = (
+    fig, graph, anchors, _plan, incoming, outgoing, target_bus, source_bus, _merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -773,7 +773,7 @@ def test_chunk_kda_pipeline_connectors_attach_flush_to_box_borders():
         _connector_target_top_entry_y,
     )
 
-    fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths = (
+    fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -809,7 +809,7 @@ def test_chunk_kda_pipeline_connectors_do_not_overlap():
 
     from visualizer.render import _find_connector_path_overlaps
 
-    fig, graph, anchors, _plan, incoming, outgoing, target_bus, source_bus, merge_link_bus, link_paths = (
+    fig, graph, anchors, _plan, incoming, outgoing, target_bus, source_bus, merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -839,7 +839,7 @@ def test_small_fan_in_blocks_skip_shared_target_bus():
     """Blocks with three or fewer inputs route directly without a merge bus."""
     import matplotlib.pyplot as plt
 
-    fig, graph, _anchors, _plan, _incoming, _outgoing, target_bus, _source_bus, _merge_link_bus, link_paths = (
+    fig, graph, _anchors, _plan, _incoming, _outgoing, target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -871,7 +871,7 @@ def test_l2norm_fwd_bypass_connectors_are_separated():
     from visualizer.render import PARALLEL_CONNECTOR_CHANNEL_GAP
     from visualizer.sizing import min_vertical_block_gap
 
-    fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths = (
+    fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -916,7 +916,7 @@ def test_l2norm_fwd_main_chain_uses_straight_vertical_connectors():
     """Spine links inside l2norm_fwd frames should be simple vertical lines."""
     import matplotlib.pyplot as plt
 
-    fig, graph, _anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths = (
+    fig, graph, _anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -947,7 +947,7 @@ def test_fused_beta_sigmoid_frame_has_wider_tile_spacing():
     from visualizer.computation_graph import _inline_frame_vertical_gap
     from visualizer.sizing import min_vertical_block_gap
 
-    fig, graph, _anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths = (
+    fig, graph, _anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -969,7 +969,7 @@ def test_parallel_feeder_frame_exit_stubs_are_shrinkwrapped():
     """l2norm(k) and fused_beta columns compact down to the shared merge-bus corridor."""
     import matplotlib.pyplot as plt
 
-    fig, graph, _anchors, _plan, _incoming, _outgoing, target_bus, _source_bus, _merge_link_bus, link_paths = (
+    fig, graph, _anchors, _plan, _incoming, _outgoing, target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -1267,7 +1267,7 @@ def test_bypass_connectors_branch_from_spine_at_intermediate_op():
         _connector_target_side_entry_y,
     )
 
-    fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths = (
+    fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -1316,7 +1316,7 @@ def test_bypass_connectors_never_pass_through_skipped_blocks():
         _path_penetrates_obstacle_tiles,
     )
 
-    fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths = (
+    fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -1353,7 +1353,7 @@ def test_connectors_never_pass_through_unrelated_blocks():
         _connector_path_clear_of_blocks,
     )
 
-    fig, graph, anchors, plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths = (
+    fig, graph, anchors, plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -1387,7 +1387,7 @@ def test_l2norm_fwd_q_output_avoids_v_tensor_port():
 
     from visualizer.render import CONNECTOR_OBSTACLE_MARGIN, _path_hits_obstacles
 
-    fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths = (
+    fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -1418,7 +1418,7 @@ def test_intra_chunk_merge_bus_uses_single_straight_channel():
         _segment_orientation,
     )
 
-    fig, graph, anchors, _plan, _incoming, _outgoing, target_bus, _source_bus, _merge_link_bus, link_paths = (
+    fig, graph, anchors, _plan, _incoming, _outgoing, target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -1483,7 +1483,7 @@ def test_l2norm_fwd_junction_dots_only_on_shared_buses():
 
     from visualizer.render import _collect_connector_join_points
 
-    fig, graph, anchors, _plan, incoming, _outgoing, target_bus, source_bus, merge_link_bus, link_paths = (
+    fig, graph, anchors, _plan, incoming, _outgoing, target_bus, source_bus, merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:

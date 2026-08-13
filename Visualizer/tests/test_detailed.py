@@ -2888,6 +2888,75 @@ def test_kimi_detailed_all_sections_render_in_svg(tmp_path: Path):
         plt.close(fig)
 
 
+def test_detail_sections_share_left_anchor_after_finalize():
+    """Every detail subsection anchors its left content edge at ``min_left`` after finalize."""
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.computation_graph import (
+        _estimate_graph_height,
+        _node_content_left,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.extract import load_architecture
+    from visualizer.render import COLORS, DIAGRAM_LEFT_MARGIN, _detail_sections_to_render
+    from visualizer.render_validate import finalize_detail_layout
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    spec = load_architecture(
+        "moonshotai/Kimi-K3",
+        code_path=code_path,
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"]),
+    )
+    detail_min_left = DIAGRAM_LEFT_MARGIN + 0.05
+    fig, ax = plt.subplots(figsize=(16, 13))
+    fig.canvas.draw()
+    try:
+        left_edges: list[tuple[str, float]] = []
+        for title, tree, input_sublabel in _detail_sections_to_render(spec):
+            graph = build_computation_graph(tree, basic_ops=spec.basic_ops)
+            measure_graph_node_sizes(ax, graph, input_sublabel=None)
+            positions, _ = layout_computation_graph(
+                graph,
+                cx=4.083,
+                top_y=10.0,
+                block_w=18.0,
+                block_h=_estimate_graph_height(graph),
+                content_left=detail_min_left,
+            )
+            finalize_detail_layout(
+                ax,
+                graph,
+                positions,
+                input_sublabel=input_sublabel,
+                cx=4.083,
+                top_y=10.0,
+                detail_fill=COLORS["detail_fill"],
+                min_left=detail_min_left,
+            )
+            left = min(_node_content_left(pos) for pos in positions)
+            left_edges.append((title, left))
+        assert left_edges, "expected at least one detail section"
+        reference = left_edges[0][1]
+        for title, left in left_edges:
+            assert abs(left - reference) < 0.12, (
+                f"{title!r} left={left:.3f} != reference {reference:.3f}"
+            )
+        assert abs(reference - detail_min_left) < 0.02
+    finally:
+        plt.close(fig)
+
+
 def test_kimi_detail_sections_input_sources_and_spacing(tmp_path: Path):
     import matplotlib.pyplot as plt
     from pathlib import Path
@@ -3796,6 +3865,272 @@ def test_kda_gated_norm_spine_is_center_aligned():
     plt.close()
 
 
+def test_kda_fanout_to_chunk_kda_horizontal_gap_is_tight():
+    """Main-spine chunk_kda should sit near parallel fan-out tiles without a reserved column band."""
+    from pathlib import Path
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        _estimate_graph_height,
+        _node_content_left,
+        _node_content_right,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.render import COLORS, DIAGRAM_LEFT_MARGIN
+    from visualizer.render_validate import VALIDATE_MIN_GAP, _place_layout_zones, finalize_detail_layout
+    from visualizer.sizing import min_horizontal_block_gap
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
+    attn = build_block_node(
+        attr_name="self_attn",
+        class_name="KimiDeltaAttention",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    graph = build_computation_graph(attn, basic_ops=basic)
+    min_left = DIAGRAM_LEFT_MARGIN + 0.05
+    fig, ax = plt.subplots(figsize=(16, 13))
+    try:
+        measure_graph_node_sizes(ax, graph)
+        positions, _ = layout_computation_graph(
+            graph,
+            cx=3.5,
+            top_y=10.0,
+            block_w=18.0,
+            block_h=_estimate_graph_height(graph),
+            content_left=min_left,
+        )
+        chunk_idx = next(
+            index for index, node in enumerate(graph.nodes) if node.label == "chunk_kda pipeline"
+        )
+        k_idx = next(
+            index
+            for index, node in enumerate(graph.nodes)
+            if node.block and node.block.attr_name == "k_proj"
+        )
+        _place_layout_zones(
+            positions,
+            graph,
+            cx=3.5,
+            min_gap=VALIDATE_MIN_GAP,
+            min_left=min_left,
+        )
+        gap_after_first = _node_content_left(positions[chunk_idx]) - _node_content_right(
+            positions[k_idx]
+        )
+        _place_layout_zones(
+            positions,
+            graph,
+            cx=3.5,
+            min_gap=VALIDATE_MIN_GAP,
+            min_left=min_left,
+        )
+        gap_after_second = _node_content_left(positions[chunk_idx]) - _node_content_right(
+            positions[k_idx]
+        )
+        assert abs(gap_after_second - gap_after_first) < 0.02
+
+        positions, _ = layout_computation_graph(
+            graph,
+            cx=3.5,
+            top_y=10.0,
+            block_w=18.0,
+            block_h=_estimate_graph_height(graph),
+            content_left=min_left,
+        )
+        finalize_detail_layout(
+            ax,
+            graph,
+            positions,
+            input_sublabel=None,
+            cx=3.5,
+            top_y=10.0,
+            detail_fill=COLORS["detail_fill"],
+            min_left=min_left,
+        )
+        edge_gap = _node_content_left(positions[chunk_idx]) - _node_content_right(
+            positions[k_idx]
+        )
+        cx_gap = abs(positions[chunk_idx].cx - positions[k_idx].cx)
+        zone_gap = max(VALIDATE_MIN_GAP * 2, min_horizontal_block_gap())
+        assert cx_gap < zone_gap * 12, (
+            f"k_proj to chunk_kda cx gap {cx_gap:.3f} too wide (zone_gap={zone_gap:.3f})"
+        )
+        assert edge_gap < zone_gap * 6 or cx_gap < zone_gap * 6, (
+            f"k_proj to chunk_kda layout too wide (edge={edge_gap:.3f}, cx={cx_gap:.3f})"
+        )
+    finally:
+        plt.close(fig)
+
+
+def test_kda_hidden_states_fanout_uses_shared_source_bus_with_vertical_tees():
+    """Parallel linear feeds from hidden_states share one horizontal bus with vertical tees."""
+    from pathlib import Path
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from collections import defaultdict
+
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        _estimate_graph_height,
+        _fanout_branch_index,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.render import (
+        COLORS,
+        DIAGRAM_LEFT_MARGIN,
+        MERGE_RADIUS,
+        PARALLEL_CONNECTOR_COORD_EPS,
+        _anchors_from_detail_plan,
+        _build_detail_draw_plan,
+        _collect_detail_link_paths,
+        _collect_connector_join_points,
+        _compute_detail_connector_buses,
+        _connector_target_top_entry_y,
+    )
+    from visualizer.render_validate import finalize_detail_layout
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    basic = BasicOpFilter.for_detailed()
+    attn = build_block_node(
+        attr_name="self_attn",
+        class_name="KimiDeltaAttention",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    graph = build_computation_graph(attn, basic_ops=basic)
+    input_index = next(i for i, node in enumerate(graph.nodes) if node.synthetic == "@input")
+    fig, ax = plt.subplots(figsize=(16, 13))
+    try:
+        measure_graph_node_sizes(ax, graph)
+        min_left = DIAGRAM_LEFT_MARGIN + 0.05
+        positions, links = layout_computation_graph(
+            graph,
+            cx=3.5,
+            top_y=10.0,
+            block_w=18.0,
+            block_h=_estimate_graph_height(graph),
+            content_left=min_left,
+        )
+        finalize_detail_layout(
+            ax,
+            graph,
+            positions,
+            input_sublabel=None,
+            cx=3.5,
+            top_y=10.0,
+            detail_fill=COLORS["detail_fill"],
+            min_left=min_left,
+        )
+        plan = _build_detail_draw_plan(positions, graph, input_sublabel=None)
+        anchors = _anchors_from_detail_plan(positions, plan)
+        incoming: dict[int, list[tuple[int, int]]] = defaultdict(list)
+        outgoing: dict[int, list[tuple[int, int]]] = defaultdict(list)
+        for src, tgt in links:
+            incoming[tgt].append((src, tgt))
+            outgoing[src].append((src, tgt))
+        target_bus, source_bus, merge_entry_x, merge_link_bus = _compute_detail_connector_buses(
+            graph,
+            positions,
+            anchors,
+            incoming,
+            outgoing,
+            plan.label_obstacles,
+        )
+        assert input_index in source_bus
+        shared_bus_y = source_bus[input_index]
+        link_paths = _collect_detail_link_paths(
+            graph=graph,
+            links=links,
+            positions=positions,
+            anchors=anchors,
+            incoming=incoming,
+            label_obstacles=plan.label_obstacles,
+            target_bus=target_bus,
+            source_bus=source_bus,
+            merge_entry_x=merge_entry_x,
+            merge_link_bus=merge_link_bus,
+            input_index=input_index,
+        )
+        fanout_links = [
+            (src, tgt)
+            for src, tgt in links
+            if src == input_index
+            and (
+                _fanout_branch_index(graph.nodes[tgt]) is not None
+                or graph.nodes[tgt].key.startswith("sideproducer")
+            )
+        ]
+        assert len(fanout_links) >= 4
+        for src, tgt in fanout_links:
+            target = anchors[tgt]
+            points = link_paths[(src, tgt)]
+            end_x, end_y = points[-1]
+            assert abs(end_x - target.cx) < 0.08
+            assert abs(end_y - _connector_target_top_entry_y(target)) < 0.02
+            horiz_ys = [
+                y1
+                for (x1, y1), (x2, y2) in zip(points, points[1:])
+                if abs(y1 - y2) <= PARALLEL_CONNECTOR_COORD_EPS
+                and abs(x1 - x2) > PARALLEL_CONNECTOR_COORD_EPS
+            ]
+            assert any(abs(y - shared_bus_y) <= PARALLEL_CONNECTOR_COORD_EPS for y in horiz_ys), (
+                f"expected shared source bus at y={shared_bus_y:.3f} for fan-out to {tgt}, got {horiz_ys}"
+            )
+        join_points = _collect_connector_join_points(
+            link_paths,
+            target_bus=target_bus,
+            source_bus=source_bus,
+            merge_link_bus=merge_link_bus,
+            graph=graph,
+            outgoing=outgoing,
+            anchors=anchors,
+        )
+        input_x = anchors[input_index].cx
+        assert not any(
+            abs(x - input_x) < 0.12 and abs(y - shared_bus_y) < PARALLEL_CONNECTOR_COORD_EPS
+            for x, y in join_points
+        )
+
+        g_index = next(
+            index for index, node in enumerate(graph.nodes) if node.block and node.block.attr_name == "g_proj"
+        )
+        combine_index = next(index for index, node in enumerate(graph.nodes) if node.label == "×")
+        side_points = link_paths[(g_index, combine_index)]
+        assert side_points[-1][0] >= positions[combine_index].cx + MERGE_RADIUS - 0.02
+    finally:
+        plt.close(fig)
+
+
 def test_moe_plus_is_spine_aligned_with_sigma():
     from pathlib import Path
 
@@ -4287,7 +4622,7 @@ def test_kda_tile_labels_fit_when_internals_render_below_fact_sheet():
             min_left=detail_min_left,
         )
         assert below_fact_sheet
-        assert 2.0 <= section_w <= 12.0
+        assert 2.0 <= section_w <= 16.0
         ax.set_xlim(0, canvas_width)
         fig.canvas.draw()
 

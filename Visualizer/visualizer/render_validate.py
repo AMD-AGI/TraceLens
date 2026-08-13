@@ -1169,6 +1169,90 @@ def _align_and_stack_inline_frames(
     _layout_fork_join_branches(positions, graph)
 
 
+def _layout_zone_gap(min_gap: float) -> float:
+    from visualizer.sizing import min_horizontal_block_gap
+
+    return max(min_gap * 2, min_horizontal_block_gap())
+
+
+def _layout_zones_already_separated(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float,
+) -> bool:
+    """True when layout zones already honor side-branch separation."""
+    fanout, main, side, input_hidden = _classify_layout_zones(positions, graph)
+    zone_gap = _layout_zone_gap(min_gap)
+    eps = zone_gap / 4
+
+    if not side:
+        return True
+    core_bounds = _cluster_horizontal_bounds(positions, main | input_hidden)
+    side_bounds = _cluster_horizontal_bounds(positions, side)
+    if core_bounds is None or side_bounds is None:
+        return False
+    _core_left, core_right = core_bounds
+    side_left, _side_right = side_bounds
+    return abs(side_left - (core_right + zone_gap)) <= eps
+
+
+def _anchor_layout_zone_extents(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    indices: set[int],
+    *,
+    min_left: float | None,
+    max_right: float | None,
+) -> None:
+    """Shift settled zone columns to honor left/right layout bounds without re-separating."""
+    if not indices:
+        return
+    content_left, content_right = _content_horizontal_extent_from_positions(positions, graph)
+    if min_left is not None:
+        _shift_node_indices(positions, indices, min_left - content_left)
+        content_left, content_right = _content_horizontal_extent_from_positions(positions, graph)
+    if max_right is None:
+        return
+    if content_right <= max_right:
+        return
+    overflow = content_right - max_right
+    _shift_node_indices(positions, indices, -overflow)
+    content_left, _content_right = _content_horizontal_extent_from_positions(positions, graph)
+    target_min_left = min_left if min_left is not None else content_left
+    if content_left < target_min_left:
+        _shift_node_indices(positions, indices, target_min_left - content_left)
+
+
+def _center_input_over_consumers(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    input_hidden: set[int],
+) -> None:
+    """Place synthetic inputs over the horizontal center of their fan-out consumers."""
+    from visualizer.computation_graph import _fanout_branch_index
+
+    for index in input_hidden:
+        targets = [target for source, target in graph.links if source == index]
+        fanout_targets = [
+            target
+            for target in targets
+            if _fanout_branch_index(graph.nodes[target]) is not None
+        ]
+        if fanout_targets:
+            by_branch: dict[int, int] = {}
+            for target in fanout_targets:
+                branch = _fanout_branch_index(graph.nodes[target])
+                if branch is not None:
+                    by_branch.setdefault(branch, target)
+            targets = list(by_branch.values())
+        if not targets:
+            continue
+        left = min(positions[target].cx - positions[target].width / 2 for target in targets)
+        right = max(positions[target].cx + positions[target].width / 2 for target in targets)
+        positions[index].cx = (left + right) / 2
+
+
 def _place_layout_zones(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
@@ -1178,54 +1262,52 @@ def _place_layout_zones(
     max_right: float | None = None,
     min_left: float | None = None,
 ) -> None:
-    """Separate fan-out, main path, and side branches into non-overlapping columns."""
+    """Keep side branches outside the core diagram and anchor content to layout bounds."""
     fanout, main, side, input_hidden = _classify_layout_zones(positions, graph)
-    from visualizer.sizing import min_horizontal_block_gap
-
-    zone_gap = max(min_gap * 2, min_horizontal_block_gap())
     all_indices = fanout | main | side | input_hidden
+    zone_gap = _layout_zone_gap(min_gap)
 
-    main_bounds = _cluster_horizontal_bounds(positions, main | input_hidden)
-    if main_bounds is None:
+    if _layout_zones_already_separated(positions, graph, min_gap=min_gap):
+        _center_input_over_consumers(positions, graph, input_hidden)
+        _anchor_layout_zone_extents(
+            positions,
+            graph,
+            all_indices,
+            min_left=min_left,
+            max_right=max_right,
+        )
         return
-    main_left, main_right = main_bounds
+
+    core_main = main | input_hidden
     if min_left is not None:
-        _shift_node_indices(positions, main | input_hidden, -main_left)
+        content_left, _content_right = _content_horizontal_extent_from_positions(
+            positions,
+            graph,
+        )
+        _shift_node_indices(positions, all_indices, -content_left)
     else:
-        main_center = (main_left + main_right) / 2
-        _shift_node_indices(positions, main | input_hidden, cx - main_center)
+        core_bounds = _cluster_horizontal_bounds(positions, core_main)
+        if core_bounds is not None:
+            core_center = (core_bounds[0] + core_bounds[1]) / 2
+            _shift_node_indices(positions, all_indices, cx - core_center)
 
-    main_bounds = _cluster_horizontal_bounds(positions, main | input_hidden)
-    if main_bounds is None:
-        return
-    main_left, main_right = main_bounds
+    core_bounds = _cluster_horizontal_bounds(positions, core_main)
+    if core_bounds is not None and side:
+        _core_left, core_right = core_bounds
+        side_bounds = _cluster_horizontal_bounds(positions, side)
+        if side_bounds is not None:
+            side_left, _side_right = side_bounds
+            _shift_node_indices(positions, side, core_right + zone_gap - side_left)
 
-    fan_bounds = _cluster_horizontal_bounds(positions, fanout)
-    if fan_bounds is not None:
-        _fan_left, fan_right = fan_bounds
-        _shift_node_indices(positions, fanout, main_left - zone_gap - fan_right)
+    _center_input_over_consumers(positions, graph, input_hidden)
 
-    side_bounds = _cluster_horizontal_bounds(positions, side)
-    if side_bounds is not None:
-        side_left, side_right = side_bounds
-        target_side_left = main_right + zone_gap
-        _shift_node_indices(positions, side, target_side_left - side_left)
-
-    content_left, content_right = _content_horizontal_extent_from_positions(positions, graph)
-    if min_left is not None:
-        _shift_node_indices(positions, all_indices, min_left - content_left)
-        content_left, content_right = _content_horizontal_extent_from_positions(positions, graph)
-
-    if max_right is None:
-        return
-    if content_right <= max_right:
-        return
-    overflow = content_right - max_right
-    _shift_node_indices(positions, all_indices, -overflow)
-    content_left, _content_right = _content_horizontal_extent_from_positions(positions, graph)
-    target_min_left = min_left if min_left is not None else content_left
-    if content_left < target_min_left:
-        _shift_node_indices(positions, all_indices, target_min_left - content_left)
+    _anchor_layout_zone_extents(
+        positions,
+        graph,
+        all_indices,
+        min_left=min_left,
+        max_right=max_right,
+    )
 
 
 def _content_horizontal_extent_from_positions(
@@ -1505,6 +1587,11 @@ def _resolve_obstacle_layout(
     min_left: float | None = None,
 ) -> None:
     """Repack columns and frames after measured resize."""
+    from visualizer.computation_graph import (
+        _graph_has_tensor_ports,
+        finalize_tensor_port_pipeline_layout,
+    )
+
     _align_and_stack_inline_frames(positions, graph)
     _place_layout_zones(
         positions,
@@ -1514,6 +1601,16 @@ def _resolve_obstacle_layout(
         max_right=max_right,
         min_left=min_left,
     )
+    if _graph_has_tensor_ports(graph):
+        finalize_tensor_port_pipeline_layout(positions, graph, min_left=min_left)
+        _redock_tensor_ports_after_layout(
+            positions,
+            graph,
+            elements,
+            min_gap=min_gap,
+        )
+        resolve_measured_overlaps(positions, graph, min_gap=min_gap)
+        _resolve_same_row_tile_overlaps(positions, min_gap=min_gap)
     _separate_overlapping_inline_frames(positions, graph, elements, min_gap=min_gap)
     if forbidden_regions:
         _shift_clear_forbidden_regions(positions, elements, forbidden_regions, min_gap=min_gap)
@@ -2390,7 +2487,12 @@ def finalize_detail_layout(
     from visualizer.shrinkwrap import shrinkwrap_detail_layout
 
     if _graph_has_tensor_ports(graph):
-        shrinkwrap_detail_layout(positions, graph, min_gap=VALIDATE_MIN_GAP)
+        shrinkwrap_detail_layout(
+            positions,
+            graph,
+            min_gap=VALIDATE_MIN_GAP,
+            min_left=min_left,
+        )
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = _apply_inline_frame_label_layout(

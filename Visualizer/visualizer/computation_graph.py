@@ -2053,7 +2053,9 @@ def _compact_synthetic_input_spacing(
         ]
         if caption_tops:
             desired_bottom = max(desired_bottom, max(caption_tops) + gap)
-    input_pos.top_y += desired_bottom - input_pos.bottom
+    shift = desired_bottom - input_pos.bottom
+    if shift > 0:
+        input_pos.top_y += shift
 
 
 def _ensure_input_above_fork_join_clusters(
@@ -2436,6 +2438,7 @@ def compact_horizontal_shrink_wrap(
     graph: ComputationGraph,
     *,
     min_left: float | None = None,
+    skip_frame_repack: bool = False,
 ) -> None:
     """Pack inline-frame columns tightly; align loose nodes from graph connectivity."""
     if not positions:
@@ -2452,7 +2455,7 @@ def compact_horizontal_shrink_wrap(
         if indices:
             frame_columns.append(indices)
 
-    if frame_columns:
+    if frame_columns and not skip_frame_repack:
         frame_columns.sort(key=lambda indices: _inline_frame_column_bounds(graph, positions, indices, pad=frame_pad)[0])
         cursor_left: float | None = None
         prev_indices: list[int] | None = None
@@ -3202,6 +3205,12 @@ def _dock_single_consumer_tensor_ports(
             port_pos.top_y = target_pos.top_y + row_gap + port_pos.height
             continue
 
+        target_spec = graph.nodes[target_index]
+        if target_spec.label == "×":
+            port_pos.cx = _node_content_left(target_pos) - side_gap - port_pos.width / 2
+            port_pos.top_y = target_pos.top_y + row_gap + port_pos.height
+            continue
+
         frame_id = _inline_frame_id_for_node(graph, target_index)
         if frame_id is not None:
             frame = next(item for item in graph.inline_frames if item.frame_id == frame_id)
@@ -3229,6 +3238,8 @@ def _align_tensor_port_columns(
     """Place each modeling tensor port above the kernel step it feeds."""
     for source, target in graph.links:
         if graph.nodes[source].synthetic != SYNTHETIC_TENSOR:
+            continue
+        if graph.nodes[target].label == "×":
             continue
         positions[source].cx = positions[target].cx
 

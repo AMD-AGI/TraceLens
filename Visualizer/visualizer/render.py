@@ -2219,7 +2219,11 @@ def _connector_uses_target_side_entry(
     side_y = _connector_target_side_entry_y(target)
     if abs(end_y - side_y) > eps:
         return False
-    return abs(end_x - target.left) <= eps or abs(end_x - target.right) <= eps
+    if abs(end_x - target.left) <= eps or abs(end_x - target.right) <= eps:
+        return True
+    return abs(end_x - (target.cx - MERGE_RADIUS)) <= eps or abs(
+        end_x - (target.cx + MERGE_RADIUS)
+    ) <= eps
 
 
 def _snap_connector_path_endpoints(
@@ -2239,6 +2243,16 @@ def _snap_connector_path_endpoints(
         snapped[0] = (source.cx, y_stub)
         entry_x = target.left if snapped[-2][0] <= target.cx else target.right
         snapped[-1] = (entry_x, _connector_target_side_entry_y(target))
+    elif link_key in getattr(graph, "side_entry_links", set()):
+        snapped[0] = (source.cx, _connector_source_bottom_exit_y(source))
+        tgt = link_key[1]
+        if tgt < len(graph.nodes) and _is_combine_synthetic(graph.nodes[tgt].synthetic):
+            combine_cy = (target.top + target.bottom) / 2
+            if source.cx >= target.cx:
+                entry_x = target.cx + MERGE_RADIUS
+            else:
+                entry_x = target.cx - MERGE_RADIUS
+            snapped[-1] = (entry_x, combine_cy)
     elif _connector_uses_target_side_entry(target, snapped):
         snapped[0] = (source.cx, _connector_source_bottom_exit_y(source))
     else:
@@ -2638,7 +2652,7 @@ def _orthogonal_path(
                 ):
                     return detour
             return _same_column_straight_connector_points(source, target, gap=gap)
-        bus_y = max(min_bus_y, min(y_stub, bus_y))
+        bus_y = max(min_bus_y, bus_y if bus_near == "source" else min(y_stub, bus_y))
         aligned = [(x1, y1), (x1, y_stub), (x1, bus_y), (x2, bus_y), (x2, y2)]
         if (
             not _path_hits_obstacles(aligned, obstacles, margin=CONNECTOR_OBSTACLE_MARGIN)
@@ -2655,7 +2669,7 @@ def _orthogonal_path(
             bus_y = y2 + min(0.10, channel * 0.25)
         bus_y = min(y_stub - 0.02, max(min_bus_y, bus_y))
     else:
-        bus_y = max(min_bus_y, min(y_stub, bus_y))
+        bus_y = max(min_bus_y, bus_y if bus_near == "source" else min(y_stub, bus_y))
 
     for _ in range(6):
         points = [(x1, y1), (x1, y_stub), (x1, bus_y), (x2, bus_y), (x2, y2)]
@@ -2792,15 +2806,16 @@ def _fanout_source_bus_y(
     if len(main_links) < SHARED_SOURCE_BUS_MIN_LINKS or link_key not in main_links:
         return base
     target_bus = target_bus or {}
-    if _source_fanout_splits_before_target_bus(
+    if not _source_fanout_splits_before_target_bus(
         graph,
         src,
         outgoing,
         target_bus,
     ):
-        _, tgt = link_key
-        if tgt not in target_bus:
-            return base
+        return base
+    _, tgt = link_key
+    if tgt not in target_bus:
+        return base
     ordered = sorted(
         main_links,
         key=lambda link: (-positions[link[1]].top_y, positions[link[1]].cx, link[1]),
@@ -4063,25 +4078,29 @@ def _point_is_fanout_split_tee(
     anchors: dict[int, _RenderAnchor],
     eps: float = PARALLEL_CONNECTOR_COORD_EPS,
 ) -> bool:
-    """True for a source-column tee that splits before a lower merge bus."""
+    """True for a single-source tee distributing one tensor onto a shared source bus."""
     sources = {link_key[0] for link_key in link_keys}
     if len(sources) != 1:
         return False
     src = next(iter(sources))
     if src not in source_bus:
         return False
-    if not _source_fanout_splits_before_target_bus(graph, src, outgoing, target_bus):
+    if not all(link_key[0] == src for link_key in link_keys):
         return False
     source = anchors.get(src)
     if source is None:
         return False
-    if abs(x - source.cx) > eps:
-        return False
-    if not all(link_key[0] == src for link_key in link_keys):
-        return False
-    merge_bus_y = _fanout_lowest_target_merge_bus_y(graph, src, outgoing, target_bus)
-    if merge_bus_y is not None and y <= merge_bus_y + eps:
-        return False
+    bus_y = source_bus[src]
+    splits_before_merge = _source_fanout_splits_before_target_bus(
+        graph,
+        src,
+        outgoing,
+        target_bus,
+    )
+    if splits_before_merge:
+        merge_bus_y = _fanout_lowest_target_merge_bus_y(graph, src, outgoing, target_bus)
+        if merge_bus_y is not None and y <= merge_bus_y + eps:
+            return False
     for link_key in link_keys:
         path = _dedupe_polyline_points(link_paths.get(link_key, []), eps=eps)
         for index in range(1, len(path) - 1):
@@ -4089,7 +4108,14 @@ def _point_is_fanout_split_tee(
             if abs(px - x) > eps or abs(py - y) > eps:
                 continue
             in_ori, out_ori = _orientations_at_path_vertex(path, index, eps=eps)
-            if in_ori == "v" and out_ori == "h":
+            if abs(y - bus_y) <= eps and in_ori == "h" and out_ori == "v":
+                return True
+            if (
+                abs(x - source.cx) <= eps
+                and abs(y - bus_y) <= eps + CONNECTOR_EXIT_STUB
+                and in_ori == "v"
+                and out_ori == "h"
+            ):
                 return True
     return False
 
@@ -4110,6 +4136,8 @@ def _connector_point_is_bus_t_junction(
 ) -> bool:
     """True when two or more links form a T on a shared bus, not a single-link L."""
     if len(link_keys) < 2:
+        return False
+    if len({link_key[0] for link_key in link_keys}) < 2:
         return False
     outgoing = outgoing or {}
     anchors = anchors or {}
@@ -4189,6 +4217,8 @@ def _collect_cross_link_bus_t_junctions(
             seg_lo, seg_hi = sorted((x1, x2))
             for link_b, points_b in link_items:
                 if link_a == link_b:
+                    continue
+                if link_a[0] == link_b[0]:
                     continue
                 path_b = _dedupe_polyline_points(points_b, eps=eps)
                 for index in range(1, len(path_b) - 1):
@@ -5509,6 +5539,7 @@ def _connector_points_for_link(
         and not combine_side_entry
         and not combine_top_entry
         and positions[src].spec.synthetic != SYNTHETIC_TENSOR
+        and src not in source_bus
         and _needs_cross_column_side_entry(source, target)
     ):
         return _cross_column_side_entry_connector_points(

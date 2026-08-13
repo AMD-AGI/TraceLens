@@ -30,13 +30,14 @@ def shrinkwrap_detail_layout(
     graph: ComputationGraph,
     *,
     min_gap: float = SHRINKWRAP_MIN_GAP,
+    min_left: float | None = None,
 ) -> None:
     """Apply vertical and horizontal shrinkwrap after layout rules have settled."""
     if not positions or not graph.nodes:
         return
 
     _shrinkwrap_vertical_layout(positions, graph, min_gap=min_gap)
-    _shrinkwrap_horizontal_layout(positions, graph)
+    _shrinkwrap_horizontal_layout(positions, graph, min_left=min_left)
 
 
 def _shrinkwrap_vertical_layout(
@@ -54,11 +55,17 @@ def _shrinkwrap_vertical_layout(
 def _shrinkwrap_horizontal_layout(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
+    *,
+    min_left: float | None = None,
 ) -> None:
-    """Tighten horizontal packing for non-tensor detail graphs."""
+    """Tighten horizontal packing and re-anchor content to ``min_left`` when set."""
     if _graph_has_tensor_ports(graph):
+        if min_left is not None:
+            from visualizer.computation_graph import _align_positions_left
+
+            _align_positions_left(positions, min_left)
         return
-    compact_horizontal_shrink_wrap(positions, graph)
+    compact_horizontal_shrink_wrap(positions, graph, min_left=min_left)
 
 
 def shrinkwrap_detail_link_paths(
