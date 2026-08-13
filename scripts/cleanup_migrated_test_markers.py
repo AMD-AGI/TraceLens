@@ -88,7 +88,9 @@ def _function_body_text(func: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     return "\n".join(parts)
 
 
-def _should_keep_nested(func: ast.FunctionDef | ast.AsyncFunctionDef, node: ast.stmt) -> bool:
+def _should_keep_nested(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, node: ast.stmt
+) -> bool:
     if func.name in KEEP_NESTED_IN_FUNCTIONS:
         return True
     body = _function_body_text(func)
