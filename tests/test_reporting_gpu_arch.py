@@ -17,6 +17,7 @@ from TraceLens.Reporting.reporting_utils import resolve_gpu_arch
 from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch,
 )
+import pandas as pd
 
 TRACE_PATH = os.path.join(
     "tests",
@@ -95,7 +96,6 @@ def perf_report_from_platform(tmp_path_factory):
 
 
 def test_roofline_bound_with_gpu_arch_platform(perf_report_from_platform):
-    import pandas as pd
 
     df = pd.read_csv(
         os.path.join(perf_report_from_platform, "unified_perf_summary.csv")

@@ -19,6 +19,7 @@ from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     perf_report_sanity_check,
     trunc_kernel_details,
 )
+from TraceLens import TreePerfAnalyzer
 
 
 def _make_sanity_check_inputs():
@@ -96,8 +97,6 @@ def test_add_truncated_kernel_details():
 def test_get_dfs_short_kernels():
     if not torch.cuda.is_available():
         pytest.skip("Requires CUDA/HIP with at least one visible GPU")
-
-    from TraceLens import TreePerfAnalyzer
 
     trace = os.path.join(
         "tests",

@@ -26,6 +26,7 @@ from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
     _resolve_trace_files_glob,
     generate_collective_report,
 )
+import TraceLens.Reporting.generate_multi_rank_collective_report_pytorch as mod
 
 LLAMA_TRACE_DIR = "tests/traces/mi300/llama_70b_fsdp"
 
@@ -129,9 +130,6 @@ def test_generate_collective_report_llama_traces(tmp_path):
     assert os.path.isfile(os.path.join(out_dir, "nccl_summary_implicit_sync.csv"))
 
 
-# --- migrated from test_coverage_95_final.py ---
-
-
 class TestCollectiveReportErrors:
     def test_glob_rank_resolution_errors(self, tmp_path):
         (tmp_path / "bad.json").write_text("{}")
@@ -187,9 +185,6 @@ class TestCollectiveReportErrors:
             )
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_collective_report_main ---
-
-
 def test_collective_report_main(tmp_path):
     for rank in (0, 1):
         (tmp_path / f"trace_rank_{rank}.json").write_text(
@@ -235,9 +230,6 @@ def test_collective_report_main(tmp_path):
     assert out.exists()
 
 
-# --- migrated from test_reporting_cli_coverage.py ---
-
-
 def test_collective_report_main_trace_glob(tmp_path):
     for rank in (0, 1):
         events = {
@@ -260,7 +252,6 @@ def test_collective_report_main_trace_glob(tmp_path):
         }
         (tmp_path / f"trace_rank_{rank}.json").write_text(json.dumps(events))
     out = tmp_path / "coll.xlsx"
-    import TraceLens.Reporting.generate_multi_rank_collective_report_pytorch as mod
 
     old_argv = sys.argv
     sys.argv = [

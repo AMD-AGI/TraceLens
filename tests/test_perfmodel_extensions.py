@@ -108,6 +108,17 @@ from tests.fixtures.perfmodel import (
     _moe_unfused_event,
     _norm_event,
 )
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as aext
+from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
+    fused_rms_mxfp4_quant,
+)
+from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
+    FusedMoE,
+    moe_aiter_fused_1stage,
+)
+from tests.test_primus_fp8_gemm_quantize import _fp8_gemm_event
+from tests.test_primus_mxfp4_gemm_quantize import _fp4_gemm_event
+from tests.fixtures.perfmodel import _moe_unfused_event
 
 _GDN_ANNOTATION = (
     "execute_64_context_0(sq0sk0sqsq0sqsk0)"
@@ -373,7 +384,6 @@ class TestPerfModelExtensions:
         assert model.bytes() > 0
 
 
-# --- migrated from test_perfmodel_coverage.py ---
 ###############################################################################
 # Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -1667,9 +1677,6 @@ class TestRmsNormExtensionsCoverage:
                 "Input Strides": [(256, 1), (1,), (), (128, 1), (1,), (), (256, 1)],
             }
         }
-        from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
-            fused_rms_mxfp4_quant,
-        )
 
         model = fused_rms_mxfp4_quant(event)
         assert model.has_x2 is True
@@ -2186,10 +2193,6 @@ class TestMoeExtendedCoverage:
     }
 
     def test_moe_aiter_fused_1stage(self):
-        from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
-            FusedMoE,
-            moe_aiter_fused_1stage,
-        )
 
         model = moe_aiter_fused_1stage(self.MOE_1STAGE)
         assert model.flops() > 0
@@ -2200,10 +2203,6 @@ class TestMoeExtendedCoverage:
         assert FusedMoE.bytes_func(32, 4096, 7168, 8, 2, True, None, 1, 2) is None
 
     def test_biased_grouped_topk_and_sort_scatter(self):
-        from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
-            BiasedGroupedTopk,
-            MoeSortScatterGather,
-        )
 
         topk_event = {
             "args": {
@@ -2221,7 +2220,6 @@ class TestMoeExtendedCoverage:
         assert MoeSortScatterGather(sort_event).bytes() > 0
 
 
-# --- migrated from test_custom_collectives_coverage.py ---
 ###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -2407,9 +2405,6 @@ class TestTreePerfInitKwargs:
         assert kwargs["event"] == {}
 
 
-# --- migrated from test_coverage_95_bulk.py ---
-
-
 class TestPerfModelExhaustiveSweep:
     _EVENTS = [
         _gemm_event("aten::mm", (4, 8), (8, 16)),
@@ -2541,9 +2536,6 @@ class TestPerfModelExhaustiveSweep:
         assert hit >= 40
 
 
-# --- migrated from test_coverage_95_final.py ---
-
-
 class TestPerfModelRemaining:
     def test_scaled_mm_mismatched_dtypes(self):
         event = {
@@ -2597,9 +2589,6 @@ class TestPerfModelRemaining:
                 {"freq_mhz": 2200}, None, 8, 16, 1, "bf16"
             )
         perf_model.GEMM.cache_gemm_results.clear()
-
-
-# --- migrated from test_coverage_95_phase11.py ---
 
 
 class _GroupedGemmNoBwdOverride(perf_model.GroupedGemm):
@@ -2981,9 +2970,6 @@ class TestPerfModelPhase11:
         assert aiter.bytes() > 0
 
 
-# --- migrated from test_coverage_95_phase11.py ---
-
-
 class TestMoeExtensionsPhase11:
     def test_unfused_bytes_none_and_precision(self):
         up = moe_ext.moe_triton_unfused_up(_moe_unfused_event())
@@ -3013,9 +2999,6 @@ class TestMoeExtensionsPhase11:
         assert down.bytes() > 0
         with pytest.raises(NotImplementedError):
             down.flops_bwd()
-
-
-# --- migrated from test_coverage_95_phase12.py ---
 
 
 class TestPerfModelPhase12:
@@ -3080,9 +3063,6 @@ class TestPerfModelPhase12:
         assert model.get_compute_precision() is not None
 
 
-# --- migrated from test_coverage_95_phase12.py ---
-
-
 class TestPerfModelPhase12B:
     def test_remaining_conv_and_reduce_edges(self):
         with pytest.raises(ValueError, match="Unknown convolution"):
@@ -3125,9 +3105,6 @@ class TestPerfModelPhase12B:
             )
 
 
-# --- migrated from test_coverage_95_phase13.py ---
-
-
 class TestMoePhase13:
     def test_fused_moe_precision_paths(self):
         fused = moe_ext.moe_aiter_fused_1stage(
@@ -3153,9 +3130,6 @@ class TestMoePhase13:
         assert fused.get_compute_precision() in (None, "fp8", "bf16", "fp16")
         fused.param_details["input_dtype"] = None
         assert fused.get_compute_precision() is None
-
-
-# --- migrated from test_coverage_95_phase14.py ---
 
 
 class TestKernelNameParserFull:
@@ -3184,8 +3158,6 @@ class TestKernelNameParserFull:
     def test_unknown_kernel_returns_none(self):
         assert kernel_name_parser.gemm_name_parser("not_a_gemm") is None
 
-
-# --- migrated from test_coverage_95_phase4.py ---
 
 _GEMM_EVT = _gemm_event("aten::mm", (4, 8), (8, 16))
 _CONV_EVT = _conv_bias_fwd_event()
@@ -3293,9 +3265,6 @@ class TestPerfModelBulkSweep:
         assert covered > 30
 
 
-# --- migrated from test_coverage_95_phase6.py ---
-
-
 class TestPerfModelPhase6:
     def test_conv_bias_bwd_empty_dims(self):
         perf_model.ConvBias_.fwd_pass_cache.clear()
@@ -3358,9 +3327,6 @@ class TestPerfModelPhase6:
         assert model.bytes() > 0
 
 
-# --- migrated from test_coverage_95_phase6.py ---
-
-
 class TestMoeExtensionsPhase6:
     MOE_FUSED = {
         "args": {
@@ -3420,9 +3386,6 @@ class TestMoeExtensionsPhase6:
         }
         b = moe_ext.BiasedGroupedTopk(topk_evt).bytes()
         assert b is None or b >= 0
-
-
-# --- migrated from test_coverage_95_phase8.py ---
 
 
 class TestPerfModelPhase8:
@@ -3491,9 +3454,6 @@ class TestPerfModelPhase8:
         fwd = perf_model.ConvBiasReLU_(_conv_bias_fwd_event())
         assert fwd.flops() > 0
         assert fwd.bytes() > 0
-
-
-# --- migrated from test_coverage_95_phase9.py ---
 
 
 class TestPerfModelPhase9:
@@ -3582,16 +3542,12 @@ class TestPerfModelPhase9:
         assert bwd.bytes_bwd() > 0
 
     def test_flash_attention_backward_simulation_none(self):
-        from unittest.mock import patch
 
         model = perf_model.flash_attention_backward(_flash_bwd_event())
         with patch.object(
             perf_model.GEMM, "get_simulation_time_func", return_value=(None, None)
         ):
             assert model.get_simulation_time() is None
-
-
-# --- migrated from test_coverage_boost.py ---
 
 
 class TestMoeExtensionsBoost:
@@ -3720,9 +3676,6 @@ class TestMoeExtensionsBoost:
         assert topk.flops() > 0
 
 
-# --- migrated from test_coverage_boost.py ---
-
-
 class TestPerfModelExtensionsBoost:
     def test_jax_conv_metadata_path(self):
         conv_event = {
@@ -3745,9 +3698,6 @@ class TestPerfModelExtensionsBoost:
         }
         model = perf_model.jax_conv(conv_event)
         assert model.flops_bwd() > 0
-
-
-# --- migrated from test_coverage_push95.py ---
 
 
 class TestPerfModelPush95:
@@ -3900,9 +3850,6 @@ class TestPerfModelPush95:
         assert model.flops() > 0
 
 
-# --- migrated from test_coverage_push95.py ---
-
-
 class TestMoeExtensionsPush95:
     def test_blockscale_missing_topk_raises(self):
         event = {
@@ -3943,9 +3890,6 @@ class TestMoeExtensionsPush95:
         assert down.bytes() > 0
         with pytest.raises(NotImplementedError):
             up.flops_bwd()
-
-
-# --- migrated from test_coverage_push95.py ---
 
 
 class TestAttentionRmsnormPush95:
@@ -4005,11 +3949,7 @@ class TestAttentionRmsnormPush95:
         assert rms_ext.vllm_rocm_aiter_rmsnorm_fp8_group_quant(vllm_evt).flops() > 0
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_norm_and_mamba_perf_models ---
-
-
 def test_norm_and_mamba_perf_models():
-    from tests.test_mamba_ssd import _mamba_event
 
     mamba = perf_model.mamba_ssd_fwd(_mamba_event())
     assert mamba.flops() > 0
@@ -4032,9 +3972,6 @@ def test_norm_and_mamba_perf_models():
         }
     )
     assert combine.bytes() >= 0
-
-
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_moe_ck_and_gptq_extended ---
 
 
 def test_moe_ck_and_gptq_extended():
@@ -4087,9 +4024,6 @@ def test_moe_ck_and_gptq_extended():
     assert moe_ext.moe_gptq_awq_down(gptq).flops() > 0
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_gemm_simulator_clears_cache ---
-
-
 def test_gemm_simulator_clears_cache(monkeypatch, tmp_path):
     perf_model.GEMM.cache_gemm_results.clear()
     sim_dir = tmp_path / "simdir"
@@ -4106,11 +4040,7 @@ def test_gemm_simulator_clears_cache(monkeypatch, tmp_path):
     perf_model.GEMM.cache_gemm_results.clear()
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_untested_perf_extensions ---
-
-
 def test_untested_perf_extensions():
-    from TraceLens.PerfModel.extensions import perf_model_extensions as pext
 
     blockscale = {
         "args": {
@@ -4169,13 +4099,7 @@ def test_untested_perf_extensions():
     assert pext.aiter_fused_qk_rope_cat_and_cache_mla(rope_mla).bytes() > 0
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_attention_extension_variants ---
-
-
 def test_attention_extension_variants():
-    from TraceLens.PerfModel.extensions import (
-        attention_perf_model_extensions as aext,
-    )
 
     for cls, event in [
         (
@@ -4204,9 +4128,6 @@ def test_attention_extension_variants():
             assert model.flops() is None
         else:
             assert model.flops() > 0
-
-
-# --- migrated from test_coverage_sweep.py ---
 
 
 class TestAttentionExtensionsBytes:
@@ -4249,9 +4170,6 @@ class TestAttentionExtensionsBytes:
             assert b >= 0
         prec = model.get_compute_precision()
         assert prec in (None, "bf16", "fp16", "fp8", "fp32")
-
-
-# --- migrated from test_coverage_sweep.py ---
 
 
 class TestMoeExtensionsSweep:
@@ -4302,9 +4220,6 @@ class TestMoeExtensionsSweep:
             }
         }
         assert moe_ext.moe_gptq_awq_down(gptq).flops() > 0
-
-
-# --- migrated from test_push95_coverage.py ---
 
 
 class TestPerfModelPush95Coverage:
@@ -4520,8 +4435,6 @@ class TestPerfModelPush95Coverage:
         assert conv.flops_bwd() > 0
 
     def test_hipblaslt_gemm_fp8_fp4(self):
-        from tests.test_primus_fp8_gemm_quantize import _fp8_gemm_event
-        from tests.test_primus_mxfp4_gemm_quantize import _fp4_gemm_event
 
         fp8 = perf_model.hipblaslt_gemm_fp8(
             _fp8_gemm_event((128, 64), (256, 64), trans_b=True)
@@ -4536,9 +4449,6 @@ class TestPerfModelPush95Coverage:
         )
         assert fp4.flops() > 0
         assert fp4.bytes() > 0
-
-
-# --- migrated from test_push95_coverage.py ---
 
 
 class TestMoeExtensionsPush95Coverage:
@@ -4741,9 +4651,6 @@ class TestMoeExtensionsPush95Coverage:
                 model.bytes_bwd()
 
 
-# --- migrated from test_coverage_final.py ---
-
-
 class TestPerfModelFinalCoverage:
     @pytest.mark.parametrize(
         "cls,fwd_factory,bwd_cls,bwd_factory",
@@ -4932,9 +4839,6 @@ class TestPerfModelFinalCoverage:
         assert g.bytes() > 0
 
 
-# --- migrated from test_coverage_final.py ---
-
-
 class TestMoeExtensionsFinal:
     MOE_BLOCKSCALE = {
         "args": {
@@ -5058,7 +4962,6 @@ class TestMoeExtensionsFinal:
                 model.flops_bwd()
 
     def test_moe_triton_unfused_and_sglang(self):
-        from tests.fixtures.perfmodel import _moe_unfused_event
 
         up = moe_ext.moe_triton_unfused_up(
             _moe_unfused_event(kernel_name="moe_mxfp4_up_kernel")
@@ -5146,9 +5049,6 @@ class TestMoeExtensionsFinal:
             }
         )
         assert sort.bytes() > 0
-
-
-# --- migrated from test_coverage_final.py ---
 
 
 class TestPerfModelDeepCoverage2:

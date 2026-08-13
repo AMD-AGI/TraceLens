@@ -56,6 +56,9 @@ from TraceLens.Reporting.pftrace_hip_activity_analysis import (
     extract_time_ns,
     rccl_overlap_two_pointer,
 )
+import gzip
+import types
+from TraceLens.Agent.Analysis.utils import arch_utils
 
 
 def _minimal_trace_events_with_agent():
@@ -179,9 +182,6 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 
-# --- migrated from test_coverage_95_phase10.py ---
-
-
 class TestPftraceClassifyAndReportPhase10:
     def test_classify_all_branches(self):
         assert classify("ncclRing") == "rccl"
@@ -234,7 +234,6 @@ class TestPftraceClassifyAndReportPhase10:
     def test_pftrace_activity_default_xlsx_and_gz_stem(self, tmp_path):
         events = _full_pftrace_events()
         gz = tmp_path / "trace.json.gz"
-        import gzip
 
         with gzip.open(gz, "wt", encoding="utf-8") as f:
             json.dump({"traceEvents": events}, f)
@@ -283,9 +282,6 @@ class TestPftraceClassifyAndReportPhase10:
         assert (tmp_path / "csv").is_dir()
 
 
-# --- migrated from test_coverage_95_phase5.py ---
-
-
 class TestPftraceHipActivityDeep:
     def test_analyser_all_methods(self, tmp_path):
         events = _minimal_pftrace_events()
@@ -300,12 +296,8 @@ class TestPftraceHipActivityDeep:
         assert isinstance(hip, pd.DataFrame)
 
 
-# --- migrated from test_coverage_95_phase8.py ---
-
-
 class TestPftraceAndArchPhase8:
     def test_pftrace_utils_branches(self, tmp_path):
-        from TraceLens.Reporting import pftrace_utils
 
         preferred = tmp_path / "traceconv"
         preferred.write_text("#!/bin/sh\necho ok\n")
@@ -317,9 +309,6 @@ class TestPftraceAndArchPhase8:
         assert pftrace_utils.ensure_trace_json(str(p)) == str(p.resolve())
 
     def test_arch_utils_tl_extension(self, tmp_path, monkeypatch):
-        import sys
-        import types
-        from TraceLens.Agent.Analysis.utils import arch_utils
 
         pkg_root = tmp_path / "fake_pkg"
         ext_arch = pkg_root / "Agent" / "Analysis" / "utils" / "arch"
@@ -332,9 +321,6 @@ class TestPftraceAndArchPhase8:
         monkeypatch.setitem(sys.modules, "fake_tl_ext", pkg)
         monkeypatch.setenv("TL_EXTENSION", "fake_tl_ext")
         assert "CUSTOM" in arch_utils._collect_arch_jsons()
-
-
-# --- migrated from test_coverage_95_phase9.py ---
 
 
 class TestPftraceExtendedPhase9:
@@ -418,9 +404,6 @@ class TestPftraceExtendedPhase9:
         )
 
 
-# --- migrated from test_reporting_cli_coverage.py ---
-
-
 def test_inference_report_main(tmp_path):
     trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 80)])
     out_dir = tmp_path / "inf_csvs"
@@ -441,9 +424,6 @@ def test_inference_report_main(tmp_path):
     finally:
         sys.argv = old_argv
     assert (out_dir / "gpu_timeline.csv").exists()
-
-
-# --- migrated from test_reporting_cli_coverage.py ---
 
 
 def test_pftrace_hip_activity_main(tmp_path):

@@ -31,6 +31,7 @@ from TraceLens.TraceDiff.trace_diff import TraceDiff
 from tests.test_trace2tree import _add_gpu_chain, _build_tree, _mk_event
 from tests.test_trace2tree import _add_gpu_chain, _mk_event
 from tests.fixtures.reporting import _mk_event
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
 _TK = TraceEventUtils.TraceKeys
 
@@ -816,9 +817,6 @@ class TestTraceDiffHelpers:
         assert result == ops
 
 
-# --- migrated from test_coverage_95_phase10.py ---
-
-
 class TestArchTracediffTreePerfPhase10:
     def test_arch_utils_missing_ext_dir(self, tmp_path, monkeypatch):
         pkg_root = tmp_path / "pkg_no_arch"
@@ -931,16 +929,12 @@ class TestArchTracediffTreePerfPhase10:
         assert isinstance(df, pd.DataFrame)
 
 
-# --- migrated from test_coverage_95_phase12.py ---
-
-
 class TestTraceDiffPhase12:
     @pytest.mark.skipif(
         not (os.path.isfile(TIMESFORMER1) and os.path.isfile(TIMESFORMER2)),
         reason="timesformer traces missing",
     )
     def test_tracediff_prune_and_diff_stats(self, tmp_path):
-        from TraceLens.TraceDiff.trace_diff import TraceDiff
 
         pa1 = TreePerfAnalyzer.from_file(TIMESFORMER1)
         pa2 = TreePerfAnalyzer.from_file(TIMESFORMER2)
@@ -951,9 +945,6 @@ class TestTraceDiffPhase12:
         out_txt = tmp_path / "merged.txt"
         td.print_merged_tree(str(out_txt), prune_non_gpu=True)
         assert out_txt.exists()
-
-
-# --- migrated from test_coverage_95_phase14.py ---
 
 
 class TestTraceDiffUtil:
@@ -991,16 +982,12 @@ class TestTraceDiffUtil:
         assert launch == "__kernel_launch__"
 
 
-# --- migrated from test_coverage_95_phase7.py ---
-
-
 class TestTraceDiffPhase7:
     @pytest.mark.skipif(
         not os.path.isdir(COMPARE_DIR),
         reason="compare traces missing",
     )
     def test_trace_diff_from_compare_traces(self):
-        from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
         t1 = os.path.join(COMPARE_DIR, "256thread", "perf_28ch_rank0.json.gz")
         t2 = os.path.join(COMPARE_DIR, "512thread", "perf_28ch_rank0.json.gz")
@@ -1011,9 +998,6 @@ class TestTraceDiffPhase7:
         diff = TraceDiff(tree1, tree2)
         stats = diff.get_diff_stats()
         assert isinstance(stats, pd.DataFrame)
-
-
-# --- migrated from test_coverage_95_phase9.py ---
 
 
 class TestTraceDiffPhase9:

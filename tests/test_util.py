@@ -1147,9 +1147,6 @@ def test_pftrace_parser_validation_errors(tmp_path):
         PftraceParser.load_pftrace_data(str(not_list_path))
 
 
-# --- migrated from test_coverage_95_phase13.py ---
-
-
 class TestAnalysisUtilsPhase13:
     def test_efficiency_memory_bound_and_fusion_map_empty(self, tmp_path):
         row = pd.Series(
@@ -1166,9 +1163,6 @@ class TestAnalysisUtilsPhase13:
         )
         assert eff["bound_type"] == "memory"
         assert au._load_fusion_map(str(tmp_path)) == {}
-
-
-# --- migrated from test_coverage_95_phase7.py ---
 
 
 class TestAnalysisUtilsPhase7:
@@ -1216,9 +1210,6 @@ class TestAnalysisUtilsPhase7:
             }
         ]
         assert len(kfa._filter_and_dedup(ops)) >= 1
-
-
-# --- migrated from test_coverage_95_phase8.py ---
 
 
 class TestAnalysisUtilsPhase8:

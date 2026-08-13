@@ -41,21 +41,18 @@ def _require_cuda_gpu():
 
 def _import_microbench():
     _require_torch()
-    from TraceLens.PerfModel.benchmarking import microbench as mb
 
     return mb
 
 
 def _import_microbench_rocprof():
     _require_torch()
-    from TraceLens.PerfModel.benchmarking import microbench_rocprof as rp
 
     return rp
 
 
 def _import_fp4fp6_helpers():
     _require_torch()
-    from TraceLens.PerfModel.benchmarking import fp4fp6_helpers as fp
 
     return fp
 

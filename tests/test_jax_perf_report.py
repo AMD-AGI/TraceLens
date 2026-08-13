@@ -44,6 +44,7 @@ from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_d
 from tests.fixtures.traces import JAX_PB
 from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
 from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
+import TraceLens.Reporting.generate_perf_report_jax as mod
 
 # ---------------------------------------------------------------------------
 # Test-trace discovery
@@ -218,9 +219,6 @@ def test_jax_perf_report_csv_regression(
         ), f"Sheet '{sheet}' has differences for {trace_path}:{format_diff_details(diff_cols)}"
 
 
-# --- migrated from test_coverage_95_final.py ---
-
-
 class TestJaxAnalysisMain:
     def test_jax_analysis_main(self, tmp_path):
         mod = importlib.import_module(
@@ -274,18 +272,12 @@ class TestJaxAnalysisMain:
             )
 
 
-# --- migrated from test_coverage_95_final.py ---
-
-
 class TestJaxFromFile:
     def test_jax_analyzer_from_pb(self):
         analyzer = JaxTreePerfAnalyzer.from_file(profile_filepath=JAX_PB)
         assert analyzer.tree is not None
         timeline = analyzer.get_df_gpu_timeline()
         assert isinstance(timeline, pd.DataFrame)
-
-
-# --- migrated from test_coverage_95_phase13.py ---
 
 
 class TestJaxComparePhase13:
@@ -298,16 +290,12 @@ class TestJaxComparePhase13:
         assert d_model == 4096
 
 
-# --- migrated from test_reporting_cli_coverage.py ---
-
-
 def test_jax_report_main(tmp_path):
     trace = os.path.join(
         os.path.dirname(__file__),
         "traces/mi300/jax_conv_minimal_legacy/chi-mi300x-013.ord.vultr.cpe.ice.amd.com.xplane.pb",
     )
     out = tmp_path / "jax.xlsx"
-    import TraceLens.Reporting.generate_perf_report_jax as mod
 
     old_argv = sys.argv
     sys.argv = [

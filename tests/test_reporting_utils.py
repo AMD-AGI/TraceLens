@@ -94,10 +94,44 @@ from tests.fixtures.agent import (
     _write_minimal_orchestrator_csvs,
 )
 from tests.fixtures.reporting import _write_trace
-from tests.test_treeperf import GPU_ONLY_TRACE
+
+GPU_ONLY_TRACE = os.path.join(
+    os.path.dirname(__file__),
+    "traces/mi210/gpu_only_trace/gpu_only_trace.json.gz",
+)
 from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION
 from tests.fixtures.perfmodel import _ARCH
 from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
+import subprocess
+from TraceLens.Reporting.reporting_utils import _node_span_for_pg, _parse_pg_ranks
+from TraceLens.Reporting import generate_perf_report_pytorch_inference as inf_mod
+from TraceLens.Reporting import (
+    generate_multi_rank_collective_report_pytorch as coll_mod,
+)
+from TraceLens.Trace2Tree.extensions import pseudo_ops_registry as por
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from pathlib import Path
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch,
+)
+from TraceLens.Reporting.generate_perf_report_rocprof import (
+    generate_perf_report_rocprof,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as gen_inf,
+    perf_report_sanity_check,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as gen_inf,
+)
+from tests.test_pftrace_memory_copy_report import _make_memory_copy_events
+from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
+from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
+from tests.fixtures.reporting import _minimal_pftrace_events
+from TraceLens.PerfModel.extensions import attention_perf_model_extensions as aext
+from TraceLens.Reporting import tracediff_comparison_extension as tde
+from tests.test_analysis_agent_utils import TestOrchestratorPhase6
+from TraceLens.Reporting.rocprof_analysis import _categorize_kernel
 
 
 def test_export_data_df_csv_and_xlsx(tmp_path):
@@ -164,7 +198,6 @@ def test_request_install_accepts_and_installs():
 
 
 def test_request_install_failed_install_exits():
-    import subprocess
 
     with mock.patch("builtins.input", return_value="y"):
         with mock.patch(
@@ -240,7 +273,6 @@ def test_add_node_span_columns_uninferable_world_size():
 
 
 def test_parse_pg_ranks_and_node_span_helpers():
-    from TraceLens.Reporting.reporting_utils import _node_span_for_pg, _parse_pg_ranks
 
     assert _parse_pg_ranks([0, 1]) == [0, 1]
     assert _parse_pg_ranks("[0, 1]") == [0, 1]
@@ -288,7 +320,6 @@ def test_resolve_gpu_arch_json_roundtrip(tmp_path):
     assert resolve_gpu_arch(gpu_arch_json_path=str(path)) == arch
 
 
-# --- migrated from test_reporting_coverage.py ---
 ###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -1082,12 +1113,10 @@ def test_inference_report_with_overlap_and_collective(tmp_path):
 
 
 def test_inference_report_main_cli(tmp_path):
-    import sys
 
     trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)])
     out_dir = tmp_path / "cli_out"
     xlsx = tmp_path / "cli_report.xlsx"
-    from TraceLens.Reporting import generate_perf_report_pytorch_inference as inf_mod
 
     old_argv = sys.argv
     sys.argv = [
@@ -1126,14 +1155,10 @@ def test_collective_report_trace_glob(tmp_path):
 
 
 def test_collective_report_main_cli(tmp_path):
-    import sys
 
     trace = _make_trace(0, 2)
     (tmp_path / "rank0_trace.json").write_text(json.dumps(trace))
     out = tmp_path / "nccl_cli.xlsx"
-    from TraceLens.Reporting import (
-        generate_multi_rank_collective_report_pytorch as coll_mod,
-    )
 
     old_argv = sys.argv
     sys.argv = [
@@ -1150,9 +1175,6 @@ def test_collective_report_main_cli(tmp_path):
     finally:
         sys.argv = old_argv
     assert out.exists()
-
-
-# --- migrated from test_coverage_95_final.py ---
 
 
 class TestAnalysisUtilsAndReporting:
@@ -1177,21 +1199,14 @@ class TestAnalysisUtilsAndReporting:
         assert "node_id" in out.columns
 
     def test_reporting_utils_export_and_node_span(self, tmp_path):
-        from pathlib import Path
 
         df = pd.DataFrame({"a": [1, 2]})
         ru.export_data_df(df, Path(tmp_path), "test", output_table_format=[".csv"])
         assert (tmp_path / "test_summary_statistics.csv").exists()
 
 
-# --- migrated from test_coverage_95_phase10.py ---
-
-
 class TestPytorchReportOverlapPhase10:
     def test_pytorch_report_with_overlap_sheets(self, tmp_path):
-        from TraceLens.Reporting.generate_perf_report_pytorch import (
-            generate_perf_report_pytorch,
-        )
 
         trace = _write_trace(
             tmp_path,
@@ -1215,15 +1230,8 @@ class TestPytorchReportOverlapPhase10:
         assert (out / "gpu_timeline.csv").exists()
 
 
-# --- migrated from test_coverage_95_phase11.py ---
-
-
 class TestReportingPhase11:
     def test_inference_report_capture_merge(self, tmp_path):
-        from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-            generate_perf_report_pytorch,
-        )
-        from tests.fixtures.reporting import _write_trace
 
         trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "inf.json")
         out = tmp_path / "inf_out"
@@ -1233,9 +1241,6 @@ class TestReportingPhase11:
             kernel_summary=True,
         )
         assert isinstance(dfs, dict)
-
-
-# --- migrated from test_coverage_95_phase12.py ---
 
 
 class TestReportingPhase12:
@@ -1268,12 +1273,8 @@ class TestReportingPhase12:
         reason="timesformer traces missing",
     )
     def test_inference_report_overlap_on_trace(self, tmp_path):
-        from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-            generate_perf_report_pytorch,
-        )
-
         out = tmp_path / "inf_csv"
-        generate_perf_report_pytorch(
+        generate_inference_report(
             profile_json_path=TIMESFORMER1,
             output_csvs_dir=str(out),
             include_overlap_info=True,
@@ -1284,15 +1285,9 @@ class TestReportingPhase12:
         assert (out / "gpu_timeline.csv").exists()
 
 
-# --- migrated from test_coverage_95_phase12.py ---
-
-
 class TestReportingPhase12B:
     @pytest.mark.skipif(not os.path.isfile(RESNET_TRACE), reason="resnet missing")
     def test_pytorch_report_overlap_bwd(self, tmp_path):
-        from TraceLens.Reporting.generate_perf_report_pytorch import (
-            generate_perf_report_pytorch,
-        )
 
         out = tmp_path / "pt_out"
         dfs = generate_perf_report_pytorch(
@@ -1304,9 +1299,6 @@ class TestReportingPhase12B:
         )
         assert isinstance(dfs, dict)
         assert (out / "gpu_timeline.csv").exists()
-
-
-# --- migrated from test_coverage_95_phase4.py ---
 
 
 class TestReportingCliPhase4:
@@ -1377,9 +1369,6 @@ class TestReportingCliPhase4:
         not os.path.isfile(ROCprof_FILE), reason="rocprof fixture missing"
     )
     def test_rocprof_report_function(self, tmp_path):
-        from TraceLens.Reporting.generate_perf_report_rocprof import (
-            generate_perf_report_rocprof,
-        )
 
         generate_perf_report_rocprof(
             profile_json_path=ROCprof_FILE,
@@ -1424,9 +1413,6 @@ class TestReportingCliPhase4:
         finally:
             sys.argv = old_argv
         assert out.exists()
-
-
-# --- migrated from test_coverage_95_phase6.py ---
 
 
 class TestReportingPhase6:
@@ -1481,10 +1467,6 @@ class TestReportingPhase6:
         assert details[0]["batch_size"] == 8
 
     def test_inference_extension_and_sanity(self, tmp_path):
-        from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-            generate_perf_report_pytorch as gen_inf,
-            perf_report_sanity_check,
-        )
 
         trace = _write_trace(
             tmp_path,
@@ -1521,9 +1503,6 @@ class TestReportingPhase6:
         reason="inference fixture missing",
     )
     def test_inference_real_fixture_report(self, tmp_path):
-        from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-            generate_perf_report_pytorch as gen_inf,
-        )
 
         case = os.path.join(INFERENCE_ROOT, "vllm_decode_full")
         trace = next(
@@ -1539,7 +1518,6 @@ class TestReportingPhase6:
         assert (tmp_path / "inf" / "gpu_timeline.csv").exists()
 
 
-# --- migrated from test_coverage_95_phase7.py ---
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from tests.fixtures.reporting import (
     _minimal_pftrace_events,
@@ -1550,9 +1528,6 @@ from tests.fixtures.reporting import (
 
 class TestReportingPhase7:
     def test_compare_perf_reports_all_sheets(self, tmp_path):
-        from TraceLens.Reporting.generate_perf_report_pytorch import (
-            generate_perf_report_pytorch,
-        )
 
         t1 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "t1.json")
         t2 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 120)], "t2.json")
@@ -1656,7 +1631,6 @@ class TestReportingPhase7:
         assert isinstance(dfs, dict)
 
 
-# --- migrated from test_coverage_95_phase7.py ---
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from tests.fixtures.reporting import (
     _minimal_pftrace_events,
@@ -1710,9 +1684,6 @@ class TestReportingCliPhase7:
         finally:
             sys.argv = old_argv
         assert (tmp_path / "csv" / "memory_copy_by_copy_bytes.csv").exists()
-
-
-# --- migrated from test_coverage_95_phase9.py ---
 
 
 class TestReportingCliPhase9:
@@ -1824,9 +1795,6 @@ class TestReportingCliPhase9:
             sys.argv = old_argv
 
 
-# --- migrated from test_coverage_boost.py ---
-
-
 class TestReportingCliBoost:
     def test_inference_report_all_sheets(self, tmp_path):
         trace = _write_trace(
@@ -1906,9 +1874,6 @@ class TestReportingCliBoost:
         assert isinstance(unified, pd.DataFrame)
 
 
-# --- migrated from test_coverage_push95.py ---
-
-
 class TestReportingCliPush95:
     def test_rocprof_main(self, tmp_path):
         if not os.path.isfile(ROCprof_FILE):
@@ -1954,7 +1919,6 @@ class TestReportingCliPush95:
         assert (tmp_path / "hip_api_csv" / "api_kernel_summary.csv").exists()
 
     def test_pftrace_memory_copy_main(self, tmp_path):
-        from tests.test_pftrace_memory_copy_report import _make_memory_copy_events
 
         trace_path = tmp_path / "trace.json"
         trace_path.write_text(json.dumps({"traceEvents": _make_memory_copy_events()}))
@@ -2079,13 +2043,7 @@ class TestReportingCliPush95:
         assert (tmp_path / "py_ext" / "gpu_timeline.csv").exists()
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_reporting_utils_and_pseudo_registry ---
-
-
 def test_reporting_utils_and_pseudo_registry(tmp_path):
-    from TraceLens.Reporting import reporting_utils as ru
-    from TraceLens.Trace2Tree.extensions import pseudo_ops_registry as por
-    from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
     trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)])
     assert ru.detect_gpus_per_node(trace) is None or isinstance(
@@ -2095,9 +2053,6 @@ def test_reporting_utils_and_pseudo_registry(tmp_path):
     tree.build_tree()
     por.apply_pseudo_op_extensions(tree, verbose=False)
     assert tree is not None
-
-
-# --- migrated from test_reporting_cli_coverage.py ---
 
 
 def test_pytorch_report_main(tmp_path):
@@ -2130,7 +2085,6 @@ def test_pytorch_report_main(tmp_path):
     assert xlsx.exists()
 
 
-# --- migrated from test_push95_coverage.py ---
 from tests.fixtures.reporting import (
     _build_synthetic_trace,
     _create_genesis_capture,
@@ -2156,9 +2110,6 @@ class TestReportingPush95Coverage:
             "include_overlap_info": True,
         }
         if os.path.isdir(capture) and os.path.isfile(metadata):
-            from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-                merge_capture_trace_into_graph,
-            )
 
             merged = merge_capture_trace_into_graph(capture, metadata, trace_path)
             kwargs["augmented_tree"] = merged
@@ -2291,7 +2242,6 @@ class TestReportingPush95Coverage:
         assert pext.aiter_silu_and_mul(silu).bytes() > 0
 
 
-# --- migrated from test_push95_coverage.py ---
 from tests.fixtures.reporting import (
     _build_synthetic_trace,
     _create_genesis_capture,
@@ -2317,7 +2267,6 @@ class TestPush95Phase2:
         assert isinstance(ops, pd.DataFrame)
 
     def test_orchestrator_main_multi_kernel_memcpy_nccl(self, tmp_path, monkeypatch):
-        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
         out = str(tmp_path)
         _write_minimal_orchestrator_csvs(out, comparative=False)
@@ -2411,7 +2360,6 @@ class TestPush95Phase2:
         assert t is None
 
     def test_orchestrator_comparative_main(self, tmp_path, monkeypatch):
-        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
         out = str(tmp_path)
         _write_minimal_orchestrator_csvs(out, comparative=True)
@@ -2459,10 +2407,6 @@ class TestPush95Phase2:
         )
 
     def test_analysis_utils_and_kernel_fusion(self, tmp_path):
-        from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-        from TraceLens.Agent.Analysis.category_analyses import (
-            kernel_fusion_analysis as kfa,
-        )
 
         row = pd.Series(
             {
@@ -2489,13 +2433,6 @@ class TestPush95Phase2:
         assert len(kfa._filter_and_dedup(ops)) == 1
 
     def test_reporting_pftrace_and_collective(self, tmp_path):
-        from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
-            generate_collective_report,
-        )
-        from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
-            generate_perf_report_pftrace_hip_activity,
-        )
-        from tests.fixtures.reporting import _minimal_pftrace_events
 
         trace_path = tmp_path / "pf.json"
         trace_path.write_text(json.dumps({"traceEvents": _minimal_pftrace_events()}))
@@ -2578,9 +2515,6 @@ class TestPush95Phase2:
         assert "gpu_timeline" in result
 
     def test_attention_extensions_remaining(self):
-        from TraceLens.PerfModel.extensions import (
-            attention_perf_model_extensions as aext,
-        )
 
         base = {
             "annotation": _GDN_ANNOTATION,
@@ -2599,7 +2533,6 @@ class TestPush95Phase2:
             assert model.bytes() is None or model.bytes() >= 0
 
 
-# --- migrated from test_push95_coverage.py ---
 from tests.fixtures.reporting import (
     _build_synthetic_trace,
     _create_genesis_capture,
@@ -2609,7 +2542,6 @@ from tests.fixtures.reporting import (
 
 class TestPush95Phase3:
     def test_tracediff_perf_summary_branches(self):
-        from TraceLens.Reporting import tracediff_comparison_extension as tde
 
         assert tde.tracediff_perf_summary_from_diff_stats(pd.DataFrame()).empty
         diff = pd.DataFrame(
@@ -2654,9 +2586,6 @@ class TestPush95Phase3:
         )
 
     def test_kernel_fusion_impact_pipeline(self, tmp_path):
-        from TraceLens.Agent.Analysis.category_analyses import (
-            kernel_fusion_analysis as kfa,
-        )
 
         csv_dir = tmp_path / "perf_report_csvs"
         csv_dir.mkdir()
@@ -2749,8 +2678,6 @@ class TestPush95Phase3:
         assert (cat_dir / "kernel_fusion_metrics.json").exists()
 
     def test_pftrace_cli_mains(self, tmp_path):
-        from tests.test_pftrace_memory_copy_report import _make_memory_copy_events
-        from tests.fixtures.reporting import _minimal_pftrace_events
 
         hip_api = importlib.import_module(
             "TraceLens.Reporting.generate_perf_report_pftrace_hip_api"
@@ -2837,7 +2764,6 @@ class TestPush95Phase3:
         assert perf_model.aten_reduce(mean_evt).flops() > 0
 
 
-# --- migrated from test_push95_coverage.py ---
 from tests.fixtures.traces import TESTS_DIR
 from tests.fixtures.reporting import (
     _build_synthetic_trace,
@@ -2848,7 +2774,6 @@ from tests.fixtures.reporting import (
 
 class TestPush95Phase4:
     def test_orchestrator_main_real_fusion_extraction(self, tmp_path, monkeypatch):
-        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
         out = str(tmp_path)
         csv_dir = os.path.join(out, "perf_report_csvs")
@@ -2919,7 +2844,6 @@ class TestPush95Phase4:
         assert isinstance(json.loads(open(fusion_path).read()), list)
 
     def test_orchestrator_comparative_fusion_via_main(self, tmp_path, monkeypatch):
-        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
         out = str(tmp_path)
         _write_minimal_orchestrator_csvs(out, comparative=True)
@@ -3034,7 +2958,6 @@ class TestPush95Phase4:
                 analyzer.build_nn_module_latency_tree(nn[0])
 
 
-# --- migrated from test_push95_coverage.py ---
 from tests.fixtures.reporting import (
     _build_synthetic_trace,
     _create_genesis_capture,
@@ -3044,21 +2967,16 @@ from tests.fixtures.reporting import (
 
 class TestPush95Phase5:
     def test_orchestrator_sync_bottleneck_via_phase6(self, tmp_path, monkeypatch):
-        from tests.test_analysis_agent_utils import TestOrchestratorPhase6
 
         TestOrchestratorPhase6().test_main_no_time_column_sync_and_memcpy_dirs(
             tmp_path, monkeypatch
         )
 
     def test_rocprof_categorize_branches(self):
-        from TraceLens.Reporting.rocprof_analysis import _categorize_kernel
 
         assert _categorize_kernel("conv2d_fwd") == "Convolution"
         assert _categorize_kernel("layer_norm") == "Normalization"
         assert _categorize_kernel("flash_attn") == "Attention"
-
-
-# --- migrated from test_coverage_final.py ---
 
 
 class TestPerfExtensionsFinal:
@@ -3168,9 +3086,6 @@ class TestPerfExtensionsFinal:
             }
         )
         assert rope2.bytes() > 0
-
-
-# --- migrated from test_coverage_final.py ---
 
 
 class TestReportingFinalCoverage:
@@ -3312,9 +3227,6 @@ class TestReportingFinalCoverage:
         df = pd.DataFrame({"kernel_details": [[{"name": "x" * 200, "dur": 1}]]})
         out = add_truncated_inference(df, "kernel_details")
         assert "trunc_kernel_details" in out.columns
-
-
-# --- migrated from test_coverage_final.py ---
 
 
 class TestReportingExtended:

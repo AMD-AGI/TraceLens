@@ -107,6 +107,13 @@ from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
     _is_gemm_norm_only,
 )
 from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
+from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
+from TraceLens.Agent.Analysis.utils.validation_utils import _check_priority_consistency
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
+from TraceLens.Reporting import tracediff_comparison_extension as tde
+from tests.fixtures.agent import _write_minimal_orchestrator_csvs
+from TraceLens.TreePerf import GPUEventAnalyser
 
 # ----- Fixtures: minimal output dir layout for analysis_utils -----
 
@@ -2508,8 +2515,6 @@ def orchestrator_prepared_output(tmp_path_factory):
     ):
         pytest.skip("perf report generation failed: " + (gen.stderr or "")[-500:])
 
-    from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
-
     old_argv = sys.argv
     sys.argv = [
         "orchestrator_prepare",
@@ -2569,7 +2574,6 @@ def test_orchestrator_main_writes_metadata_with_time_breakdown(
     assert "gpu_kernel_time_ms" in meta["time_breakdown"]
 
 
-# --- migrated from test_agent_coverage.py ---
 ###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -2914,9 +2918,6 @@ def test_validate_compute_data_kernel_name_mismatch(tmp_path):
 
 
 def test_check_priority_consistency_unreadable_json(tmp_path):
-    from TraceLens.Agent.Analysis.utils.validation_utils import (
-        _check_priority_consistency,
-    )
 
     (tmp_path / "priority_data.json").write_text("{not json")
     result = _check_priority_consistency(str(tmp_path), {})
@@ -3684,7 +3685,6 @@ def test_orchestrator_main_missing_csv_exits(tmp_path):
 
 
 def test_orchestrator_main_comparative_mocked(tmp_path, monkeypatch):
-    from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
     out = str(tmp_path)
     _write_minimal_orchestrator_csvs(out, comparative=True)
@@ -3733,7 +3733,6 @@ def test_orchestrator_main_comparative_mocked(tmp_path, monkeypatch):
 
 
 def test_orchestrator_main_standalone_mocked(tmp_path, monkeypatch):
-    from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
     out = str(tmp_path)
     _write_minimal_orchestrator_csvs(out, comparative=False)
@@ -3788,9 +3787,6 @@ def test_orchestrator_main_standalone_mocked(tmp_path, monkeypatch):
     assert "kernel_fusion" in names
 
 
-# --- migrated from test_coverage_95_final.py ---
-
-
 class TestOrchestratorComparativeFusion:
     def test_comparative_fusion_two_kernel_match(self, tmp_path):
         k1 = _kernel_event(10, "Cijk_A", dur=500)
@@ -3818,9 +3814,6 @@ class TestOrchestratorComparativeFusion:
 
         cands = _extract_comparative_fusion_candidates(str(csv_dir), analyzer, tree)
         assert isinstance(cands, list)
-
-
-# --- migrated from test_coverage_95_phase11.py ---
 
 
 class TestOrchestratorPhase11:
@@ -3886,7 +3879,6 @@ class TestOrchestratorPhase11:
         assert cands2
 
     def test_orchestrator_main_empty_csv_exit(self, tmp_path, monkeypatch):
-        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
         out = str(tmp_path / "empty_out")
         os.makedirs(out)
@@ -3913,7 +3905,6 @@ class TestOrchestratorPhase11:
             sys.argv = old_argv
 
     def test_orchestrator_bottleneck_top5_fallback(self, tmp_path, monkeypatch):
-        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
         out = str(tmp_path / "orch_out")
         _write_minimal_orchestrator_csvs(out, comparative=False)
@@ -3970,9 +3961,6 @@ class TestOrchestratorPhase11:
         assert os.path.isdir(os.path.join(out, "category_data"))
 
 
-# --- migrated from test_coverage_95_phase12.py ---
-
-
 class TestOrchestratorPhase12:
     def test_comparative_fusion_multi_kernel_module(self, tmp_path):
         csv_dir = tmp_path / "t1"
@@ -4006,15 +3994,10 @@ class TestOrchestratorPhase12:
         assert isinstance(cands, list)
 
 
-# --- migrated from test_coverage_95_phase12.py ---
-
-
 class TestOrchestratorPhase12B:
     def _run_orch(self, tmp_path, monkeypatch, unified_rows, tree_events=None):
-        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
         out = str(tmp_path / "orch")
-        from tests.fixtures.agent import _write_minimal_orchestrator_csvs
 
         _write_minimal_orchestrator_csvs(out, comparative=False)
         csv_dir = os.path.join(out, "perf_report_csvs")
@@ -4073,7 +4056,6 @@ class TestOrchestratorPhase12B:
         assert os.path.isfile(os.path.join(out, "category_data", "gemm_ops.csv"))
 
     def test_overlap_metrics_exception_path(self, tmp_path, monkeypatch):
-        from TraceLens.TreePerf import GPUEventAnalyser
 
         def boom(*args, **kwargs):
             raise RuntimeError("overlap boom")
@@ -4131,14 +4113,8 @@ class TestOrchestratorPhase12B:
         assert os.path.isfile(gemm_meta)
 
 
-# --- migrated from test_coverage_95_phase4.py ---
-
-
 class TestKernelFusionMain:
     def test_kernel_fusion_standalone_main(self, tmp_path):
-        from TraceLens.Agent.Analysis.category_analyses import (
-            kernel_fusion_analysis as kfa,
-        )
 
         out = str(tmp_path)
         _write_minimal_orchestrator_csvs(out, comparative=False)
@@ -4186,12 +4162,8 @@ class TestKernelFusionMain:
         )
 
 
-# --- migrated from test_coverage_95_phase4.py ---
-
-
 class TestOrchestratorPhase4:
     def test_orchestrator_comparative_with_fusion(self, tmp_path, monkeypatch):
-        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
         out = str(tmp_path)
         _write_minimal_orchestrator_csvs(out, comparative=True)
@@ -4246,12 +4218,8 @@ class TestOrchestratorPhase4:
         assert manifest["comparison_scope"] == "comparative"
 
 
-# --- migrated from test_coverage_95_phase6.py ---
-
-
 class TestOrchestratorPhase6:
     def _run_main(self, tmp_path, monkeypatch, fusion_extract_raises=False):
-        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
         out = str(tmp_path)
         _write_minimal_orchestrator_csvs(out, comparative=False)
@@ -4431,14 +4399,8 @@ class TestOrchestratorPhase6:
         assert isinstance(cands, list)
 
 
-# --- migrated from test_coverage_95_phase6.py ---
-
-
 class TestKernelFusionMainPhase6:
     def test_kernel_fusion_main_end_to_end(self, tmp_path):
-        from TraceLens.Agent.Analysis.category_analyses import (
-            kernel_fusion_analysis as kfa,
-        )
 
         out = str(tmp_path)
         _write_minimal_orchestrator_csvs(out, comparative=False)
@@ -4469,9 +4431,6 @@ class TestKernelFusionMainPhase6:
             sys.argv = old_argv
         cat_dir = os.path.join(out, "category_data")
         assert os.path.isfile(os.path.join(cat_dir, "kernel_fusion_metrics.json"))
-
-
-# --- migrated from test_coverage_push95.py ---
 
 
 class TestOrchestratorPush95:
@@ -4529,9 +4488,6 @@ class TestOrchestratorPush95:
         assert isinstance(cands, list)
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_comparative_fusion_full_path ---
-
-
 def test_comparative_fusion_full_path(tmp_path):
     csv_dir = tmp_path / "trace1_csvs"
     csv_dir.mkdir()
@@ -4570,11 +4526,7 @@ def test_comparative_fusion_full_path(tmp_path):
     assert len(cands) >= 1
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_analysis_utils_efficiency_and_fusion ---
-
-
 def test_analysis_utils_efficiency_and_fusion(tmp_path):
-    from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
 
     row = pd.Series(
         {
@@ -4602,11 +4554,7 @@ def test_analysis_utils_efficiency_and_fusion(tmp_path):
     )
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_orchestrator_comparative_main ---
-
-
 def test_orchestrator_comparative_main(tmp_path, monkeypatch):
-    from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
     out = str(tmp_path)
     _write_minimal_orchestrator_csvs(out, comparative=True)
@@ -4653,14 +4601,7 @@ def test_orchestrator_comparative_main(tmp_path, monkeypatch):
     assert manifest["comparison_scope"] == "comparative"
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_kernel_fusion_and_tracediff_helpers ---
-
-
 def test_kernel_fusion_and_tracediff_helpers(tmp_path):
-    from TraceLens.Agent.Analysis.category_analyses import (
-        kernel_fusion_analysis as kfa,
-    )
-    from TraceLens.Reporting import tracediff_comparison_extension as tde
 
     ops = [
         {
@@ -4690,12 +4631,8 @@ def test_kernel_fusion_and_tracediff_helpers(tmp_path):
     assert "unified_perf_summary" in report
 
 
-# --- migrated from test_coverage_sweep.py ---
-
-
 class TestOrchestratorHelpersSweep:
     def test_helper_functions(self):
-        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
         assert op._strip_module_index("nn.Module: MLP_0") == "MLP"
         assert op._is_fusion_eligible("Cijk_gemm_kernel")
@@ -4709,9 +4646,6 @@ class TestOrchestratorHelpersSweep:
         )
         metrics = op._gpu_utilization_metrics_from_gpu_timeline_df(tl)
         assert metrics["total_time_ms"] == 1000.0
-
-
-# --- migrated from test_push95_coverage.py ---
 
 
 class TestOrchestratorPush95Coverage:
@@ -4856,7 +4790,6 @@ class TestOrchestratorPush95Coverage:
         assert isinstance(cands, list)
 
     def test_orchestrator_main_alt_ops_summary_column(self, tmp_path, monkeypatch):
-        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
         out = str(tmp_path)
         csv_dir = os.path.join(out, "perf_report_csvs")
@@ -4924,9 +4857,6 @@ class TestOrchestratorPush95Coverage:
             open(os.path.join(out, "category_data", "category_manifest.json")).read()
         )
         assert manifest["comparison_scope"] == "standalone"
-
-
-# --- migrated from test_coverage_final.py ---
 
 
 class TestOrchestratorPrepareFinal:
@@ -5030,12 +4960,8 @@ class TestOrchestratorPrepareFinal:
         assert isinstance(cands, list)
 
 
-# --- migrated from test_coverage_final.py ---
-
-
 class TestOrchestratorMainExtended:
     def test_orchestrator_disable_pseudo_ops(self, tmp_path, monkeypatch):
-        from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
 
         out = str(tmp_path)
         _write_minimal_orchestrator_csvs(out, comparative=False)

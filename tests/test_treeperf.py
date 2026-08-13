@@ -652,7 +652,6 @@ class TestJaxTreePerfAnalyzer:
 @pytest.mark.gpu
 def test_tree_perf_analyzer_live_gpu_profile(tmp_path):
     _require_cuda_torch()
-    import torch
 
     device = "cuda"
     model = torch.nn.Linear(32, 16, bias=False).to(device=device, dtype=torch.float16)
@@ -711,9 +710,6 @@ def test_build_nn_module_latency_tree():
     assert layer["nn Parent GPU Time"] == pytest.approx(root["GPU Time"])
     assert attention["nn Parent GPU Time"] == pytest.approx(layer["GPU Time"])
     assert attention["Non-nn.Module GPU Time"] > 0
-
-
-# --- migrated from test_treeperf_coverage.py ---
 
 
 class TestTreePerfCoverageExtended:
@@ -908,9 +904,6 @@ class TestTreePerfCoverageExtended:
         assert len(df) >= 1
 
 
-# --- migrated from test_coverage_95_bulk.py ---
-
-
 @pytest.mark.parametrize("trace_path", _discover_trace_gz_files())
 def test_treeperf_full_method_sweep(trace_path):
     try:
@@ -933,9 +926,6 @@ def test_treeperf_full_method_sweep(trace_path):
         pytest.skip(f"trace not suitable for sweep: {exc}")
 
 
-# --- migrated from test_coverage_95_bulk.py ---
-
-
 @pytest.mark.skipif(not os.path.isfile(JAX_PB), reason="JAX fixture missing")
 class TestJaxTreePerfSweep:
     def test_jax_from_file_all_methods(self):
@@ -947,9 +937,6 @@ class TestJaxTreePerfSweep:
                 analyzer.get_df_gpu_timeline(gpu_pid=gpu_pid)
             except Exception:
                 pass
-
-
-# --- migrated from test_coverage_95_final.py ---
 
 
 class TestTreePerfRemaining:
@@ -1087,9 +1074,6 @@ class TestTreePerfRemaining:
         assert isinstance(launchers, pd.DataFrame)
 
 
-# --- migrated from test_coverage_95_phase11.py ---
-
-
 class TestTreePerfPhase11:
     def test_build_df_perf_metrics_exception_paths(self):
         corr = 300
@@ -1168,9 +1152,6 @@ class TestTreePerfPhase11:
             df, include_overlapping_kernels=True
         )
         assert isinstance(summary, pd.DataFrame)
-
-
-# --- migrated from test_coverage_95_phase12.py ---
 
 
 class TestTreePerfPhase12:
@@ -1371,9 +1352,6 @@ class TestTreePerfPhase12:
             )
 
 
-# --- migrated from test_coverage_95_phase12.py ---
-
-
 class TestTreePerfCollectPhase12:
     @pytest.mark.skipif(not os.path.isfile(RESNET_TRACE), reason="resnet missing")
     def test_collect_unified_with_python_func_roots(self):
@@ -1439,9 +1417,6 @@ class TestTreePerfCollectPhase12:
         assert isinstance(collected, list)
 
 
-# --- migrated from test_coverage_95_phase13.py ---
-
-
 class TestTreePerfPhase13:
     @pytest.mark.skipif(not os.path.isfile(RESNET), reason="resnet missing")
     def test_unified_table_with_perf_metrics(self):
@@ -1456,9 +1431,6 @@ class TestTreePerfPhase13:
         if not df.empty:
             summary = analyzer.summarize_df_unified_perf_table(df, include_pct=True)
             assert isinstance(summary, pd.DataFrame)
-
-
-# --- migrated from test_coverage_95_phase4.py ---
 
 
 class TestTreePerfPhase4:
@@ -1505,9 +1477,6 @@ class TestTreePerfPhase4:
                 except Exception:
                     continue
         assert count > 0
-
-
-# --- migrated from test_coverage_95_phase5.py ---
 
 
 class TestTreePerfDeepPaths:
@@ -1610,9 +1579,6 @@ class TestTreePerfDeepPaths:
         assert len(stats) == 2
 
 
-# --- migrated from test_coverage_95_phase6.py ---
-
-
 class TestTreePerfPhase6:
     def test_inconsistent_kernel_list_length(self):
         with pytest.warns(UserWarning, match="Inconsistent kernel list length"):
@@ -1702,9 +1668,6 @@ class TestTreePerfPhase6:
         assert isinstance(df, pd.DataFrame)
 
 
-# --- migrated from test_coverage_95_phase8.py ---
-
-
 class TestTreePerfPhase8:
     def test_resnet_detect_recompute_nccl_bwd(self):
         analyzer = TreePerfAnalyzer.from_file(
@@ -1729,9 +1692,6 @@ class TestTreePerfPhase8:
             TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
                 launchers, include_pct=True
             )
-
-
-# --- migrated from test_coverage_95_phase9.py ---
 
 
 class TestTreePerfExtendedPhase9:
@@ -1823,9 +1783,6 @@ class TestTreePerfExtendedPhase9:
         ).empty
 
 
-# --- migrated from test_coverage_push95.py ---
-
-
 @pytest.mark.parametrize(
     "case_dir",
     [
@@ -1851,9 +1808,6 @@ def test_merge_capture_into_graph_fixture(case_dir):
     analyzer = TreePerfAnalyzer(merged, rebuild_tree=False, add_python_func=True)
     df = analyzer.build_df_unified_perf_table(include_nccl=False)
     assert isinstance(df, pd.DataFrame)
-
-
-# --- migrated from test_coverage_push95.py ---
 
 
 class TestTreePerfPush95:
@@ -1906,9 +1860,6 @@ class TestTreePerfPush95:
         assert 1 in cat
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_merged_graph_treeperf_extended ---
-
-
 def test_merged_graph_treeperf_extended():
     case_dir = os.path.join(INFERENCE_ROOT, "vllm_decode_full")
     capture = os.path.join(case_dir, "capture_traces")
@@ -1926,20 +1877,13 @@ def test_merged_graph_treeperf_extended():
     assert isinstance(unified, pd.DataFrame)
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_jax_gemm_performance_from_pb ---
-
-
 @pytest.mark.skipif(not os.path.isfile(JAX_PB), reason="JAX fixture missing")
 def test_jax_gemm_performance_from_pb():
     df = JaxAnalyses.gemm_performance_from_pb(JAX_PB, module_name="jit_forward_3d_conv")
     assert isinstance(df, pd.DataFrame)
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_gpu_only_treeperf_extended ---
-
-
 def test_gpu_only_treeperf_extended():
-    from tests.test_treeperf import GPU_ONLY_TRACE
 
     if not os.path.isfile(GPU_ONLY_TRACE):
         pytest.skip("gpu_only trace missing")
@@ -1958,9 +1902,6 @@ def test_gpu_only_treeperf_extended():
         tree=analyzer.tree,
     )
     assert isinstance(summarized, pd.DataFrame)
-
-
-# --- migrated from test_coverage_sweep.py ---
 
 
 class TestTreePerfFromFileCapture:
@@ -1985,9 +1926,6 @@ class TestTreePerfFromFileCapture:
             capture, metadata, os.path.join(case, trace_gz)
         )
         assert len(merged.events) > 0
-
-
-# --- migrated from test_coverage_sweep.py ---
 
 
 class TestTreePerfSummaries:
@@ -2081,9 +2019,6 @@ class TestTreePerfSummaries:
         assert isinstance(df, pd.DataFrame)
 
 
-# --- migrated from test_push95_coverage.py ---
-
-
 @pytest.mark.parametrize("trace_path", _discover_trace_gz_files())
 def test_treeperf_from_file_full_methods(trace_path):
     analyzer = TreePerfAnalyzer.from_file(
@@ -2124,9 +2059,6 @@ def test_treeperf_from_file_full_methods(trace_path):
         assert isinstance(summary, pd.DataFrame)
 
 
-# --- migrated from test_push95_coverage.py ---
-
-
 class TestTreePerfSyntheticPush95:
     def test_bwd_perf_and_launcher_summaries(self):
         analyzer = _build_analyzer(_mk_pytorch_trace())
@@ -2145,9 +2077,6 @@ class TestTreePerfSyntheticPush95:
                 )
             )
             assert isinstance(by_mod, pd.DataFrame)
-
-
-# --- migrated from test_coverage_final.py ---
 
 
 class TestTreePerfFinalCoverage:

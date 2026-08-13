@@ -7,10 +7,13 @@
 """Unit tests for TraceLens.Reporting.compare_traces_jax_llama."""
 
 import gzip
+import importlib
 import json
+import sys
 
 import pytest
 
+from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
 from TraceLens.Reporting.compare_traces_jax_llama import (
     Event,
     Stats,
@@ -25,6 +28,7 @@ from TraceLens.Reporting.compare_traces_jax_llama import (
     get_path,
     infer_params,
     is_loop_multiply_fusion,
+    load_trace,
     mk_stats,
     parse_range,
     percentile,
@@ -33,31 +37,6 @@ from TraceLens.Reporting.compare_traces_jax_llama import (
     token_start_times,
     top_stats_by_key,
 )
-import importlib
-import sys
-from TraceLens.Reporting.compare_traces_jax_llama import (
-    Event,
-    Summary,
-    classify_stage_base,
-    compute_stage_table,
-    emit_report,
-    extract_gpu_events,
-    infer_params,
-    is_loop_multiply_fusion,
-    load_trace,
-    mk_stats,
-    percentile,
-    summarize_one,
-    token_start_times,
-    top_stats_by_key,
-)
-from TraceLens.Reporting.compare_traces_jax_llama import (
-    Event,
-    compute_stage_table,
-    extract_gpu_events,
-    load_trace,
-)
-from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
 from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
 
 
@@ -343,9 +322,6 @@ def test_get_path():
     assert get_path(Event(1, 1, 0, 1, "k", {})) == ""
 
 
-# --- migrated from test_coverage_95_final.py ---
-
-
 class TestCompareTracesJaxLlama:
     def test_helper_functions(self, tmp_path):
         trace_path = _write_gz_trace(tmp_path, _jax_llama_trace_events())
@@ -414,9 +390,6 @@ class TestCompareTracesJaxLlama:
         assert out_md.exists()
 
 
-# --- migrated from test_coverage_95_phase5.py ---
-
-
 class TestCompareTracesEdgeCases:
     def test_extract_gpu_events_partial_pid_match(self, tmp_path):
         events = [
@@ -453,9 +426,6 @@ class TestCompareTracesEdgeCases:
             compute_stage_table(stream, starts, (0, 0), (0, 2))
 
 
-# --- migrated from test_coverage_95_phase7.py ---
-
-
 class TestJaxLlamaPhase7:
     def test_jax_llama_helpers_full(self, tmp_path):
         path = _write_gz_trace(tmp_path, _jax_llama_trace_events())
@@ -479,16 +449,7 @@ class TestJaxLlamaPhase7:
         )
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_compare_traces_jax_llama_helpers ---
-
-
 def test_compare_traces_jax_llama_helpers(tmp_path):
-    import gzip
-    from TraceLens.Reporting.compare_traces_jax_llama import (
-        infer_params,
-        load_trace,
-    )
-    from tests.test_compare_traces_jax_llama import _make_synthetic_trace_events
 
     path = tmp_path / "t1.json.gz"
     with gzip.open(path, "wt", encoding="utf-8") as f:

@@ -31,6 +31,10 @@ from TraceLens.Reporting.tracediff_comparison_extension import (
     enrich_perf_report_dict_inplace,
     tracediff_perf_summary_from_diff_stats,
 )
+from TraceLens import TraceDiff, TreePerfAnalyzer
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
 
 
 def _diff_to_summary_report(df: pd.DataFrame) -> dict:
@@ -1129,11 +1133,6 @@ class TestIntegrationSyntheticTraces:
             json.dump(_build_synthetic_trace(trace1_specs), f)
         with open(trace2_path, "w") as f:
             json.dump(_build_synthetic_trace(trace2_specs), f)
-
-        from TraceLens import TraceDiff, TreePerfAnalyzer
-        from TraceLens.Reporting.generate_perf_report_pytorch import (
-            generate_perf_report_pytorch,
-        )
 
         perf1 = generate_perf_report_pytorch(trace1_path, collective_analysis=False)
         perf2 = generate_perf_report_pytorch(trace2_path, collective_analysis=False)

@@ -295,9 +295,6 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 
-# --- migrated from test_coverage_95_final.py ---
-
-
 class TestRocprofAnalysisDeep:
     def test_full_rocprof_pipeline(self):
         if not os.path.isfile(ROCprof_FILE):
@@ -347,9 +344,6 @@ class TestRocprofAnalysisDeep:
         assert out.exists()
 
 
-# --- migrated from test_coverage_95_phase6.py ---
-
-
 class TestRocprofPhase6:
     @pytest.mark.parametrize(
         "name,expected",
@@ -386,11 +380,7 @@ class TestRocprofPhase6:
         assert isinstance(analyser.get_df_kernel_summary_by_category(), pd.DataFrame)
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_rocprof_analyzer_synthetic ---
-
-
 def test_rocprof_analyzer_synthetic():
-    from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
 
     kernels = [
         {
@@ -411,7 +401,6 @@ def test_rocprof_analyzer_synthetic():
 
 
 def test_rocprof_analyzer_empty_and_short_kernel_paths():
-    from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
 
     empty = RocprofAnalyzer([], [], [], {})
     assert empty.get_df_kernel_summary().empty

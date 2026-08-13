@@ -1702,9 +1702,6 @@ def test_driver_multi_kernel_main_success(tmp_path, monkeypatch):
     assert len(metrics["patterns_detected"]) >= 1
 
 
-# --- migrated from test_coverage_95_phase14.py ---
-
-
 class TestArchUtils:
     def test_list_and_load_platform(self):
         platforms = arch_utils.list_platforms()
@@ -1731,9 +1728,6 @@ class TestArchUtils:
         mapping = arch_utils._collect_arch_jsons()
         assert "CUSTOM" in mapping
         assert arch_utils.load_arch("CUSTOM")["mem_bw_gbps"] == 1000
-
-
-# --- migrated from test_coverage_95_phase14.py ---
 
 
 class TestCategoryAnalysisHelpers:
@@ -1839,9 +1833,6 @@ class TestCategoryAnalysisHelpers:
         assert missing["status"] == "NO_DATA"
 
 
-# --- migrated from test_coverage_95_phase5.py ---
-
-
 class TestPerfModelNormAndConvDeep:
     def test_batch_norm_bwd_full(self):
         event = {
@@ -1905,9 +1896,6 @@ class TestPerfModelNormAndConvDeep:
         assert fwd.flops() > 0
         bwd = perf_model.ConvBias_Backward(_conv_bias_bwd_event())
         assert bwd.flops_bwd() > 0
-
-
-# --- migrated from test_coverage_95_phase9.py ---
 
 
 def _build_moe_tree(events: List[Dict], add_python_func: bool = False) -> TraceToTree:
@@ -2032,9 +2020,6 @@ class TestArchAndMoePhase9:
         create_pseudo_ops_moe_flydsl(_build_moe_tree(fly_events, add_python_func=True))
 
 
-# --- migrated from test_coverage_boost.py ---
-
-
 class TestPerfModelConvAndNormBoost:
     @pytest.mark.parametrize(
         "cls,fwd_factory,bwd_cls,bwd_factory",
@@ -2106,9 +2091,6 @@ class TestPerfModelConvAndNormBoost:
         }
         g = perf_model.primus_turbo_grouped_gemm(gg_event)
         assert g.flops() > 0
-
-
-# --- migrated from test_coverage_sweep.py ---
 
 
 class TestRmsNormExtensionsBytes:

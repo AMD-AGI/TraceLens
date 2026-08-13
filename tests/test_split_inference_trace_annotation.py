@@ -55,6 +55,8 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     verify_subtree_events,
 )
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.Trace2Tree.inference_iteration_roots import find_iteration_roots_generic
+from TraceLens.Trace2Tree import trace_capture_merge_experimental as tcm
 
 # --------------------------------------------------------------------------- #
 # Dummy-trace builder
@@ -443,9 +445,6 @@ def test_get_filename_json_and_zip(tmp_path):
 
 
 def test_find_iteration_roots_generic_fallback():
-    from TraceLens.Trace2Tree.inference_iteration_roots import (
-        find_iteration_roots_generic,
-    )
 
     events: List[Dict] = []
     events.append(
@@ -525,7 +524,6 @@ def test_find_iteration_roots_generic_fallback():
     assert len(roots) >= 1
 
 
-# --- migrated from test_split_annotation_coverage.py ---
 ###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -1039,9 +1037,6 @@ def test_main_dummy_runs_and_steady_state_message(tmp_path, capsys):
     )
 
 
-# --- migrated from test_coverage_95_final.py ---
-
-
 class TestCaptureMergeAndMoe:
     def test_align_streams_multistream(self):
         graph = [
@@ -1077,12 +1072,8 @@ class TestCaptureMergeAndMoe:
         assert model.bytes() is None or model.bytes() >= 0
 
 
-# --- migrated from test_coverage_95_phase10.py ---
-
-
 class TestSplitAnnotationDummyPhase10:
     def test_main_dummy_store_single_iteration(self, tmp_path):
-        from TraceLens.TraceUtils import split_inference_trace_annotation as split
 
         dummy_name = "vllm/v1/worker/gpu_model_runner.py(99): _dummy_run"
         trace = {"traceEvents": [], "schemaVersion": 1}
@@ -1119,9 +1110,6 @@ class TestSplitAnnotationDummyPhase10:
         assert (out_dir / "execution_details.json").exists()
 
 
-# --- migrated from test_coverage_95_phase5.py ---
-
-
 class TestCaptureMergeDeep:
     def test_find_closest_batch_size_and_execution_details(self):
         assert find_closest_batch_size(128, [64, 256, 512]) == 256
@@ -1144,9 +1132,6 @@ class TestCaptureMergeDeep:
         assert len(merged.events) > 0
         analyzer = TreePerfAnalyzer(merged, rebuild_tree=False)
         assert analyzer.get_df_gpu_timeline() is not None
-
-
-# --- migrated from test_coverage_push95.py ---
 
 
 class TestCaptureMergePush95:
@@ -1197,9 +1182,6 @@ class TestCaptureMergePush95:
         assert [e["name"] for e in aligned] == ["a", "b"]
 
 
-# --- migrated from test_coverage_sweep.py ---
-
-
 class TestCaptureMergeIntegration:
     def test_merge_synthetic_capture_graph(self, tmp_path):
         graph_events = {
@@ -1223,7 +1205,6 @@ class TestCaptureMergeIntegration:
             ]
         }
         graph_path = tmp_path / "graph.json.gz"
-        import gzip
 
         with gzip.open(graph_path, "wt") as f:
             json.dump(graph_events, f)
@@ -1272,9 +1253,6 @@ class TestCaptureMergeIntegration:
             assert len(merged.events) > 0
         except Exception:
             pytest.skip("synthetic capture merge not supported in this environment")
-
-
-# --- migrated from test_coverage_final.py ---
 
 
 class TestCaptureMergeFinal:
@@ -1339,7 +1317,6 @@ class TestCaptureMergeFinal:
         assert len(filt) >= 1
 
     def test_capture_tree_cache(self, tmp_path):
-        from TraceLens.Trace2Tree import trace_capture_merge_experimental as tcm
 
         tcm._capture_tree_cache.clear()
         events = {

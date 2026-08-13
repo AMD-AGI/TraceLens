@@ -7,6 +7,9 @@
 import unittest
 from unittest.mock import patch
 from TraceLens import JaxNcclAnalyser
+import pandas as pd
+import ast
+import os
 
 
 class TestJaxNcclAnalyserLoadTraceData(unittest.TestCase):
@@ -121,9 +124,6 @@ class TestJaxNcclAnalyserAnalyzeAllCollectivesFromDf(unittest.TestCase):
 
     def create_mock_dataframe(self):
         """Create a comprehensive mock dataframe for testing using real data from CSV."""
-        import pandas as pd
-        import ast
-        import os
 
         # Load the CSV file with all-gather data for a slice across 32 gpus
         # CSV contains made-up data for demonstrating representative calculations

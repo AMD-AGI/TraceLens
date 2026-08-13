@@ -17,6 +17,7 @@ torchvision_models = pytest.importorskip("torchvision").models
 from torch.profiler import profile, ProfilerActivity
 import os
 from TraceLens import EventReplayer, TreePerfAnalyzer, GPUEventAnalyser
+from TraceLens import EventReplay
 
 
 def profile_resnet(path=None):
@@ -295,7 +296,6 @@ def test_resnet(full_run_trace_path=None, output_csv_path=None):
         json.dump(list_replay_ir, f, indent=4)
 
     # now we test the batched replay
-    from TraceLens import EventReplay
 
     dir_batched_replay = os.path.dirname(EventReplay.__file__)
     batched_replay_file = os.path.join(dir_batched_replay, "batched_replay.py")

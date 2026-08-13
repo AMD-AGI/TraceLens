@@ -74,6 +74,7 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     find_closest_batch_size,
     verify_subtree_events,
 )
+from TraceLens.Trace2Tree import trace_to_tree as ttt
 
 
 def _mk_event(
@@ -1204,7 +1205,6 @@ class TestPseudoOpsExtensionsExtended:
         assert any("pseudo_v4_paged_decode" in p["name"] for p in pseudo_ops)
 
 
-# --- migrated from test_trace_to_tree_coverage.py ---
 ###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -1599,11 +1599,7 @@ class TestTraceToTreeTraversal:
         assert len(uids) >= 1
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_trace_to_tree_edge_helpers ---
-
-
 def test_trace_to_tree_edge_helpers():
-    from TraceLens.Trace2Tree import trace_to_tree as ttt
 
     events = [
         {

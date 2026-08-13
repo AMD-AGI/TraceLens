@@ -59,6 +59,12 @@ from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
     create_pseudo_ops_moe_gptq_awq,
 )
 from tests.test_trace2tree import _add_gpu_chain, _mk_event
+from TraceLens.PerfModel.torch_op_mapping import categorize_torch_op
+from TraceLens.PerfModel.torch_op_mapping import (
+    OP_CATEGORY_REGISTRY,
+    register_perf_model_categories,
+)
+import gzip
 
 
 def _mk_event(
@@ -572,19 +578,11 @@ class TestFusedAttnFuncBackwardCategorization:
         assert op_category_extension["FusedAttnFuncBackward"] == "SDPA_bwd"
 
     def test_categorize_as_sdpa_bwd(self):
-        """Core categorizer must return SDPA_bwd for FusedAttnFuncBackward."""
-        from TraceLens.PerfModel.torch_op_mapping import categorize_torch_op
-
         result = categorize_torch_op({"name": "FusedAttnFuncBackward"})
         assert result == "SDPA_bwd", f"Expected SDPA_bwd, got {result}"
 
     def test_fused_attn_fwd_still_sdpa_fwd(self):
         """FusedAttnFunc (forward) must still be SDPA_fwd."""
-        from TraceLens.PerfModel.torch_op_mapping import (
-            OP_CATEGORY_REGISTRY,
-            register_perf_model_categories,
-        )
-
         registry = dict(OP_CATEGORY_REGISTRY)
         register_perf_model_categories(
             {"FusedAttnFunc": perf_model_extension["FusedAttnFunc"]},
@@ -671,11 +669,6 @@ class TestLayerNormFnPerfModel:
 
     def test_categorize_as_norm_fwd_bwd(self):
         """Core categorizer must return NORM_fwd and NORM_bwd."""
-        from TraceLens.PerfModel.torch_op_mapping import (
-            OP_CATEGORY_REGISTRY,
-            register_perf_model_categories,
-        )
-
         registry = dict(OP_CATEGORY_REGISTRY)
         register_perf_model_categories(
             {
@@ -925,7 +918,6 @@ class TestActivationCheckpointingPseudoOps:
         assert len(fwd_events[0]["bwd_events"]) == 1
 
 
-# --- migrated from test_trace2tree_mla_coverage.py ---
 ###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -1400,9 +1392,6 @@ class TestPseudoOpsRegistryMla:
         assert "Failed to apply pseudo-op extension MoE_Fused" in caplog.text
 
 
-# --- migrated from test_coverage_95_final.py ---
-
-
 class TestPseudoOpsRegistryFull:
     def test_registry_detects_all_extension_types(self, tmp_path):
         events = [
@@ -1443,9 +1432,6 @@ class TestPseudoOpsRegistryFull:
         tree.build_tree(add_python_func=True)
         apply_pseudo_op_extensions(tree, verbose=True)
         assert tree is not None
-
-
-# --- migrated from test_coverage_95_phase10.py ---
 
 
 class TestMoePseudoOpsFullPhase10:
@@ -1582,26 +1568,14 @@ class TestMoePseudoOpsFullPhase10:
         )
 
 
-# --- migrated from test_coverage_95_phase12.py ---
-
-
 class TestTraceToTreePhase12:
     @pytest.mark.skipif(not os.path.isfile(NORM_TRACE), reason="norm trace missing")
     def test_trace_to_tree_rebuild_pseudo_ops(self):
-        from copy import deepcopy
-
-        import gzip
-
-        from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-
         with gzip.open(NORM_TRACE, "rt") as f:
             data = json.load(f)
         tree = TraceToTree(deepcopy(data["traceEvents"]), prune_nongpu_paths=False)
         tree.build_tree(add_python_func=True)
         assert len(tree.events) > 0
-
-
-# --- migrated from test_coverage_95_phase4.py ---
 
 
 class TestTraceToTreePhase4:

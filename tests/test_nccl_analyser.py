@@ -26,6 +26,8 @@ from TraceLens.NcclAnalyser.util.node_rank_to_protobuf_file_mapping import (
 )
 from TraceLens.NcclAnalyser.util.xla_parser import XLACollectiveParser
 from TraceLens.util import TraceEventUtils
+import importlib
+import logging
 
 
 def _nccl_kernel(name="ncclKernel_AllReduce", external_id=42, ts=100, dur=10):
@@ -358,7 +360,6 @@ def test_get_node_rank_protobuf_mapping_warns_on_unmapped_pb(tmp_path, capsys):
 
 
 def test_parse_log_file_for_node_rank_from_filename(tmp_path, monkeypatch):
-    import importlib
 
     mapping_mod = importlib.import_module(parse_log_file_for_node_rank.__module__)
     log_file = tmp_path / "worker_node_rank_3.log"
@@ -493,7 +494,6 @@ def test_nccl_analyser_instance_filter_fn():
     assert analyser._nccl_filter_event_fn({**event, "cat": "cpu_op"}) is False
 
 
-# --- migrated from test_nccl_analyser_coverage.py ---
 ###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -676,7 +676,6 @@ def test_infer_collective_name_in_build_df_long(tmp_path):
 
 
 def test_all2allv_heatmap_world_size_warnings(caplog):
-    import logging
 
     analyser = NcclAnalyser.__new__(NcclAnalyser)
     analyser.logger = logging.getLogger("TraceLens.NcclAnalyser.nccl_analyser")

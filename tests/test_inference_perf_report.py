@@ -51,6 +51,10 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
 )
 from tests.fixtures.reporting import _build_synthetic_trace
 from tests.fixtures.traces import _discover_inference_cases
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
+from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as gen_inf,
+)
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Input list of events is empty.*:UserWarning",
@@ -330,8 +334,6 @@ def test_inference_perf_report(
         )
 
 
-# --- migrated from test_inference_trace_coverage.py ---
-
 ###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -448,14 +450,8 @@ class TestCaptureMergeHelpers:
         assert capture_has_kernel_names(capture) is False
 
 
-# --- migrated from test_coverage_95_phase5.py ---
-
-
 class TestReportingInferenceSheets:
     def test_inference_all_report_variants(self, tmp_path):
-        from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-            generate_perf_report_pytorch as gen_inf,
-        )
 
         trace = _write_trace(
             tmp_path,
@@ -482,9 +478,6 @@ class TestReportingInferenceSheets:
             include_call_stack=True,
         )
         assert (tmp_path / "out" / "gpu_timeline.csv").exists()
-
-
-# --- migrated from test_coverage_95_phase8.py ---
 
 
 class TestInferenceZipPhase8:
@@ -522,9 +515,6 @@ class TestInferenceZipPhase8:
         assert details[0]["batch_size"] == 4
 
 
-# --- migrated from test_coverage_push95.py ---
-
-
 @pytest.mark.parametrize("dirpath,trace_gz", _discover_inference_cases())
 def test_inference_fixture_full_report(dirpath, trace_gz, tmp_path):
     trace_path = os.path.join(dirpath, trace_gz)
@@ -547,9 +537,6 @@ def test_inference_fixture_full_report(dirpath, trace_gz, tmp_path):
     assert "gpu_timeline" in result
 
 
-# --- migrated from test_coverage_push95.py ---
-
-
 def test_inference_report_comparison_and_debug_columns(tmp_path, monkeypatch):
     trace1 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "t1.json")
     trace2 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 120)], "t2.json")
@@ -569,9 +556,6 @@ def test_inference_report_comparison_and_debug_columns(tmp_path, monkeypatch):
         assert "entry_point" in up.columns
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_piecewise_capture_merge ---
-
-
 def test_piecewise_capture_merge():
     case_dir = os.path.join(INFERENCE_ROOT, "vllm_prefilldecode_piecewise")
     capture = os.path.join(case_dir, "capture_traces")
@@ -583,11 +567,7 @@ def test_piecewise_capture_merge():
     assert len(merged.events) > 1000
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_align_streams_multistream_tiebreak ---
-
-
 def test_align_streams_multistream_tiebreak():
-    from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
 
     graph = [
         {"name": "k1", "args": {"stream": 1}},
@@ -604,17 +584,11 @@ def test_align_streams_multistream_tiebreak():
     assert len(aligned) == 3
 
 
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase2.test_verify_subtree_direct_match ---
-
-
 def test_verify_subtree_direct_match():
     capture = [{"name": "hipLaunchKernel", "args": {"kernel": "k1"}}]
     graph = [{"name": "k1", "args": {}}]
     code, cap, gr = verify_subtree_events(capture, graph)
     assert code == 1
-
-
-# --- migrated from test_coverage_push95.py::TestCoveragePush95Phase3.test_inference_on_merged_tree ---
 
 
 def test_inference_on_merged_tree(tmp_path):
@@ -636,9 +610,6 @@ def test_inference_on_merged_tree(tmp_path):
         kernel_summary=True,
     )
     assert "gpu_timeline" in result
-
-
-# --- migrated from test_coverage_sweep.py ---
 
 
 class TestInferenceReportSweep:
