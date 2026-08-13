@@ -6,16 +6,8 @@
 
 """Unit tests for TraceLens.util helpers."""
 
-import contextlib
-import gzip
-import json
-import os
-import sys
-import types
+import contextlib, gzip, json, os, sys, types, pytest, pandas as pd
 from unittest.mock import patch
-
-import pytest
-
 from TraceLens.util import (
     DataLoader,
     JaxProfileProcessor,
@@ -24,9 +16,10 @@ from TraceLens.util import (
     TraceEventUtils,
     suppress_native_hlo_logs,
 )
-import pandas as pd
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
+from TraceLens.Agent.Analysis.category_analyses import (
+    analysis_utils as au,
+    kernel_fusion_analysis as kfa,
+)
 
 TK = TraceEventUtils.TraceKeys
 TP = TraceEventUtils.TracePhases

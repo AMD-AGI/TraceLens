@@ -6,58 +6,32 @@
 
 """Tests for pftrace hip activity report (category, kernel, HIP API summaries)."""
 
-import json
-import os
-import tempfile
-
-import pandas as pd
-import pytest
-
+import json, os, tempfile, pandas as pd, pytest, importlib, sys, shutil, urllib.request, gzip, types
 from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
+    _write_markdown_report,
     generate_perf_report_pftrace_hip_activity,
 )
 from TraceLens.Reporting.pftrace_hip_activity_analysis import (
+    Event,
     PftraceHipActivityAnalyzer,
     build_event_lists,
     build_hip_api_events,
     classify,
     discover_gpus,
     extract_time_ns,
+    rccl_overlap_two_pointer,
 )
-import importlib
-import sys
 from unittest.mock import patch
-from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
-    _write_markdown_report,
-    generate_perf_report_pftrace_hip_activity,
-)
-from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
-from tests.fixtures.reporting import _minimal_pftrace_events, _write_trace
-from tests.fixtures.reporting import _mk_event
-import shutil
-import urllib.request
-from pathlib import Path
-from TraceLens.Reporting import pftrace_utils
 from tests.fixtures.reporting import (
+    _full_pftrace_events,
     _minimal_pftrace_events,
+    _mk_event,
     _rich_pftrace_events,
     _write_trace,
 )
-from TraceLens.Reporting.pftrace_hip_activity_analysis import (
-    PftraceHipActivityAnalyzer,
-    classify,
-)
-from tests.fixtures.reporting import _full_pftrace_events, _write_trace
+from pathlib import Path
+from TraceLens.Reporting import pftrace_utils
 from tests.test_trace2tree import _mk_event
-from TraceLens.Reporting.pftrace_hip_activity_analysis import (
-    Event,
-    PftraceHipActivityAnalyzer,
-    classify,
-    extract_time_ns,
-    rccl_overlap_two_pointer,
-)
-import gzip
-import types
 from TraceLens.Agent.Analysis.utils import arch_utils
 
 

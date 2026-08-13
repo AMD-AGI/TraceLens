@@ -11,18 +11,10 @@ and gpu_event_analyser.py.
 
 from __future__ import annotations
 
-import gzip
-import json
-import math
-import os
-import tempfile
+import gzip, json, math, os, tempfile, pandas as pd, pytest
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-
-import pandas as pd
-import pytest
-
 from TraceLens.Reporting.pftrace_hip_activity_analysis import (
     Event,
     HIPEvent,
@@ -55,10 +47,10 @@ from tests.fixtures.traces import (
     JAX_PB,
     RESNET,
     RESNET_TRACE,
+    RESNET_TRACE as RESNET_CKPT,
     TRACES_ROOT,
     _discover_trace_gz_files,
 )
-from tests.fixtures.traces import RESNET_TRACE as RESNET_CKPT
 from tests.fixtures.treeperf import (
     _build_analyzer,
     _make_gpu_event,

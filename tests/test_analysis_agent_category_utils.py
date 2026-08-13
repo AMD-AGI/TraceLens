@@ -18,22 +18,16 @@ Covers every module under category_analyses/ plus the shared kernel classifier:
 - The per-module main() drivers, exercised end-to-end over tmp_path fixtures.
 """
 
-import json
-import os
-import sys
-from copy import deepcopy
-from pathlib import Path
-from types import ModuleType
-from typing import Dict, List
-
-import pandas as pd
-import pytest
+import json, os, sys, pandas as pd, pytest
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(ANALYSIS_DIR, "category_analyses"))
-
+from copy import deepcopy
+from pathlib import Path
+from types import ModuleType
+from typing import Dict, List
 from TraceLens.Agent.Analysis.utils.classify_kernels import (
     MIN_CONFIDENCE,
     classify_kernel,

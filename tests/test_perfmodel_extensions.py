@@ -6,69 +6,43 @@
 
 """Unit tests for TraceLens/PerfModel/extensions."""
 
-import pytest
-
+import pytest, inspect, sys
 from TraceLens.PerfModel.extensions import (
     FusedMoE,
     InferenceAttention,
     aiter_fused_allreduce_rmsnorm,
     aiter_rms_norm,
+    attention_perf_model_extensions as aext,
+    attention_perf_model_extensions as attn_ext,
     custom_ar_all_reduce,
     gdn_attention_core,
     get_pseudo_op_category_only_mappings,
     get_pseudo_op_mappings,
     moe_aiter_fused_1stage,
-)
-from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
-    CustomCollective,
-)
-from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
-    BiasedGroupedTopk,
-    MoeSortScatterGather,
-)
-from TraceLens.PerfModel.extensions.perf_model_extensions import (
-    aiter_gelu_and_mul,
-    aiter_gelu_tanh_and_mul,
-    aiter_silu_and_mul,
-    gemm_a8w8_blockscale,
-)
-from TraceLens.PerfModel.extensions.pseudo_ops_perf_utils import (
-    get_pseudo_op_category_only_mappings as _category_only_from_utils,
-)
-from TraceLens.PerfModel.extensions.pseudo_ops_perf_utils import (
-    get_pseudo_op_mappings as _mappings_from_utils,
-)
-from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import RMSNorm
-import inspect
-from TraceLens.PerfModel import perf_model
-from tests.fixtures.perfmodel import _ARCH, _gemm_event, _norm_event
-import sys
-from unittest.mock import MagicMock, patch
-from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from unittest.mock import patch
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event, _conv_bias_fwd_event
-from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
-from tests.test_mamba_ssd import _mamba_event
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _conv_bwd_event,
-    _conv_fwd_event,
-    _gemm_event,
-    _moe_unfused_event,
-    _norm_event,
-)
-from TraceLens.PerfModel import kernel_name_parser
-from TraceLens.PerfModel.extensions import (
-    attention_perf_model_extensions as attn_ext,
     moe_perf_model_extensions as moe_ext,
     perf_model_extensions as pext,
     rmsnorm_perf_model_extensions as rms_ext,
 )
-from tests.fixtures.perfmodel import _ARCH, _gemm_event, _moe_unfused_event
-from tests.test_conv_backward_bytes import _conv_bias_fwd_event
+from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
+    CustomCollective,
+    aiter_all_gather_reg,
+    aiter_fused_allreduce_rmsnorm,
+    aiter_fused_allreduce_rmsnorm_,
+    aiter_reduce_scatter,
+    custom_ar_all_reduce,
+    custom_ar_qr_all_reduce,
+    sgl_kernel_all_reduce_reg,
+    sgl_kernel_qr_all_reduce,
+    sgl_kernel_reg_all_gather_into_tensor,
+)
 from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
     BiasedGroupedTopk,
+    FusedMoE,
+    MoeSortScatterGather,
+    moe_aiter_ck_stage1,
+    moe_aiter_ck_stage2,
     moe_aiter_fused_1stage,
+    moe_aiter_fused_blockscale,
     moe_aiter_unfused_down,
     moe_aiter_unfused_up,
     moe_flydsl_stage1,
@@ -76,49 +50,106 @@ from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
     moe_gptq_awq_down,
     moe_gptq_awq_up,
     moe_triton_invoke_grouped_gemm,
+    moe_triton_unfused_down,
+    moe_triton_unfused_up,
+    sglang_fused_append_shared_experts,
 )
-from TraceLens.PerfModel.extensions import attention_perf_model_extensions as attn_ext
-from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
-from tests.test_conv_backward_bytes import _conv_bias_bwd_event
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _moe_unfused_event
-from tests.fixtures.perfmodel import _GDN, _GDN_ANNOTATION, _attn_base
-from tests.fixtures.perfmodel import _GDN_ANNOTATION
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
+from TraceLens.PerfModel.extensions.perf_model_extensions import (
+    aiter_dynamic_per_group_scaled_quant_fp4,
+    aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,
+    aiter_gelu_and_mul,
+    aiter_gelu_tanh_and_mul,
+    aiter_rope_cached_positions_2c_fwd_impl,
+    aiter_silu_and_mul,
+    batched_gemm_a16wfp4,
+    batched_gemm_a8w8,
+    fused_flatten_mxfp4_quant,
+    gemm_a16w16,
+    gemm_a16w16_asm,
+    gemm_a8w8_blockscale,
+    gemm_afp4wfp4,
+    mhc_fused_post_pre_gemm_sqrsum,
+    mhc_post,
+    mhc_pre_big_fuse_rmsnorm,
+    mhc_pre_gemm_sqrsum,
+    mixed_sample_outer_exponential,
+    sglang_quant_dynamic_mxfp4_quant,
+    sglang_store_cache,
+    topk_softplus,
+    vllm_rocm_unquantized_gemm,
+)
+from TraceLens.PerfModel.extensions.pseudo_ops_perf_utils import (
+    get_pseudo_op_category_only_mappings as _category_only_from_utils,
+    get_pseudo_op_mappings as _mappings_from_utils,
+)
+from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
+    RMSNorm,
+    aiter_add_rmsnorm,
+    aiter_rmsnorm,
+    aiter_rmsnorm2d_fwd_with_dynamicquant_ck,
+    aiter_rmsnorm_quant,
+    fused_rms_mxfp4_quant,
+    vllm_rocm_aiter_rmsnorm_fp8_group_quant,
+    vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant,
+    vllm_rocm_aiter_triton_add_rmsnorm_pad,
+)
+from TraceLens.PerfModel import kernel_name_parser, perf_model
 from tests.fixtures.perfmodel import (
     _ARCH,
+    _GDN,
     _GDN_ANNOTATION,
-    _moe_unfused_event,
-    _norm_event,
-)
-from tests.test_conv_backward_bytes import (
-    _conv_bias_bwd_event,
-    _conv_bias_fwd_event,
-    _conv_bias_relu_bwd_event,
-    _conv_bias_relu_fwd_event,
-)
-from tests.fixtures.perfmodel import _ARCH, _gemm_event
-from tests.test_dit_fused_ln_modulate import _fused_ln_fwd_event
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION, _gemm_event, _norm_event
-from tests.fixtures.perfmodel import (
-    _ARCH,
-    _GDN_ANNOTATION,
+    _attn_base,
     _conv_bwd_event,
     _conv_fwd_event,
     _gemm_event,
     _moe_unfused_event,
     _norm_event,
 )
-from TraceLens.PerfModel.extensions import attention_perf_model_extensions as aext
-from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
-    fused_rms_mxfp4_quant,
+from unittest.mock import MagicMock, patch
+from tests.test_conv_backward_bytes import (
+    _conv_bias_bwd_event,
+    _conv_bias_fwd_event,
+    _conv_bias_relu_bwd_event,
+    _conv_bias_relu_fwd_event,
 )
-from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
-    FusedMoE,
-    moe_aiter_fused_1stage,
-)
+from tests.test_flash_attention_backward import _bwd_event as _flash_bwd_event
+from tests.test_mamba_ssd import _mamba_event
+from tests.test_dit_fused_ln_modulate import _fused_ln_fwd_event
 from tests.test_primus_fp8_gemm_quantize import _fp8_gemm_event
 from tests.test_primus_mxfp4_gemm_quantize import _fp4_gemm_event
-from tests.fixtures.perfmodel import _moe_unfused_event
+from math import prod
+from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+    InferenceAttention,
+    aiter_fmha_v3_varlen_fwd,
+    aiter_mha_batch_prefill,
+    aiter_paged_attention_ragged,
+    mha_varlen_fwd,
+    mla_decode_fwd,
+    mla_tilelang_sparse_fwd,
+    pa_decode_gluon,
+    pa_sparse_prefill_opus_fwd,
+    pseudo_mla_prefill_fwd,
+    pseudo_v4_paged_decode_csa,
+    pseudo_v4_paged_decode_hca,
+    pseudo_v4_paged_decode_swa,
+    vllm_unified_mla_attention_with_output,
+)
+from TraceLens.PerfModel.kernel_name_parser import parse_rocm_gemm
+from TraceLens.PerfModel.triton_compiled_perf_model import (
+    TritonCompiledPerfModel,
+    _lookup,
+    _meta_from_trace_args,
+    _parse_kernel_name,
+    _parse_wrapper,
+)
+from TraceLens.PerfModel.utils import (
+    add_simulation_time_columns,
+    name2bpe,
+    parse_bool,
+    simulation_dtype_map,
+    torch_dtype_map,
+)
+from TraceLens.TreePerf import tree_perf
 
 _GDN_ANNOTATION = (
     "execute_64_context_0(sq0sk0sqsq0sqsk0)"
@@ -383,94 +414,6 @@ class TestPerfModelExtensions:
         assert model.flops() == flops_per_elem * num_elems
         assert model.bytes() > 0
 
-
-###############################################################################
-# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-import sys
-from math import prod
-from unittest.mock import MagicMock, patch
-
-import pytest
-
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
-    InferenceAttention,
-    aiter_fmha_v3_varlen_fwd,
-    aiter_mha_batch_prefill,
-    aiter_paged_attention_ragged,
-    mha_varlen_fwd,
-    mla_decode_fwd,
-    mla_tilelang_sparse_fwd,
-    pa_decode_gluon,
-    pa_sparse_prefill_opus_fwd,
-    pseudo_mla_prefill_fwd,
-    pseudo_v4_paged_decode_csa,
-    pseudo_v4_paged_decode_hca,
-    pseudo_v4_paged_decode_swa,
-    vllm_unified_mla_attention_with_output,
-)
-from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
-    moe_aiter_ck_stage1,
-    moe_aiter_ck_stage2,
-    moe_aiter_fused_blockscale,
-    moe_aiter_unfused_down,
-    moe_aiter_unfused_up,
-    moe_flydsl_stage1,
-    moe_flydsl_stage2,
-    moe_gptq_awq_down,
-    moe_gptq_awq_up,
-    moe_triton_invoke_grouped_gemm,
-    moe_triton_unfused_down,
-    moe_triton_unfused_up,
-    sglang_fused_append_shared_experts,
-)
-from TraceLens.PerfModel.extensions.perf_model_extensions import (
-    aiter_dynamic_per_group_scaled_quant_fp4,
-    aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,
-    aiter_rope_cached_positions_2c_fwd_impl,
-    batched_gemm_a16wfp4,
-    batched_gemm_a8w8,
-    fused_flatten_mxfp4_quant,
-    gemm_a16w16,
-    gemm_a16w16_asm,
-    gemm_afp4wfp4,
-    mhc_fused_post_pre_gemm_sqrsum,
-    mhc_post,
-    mhc_pre_big_fuse_rmsnorm,
-    mhc_pre_gemm_sqrsum,
-    mixed_sample_outer_exponential,
-    sglang_quant_dynamic_mxfp4_quant,
-    sglang_store_cache,
-    topk_softplus,
-    vllm_rocm_unquantized_gemm,
-)
-from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
-    aiter_add_rmsnorm,
-    aiter_rmsnorm,
-    aiter_rmsnorm2d_fwd_with_dynamicquant_ck,
-    aiter_rmsnorm_quant,
-    vllm_rocm_aiter_rmsnorm_fp8_group_quant,
-    vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant,
-    vllm_rocm_aiter_triton_add_rmsnorm_pad,
-)
-from TraceLens.PerfModel.kernel_name_parser import parse_rocm_gemm
-from TraceLens.PerfModel.triton_compiled_perf_model import (
-    TritonCompiledPerfModel,
-    _lookup,
-    _meta_from_trace_args,
-    _parse_kernel_name,
-    _parse_wrapper,
-)
-from TraceLens.PerfModel.utils import (
-    add_simulation_time_columns,
-    name2bpe,
-    parse_bool,
-    simulation_dtype_map,
-    torch_dtype_map,
-)
 
 ROCM_GEMM = (
     "Custom_Cijk_Alik_Bljk_BBS_BH_Bias_HAS_SAV_UserArgs_MT64x16x64_MI16x16x1_SN_LDSB0"
@@ -2218,27 +2161,6 @@ class TestMoeExtendedCoverage:
             }
         }
         assert MoeSortScatterGather(sort_event).bytes() > 0
-
-
-###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-import pytest
-
-from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
-    aiter_all_gather_reg,
-    aiter_fused_allreduce_rmsnorm,
-    aiter_fused_allreduce_rmsnorm_,
-    aiter_reduce_scatter,
-    custom_ar_all_reduce,
-    custom_ar_qr_all_reduce,
-    sgl_kernel_all_reduce_reg,
-    sgl_kernel_qr_all_reduce,
-    sgl_kernel_reg_all_gather_into_tensor,
-)
-from TraceLens.TreePerf import tree_perf
 
 
 def _fused_allreduce_event():

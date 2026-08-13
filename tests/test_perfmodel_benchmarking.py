@@ -12,13 +12,9 @@ lazily and skipped unless a GPU runtime is available.
 
 from __future__ import annotations
 
-import importlib.util
-import json
+import importlib.util, json, pytest
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
-
 from TraceLens.PerfModel.benchmarking.microbench_utils import (
     _int_metric,
     check_gpu_idle,

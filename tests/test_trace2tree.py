@@ -8,11 +8,9 @@
 
 from __future__ import annotations
 
+import pytest
 from copy import deepcopy
 from typing import Dict, List
-
-import pytest
-
 from TraceLens.Trace2Tree.inference_iteration_roots import (
     _detect_iteration_roots_from_tree,
     _find_repeating_period,
@@ -68,11 +66,6 @@ from TraceLens.Trace2Tree.extensions.v4_paged_decode_pseudo_ops import (
     _parse_geometry,
     _safe_int,
     create_pseudo_ops_v4_paged_decode,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    _align_graph_to_capture_by_group,
-    find_closest_batch_size,
-    verify_subtree_events,
 )
 from TraceLens.Trace2Tree import trace_to_tree as ttt
 
@@ -1203,18 +1196,6 @@ class TestPseudoOpsExtensionsExtended:
             e for e in tree.events if e.get("args", {}).get("Pseudo op") is True
         ]
         assert any("pseudo_v4_paged_decode" in p["name"] for p in pseudo_ops)
-
-
-###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-from copy import deepcopy
-from typing import Dict, List
-
-
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
 
 def _mk_event(

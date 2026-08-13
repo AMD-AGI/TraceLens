@@ -6,13 +6,7 @@
 
 """Unit tests for TraceLens.Reporting.compare_traces_jax_llama."""
 
-import gzip
-import importlib
-import json
-import sys
-
-import pytest
-
+import gzip, importlib, json, sys, pytest
 from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
 from TraceLens.Reporting.compare_traces_jax_llama import (
     Event,

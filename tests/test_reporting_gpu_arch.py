@@ -6,18 +6,12 @@
 
 """Tests for GPU arch resolution in Reporting scripts."""
 
-import json
-import os
-import tempfile
-
-import pytest
-
+import json, os, tempfile, pytest, pandas as pd
 from TraceLens.Agent.Analysis.utils.arch_utils import load_arch
 from TraceLens.Reporting.reporting_utils import resolve_gpu_arch
 from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch,
 )
-import pandas as pd
 
 TRACE_PATH = os.path.join(
     "tests",

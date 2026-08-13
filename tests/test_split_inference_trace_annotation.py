@@ -17,43 +17,26 @@ Covers:
 No trace files are written; everything operates on in-memory dicts.
 """
 
-import gzip
-import json
-import os
-import zipfile
+import gzip, json, os, zipfile, sys, pytest
 from typing import Dict, List
-
 from TraceLens.TraceUtils import split_inference_trace_annotation as split
 from TraceLens.TraceUtils.annotation_utils import IterationAnnotation
-import sys
-import pytest
 from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.traces import INFERENCE_ROOT
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    find_closest_batch_size,
-    find_execution_details,
-    merge_capture_trace_into_graph,
-)
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _align_graph_to_capture_by_group,
+    _get_cached_capture_tree,
+    align_streams,
+    capture_has_kernel_names,
     find_closest_batch_size,
+    find_execution_details,
+    get_subtree_events,
+    is_multistream,
     load_capture_folder,
     merge_capture_trace_into_graph,
     verify_subtree_events,
 )
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    _get_cached_capture_tree,
-    align_streams,
-    capture_has_kernel_names,
-    get_subtree_events,
-    is_multistream,
-    verify_subtree_events,
-)
+from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+from tests.fixtures.traces import INFERENCE_ROOT
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.Trace2Tree.inference_iteration_roots import find_iteration_roots_generic
 from TraceLens.Trace2Tree import trace_capture_merge_experimental as tcm
@@ -523,21 +506,6 @@ def test_find_iteration_roots_generic_fallback():
     assert roots is not None
     assert len(roots) >= 1
 
-
-###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-import gzip
-import json
-import os
-import sys
-import zipfile
-
-import pytest
-
-from TraceLens.TraceUtils import split_inference_trace_annotation as split
 
 VLLM_PRIMARY = (
     "execute_{i}_context_3(sq128sk256sqsq1sqsk1)_generation_2(sq1sk300sqsq1sqsk1)"

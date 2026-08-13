@@ -14,80 +14,84 @@
 - Unit tests for utils/validation_utils (pure markdown/JSON validation heuristics).
 """
 
-import json
-import os
-import subprocess
-import sys
-
-import pandas as pd
-import pytest
+import json, os, subprocess, sys, pandas as pd, pytest
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, ANALYSIS_DIR)
 sys.path.insert(0, os.path.join(ANALYSIS_DIR, "category_analyses"))
-
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
-    validate_efficiency,
-    calculate_efficiency_with_validation,
-    compute_impact_estimates,
-    write_metrics_json,
-    load_category_data,
-    calculate_time_metrics,
-    build_operation_metrics,
-    build_category_findings,
-    calculate_efficiency,
-    comparative_efficiency,
-    standalone_efficiency,
-    _extract_kernel_names,
-    format_args,
-    classify_kernel_library,
     _eff_bucket,
-    shape_aware_lookup,
-    parse_first_shape,
-    _resolve_peak_maf,
-    get_peak_specs,
     _extract_call_chain,
+    _extract_kernel_names,
     _extract_module_chain,
-    _parse_call_stack,
     _match_fusion_op,
+    _parse_call_stack,
+    _resolve_peak_maf,
+    build_category_findings,
+    build_operation_metrics,
+    calculate_efficiency,
+    calculate_efficiency_with_validation,
+    calculate_time_metrics,
+    classify_kernel_library,
+    comparative_efficiency,
+    compute_impact_estimates,
+    format_args,
+    get_peak_specs,
+    load_category_data,
+    parse_first_shape,
+    shape_aware_lookup,
+    standalone_efficiency,
+    validate_efficiency,
+    write_metrics_json,
 )
 from TraceLens.Agent.Analysis.utils.report_utils import (
     generate_priority_data,
+    load_findings,
+    load_manifest,
+    load_manifest_categories,
+    prepare_model_identification_data,
 )
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     MarkerValidator,
-    validate_report,
-    _validate_report_priority_consistency,
+    _category_findings_empty,
+    _check_coverage,
     _check_priority_consistency,
+    _check_time_sanity,
+    _extract_detailed_analysis_subsection,
+    _load_valid_args,
+    _metrics_json_for_findings,
+    _scan_args_cells,
     _validate_compute_data_tables,
+    _validate_report_args_column,
+    _validate_report_comparison_scope_diffs,
+    _validate_report_priority_consistency,
+    _validate_report_reasoning_candidates,
+    validate_findings_file,
+    validate_report,
+    validate_subagent_outputs,
 )
 from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _compute_data_in_out,
-    _is_case_a_fusion_gap,
-    _gpu_utilization_metrics_from_gpu_timeline_df,
-    _normalize_category,
-    _strip_module_index,
-    _has_fused_kernel,
-    _dedup_by_kernel_set,
-    _prefix_lookup,
-    _extract_attention_core,
-    _build_diff_stats_lookups,
-    _make_comparative_candidate,
     _apply_comparative_gates,
-    _is_gemm_norm_only,
-    _is_fusion_eligible,
-    _build_parent_chain,
+    _build_diff_stats_lookups,
     _build_kernel_perf_lookup,
+    _build_parent_chain,
     _build_trace2_ops_summary_by_enhanced_category,
-)
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
+    _compute_data_in_out,
+    _dedup_by_kernel_set,
+    _extract_attention_core,
     _extract_comparative_fusion_candidates,
-)
-from tests.fixtures.traces import NORM_TRACE
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
     _extract_standalone_fusion_candidates,
+    _gpu_utilization_metrics_from_gpu_timeline_df,
+    _has_fused_kernel,
+    _is_case_a_fusion_gap,
+    _is_fusion_eligible,
+    _is_gemm_norm_only,
+    _make_comparative_candidate,
+    _normalize_category,
+    _prefix_lookup,
+    _strip_module_index,
 )
 from tests.fixtures.traces import NORM_TRACE, RESNET_TRACE
 from tests.fixtures.agent import (
@@ -96,24 +100,17 @@ from tests.fixtures.agent import (
     _kernel_event,
     _write_minimal_orchestrator_csvs,
 )
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
+from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op, plot_utils
+from TraceLens.Agent.Analysis.category_analyses import (
+    analysis_utils as au,
+    kernel_fusion_analysis as kfa,
 )
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_attention_core,
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-    _is_gemm_norm_only,
-)
-from tests.fixtures.agent import _StubAnalyzer, _StubTree, _kernel_event
-from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
-from TraceLens.Agent.Analysis.utils.validation_utils import _check_priority_consistency
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
 from TraceLens.Reporting import tracediff_comparison_extension as tde
-from tests.fixtures.agent import _write_minimal_orchestrator_csvs
 from TraceLens.TreePerf import GPUEventAnalyser
+from TraceLens.Agent.Analysis.utils.classify_kernels import (
+    classify_all,
+    main as classify_main,
+)
 
 # ----- Fixtures: minimal output dir layout for analysis_utils -----
 
@@ -2573,57 +2570,6 @@ def test_orchestrator_main_writes_metadata_with_time_breakdown(
     assert "time_breakdown" in meta
     assert "gpu_kernel_time_ms" in meta["time_breakdown"]
 
-
-###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-import json
-import os
-import subprocess
-import sys
-
-import pandas as pd
-import pytest
-
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
-sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, ANALYSIS_DIR)
-
-from TraceLens.Agent.Analysis.utils import plot_utils
-from TraceLens.Agent.Analysis.utils.classify_kernels import (
-    classify_all,
-    main as classify_main,
-)
-from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
-    _extract_comparative_fusion_candidates,
-    _extract_standalone_fusion_candidates,
-)
-from TraceLens.Agent.Analysis.utils.report_utils import (
-    load_findings,
-    load_manifest,
-    load_manifest_categories,
-    prepare_model_identification_data,
-    generate_priority_data,
-)
-from TraceLens.Agent.Analysis.utils.validation_utils import (
-    MarkerValidator,
-    _category_findings_empty,
-    _check_coverage,
-    _check_time_sanity,
-    _extract_detailed_analysis_subsection,
-    _load_valid_args,
-    _metrics_json_for_findings,
-    _scan_args_cells,
-    _validate_report_args_column,
-    _validate_report_comparison_scope_diffs,
-    _validate_report_reasoning_candidates,
-    validate_findings_file,
-    validate_report,
-    validate_subagent_outputs,
-)
 
 # ----- Fixtures -----
 

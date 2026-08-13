@@ -15,19 +15,8 @@ Usage:
     pytest tests/test_jax_perf_report.py -v
 """
 
-import glob
-import os
-import shutil
-import tempfile
-
-import pytest
-
+import glob, os, shutil, tempfile, pytest, importlib, sys, pandas as pd, TraceLens.Reporting.generate_perf_report_jax as mod
 from TraceLens.Reporting.generate_perf_report_jax import generate_perf_report_jax
-
-# xprof writes SSTABLE cache files next to each .xplane.pb; keep all JAX
-# perf-report tests on one xdist worker so trace loads do not race.
-pytestmark = pytest.mark.xdist_group("jax_traces")
-
 from conftest import (
     compare_cols,
     format_diff_details,
@@ -35,16 +24,17 @@ from conftest import (
     read_perf_report_csv,
     update_reference_csvs,
 )
-import importlib
-import sys
 from unittest.mock import MagicMock, patch
-import pandas as pd
 from TraceLens.TreePerf.tree_perf import JaxTreePerfAnalyzer
 from tests.test_jax_analysis_report import _mock_side_inputs, _sample_averages_df
 from tests.fixtures.traces import JAX_PB
 from TraceLens.Reporting import compare_traces_jax_llama as jax_cmp
 from tests.fixtures.reporting import _jax_llama_trace_events, _write_gz_trace
-import TraceLens.Reporting.generate_perf_report_jax as mod
+
+# xprof writes SSTABLE cache files next to each .xplane.pb; keep all JAX
+# perf-report tests on one xdist worker so trace loads do not race.
+pytestmark = pytest.mark.xdist_group("jax_traces")
+
 
 # ---------------------------------------------------------------------------
 # Test-trace discovery

@@ -6,13 +6,7 @@
 
 """Unit tests for helper functions in generate_perf_report_pytorch_inference."""
 
-import os
-
-import pandas as pd
-import pytest
-
-torch = pytest.importorskip("torch")
-
+import os, pandas as pd, pytest
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     add_truncated_kernel_details,
     get_dfs_short_kernels,
@@ -20,6 +14,8 @@ from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     trunc_kernel_details,
 )
 from TraceLens import TreePerfAnalyzer
+
+torch = pytest.importorskip("torch")
 
 
 def _make_sanity_check_inputs():

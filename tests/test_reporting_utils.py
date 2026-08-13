@@ -6,14 +6,11 @@
 
 """Unit tests for TraceLens.Reporting.reporting_utils helpers."""
 
-import json
-import os
+import json, os, pandas as pd, pytest, gzip, importlib, sys, subprocess, textwrap
 from unittest import mock
-
-import pandas as pd
-import pytest
-
 from TraceLens.Reporting.reporting_utils import (
+    _node_span_for_pg,
+    _parse_pg_ranks,
     add_gpu_arch_cli_args,
     add_node_span_columns,
     detect_gpus_per_node,
@@ -21,12 +18,18 @@ from TraceLens.Reporting.reporting_utils import (
     request_install,
     resolve_gpu_arch,
 )
-import gzip
-import importlib
-import sys
-from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
-from TraceLens.Reporting import reporting_utils as ru
+from TraceLens.Agent.Analysis.category_analyses import (
+    analysis_utils as au,
+    kernel_fusion_analysis as kfa,
+)
+from TraceLens.Reporting import (
+    generate_multi_rank_collective_report_pytorch as coll_mod,
+    generate_perf_report_pytorch_inference as inf_mod,
+    reporting_utils as ru,
+    tracediff_comparison_extension as tde,
+)
 from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+    find_trace_files,
     generate_collective_report,
 )
 from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
@@ -35,55 +38,63 @@ from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
 )
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from tests.fixtures.treeperf import _mk_ac2g
-from tests.fixtures.traces import TIMESFORMER1, TIMESFORMER2
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    classify_graph_capture_trace,
-    generate_perf_report_pytorch,
-)
-from tests.fixtures.traces import RESNET_TRACE
-from tests.fixtures.traces import ROCprof_FILE
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as generate_inference_report,
-)
-from tests.fixtures.traces import INFERENCE_ROOT, NORM_TRACE
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    classify_graph_capture_trace,
-)
-from tests.fixtures.traces import INFERENCE_ROOT
-from TraceLens.Reporting.compare_perf_reports_pytorch import (
-    generate_compare_perf_reports_pytorch,
-)
-from tests.fixtures.reporting import _minimal_pftrace_events, _write_trace
-from tests.test_trace2tree import _mk_event
-from tests.fixtures.traces import NORM_TRACE, ROCprof_FILE, _discover_inference_cases
-from unittest.mock import patch
-from TraceLens.PerfModel import perf_model
-from TraceLens.PerfModel.extensions import perf_model_extensions as pext
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    generate_perf_report_pytorch,
-)
-from tests.fixtures.traces import NORM_TRACE
-from tests.fixtures.traces import TRACES_ROOT
-from tests.fixtures.reporting import _mk_ac2g, _mk_event
-from TraceLens.Reporting.pftrace_hip_activity_analysis import PftraceHipActivityAnalyzer
-from tests.fixtures.reporting import (
-    _create_genesis_capture,
-    _minimal_pftrace_events,
-    _write_trace,
-)
-from tests.fixtures.reporting import _mk_event, _write_trace
-from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
-    generate_perf_report_pftrace_hip_activity,
+from tests.fixtures.traces import (
+    INFERENCE_ROOT,
+    NORM_TRACE,
+    RESNET_TRACE,
+    ROCprof_FILE,
+    TESTS_DIR,
+    TIMESFORMER1,
+    TIMESFORMER2,
+    TRACES_ROOT,
+    _discover_inference_cases,
 )
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     add_truncated_kernel_details as add_truncated_inference,
+    add_truncated_kernel_details as add_truncated_kernel_details_inference,
+    apply_extension as apply_extension_inference,
+    classify_graph_capture_trace,
+    generate_perf_report_pytorch,
+    generate_perf_report_pytorch as gen_inf,
     generate_perf_report_pytorch as generate_inference_report,
+    get_dfs_short_kernels as get_dfs_short_kernels_inference,
     perf_report_sanity_check,
+)
+from TraceLens.Reporting.compare_perf_reports_pytorch import (
+    generate_compare_perf_reports_pytorch,
+)
+from tests.fixtures.reporting import (
+    _build_synthetic_trace,
+    _create_genesis_capture,
+    _minimal_pftrace_events,
+    _mk_ac2g,
+    _mk_event,
+    _write_trace,
+)
+from tests.test_trace2tree import _mk_event
+from unittest.mock import patch
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import (
+    attention_perf_model_extensions as aext,
+    perf_model_extensions as pext,
+)
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    _find_entry_point,
+    _is_wrapper_frame,
+    apply_extension as apply_extension_pytorch,
+    generate_perf_report_pytorch,
+    get_dfs_short_kernels as get_dfs_short_kernels_pytorch,
+)
+from TraceLens.Reporting.pftrace_hip_activity_analysis import (
+    Event,
+    HIPEvent,
+    PftraceHipActivityAnalyzer,
+    build_hip_summary_df,
+    build_kernel_summary_df_for_name,
 )
 from TraceLens.Reporting.tracediff_comparison_extension import (
     tracediff_perf_summary_from_diff_stats,
 )
-from tests.fixtures.reporting import _build_synthetic_trace
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
@@ -93,45 +104,28 @@ from tests.fixtures.agent import (
     _kernel_event,
     _write_minimal_orchestrator_csvs,
 )
-from tests.fixtures.reporting import _write_trace
+from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION
+from TraceLens.Trace2Tree.extensions import pseudo_ops_registry as por
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from pathlib import Path
+from TraceLens.Reporting.generate_perf_report_rocprof import (
+    generate_perf_report_rocprof,
+)
+from tests.test_pftrace_memory_copy_report import _make_memory_copy_events
+from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
+from tests.test_analysis_agent_utils import TestOrchestratorPhase6
+from TraceLens.Reporting.rocprof_analysis import _categorize_kernel
+from types import SimpleNamespace
+from TraceLens.Reporting.generate_perf_report_genesis import (
+    _cleanup_work_dir,
+    generate_perf_report_genesis,
+)
+from TraceLens.Reporting.pftrace_utils import ensure_trace_json
 
 GPU_ONLY_TRACE = os.path.join(
     os.path.dirname(__file__),
     "traces/mi210/gpu_only_trace/gpu_only_trace.json.gz",
 )
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION
-from tests.fixtures.perfmodel import _ARCH
-from tests.fixtures.reporting import _build_synthetic_trace, _mk_ac2g, _mk_event
-import subprocess
-from TraceLens.Reporting.reporting_utils import _node_span_for_pg, _parse_pg_ranks
-from TraceLens.Reporting import generate_perf_report_pytorch_inference as inf_mod
-from TraceLens.Reporting import (
-    generate_multi_rank_collective_report_pytorch as coll_mod,
-)
-from TraceLens.Trace2Tree.extensions import pseudo_ops_registry as por
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from pathlib import Path
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_rocprof import (
-    generate_perf_report_rocprof,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as gen_inf,
-    perf_report_sanity_check,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as gen_inf,
-)
-from tests.test_pftrace_memory_copy_report import _make_memory_copy_events
-from TraceLens.Agent.Analysis.utils import orchestrator_prepare as op
-from TraceLens.Agent.Analysis.category_analyses import kernel_fusion_analysis as kfa
-from tests.fixtures.reporting import _minimal_pftrace_events
-from TraceLens.PerfModel.extensions import attention_perf_model_extensions as aext
-from TraceLens.Reporting import tracediff_comparison_extension as tde
-from tests.test_analysis_agent_utils import TestOrchestratorPhase6
-from TraceLens.Reporting.rocprof_analysis import _categorize_kernel
 
 
 def test_export_data_df_csv_and_xlsx(tmp_path):
@@ -319,57 +313,6 @@ def test_resolve_gpu_arch_json_roundtrip(tmp_path):
     path.write_text(json.dumps(arch))
     assert resolve_gpu_arch(gpu_arch_json_path=str(path)) == arch
 
-
-###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-import gzip
-import json
-import os
-import textwrap
-from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
-
-import pandas as pd
-import pytest
-
-from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
-    find_trace_files,
-    generate_collective_report,
-)
-from TraceLens.Reporting.generate_perf_report_genesis import (
-    _cleanup_work_dir,
-    generate_perf_report_genesis,
-)
-from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
-    _write_markdown_report,
-    generate_perf_report_pftrace_hip_activity,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch import (
-    _find_entry_point,
-    _is_wrapper_frame,
-    apply_extension as apply_extension_pytorch,
-    generate_perf_report_pytorch,
-    get_dfs_short_kernels as get_dfs_short_kernels_pytorch,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    add_truncated_kernel_details as add_truncated_kernel_details_inference,
-    apply_extension as apply_extension_inference,
-    classify_graph_capture_trace,
-    generate_perf_report_pytorch as generate_inference_report,
-    get_dfs_short_kernels as get_dfs_short_kernels_inference,
-    perf_report_sanity_check,
-)
-from TraceLens.Reporting.pftrace_hip_activity_analysis import (
-    Event,
-    HIPEvent,
-    build_hip_summary_df,
-    build_kernel_summary_df_for_name,
-)
-from TraceLens.Reporting.pftrace_utils import ensure_trace_json
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Source column .* not found.*:UserWarning",
@@ -1518,14 +1461,6 @@ class TestReportingPhase6:
         assert (tmp_path / "inf" / "gpu_timeline.csv").exists()
 
 
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import (
-    _minimal_pftrace_events,
-    _mk_event,
-    _write_trace,
-)
-
-
 class TestReportingPhase7:
     def test_compare_perf_reports_all_sheets(self, tmp_path):
 
@@ -1629,14 +1564,6 @@ class TestReportingPhase7:
             all2allv_heatmap=True,
         )
         assert isinstance(dfs, dict)
-
-
-from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from tests.fixtures.reporting import (
-    _minimal_pftrace_events,
-    _mk_event,
-    _write_trace,
-)
 
 
 class TestReportingCliPhase7:
@@ -2085,13 +2012,6 @@ def test_pytorch_report_main(tmp_path):
     assert xlsx.exists()
 
 
-from tests.fixtures.reporting import (
-    _build_synthetic_trace,
-    _create_genesis_capture,
-    _write_trace,
-)
-
-
 class TestReportingPush95Coverage:
     @pytest.mark.parametrize("dirpath,trace_gz", _discover_inference_cases())
     def test_inference_report_with_capture_merge(self, dirpath, trace_gz, tmp_path):
@@ -2240,13 +2160,6 @@ class TestReportingPush95Coverage:
             }
         }
         assert pext.aiter_silu_and_mul(silu).bytes() > 0
-
-
-from tests.fixtures.reporting import (
-    _build_synthetic_trace,
-    _create_genesis_capture,
-    _write_trace,
-)
 
 
 class TestPush95Phase2:
@@ -2533,13 +2446,6 @@ class TestPush95Phase2:
             assert model.bytes() is None or model.bytes() >= 0
 
 
-from tests.fixtures.reporting import (
-    _build_synthetic_trace,
-    _create_genesis_capture,
-    _write_trace,
-)
-
-
 class TestPush95Phase3:
     def test_tracediff_perf_summary_branches(self):
 
@@ -2764,14 +2670,6 @@ class TestPush95Phase3:
         assert perf_model.aten_reduce(mean_evt).flops() > 0
 
 
-from tests.fixtures.traces import TESTS_DIR
-from tests.fixtures.reporting import (
-    _build_synthetic_trace,
-    _create_genesis_capture,
-    _write_trace,
-)
-
-
 class TestPush95Phase4:
     def test_orchestrator_main_real_fusion_extraction(self, tmp_path, monkeypatch):
 
@@ -2956,13 +2854,6 @@ class TestPush95Phase4:
             ]
             if nn:
                 analyzer.build_nn_module_latency_tree(nn[0])
-
-
-from tests.fixtures.reporting import (
-    _build_synthetic_trace,
-    _create_genesis_capture,
-    _write_trace,
-)
 
 
 class TestPush95Phase5:

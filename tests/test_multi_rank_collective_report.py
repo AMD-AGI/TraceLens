@@ -6,12 +6,7 @@
 
 """Unit tests for generate_multi_rank_collective_report_pytorch."""
 
-import glob
-import os
-
-import pandas as pd
-import pytest
-
+import glob, os, pandas as pd, pytest, importlib, json, sys, TraceLens.Reporting.generate_multi_rank_collective_report_pytorch as mod
 from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
     DEFAULT_RANK_REGEX,
     _resolve_trace_files_glob,
@@ -19,14 +14,6 @@ from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
     generate_collective_report,
     infer_world_size,
 )
-import importlib
-import json
-import sys
-from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
-    _resolve_trace_files_glob,
-    generate_collective_report,
-)
-import TraceLens.Reporting.generate_multi_rank_collective_report_pytorch as mod
 
 LLAMA_TRACE_DIR = "tests/traces/mi300/llama_70b_fsdp"
 

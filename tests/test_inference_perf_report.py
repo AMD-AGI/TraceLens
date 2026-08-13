@@ -11,50 +11,26 @@
 #   - Optionally capture_traces/ (graph capture mode)
 #   - Optionally gpu_arch.json
 
-import os
-
-import numpy as np
-import pandas as pd
-import pytest
-import ast
-import re
+import os, numpy as np, pandas as pd, pytest, ast, re, gzip, json
 from pandas.api.types import is_float_dtype
-
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    classify_graph_capture_trace,
     generate_perf_report_pytorch,
-    classify_graph_capture_trace,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-    _capture_tree_cache,
-)
-
-from conftest import update_reference_csvs
-from tests.fixtures.traces import INFERENCE_ROOT
-import gzip
-import json
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    merge_capture_trace_into_graph,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    classify_graph_capture_trace,
-)
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    generate_perf_report_pytorch as gen_inf,
     generate_perf_report_pytorch as generate_inference_report,
 )
-from tests.fixtures.reporting import _write_trace
-from tests.fixtures.reporting import _mk_event
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
+    _align_capture_to_graph,
     _align_graph_to_capture_by_group,
+    _capture_tree_cache,
+    align_streams,
+    capture_has_kernel_names,
     merge_capture_trace_into_graph,
     verify_subtree_events,
 )
-from tests.fixtures.reporting import _build_synthetic_trace
-from tests.fixtures.traces import _discover_inference_cases
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import align_streams
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch as gen_inf,
-)
+from conftest import update_reference_csvs
+from tests.fixtures.traces import INFERENCE_ROOT, _discover_inference_cases
+from tests.fixtures.reporting import _build_synthetic_trace, _mk_event, _write_trace
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Input list of events is empty.*:UserWarning",
@@ -333,26 +309,6 @@ def test_inference_perf_report(
             f"{format_diff_details(diff_cols)}"
         )
 
-
-###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-import os
-
-import pytest
-
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
-    generate_perf_report_pytorch,
-)
-from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
-    _align_capture_to_graph,
-    _align_graph_to_capture_by_group,
-    align_streams,
-    capture_has_kernel_names,
-    merge_capture_trace_into_graph,
-)
 
 INFERENCE_ROOT = os.path.join(os.path.dirname(__file__), "traces/inference")
 

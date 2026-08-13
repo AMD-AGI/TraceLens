@@ -15,13 +15,7 @@ their ``gpu_op_uid``. There is no fallback to CPU-UID tree walks or to
 ``(name, args)`` string-key matching; tests below exercise that contract.
 """
 
-import json
-import math
-
-import numpy as np
-import pandas as pd
-import pytest
-
+import json, math, numpy as np, pandas as pd, pytest
 from TraceLens.Reporting.tracediff_comparison_extension import (
     _build_lca_metadata,
     _build_uid_to_row_idx,

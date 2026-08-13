@@ -4,21 +4,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import os
-import tempfile
-
-import pandas as pd
-import pytest
-
+import os, tempfile, pandas as pd, pytest, importlib, sys
 from TraceLens.Reporting.generate_perf_report_rocprof import (
     generate_perf_report_rocprof,
 )
-from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
+from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
 from TraceLens.util import RocprofParser
 from tests.fixtures.traces import ROCprof_FILE
-import importlib
-import sys
-from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
 
 
 def find_test_files(ref_root):

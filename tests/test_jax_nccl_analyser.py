@@ -4,12 +4,10 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import unittest
-from unittest.mock import patch
+import unittest, pandas as pd, ast, os, pytest, importlib
+from unittest.mock import MagicMock, patch
 from TraceLens import JaxNcclAnalyser
-import pandas as pd
-import ast
-import os
+from TraceLens.NcclAnalyser.jax_nccl_analyser import JaxNcclAnalyser
 
 
 class TestJaxNcclAnalyserLoadTraceData(unittest.TestCase):
@@ -202,13 +200,6 @@ class TestJaxNcclAnalyserAnalyzeAllCollectivesFromDf(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
-
-import pytest
-import pandas as pd
-import importlib
-from unittest.mock import MagicMock, patch
-
-from TraceLens.NcclAnalyser.jax_nccl_analyser import JaxNcclAnalyser
 
 _jax_nccl_mod = importlib.import_module("TraceLens.NcclAnalyser.jax_nccl_analyser")
 

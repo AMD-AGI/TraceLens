@@ -6,11 +6,7 @@
 
 """Unit tests for TraceLens.NcclAnalyser helpers and utilities."""
 
-import json
-import re
-
-import pytest
-
+import json, re, pytest, importlib, logging, pandas as pd
 from TraceLens.NcclAnalyser.nccl_analyser import (
     NcclAnalyser,
     _collective_filter,
@@ -26,8 +22,6 @@ from TraceLens.NcclAnalyser.util.node_rank_to_protobuf_file_mapping import (
 )
 from TraceLens.NcclAnalyser.util.xla_parser import XLACollectiveParser
 from TraceLens.util import TraceEventUtils
-import importlib
-import logging
 
 
 def _nccl_kernel(name="ncclKernel_AllReduce", external_id=42, ts=100, dur=10):
@@ -492,22 +486,6 @@ def test_nccl_analyser_instance_filter_fn():
     analyser._filter_patterns = TraceEventUtils.get_communication_regexes()
     assert analyser._nccl_filter_event_fn(event) is True
     assert analyser._nccl_filter_event_fn({**event, "cat": "cpu_op"}) is False
-
-
-###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-import json
-
-import pandas as pd
-import pytest
-
-from TraceLens.NcclAnalyser.nccl_analyser import (
-    NcclAnalyser,
-    _parse_split_sizes,
-)
 
 
 def _nccl_kernel(

@@ -4,20 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import time
-import pandas as pd
-import argparse
-import json
-import subprocess
-
-import pytest
+import time, pandas as pd, argparse, json, subprocess, pytest, os
+from torch.profiler import ProfilerActivity, profile
+from TraceLens import EventReplay, EventReplayer, GPUEventAnalyser, TreePerfAnalyzer
 
 torch = pytest.importorskip("torch")
 torchvision_models = pytest.importorskip("torchvision").models
-from torch.profiler import profile, ProfilerActivity
-import os
-from TraceLens import EventReplayer, TreePerfAnalyzer, GPUEventAnalyser
-from TraceLens import EventReplay
 
 
 def profile_resnet(path=None):

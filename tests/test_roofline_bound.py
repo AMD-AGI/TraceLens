@@ -9,20 +9,14 @@ Test that the Roofline Bound column appears in the unified_perf_summary
 and per-category sheets when a GPU arch config is provided.
 """
 
-import importlib.util
-import json
-import os
-
-import pandas as pd
-import pytest
-
-_ORIGAMI_AVAILABLE = importlib.util.find_spec("origami") is not None
-
+import importlib.util, json, os, pandas as pd, pytest
 from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch,
 )
-
 from conftest import list_perf_report_csv_sheets
+
+_ORIGAMI_AVAILABLE = importlib.util.find_spec("origami") is not None
+
 
 MI300X_ARCH = {
     "name": "MI300X",

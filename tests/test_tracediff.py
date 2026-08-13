@@ -4,32 +4,23 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import pandas as pd, pytest, sys, types, os
 from types import SimpleNamespace
-
-import pandas as pd
-import pytest
-
 from TraceLens.TraceDiff.trace_diff import (
     TraceDiff,
     _disambiguate_same_name_candidates,
     _gpu_path_child_names_at_bfs_levels,
 )
 from TraceLens.util import TraceEventUtils
-import sys
-import types
 from TraceLens.Agent.Analysis.utils import arch_utils
 from TraceLens.Reporting.tracediff_comparison_extension import (
     tracediff_perf_summary_from_diff_stats,
 )
-from tests.fixtures.traces import TIMESFORMER1, TIMESFORMER2
-import os
+from tests.fixtures.traces import COMPARE_DIR, TIMESFORMER1, TIMESFORMER2
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from tests.fixtures.treeperf import _build_analyzer, _make_gpu_event, _mk_ac2g
 from TraceLens.TraceDiff import util as tracediff_util
-from tests.fixtures.traces import COMPARE_DIR
-from TraceLens.TraceDiff.trace_diff import TraceDiff
 from tests.test_trace2tree import _add_gpu_chain, _build_tree, _mk_event
-from tests.test_trace2tree import _add_gpu_chain, _mk_event
 from tests.fixtures.reporting import _mk_event
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 

@@ -6,12 +6,8 @@
 
 """Unit tests for TraceLens.TraceFusion."""
 
-import gzip
-import json
+import gzip, json, pytest
 from pathlib import Path
-
-import pytest
-
 from TraceLens.TraceFusion.trace_fuse import (
     TraceFuse,
     _default_filter_fn,

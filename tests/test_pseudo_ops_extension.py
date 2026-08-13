@@ -13,43 +13,35 @@ Tests verify that:
 3. Parent pointers are properly rewired (pseudo ops are in parent chain)
 """
 
-from typing import Dict
-from copy import deepcopy
-import sys
-import os
+import sys, os, json, pytest, gzip
 
-# Add examples to path to import extension
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples"))
-
+from typing import Dict, List
+from copy import deepcopy
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from example_megatron_extension import (
-    tree_postprocess_extension,
     _link_checkpoint_fwd_bwd,
-    perf_model_extension,
     op_category_extension,
-    te_layer_norm_fwd,
+    perf_model_extension,
     te_layer_norm_bwd,
+    te_layer_norm_fwd,
+    tree_postprocess_extension,
 )
-import json
-import pytest
 from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
     apply_pseudo_op_extensions,
 )
-from typing import Dict, List
 from TraceLens.Trace2Tree.extensions.moe_aiter_pseudo_ops import (
     _create_pseudo_op_moe_fused_aiter,
     _has_cpu_op_descendant,
     create_pseudo_ops_moe_fused_aiter,
 )
-from tests.fixtures.traces import NORM_TRACE
+from tests.fixtures.traces import NORM_TRACE, TRACES_ROOT
 from tests.fixtures.treeperf import _make_gpu_event, _mk_ac2g
-from tests.fixtures.traces import TRACES_ROOT
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch as generate_inference_report,
 )
 from tests.fixtures.reporting import _mk_ac2g, _mk_event
-from tests.fixtures.treeperf import _make_gpu_event
 from TraceLens.Trace2Tree.extensions.moe_flydsl_pseudo_ops import (
     FUSED_MOE_PARENT,
     create_pseudo_ops_moe_flydsl,
@@ -59,12 +51,29 @@ from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
     create_pseudo_ops_moe_gptq_awq,
 )
 from tests.test_trace2tree import _add_gpu_chain, _mk_event
-from TraceLens.PerfModel.torch_op_mapping import categorize_torch_op
 from TraceLens.PerfModel.torch_op_mapping import (
     OP_CATEGORY_REGISTRY,
+    categorize_torch_op,
     register_perf_model_categories,
 )
-import gzip
+from unittest import mock
+from TraceLens.Trace2Tree.extensions.mla_decode_pseudo_ops import (
+    MLA_DECODE_FWD_PATTERN,
+    STAGE1_KERNEL_NAME,
+    _create_pseudo_op_mla_decode,
+    _find_mla_decode_python_funcs,
+    _find_stage1_child,
+    create_pseudo_ops_mla_decode,
+)
+from TraceLens.Trace2Tree.extensions.mla_prefill_pseudo_ops import (
+    PREFILL_CPU_OP_NAME,
+    _create_pseudo_op_mla_prefill,
+    _find_mla_prefill_python_funcs,
+    _find_prefill_cpu_op_child,
+    create_pseudo_ops_mla_prefill,
+)
+
+# Add examples to path to import extension
 
 
 def _mk_event(
@@ -916,37 +925,6 @@ class TestActivationCheckpointingPseudoOps:
             "bwd_events"
         ), "bwd_events should be wired after _link_checkpoint_fwd_bwd"
         assert len(fwd_events[0]["bwd_events"]) == 1
-
-
-###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-from copy import deepcopy
-from typing import Dict, List
-from unittest import mock
-
-
-from TraceLens.Trace2Tree.extensions.mla_decode_pseudo_ops import (
-    MLA_DECODE_FWD_PATTERN,
-    STAGE1_KERNEL_NAME,
-    _create_pseudo_op_mla_decode,
-    _find_mla_decode_python_funcs,
-    _find_stage1_child,
-    create_pseudo_ops_mla_decode,
-)
-from TraceLens.Trace2Tree.extensions.mla_prefill_pseudo_ops import (
-    PREFILL_CPU_OP_NAME,
-    _create_pseudo_op_mla_prefill,
-    _find_mla_prefill_python_funcs,
-    _find_prefill_cpu_op_child,
-    create_pseudo_ops_mla_prefill,
-)
-from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
-    apply_pseudo_op_extensions,
-)
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
 
 def _mk_event(
