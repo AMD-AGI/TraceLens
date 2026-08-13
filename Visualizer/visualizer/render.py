@@ -527,6 +527,11 @@ def _connect_from_point(ax, x: float, y: float, target: Node, *, gap: float = 0.
     _arrow(ax, x, y, target.cx, target.top)
 
 
+def _combine_uses_box_anchor(target: _RenderAnchor) -> bool:
+    """True when a combine node was laid out as a labeled tile rather than a glyph circle."""
+    return (target.top - target.bottom) > COMBINE_OP_SIZE * 0.75
+
+
 def _draw_op_circle(ax, x: float, y: float, symbol: str) -> None:
     circle = Circle(
         (x, y),
@@ -560,23 +565,75 @@ def _draw_combine_op(
     symbol: str,
     *,
     sublabel: str | None = None,
+    width: float | None = None,
+    height: float | None = None,
 ) -> None:
-    _draw_op_circle(ax, x, y, symbol)
-    if sublabel:
-        ax.text(
-            x + MERGE_RADIUS + 0.10,
-            y,
+    from visualizer.ast_analyze import is_compact_combine_label
+
+    if is_compact_combine_label(symbol):
+        _draw_op_circle(ax, x, y, symbol)
+        if sublabel:
+            ax.text(
+                x + MERGE_RADIUS + 0.10,
+                y,
+                sublabel,
+                ha="left",
+                va="center",
+                fontsize=6.2,
+                color=COLORS["muted"],
+                zorder=6,
+            )
+        return
+
+    from visualizer.text_measure import box_label_size
+
+    fontsize = 6.8
+    pad_x, pad_y = 0.08, 0.06
+    if width is None or height is None:
+        width, height = box_label_size(
+            ax,
+            symbol,
             sublabel,
-            ha="left",
-            va="center",
-            fontsize=6.2,
-            color=COLORS["muted"],
-            zorder=6,
+            fontsize=fontsize,
+            pad_x=pad_x,
+            pad_y=pad_y,
+            white_text_stroke_pad=False,
         )
+    top_y = y + height / 2
+    leaf = _make_node(
+        f"combine:{symbol}",
+        x,
+        top_y,
+        width,
+        height,
+        symbol,
+        COLORS["bg"],
+        text_color=COLORS["residual"],
+        fontsize=fontsize,
+        pad_x=pad_x,
+        pad_y=pad_y,
+    )
+    _draw_box(ax, leaf, edgecolor=COLORS["residual"])
 
 
 def _is_combine_synthetic(synthetic: str | None) -> bool:
     return synthetic in {SYNTHETIC_COMBINE, SYNTHETIC_MULTIPLY}
+
+
+def _combine_center_y(target: _RenderAnchor) -> float:
+    return (target.top + target.bottom) / 2
+
+
+def _combine_top_entry_y(target: _RenderAnchor) -> float:
+    if _combine_uses_box_anchor(target):
+        return target.top
+    return _combine_center_y(target) + MERGE_RADIUS
+
+
+def _combine_bottom_exit_y(source: _RenderAnchor) -> float:
+    if _combine_uses_box_anchor(source):
+        return source.bottom
+    return _combine_center_y(source) - MERGE_RADIUS
 
 
 def _merge_anchor(cx: float, merge_y: float) -> _RenderAnchor:
@@ -1878,6 +1935,94 @@ def _vertical_segment_crosses_anchor(
     return lo < anchor.top - margin and hi > anchor.bottom + margin
 
 
+def _right_bypass_x_clearing_horizontal_segment(
+    x_left: float,
+    y: float,
+    obstacles: list[_RenderAnchor],
+    *,
+    initial_bypass_x: float,
+    margin: float = CONNECTOR_OBSTACLE_MARGIN,
+) -> float:
+    """Extend bypass_x rightward until a horizontal segment at y from x_left clears obstacles."""
+    bypass_x = initial_bypass_x
+    changed = True
+    while changed:
+        changed = False
+        for obstacle in obstacles:
+            interior = _anchor_interior(obstacle, margin=margin)
+            if interior is None:
+                continue
+            if y + margin < interior.bottom or y - margin > interior.top:
+                continue
+            if interior.right + margin <= x_left:
+                continue
+            if interior.left - margin >= bypass_x:
+                continue
+            new_x = interior.right + margin
+            if new_x > bypass_x:
+                bypass_x = new_x
+                changed = True
+    return bypass_x
+
+
+def _left_bypass_x_clearing_horizontal_segment(
+    x_right: float,
+    y: float,
+    obstacles: list[_RenderAnchor],
+    *,
+    initial_bypass_x: float,
+    margin: float = CONNECTOR_OBSTACLE_MARGIN,
+) -> float:
+    """Extend bypass_x leftward until a horizontal segment at y to x_right clears obstacles."""
+    bypass_x = initial_bypass_x
+    changed = True
+    while changed:
+        changed = False
+        for obstacle in obstacles:
+            interior = _anchor_interior(obstacle, margin=margin)
+            if interior is None:
+                continue
+            if y + margin < interior.bottom or y - margin > interior.top:
+                continue
+            if interior.left - margin >= x_right:
+                continue
+            if interior.right + margin <= bypass_x:
+                continue
+            new_x = interior.left - margin
+            if new_x < bypass_x:
+                bypass_x = new_x
+                changed = True
+    return bypass_x
+
+
+def _right_bypass_x_clearing_vertical_segment(
+    y_lo: float,
+    y_hi: float,
+    obstacles: list[_RenderAnchor],
+    *,
+    initial_bypass_x: float,
+    margin: float = CONNECTOR_OBSTACLE_MARGIN,
+) -> float:
+    """Extend bypass_x rightward until a vertical segment at x clears obstacles."""
+    bypass_x = initial_bypass_x
+    changed = True
+    while changed:
+        changed = False
+        for obstacle in obstacles:
+            if _vertical_segment_crosses_anchor(
+                bypass_x,
+                y_lo,
+                y_hi,
+                obstacle,
+                margin=margin,
+            ):
+                new_x = obstacle.right + margin
+                if new_x > bypass_x:
+                    bypass_x = new_x
+                    changed = True
+    return bypass_x
+
+
 def _frame_tail_exit_horiz_y(
     graph,
     positions: list,
@@ -2047,6 +2192,12 @@ def _connector_block_obstacles(
 ) -> list[_RenderAnchor]:
     """Every non-endpoint tile that a connector must not cut through."""
     excluded = {src, tgt}
+    if graph is not None:
+        for frame in graph.inline_frames:
+            members = set(frame.node_indices)
+            if tgt in members and src not in members:
+                excluded |= members - {tgt}
+                break
     obstacles = [
         anchor for node_index, anchor in anchors.items() if node_index not in excluded
     ] + label_obstacles
@@ -2072,14 +2223,12 @@ def _connector_path_violates_inline_frame_bounds(
     tgt: int,
 ) -> tuple[str, str] | None:
     """Return frame id and reason when a segment cuts through a dotted frame interior."""
+    last_index = len(points) - 2
     for frame in graph.inline_frames:
         members = set(frame.node_indices)
         if src in members and tgt in members:
             continue
         bounds = _inline_frame_draw_bounds(frame, positions, graph)
-        if _path_horizontal_segments_overlap_bounds(points, bounds):
-            return frame.frame_id, "horizontal segment crosses dotted frame interior"
-        last_index = len(points) - 2
         for index in range(len(points) - 1):
             if tgt in members and index == last_index:
                 continue
@@ -2087,8 +2236,122 @@ def _connector_path_violates_inline_frame_bounds(
                 continue
             x1, y1 = points[index]
             x2, y2 = points[index + 1]
+            if (
+                abs(y1 - y2) <= PARALLEL_CONNECTOR_COORD_EPS
+                and abs(x1 - x2) > 0.06
+                and _path_horizontal_segments_overlap_bounds(
+                    [(x1, y1), (x2, y2)],
+                    bounds,
+                )
+            ):
+                return frame.frame_id, "horizontal segment crosses dotted frame interior"
             if _segment_crosses_frame_bounds(x1, y1, x2, y2, bounds):
                 return frame.frame_id, "segment crosses dotted frame interior"
+    return None
+
+
+def _reroute_path_clearing_inline_frames(
+    points: list[tuple[float, float]],
+    *,
+    source: _RenderAnchor,
+    target: _RenderAnchor,
+    graph,
+    positions: list,
+    src: int,
+    tgt: int,
+    obstacles: list[_RenderAnchor],
+    anchors: dict[int, _RenderAnchor] | None = None,
+    bus_y: float | None = None,
+    gap: float = 0.04,
+) -> list[tuple[float, float]] | None:
+    """Reroute below or around dotted inline frames when a path cuts through one."""
+    if _connector_path_violates_inline_frame_bounds(
+        points,
+        graph,
+        positions,
+        src=src,
+        tgt=tgt,
+    ) is None:
+        return None
+
+    bypass_y = None
+    gutter_x = None
+    anchors = anchors or {}
+    for frame in graph.inline_frames:
+        members = set(frame.node_indices)
+        if src in members and tgt in members:
+            continue
+        bounds = _inline_frame_draw_bounds(frame, positions, graph)
+        crosses = _path_horizontal_segments_overlap_bounds(points, bounds)
+        if not crosses:
+            last_index = len(points) - 2
+            for index in range(len(points) - 1):
+                if tgt in members and index == last_index:
+                    continue
+                if src in members and index == 0:
+                    continue
+                x1, y1 = points[index]
+                x2, y2 = points[index + 1]
+                if _segment_crosses_frame_bounds(x1, y1, x2, y2, bounds):
+                    crosses = True
+                    break
+        if not crosses:
+            continue
+        candidate_y = bounds.bottom - CONNECTOR_OBSTACLE_MARGIN
+        bypass_y = candidate_y if bypass_y is None else min(bypass_y, candidate_y)
+        left_gutter = _inline_frame_connector_gutter_width(
+            graph,
+            frame,
+            side="left",
+            anchors=anchors,
+        )
+        gutter_x = bounds.left - INLINE_FRAME_PAD - left_gutter - CONNECTOR_OBSTACLE_MARGIN
+
+    if bypass_y is None:
+        return None
+
+    entry_y = _connector_target_top_entry_y(target, gap=gap)
+    y1 = _connector_source_bottom_exit_y(source, gap=gap)
+    route_y = min(bypass_y, y1 - CONNECTOR_EXIT_STUB)
+    if bus_y is not None:
+        route_y = min(route_y, bus_y - CONNECTOR_OBSTACLE_MARGIN)
+    candidates: list[list[tuple[float, float]]] = [
+        [
+            (source.cx, y1),
+            (source.cx, route_y),
+            (target.cx, route_y),
+            (target.cx, entry_y),
+        ]
+    ]
+    if gutter_x is not None and abs(gutter_x - source.cx) > 0.06:
+        candidates.append(
+            [
+                (source.cx, y1),
+                (source.cx, route_y),
+                (gutter_x, route_y),
+                (gutter_x, entry_y),
+                (target.cx, entry_y),
+            ]
+        )
+
+    for candidate in candidates:
+        candidate = _ensure_orthogonal_connector_path(candidate)
+        if not _connector_path_clear_of_blocks(
+            candidate,
+            source=source,
+            target=target,
+            obstacles=obstacles,
+        ):
+            continue
+        if _connector_path_violates_inline_frame_bounds(
+            candidate,
+            graph,
+            positions,
+            src=src,
+            tgt=tgt,
+        ) is not None:
+            continue
+        return candidate
     return None
 
 
@@ -2144,10 +2407,9 @@ def _assert_connector_path_clear_of_blocks(
 
 
 def _graph_requires_strict_connector_validation(graph) -> bool:
-    """Tensor-port pipeline graphs get runtime connector clearance checks."""
-    from visualizer.computation_graph import _graph_has_tensor_ports
-
-    return _graph_has_tensor_ports(graph)
+    """All detail graphs get runtime block and connector overlap checks."""
+    del graph
+    return True
 
 
 def _assert_detail_link_paths_clear_of_blocks(
@@ -2238,27 +2500,45 @@ def _snap_connector_path_endpoints(
     if len(points) < 2:
         return points
     snapped = list(points)
-    if link_key in graph.inline_binary_operand_links:
+    nodes = getattr(graph, "nodes", ())
+    side_entry_links = getattr(graph, "side_entry_links", set())
+    inline_binary_operand_links = getattr(graph, "inline_binary_operand_links", set())
+    links = getattr(graph, "links", ())
+    if link_key in inline_binary_operand_links:
         y_stub = _connector_source_bottom_exit_y(source) - CONNECTOR_EXIT_STUB
         snapped[0] = (source.cx, y_stub)
         entry_x = target.left if snapped[-2][0] <= target.cx else target.right
         snapped[-1] = (entry_x, _connector_target_side_entry_y(target))
-    elif link_key in getattr(graph, "side_entry_links", set()):
+    elif link_key in side_entry_links:
         snapped[0] = (source.cx, _connector_source_bottom_exit_y(source))
         tgt = link_key[1]
-        if tgt < len(graph.nodes) and _is_combine_synthetic(graph.nodes[tgt].synthetic):
-            combine_cy = (target.top + target.bottom) / 2
-            if source.cx >= target.cx:
-                entry_x = target.cx + MERGE_RADIUS
-            else:
-                entry_x = target.cx - MERGE_RADIUS
+        if tgt < len(nodes) and _is_combine_synthetic(nodes[tgt].synthetic):
+            combine_cy = _combine_center_y(target)
+            entry_x = _side_entry_combine_entry_x(source, target)
             snapped[-1] = (entry_x, combine_cy)
     elif _connector_uses_target_side_entry(target, snapped):
         snapped[0] = (source.cx, _connector_source_bottom_exit_y(source))
     else:
-        snapped[0] = (source.cx, _connector_source_bottom_exit_y(source))
-        entry_y = _connector_target_top_entry_y(target)
+        src = link_key[0]
+        if src < len(nodes) and _is_combine_synthetic(nodes[src].synthetic):
+            snapped[0] = (source.cx, _combine_bottom_exit_y(source))
+        else:
+            snapped[0] = (source.cx, _connector_source_bottom_exit_y(source))
         entry_x = snapped[-1][0]
+        tgt = link_key[1]
+        if tgt < len(nodes) and _is_combine_synthetic(nodes[tgt].synthetic):
+            has_side_incoming = any(
+                (side_src, tgt) in side_entry_links
+                or (side_src, tgt) in inline_binary_operand_links
+                for side_src, dst in links
+                if dst == tgt
+            )
+            if has_side_incoming and link_key not in side_entry_links:
+                entry_y = _combine_top_entry_y(target)
+            else:
+                entry_y = _connector_target_top_entry_y(target)
+        else:
+            entry_y = _connector_target_top_entry_y(target)
         if abs(entry_x - target.cx) < PARALLEL_CONNECTOR_COORD_EPS:
             entry_x = target.cx
         snapped[-1] = (entry_x, entry_y)
@@ -2311,6 +2591,134 @@ def _connector_path_clear_of_blocks(
     return not _path_penetrates_attached_boxes(points, source, target)
 
 
+def _input_to_inline_frame_top_member_route(
+    source: _RenderAnchor,
+    target: _RenderAnchor,
+    obstacles: list[_RenderAnchor],
+    graph,
+    positions: list,
+    *,
+    src: int,
+    tgt: int,
+    gap: float = 0.04,
+) -> list[tuple[float, float]] | None:
+    """Route input to the top tile of a dotted frame above the frame envelope."""
+    from visualizer.computation_graph import SYNTHETIC_INPUT
+
+    if graph.nodes[src].synthetic != SYNTHETIC_INPUT:
+        return None
+    target_frame = next(
+        (frame for frame in graph.inline_frames if tgt in frame.node_indices),
+        None,
+    )
+    if target_frame is None or not target_frame.node_indices:
+        return None
+    if target_frame.node_indices[0] != tgt:
+        return None
+    y1 = _connector_source_bottom_exit_y(source, gap=gap)
+    y2 = _connector_target_top_entry_y(target, gap=gap)
+    bypass_x = max(source.right, target.right) + CONNECTOR_OBSTACLE_MARGIN
+    bypass_x = _right_bypass_x_clearing_horizontal_segment(
+        min(source.cx, target.cx),
+        y1,
+        obstacles,
+        initial_bypass_x=bypass_x,
+    )
+    return _ensure_orthogonal_connector_path(
+        [
+            (source.cx, y1),
+            (bypass_x, y1),
+            (target.cx, y1),
+            (target.cx, y2),
+        ]
+    )
+
+
+def _horizontal_departure_side_bypass_route(
+    source: _RenderAnchor,
+    target: _RenderAnchor,
+    obstacles: list[_RenderAnchor],
+    *,
+    bus_y: float | None = None,
+    gap: float = 0.04,
+) -> list[tuple[float, float]] | None:
+    """Leave the source column horizontally before dropping to the target."""
+    y1 = _connector_source_bottom_exit_y(source, gap=gap)
+    y_stub = y1 - CONNECTOR_EXIT_STUB
+    entry_y = _connector_target_top_entry_y(target, gap=gap)
+    side_candidates = (
+        max(source.right, target.right) + gap + 0.10,
+        min(source.left, target.left) - gap - 0.10,
+    )
+    route_candidates: list[float] = []
+    if bus_y is not None:
+        route_candidates.append(bus_y)
+    route_candidates.extend(
+        entry_y + offset for offset in (0.07, 0.0, 0.15, 0.22, 0.30)
+    )
+    for step in range(16):
+        route_candidates.append(y1 - 0.08 * step)
+        route_candidates.append(y_stub - 0.08 * step)
+    seen: set[float] = set()
+    ordered_route_ys: list[float] = []
+    for route_y in route_candidates:
+        bucket = round(route_y, 4)
+        if bucket in seen:
+            continue
+        seen.add(bucket)
+        ordered_route_ys.append(route_y)
+    departure_levels = (y1, y_stub)
+    for bypass_x in side_candidates:
+        if bypass_x >= source.cx:
+            bypass_x = _right_bypass_x_clearing_horizontal_segment(
+                min(source.cx, target.cx),
+                y1,
+                obstacles,
+                initial_bypass_x=bypass_x,
+            )
+            bypass_x = _right_bypass_x_clearing_vertical_segment(
+                min(entry_y, y_stub),
+                max(y1, entry_y),
+                obstacles,
+                initial_bypass_x=bypass_x,
+            )
+        else:
+            bypass_x = _left_bypass_x_clearing_horizontal_segment(
+                max(source.cx, target.cx),
+                y1,
+                obstacles,
+                initial_bypass_x=bypass_x,
+            )
+        for depart_y in departure_levels:
+            for route_y in ordered_route_ys:
+                if abs(depart_y - y_stub) <= PARALLEL_CONNECTOR_COORD_EPS:
+                    prefix = [
+                        (source.cx, y1),
+                        (source.cx, y_stub),
+                        (bypass_x, y_stub),
+                    ]
+                else:
+                    prefix = [(source.cx, y1), (bypass_x, y1)]
+                points = _ensure_orthogonal_connector_path(
+                    [
+                        *prefix,
+                        (bypass_x, route_y),
+                        (target.cx, route_y),
+                        (target.cx, entry_y),
+                    ]
+                )
+                if (
+                    not _path_hits_obstacles(
+                        points,
+                        obstacles,
+                        margin=CONNECTOR_OBSTACLE_MARGIN,
+                    )
+                    and not _path_penetrates_attached_boxes(points, source, target)
+                ):
+                    return points
+    return None
+
+
 def _reroute_connector_path_clearing_blocks(
     points: list[tuple[float, float]],
     *,
@@ -2319,43 +2727,252 @@ def _reroute_connector_path_clearing_blocks(
     obstacles: list[_RenderAnchor],
     bus_y: float | None = None,
     bus_near: str = "target",
+    graph=None,
+    positions: list | None = None,
+    link_key: tuple[int, int] | None = None,
+    source_bus: dict[int, float] | None = None,
+    merge_link_bus: dict[tuple[int, int], float] | None = None,
 ) -> list[tuple[float, float]]:
     """Last-resort reroute when a laid-out connector still crosses a block."""
+    from visualizer.ast_analyze import is_compact_combine_label
+
+    is_side_labeled_combine = (
+        graph is not None
+        and link_key is not None
+        and positions is not None
+        and link_key in getattr(graph, "side_entry_links", set())
+        and _is_combine_synthetic(positions[link_key[1]].spec.synthetic)
+        and not is_compact_combine_label(positions[link_key[1]].spec.label)
+    )
+    if (
+        graph is not None
+        and link_key is not None
+        and link_key in getattr(graph, "side_entry_links", set())
+        and _connector_path_clear_of_blocks(
+            points,
+            source=source,
+            target=target,
+            obstacles=obstacles,
+        )
+        and (
+            positions is None
+            or _connector_path_violates_inline_frame_bounds(
+                points,
+                graph,
+                positions,
+                src=link_key[0],
+                tgt=link_key[1],
+            )
+            is None
+        )
+    ):
+        return points
     if _connector_path_clear_of_blocks(
         points,
         source=source,
         target=target,
         obstacles=obstacles,
     ):
-        return points
+        if (
+            graph is not None
+            and positions is not None
+            and link_key is not None
+            and _connector_path_violates_inline_frame_bounds(
+                points,
+                graph,
+                positions,
+                src=link_key[0],
+                tgt=link_key[1],
+            )
+            is None
+        ):
+            return points
+        if graph is None or positions is None or link_key is None:
+            return points
+
+    frame_violation = None
+    if graph is not None and positions is not None and link_key is not None:
+        frame_violation = _connector_path_violates_inline_frame_bounds(
+            points,
+            graph,
+            positions,
+            src=link_key[0],
+            tgt=link_key[1],
+        )
+        if frame_violation is None and _connector_path_clear_of_blocks(
+            points,
+            source=source,
+            target=target,
+            obstacles=obstacles,
+        ):
+            return points
 
     candidates: list[list[tuple[float, float]]] = []
-    if abs(source.cx - target.cx) < 0.06:
-        candidates.append(
-            _same_column_side_gutter_detour(source, target, obstacles)
-        )
-    candidates.append(
-        _orthogonal_path(
+    if graph is not None and positions is not None and link_key is not None:
+        top_member_route = _input_to_inline_frame_top_member_route(
             source,
             target,
             obstacles,
-            bus_near=bus_near,
+            graph,
+            positions,
+            src=link_key[0],
+            tgt=link_key[1],
+        )
+        if top_member_route is not None:
+            candidates.append(top_member_route)
+        if link_key in getattr(graph, "side_entry_links", set()):
+            tgt_spec = positions[link_key[1]].spec
+            if _is_combine_synthetic(tgt_spec.synthetic):
+                combine_cy = _combine_center_y(target)
+                entry_x = _side_entry_combine_entry_x(source, target)
+                shared_frame = _inline_frame_for_nodes(graph, link_key[0], link_key[1])
+                frame_bounds = (
+                    _inline_frame_draw_bounds(shared_frame, positions, graph)
+                    if shared_frame is not None
+                    else None
+                )
+                candidates.insert(
+                    0,
+                    _side_entry_combine_l_route(source, target),
+                )
+                candidates.append(
+                    _side_entry_combine_connector_points(
+                        source,
+                        target.cx,
+                        combine_cy,
+                        frame_bounds=frame_bounds,
+                        obstacles=obstacles,
+                        target=target,
+                    )
+                )
+                crossing_frames = [
+                    frame
+                    for frame in graph.inline_frames
+                    if not (
+                        link_key[0] in frame.node_indices
+                        and link_key[1] in frame.node_indices
+                    )
+                    and _path_horizontal_segments_overlap_bounds(
+                        points,
+                        _inline_frame_draw_bounds(frame, positions, graph),
+                    )
+                ]
+                if shared_frame is not None or crossing_frames:
+                    frame_list = (
+                        [shared_frame]
+                        if shared_frame is not None
+                        else crossing_frames
+                    )
+                    below_y = min(
+                        _inline_frame_draw_bounds(frame, positions, graph).bottom
+                        - CONNECTOR_OBSTACLE_MARGIN
+                        for frame in frame_list
+                    )
+                    if crossing_frames:
+                        below_y -= PARALLEL_CONNECTOR_CHANNEL_GAP
+                    below_frame_route = _ensure_orthogonal_connector_path(
+                        [
+                            (source.cx, _connector_source_bottom_exit_y(source)),
+                            (source.cx, below_y),
+                            (entry_x, below_y),
+                            (entry_x, combine_cy),
+                        ]
+                    )
+                    if is_side_labeled_combine:
+                        candidates.insert(0, below_frame_route)
+                    else:
+                        candidates.append(below_frame_route)
+        frame_route = _reroute_path_clearing_inline_frames(
+            points,
+            source=source,
+            target=target,
+            graph=graph,
+            positions=positions,
+            src=link_key[0],
+            tgt=link_key[1],
+            obstacles=obstacles,
+            anchors=None,
             bus_y=bus_y,
         )
-    )
-    if abs(source.cx - target.cx) < 0.06:
+        if frame_route is not None:
+            candidates.append(frame_route)
+    if (
+        graph is not None
+        and link_key is not None
+        and source_bus is not None
+        and merge_link_bus is not None
+    ):
+        tee_y = source_bus.get(link_key[0])
+        leg_bus = merge_link_bus.get(link_key)
+        if (
+            tee_y is not None
+            and leg_bus is not None
+            and leg_bus < tee_y - PARALLEL_CONNECTOR_COORD_EPS
+        ):
+            candidates.insert(
+                0,
+                _fanout_tee_then_entry_column_points(
+                    source,
+                    target,
+                    target.cx,
+                    tee_y=tee_y,
+                    bus_y=leg_bus,
+                ),
+            )
+    side_bypass = None
+    if not is_side_labeled_combine:
+        side_bypass = _horizontal_departure_side_bypass_route(
+            source,
+            target,
+            obstacles,
+            bus_y=bus_y,
+        )
+    if side_bypass is not None:
+        candidates.insert(0, side_bypass)
+    if abs(source.cx - target.cx) < 0.06 and not is_side_labeled_combine:
+        candidates.append(
+            _same_column_side_gutter_detour(source, target, obstacles)
+        )
+    if not is_side_labeled_combine:
+        candidates.append(
+            _orthogonal_path(
+                source,
+                target,
+                obstacles,
+                bus_near=bus_near,
+                bus_y=bus_y,
+            )
+        )
+    if abs(source.cx - target.cx) < 0.06 and not is_side_labeled_combine:
         candidates.append(
             _same_column_top_entry_detour(source, target, obstacles, bus_y=bus_y)
         )
 
     for candidate in candidates:
-        if _connector_path_clear_of_blocks(
+        if not _connector_path_clear_of_blocks(
             candidate,
             source=source,
             target=target,
             obstacles=obstacles,
         ):
-            return candidate
+            continue
+        if (
+            graph is not None
+            and positions is not None
+            and link_key is not None
+            and _connector_path_violates_inline_frame_bounds(
+                candidate,
+                graph,
+                positions,
+                src=link_key[0],
+                tgt=link_key[1],
+            )
+            is not None
+        ):
+            continue
+        return candidate
+    if frame_violation is None:
+        return points
     return points
 
 
@@ -2368,8 +2985,10 @@ def _reroute_detail_link_paths_clearing_blocks(
     positions: list | None,
     target_bus: dict[int, float],
     source_bus: dict[int, float],
+    merge_link_bus: dict[tuple[int, int], float] | None = None,
 ) -> dict[tuple[int, int], list[tuple[float, float]]]:
     """Reroute every connector that still crosses an intermediate block."""
+    merge_link_bus = merge_link_bus or {}
     rerouted: dict[tuple[int, int], list[tuple[float, float]]] = {}
     for link_key, points in link_paths.items():
         src, tgt = link_key
@@ -2387,15 +3006,23 @@ def _reroute_detail_link_paths_clearing_blocks(
             positions=positions,
             link_key=link_key,
         )
-        bus_y = target_bus.get(tgt)
-        if bus_y is None:
-            bus_y = source_bus.get(src)
+        bus_y = _link_routing_bus_y(
+            link_key,
+            target_bus=target_bus,
+            source_bus=source_bus,
+            merge_link_bus=merge_link_bus,
+        )
         rerouted[link_key] = _reroute_connector_path_clearing_blocks(
             points,
             source=source,
             target=target,
             obstacles=obstacles,
             bus_y=bus_y,
+            graph=graph,
+            positions=positions,
+            link_key=link_key,
+            source_bus=source_bus,
+            merge_link_bus=merge_link_bus,
         )
     return rerouted
 
@@ -2601,6 +3228,8 @@ def _orthogonal_path(
     gap: float = 0.04,
     bus_near: str = "target",
     bus_y: float | None = None,
+    graph=None,
+    positions: list | None = None,
 ) -> list[tuple[float, float]]:
     """Build a Manhattan path from source bottom to target top."""
     y1, y_stub = _connector_exit_stub_y(source.bottom, gap=gap)
@@ -2652,8 +3281,12 @@ def _orthogonal_path(
                 ):
                     return detour
             return _same_column_straight_connector_points(source, target, gap=gap)
-        bus_y = max(min_bus_y, bus_y if bus_near == "source" else min(y_stub, bus_y))
-        aligned = [(x1, y1), (x1, y_stub), (x1, bus_y), (x2, bus_y), (x2, y2)]
+        if bus_near == "source":
+            bus_y = max(min_bus_y, bus_y)
+            aligned = [(x1, y1), (x1, bus_y), (x2, y2)]
+        else:
+            bus_y = max(min_bus_y, bus_y if bus_near == "source" else min(y_stub, bus_y))
+            aligned = [(x1, y1), (x1, y_stub), (x1, bus_y), (x2, bus_y), (x2, y2)]
         if (
             not _path_hits_obstacles(aligned, obstacles, margin=CONNECTOR_OBSTACLE_MARGIN)
             and not _path_penetrates_attached_boxes(aligned, source, target)
@@ -2669,17 +3302,118 @@ def _orthogonal_path(
             bus_y = y2 + min(0.10, channel * 0.25)
         bus_y = min(y_stub - 0.02, max(min_bus_y, bus_y))
     else:
+        if (
+            bus_near == "source"
+            and bus_y is not None
+            and bus_y < min_bus_y - PARALLEL_CONNECTOR_COORD_EPS
+        ):
+            low_bus_points = [(x1, y1), (x1, bus_y), (x2, bus_y), (x2, y2)]
+            if (
+                not _path_hits_obstacles(
+                    low_bus_points,
+                    obstacles,
+                    margin=CONNECTOR_OBSTACLE_MARGIN,
+                )
+                and not _path_penetrates_attached_boxes(
+                    low_bus_points,
+                    source,
+                    target,
+                )
+            ):
+                return low_bus_points
+            if graph is not None and positions is not None:
+                gutter = _input_fanout_gutter_route(
+                    source,
+                    target,
+                    obstacles,
+                    graph=graph,
+                    positions=positions,
+                    bus_y=bus_y,
+                )
+                if gutter is not None:
+                    return gutter
         bus_y = max(min_bus_y, bus_y if bus_near == "source" else min(y_stub, bus_y))
 
-    for _ in range(6):
+    if bus_near == "source":
+        points = [(x1, y1), (x1, bus_y), (x2, bus_y), (x2, y2)]
+    else:
         points = [(x1, y1), (x1, y_stub), (x1, bus_y), (x2, bus_y), (x2, y2)]
+    for _ in range(6):
         if (
             not _path_hits_obstacles(points, obstacles, margin=CONNECTOR_OBSTACLE_MARGIN)
             and not _path_penetrates_attached_boxes(points, source, target)
         ):
             return points
         bus_y = max(min_bus_y, bus_y - 0.08)
-    return [(x1, y1), (x1, y_stub), (x1, bus_y), (x2, bus_y), (x2, y2)]
+        if bus_near == "source":
+            points = [(x1, y1), (x1, bus_y), (x2, bus_y), (x2, y2)]
+        else:
+            points = [(x1, y1), (x1, y_stub), (x1, bus_y), (x2, bus_y), (x2, y2)]
+    if bus_near == "source" and graph is not None and positions is not None:
+        gutter = _input_fanout_gutter_route(
+            source,
+            target,
+            obstacles,
+            graph=graph,
+            positions=positions,
+            bus_y=bus_y if bus_y is not None else min_bus_y - CONNECTOR_OBSTACLE_MARGIN,
+        )
+        if gutter is not None:
+            return gutter
+    return points
+
+
+def _input_fanout_gutter_route(
+    source: _RenderAnchor,
+    target: _RenderAnchor,
+    obstacles: list[_RenderAnchor],
+    *,
+    graph,
+    positions: list,
+    bus_y: float,
+    gap: float = 0.04,
+) -> list[tuple[float, float]] | None:
+    """Route dense input fan-out below dotted frames when the shared bus cannot lift."""
+    y1 = _connector_source_bottom_exit_y(source, gap=gap)
+    y2 = _connector_target_top_entry_y(target, gap=gap)
+    gutter_y = bus_y
+    gutter_x = min(source.left, target.left) - CONNECTOR_OBSTACLE_MARGIN
+    for frame in graph.inline_frames:
+        bounds = _inline_frame_draw_bounds(frame, positions, graph)
+        x_left = min(source.cx, target.cx)
+        x_right = max(source.cx, target.cx)
+        if bounds.right < x_left - CONNECTOR_OBSTACLE_MARGIN or bounds.left > x_right + CONNECTOR_OBSTACLE_MARGIN:
+            continue
+        gutter_y = min(gutter_y, bounds.bottom - CONNECTOR_OBSTACLE_MARGIN - CONNECTOR_EXIT_STUB)
+        left_gutter = _inline_frame_connector_gutter_width(graph, frame, side="left", anchors={})
+        gutter_x = min(gutter_x, bounds.left - INLINE_FRAME_PAD - left_gutter - CONNECTOR_OBSTACLE_MARGIN)
+
+    candidates = [
+        [(source.cx, y1), (source.cx, gutter_y), (target.cx, gutter_y), (target.cx, y2)],
+    ]
+    if abs(gutter_x - source.cx) > 0.06:
+        candidates.append(
+            [
+                (source.cx, y1),
+                (source.cx, gutter_y),
+                (gutter_x, gutter_y),
+                (gutter_x, y2),
+                (target.cx, y2),
+            ]
+        )
+    for candidate in candidates:
+        candidate = _ensure_orthogonal_connector_path(candidate)
+        if _path_hits_obstacles(candidate, obstacles, margin=CONNECTOR_OBSTACLE_MARGIN):
+            continue
+        if _path_penetrates_attached_boxes(candidate, source, target):
+            continue
+        if any(
+            _path_horizontal_segments_overlap_bounds(candidate, _inline_frame_draw_bounds(frame, positions, graph))
+            for frame in graph.inline_frames
+        ):
+            continue
+        return candidate
+    return None
 
 
 def _compute_shared_target_bus_y(
@@ -2716,12 +3450,53 @@ def _compute_shared_target_bus_y(
     return max(min_bus_y, bus_y)
 
 
+def _clamp_bus_y_clearing_obstacles_on_span(
+    bus_y: float,
+    obstacles: list[_RenderAnchor],
+    *,
+    x_left: float,
+    x_right: float,
+    margin: float = CONNECTOR_OBSTACLE_MARGIN,
+) -> float:
+    """Lower a bus so its horizontal span stays below crossing tiles."""
+    cleared = bus_y
+    for obstacle in obstacles:
+        if obstacle.right < x_left - margin or obstacle.left > x_right + margin:
+            continue
+        if obstacle.bottom - margin < cleared:
+            cleared = min(cleared, obstacle.bottom - margin - CONNECTOR_EXIT_STUB)
+    return cleared
+
+
+def _clamp_bus_y_clearing_inline_frames(
+    bus_y: float,
+    *,
+    graph,
+    positions: list,
+    x_left: float,
+    x_right: float,
+    margin: float = CONNECTOR_OBSTACLE_MARGIN,
+) -> float:
+    """Lower a horizontal bus so it sits below dotted-frame interiors it would span."""
+    cleared = bus_y
+    for frame in graph.inline_frames:
+        bounds = _inline_frame_draw_bounds(frame, positions, graph)
+        if x_right < bounds.left - margin or x_left > bounds.right + margin:
+            continue
+        if bus_y >= bounds.top - margin:
+            continue
+        cleared = min(cleared, bounds.bottom - margin - CONNECTOR_EXIT_STUB)
+    return cleared
+
+
 def _compute_shared_source_bus_y(
     source: _RenderAnchor,
     targets: list[_RenderAnchor],
     obstacles: list[_RenderAnchor],
     *,
     gap: float = 0.04,
+    graph=None,
+    positions: list | None = None,
 ) -> float:
     """Pick one horizontal channel so fan-out links leave the source vertically aligned."""
     y1 = _connector_source_bottom_exit_y(source, gap=gap)
@@ -2742,8 +3517,26 @@ def _compute_shared_source_bus_y(
             )
             for target in targets
         ):
+            if graph is not None and positions is not None:
+                xs = [source.cx, *(target.cx for target in targets)]
+                return _clamp_bus_y_clearing_inline_frames(
+                    bus_y,
+                    graph=graph,
+                    positions=positions,
+                    x_left=min(xs),
+                    x_right=max(xs),
+                )
             return bus_y
         bus_y -= 0.08
+    if graph is not None and positions is not None:
+        xs = [source.cx, *(target.cx for target in targets)]
+        return _clamp_bus_y_clearing_inline_frames(
+            bus_y,
+            graph=graph,
+            positions=positions,
+            x_left=min(xs),
+            x_right=max(xs),
+        )
     return bus_y
 
 
@@ -2761,6 +3554,22 @@ def _compute_fanout_split_tee_y(
     else:
         tee_y = y1 - min(0.10, channel * 0.35)
     return max(tee_y, lowest_merge_bus_y + gap * 2)
+
+
+def _effective_source_bus_y(
+    source: _RenderAnchor,
+    targets: list[_RenderAnchor],
+    proposed_bus_y: float,
+    *,
+    gap: float = 0.04,
+) -> float:
+    """Return the horizontal tee Y that fan-out routing will actually use."""
+    if not targets:
+        return proposed_bus_y
+    min_bus_y = max(_connector_min_bus_y_above_target(target, gap=gap) for target in targets)
+    _, y_stub = _connector_exit_stub_y(source.bottom, gap=gap)
+    bus_y = max(min_bus_y, proposed_bus_y)
+    return max(min_bus_y, min(y_stub - 0.02, bus_y))
 
 
 def _fanout_lowest_target_merge_bus_y(
@@ -2904,6 +3713,204 @@ def _assert_connector_tees_precede_bus_joins(
         )
 
 
+def _connector_fanout_branch_tee_y(
+    points: list[tuple[float, float]],
+    *,
+    source: _RenderAnchor,
+) -> float | None:
+    """Return the horizontal tee Y when a fan-out leg branches from the source column."""
+    if len(points) < 3:
+        return None
+    y_exit = _connector_source_bottom_exit_y(source)
+    x0, y0 = points[0]
+    x1, y1 = points[1]
+    x2, y2 = points[2]
+    if abs(x0 - source.cx) > PARALLEL_CONNECTOR_COORD_EPS:
+        return None
+    if abs(y0 - y_exit) > PARALLEL_CONNECTOR_COORD_EPS:
+        return None
+    if abs(x1 - source.cx) > PARALLEL_CONNECTOR_COORD_EPS:
+        return None
+    tee_y = y1
+    if abs(y2 - tee_y) <= PARALLEL_CONNECTOR_COORD_EPS and abs(x2 - source.cx) > PARALLEL_CONNECTOR_COORD_EPS:
+        return tee_y
+    return None
+
+
+def _assert_shared_fanout_branch_tees_aligned(
+    link_paths: dict[tuple[int, int], list[tuple[float, float]]],
+    *,
+    graph,
+    anchors: dict[int, _RenderAnchor],
+    outgoing: dict[int, list[tuple[int, int]]],
+    source_bus: dict[int, float],
+    target_bus: dict[int, float],
+    stage: str,
+) -> None:
+    """Runtime check: branch-style fan-out legs share one horizontal tee level."""
+    offenders: list[str] = []
+    for src, tee_y in source_bus.items():
+        if _source_fanout_splits_before_target_bus(graph, src, outgoing, target_bus):
+            continue
+        main_links = _fanout_links_excluding_bypasses(graph, outgoing.get(src, []))
+        if len(main_links) < SHARED_SOURCE_BUS_MIN_LINKS:
+            continue
+        source = anchors.get(src)
+        if source is None:
+            continue
+        branch_tees: list[tuple[tuple[int, int], float]] = []
+        for link in main_links:
+            points = link_paths.get(link)
+            if points is None:
+                continue
+            branch_tee = _connector_fanout_branch_tee_y(points, source=source)
+            if branch_tee is not None:
+                branch_tees.append((link, branch_tee))
+        if (
+            len(branch_tees) != len(main_links)
+            or len(branch_tees) < SHARED_SOURCE_BUS_MIN_LINKS
+        ):
+            continue
+        if not all(
+            abs(branch_tee - tee_y) <= PARALLEL_CONNECTOR_COORD_EPS
+            for _, branch_tee in branch_tees
+        ):
+            continue
+        ref_y = branch_tees[0][1]
+        for link, branch_tee in branch_tees:
+            if abs(branch_tee - ref_y) > PARALLEL_CONNECTOR_COORD_EPS:
+                offenders.append(
+                    f"{link} tee={branch_tee:.4f} != shared={ref_y:.4f}@{stage}"
+                )
+    if offenders:
+        raise RuntimeError("fan-out branch tees misaligned: " + ", ".join(offenders))
+
+
+def _assert_fanout_avoids_input_horizontal_departure(
+    link_paths: dict[tuple[int, int], list[tuple[float, float]]],
+    *,
+    graph,
+    anchors: dict[int, _RenderAnchor],
+    outgoing: dict[int, list[tuple[int, int]]],
+    source_bus: dict[int, float],
+    stage: str,
+) -> None:
+    """Runtime check: fan-out legs leave the input vertically, not sideways at the bottom."""
+    offenders: list[str] = []
+    for src in source_bus:
+        source = anchors.get(src)
+        if source is None:
+            continue
+        main_links = _fanout_links_excluding_bypasses(graph, outgoing.get(src, []))
+        if len(main_links) < SHARED_SOURCE_BUS_MIN_LINKS:
+            continue
+        y_exit = _connector_source_bottom_exit_y(source)
+        branch_by_link = {
+            link: _connector_fanout_branch_tee_y(
+                link_paths.get(link) or [],
+                source=source,
+            )
+            for link in main_links
+        }
+        branch_tees = [link for link, tee in branch_by_link.items() if tee is not None]
+        if (
+            len(branch_tees) != len(main_links)
+            or len(branch_tees) < SHARED_SOURCE_BUS_MIN_LINKS
+        ):
+            continue
+        tee_y = source_bus[src]
+        if not all(
+            abs(branch_by_link[link] - tee_y) <= PARALLEL_CONNECTOR_COORD_EPS
+            for link in branch_tees
+        ):
+            continue
+        for link in main_links:
+            points = link_paths.get(link)
+            if points is None or len(points) < 2:
+                continue
+            x1, y1 = points[0]
+            x2, y2 = points[1]
+            if abs(y1 - y2) > PARALLEL_CONNECTOR_COORD_EPS:
+                continue
+            if abs(x1 - x2) <= PARALLEL_CONNECTOR_COORD_EPS:
+                continue
+            if abs(y1 - y_exit) > CONNECTOR_OBSTACLE_MARGIN + PARALLEL_CONNECTOR_COORD_EPS:
+                continue
+            offenders.append(f"{link} horizontal at input bottom y={y1:.4f}@{stage}")
+    if offenders:
+        raise RuntimeError(
+            "fan-out must not depart horizontally from input: " + ", ".join(offenders)
+        )
+
+
+def _assert_source_bus_clears_fanout_targets(
+    source_bus: dict[int, float],
+    *,
+    graph,
+    anchors: dict[int, _RenderAnchor],
+    outgoing: dict[int, list[tuple[int, int]]],
+    stage: str,
+) -> None:
+    """Runtime check: shared source-bus Y clears every fan-out target's min merge level."""
+    offenders: list[str] = []
+    for src, tee_y in source_bus.items():
+        main_links = _fanout_links_excluding_bypasses(graph, outgoing.get(src, []))
+        if len(main_links) < SHARED_SOURCE_BUS_MIN_LINKS:
+            continue
+        for _, tgt in main_links:
+            target = anchors.get(tgt)
+            if target is None:
+                continue
+            min_bus = _connector_min_bus_y_above_target(target)
+            if tee_y + PARALLEL_CONNECTOR_COORD_EPS < min_bus:
+                offenders.append(
+                    f"({src},{tgt}) source_bus={tee_y:.4f} < min_bus={min_bus:.4f}@{stage}"
+                )
+    if offenders:
+        raise RuntimeError(
+            "source_bus below target clearance: " + ", ".join(offenders)
+        )
+
+
+def _assert_detail_fanout_connector_invariants(
+    link_paths: dict[tuple[int, int], list[tuple[float, float]]],
+    *,
+    graph,
+    anchors: dict[int, _RenderAnchor],
+    outgoing: dict[int, list[tuple[int, int]]],
+    source_bus: dict[int, float],
+    target_bus: dict[int, float],
+    stage: str,
+) -> None:
+    """Runtime checks for shared fan-out tee alignment and input departure routing."""
+    if not source_bus:
+        return
+    _assert_source_bus_clears_fanout_targets(
+        source_bus,
+        graph=graph,
+        anchors=anchors,
+        outgoing=outgoing,
+        stage=stage,
+    )
+    _assert_shared_fanout_branch_tees_aligned(
+        link_paths,
+        graph=graph,
+        anchors=anchors,
+        outgoing=outgoing,
+        source_bus=source_bus,
+        target_bus=target_bus,
+        stage=stage,
+    )
+    _assert_fanout_avoids_input_horizontal_departure(
+        link_paths,
+        graph=graph,
+        anchors=anchors,
+        outgoing=outgoing,
+        source_bus=source_bus,
+        stage=stage,
+    )
+
+
 def _swap_merge_entry_x_if_crossing(
     ordered_links: list[tuple[int, int]],
     entry_x: dict[tuple[int, int], float],
@@ -2929,45 +3936,27 @@ def _assign_spread_merge_entry_x(
     anchors: dict[int, _RenderAnchor],
     merge_entry_x: dict[tuple[int, int], float],
 ) -> None:
-    """Spread top-edge ports; stacked same-column feeders enter at the target center."""
-    inner_w = max(target_pos.width * 0.72, 0.35 * len(spread_links))
-    same_column = [
-        link
-        for link in spread_links
-        if abs(positions[link[0]].cx - target_anchor.cx) < 0.08
-    ]
-    for link in same_column:
-        merge_entry_x[link] = target_anchor.cx
-    offset_links = [link for link in spread_links if link not in same_column]
-    if not offset_links:
+    """Spread top-edge ports preserving each feeder's relative horizontal order."""
+    margin = CONNECTOR_ATTACHED_BOX_MARGIN
+    usable_left = target_anchor.left + margin
+    usable_right = target_anchor.right - margin
+    if usable_right <= usable_left:
+        for link in spread_links:
+            merge_entry_x[link] = target_anchor.cx
         return
-    feeder_clearance = target_anchor.cx
-    for link in same_column:
-        source_anchor = anchors.get(link[0])
-        if source_anchor is not None:
-            feeder_clearance = max(
-                feeder_clearance,
-                source_anchor.right
-                + CONNECTOR_OBSTACLE_MARGIN
-                + CONNECTOR_ATTACHED_BOX_MARGIN,
-            )
-    left_links = sorted(
-        [link for link in offset_links if positions[link[0]].cx < target_anchor.cx],
-        key=lambda link: positions[link[0]].cx,
-    )
-    right_links = sorted(
-        [link for link in offset_links if positions[link[0]].cx > target_anchor.cx],
-        key=lambda link: positions[link[0]].cx,
-    )
-    for index, link in enumerate(left_links, start=1):
-        merge_entry_x[link] = target_anchor.cx - index * inner_w / (len(left_links) + 1)
-    for index, link in enumerate(right_links, start=1):
-        entry_x = target_anchor.cx + index * inner_w / (len(right_links) + 1)
-        merge_entry_x[link] = max(entry_x, feeder_clearance)
-        merge_entry_x[link] = min(
-            merge_entry_x[link],
-            target_anchor.right - CONNECTOR_ATTACHED_BOX_MARGIN,
-        )
+
+    source_cxs = [positions[link[0]].cx for link in spread_links]
+    min_src = min(source_cxs)
+    max_src = max(source_cxs)
+    if abs(max_src - min_src) <= PARALLEL_CONNECTOR_COORD_EPS:
+        for link in spread_links:
+            merge_entry_x[link] = target_anchor.cx
+        return
+
+    for link in spread_links:
+        src_cx = positions[link[0]].cx
+        ratio = (src_cx - min_src) / (max_src - min_src)
+        merge_entry_x[link] = usable_left + ratio * (usable_right - usable_left)
     _swap_merge_entry_x_if_crossing(spread_links, merge_entry_x, positions)
 
 
@@ -3214,6 +4203,29 @@ def _connector_overlap_is_fanout_source_tee(
     return False
 
 
+def _connector_overlap_is_shared_source_fanout_horizontal(
+    link_a: tuple[int, int],
+    seg_a: tuple[str, float, float, float, int],
+    link_b: tuple[int, int],
+    seg_b: tuple[str, float, float, float, int],
+    *,
+    anchors: dict[int, _RenderAnchor],
+) -> bool:
+    """Fan-out legs intentionally share the horizontal departure from a source."""
+    if link_a[0] != link_b[0] or seg_a[0] != "h" or seg_b[0] != "h":
+        return False
+    if abs(seg_a[1] - seg_b[1]) > PARALLEL_CONNECTOR_COORD_EPS:
+        return False
+    source = anchors.get(link_a[0])
+    if source is None:
+        return False
+    overlap_lo = max(min(seg_a[2], seg_a[3]), min(seg_b[2], seg_b[3]))
+    overlap_hi = min(max(seg_a[2], seg_a[3]), max(seg_b[2], seg_b[3]))
+    if overlap_hi <= overlap_lo + PARALLEL_CONNECTOR_COORD_EPS:
+        return False
+    return overlap_lo <= source.cx + 0.15
+
+
 def _find_connector_inline_frame_overlaps(
     link_paths: dict[tuple[int, int], list[tuple[float, float]]],
     *,
@@ -3355,6 +4367,27 @@ def _find_connector_path_overlaps(
                 target_bus=target_bus,
             ):
                 continue
+            if _connector_overlap_is_shared_source_fanout_horizontal(
+                link_a,
+                seg_a,
+                link_b,
+                seg_b,
+                anchors=anchors,
+            ):
+                continue
+            if (
+                link_a[0] == link_b[0]
+                and link_a[0] in source_bus
+                and seg_a[0] == "v"
+                and seg_b[0] == "v"
+            ):
+                source = anchors.get(link_a[0])
+                if (
+                    source is not None
+                    and abs(seg_a[1] - source.cx) <= PARALLEL_CONNECTOR_COORD_EPS
+                    and abs(seg_b[1] - source.cx) <= PARALLEL_CONNECTOR_COORD_EPS
+                ):
+                    continue
             pair = tuple(sorted((link_a, link_b)))
             if pair not in seen:
                 seen.add(pair)
@@ -3389,6 +4422,35 @@ def _shift_path_horizontal_levels(
         if not shifted:
             adjusted.append((x, y))
     return adjusted
+
+
+def _shift_path_vertical_levels(
+    points: list[tuple[float, float]],
+    *,
+    delta_x: float,
+    eps: float = PARALLEL_CONNECTOR_COORD_EPS,
+) -> list[tuple[float, float]]:
+    if abs(delta_x) <= eps:
+        return points
+    vertical_columns: set[float] = set()
+    for index in range(len(points) - 1):
+        x1, y1 = points[index]
+        x2, y2 = points[index + 1]
+        if abs(x1 - x2) <= eps:
+            vertical_columns.add(x1)
+    if not vertical_columns:
+        return points
+    adjusted: list[tuple[float, float]] = []
+    for x, y in points:
+        shifted = False
+        for column in vertical_columns:
+            if abs(x - column) <= eps:
+                adjusted.append((x + delta_x, y))
+                shifted = True
+                break
+        if not shifted:
+            adjusted.append((x, y))
+    return _ensure_orthogonal_connector_path(adjusted)
 
 
 def _shift_path_resolving_overlap(
@@ -3465,6 +4527,45 @@ def _ensure_connector_paths_non_overlapping(
                 anchors=anchors,
                 delta_y=PARALLEL_CONNECTOR_CHANNEL_GAP,
             )
+            continue
+        seg_a = next(
+            segment
+            for segment in _connector_axis_segments(cleared[link_a])
+            if segment[0] == "v"
+        )
+        seg_b = next(
+            segment
+            for segment in _connector_axis_segments(cleared[link_b])
+            if segment[0] == "v"
+        )
+        if (
+            seg_a[0] == "v"
+            and seg_b[0] == "v"
+            and abs(seg_a[1] - seg_b[1]) <= PARALLEL_CONNECTOR_COORD_EPS
+            and _ranges_overlap(seg_a[2], seg_a[3], seg_b[2], seg_b[3])
+        ):
+            for delta in (
+                PARALLEL_CONNECTOR_CHANNEL_GAP,
+                -PARALLEL_CONNECTOR_CHANNEL_GAP,
+                2 * PARALLEL_CONNECTOR_CHANNEL_GAP,
+                -2 * PARALLEL_CONNECTOR_CHANNEL_GAP,
+            ):
+                candidate = _shift_path_vertical_levels(
+                    cleared[link_b],
+                    delta_x=delta,
+                )
+                if not _find_connector_path_overlaps(
+                    {**cleared, link_b: candidate},
+                    incoming=incoming,
+                    outgoing=outgoing,
+                    target_bus=target_bus,
+                    source_bus=source_bus,
+                    merge_link_bus=merge_link_bus,
+                    anchors=anchors,
+                    graph=graph,
+                ):
+                    cleared[link_b] = candidate
+                    break
             continue
         cleared[link_b] = _shift_path_resolving_overlap(
             cleared[link_b],
@@ -3652,6 +4753,7 @@ def _collect_detail_link_paths(
     merge_entry_x: dict[tuple[int, int], float],
     merge_link_bus: dict[tuple[int, int], float],
     input_index: int | None,
+    validate_layout: bool = True,
 ) -> dict[tuple[int, int], list[tuple[float, float]]]:
     from collections import defaultdict
 
@@ -3693,15 +4795,23 @@ def _collect_detail_link_paths(
                     positions=positions,
                     link_key=link_key,
                 )
-                bus_y = target_bus.get(tgt)
-                if bus_y is None:
-                    bus_y = source_bus.get(src)
+                bus_y = _link_routing_bus_y(
+                    link_key,
+                    target_bus=target_bus,
+                    source_bus=source_bus,
+                    merge_link_bus=merge_link_bus,
+                )
                 points = _reroute_connector_path_clearing_blocks(
                     points,
                     source=source,
                     target=target,
                     obstacles=obstacles,
                     bus_y=bus_y,
+                    graph=graph,
+                    positions=positions,
+                    link_key=link_key,
+                    source_bus=source_bus,
+                    merge_link_bus=merge_link_bus,
                 )
             link_paths[link_key] = points
     separated = _separate_parallel_connector_paths(
@@ -3713,6 +4823,35 @@ def _collect_detail_link_paths(
         merge_link_bus=merge_link_bus,
         anchors=anchors,
     )
+    for link_key, points in separated.items():
+        original = link_paths.get(link_key)
+        if original is None or points == original:
+            continue
+        src, tgt = link_key
+        source = anchors.get(src)
+        target = anchors.get(tgt)
+        if source is None or target is None:
+            continue
+        obstacles = _connector_block_obstacles(
+            anchors,
+            src=src,
+            tgt=tgt,
+            label_obstacles=label_obstacles,
+            graph=graph,
+            positions=positions,
+            link_key=link_key,
+        )
+        if _path_hits_obstacles(
+            points,
+            obstacles,
+            margin=CONNECTOR_OBSTACLE_MARGIN,
+        ) or not _connector_path_clear_of_blocks(
+            points,
+            source=source,
+            target=target,
+            obstacles=obstacles,
+        ):
+            separated[link_key] = original
     cleared = _clear_detail_link_paths(
         separated,
         anchors,
@@ -3728,6 +4867,7 @@ def _collect_detail_link_paths(
         positions=positions,
         target_bus=target_bus,
         source_bus=source_bus,
+        merge_link_bus=merge_link_bus,
     )
     _assert_detail_link_paths_clear_of_blocks(
         cleared,
@@ -3755,6 +4895,7 @@ def _collect_detail_link_paths(
         positions=positions,
         target_bus=target_bus,
         source_bus=source_bus,
+        merge_link_bus=merge_link_bus,
     )
     _assert_detail_link_paths_clear_of_blocks(
         cleared,
@@ -3779,6 +4920,7 @@ def _collect_detail_link_paths(
         positions=positions,
         target_bus=target_bus,
         source_bus=source_bus,
+        merge_link_bus=merge_link_bus,
     )
     _assert_detail_link_paths_clear_of_blocks(
         cleared,
@@ -3805,25 +4947,58 @@ def _collect_detail_link_paths(
             positions=positions,
             link_key=link_key,
         )
-        bus_y = target_bus.get(tgt)
-        if bus_y is None:
-            bus_y = source_bus.get(src)
-        routed = _reroute_connector_path_clearing_blocks(
+        bus_y = _link_routing_bus_y(
+            link_key,
+            target_bus=target_bus,
+            source_bus=source_bus,
+            merge_link_bus=merge_link_bus,
+        )
+        routed = points
+        if not _connector_path_clear_of_blocks(
             points,
             source=source,
             target=target,
             obstacles=obstacles,
-            bus_y=bus_y,
-        )
-        routed = _snap_connector_path_endpoints(
+        ):
+            routed = _reroute_connector_path_clearing_blocks(
+                points,
+                source=source,
+                target=target,
+                obstacles=obstacles,
+                bus_y=bus_y,
+                graph=graph,
+                positions=positions,
+                link_key=link_key,
+                source_bus=source_bus,
+                merge_link_bus=merge_link_bus,
+            )
+        snapped = _snap_connector_path_endpoints(
             routed,
             source=source,
             target=target,
             link_key=link_key,
             graph=graph,
         )
+        if _connector_path_clear_of_blocks(
+            snapped,
+            source=source,
+            target=target,
+            obstacles=obstacles,
+        ) and (
+            graph is None
+            or positions is None
+            or _connector_path_violates_inline_frame_bounds(
+                snapped,
+                graph,
+                positions,
+                src=src,
+                tgt=tgt,
+            )
+            is None
+        ):
+            routed = snapped
         validated[link_key] = routed
-        if _graph_requires_strict_connector_validation(graph):
+        if validate_layout and _graph_requires_strict_connector_validation(graph):
             _assert_connector_path_clear_of_blocks(
                 link_key,
                 routed,
@@ -3831,7 +5006,7 @@ def _collect_detail_link_paths(
                 anchors=anchors,
                 label_obstacles=label_obstacles,
                 positions=positions,
-                stage="final reroute",
+                stage="pre-shrinkwrap snap",
             )
     _assert_connector_tees_precede_bus_joins(
         validated,
@@ -3853,16 +5028,19 @@ def _collect_detail_link_paths(
         target_bus=target_bus,
         source_bus=source_bus,
         merge_link_bus=merge_link_bus,
+        incoming=incoming,
+        outgoing=outgoing,
         min_gap=SHRINKWRAP_MIN_GAP,
     )
-    _assert_detail_link_paths_clear_of_blocks(
-        validated,
-        graph=graph,
-        anchors=anchors,
-        label_obstacles=label_obstacles,
-        positions=positions,
-        stage="shrinkwrap",
-    )
+    if validate_layout:
+        _assert_detail_link_paths_clear_of_blocks(
+            validated,
+            graph=graph,
+            anchors=anchors,
+            label_obstacles=label_obstacles,
+            positions=positions,
+            stage="shrinkwrap",
+        )
     overlap_pairs = _find_connector_path_overlaps(
         validated,
         incoming=incoming,
@@ -3873,12 +5051,12 @@ def _collect_detail_link_paths(
         anchors=anchors,
         graph=graph,
     )
-    if overlap_pairs and _graph_requires_strict_connector_validation(graph):
+    if validate_layout and overlap_pairs and _graph_requires_strict_connector_validation(graph):
         raise RuntimeError(
             "connector overlap after layout: "
             + ", ".join(f"{pair[0]}|{pair[1]}" for pair in overlap_pairs[:4])
         )
-    if _graph_requires_strict_connector_validation(graph):
+    if validate_layout and _graph_requires_strict_connector_validation(graph):
         frame_overlaps = _find_connector_inline_frame_overlaps(
             validated,
             graph=graph,
@@ -3908,6 +5086,15 @@ def _collect_detail_link_paths(
                     for key, reason in node_clearance[:4]
                 )
             )
+    _assert_detail_fanout_connector_invariants(
+        validated,
+        graph=graph,
+        anchors=anchors,
+        outgoing=outgoing,
+        source_bus=source_bus,
+        target_bus=target_bus,
+        stage="final",
+    )
     return validated
 
 
@@ -4475,6 +5662,53 @@ def _inline_dashed_port_connector_points(
     return [(source.cx, y1), (source.cx, y_stub), (source.cx, bus_y), (entry_x, bus_y), (entry_x, entry_y)]
 
 
+def _link_routing_bus_y(
+    link_key: tuple[int, int],
+    *,
+    target_bus: dict[int, float],
+    source_bus: dict[int, float],
+    merge_link_bus: dict[tuple[int, int], float],
+) -> float | None:
+    """Per-link horizontal routing level used by obstacle reroutes."""
+    if link_key in merge_link_bus:
+        return merge_link_bus[link_key]
+    tgt = link_key[1]
+    if tgt in target_bus:
+        return target_bus[tgt]
+    src = link_key[0]
+    if src in source_bus:
+        return source_bus[src]
+    return None
+
+
+def _fanout_tee_then_entry_column_points(
+    source: _RenderAnchor,
+    target: _RenderAnchor,
+    entry_x: float,
+    *,
+    tee_y: float,
+    bus_y: float,
+    gap: float = 0.04,
+) -> list[tuple[float, float]]:
+    """Fan-out leg tees on the source column, branches, then drops on the target column."""
+    y1 = _connector_source_bottom_exit_y(source, gap=gap)
+    y2 = _connector_target_top_entry_y(target, gap=gap)
+    if bus_y >= tee_y - PARALLEL_CONNECTOR_COORD_EPS:
+        return [
+            (source.cx, y1),
+            (source.cx, tee_y),
+            (entry_x, tee_y),
+            (entry_x, y2),
+        ]
+    return [
+        (source.cx, y1),
+        (source.cx, tee_y),
+        (entry_x, tee_y),
+        (entry_x, bus_y),
+        (entry_x, y2),
+    ]
+
+
 def _shared_merge_bus_connector_points(
     source: _RenderAnchor,
     target: _RenderAnchor,
@@ -4486,6 +5720,10 @@ def _shared_merge_bus_connector_points(
     y_stub: float | None = None,
     spine_tee_y: float | None = None,
     gap: float = 0.04,
+    graph=None,
+    positions: list | None = None,
+    link_key: tuple[int, int] | None = None,
+    prefer_tee_branch: bool = False,
 ) -> list[tuple[float, float]]:
     """Route a fan-in branch down to a shared merge bus, across, then into the target."""
     y1 = _connector_source_bottom_exit_y(source, gap=gap)
@@ -4515,6 +5753,22 @@ def _shared_merge_bus_connector_points(
             [(source.cx, y1), (source.cx, bus_y), (entry_x, bus_y), (entry_x, y2)]
         )
 
+    def _via_tee_then_entry_column() -> list[tuple[float, float]] | None:
+        """Fan-out leg tees on the source column before dropping to a lower per-leg bus."""
+        if (
+            spine_tee_y is None
+            or spine_tee_y <= bus_y + PARALLEL_CONNECTOR_COORD_EPS
+        ):
+            return None
+        return _fanout_tee_then_entry_column_points(
+            source,
+            target,
+            entry_x,
+            tee_y=spine_tee_y,
+            bus_y=bus_y,
+            gap=gap,
+        )
+
     def _via_gutter(gutter_x: float) -> list[tuple[float, float]]:
         return _prepend_spine(
             [
@@ -4527,12 +5781,42 @@ def _shared_merge_bus_connector_points(
             ]
         )
 
-    candidates: list[list[tuple[float, float]]] = [_straight_on_bus()]
+    straight = _straight_on_bus()
+    tee_route = _via_tee_then_entry_column()
+    prefer_tee = prefer_tee_branch
+    if (
+        not prefer_tee
+        and tee_route is not None
+        and graph is not None
+        and positions is not None
+        and link_key is not None
+    ):
+        prefer_tee = (
+            _connector_path_violates_inline_frame_bounds(
+                straight,
+                graph,
+                positions,
+                src=link_key[0],
+                tgt=link_key[1],
+            )
+            is not None
+        )
+    candidates: list[list[tuple[float, float]]] = []
+    if prefer_tee and tee_route is not None:
+        candidates.append(tee_route)
+    candidates.append(straight)
+    if tee_route is not None and not prefer_tee:
+        candidates.append(tee_route)
     gutter_x = exit_x
     if gutter_x is None and abs(source.cx - entry_x) > 0.06:
         gutter_x = source.left - CONNECTOR_OBSTACLE_MARGIN
     if gutter_x is not None and abs(gutter_x - source.cx) > 0.06:
         candidates.append(_via_gutter(gutter_x))
+    right_gutter = source.right + CONNECTOR_OBSTACLE_MARGIN
+    if abs(right_gutter - source.cx) > 0.06 and (
+        gutter_x is None or abs(right_gutter - gutter_x) > 0.06
+    ):
+        candidates.append(_via_gutter(right_gutter))
 
     for candidate in candidates:
         if not _path_penetrates_obstacle_tiles(
@@ -4575,15 +5859,19 @@ def _top_entry_combine_connector_points(
     target_cy: float,
     *,
     gap: float = 0.04,
+    target: _RenderAnchor | None = None,
 ) -> list[tuple[float, float]]:
     """Route the main sequential path into the top of a combine operator."""
     entry_x = target_cx
-    entry_y = target_cy + MERGE_RADIUS
-    y1, y_stub = _connector_exit_stub_y(source.bottom, gap=gap)
+    if target is not None and _combine_uses_box_anchor(target):
+        entry_y = target.top
+    else:
+        entry_y = target_cy + MERGE_RADIUS
+    y1 = _connector_source_bottom_exit_y(source, gap=gap)
     if abs(source.cx - target_cx) < 0.08:
-        return [(source.cx, y1), (source.cx, y_stub), (source.cx, entry_y)]
-    bus_y = (y_stub + entry_y) / 2
-    return [(source.cx, y1), (source.cx, y_stub), (source.cx, bus_y), (entry_x, bus_y), (entry_x, entry_y)]
+        return [(source.cx, y1), (source.cx, entry_y)]
+    bus_y = (y1 + entry_y) / 2
+    return [(source.cx, y1), (source.cx, bus_y), (entry_x, bus_y), (entry_x, entry_y)]
 
 
 def _inline_binary_side_entry_connector_points(
@@ -4625,6 +5913,33 @@ def _inline_binary_side_entry_connector_points(
     ]
 
 
+def _side_entry_combine_entry_x(
+    source: _RenderAnchor,
+    target: _RenderAnchor,
+) -> float:
+    """Horizontal attach point on the near side of a combine operator."""
+    if _combine_uses_box_anchor(target):
+        return target.left if source.cx < target.cx else target.right
+    if source.cx >= target.cx:
+        return target.cx + MERGE_RADIUS
+    return target.cx - MERGE_RADIUS
+
+
+def _side_entry_combine_l_route(
+    source: _RenderAnchor,
+    target: _RenderAnchor,
+    *,
+    gap: float = 0.04,
+) -> list[tuple[float, float]]:
+    """Drop from the source column straight to combine center, then enter from the side."""
+    combine_cy = _combine_center_y(target)
+    entry_x = _side_entry_combine_entry_x(source, target)
+    y1 = _connector_source_bottom_exit_y(source, gap=gap)
+    return _ensure_orthogonal_connector_path(
+        [(source.cx, y1), (source.cx, combine_cy), (entry_x, combine_cy)]
+    )
+
+
 def _side_entry_combine_connector_points(
     source: _RenderAnchor,
     target_cx: float,
@@ -4632,9 +5947,17 @@ def _side_entry_combine_connector_points(
     *,
     gap: float = 0.04,
     frame_bounds=None,
+    obstacles: list[_RenderAnchor] | None = None,
+    target: _RenderAnchor | None = None,
 ) -> list[tuple[float, float]]:
     """Route a side branch into the center of a combine node without a long horizontal bus."""
-    if source.cx >= target_cx:
+    if target is not None and _combine_uses_box_anchor(target):
+        entry_x = target.left if source.cx < target.cx else target.right
+        if source.cx >= target_cx:
+            bus_x = entry_x + gap + 0.08
+        else:
+            bus_x = entry_x - gap - 0.08
+    elif source.cx >= target_cx:
         entry_x = target_cx + MERGE_RADIUS
         bus_x = entry_x + gap + 0.08
     else:
@@ -4652,14 +5975,28 @@ def _side_entry_combine_connector_points(
 
     y1, y_stub = _connector_exit_stub_y(source.bottom, gap=gap)
     if abs(source.cx - bus_x) < 0.06:
-        return [(source.cx, y1), (source.cx, y_stub), (bus_x, target_cy), (entry_x, target_cy)]
-    return [
-        (source.cx, y1),
-        (source.cx, y_stub),
-        (bus_x, y_stub),
-        (bus_x, target_cy),
-        (entry_x, target_cy),
-    ]
+        stub_path = [(source.cx, y1), (source.cx, y_stub), (bus_x, target_cy), (entry_x, target_cy)]
+    else:
+        stub_path = [
+            (source.cx, y1),
+            (source.cx, y_stub),
+            (bus_x, y_stub),
+            (bus_x, target_cy),
+            (entry_x, target_cy),
+        ]
+    if obstacles is not None and _path_hits_obstacles(
+        stub_path,
+        obstacles,
+        margin=CONNECTOR_OBSTACLE_MARGIN,
+    ):
+        l_route = [(source.cx, y1), (source.cx, target_cy), (entry_x, target_cy)]
+        if not _path_hits_obstacles(
+            l_route,
+            obstacles,
+            margin=CONNECTOR_OBSTACLE_MARGIN,
+        ):
+            return l_route
+    return stub_path
 
 
 def _detail_connector_linestyle(
@@ -5308,6 +6645,60 @@ def _connector_points_for_link(
     route_obstacles = [
         anchor for node_index, anchor in anchors.items() if node_index not in {src, tgt}
     ] + label_obstacles
+    gap = 0.04
+    if input_index is not None and src == input_index:
+        target_frame = next(
+            (frame for frame in graph.inline_frames if tgt in frame.node_indices),
+            None,
+        )
+        if target_frame is not None:
+            y1 = _connector_source_bottom_exit_y(source, gap=gap)
+            y2 = _connector_target_top_entry_y(target, gap=gap)
+            bypass_x = max(source.right, target.right) + CONNECTOR_OBSTACLE_MARGIN
+            if target_frame.node_indices and target_frame.node_indices[0] == tgt:
+                bypass_x = _right_bypass_x_clearing_horizontal_segment(
+                    min(source.cx, target.cx),
+                    y1,
+                    route_obstacles,
+                    initial_bypass_x=bypass_x,
+                )
+                return _ensure_orthogonal_connector_path(
+                    [
+                        (source.cx, y1),
+                        (bypass_x, y1),
+                        (target.cx, y1),
+                        (target.cx, y2),
+                    ]
+                )
+            draw_bounds = _inline_frame_draw_bounds(target_frame, positions, graph)
+            gutter_y = draw_bounds.bottom - CONNECTOR_OBSTACLE_MARGIN - CONNECTOR_EXIT_STUB
+            bypass_x = _right_bypass_x_clearing_horizontal_segment(
+                min(source.cx, target.cx),
+                gutter_y,
+                route_obstacles,
+                initial_bypass_x=bypass_x,
+            )
+            bypass_x = _right_bypass_x_clearing_horizontal_segment(
+                source.cx,
+                y1,
+                route_obstacles,
+                initial_bypass_x=bypass_x,
+            )
+            bypass_x = _right_bypass_x_clearing_vertical_segment(
+                gutter_y,
+                y1,
+                route_obstacles,
+                initial_bypass_x=bypass_x,
+            )
+            return _ensure_orthogonal_connector_path(
+                [
+                    (source.cx, y1),
+                    (bypass_x, y1),
+                    (bypass_x, gutter_y),
+                    (target.cx, gutter_y),
+                    (target.cx, y2),
+                ]
+            )
     target_spec = positions[tgt].spec
     inline_port = target_spec.port_style == "inline"
     floating_port = target_spec.port_style == "floating"
@@ -5344,11 +6735,35 @@ def _connector_points_for_link(
             source_bus=source_bus,
             target_bus=target_bus,
         )
-        if (
-            src in source_bus
-            and _source_fanout_splits_before_target_bus(graph, src, outgoing, target_bus)
-        ):
-            fanout_tee_y = source_bus[src]
+        if src in source_bus and outgoing is not None:
+            main_links = _fanout_links_excluding_bypasses(graph, outgoing.get(src, []))
+            if len(main_links) >= SHARED_SOURCE_BUS_MIN_LINKS:
+                fanout_tee_y = source_bus[src]
+            else:
+                link_bus = merge_link_bus.get(link_key)
+                if (
+                    link_bus is not None
+                    and link_bus < source_bus[src] - PARALLEL_CONNECTOR_COORD_EPS
+                ):
+                    fanout_tee_y = source_bus[src]
+                elif _source_fanout_splits_before_target_bus(
+                    graph, src, outgoing, target_bus
+                ):
+                    fanout_tee_y = source_bus[src]
+    prefer_tee_branch = False
+    if (
+        fanout_tee_y is not None
+        and outgoing is not None
+        and not _source_fanout_splits_before_target_bus(graph, src, outgoing, target_bus)
+    ):
+        main_links = _fanout_links_excluding_bypasses(graph, outgoing.get(src, []))
+        prefer_tee_branch = len(main_links) >= SHARED_SOURCE_BUS_MIN_LINKS
+        if not prefer_tee_branch:
+            link_bus = merge_link_bus.get(link_key)
+            prefer_tee_branch = (
+                link_bus is not None
+                and link_bus < fanout_tee_y - PARALLEL_CONNECTOR_COORD_EPS
+            )
     if positions[src].spec.synthetic == SYNTHETIC_TENSOR:
         pass
     elif bus_y is None and tgt in target_bus and not combine_side_entry and not combine_top_entry:
@@ -5357,8 +6772,10 @@ def _connector_points_for_link(
     elif bus_y is None and src in source_bus and link_key not in graph.inline_binary_operand_links:
         bus_y = source_bus[src]
         bus_near = "source"
+    elif bus_y is None and src in source_bus and link_key not in graph.inline_binary_operand_links:
+        bus_y = source_bus[src]
+        bus_near = "source"
 
-    gap = 0.04
     shared_frame = _inline_frame_for_nodes(graph, src, tgt)
     frame_bounds = (
         _inline_frame_draw_bounds(shared_frame, positions, graph)
@@ -5384,6 +6801,8 @@ def _connector_points_for_link(
             combine_center_y,
             gap=gap,
             frame_bounds=frame_bounds,
+            obstacles=route_obstacles,
+            target=target,
         )
     if combine_top_entry and combine_center_y is not None:
         return _top_entry_combine_connector_points(
@@ -5391,6 +6810,7 @@ def _connector_points_for_link(
             target.cx,
             combine_center_y,
             gap=gap,
+            target=target,
         )
     if inline_port and is_side_link:
         return _inline_dashed_port_connector_points(source, target, gap=gap, bus_y=bus_y)
@@ -5423,6 +6843,10 @@ def _connector_points_for_link(
                 route_obstacles,
                 gap=gap,
                 spine_tee_y=fanout_tee_y,
+                graph=graph,
+                positions=positions,
+                link_key=link_key,
+                prefer_tee_branch=prefer_tee_branch,
             )
         is_frame_tail = (
             _graph_has_tensor_ports(graph) and src in _inline_frame_tail_indices(graph)
@@ -5437,6 +6861,10 @@ def _connector_points_for_link(
                 route_obstacles,
                 gap=gap,
                 spine_tee_y=fanout_tee_y,
+                graph=graph,
+                positions=positions,
+                link_key=link_key,
+                prefer_tee_branch=prefer_tee_branch,
             )
     if positions[src].spec.synthetic == SYNTHETIC_TENSOR:
         if tgt in target_bus:
@@ -5494,28 +6922,66 @@ def _connector_points_for_link(
             route_obstacles,
             gap=gap,
             spine_tee_y=fanout_tee_y,
+            graph=graph,
+            positions=positions,
+            link_key=link_key,
+            prefer_tee_branch=prefer_tee_branch,
         )
-    if link_key in merge_entry_x and bus_y is not None:
+    if (
+        link_key in merge_entry_x
+        and not inline_binary_side_entry
+        and not combine_side_entry
+        and not combine_top_entry
+    ):
+        if abs(source.cx - target.cx) < 0.08:
+            straight = _same_column_straight_connector_points(source, target, gap=gap)
+            if (
+                not _path_hits_obstacles(
+                    straight,
+                    route_obstacles,
+                    margin=CONNECTOR_OBSTACLE_MARGIN,
+                )
+                and not _path_penetrates_attached_boxes(straight, source, target)
+            ):
+                return straight
         entry_x = merge_entry_x[link_key]
-        if fanout_tee_y is not None and tgt not in target_bus:
-            bus_y = fanout_tee_y
-        bus_y = max(
-            bus_y,
+        spread_bus_y = merge_link_bus.get(link_key, bus_y)
+        if spread_bus_y is None:
+            y_stub = _connector_source_bottom_exit_y(source, gap=gap) - CONNECTOR_EXIT_STUB
+            entry_y = _connector_target_top_entry_y(target, gap=gap)
+            spread_bus_y = max(
+                _connector_min_bus_y_above_target(target, gap=gap),
+                _min_bus_y_clearing_horizontal_corridor(
+                    source.cx,
+                    entry_x,
+                    route_obstacles,
+                    proposed_y=(y_stub + entry_y) / 2,
+                ),
+            )
+        elif fanout_tee_y is not None and tgt not in target_bus:
+            spread_bus_y = fanout_tee_y
+        spread_bus_y = max(
+            spread_bus_y,
             _connector_min_bus_y_above_target(target, gap=gap),
             _min_bus_y_clearing_horizontal_corridor(
                 source.cx,
                 entry_x,
                 route_obstacles,
-                proposed_y=bus_y,
+                proposed_y=spread_bus_y,
             ),
         )
         return _shared_merge_bus_connector_points(
             source,
             target,
             entry_x,
-            bus_y,
+            spread_bus_y,
             route_obstacles,
             gap=gap,
+            spine_tee_y=fanout_tee_y,
+            graph=graph,
+            positions=positions,
+            link_key=link_key,
+            prefer_tee_branch=prefer_tee_branch,
         )
     if (
         not inline_binary_side_entry
@@ -5540,6 +7006,7 @@ def _connector_points_for_link(
         and not combine_top_entry
         and positions[src].spec.synthetic != SYNTHETIC_TENSOR
         and src not in source_bus
+        and link_key not in merge_entry_x
         and _needs_cross_column_side_entry(source, target)
     ):
         return _cross_column_side_entry_connector_points(
@@ -5548,7 +7015,36 @@ def _connector_points_for_link(
             route_obstacles,
             bus_y=bus_y,
         )
-    return _orthogonal_path(source, target, route_obstacles, bus_near=bus_near, bus_y=bus_y)
+    if (
+        src in source_bus
+        and link_key in merge_link_bus
+        and link_key not in merge_entry_x
+        and not inline_binary_side_entry
+        and not combine_side_entry
+        and not combine_top_entry
+    ):
+        return _shared_merge_bus_connector_points(
+            source,
+            target,
+            target.cx,
+            merge_link_bus[link_key],
+            route_obstacles,
+            gap=gap,
+            spine_tee_y=fanout_tee_y,
+            graph=graph,
+            positions=positions,
+            link_key=link_key,
+            prefer_tee_branch=prefer_tee_branch,
+        )
+    return _orthogonal_path(
+        source,
+        target,
+        route_obstacles,
+        bus_near=bus_near,
+        bus_y=bus_y,
+        graph=graph,
+        positions=positions,
+    )
 
 
 def _compute_detail_connector_buses(
@@ -5617,11 +7113,17 @@ def _compute_detail_connector_buses(
         involved = {src, *(tgt for _, tgt in main_links)}
         route_obstacles = [
             anchor for node_index, anchor in anchors.items() if node_index not in involved
-        ] + label_obstacles
+        ] + label_obstacles + _inline_frame_bounds_obstacles(
+            graph,
+            positions,
+            exclude_nodes=involved,
+        )
         source_bus[src] = _compute_shared_source_bus_y(
             source_anchor,
             target_anchors,
             route_obstacles,
+            graph=graph,
+            positions=positions,
         )
 
     for src in list(source_bus):
@@ -5681,6 +7183,26 @@ def _compute_detail_connector_buses(
             merge_entry_x,
         )
         base_bus = target_bus.get(tgt)
+        if base_bus is None and len(spread_links) >= 2:
+            spread_sources = [anchors[src] for src, _ in spread_links if src in anchors]
+            involved = {tgt, *(src for src, _ in spread_links)}
+            route_obstacles = [
+                anchor for node_index, anchor in anchors.items() if node_index not in involved
+            ] + label_obstacles + _inline_frame_bounds_obstacles(
+                graph,
+                positions,
+                exclude_nodes=involved,
+            )
+            if len(spread_sources) >= 2:
+                base_bus = _compute_shared_target_bus_y(
+                    spread_sources,
+                    target_anchor,
+                    route_obstacles,
+                )
+                base_bus = max(
+                    _connector_min_bus_y_above_target(target_anchor),
+                    base_bus,
+                )
         if base_bus is not None and len(spread_links) >= 2:
             for link in spread_links:
                 merge_link_bus[link] = base_bus
@@ -5716,6 +7238,43 @@ def _compute_detail_connector_buses(
             )
             if bus_y is not None:
                 merge_link_bus[link] = bus_y
+
+    for src in list(source_bus):
+        source_anchor = anchors.get(src)
+        if source_anchor is None:
+            continue
+        main_links = _fanout_links_excluding_bypasses(graph, outgoing.get(src, []))
+        target_anchors = [anchors[tgt] for _, tgt in main_links if tgt in anchors]
+        if not target_anchors:
+            continue
+        if not _source_fanout_splits_before_target_bus(graph, src, outgoing, target_bus):
+            xs = [source_anchor.cx, *(target.cx for target in target_anchors)]
+            source_bus[src] = _clamp_bus_y_clearing_inline_frames(
+                source_bus[src],
+                graph=graph,
+                positions=positions,
+                x_left=min(xs),
+                x_right=max(xs),
+            )
+        source_bus[src] = _effective_source_bus_y(
+            source_anchor,
+            target_anchors,
+            source_bus[src],
+        )
+
+    for src in list(source_bus):
+        if _source_fanout_splits_before_target_bus(graph, src, outgoing, target_bus):
+            continue
+        for _, tgt in outgoing.get(src, []):
+            link = (src, tgt)
+            if link in graph.inline_binary_operand_links or link in graph.side_entry_links:
+                continue
+            if tgt in target_bus:
+                continue
+            target_anchor = anchors.get(tgt)
+            if target_anchor is None:
+                continue
+            merge_link_bus[link] = _connector_min_bus_y_above_target(target_anchor)
 
     return target_bus, source_bus, merge_entry_x, merge_link_bus
 
@@ -5796,6 +7355,7 @@ def _draw_graph_connector(
             target.cx,
             combine_center_y,
             gap=gap,
+            obstacles=obstacles,
         )
     elif combine_top_entry and combine_center_y is not None:
         points = _top_entry_combine_connector_points(
@@ -6236,8 +7796,13 @@ def _anchors_from_detail_plan(
     for index, pos in enumerate(positions):
         spec = pos.spec
         if _is_combine_synthetic(spec.synthetic):
+            from visualizer.ast_analyze import is_compact_combine_label
+
             center_y = pos.top_y - pos.height / 2
-            anchors[index] = _merge_anchor(pos.cx, center_y)
+            if is_compact_combine_label(spec.label):
+                anchors[index] = _merge_anchor(pos.cx, center_y)
+            else:
+                anchors[index] = _anchor_from_position(pos)
             continue
         anchors[index] = _anchor_from_position(pos)
     return anchors
@@ -6447,7 +8012,23 @@ def _render_laid_out_computation_graph(
     )
 
     for op_x, op_y, symbol, op_sublabel in plan.combine_ops:
-        _draw_combine_op(ax, op_x, op_y, symbol, sublabel=op_sublabel)
+        width = height = None
+        for pos in positions:
+            if not _is_combine_synthetic(pos.spec.synthetic):
+                continue
+            center_y = pos.top_y - pos.height / 2
+            if abs(pos.cx - op_x) < 1e-6 and abs(center_y - op_y) < 1e-6 and pos.spec.label == symbol:
+                width, height = pos.width, pos.height
+                break
+        _draw_combine_op(
+            ax,
+            op_x,
+            op_y,
+            symbol,
+            sublabel=op_sublabel,
+            width=width,
+            height=height,
+        )
 
     for label, x, y, ha, va in plan.branch_labels:
         _draw_floating_port_label(ax, label, x, y, ha=ha, va=va)

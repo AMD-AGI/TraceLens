@@ -456,6 +456,13 @@ def _router_forward_step_details(
 
 
 COMBINE_DETAIL_PREFIX = "combine:"
+MOE_AGGREGATION_LABEL = "MoE aggregation"
+COMPACT_COMBINE_LABELS = frozenset({"×", "+", "Elementwise ×"})
+
+
+def is_compact_combine_label(label: str) -> bool:
+    """True for single-glyph combine nodes (×, +); false for labeled tiles like MoE aggregation."""
+    return label in COMPACT_COMBINE_LABELS
 
 
 def combine_op_from_step_details(details: list[str] | None) -> str | None:
@@ -495,6 +502,8 @@ def _expr_is_weighted_sum(node: ast.AST) -> bool:
 
 def _detect_method_combine_op(func: ast.FunctionDef) -> str | None:
     """Infer a combine-operator symbol from a helper method body."""
+    if func.name == "moe_infer":
+        return MOE_AGGREGATION_LABEL
     for node in ast.walk(func):
         value: ast.AST | None = None
         if isinstance(node, ast.Return):

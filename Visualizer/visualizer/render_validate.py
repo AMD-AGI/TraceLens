@@ -192,15 +192,16 @@ def collect_measured_elements(
         spec = pos.spec
         if _is_combine(spec.synthetic):
             center_y = pos.top_y - pos.height / 2
-            half = pos.width / 2
+            half_w = pos.width / 2
+            half_h = pos.height / 2
             elements.append(
                 MeasuredElement(
                     kind="combine",
                     bounds=ContentBounds(
-                        left=pos.cx - half,
-                        right=pos.cx + half,
-                        bottom=center_y - half,
-                        top=center_y + half,
+                        left=pos.cx - half_w,
+                        right=pos.cx + half_w,
+                        bottom=center_y - half_h,
+                        top=center_y + half_h,
                     ),
                     label=spec.label,
                     node_index=index,
@@ -1648,9 +1649,12 @@ def _separate_parallel_tiles_from_inline_frames(
             if not box.bounds.overlaps(frame.bounds, min_gap=min_gap):
                 continue
             if _fanout_branch_index(pos.spec) is not None:
-                shift = frame.bounds.left - min_gap - box.bounds.right
-                if shift < 0:
-                    pos.cx += shift
+                shift_left = frame.bounds.left - min_gap - box.bounds.right
+                shift_right = frame.bounds.right + min_gap - box.bounds.left
+                if shift_left < 0 and (shift_right <= 0 or abs(shift_left) <= shift_right):
+                    pos.cx += shift_left
+                elif shift_right > 0:
+                    pos.cx += shift_right
             else:
                 shift = frame.bounds.right + min_gap - box.bounds.left
                 if shift > 0:
@@ -2486,13 +2490,64 @@ def finalize_detail_layout(
     from visualizer.computation_graph import _graph_has_tensor_ports
     from visualizer.shrinkwrap import shrinkwrap_detail_layout
 
-    if _graph_has_tensor_ports(graph):
-        shrinkwrap_detail_layout(
+    shrinkwrap_detail_layout(
+        positions,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+        min_left=min_left,
+    )
+    if positions and not _graph_has_tensor_ports(graph):
+        _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+        _align_and_stack_inline_frames(positions, graph)
+        plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+        enforce_text_fit_node_sizes(ax, positions, plan)
+        elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+        _separate_overlapping_inline_frames(
             positions,
             graph,
+            elements,
             min_gap=VALIDATE_MIN_GAP,
-            min_left=min_left,
         )
+        _separate_parallel_tiles_from_inline_frames(
+            positions,
+            elements,
+            graph,
+            min_gap=VALIDATE_MIN_GAP,
+        )
+        _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+        if min_left is not None:
+            from visualizer.computation_graph import _align_positions_left
+
+            _align_positions_left(positions, min_left)
+    from visualizer.computation_graph import _center_align_vertical_chains
+
+    _center_align_vertical_chains(positions, graph)
+    _layout_fork_join_branches(positions, graph)
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    _separate_parallel_tiles_from_inline_frames(
+        positions,
+        elements,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+    )
+    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = _apply_inline_frame_label_layout(
+        ax,
+        graph,
+        positions,
+        plan,
+        detail_fill=fill,
+        min_gap=VALIDATE_MIN_GAP,
+        min_left=min_left,
+    )
+    _compact_synthetic_input_spacing(
+        positions,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+        elements=elements,
+    )
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = _apply_inline_frame_label_layout(

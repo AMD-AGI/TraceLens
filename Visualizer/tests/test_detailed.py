@@ -1788,11 +1788,11 @@ def test_moe_infer_combine_op_comes_from_ast():
     moe_infer = next(
         item for item in moe_class.body if isinstance(item, ast.FunctionDef) and item.name == "moe_infer"
     )
-    assert _detect_method_combine_op(moe_infer) == "Σ"
+    assert _detect_method_combine_op(moe_infer) == "MoE aggregation"
 
     analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
     cls = analysis.class_registry["KimiSparseMoeBlock"]
-    assert combine_op_from_step_details(cls.forward_step_details["moe_infer"]) == "Σ"
+    assert combine_op_from_step_details(cls.forward_step_details["moe_infer"]) == "MoE aggregation"
 
 
 def test_moe_infer_graph_dashed_router_side_link():
@@ -1822,7 +1822,7 @@ def test_moe_infer_graph_dashed_router_side_link():
     combine_index = next(
         index
         for index, spec in enumerate(graph.nodes)
-        if spec.synthetic == SYNTHETIC_COMBINE and spec.label == "Σ"
+        if spec.synthetic == SYNTHETIC_COMBINE and spec.label == "MoE aggregation"
     )
     assert graph.nodes[combine_index].sublabel is None
     route_scaling_index = next(
@@ -2620,10 +2620,10 @@ def test_moe_finalize_keeps_combine_gap_tight():
         content_left=0.6,
     )
     route_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "Route scaling")
-    combine_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "Σ")
+    combine_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "MoE aggregation")
     gap = positions[route_index].bottom - positions[combine_index].top_y
     assert gap <= DETAIL_LAYER_GAP + 0.02, (
-        f"Route scaling -> Σ gap {gap:.3f} exceeds layer gap {DETAIL_LAYER_GAP:.3f}"
+        f"Route scaling -> MoE aggregation gap {gap:.3f} exceeds layer gap {DETAIL_LAYER_GAP:.3f}"
     )
     finalize_detail_layout(
         ax,
@@ -3708,7 +3708,7 @@ def test_moe_and_situ_expand_in_basic_only_detailed():
         "Renormalize",
         "Route scaling",
     ]
-    assert "Σ" in moe_labels
+    assert "MoE aggregation" in moe_labels
     assert "×" in moe_labels
     assert "Situ" in moe_labels
     gate_frame = next(frame for frame in moe_graph.inline_frames if frame.frame_id == "gate")
@@ -4195,10 +4195,10 @@ def test_moe_plus_is_spine_aligned_with_sigma():
         for index, spec in enumerate(graph.nodes)
         if spec.block and spec.block.attr_name == "routed_expert_up_proj"
     )
-    spine = [positions[index].cx for index in (by_label["Σ"], up_index, by_label["+"])]
+    spine = [positions[index].cx for index in (by_label["MoE aggregation"], up_index, by_label["+"])]
     draw = {symbol: x for x, _, symbol, _ in plan.combine_ops}
     assert max(spine) - min(spine) < 0.02
-    assert abs(draw["Σ"] - positions[by_label["Σ"]].cx) < 0.02
+    assert abs(draw["MoE aggregation"] - positions[by_label["MoE aggregation"]].cx) < 0.02
     assert abs(draw["+"] - positions[by_label["+"]].cx) < 0.02
     assert abs(anchors[by_label["+"]].cx - positions[by_label["+"]].cx) < 0.02
     gap = positions[up_index].bottom - positions[by_label["+"]].top_y

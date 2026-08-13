@@ -53,7 +53,7 @@ _REDUCED_OPERATION_KINDS = frozenset(
 )
 
 _SYNTHETIC_KEYS = frozenset({"@input", "@hidden_states", "@tensor", "@combine"})
-_COMBINE_LABELS = frozenset({"×", "Σ", "+", "Elementwise ×"})
+_COMBINE_LABELS = frozenset({"×", "MoE aggregation", "+", "Elementwise ×"})
 _KERNEL_CLASS_NAMES = frozenset(
     {
         "KernelOp",

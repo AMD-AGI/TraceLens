@@ -248,7 +248,7 @@ _DETAIL_OPERATION_LABELS = _BASIC_DETAIL_LABELS | frozenset(
     }
 )
 
-_DETAIL_COMBINE_LABELS = frozenset({"×", "Σ", "+", "Elementwise ×"})
+_DETAIL_COMBINE_LABELS = frozenset({"×", "MoE aggregation", "+", "Elementwise ×"})
 
 _DETAIL_OPERATION_CLASSES = frozenset(
     {

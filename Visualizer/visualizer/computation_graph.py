@@ -50,8 +50,10 @@ from visualizer.sizing import (
     to_layout_pixels,
 )
 
-# Match render.py MERGE_RADIUS + MERGE_CLEARANCE for combine (×) nodes.
+# Match render.py MERGE_RADIUS + MERGE_CLEARANCE for compact combine (×) nodes.
 COMBINE_OP_SIZE = 0.32
+LABELED_COMBINE_DEFAULT_WIDTH = 1.35
+LABELED_COMBINE_DEFAULT_HEIGHT = 0.34
 
 SYNTHETIC_INPUT = "@input"
 SYNTHETIC_HIDDEN = "@hidden_states"  # legacy alias; replaced by SYNTHETIC_INPUT in graphs
@@ -137,7 +139,11 @@ def _is_combine_synthetic(synthetic: str | None) -> bool:
 
 def _estimate_node_size(spec: GraphNodeSpec) -> tuple[float, float]:
     if _is_combine_synthetic(spec.synthetic):
-        return to_layout_pixels(COMBINE_OP_SIZE, COMBINE_OP_SIZE)
+        from visualizer.ast_analyze import is_compact_combine_label
+
+        if is_compact_combine_label(spec.label):
+            return to_layout_pixels(COMBINE_OP_SIZE, COMBINE_OP_SIZE)
+        return to_layout_pixels(LABELED_COMBINE_DEFAULT_WIDTH, LABELED_COMBINE_DEFAULT_HEIGHT)
     if spec.synthetic in {SYNTHETIC_INPUT, SYNTHETIC_HIDDEN}:
         return 48.0, 20.0
     diagram_w, diagram_h = _diagram_size_for_rendered_spec(spec)
@@ -2056,6 +2062,14 @@ def _compact_synthetic_input_spacing(
     shift = desired_bottom - input_pos.bottom
     if shift > 0:
         input_pos.top_y += shift
+    elif shift < -1e-6:
+        # Input sits too far above its downstream targets; lift targets toward it.
+        for index, pos in enumerate(positions):
+            if index == input_index:
+                continue
+            if pos.top_y > input_pos.top_y + 1e-6:
+                continue
+            pos.top_y -= shift
 
 
 def _ensure_input_above_fork_join_clusters(
@@ -2084,12 +2098,14 @@ def _router_spine_column_indices(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
 ) -> set[int]:
-    """Node indices in the MoE router spine column (Σ and downstream main path)."""
+    """Node indices in the MoE router spine column (MoE aggregation and downstream main path)."""
+    from visualizer.ast_analyze import MOE_AGGREGATION_LABEL
+
     sigma = next(
         (
             index
             for index, spec in enumerate(graph.nodes)
-            if spec.label == "Σ" and _is_combine_synthetic(spec.synthetic)
+            if spec.label == MOE_AGGREGATION_LABEL and _is_combine_synthetic(spec.synthetic)
         ),
         None,
     )
@@ -2138,12 +2154,14 @@ def _align_router_spine_column(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
 ) -> None:
-    """Keep the MoE router spine (Σ and its non-fork/join chain) in one column."""
+    """Keep the MoE router spine (MoE aggregation and its non-fork/join chain) in one column."""
+    from visualizer.ast_analyze import MOE_AGGREGATION_LABEL
+
     sigma = next(
         (
             index
             for index, spec in enumerate(graph.nodes)
-            if spec.label == "Σ" and _is_combine_synthetic(spec.synthetic)
+            if spec.label == MOE_AGGREGATION_LABEL and _is_combine_synthetic(spec.synthetic)
         ),
         None,
     )
@@ -2622,7 +2640,22 @@ def measure_graph_node_sizes(
     inline_members = inline_frame_member_indices(graph)
     for index, spec in enumerate(graph.nodes):
         if _is_combine_synthetic(spec.synthetic):
-            spec.diagram_width, spec.diagram_height = COMBINE_OP_SIZE, COMBINE_OP_SIZE
+            from visualizer.ast_analyze import is_compact_combine_label
+            from visualizer.text_measure import box_label_size
+
+            if is_compact_combine_label(spec.label):
+                spec.diagram_width, spec.diagram_height = COMBINE_OP_SIZE, COMBINE_OP_SIZE
+            else:
+                width, height = box_label_size(
+                    ax,
+                    spec.label,
+                    spec.sublabel,
+                    fontsize=6.8,
+                    pad_x=0.08,
+                    pad_y=0.06,
+                    white_text_stroke_pad=False,
+                )
+                spec.diagram_width, spec.diagram_height = width, height
             continue
         if spec.synthetic == SYNTHETIC_INPUT:
             width, height = input_box_label_size(ax, spec.label, input_sublabel, fontsize=7.2)
@@ -2671,7 +2704,13 @@ def _diagram_size_for_rendered_spec(
 
 def _diagram_size_for_spec(spec: GraphNodeSpec) -> tuple[float, float]:
     if _is_combine_synthetic(spec.synthetic):
-        return COMBINE_OP_SIZE, COMBINE_OP_SIZE
+        from visualizer.ast_analyze import is_compact_combine_label
+
+        if is_compact_combine_label(spec.label):
+            return COMBINE_OP_SIZE, COMBINE_OP_SIZE
+        if spec.diagram_width is not None and spec.diagram_height is not None:
+            return spec.diagram_width, spec.diagram_height
+        return LABELED_COMBINE_DEFAULT_WIDTH, LABELED_COMBINE_DEFAULT_HEIGHT
     return _diagram_size_for_rendered_spec(spec)
 
 
@@ -3090,9 +3129,6 @@ def _compact_parallel_feeder_frame_exit_stubs(
         PIPELINE_MERGE_BUS_BELOW_FRAME_GAP,
         _frame_tail_exit_horiz_y,
     )
-
-    if not _graph_has_tensor_ports(graph):
-        return
 
     from visualizer.render import CONNECTOR_OBSTACLE_MARGIN
 
