@@ -9,8 +9,24 @@ name: Unit Tests
 on:
   push:
     branches: [ main ]
+    paths:
+      - "**/*.py"
+      - "tests/**"
+      - "setup.py"
+      - "MANIFEST.in"
+      - ".coveragerc"
+      - "codecov.yml"
+      - ".github/workflows/unit-tests.yml"
   pull_request:
     branches: [ main ]
+    paths:
+      - "**/*.py"
+      - "tests/**"
+      - "setup.py"
+      - "MANIFEST.in"
+      - ".coveragerc"
+      - "codecov.yml"
+      - ".github/workflows/unit-tests.yml"
 
 jobs:
   unit-tests:
