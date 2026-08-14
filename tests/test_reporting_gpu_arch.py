@@ -6,12 +6,7 @@
 
 """Tests for GPU arch resolution in Reporting scripts."""
 
-import json
-import os
-import tempfile
-
-import pytest
-
+import json, os, tempfile, pytest, pandas as pd
 from TraceLens.Agent.Analysis.utils.arch_utils import load_arch
 from TraceLens.Reporting.reporting_utils import resolve_gpu_arch
 from TraceLens.Reporting.generate_perf_report_pytorch import (
@@ -95,7 +90,6 @@ def perf_report_from_platform(tmp_path_factory):
 
 
 def test_roofline_bound_with_gpu_arch_platform(perf_report_from_platform):
-    import pandas as pd
 
     df = pd.read_csv(
         os.path.join(perf_report_from_platform, "unified_perf_summary.csv")

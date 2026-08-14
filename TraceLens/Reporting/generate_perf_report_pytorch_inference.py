@@ -769,6 +769,7 @@ def generate_perf_report_pytorch(
                 # For now, flash_attention_varlen_backward and aten::convolution_backward are processed with bwd=True,
                 # so we need a workaround to extract them from the fwd df and append them to the bwd df.
                 filtered_df_bwd_ops = None
+                df_ops_bwd_raw = None
                 if not df_ops_fwd.empty:
                     # Filter out backward operations that were incorrectly included in forward
                     bwd_op_names = [

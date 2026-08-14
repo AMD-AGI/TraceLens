@@ -746,10 +746,9 @@ def merge_capture_trace_into_graph(
             key, filepath
         )
 
-        # Build (capture_root, graph_root) pairs.  When there is a single
-        # capture root (e.g. diffusion where one captured graph is replayed
-        # across many denoising steps), map it to every graph root.
-        # Otherwise pair 1:1 positionally (vLLM/SGLang).
+        # Build (capture_root, graph_root) pairs. When there is a single
+        # capture root , map it to every graph root.
+        # Otherwise pair 1:1 positionally.
         if len(capture_roots) == 1:
             pairs = [(capture_roots[0], g) for g in graph_roots]
             data = [capture_root_data[0]] * len(graph_roots)
