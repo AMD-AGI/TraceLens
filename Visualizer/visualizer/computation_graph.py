@@ -245,8 +245,8 @@ def _add_chain(
             continue
 
         for sub_index, sub_step in enumerate(expanded_steps):
-        node_index = _add_node(
-            graph,
+            node_index = _add_node(
+                graph,
                 key=f"{key_prefix}:{step.attr_name}:{sub_step.attr_name}:{sub_index}",
                 block=sub_step,
                 port_label=step_port if sub_index == 0 else None,
@@ -254,11 +254,11 @@ def _add_chain(
             )
             if attr_last_index is not None:
                 _track_attr_index(attr_last_index, sub_step.attr_name, node_index)
-        if first_index is None:
-            first_index = node_index
-        if previous is not None:
-            graph.links.append((previous, node_index))
-        previous = node_index
+            if first_index is None:
+                first_index = node_index
+            if previous is not None:
+                graph.links.append((previous, node_index))
+            previous = node_index
         if expanded_steps and attr_last_index is not None:
             _track_attr_index(attr_last_index, step.attr_name, previous)
     return first_index, previous
@@ -782,7 +782,7 @@ def _filter_graph_basic_only(graph: ComputationGraph) -> ComputationGraph:
                         bridged_links.add((kept_source, kept_target))
                         if port_label and (kept_source, kept_target) not in bridged_port_labels:
                             bridged_port_labels[(kept_source, kept_target)] = port_label
-    if dashed:
+                        if dashed:
                             bridged_dashed.add((kept_source, kept_target))
                         if side:
                             bridged_side.add((kept_source, kept_target))
@@ -932,7 +932,7 @@ def build_computation_graph(
         input_index = _add_forward_input(graph, root) if include_input else None
         node_index = _add_node(graph, key=root.attr_name, block=root)
         if input_index is not None:
-        graph.links.append((input_index, node_index))
+            graph.links.append((input_index, node_index))
         return graph
 
     resolved_include_input = include_input and not root.tensor_input_labels
@@ -1042,14 +1042,14 @@ def build_computation_graph(
                 if merge_tail is not None:
                     _track_attr_index(attr_last_index, merge_wrapper.attr_name, merge_tail)
             else:
-            merge_index = _add_node(
-                graph,
-                key=f"merge:{segment_index}",
-                block=segment.merge,
-            )
+                merge_index = _add_node(
+                    graph,
+                    key=f"merge:{segment_index}",
+                    block=segment.merge,
+                )
                 for tail in branch_tails:
-                graph.links.append((tail, merge_index))
-            last_index = merge_index
+                    graph.links.append((tail, merge_index))
+                last_index = merge_index
                 _track_attr_index(attr_last_index, segment.merge.attr_name, merge_index)
             continue
 
@@ -1310,7 +1310,7 @@ def build_computation_graph(
                 if last_index is None:
                     continue
                 first_after, tail = _add_chain(
-                        graph,
+                    graph,
                     after_nodes,
                     key_prefix=f"post:{segment_index}",
                     attr_last_index=attr_last_index,
@@ -1341,15 +1341,15 @@ def build_computation_graph(
                 _track_attr_index(attr_last_index, side.attr_name, side_index)
             else:
                 side_block = expanded_side[0] if len(expanded_side) == 1 else side
-            side_index = _add_node(
-                graph,
-                key=f"side:{segment_index}",
+                side_index = _add_node(
+                    graph,
+                    key=f"side:{segment_index}",
                     block=side_block,
-                port_label=segment.side_port_label,
-                port_style=segment.side_port_style,
-            )
+                    port_label=segment.side_port_label,
+                    port_style=segment.side_port_style,
+                )
                 _track_attr_index(attr_last_index, side.attr_name, side_index)
-            if input_index is not None and segment.side_source == "forward_input":
+                if input_index is not None and segment.side_source == "forward_input":
                     _link_forward_input(graph, input_index, side_index)
             if last_index is None:
                 continue
@@ -1366,7 +1366,7 @@ def build_computation_graph(
             if segment.side_source == "forward_input":
                 graph.side_entry_links.add((side_index, mult_index))
             first_after, tail = _add_chain(
-                    graph,
+                graph,
                 after_nodes,
                 key_prefix=f"post:{segment_index}",
                 attr_last_index=attr_last_index,
@@ -1416,8 +1416,8 @@ def build_computation_graph(
                 _track_attr_index(attr_last_index, wrapper.attr_name, last_index)
                 continue
             for sub_index, sub_step in enumerate(expanded_steps):
-            step_index = _add_node(
-                graph,
+                step_index = _add_node(
+                    graph,
                     key=f"seq:{segment_index}:{step.attr_name}:{sub_step.attr_name}:{sub_index}",
                     block=sub_step,
                     label=inline_wrapper_step_label(None, sub_step, sub_index),
@@ -1430,7 +1430,7 @@ def build_computation_graph(
                     step_index=step_index,
                     fork_from_input=use_fork,
                 )
-            last_index = step_index
+                last_index = step_index
                 _track_attr_index(attr_last_index, sub_step.attr_name, step_index)
             if expanded_steps:
                 _track_attr_index(attr_last_index, step.attr_name, last_index)
@@ -2506,14 +2506,15 @@ def stack_fanout_branch_columns(
                 ) / len(indices)
             continue
         column_cx = sum(positions[index].cx for index in stack_chain) / len(stack_chain)
+        restack = chain[chain.index(stack_chain[0]) :]
         cursor_top = max(positions[index].top_y for index in stack_chain)
-        for index in stack_chain:
+        for index in restack:
             pos = positions[index]
             pos.cx = column_cx
             pos.top_y = cursor_top
             cursor_top -= pos.height + gap
         for index in chain:
-            if index not in stack_chain:
+            if index not in restack:
                 positions[index].cx = column_cx
 
 
@@ -2933,11 +2934,11 @@ def measure_graph_node_sizes(
                 )
                 spec.diagram_width, spec.diagram_height = width, height
             continue
-    if spec.synthetic == SYNTHETIC_INPUT:
+        if spec.synthetic == SYNTHETIC_INPUT:
             width, height = input_box_label_size(ax, spec.label, input_sublabel, fontsize=7.2)
             spec.diagram_width, spec.diagram_height = width, height
             continue
-    if spec.synthetic == SYNTHETIC_HIDDEN:
+        if spec.synthetic == SYNTHETIC_HIDDEN:
             width, height = input_box_label_size(ax, spec.label, None, fontsize=6.5)
             spec.diagram_width, spec.diagram_height = width, height
             continue
@@ -3585,7 +3586,7 @@ def _compact_fanout_branch_tail_spacing(
     graph: ComputationGraph,
     *,
     min_gap: float | None = None,
-    max_compaction: float = 0.5,
+    max_compaction: float = 1.0,
 ) -> None:
     """Shrinkwrap branch tail tiles (e.g. Pad) toward the Linear/RMSNorm stack above."""
     from visualizer.sizing import min_vertical_block_gap
@@ -4502,7 +4503,7 @@ def layout_computation_graph(
     if align_left:
         _align_positions_left(positions, content_left)
     else:
-    _center_positions_horizontally(positions, cx)
+        _center_positions_horizontally(positions, cx)
     stack_inline_frame_positions(positions, graph)
     finalize_tensor_port_pipeline_layout(
         positions,
@@ -4592,7 +4593,7 @@ def _resolve_vertical_overlaps(
     changed = True
     while changed:
         changed = False
-    ordered = sorted(positions, key=lambda pos: pos.top_y, reverse=True)
+        ordered = sorted(positions, key=lambda pos: pos.top_y, reverse=True)
         for above_index, above in enumerate(ordered):
             for below in ordered[above_index + 1 :]:
                 if not _boxes_overlap_horizontally(above, below, min_gap=min_gap):
@@ -4601,7 +4602,7 @@ def _resolve_vertical_overlaps(
                     below.top_y = above.bottom - min_gap
                     changed = True
                     continue
-        allowed_top = above.bottom - min_gap
+                allowed_top = above.bottom - min_gap
                 if below.top_y > allowed_top:
                     below.top_y = allowed_top
                     changed = True

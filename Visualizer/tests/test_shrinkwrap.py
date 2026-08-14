@@ -1,6 +1,12 @@
 """Tests for post-layout shrinkwrap passes."""
 
-from visualizer.computation_graph import GraphNodeSpec, InlineFrameSpec, LayoutPosition
+from visualizer.computation_graph import (
+    ComputationGraph,
+    GraphNodeSpec,
+    InlineFrameSpec,
+    LayoutPosition,
+    stack_fanout_branch_columns,
+)
 from visualizer.render import PARALLEL_CONNECTOR_COORD_EPS
 from visualizer.shrinkwrap import (
     _apply_bus_y_shift,
@@ -8,8 +14,10 @@ from visualizer.shrinkwrap import (
     _max_upward_bus_shift,
     _path_uses_bus_y,
     _shift_feeder_layout_for_bus_y,
+    _shrinkwrap_vertical_layout,
     _validate_shrunk_paths,
 )
+from visualizer.sizing import min_vertical_block_gap
 
 
 class _Anchor:
@@ -129,6 +137,41 @@ def test_shift_feeder_layout_for_bus_y_moves_frame_column_and_anchors():
     assert abs(link_paths[(0, 2)][0][1] - 8.4) < 1e-6
     assert abs(link_paths[(0, 2)][1][1] - new_y) < 1e-6
     assert abs(source_bus[0] - new_y) < 1e-6
+
+
+def _pad_tail_branch_layout(*, pad_top_y: float):
+    """Fan-out branch column ``Linear -> RMSNorm -> Pad`` with the Pad left behind."""
+    graph = ComputationGraph(
+        nodes=[
+            GraphNodeSpec(key="fan0-1:kv_b_proj:0", label="Linear"),
+            GraphNodeSpec(key="fan0-1:k_norm:0", label="RMSNorm"),
+            GraphNodeSpec(key="fan0-1:pad:0", label="Pad"),
+        ],
+        links=[(0, 1), (1, 2)],
+    )
+    positions = [
+        LayoutPosition(spec=graph.nodes[0], cx=5.0, top_y=9.0, width=0.6, height=0.2),
+        LayoutPosition(spec=graph.nodes[1], cx=5.2, top_y=8.4, width=0.6, height=0.2),
+        LayoutPosition(spec=graph.nodes[2], cx=5.4, top_y=pad_top_y, width=0.6, height=0.2),
+    ]
+    return graph, positions
+
+
+def test_stack_fanout_branch_columns_stacks_branch_tails():
+    """Tail tiles (e.g. Pad) join the branch column instead of keeping their layer row."""
+    graph, positions = _pad_tail_branch_layout(pad_top_y=6.0)
+    stack_fanout_branch_columns(positions, graph, min_gap=0.1)
+    assert abs(positions[0].bottom - positions[1].top_y - 0.1) < 1e-6
+    assert abs(positions[1].bottom - positions[2].top_y - 0.1) < 1e-6
+    assert len({round(pos.cx, 6) for pos in positions}) == 1
+
+
+def test_shrinkwrap_vertical_compacts_fanout_branch_tail_fully():
+    """The vertical pass closes branch tail slack down to the column gap."""
+    graph, positions = _pad_tail_branch_layout(pad_top_y=6.0)
+    _shrinkwrap_vertical_layout(positions, graph, min_gap=0.02)
+    slack = positions[1].bottom - positions[2].top_y
+    assert abs(slack - min_vertical_block_gap()) < 1e-6
 
 
 def test_is_source_fanout_bus_y_skips_per_leg_merge_buses():

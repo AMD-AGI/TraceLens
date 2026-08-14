@@ -2628,7 +2628,7 @@ def finalize_detail_layout(
     _compact_parallel_feeder_frame_exit_stubs(positions, graph)
     from visualizer.computation_graph import _compact_fanout_branch_tail_spacing
 
-    _compact_fanout_branch_tail_spacing(positions, graph, min_gap=VALIDATE_MIN_GAP)
+    _compact_fanout_branch_tail_spacing(positions, graph)
     from visualizer.computation_graph import (
         _align_k_proj_adjacent_to_chunk_pipeline,
         _ensure_multi_branch_input_fanout_clearance,

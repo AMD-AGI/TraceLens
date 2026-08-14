@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from visualizer.ast_analyze import analyze_source
 from visualizer.basic_ops import BasicOpFilter, introspect_is_modeling_operation, resolve_is_basic
 from visualizer.block_tree import (
@@ -1191,6 +1193,7 @@ def test_kimi_mla_spread_attention_merge_routes():
     )
     from visualizer.render import (
         COLORS,
+        CONNECTOR_EXIT_STUB,
         TOP_ENTRY_PORT_GAP,
         _anchors_from_detail_plan,
         _build_detail_draw_plan,
@@ -1201,6 +1204,7 @@ def test_kimi_mla_spread_attention_merge_routes():
         _spread_merge_horizontal_below_target_corridor,
     )
     from visualizer.render_validate import finalize_detail_layout
+    from visualizer.sizing import min_vertical_block_gap
 
     code_path = (
         Path.home()
@@ -1305,13 +1309,42 @@ def test_kimi_mla_spread_attention_merge_routes():
     pad_index = next(i for i, node in enumerate(graph.nodes) if node.label == "Pad")
     kv_linear_index = next(src for src, tgt in graph.links if tgt == pad_index)
     linear_pad_gap = positions[kv_linear_index].bottom - positions[pad_index].top_y
-    assert linear_pad_gap <= 0.85, f"Linear->Pad slack {linear_pad_gap:.3f} too large"
+    assert linear_pad_gap <= min_vertical_block_gap() + 0.02, (
+        f"Linear->Pad slack {linear_pad_gap:.3f} should shrinkwrap to the column gap"
+    )
     pad_path = link_paths[(pad_index, attn_index)]
-    y_stub = pad_path[0][1] - 0.1
-    for x1, y1 in pad_path[1:]:
-        if abs(y1 - y_stub) < 0.02 and abs(x1 - positions[pad_index].cx) > 0.04:
-            pytest.fail("Pad exit must not jog horizontally at the source stub level")
+    pad_cx = positions[pad_index].cx
+    exit_x, exit_y = pad_path[0]
+    turn_x, turn_y = pad_path[1]
+    assert abs(exit_x - pad_cx) < 0.04 and abs(turn_x - pad_cx) < 0.04, (
+        f"Pad exit must leave straight down its own column: {pad_path[:2]}"
+    )
+    assert exit_y - turn_y >= CONNECTOR_EXIT_STUB - 0.02, (
+        f"Pad exit must clear the exit stub before jogging: {pad_path[:2]}"
+    )
     plt.close(fig)
+
+
+def test_spread_merge_gutter_route_skips_overshoot_on_direct_drop():
+    """A drop that already clears the stub must not detour right of the source."""
+    from visualizer.render import (
+        _RenderAnchor,
+        _spread_merge_cross_column_gutter_route,
+    )
+
+    source = _RenderAnchor(cx=5.2, top=7.7, bottom=7.5, left=4.9, right=5.5)
+    target = _RenderAnchor(cx=2.9, top=7.3, bottom=7.1, left=2.5, right=3.3)
+    points = _spread_merge_cross_column_gutter_route(
+        source,
+        target,
+        target.cx,
+        7.4,
+        [],
+    )
+    assert len(points) == 4, f"direct drop should be a plain L route: {points}"
+    assert max(x for x, _y in points) <= source.cx + 1e-6, (
+        f"route must not overshoot right of the source column: {points}"
+    )
 
 
 def test_build_computation_graph_includes_method_wrappers():

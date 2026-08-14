@@ -5,7 +5,7 @@ Shrinkwrap performs in-place edits only. It never calls connector routing
 or similar). Two passes run at different stages:
 
 1. ``shrinkwrap_detail_layout`` — before connectors exist; moves block tiles in
-   ``positions`` (feeder frame columns, horizontal packing).
+   ``positions`` (feeder frame columns, fan-out branch tails, horizontal packing).
 2. ``shrinkwrap_detail_link_paths`` — after routing finishes; shortens existing
    polylines (bus Y shifts, horizontal bus trimming) and keeps ``positions``,
    anchors, and bus metadata aligned with the tightened corridors.
@@ -22,6 +22,7 @@ from visualizer.computation_graph import (
     ComputationGraph,
     LayoutPosition,
     SYNTHETIC_TENSOR,
+    _compact_fanout_branch_tail_spacing,
     _compact_parallel_feeder_frame_exit_stubs,
     _graph_has_tensor_ports,
     _inline_frame_for_tail_node,
@@ -70,6 +71,7 @@ def _shrinkwrap_vertical_layout(
     """Shorten vertical straight stubs by moving feeder columns toward merge buses."""
     del min_gap
     _compact_parallel_feeder_frame_exit_stubs(positions, graph)
+    _compact_fanout_branch_tail_spacing(positions, graph)
     _separate_parallel_merge_horiz_corridors(positions, graph)
 
 

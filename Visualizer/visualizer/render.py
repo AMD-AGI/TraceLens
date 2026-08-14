@@ -3052,11 +3052,12 @@ def _spread_merge_cross_column_gutter_route(
         initial_bypass_x=bypass_x,
     )
     if approach_y <= y_stub + PARALLEL_CONNECTOR_COORD_EPS:
+        # The drop already clears the stub level, so the gutter column would only
+        # overshoot right of the source and double back along the same corridor.
         return _ensure_orthogonal_connector_path(
             [
                 (source.cx, y1),
                 (source.cx, approach_y),
-                (bypass_x, approach_y),
                 (entry_x, approach_y),
                 (entry_x, y2),
             ]
