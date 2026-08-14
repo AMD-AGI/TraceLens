@@ -114,6 +114,23 @@ _KERNEL_MERGE_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 _SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "getattr"})
+_SKIP_INIT_FORWARD_ATTRS = frozenset(
+    {
+        "config",
+        "layer_idx",
+        "layer_id",
+        "layers",
+        "layer",
+        "module",
+        "modules",
+        "training",
+        "gradient_checkpointing",
+        "gradient_checkpointing_func",
+        "device",
+        "dtype",
+    }
+)
+_SKIP_INIT_FORWARD_CLASS_NAMES = frozenset({"ModuleList", "Sequential", "ModuleDict"})
 
 
 def _append_forward_call(calls: list[str], attr: str) -> None:
@@ -730,6 +747,32 @@ class ClassStructure:
     side_inputs: dict[str, list[SideInputSpec]] = field(default_factory=dict)
     init_assignment_options: dict[str, list[str]] = field(default_factory=dict)
     forward_input_name: str | None = None
+
+
+def infer_forward_steps_from_init(cls: ClassStructure) -> list[str]:
+    """Infer a sequential forward pipeline from ``__init__`` submodule assignments.
+
+    Used when a class has submodule ``self.foo = ...`` assignments but no parsed
+    ``forward()`` body (common in test fixtures and some wrapper modules).
+    """
+    steps: list[str] = []
+    for attr, class_name in cls.init_assignments.items():
+        if class_name in _SKIP_INIT_CLASS_NAMES:
+            continue
+        if class_name in _SKIP_INIT_FORWARD_CLASS_NAMES:
+            continue
+        if attr in _SKIP_INIT_FORWARD_ATTRS or attr.startswith("_"):
+            continue
+        steps.append(attr)
+    return steps
+
+
+def effective_forward_calls(cls: ClassStructure) -> list[str]:
+    """Return parsed ``forward()`` calls, falling back to inferred init order."""
+    steps = [step for step in cls.forward_calls if step not in _SKIP_INIT_CLASS_NAMES]
+    if steps:
+        return steps
+    return infer_forward_steps_from_init(cls)
 
 
 # Backwards-compatible alias used internally.

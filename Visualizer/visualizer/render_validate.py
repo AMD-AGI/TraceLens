@@ -2605,6 +2605,9 @@ def finalize_detail_layout(
         _align_and_stack_inline_frames(positions, graph)
         realign_fanout_branch_columns(positions, graph)
         _center_align_vertical_chains(positions, graph)
+    from visualizer.computation_graph import _ensure_top_entry_clearance_below_inline_frames
+
+    _ensure_top_entry_clearance_below_inline_frames(positions, graph)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = _apply_inline_frame_label_layout(
@@ -2616,5 +2619,36 @@ def finalize_detail_layout(
         min_gap=VALIDATE_MIN_GAP,
         min_left=min_left,
     )
+    _compact_synthetic_input_spacing(
+        positions,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+        elements=elements,
+    )
+    from visualizer.computation_graph import _compact_parallel_feeder_frame_exit_stubs
+
+    _compact_parallel_feeder_frame_exit_stubs(positions, graph)
+    from visualizer.computation_graph import (
+        _align_k_proj_adjacent_to_chunk_pipeline,
+        _ensure_multi_branch_input_fanout_clearance,
+    )
+    from visualizer.sizing import min_horizontal_block_gap
+
+    zone_gap = max(VALIDATE_MIN_GAP * 2, min_horizontal_block_gap())
+    _align_k_proj_adjacent_to_chunk_pipeline(
+        positions,
+        graph,
+        max_cx_gap=zone_gap * 12 - 1e-3,
+    )
+    _ensure_multi_branch_input_fanout_clearance(
+        positions,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+    )
+    saved_inline_frame_labels = plan.inline_frame_labels
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    plan.inline_frame_labels = saved_inline_frame_labels
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
     validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden).raise_if_invalid()
     return plan

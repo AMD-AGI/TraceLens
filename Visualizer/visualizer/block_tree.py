@@ -22,6 +22,7 @@ from visualizer.ast_analyze import (
     attention_kernel_details,
     attention_kernel_label,
     displays_as_linear,
+    effective_forward_calls,
     expand_conditional_block_components,
     functional_display_label,
     is_functional_synthetic,
@@ -1354,6 +1355,7 @@ def build_block_node(
     visited: frozenset[str] | None = None,
     details: list[str] | None = None,
     forward_order: int | None = None,
+    infer_init_steps: bool = False,
 ) -> BlockNode:
     """Expand one submodule into a recursive block tree using forward-pass order."""
     visited = visited or frozenset()
@@ -1413,7 +1415,8 @@ def build_block_node(
         )
 
     cls = registry[class_name]
-    forward_steps = [step for step in cls.forward_calls if step not in _SKIP_INIT_CLASS_NAMES]
+    parsed_steps = [step for step in cls.forward_calls if step not in _SKIP_INIT_CLASS_NAMES]
+    forward_steps = effective_forward_calls(cls) if infer_init_steps else parsed_steps
 
     if not forward_steps:
         return BlockNode(
@@ -1426,7 +1429,11 @@ def build_block_node(
             is_basic=True,
         )
 
-    order_map = {name: idx for idx, name in enumerate(cls.forward_calls)}
+    order_map = (
+        {name: idx for idx, name in enumerate(cls.forward_calls)}
+        if cls.forward_calls
+        else {name: idx for idx, name in enumerate(forward_steps)}
+    )
     child_nodes: list[BlockNode] = []
 
     for index, call_attr in enumerate(forward_steps):
@@ -1527,6 +1534,7 @@ def build_block_node(
                 visited=visited | {class_name},
                 details=child_details,
                 forward_order=child_order,
+                infer_init_steps=infer_init_steps,
             )
         )
 
@@ -1654,24 +1662,92 @@ def spine_expanded_frame_label(component: BlockComponent, *, positional_encoding
     return f"{component.label} ({component.attr_name})"
 
 
-def build_pipeline_block_trees(
-    *,
-    positional_encoding: str,
+def _build_component_block_trees(
+    components: list[BlockComponent],
     registry: dict[str, ClassStructure],
     basic_ops: BasicOpFilter,
+    *,
+    include_norms: bool = False,
+    skip_method_wrappers: bool = True,
+    infer_init_steps: bool = False,
 ) -> list[tuple[str, BlockNode]]:
-    """Build pre-decoder detail sections matching the main diagram stack."""
-    return []
+    """Build block trees for a flat list of stack or decoder components."""
+    trees: list[tuple[str, BlockNode]] = []
+    seen: set[tuple[str, str]] = set()
+    ordered = sorted(
+        components,
+        key=lambda comp: (
+            comp.forward_order is None,
+            comp.forward_order if comp.forward_order is not None else 999,
+            comp.attr_name,
+            comp.class_name,
+        ),
+    )
+    for comp in ordered:
+        if comp.role == "norm" and not include_norms:
+            continue
+        if comp.forward_order is None and comp.role not in {"embedding", "head", "positional", "norm"}:
+            continue
+        key = (comp.attr_name, comp.class_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        tree = build_block_node(
+            attr_name=comp.attr_name,
+            class_name=comp.class_name,
+            registry=registry,
+            basic_ops=basic_ops,
+            details=list(comp.details),
+            forward_order=comp.forward_order,
+            infer_init_steps=infer_init_steps,
+        )
+        if skip_method_wrappers and is_method_wrapper(tree):
+            continue
+        cls_info = registry.get(comp.class_name)
+        if comp.role in {"embedding", "head", "positional", "norm"}:
+            tree.input_label = (
+                cls_info.forward_input_name
+                if cls_info and cls_info.forward_input_name
+                else ("input_ids" if comp.role == "embedding" else "hidden_states")
+            )
+        trees.append((comp.label, tree))
+    return trees
+
+
+def build_pipeline_block_trees(
+    *,
+    stack_pre: list[BlockComponent],
+    registry: dict[str, ClassStructure],
+    basic_ops: BasicOpFilter,
+    include_norms: bool = False,
+    infer_init_steps: bool = False,
+) -> list[tuple[str, BlockNode]]:
+    """Build pre-decoder detail sections (embeddings, positional encoding)."""
+    return _build_component_block_trees(
+        stack_pre,
+        registry,
+        basic_ops,
+        include_norms=include_norms,
+        infer_init_steps=infer_init_steps,
+    )
 
 
 def build_head_block_trees(
     *,
-    norm_type: str,
+    stack_tail: list[BlockComponent],
     registry: dict[str, ClassStructure],
     basic_ops: BasicOpFilter,
+    include_norms: bool = False,
+    infer_init_steps: bool = False,
 ) -> list[tuple[str, BlockNode]]:
-    """Build post-decoder LM head detail section."""
-    return []
+    """Build post-decoder detail sections (final norm, LM head)."""
+    return _build_component_block_trees(
+        stack_tail,
+        registry,
+        basic_ops,
+        include_norms=include_norms,
+        infer_init_steps=infer_init_steps,
+    )
 
 
 def build_decoder_block_trees(
@@ -1680,6 +1756,8 @@ def build_decoder_block_trees(
     basic_ops: BasicOpFilter,
     *,
     decoder_class: str | None = None,
+    include_norms: bool = False,
+    infer_init_steps: bool = False,
 ) -> list[tuple[str, BlockNode]]:
     """Build recursive trees for detailed diagrams."""
     trees: list[tuple[str, BlockNode]] = []
@@ -1707,7 +1785,7 @@ def build_decoder_block_trees(
     )
 
     for comp in ordered:
-        if comp.role == "norm":
+        if comp.role == "norm" and not include_norms:
             continue
         if comp.forward_order is None:
             continue
@@ -1723,6 +1801,7 @@ def build_decoder_block_trees(
             basic_ops=basic_ops,
             details=list(comp.details),
             forward_order=comp.forward_order,
+            infer_init_steps=infer_init_steps,
         )
         if is_method_wrapper(tree):
             continue
@@ -1742,12 +1821,19 @@ def build_full_detailed_block_trees(
     positional_encoding: str,
     norm_type: str,
     decoder_class: str | None = None,
+    stack_pre: list[BlockComponent] | None = None,
+    stack_tail: list[BlockComponent] | None = None,
+    partition: bool = True,
+    include_norms: bool = False,
+    infer_init_steps: bool = False,
 ) -> list[tuple[str, BlockNode]]:
     """Build pipeline, decoder-layer, and LM head detail sections in main-diagram order."""
     pipeline = build_pipeline_block_trees(
-        positional_encoding=positional_encoding,
+        stack_pre=stack_pre or [],
         registry=registry,
         basic_ops=basic_ops,
+        include_norms=include_norms,
+        infer_init_steps=infer_init_steps,
     )
     decoder_trees: list[tuple[str, BlockNode]] = []
     if components:
@@ -1756,13 +1842,20 @@ def build_full_detailed_block_trees(
             registry,
             basic_ops,
             decoder_class=decoder_class,
+            include_norms=include_norms,
+            infer_init_steps=infer_init_steps,
         )
     head_trees = build_head_block_trees(
-        norm_type=norm_type,
+        stack_tail=stack_tail or [],
         registry=registry,
         basic_ops=basic_ops,
+        include_norms=include_norms,
+        infer_init_steps=infer_init_steps,
     )
-    return partition_detail_trees(pipeline + decoder_trees + head_trees)
+    trees = pipeline + decoder_trees + head_trees
+    if partition:
+        return partition_detail_trees(trees)
+    return trees
 
 
 def collect_graph_segments(

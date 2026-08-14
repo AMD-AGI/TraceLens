@@ -2057,6 +2057,35 @@ def _ensure_synthetic_input_clears_consumers(
         input_pos.top_y += required_bottom - input_pos.bottom
 
 
+def _ensure_multi_branch_input_fanout_clearance(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float | None = None,
+) -> None:
+    """Reserve connector clearance above dense multi-branch fan-outs."""
+    if len(_fanout_branch_node_groups(positions)) < 3:
+        return
+    from visualizer.render import CONNECTOR_ATTACHED_BOX_MARGIN, CONNECTOR_OBSTACLE_MARGIN
+
+    gap = DETAIL_LAYER_GAP if min_gap is None else max(min_gap, DETAIL_LAYER_GAP)
+    input_index = next(
+        (index for index, pos in enumerate(positions) if pos.spec.synthetic == SYNTHETIC_INPUT),
+        None,
+    )
+    if input_index is None:
+        return
+    targets = [target for source, target in graph.links if source == input_index]
+    if not targets:
+        return
+    min_fanout_clearance = gap + CONNECTOR_OBSTACLE_MARGIN + CONNECTOR_ATTACHED_BOX_MARGIN
+    input_pos = positions[input_index]
+    highest_top = max(positions[target].top_y for target in targets)
+    required_bottom = highest_top + min_fanout_clearance
+    if input_pos.bottom < required_bottom:
+        input_pos.top_y += required_bottom - input_pos.bottom
+
+
 def _compact_synthetic_input_spacing(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
@@ -2077,16 +2106,6 @@ def _compact_synthetic_input_spacing(
         return
     highest_top = max(positions[target].top_y for target in targets)
     input_pos = positions[input_index]
-    if len(targets) >= 2:
-        from visualizer.render import (
-            CONNECTOR_ATTACHED_BOX_MARGIN,
-            CONNECTOR_OBSTACLE_MARGIN,
-        )
-
-        gap = max(
-            gap,
-            DETAIL_LAYER_GAP + CONNECTOR_OBSTACLE_MARGIN + CONNECTOR_ATTACHED_BOX_MARGIN,
-        )
     desired_bottom = highest_top + gap
     if elements:
         input_left = input_pos.cx - input_pos.width / 2
@@ -2104,6 +2123,16 @@ def _compact_synthetic_input_spacing(
     if shift > 0:
         input_pos.top_y += shift
     elif shift < -1e-6:
+        from visualizer.render import CONNECTOR_ATTACHED_BOX_MARGIN, CONNECTOR_OBSTACLE_MARGIN
+
+        min_fanout_clearance = gap + CONNECTOR_OBSTACLE_MARGIN + CONNECTOR_ATTACHED_BOX_MARGIN
+        allowable = min(
+            positions[target].top_y + min_fanout_clearance - input_pos.bottom
+            for target in targets
+        )
+        shift = max(shift, allowable)
+        if shift >= -1e-6:
+            return
         # Input sits too far above its downstream targets; lift targets toward it.
         for index, pos in enumerate(positions):
             if index == input_index:
@@ -2455,6 +2484,42 @@ def stack_inline_frame_positions(
             cursor_top -= pos.height + frame_gap
 
 
+def _align_k_proj_adjacent_to_chunk_pipeline(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    max_cx_gap: float | None = None,
+) -> None:
+    """Keep the chunk_kda pipeline handoff near the k_proj fan-out column."""
+    chunk_indices = [
+        index
+        for index, spec in enumerate(graph.nodes)
+        if spec.label == "chunk_kda pipeline"
+    ]
+    k_indices = [
+        index
+        for index, spec in enumerate(graph.nodes)
+        if spec.block is not None and spec.block.attr_name == "k_proj"
+    ]
+    if not chunk_indices or not k_indices:
+        return
+    chunk_index = chunk_indices[0]
+    k_index = k_indices[0]
+    chunk_pos = positions[chunk_index]
+    k_pos = positions[k_index]
+    gap_limit = (
+        max_cx_gap
+        if max_cx_gap is not None
+        else MIN_HORIZONTAL_BLOCK_GAP * 12
+    )
+    cx_gap = abs(chunk_pos.cx - k_pos.cx)
+    if cx_gap <= gap_limit + 1e-6:
+        return
+    if k_pos.cx <= chunk_pos.cx:
+        return
+    chunk_pos.cx = k_pos.cx - gap_limit
+
+
 def finalize_tensor_port_pipeline_layout(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
@@ -2472,6 +2537,7 @@ def finalize_tensor_port_pipeline_layout(
     repack_inline_frame_columns(positions, graph)
     stack_inline_frame_positions(positions, graph)
     _align_tensor_port_pipeline_merge_clearance(positions, graph)
+    _align_k_proj_adjacent_to_chunk_pipeline(positions, graph)
 
     if min_left is None or not positions:
         return
@@ -3219,12 +3285,80 @@ def _max_frame_exit_downward_shift(
     return max(0.0, max_shift)
 
 
+def _top_entry_incoming_sources(
+    graph: ComputationGraph,
+    incoming: dict[int, list[int]],
+    target: int,
+) -> list[int]:
+    """Main-path sources that should enter a merge target from the top edge."""
+    return [
+        source
+        for source in incoming.get(target, [])
+        if (source, target) not in graph.side_entry_links
+        and (source, target) not in graph.inline_binary_operand_links
+    ]
+
+
+def _ensure_top_entry_clearance_below_inline_frames(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+) -> None:
+    """Leave corridor space below dotted inline frames for dual top-entry merge buses."""
+    from visualizer.ast_analyze import MOE_AGGREGATION_LABEL
+    from visualizer.render import (
+        CONNECTOR_ATTACHED_BOX_MARGIN,
+        CONNECTOR_EXIT_STUB,
+        CONNECTOR_OBSTACLE_MARGIN,
+        PIPELINE_MERGE_BUS_BELOW_FRAME_GAP,
+        _inline_frame_draw_bounds,
+    )
+
+    incoming = _build_incoming_links(graph, node_count=len(positions))
+    frame_tails = _inline_frame_tail_indices(graph)
+    clearance = (
+        CONNECTOR_EXIT_STUB
+        + PIPELINE_MERGE_BUS_BELOW_FRAME_GAP
+        + CONNECTOR_OBSTACLE_MARGIN
+        + CONNECTOR_ATTACHED_BOX_MARGIN
+    )
+
+    for target, sources in incoming.items():
+        if graph.nodes[target].label != MOE_AGGREGATION_LABEL:
+            continue
+        top_sources = _top_entry_incoming_sources(graph, incoming, target)
+        if len(top_sources) < 2:
+            continue
+        tail_sources = [source for source in top_sources if source in frame_tails]
+        if not tail_sources:
+            continue
+        frame_bottom = float("-inf")
+        for source in tail_sources:
+            frame = _inline_frame_for_tail_node(graph, source)
+            if frame is None:
+                continue
+            bounds = _inline_frame_draw_bounds(frame, positions, graph)
+            frame_bottom = max(frame_bottom, bounds.bottom)
+        if frame_bottom == float("-inf"):
+            continue
+        max_top_y = frame_bottom - clearance
+        if positions[target].top_y <= max_top_y + 1e-6:
+            continue
+        _shift_node_subtree(
+            positions,
+            graph,
+            target,
+            positions[target].top_y - max_top_y,
+        )
+
+
 def _compact_parallel_feeder_frame_exit_stubs(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
 ) -> None:
     """Shrinkwrap parallel feeder columns down to the shared merge-bus corridor."""
+    from visualizer.ast_analyze import MOE_AGGREGATION_LABEL
     from visualizer.render import (
+        CONNECTOR_ATTACHED_BOX_MARGIN,
         CONNECTOR_EXIT_STUB,
         PIPELINE_MERGE_BUS_BELOW_FRAME_GAP,
         _frame_tail_exit_horiz_y,
@@ -3239,37 +3373,101 @@ def _compact_parallel_feeder_frame_exit_stubs(
 
     for target, sources in incoming.items():
         tail_sources = [source for source in sources if source in frame_tails]
-        if len(tail_sources) < 2:
+        top_sources = _top_entry_incoming_sources(graph, incoming, target)
+        if len(top_sources) < 2 or not tail_sources:
+            continue
+        if len(tail_sources) < 2 and graph.nodes[target].label != MOE_AGGREGATION_LABEL:
             continue
 
         bus_y = _pipeline_merge_bus_y_for_layout(graph, positions, target, tail_sources)
         if bus_y is None:
             continue
 
-        target_exit_y = bus_y + CONNECTOR_EXIT_STUB + PIPELINE_MERGE_BUS_BELOW_FRAME_GAP
-        for source in tail_sources:
-            exit_horiz_y = _frame_tail_exit_horiz_y(graph, positions, source)
-            if exit_horiz_y is None:
-                continue
-            shift = exit_horiz_y - target_exit_y
-            if shift <= corridor_eps:
-                continue
-            frame = _inline_frame_for_tail_node(graph, source)
-            if frame is None:
-                continue
-            shift = min(
-                shift,
-                _max_frame_exit_downward_shift(
+        min_bus_y = (
+            positions[target].top_y
+            + CONNECTOR_OBSTACLE_MARGIN
+            + CONNECTOR_ATTACHED_BOX_MARGIN
+        )
+        min_exit_horiz = (
+            min_bus_y + CONNECTOR_EXIT_STUB + PIPELINE_MERGE_BUS_BELOW_FRAME_GAP + corridor_eps
+        )
+        for _pass in range(8):
+            shifted = False
+            for source in tail_sources:
+                max_tail_stub = (
+                    0.55
+                    if abs(positions[source].cx - positions[target].cx) > 0.08
+                    else 0.45
+                )
+                exit_horiz_y = _frame_tail_exit_horiz_y(graph, positions, source)
+                if exit_horiz_y is None:
+                    continue
+                shift = positions[source].bottom - (bus_y + max_tail_stub)
+                if shift <= corridor_eps:
+                    continue
+                frame = _inline_frame_for_tail_node(graph, source)
+                if frame is None:
+                    continue
+                max_shift = _max_frame_exit_downward_shift(
                     graph,
                     positions,
                     frame,
                     source,
                     min_gap=min_gap,
-                ),
+                )
+                if abs(positions[source].cx - positions[target].cx) > 0.08:
+                    post_exit = exit_horiz_y - shift
+                    side_min_exit = min_bus_y + CONNECTOR_EXIT_STUB + corridor_eps
+                    if post_exit < side_min_exit:
+                        shift = min(shift, max(0.0, exit_horiz_y - side_min_exit))
+                    elif post_exit < min_exit_horiz:
+                        shift = min(shift, max(0.0, exit_horiz_y - min_exit_horiz))
+                shift = min(shift, max_shift)
+                if shift <= corridor_eps:
+                    continue
+                _shift_inline_frame_column_and_ports(positions, graph, frame, shift)
+                shifted = True
+            if not shifted:
+                break
+            bus_y = _pipeline_merge_bus_y_for_layout(graph, positions, target, tail_sources)
+            if bus_y is None:
+                break
+
+        max_side_stub = 0.55
+        side_sources = [
+            source
+            for source in tail_sources
+            if abs(positions[source].cx - positions[target].cx) > 0.08
+        ]
+        if not side_sources:
+            continue
+        for _lift_pass in range(4):
+            bus_y = _pipeline_merge_bus_y_for_layout(graph, positions, target, tail_sources)
+            if bus_y is None:
+                break
+            longest_stub = max(
+                positions[source].bottom - bus_y for source in side_sources
             )
-            if shift <= corridor_eps:
-                continue
-            _shift_inline_frame_column_and_ports(positions, graph, frame, shift)
+            if longest_stub <= max_side_stub + corridor_eps:
+                break
+            lift = longest_stub - max_side_stub
+            candidate_bus = bus_y + lift
+            corridor_ok = True
+            for source in tail_sources:
+                exit_horiz_y = _frame_tail_exit_horiz_y(graph, positions, source)
+                if exit_horiz_y is None:
+                    continue
+                max_bus = (
+                    exit_horiz_y
+                    - CONNECTOR_EXIT_STUB
+                    - PIPELINE_MERGE_BUS_BELOW_FRAME_GAP
+                )
+                if candidate_bus > max_bus + 1e-6:
+                    corridor_ok = False
+                    break
+            if not corridor_ok or lift <= corridor_eps:
+                break
+            _shift_node_subtree(positions, graph, target, -lift)
 
 
 def _align_tensor_port_merge_nodes(
@@ -3823,6 +4021,14 @@ def _estimate_graph_height(graph: ComputationGraph) -> float:
         gaps += _inline_frame_internal_gap(graph, layers, upper_layer_index=layer_index)
     if graph.inline_frames and len(layers) > 1:
         gaps += INPUT_INLINE_FRAME_CAPTION_CLEARANCE
+    if _graph_has_tensor_ports(graph) and len(layers) > 1:
+        gaps += TENSOR_PORT_LAYER_EXTRA_GAP
+    side_entry_links = getattr(graph, "side_entry_links", set())
+    if side_entry_links and len(layers) > 1:
+        from visualizer.render import INLINE_FRAME_SIDE_ENTRY_EXTRA_GAP
+
+        gaps += 0.12 * len({link[0] for link in side_entry_links})
+        gaps += INLINE_FRAME_SIDE_ENTRY_EXTRA_GAP
     return content + gaps + DETAIL_TOP_INSET + DETAIL_BOTTOM_INSET
 
 
@@ -3860,9 +4066,11 @@ def _resolve_vertical_overlaps(
         ordered = sorted(positions, key=lambda pos: pos.top_y, reverse=True)
         for above_index, above in enumerate(ordered):
             for below in ordered[above_index + 1 :]:
-                if abs(above.top_y - below.top_y) <= layer_y_epsilon:
-                    continue
                 if not _boxes_overlap_horizontally(above, below, min_gap=min_gap):
+                    continue
+                if abs(above.top_y - below.top_y) <= layer_y_epsilon:
+                    below.top_y = above.bottom - min_gap
+                    changed = True
                     continue
                 allowed_top = above.bottom - min_gap
                 if below.top_y > allowed_top:

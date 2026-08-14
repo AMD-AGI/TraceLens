@@ -8,8 +8,9 @@ import json
 import sys
 from pathlib import Path
 
-from visualizer.basic_ops import COMMON_LEAF_PATTERNS, DEFAULT_BASIC_OP_PATTERNS, BasicOpFilter
+from visualizer.basic_ops import DEFAULT_BASIC_OP_PATTERNS, BasicOpFilter
 from visualizer.extract import dump_model_ast, load_architecture
+from visualizer.loader import build_detailed_basic_ops, resolve_checkpoint_arg
 from visualizer.model_graph import build_architecture_model_graphs, save_architecture_model_graphs
 from visualizer.render import render_diagram, _fact_lines
 
@@ -132,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_checkpoint_arg(args: argparse.Namespace) -> str | Path | None:
-    return args.checkpoint or args.source
+    return resolve_checkpoint_arg(checkpoint=args.checkpoint, source=args.source)
 
 
 def default_output_path(
@@ -175,10 +176,9 @@ def main(argv: list[str] | None = None) -> int:
 
         extra_add = list(args.basic_op_add or [])
         if args.detailed:
-            for pattern in COMMON_LEAF_PATTERNS:
-                if pattern not in extra_add:
-                    extra_add.append(pattern)
-        basic_ops = BasicOpFilter.from_cli(add=extra_add, remove=args.basic_op_remove)
+            basic_ops = build_detailed_basic_ops(add=extra_add, remove=args.basic_op_remove)
+        else:
+            basic_ops = BasicOpFilter.from_cli(add=extra_add, remove=args.basic_op_remove)
 
         if args.dump_ast:
             ast_dump = dump_model_ast(

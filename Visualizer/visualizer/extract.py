@@ -9,7 +9,12 @@ from typing import Any
 
 from visualizer.ast_analyze import analyze_sources, dump_ast
 from visualizer.basic_ops import BasicOpFilter
-from visualizer.block_tree import BlockNode, build_full_detailed_block_trees
+from visualizer.block_tree import (
+    BlockNode,
+    build_decoder_block_trees,
+    build_full_detailed_block_trees,
+    partition_detail_trees,
+)
 from visualizer.blocks import BlockComponent, CodeAnalysis, LayerVariant
 from visualizer.config_resolve import load_checkpoint_config
 from visualizer.github import fetch_github_source, github_config_path, parse_github_url
@@ -86,6 +91,7 @@ class ArchitectureSpec:
     analysis_notes: list[str] = field(default_factory=list)
     custom_blocks: list[str] = field(default_factory=list)
     detailed_block_trees: list[tuple[str, BlockNode]] = field(default_factory=list)
+    export_block_trees: list[tuple[str, BlockNode]] = field(default_factory=list)
     class_registry: dict = field(default_factory=dict, repr=False)
     basic_ops: BasicOpFilter | None = None
 
@@ -748,14 +754,32 @@ def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None
 def _build_detailed_block_trees(spec: ArchitectureSpec, basic_ops: BasicOpFilter) -> None:
     if not spec.class_registry:
         spec.detailed_block_trees = []
+        spec.export_block_trees = []
         return
-    spec.detailed_block_trees = build_full_detailed_block_trees(
+    common_kwargs = dict(
         components=spec.block_components,
         registry=spec.class_registry,
         basic_ops=basic_ops,
         positional_encoding=spec.positional_encoding,
         norm_type=spec.norm_type,
         decoder_class=spec.decoder_class,
+        stack_pre=spec.stack_pre,
+        stack_tail=spec.stack_tail,
+    )
+    decoder_trees = build_decoder_block_trees(
+        spec.block_components,
+        spec.class_registry,
+        basic_ops,
+        decoder_class=spec.decoder_class,
+        include_norms=False,
+        infer_init_steps=False,
+    )
+    spec.detailed_block_trees = partition_detail_trees(decoder_trees)
+    spec.export_block_trees = build_full_detailed_block_trees(
+        **common_kwargs,
+        partition=False,
+        include_norms=True,
+        infer_init_steps=True,
     )
 
 

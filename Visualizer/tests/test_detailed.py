@@ -1049,6 +1049,126 @@ def test_mla_gate_input_uses_solid_residual_connector(tmp_path: Path):
     assert COLORS["residual"] not in svg or "stroke-dasharray" not in svg.split(COLORS["residual"])[-1][:200]
 
 
+def test_kimi_mla_attention_feeds_depart_vertically():
+    """Same-column spread top-entry ports must drop vertically before shifting horizontally."""
+    from collections import defaultdict
+    from pathlib import Path
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        SYNTHETIC_INPUT,
+        _estimate_graph_height,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.render import (
+        COLORS,
+        PARALLEL_CONNECTOR_COORD_EPS,
+        _anchors_from_detail_plan,
+        _build_detail_draw_plan,
+        _collect_detail_link_paths,
+        _compute_detail_connector_buses,
+        _connector_source_bottom_exit_y,
+    )
+    from visualizer.render_validate import finalize_detail_layout
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
+    attn = build_block_node(
+        attr_name="self_attn",
+        class_name="KimiMLAAttention",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    graph = build_computation_graph(attn, basic_ops=basic)
+    fig, ax = plt.subplots(figsize=(16, 13))
+    measure_graph_node_sizes(ax, graph)
+    positions, links = layout_computation_graph(
+        graph,
+        cx=2.6,
+        top_y=10.0,
+        block_w=8.0,
+        block_h=_estimate_graph_height(graph),
+        content_left=0.6,
+    )
+    finalize_detail_layout(
+        ax,
+        graph,
+        positions,
+        input_sublabel=None,
+        cx=2.6,
+        top_y=10.0,
+        detail_fill=COLORS["detail_fill"],
+        min_left=0.6,
+    )
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=None)
+    anchors = _anchors_from_detail_plan(positions, plan)
+    incoming: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    outgoing: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for src, tgt in links:
+        incoming[tgt].append((src, tgt))
+        outgoing[src].append((src, tgt))
+    input_index = next(i for i, node in enumerate(graph.nodes) if node.synthetic == SYNTHETIC_INPUT)
+    target_bus, source_bus, merge_entry_x, merge_link_bus = _compute_detail_connector_buses(
+        graph,
+        positions,
+        anchors,
+        incoming,
+        outgoing,
+        plan.label_obstacles,
+    )
+    link_paths = _collect_detail_link_paths(
+        graph=graph,
+        links=links,
+        positions=positions,
+        anchors=anchors,
+        incoming=incoming,
+        label_obstacles=plan.label_obstacles,
+        target_bus=target_bus,
+        source_bus=source_bus,
+        merge_entry_x=merge_entry_x,
+        merge_link_bus=merge_link_bus,
+        input_index=input_index,
+    )
+    attn_index = next(i for i, node in enumerate(graph.nodes) if node.label == "Attention")
+    try:
+        for src, tgt in links:
+            if tgt != attn_index:
+                continue
+            points = link_paths[(src, tgt)]
+            assert len(points) >= 2, f"{graph.nodes[src].label} -> Attention missing connector"
+            source = anchors[src]
+            y_exit = _connector_source_bottom_exit_y(source)
+            x1, y1 = points[0]
+            x2, y2 = points[1]
+            assert abs(y1 - y_exit) < 1e-6, (
+                f"{graph.nodes[src].label} must start at source bottom exit"
+            )
+            assert abs(x1 - x2) < PARALLEL_CONNECTOR_COORD_EPS, (
+                f"{graph.nodes[src].label} must depart vertically, not horizontally"
+            )
+            assert abs(y1 - y2) > PARALLEL_CONNECTOR_COORD_EPS, (
+                f"{graph.nodes[src].label} first segment must be vertical"
+            )
+    finally:
+        plt.close(fig)
+
+
 def test_build_computation_graph_includes_method_wrappers():
     from visualizer.block_tree import BlockNode
     from visualizer.computation_graph import build_computation_graph

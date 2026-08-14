@@ -222,66 +222,113 @@ def test_moe_shared_experts_to_plus_enters_from_producer_side():
         plt.close(fig)
 
 
-def test_moe_route_scaling_exits_frame_tail_vertically():
+def test_moe_route_scaling_uses_direct_merge_bus_to_aggregation():
     fig, graph, positions, anchors, _incoming, _outgoing, _input_index, buses, link_paths = (
         _kimi_sparse_moe_layout()
     )
     try:
         from visualizer.render import (
+            _connector_target_top_entry_y,
             _find_connector_inline_frame_overlaps,
-            _inline_frame_draw_bounds,
-            _frame_tail_routing_corridor_y,
-            CONNECTOR_EXIT_STUB,
-            CONNECTOR_OBSTACLE_MARGIN,
+            _path_penetrates_attached_boxes,
         )
 
         link_key, points = _link_by_labels(
             graph, link_paths, "Route scaling", "MoE aggregation"
         )
         route_scaling = anchors[link_key[0]]
+        aggregation = anchors[link_key[1]]
         y_exit = _connector_source_bottom_exit_y(route_scaling)
         assert abs(points[0][1] - y_exit) < PARALLEL_CONNECTOR_COORD_EPS
         assert abs(points[0][0] - points[1][0]) < PARALLEL_CONNECTOR_COORD_EPS, (
-            "Route scaling must drop vertically before leaving the gate column"
-        )
-        assert points[1][1] < points[0][1]
-        gate = next(frame for frame in graph.inline_frames if frame.frame_id == "gate")
-        gate_bounds = _inline_frame_draw_bounds(gate, positions, graph)
-        corridor_y = _frame_tail_routing_corridor_y(
-            gate_bounds,
-            route_scaling,
-            anchors[link_key[1]],
-        )
-        assert any(
-            y <= corridor_y + PARALLEL_CONNECTOR_COORD_EPS for _x, y in points
-        ), "Route scaling must route through the below-frame corridor"
-        below_frame_y = (
-            gate_bounds.bottom - CONNECTOR_OBSTACLE_MARGIN - CONNECTOR_EXIT_STUB
+            "Route scaling must drop vertically before joining the merge bus"
         )
         merge_bus_y = buses[3][link_key]
-        if abs(merge_bus_y - corridor_y) <= PARALLEL_CONNECTOR_COORD_EPS:
-            assert any(
-                abs(y - merge_bus_y) < PARALLEL_CONNECTOR_COORD_EPS for _x, y in points
-            )
-        assert not _find_connector_inline_frame_overlaps(
-            link_paths,
-            graph=graph,
-            positions=positions,
-        )
         horizontals = [
             (y1, x1, x2)
             for (x1, y1), (x2, y2) in zip(points, points[1:])
             if abs(y1 - y2) < PARALLEL_CONNECTOR_COORD_EPS and abs(x1 - x2) > 0.06
         ]
         assert any(
-            y <= corridor_y + PARALLEL_CONNECTOR_COORD_EPS for y, _x1, _x2 in horizontals
-        ), "Route scaling must turn horizontally in the below-frame corridor"
+            abs(y - merge_bus_y) < PARALLEL_CONNECTOR_COORD_EPS for y, _x1, _x2 in horizontals
+        ), "Route scaling must turn horizontally on the shared merge bus"
+        assert all(x >= route_scaling.cx - PARALLEL_CONNECTOR_COORD_EPS for x, _y in points), (
+            "Route scaling must not detour left of its column"
+        )
+        assert not _path_penetrates_attached_boxes(points, route_scaling, aggregation)
+        assert not _find_connector_inline_frame_overlaps(
+            link_paths,
+            graph=graph,
+            positions=positions,
+        )
+        entry_x = buses[2][link_key]
+        assert abs(points[-1][0] - entry_x) < PARALLEL_CONNECTOR_COORD_EPS
+        assert abs(points[-1][1] - _connector_target_top_entry_y(aggregation)) < PARALLEL_CONNECTOR_COORD_EPS
 
         down_proj_points = link_paths[(9, 10)]
         down_horiz_y = next(
             y1 for (x1, y1), (x2, y2) in zip(down_proj_points, down_proj_points[1:]) if abs(y1 - y2) < 1e-6
         )
         assert abs(down_horiz_y - buses[3][link_key]) < PARALLEL_CONNECTOR_COORD_EPS
+    finally:
+        plt.close(fig)
+
+
+def test_moe_aggregation_is_regular_block_with_dual_top_entry_ports():
+    from visualizer.render import (
+        CONNECTOR_ATTACHED_BOX_MARGIN,
+        CONNECTOR_EXIT_STUB,
+        CONNECTOR_OBSTACLE_MARGIN,
+        PIPELINE_MERGE_BUS_BELOW_FRAME_GAP,
+        TOP_ENTRY_PORT_GAP,
+        _connector_target_top_entry_y,
+        _inline_frame_draw_bounds,
+    )
+
+    fig, graph, positions, anchors, _incoming, _outgoing, _input_index, buses, link_paths = (
+        _kimi_sparse_moe_layout()
+    )
+    try:
+        by_label = {spec.label: index for index, spec in enumerate(graph.nodes)}
+        agg_index = by_label["MoE aggregation"]
+        route_index = by_label["Route scaling"]
+        down_index = next(
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.block and spec.block.attr_name == "routed_expert_down_proj"
+        )
+        assert graph.nodes[agg_index].synthetic is None
+        assert graph.nodes[agg_index].label == "MoE aggregation"
+
+        merge_entry_x = buses[2]
+        assert len(merge_entry_x) == 2
+        route_link = (route_index, agg_index)
+        down_link = (down_index, agg_index)
+        assert route_link in merge_entry_x and down_link in merge_entry_x
+        assert merge_entry_x[route_link] < merge_entry_x[down_link]
+
+        agg_anchor = anchors[agg_index]
+        top_y = _connector_target_top_entry_y(agg_anchor)
+        for link_key in (route_link, down_link):
+            end_x, end_y = link_paths[link_key][-1]
+            assert abs(end_y - top_y) < PARALLEL_CONNECTOR_COORD_EPS
+            assert abs(end_x - merge_entry_x[link_key]) < PARALLEL_CONNECTOR_COORD_EPS
+
+        assert positions[route_index].cx < positions[down_index].cx
+        assert merge_entry_x[route_link] < merge_entry_x[down_link]
+        span = merge_entry_x[down_link] - merge_entry_x[route_link]
+        assert span >= TOP_ENTRY_PORT_GAP - PARALLEL_CONNECTOR_COORD_EPS
+        assert span <= agg_anchor.right - agg_anchor.left
+
+        gate = next(frame for frame in graph.inline_frames if frame.frame_id == "gate")
+        gate_bounds = _inline_frame_draw_bounds(gate, positions, graph)
+        clearance = (
+            CONNECTOR_EXIT_STUB
+            + PIPELINE_MERGE_BUS_BELOW_FRAME_GAP
+            + CONNECTOR_OBSTACLE_MARGIN
+            + CONNECTOR_ATTACHED_BOX_MARGIN
+        )
+        assert agg_anchor.top <= gate_bounds.bottom - clearance + PARALLEL_CONNECTOR_COORD_EPS
     finally:
         plt.close(fig)
 
