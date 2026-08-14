@@ -32,6 +32,8 @@ subtrees:
       title: JAX performance report
     - file: how-to/generate-perf-report-rocprof
       title: rocprof performance report
+    - file: how-to/generate-perf-report-genesis
+      title: Genesis / Taichi performance report
     - file: how-to/collective-report
       title: Collective-communication report
     - file: how-to/compare-perf-reports
