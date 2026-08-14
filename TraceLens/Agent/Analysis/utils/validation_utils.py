@@ -129,6 +129,20 @@ def _category_findings_empty(filepath):
     return isinstance(cf, list) and len(cf) == 0
 
 
+def _fusion_no_data(filepath):
+    """True when kernel_fusion_metrics.json has no impact estimates (kernel-fusion-analyzer § empty fallback)."""
+    mp = _metrics_json_for_findings(filepath)
+    try:
+        with open(mp) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if data.get("status") == "NO_DATA":
+        return True
+    est = data.get("impact_estimates")
+    return isinstance(est, list) and len(est) == 0
+
+
 def validate_findings_file(filepath, tier, comparison_scope=None):
     """Validate a single findings file against the sub-agent spec contract.
 
@@ -160,21 +174,23 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
 
     errors = []
 
-    header_positions = []
-    for h in _REQUIRED_FINDINGS_HEADERS:
-        pos = content.find(h)
-        if pos < 0:
-            errors.append(f"Missing required section: {h}")
-        header_positions.append(pos)
+    relaxed_empty = tier == "compute" and _category_findings_empty(filepath)
+    relaxed_empty = relaxed_empty or (tier == "fusion" and _fusion_no_data(filepath))
 
-    if all(p >= 0 for p in header_positions):
+    header_positions = []
+    if not relaxed_empty:
+        for h in _REQUIRED_FINDINGS_HEADERS:
+            pos = content.find(h)
+            if pos < 0:
+                errors.append(f"Missing required section: {h}")
+            header_positions.append(pos)
+
+    if header_positions and all(p >= 0 for p in header_positions):
         if header_positions[0] > header_positions[1]:
             errors.append("## Recommendations must appear before ## Detailed Analysis")
 
     rec_start = content.find("## Recommendations")
     da_start = content.find("## Detailed Analysis")
-
-    relaxed_empty = tier == "compute" and _category_findings_empty(filepath)
 
     p_items = []
     if rec_start >= 0:
@@ -999,7 +1015,7 @@ class MarkerValidator:
         if file_class == "category_findings" and rel not in cls.COMPUTE_NO_P_ITEM:
             if not skip_p_item_required and "p_item" not in seen_kinds:
                 errors.append(f"{rel}: missing required kind=p_item")
-        if file_class == "system_findings" and "p_item" not in seen_kinds:
+        if file_class == "system_findings" and not skip_p_item_required and "p_item" not in seen_kinds:
             errors.append(f"{rel}: missing required kind=p_item")
         n_headings = len(_P_ITEM_RE.findall(text))
         n_markers = sum(
