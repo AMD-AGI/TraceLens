@@ -19,7 +19,6 @@ from collections import OrderedDict, deque, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
-import glob
 import warnings
 import TraceLens
 

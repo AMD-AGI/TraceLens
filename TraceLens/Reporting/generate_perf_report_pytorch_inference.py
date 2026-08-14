@@ -5,7 +5,6 @@
 ###############################################################################
 
 import argparse
-import glob
 import importlib.util
 import json
 import os
