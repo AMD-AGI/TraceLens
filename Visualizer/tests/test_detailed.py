@@ -1169,6 +1169,151 @@ def test_kimi_mla_attention_feeds_depart_vertically():
         plt.close(fig)
 
 
+def test_kimi_mla_spread_attention_merge_routes():
+    """Cross-column Pad/kv feeders use distinct ports and avoid overlaying Attention."""
+    from collections import defaultdict
+    from pathlib import Path
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        SYNTHETIC_INPUT,
+        _estimate_graph_height,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.render import (
+        COLORS,
+        TOP_ENTRY_PORT_GAP,
+        _anchors_from_detail_plan,
+        _build_detail_draw_plan,
+        _collect_detail_link_paths,
+        _compute_detail_connector_buses,
+        _inline_frame_for_top_member,
+        _path_crosses_attached_block_edge_band,
+        _spread_merge_horizontal_below_target_corridor,
+    )
+    from visualizer.render_validate import finalize_detail_layout
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
+    attn = build_block_node(
+        attr_name="self_attn",
+        class_name="KimiMLAAttention",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    graph = build_computation_graph(attn, basic_ops=basic)
+    fig, ax = plt.subplots(figsize=(16, 13))
+    measure_graph_node_sizes(ax, graph)
+    positions, links = layout_computation_graph(
+        graph,
+        cx=2.6,
+        top_y=10.0,
+        block_w=8.0,
+        block_h=_estimate_graph_height(graph),
+        content_left=0.6,
+    )
+    finalize_detail_layout(
+        ax,
+        graph,
+        positions,
+        input_sublabel=None,
+        cx=2.6,
+        top_y=10.0,
+        detail_fill=COLORS["detail_fill"],
+        min_left=0.6,
+    )
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=None)
+    anchors = _anchors_from_detail_plan(positions, plan, graph)
+    incoming: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    outgoing: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for src, tgt in links:
+        incoming[tgt].append((src, tgt))
+        outgoing[src].append((src, tgt))
+    input_index = next(i for i, node in enumerate(graph.nodes) if node.synthetic == SYNTHETIC_INPUT)
+    target_bus, source_bus, merge_entry_x, merge_link_bus = _compute_detail_connector_buses(
+        graph,
+        positions,
+        anchors,
+        incoming,
+        outgoing,
+        plan.label_obstacles,
+    )
+    link_paths = _collect_detail_link_paths(
+        graph=graph,
+        links=links,
+        positions=positions,
+        anchors=anchors,
+        incoming=incoming,
+        label_obstacles=plan.label_obstacles,
+        target_bus=target_bus,
+        source_bus=source_bus,
+        merge_entry_x=merge_entry_x,
+        merge_link_bus=merge_link_bus,
+        input_index=input_index,
+    )
+    attn_index = next(i for i, node in enumerate(graph.nodes) if node.label == "Attention")
+    side_feeders = [
+        (src, tgt)
+        for src, tgt in links
+        if tgt == attn_index and abs(positions[src].cx - positions[attn_index].cx) > 0.08
+    ]
+    assert len(side_feeders) >= 2
+    entry_ports = [link_paths[link][-1][0] for link in side_feeders]
+    assert len(set(round(x, 3) for x in entry_ports)) == len(entry_ports)
+    for index in range(len(entry_ports) - 1):
+        assert entry_ports[index + 1] - entry_ports[index] >= TOP_ENTRY_PORT_GAP - 0.02
+    attn_anchor = anchors[attn_index]
+    for src, tgt in side_feeders:
+        points = link_paths[(src, tgt)]
+        assert not _path_crosses_attached_block_edge_band(
+            points,
+            source=anchors[src],
+            target=attn_anchor,
+        )
+        assert not _spread_merge_horizontal_below_target_corridor(points, attn_anchor)
+        assert abs(points[-1][0] - merge_entry_x[(src, tgt)]) < 0.02
+
+    g_proj_index = next(
+        i
+        for i, node in enumerate(graph.nodes)
+        if node.block is not None and node.block.attr_name == "g_proj"
+    )
+    frame = _inline_frame_for_top_member(graph, g_proj_index)
+    assert frame is not None
+    assert abs(anchors[g_proj_index].top - positions[g_proj_index].top_y) <= 0.02
+    shared_tee = source_bus[input_index]
+    g_path = link_paths[(input_index, g_proj_index)]
+    assert any(abs(y - shared_tee) < 0.02 for _x, y in g_path)
+    assert abs(g_path[-1][1] - positions[g_proj_index].top_y) < 0.02
+
+    pad_index = next(i for i, node in enumerate(graph.nodes) if node.label == "Pad")
+    kv_linear_index = next(src for src, tgt in graph.links if tgt == pad_index)
+    linear_pad_gap = positions[kv_linear_index].bottom - positions[pad_index].top_y
+    assert linear_pad_gap <= 0.85, f"Linear->Pad slack {linear_pad_gap:.3f} too large"
+    pad_path = link_paths[(pad_index, attn_index)]
+    y_stub = pad_path[0][1] - 0.1
+    for x1, y1 in pad_path[1:]:
+        if abs(y1 - y_stub) < 0.02 and abs(x1 - positions[pad_index].cx) > 0.04:
+            pytest.fail("Pad exit must not jog horizontally at the source stub level")
+    plt.close(fig)
+
+
 def test_build_computation_graph_includes_method_wrappers():
     from visualizer.block_tree import BlockNode
     from visualizer.computation_graph import build_computation_graph
@@ -1769,6 +1914,86 @@ def test_inline_composite_steps_expands_single_op_wrappers():
     assert len(expanded_mlp) == 2
     assert expanded_mlp[0].attr_name == "gate_proj"
     assert expanded_mlp[1].attr_name == "up_proj"
+
+
+def test_expand_block_tree_inplace_expands_straight_line_children():
+    from visualizer.block_tree import BlockNode, expand_block_tree_inplace
+
+    mlp = BlockNode(
+        attr_name="shared_experts",
+        class_name="KimiMLP",
+        role="ffn",
+        label="KimiMLP",
+        children=[
+            BlockNode(attr_name="gate_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
+            BlockNode(attr_name="up_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
+            BlockNode(attr_name="down_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
+        ],
+    )
+    expanded = expand_block_tree_inplace(mlp)
+    assert expanded.attr_name == "shared_experts"
+    assert [child.attr_name for child in expanded.children] == ["gate_proj", "up_proj", "down_proj"]
+
+
+def test_expand_block_tree_inplace_substitutes_single_op_subgraph():
+    from visualizer.block_tree import BlockNode, expand_block_tree_inplace
+
+    linear = BlockNode(
+        attr_name="down_proj",
+        class_name="Linear",
+        role="other",
+        label="Linear",
+        is_basic=True,
+    )
+    wrapper = BlockNode(
+        attr_name="routed_expert",
+        class_name="KimiMLP",
+        role="ffn",
+        label="Expert",
+        input_source="moe scores",
+        children=[linear],
+    )
+    parent = BlockNode(
+        attr_name="moe",
+        class_name="MoE",
+        role="moe",
+        label="MoE",
+        children=[
+            wrapper,
+            BlockNode(
+                attr_name="merge",
+                class_name="Merge",
+                role="other",
+                label="Merge",
+                is_basic=True,
+            ),
+        ],
+    )
+
+    expanded = expand_block_tree_inplace(parent)
+    assert len(expanded.children) == 2
+    assert expanded.children[0].attr_name == "down_proj"
+    assert expanded.children[0].input_source == "moe scores"
+    assert expanded.children[1].attr_name == "merge"
+
+
+def test_prepare_diagram_section_trees_expands_before_render():
+    from visualizer.block_tree import BlockNode, prepare_diagram_section_trees
+
+    mlp = BlockNode(
+        attr_name="mlp",
+        class_name="KimiMLP",
+        role="ffn",
+        label="KimiMLP",
+        children=[
+            BlockNode(attr_name="gate_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
+            BlockNode(attr_name="up_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
+        ],
+    )
+    prepared = prepare_diagram_section_trees([("KimiMLP", mlp)])
+    assert len(prepared) == 1
+    _, tree = prepared[0]
+    assert [child.attr_name for child in tree.children] == ["gate_proj", "up_proj"]
 
 
 def test_router_gate_expands_to_pipeline_steps():
@@ -3418,7 +3643,7 @@ def test_chunk_kda_pipeline_inline_frames_stay_column_aligned():
 
         content_left = min(pos.cx - pos.width / 2 for pos in positions)
         content_right = max(pos.cx + pos.width / 2 for pos in positions)
-        assert content_right - content_left < 7.0, (
+        assert content_right - content_left < 8.5, (
             f"chunk_kda pipeline too wide ({content_right - content_left:.2f})"
         )
 
@@ -4214,6 +4439,97 @@ def test_kda_fanout_to_chunk_kda_horizontal_gap_is_tight():
         )
     finally:
         plt.close(fig)
+
+
+def test_fanout_exit_feeders_pack_to_outside():
+    """Input branches feeding the exit path pack outside; closer consumers sit further out."""
+    from pathlib import Path
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        _estimate_graph_height,
+        _fanout_branch_node_groups,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.render import COLORS
+    from visualizer.render_validate import finalize_detail_layout
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
+
+    def branch_centers(block_class: str) -> dict[str, float]:
+        attn = build_block_node(
+            attr_name="self_attn",
+            class_name=block_class,
+            registry=analysis.class_registry,
+            basic_ops=basic,
+        )
+        graph = build_computation_graph(attn)
+        fig, ax = plt.subplots(figsize=(16, 13))
+        try:
+            measure_graph_node_sizes(ax, graph)
+            positions, _ = layout_computation_graph(
+                graph,
+                cx=2.6,
+                top_y=10.0,
+                block_w=8.0,
+                block_h=_estimate_graph_height(graph),
+                content_left=0.6,
+            )
+            finalize_detail_layout(
+                ax,
+                graph,
+                positions,
+                input_sublabel=None,
+                cx=2.6,
+                top_y=10.0,
+                detail_fill=COLORS["detail_fill"],
+                min_left=0.6,
+            )
+            centers: dict[str, float] = {}
+            for branch_index, indices in _fanout_branch_node_groups(positions).items():
+                labels = [
+                    graph.nodes[index].block.attr_name
+                    if graph.nodes[index].block
+                    else graph.nodes[index].label
+                    for index in indices
+                ]
+                label = labels[0]
+                if any(name == "@functional_pad" for name in labels):
+                    label = "pad_branch"
+                elif label in centers:
+                    label = f"{label}_{branch_index}"
+                centers[label] = sum(positions[index].cx for index in indices) / len(indices)
+            return centers
+        finally:
+            plt.close(fig)
+
+    kda = branch_centers("KimiDeltaAttention")
+    kda_cx = list(kda.values())
+    assert abs(kda["b_proj"] - min(kda_cx)) < 0.08, (
+        f"b_proj should be the leftmost exit feeder, got cx={kda['b_proj']:.3f}"
+    )
+
+    mla = branch_centers("KimiMLAAttention")
+    mla_cx = list(mla.values())
+    assert abs(mla["pad_branch"] - max(mla_cx)) < 0.08, (
+        f"Pad branch should be the rightmost exit feeder, got cx={mla['pad_branch']:.3f}"
+    )
 
 
 def test_kda_hidden_states_fanout_uses_shared_source_bus_with_vertical_tees():

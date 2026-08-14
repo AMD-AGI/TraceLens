@@ -347,12 +347,25 @@ class ShapeInferencer:
         sections: list[dict[str, Any]] = []
         lm_head_tensor: str | None = None
 
+        from visualizer.block_tree import subgraph_warrants_json_export
+
+        seen_shape_signatures: set[tuple[Any, ...]] = set()
         for title, block_tree in block_trees:
             graph = build_model_graph(block_tree, title=title, basic_ops=basic_ops)
             operators = self.export_operators(graph, root=block_tree)
             for op in operators:
                 if op.name == "lm_head":
                     lm_head_tensor = "lm_head"
+            if not subgraph_warrants_json_export(block_tree, basic_ops=basic_ops):
+                continue
+            signature = subgraph_boundary_signature(
+                operators,
+                class_name=block_tree.class_name,
+            )
+            if signature is not None:
+                if signature in seen_shape_signatures:
+                    continue
+                seen_shape_signatures.add(signature)
             sections.append(
                 {
                     "title": title,
@@ -499,6 +512,36 @@ class ShapeInferencer:
         if attr:
             return self.module_dims.embedding_by_attr.get(attr)
         return None
+
+
+def subgraph_boundary_signature(
+    operators: list[OperatorRecord],
+    *,
+    class_name: str | None = None,
+) -> tuple[Any, ...] | None:
+    """Hashable input/output boundary signature for deduplicating exported subgraphs."""
+    input_ops = [op for op in operators if op.operation == "input"]
+    compute_ops = [op for op in operators if op.operation not in {"input", "output"}]
+    if not compute_ops:
+        return None
+    identity = class_name or compute_ops[0].class_name or compute_ops[0].computation
+    if input_ops:
+        in_spec = input_ops[0].output
+        return (
+            identity,
+            tuple(in_spec.shape),
+            in_spec.dtype,
+            tuple(compute_ops[-1].output.shape),
+            compute_ops[-1].output.dtype,
+        )
+    return (
+        identity,
+        tuple(compute_ops[0].output.shape),
+        compute_ops[0].output.dtype,
+        tuple(compute_ops[-1].output.shape),
+        compute_ops[-1].output.dtype,
+        "no_input",
+    )
 
 
 def build_operator_export(

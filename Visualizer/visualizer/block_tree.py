@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from visualizer.ast_analyze import (
@@ -194,7 +194,160 @@ def collect_function_steps(node: BlockNode) -> list[BlockNode]:
     steps: list[BlockNode] = []
     for child in node.children:
         steps.extend(collect_function_steps(child))
+    if not steps and not _is_composite_block(node):
+        return [node]
     return steps
+
+
+MIN_SUBGRAPH_OPERATIONS = 2
+
+
+def forward_operation_count(
+    node: BlockNode,
+    *,
+    basic_ops: BasicOpFilter | None = None,
+) -> int:
+    """Return forward ops represented by a block tree's computation graph."""
+    from visualizer.basic_ops import BasicOpFilter as _BasicOpFilter
+    from visualizer.computation_graph import SYNTHETIC_INPUT, build_computation_graph
+
+    resolved = basic_ops or _BasicOpFilter.for_detailed()
+    graph = build_computation_graph(node, basic_ops=resolved)
+    return sum(
+        1
+        for spec in graph.nodes
+        if spec.synthetic not in {SYNTHETIC_INPUT, "@combine"}
+        and spec.label not in {"×", "+", "Elementwise ×"}
+    )
+
+
+def subgraph_expands_on_export(node: BlockNode) -> bool:
+    """True when export expands this block inline or as a nested subgraph."""
+    if is_inline_expandable_module(node):
+        return True
+    return _is_composite_block(node)
+
+
+def subgraph_warrants_export(
+    node: BlockNode,
+    *,
+    basic_ops: BasicOpFilter | None = None,
+    min_operations: int = MIN_SUBGRAPH_OPERATIONS,
+) -> bool:
+    """True when a block tree should be exported as its own subgraph/section."""
+    op_count = forward_operation_count(node, basic_ops=basic_ops)
+    if op_count >= min_operations:
+        return True
+    if op_count == 1 and subgraph_expands_on_export(node):
+        return True
+    return False
+
+
+def subgraph_warrants_json_export(
+    node: BlockNode,
+    *,
+    basic_ops: BasicOpFilter | None = None,
+) -> bool:
+    """True when a block tree should appear as its own section in operator JSON export."""
+    if _omit_from_detailed_view(node):
+        return False
+    return forward_operation_count(node, basic_ops=basic_ops) >= 1
+
+
+def _clone_block_node(node: BlockNode, **changes: object) -> BlockNode:
+    return replace(node, **changes)
+
+
+def _is_substitutable_single_op_subgraph(
+    node: BlockNode,
+    *,
+    basic_ops: BasicOpFilter | None = None,
+) -> bool:
+    """True when a composite wrapper should be replaced by its single inner op."""
+    if is_method_wrapper(node) or node.is_basic:
+        return False
+    if is_inline_expandable_module(node):
+        return False
+    if not _is_composite_block(node):
+        return False
+    return forward_operation_count(node, basic_ops=basic_ops) == 1
+
+
+def _substitute_single_op_subgraph(
+    node: BlockNode,
+    *,
+    basic_ops: BasicOpFilter | None = None,
+) -> BlockNode:
+    """Return the single forward op represented by a one-op composite wrapper."""
+    steps = collect_function_steps(node)
+    if len(steps) == 1:
+        substitute = steps[0]
+    else:
+        inner = straight_line_steps(node)
+        substitute = inner[0] if len(inner) == 1 else node
+    if substitute is node:
+        return node
+    input_source = node.input_source or substitute.input_source
+    if input_source == substitute.input_source:
+        return substitute
+    return _clone_block_node(substitute, input_source=input_source)
+
+
+def expand_block_tree_inplace(
+    node: BlockNode,
+    *,
+    basic_ops: BasicOpFilter | None = None,
+) -> BlockNode:
+    """Expand straight-line composites and substitute single-op subgraph wrappers."""
+    expanded_children = [
+        expand_block_tree_inplace(child, basic_ops=basic_ops) for child in node.children
+    ]
+    node = _clone_block_node(node, children=expanded_children)
+
+    if _is_substitutable_single_op_subgraph(node, basic_ops=basic_ops):
+        substitute = _substitute_single_op_subgraph(node, basic_ops=basic_ops)
+        return expand_block_tree_inplace(substitute, basic_ops=basic_ops)
+
+    if is_straight_line_module(node):
+        inner_steps = [
+            expand_block_tree_inplace(step, basic_ops=basic_ops)
+            for step in straight_line_steps(node)
+        ]
+        if len(inner_steps) == 1:
+            substitute = inner_steps[0]
+            input_source = node.input_source or substitute.input_source
+            if input_source != substitute.input_source:
+                substitute = _clone_block_node(substitute, input_source=input_source)
+            return substitute
+        return _clone_block_node(node, children=inner_steps)
+
+    return node
+
+
+def prepare_diagram_section_trees(
+    trees: list[tuple[str, BlockNode]],
+    *,
+    basic_ops: BasicOpFilter | None = None,
+) -> list[tuple[str, BlockNode]]:
+    """Prepare parsed section block trees for diagram rendering."""
+    return [
+        (title, expand_block_tree_inplace(tree, basic_ops=basic_ops))
+        for title, tree in trees
+    ]
+
+
+def subgraph_warrants_diagram(
+    node: BlockNode,
+    *,
+    basic_ops: BasicOpFilter | None = None,
+    min_operations: int = MIN_SUBGRAPH_OPERATIONS,
+) -> bool:
+    """Alias for :func:`subgraph_warrants_export`."""
+    return subgraph_warrants_export(
+        node,
+        basic_ops=basic_ops,
+        min_operations=min_operations,
+    )
 
 
 _PIPELINE_WRAPPER_ATTRS = frozenset({"tokenization", "tokenizer"})
@@ -1323,6 +1476,8 @@ def collect_nested_diagrams(
         if block is None or not _is_composite_block(block):
             return
         if is_inline_expandable_module(block):
+            return
+        if not subgraph_warrants_export(block, basic_ops=resolved_basic_ops):
             return
         if block.attr_name in seen:
             return

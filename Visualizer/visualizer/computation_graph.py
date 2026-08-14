@@ -1712,6 +1712,68 @@ def _inline_frame_id_for_node(graph: ComputationGraph, node_index: int) -> str |
     return None
 
 
+def _inline_frame_top_member_index(graph: ComputationGraph, node_index: int) -> bool:
+    """True when node_index is the topmost member of an inline frame column."""
+    for frame in graph.inline_frames:
+        if frame.node_indices and frame.node_indices[0] == node_index:
+            return True
+    return False
+
+
+def _input_fanout_target_top_y(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    target_index: int,
+) -> float:
+    """Top Y used for input fan-out clearance, honoring expanded frame envelopes."""
+    for frame in graph.inline_frames:
+        if frame.node_indices and frame.node_indices[0] == target_index:
+            from visualizer.render import _inline_frame_draw_bounds
+
+            return _inline_frame_draw_bounds(frame, positions, graph).top
+    return positions[target_index].top_y
+
+
+def _compact_attention_side_feeder_columns(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float | None = None,
+) -> None:
+    """Shrinkwrap side feeder columns toward Attention-style merge nodes."""
+    from visualizer.sizing import min_vertical_block_gap
+
+    gap = min_vertical_block_gap() if min_gap is None else min_gap
+    incoming = _build_incoming_links(graph, node_count=len(positions))
+    for target, sources in incoming.items():
+        if graph.nodes[target].label != "Attention":
+            continue
+        target_pos = positions[target]
+        side_sources = [
+            source
+            for source in sources
+            if abs(positions[source].cx - target_pos.cx) > 0.08
+        ]
+        if not side_sources:
+            continue
+        lowest_needed_top = target_pos.top_y + gap
+        for source in side_sources:
+            branch_indices = next(
+                (
+                    indices
+                    for indices in _fanout_branch_node_groups(positions).values()
+                    if source in indices
+                ),
+                [source],
+            )
+            branch_top = max(positions[index].top_y for index in branch_indices)
+            shift = branch_top - lowest_needed_top
+            if shift <= gap:
+                continue
+            for index in branch_indices:
+                positions[index].top_y -= shift
+
+
 def _layer_packing_units(graph: ComputationGraph, layer_indices: list[int]) -> list[list[int]]:
     """Group same-layer nodes that belong to one inline frame into a single packing unit."""
     units: list[list[int]] = []
@@ -1770,12 +1832,10 @@ def _inline_frame_column_bounds(
     left = min(_node_content_left(positions[index]) for index in indices)
     right = max(_node_content_right(positions[index]) for index in indices)
     if frame is not None:
-        from visualizer.render import _inline_frame_total_connector_gutter_width
-
-        gutter = _inline_frame_total_connector_gutter_width(graph, frame)
-    else:
-        gutter = 0.0
-    return left - pad - gutter, right + pad
+        left_gutter = _inline_frame_connector_gutter_width(graph, frame, side="left")
+        right_gutter = _inline_frame_connector_gutter_width(graph, frame, side="right")
+        return left - pad - left_gutter, right + pad + right_gutter
+    return left - pad, right + pad
 
 
 def _inter_inline_frame_gap(
@@ -1785,13 +1845,23 @@ def _inter_inline_frame_gap(
     *,
     base_gap: float,
 ) -> float:
-    from visualizer.render import INLINE_FRAME_SIDE_ENTRY_EXTRA_GAP, _inline_frame_side_entry_link_count
+    from visualizer.render import (
+        INLINE_FRAME_LABEL_CHAR_W,
+        INLINE_FRAME_SIDE_ENTRY_EXTRA_GAP,
+        _inline_frame_side_entry_link_count,
+    )
 
     extra = 0.0
     for indices in (left_indices, right_indices):
         frame = _inline_frame_for_indices(graph, indices)
-        if frame is not None and _inline_frame_side_entry_link_count(graph, frame) > 0:
+        if frame is None:
+            continue
+        if _inline_frame_side_entry_link_count(graph, frame) > 0:
             extra = max(extra, INLINE_FRAME_SIDE_ENTRY_EXTRA_GAP)
+        label = frame.label.strip()
+        if label:
+            label_extent = min(len(label) * INLINE_FRAME_LABEL_CHAR_W, 1.6)
+            extra = max(extra, label_extent)
     return base_gap + extra
 
 
@@ -2080,7 +2150,9 @@ def _ensure_multi_branch_input_fanout_clearance(
         return
     min_fanout_clearance = gap + CONNECTOR_OBSTACLE_MARGIN + CONNECTOR_ATTACHED_BOX_MARGIN
     input_pos = positions[input_index]
-    highest_top = max(positions[target].top_y for target in targets)
+    highest_top = max(
+        _input_fanout_target_top_y(positions, graph, target) for target in targets
+    )
     required_bottom = highest_top + min_fanout_clearance
     if input_pos.bottom < required_bottom:
         input_pos.top_y += required_bottom - input_pos.bottom
@@ -2104,7 +2176,9 @@ def _compact_synthetic_input_spacing(
     targets = [target for source, target in graph.links if source == input_index]
     if not targets:
         return
-    highest_top = max(positions[target].top_y for target in targets)
+    highest_top = max(
+        _input_fanout_target_top_y(positions, graph, target) for target in targets
+    )
     input_pos = positions[input_index]
     desired_bottom = highest_top + gap
     if elements:
@@ -2767,6 +2841,42 @@ def repack_inline_frame_columns(
                 positions[index].cx += shift
             cursor_left += width
             prev_indices = indices
+
+    if _graph_has_tensor_ports(graph):
+        _separate_overlapping_inline_frame_draw_bounds(positions, graph, min_gap=gap)
+
+
+def _separate_overlapping_inline_frame_draw_bounds(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float,
+) -> None:
+    """Push inline-frame columns apart when expanded draw bounds overlap across rows."""
+    from visualizer.render import INLINE_FRAME_LABEL_CHAR_W, _inline_frame_draw_bounds
+
+    def caption_reserve(frame) -> float:
+        label = frame.label.strip()
+        if not label:
+            return 0.0
+        return min(len(label) * INLINE_FRAME_LABEL_CHAR_W, 0.55)
+
+    frames = sorted(
+        graph.inline_frames,
+        key=lambda frame: _inline_frame_draw_bounds(frame, positions, graph).left,
+    )
+    for left_index in range(len(frames) - 1):
+        left_frame = frames[left_index]
+        left_bounds = _inline_frame_draw_bounds(left_frame, positions, graph)
+        right_bounds = _inline_frame_draw_bounds(frames[left_index + 1], positions, graph)
+        required_gap = min_gap + caption_reserve(left_frame)
+        overlap = left_bounds.right + required_gap - right_bounds.left
+        if overlap <= 0:
+            continue
+        for shift_index in range(left_index + 1, len(frames)):
+            for node_index in frames[shift_index].node_indices:
+                positions[node_index].cx += overlap
+    _align_tensor_port_columns(positions, graph)
 
 
 def _inline_frame_internal_gap(
@@ -3470,6 +3580,41 @@ def _compact_parallel_feeder_frame_exit_stubs(
             _shift_node_subtree(positions, graph, target, -lift)
 
 
+def _compact_fanout_branch_tail_spacing(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float | None = None,
+    max_compaction: float = 0.5,
+) -> None:
+    """Shrinkwrap branch tail tiles (e.g. Pad) toward the Linear/RMSNorm stack above."""
+    from visualizer.sizing import min_vertical_block_gap
+
+    gap = min_vertical_block_gap() if min_gap is None else min_gap
+    stack_labels = {"Linear", "RMSNorm"}
+
+    for indices in _fanout_branch_node_groups(positions).values():
+        chain = _ordered_inline_frame_chain(graph, list(indices))
+        stack_indices = [index for index in chain if graph.nodes[index].label in stack_labels]
+        tail_indices = [index for index in chain if index not in stack_indices]
+        if not stack_indices or not tail_indices:
+            continue
+        if not all(graph.nodes[index].label == "Pad" for index in tail_indices):
+            continue
+        anchor_index = stack_indices[-1]
+        anchor_bottom = positions[anchor_index].bottom
+        tail_indices.sort(key=lambda index: positions[index].top_y, reverse=True)
+        closest_tail = tail_indices[0]
+        empty = anchor_bottom - positions[closest_tail].top_y
+        if empty <= gap * 1.5:
+            continue
+        shift = min(empty * max_compaction, empty - gap)
+        if shift <= 1e-4:
+            continue
+        for index in tail_indices:
+            positions[index].top_y += shift
+
+
 def _align_tensor_port_merge_nodes(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
@@ -3505,6 +3650,34 @@ def _tensor_port_outgoing(graph: ComputationGraph) -> dict[int, list[int]]:
     return outgoing
 
 
+def _module_input_port_clearance_above_target(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    port_index: int,
+    target_index: int,
+    *,
+    row_gap: float,
+) -> float:
+    """Minimum top_y for a modeling port sitting above its consumer column."""
+    target_pos = positions[target_index]
+    port_height = positions[port_index].height
+    frame_id = _inline_frame_id_for_node(graph, target_index)
+    if frame_id is not None:
+        frame = next(item for item in graph.inline_frames if item.frame_id == frame_id)
+        chain = _ordered_inline_frame_chain(graph, list(frame.node_indices))
+        if chain and chain[-1] == target_index and chain[0] != target_index:
+            return target_pos.top_y + row_gap + port_height
+        if chain:
+            frame_top = max(positions[node_index].top_y for node_index in chain)
+            return (
+                frame_top
+                + INPUT_INLINE_FRAME_CAPTION_CLEARANCE
+                + row_gap
+                + port_height
+            )
+    return target_pos.top_y + row_gap + port_height
+
+
 def _dock_single_consumer_tensor_ports(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
@@ -3518,6 +3691,7 @@ def _dock_single_consumer_tensor_ports(
     row_gap = DETAIL_LAYER_GAP if gap is None else gap
     side_gap = MIN_HORIZONTAL_BLOCK_GAP
     outgoing = _tensor_port_outgoing(graph)
+    frame_tails = _inline_frame_tail_indices(graph)
     for index, spec in enumerate(graph.nodes):
         if spec.synthetic != SYNTHETIC_TENSOR:
             continue
@@ -3528,7 +3702,6 @@ def _dock_single_consumer_tensor_ports(
         target_pos = positions[target_index]
         port_pos = positions[index]
 
-        frame_tails = _inline_frame_tail_indices(graph)
         shared_column_tail = any(
             tgt == target_index
             for src, tgt in graph.links
@@ -3563,6 +3736,58 @@ def _dock_single_consumer_tensor_ports(
 
         port_pos.cx = target_pos.cx
         port_pos.top_y = target_pos.top_y + row_gap + port_pos.height
+
+    _align_module_input_ports_row(positions, graph, gap=row_gap)
+
+
+def _align_module_input_ports_row(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    gap: float | None = None,
+) -> None:
+    """Keep modeling inputs on one horizontal row when each can stay above its consumer."""
+    if not _graph_has_tensor_ports(graph):
+        return
+
+    row_gap = DETAIL_LAYER_GAP if gap is None else gap
+    port_indices = [
+        index for index, spec in enumerate(graph.nodes) if spec.synthetic == SYNTHETIC_TENSOR
+    ]
+    if len(port_indices) < 2:
+        return
+
+    outgoing = _tensor_port_outgoing(graph)
+    min_tops: list[float] = []
+    for port_index in port_indices:
+        targets = outgoing.get(port_index, [])
+        if len(targets) != 1:
+            continue
+        min_tops.append(
+            _module_input_port_clearance_above_target(
+                positions,
+                graph,
+                port_index,
+                targets[0],
+                row_gap=row_gap,
+            )
+        )
+    if not min_tops:
+        return
+
+    row_top = max(min_tops)
+    for port_index in port_indices:
+        if len(outgoing.get(port_index, [])) != 1:
+            continue
+        if graph.nodes[outgoing[port_index][0]].label == "×":
+            continue
+        frame_id = _inline_frame_id_for_node(graph, outgoing[port_index][0])
+        if frame_id is not None:
+            frame = next(item for item in graph.inline_frames if item.frame_id == frame_id)
+            chain = _ordered_inline_frame_chain(graph, list(frame.node_indices))
+            if chain and chain[-1] == outgoing[port_index][0] and chain[0] != outgoing[port_index][0]:
+                continue
+        positions[port_index].top_y = row_top
 
 
 def _align_tensor_port_columns(
@@ -3768,14 +3993,153 @@ def _fanout_branch_node_groups(positions: list[LayoutPosition]) -> dict[int, lis
     return groups
 
 
-def _order_fanout_branch_positions(positions: list[LayoutPosition]) -> None:
-    """Reorder entire fan-out branch columns left-to-right to reduce wire crossings."""
+def _layout_forward_successors(
+    graph: ComputationGraph,
+    index: int,
+) -> list[int]:
+    """Return forward-path successors, ignoring dashed and side-entry feeds."""
+    return [
+        target
+        for source, target in graph.links
+        if source == index
+        and (source, target) not in graph.dashed_links
+        and (source, target) not in graph.side_entry_links
+    ]
+
+
+def _has_straight_line_to_exit(graph: ComputationGraph, start: int) -> bool:
+    """True when the forward path from start is a single chain to a sink node."""
+    visited: set[int] = set()
+    current = start
+    while True:
+        successors = _layout_forward_successors(graph, current)
+        if not successors:
+            return True
+        if len(successors) != 1:
+            return False
+        next_index = successors[0]
+        if next_index in visited:
+            return False
+        visited.add(current)
+        current = next_index
+
+
+def _forward_hops_to_exit(graph: ComputationGraph, start: int) -> int:
+    """Count forward hops along a straight path; large when the path branches."""
+    hops = 0
+    visited: set[int] = set()
+    current = start
+    while True:
+        successors = _layout_forward_successors(graph, current)
+        if not successors:
+            return hops
+        if len(successors) != 1:
+            return hops + 10_000
+        next_index = successors[0]
+        if next_index in visited:
+            return hops + 10_000
+        visited.add(current)
+        current = next_index
+        hops += 1
+
+
+def _branch_merge_consumers(
+    graph: ComputationGraph,
+    branch_indices: list[int],
+) -> set[int]:
+    branch_set = set(branch_indices)
+    consumers: set[int] = set()
+    for index in branch_indices:
+        for target in _layout_forward_successors(graph, index):
+            if target not in branch_set:
+                consumers.add(target)
+    return consumers
+
+
+def _consumer_leads_to_exit(graph: ComputationGraph, consumer: int) -> bool:
+    """True when a merge consumer has exits or a straight-line path to the output."""
+    if _has_straight_line_to_exit(graph, consumer):
+        return True
+    return bool(_layout_forward_successors(graph, consumer))
+
+
+def _input_hidden_indices(graph: ComputationGraph) -> set[int]:
+    return {
+        index
+        for index, spec in enumerate(graph.nodes)
+        if spec.synthetic in {SYNTHETIC_INPUT, SYNTHETIC_HIDDEN}
+    }
+
+
+def _branch_feeds_exit_path(
+    graph: ComputationGraph,
+    branch_indices: list[int],
+    *,
+    input_indices: set[int],
+) -> bool:
+    """True when an input-fed branch reaches a consumer on a path to the output."""
+    if not branch_indices or not input_indices:
+        return False
+    branch_set = set(branch_indices)
+    fed_from_input = any(
+        source in input_indices
+        for index in branch_indices
+        for source, target in graph.links
+        if target == index and source not in branch_set
+    )
+    if not fed_from_input:
+        return False
+    consumers = _branch_merge_consumers(graph, branch_indices)
+    return any(_consumer_leads_to_exit(graph, consumer) for consumer in consumers)
+
+
+def _fanout_branch_outside_sort_key(
+    graph: ComputationGraph,
+    positions: list[LayoutPosition],
+    branch_index: int,
+    indices: list[int],
+    *,
+    input_indices: set[int],
+) -> tuple[int, int, int, float, int]:
+    """Sort key: exit feeders outside first; shorter / closer-to-output branches further out."""
+    chain_len = len(indices)
+    consumers = _branch_merge_consumers(graph, indices)
+    feeds_exit = _branch_feeds_exit_path(graph, indices, input_indices=input_indices)
+    if not feeds_exit or not consumers:
+        return (1, chain_len, 0, 0.0, branch_index)
+    exit_hops = min(_forward_hops_to_exit(graph, consumer) for consumer in consumers)
+    tail_bottom = min(positions[index].bottom for index in indices)
+    return (0, chain_len, exit_hops, tail_bottom, branch_index)
+
+
+def _order_fanout_branch_positions(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph | None = None,
+) -> None:
+    """Pack fan-out branch columns left-to-right, pushing exit feeders to the outside."""
     branch_groups = _fanout_branch_node_groups(positions)
     if len(branch_groups) < 2:
         return
 
+    input_indices = _input_hidden_indices(graph) if graph is not None else set()
+    use_exit_heuristic = graph is not None and input_indices
+    branch_order = sorted(
+        branch_groups,
+        key=lambda branch_index: (
+            _fanout_branch_outside_sort_key(
+                graph,
+                positions,
+                branch_index,
+                branch_groups[branch_index],
+                input_indices=input_indices,
+            )
+            if use_exit_heuristic
+            else (0, 0, 0, 0.0, branch_index)
+        ),
+    )
+
     columns: list[tuple[int, list[int], float, float]] = []
-    for branch_index in sorted(branch_groups):
+    for branch_index in branch_order:
         indices = branch_groups[branch_index]
         left = min(_node_content_left(positions[index]) for index in indices)
         right = max(_node_content_right(positions[index]) for index in indices)
@@ -3787,6 +4151,172 @@ def _order_fanout_branch_positions(positions: list[LayoutPosition]) -> None:
         for index in indices:
             positions[index].cx += shift
         cursor_left += (right - left) + MIN_HORIZONTAL_BLOCK_GAP
+
+
+def _main_output_spine_indices(
+    graph: ComputationGraph,
+    positions: list[LayoutPosition],
+) -> set[int]:
+    """Node indices on the straight main-path column from output back toward the merge."""
+    branch_members: set[int] = set()
+    for indices in _fanout_branch_node_groups(positions).values():
+        branch_members.update(indices)
+
+    incoming = _build_incoming_links(graph, node_count=len(positions))
+    sinks = [
+        index
+        for index in range(len(positions))
+        if index not in branch_members
+        and not _layout_forward_successors(graph, index)
+        and positions[index].spec.synthetic
+        not in {SYNTHETIC_INPUT, SYNTHETIC_HIDDEN, SYNTHETIC_TENSOR}
+    ]
+
+    spine: set[int] = set()
+    for sink in sinks:
+        current = sink
+        while True:
+            if current in branch_members:
+                break
+            spec = positions[current].spec
+            if spec.synthetic in {SYNTHETIC_INPUT, SYNTHETIC_HIDDEN, SYNTHETIC_TENSOR}:
+                break
+            predecessors = [
+                source
+                for source in incoming[current]
+                if (source, current) not in graph.dashed_links
+                and (source, current) not in graph.side_entry_links
+            ]
+            if len(predecessors) >= 2:
+                break
+            spine.add(current)
+            if len(predecessors) != 1:
+                break
+            predecessor = predecessors[0]
+            if predecessor in branch_members:
+                break
+            current = predecessor
+    return spine
+
+
+def _compact_exit_feeder_branch_indices(
+    graph: ComputationGraph,
+    branch_groups: dict[int, list[int]],
+    *,
+    input_indices: set[int],
+) -> set[int]:
+    """Branches of one or two input-fed tiles that hand off toward the output path."""
+    compact: set[int] = set()
+    for indices in branch_groups.values():
+        if len(indices) > 2:
+            continue
+        if not _branch_feeds_exit_path(graph, indices, input_indices=input_indices):
+            continue
+        compact.update(indices)
+    return compact
+
+
+def _ensure_exit_feeder_branches_left_of_spine(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float | None = None,
+) -> None:
+    """Keep compact input-fed exit feeders left of the main output spine column."""
+    gap = MIN_HORIZONTAL_BLOCK_GAP if min_gap is None else min_gap
+    branch_groups = _fanout_branch_node_groups(positions)
+    if not branch_groups:
+        return
+
+    input_indices = _input_hidden_indices(graph)
+    exit_feeder_nodes = _compact_exit_feeder_branch_indices(
+        graph,
+        branch_groups,
+        input_indices=input_indices,
+    )
+    if not exit_feeder_nodes:
+        return
+
+    spine = _main_output_spine_indices(graph, positions)
+    if not spine:
+        return
+
+    feeder_right = max(_node_content_right(positions[index]) for index in exit_feeder_nodes)
+    spine_left = min(_node_content_left(positions[index]) for index in spine)
+    shift = feeder_right + gap - spine_left
+    if shift <= 1e-6:
+        return
+    for index in spine:
+        positions[index].cx += shift
+
+
+def _separate_parallel_merge_horiz_corridors(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float | None = None,
+) -> None:
+    """Separate parallel side-feeder horizontal exit segments after vertical shrinkwrap."""
+    from visualizer.render import (
+        PARALLEL_CONNECTOR_CHANNEL_GAP,
+        PARALLEL_CONNECTOR_COORD_EPS,
+        _frame_tail_exit_horiz_y,
+    )
+
+    channel_gap = PARALLEL_CONNECTOR_CHANNEL_GAP if min_gap is None else max(
+        min_gap,
+        PARALLEL_CONNECTOR_CHANNEL_GAP,
+    )
+    incoming = _build_incoming_links(graph, node_count=len(positions))
+    frame_tails = _inline_frame_tail_indices(graph)
+
+    for target, sources in incoming.items():
+        tail_sources = [source for source in sources if source in frame_tails]
+        side_sources = [
+            source
+            for source in tail_sources
+            if abs(positions[source].cx - positions[target].cx) > 0.08
+        ]
+        if len(side_sources) < 2:
+            continue
+
+        levels: list[list[tuple[int, float]]] = []
+        for source in side_sources:
+            exit_y = _frame_tail_exit_horiz_y(graph, positions, source)
+            if exit_y is None:
+                continue
+            for group in levels:
+                if abs(group[0][1] - exit_y) <= PARALLEL_CONNECTOR_COORD_EPS:
+                    group.append((source, exit_y))
+                    break
+            else:
+                levels.append([(source, exit_y)])
+
+        if len(levels) < 2:
+            continue
+        levels.sort(key=lambda group: group[0][1], reverse=True)
+        for index in range(1, len(levels)):
+            upper_y = levels[index - 1][0][1]
+            lower_y = levels[index][0][1]
+            if upper_y - lower_y >= channel_gap - PARALLEL_CONNECTOR_COORD_EPS:
+                continue
+            lift = channel_gap - (upper_y - lower_y)
+            for source, exit_y in levels[index]:
+                frame = _inline_frame_for_tail_node(graph, source)
+                if frame is None:
+                    continue
+                max_shift = _max_frame_exit_downward_shift(
+                    graph,
+                    positions,
+                    frame,
+                    source,
+                    min_gap=channel_gap / 2,
+                )
+                shift = min(lift, max_shift)
+                if shift <= PARALLEL_CONNECTOR_COORD_EPS:
+                    continue
+                _shift_inline_frame_column_and_ports(positions, graph, frame, -shift)
+                levels[index] = [(source, exit_y - shift) for source, exit_y in levels[index]]
 
 
 def _align_fanout_branch_columns(positions: list[LayoutPosition]) -> None:
@@ -3964,7 +4494,6 @@ def layout_computation_graph(
     _compact_layer_positions(positions, layers, anchor_x, align_left=align_left, graph=graph)
     compact_horizontal_shrink_wrap(positions, graph, min_left=content_left if align_left else None)
     _center_align_vertical_chains(positions, graph)
-    _order_fanout_branch_positions(positions)
     _align_fanout_branch_columns(positions)
     layers = _optimize_layer_order(_layer_order_from_positions(positions, layers), graph)
     _compact_layer_positions(positions, layers, anchor_x, align_left=align_left, graph=graph)

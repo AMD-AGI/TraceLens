@@ -540,14 +540,12 @@ def resolve_measured_overlaps(
         _align_tensor_port_columns,
         _assign_layered_vertical_positions,
         _graph_has_tensor_ports,
-        _order_fanout_branch_positions,
         _topological_layers,
     )
 
     if top_y is not None and not _graph_has_tensor_ports(graph):
         layers = _topological_layers(graph)
         _assign_layered_vertical_positions(positions, layers, top_y=top_y)
-        _order_fanout_branch_positions(positions)
     _resolve_same_row_tile_overlaps(
         positions,
         min_gap=min_gap,
@@ -2628,6 +2626,9 @@ def finalize_detail_layout(
     from visualizer.computation_graph import _compact_parallel_feeder_frame_exit_stubs
 
     _compact_parallel_feeder_frame_exit_stubs(positions, graph)
+    from visualizer.computation_graph import _compact_fanout_branch_tail_spacing
+
+    _compact_fanout_branch_tail_spacing(positions, graph, min_gap=VALIDATE_MIN_GAP)
     from visualizer.computation_graph import (
         _align_k_proj_adjacent_to_chunk_pipeline,
         _ensure_multi_branch_input_fanout_clearance,
@@ -2645,6 +2646,38 @@ def finalize_detail_layout(
         graph,
         min_gap=VALIDATE_MIN_GAP,
     )
+    if positions and not _graph_has_tensor_ports(graph):
+        from visualizer.computation_graph import (
+            _compact_exit_feeder_branch_indices,
+            _ensure_exit_feeder_branches_left_of_spine,
+            _input_hidden_indices,
+            _order_fanout_branch_positions,
+        )
+
+        input_indices = _input_hidden_indices(graph)
+        if _compact_exit_feeder_branch_indices(
+            graph,
+            _fanout_branch_node_groups(positions),
+            input_indices=input_indices,
+        ):
+            _order_fanout_branch_positions(positions, graph)
+            _ensure_exit_feeder_branches_left_of_spine(
+                positions,
+                graph,
+                min_gap=MIN_HORIZONTAL_BLOCK_GAP,
+            )
+            realign_fanout_branch_columns(positions, graph)
+            _center_align_vertical_chains(positions, graph)
+            _ensure_exit_feeder_branches_left_of_spine(
+                positions,
+                graph,
+                min_gap=MIN_HORIZONTAL_BLOCK_GAP,
+            )
+        _resolve_same_row_tile_overlaps(
+            positions,
+            min_gap=VALIDATE_MIN_GAP,
+            graph=graph,
+        )
     saved_inline_frame_labels = plan.inline_frame_labels
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     plan.inline_frame_labels = saved_inline_frame_labels

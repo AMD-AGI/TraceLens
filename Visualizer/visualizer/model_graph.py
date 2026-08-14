@@ -345,9 +345,13 @@ def build_architecture_model_graphs(
     basic_ops: BasicOpFilter | None = None,
 ) -> dict[str, Any]:
     """Build model graphs for every detailed section in an architecture spec."""
+    from visualizer.block_tree import subgraph_warrants_json_export
+
     resolved_basic_ops = basic_ops or spec.basic_ops
     sections: list[dict[str, Any]] = []
     for section_title, block_tree in architecture_section_trees(spec):
+        if not subgraph_warrants_json_export(block_tree, basic_ops=resolved_basic_ops):
+            continue
         graph = build_model_graph(
             block_tree,
             title=section_title,

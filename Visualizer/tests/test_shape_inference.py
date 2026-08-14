@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from visualizer.ast_analyze import SYNTHETIC_ATTENTION
 from visualizer.basic_ops import BasicOpFilter
@@ -137,15 +138,106 @@ def test_build_operator_export_custom_model():
     all_ops = []
     for section in payload["sections"]:
         all_ops.extend(section["operators"])
+    section_titles = [section["title"] for section in payload["sections"]]
+    assert "Token Embedding" in section_titles
+    assert "Linear" in section_titles
+    assert "RoPE" in section_titles
+    assert section_titles.count("RMSNorm") == 1
     assert any(op["name"] == "q_proj" for op in all_ops)
     assert any(op["name"] == "input" and op["operation"] == "input" for op in all_ops)
     assert any(op["name"] == "router" for op in all_ops)
-    assert any(op["name"] == "embed_tokens" for op in all_ops)
-    assert any(op["name"] == "lm_head" for op in all_ops)
     output_ops = [op for op in all_ops if op["name"] == "output"]
     assert len(output_ops) == 1
     assert output_ops[0]["inputs"] == ["lm_head"]
     json.dumps(payload)
+
+
+def test_subgraph_warrants_export_filters_opaque_single_ops():
+    from visualizer.block_tree import (
+        BlockNode,
+        forward_operation_count,
+        subgraph_expands_on_export,
+        subgraph_warrants_export,
+    )
+
+    embed = BlockNode(
+        attr_name="embed_tokens",
+        class_name="Embedding",
+        role="embedding",
+        label="Embedding",
+        is_basic=True,
+    )
+    rope = BlockNode(
+        attr_name="rotary_emb",
+        class_name="RotaryEmbedding",
+        role="positional",
+        label="RoPE",
+        details=["positional encoding (RoPE)"],
+    )
+    attn = BlockNode(
+        attr_name="attn",
+        class_name="Attn",
+        role="attention",
+        label="Attn",
+        children=[
+            BlockNode(attr_name="q_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
+            BlockNode(attr_name="k_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
+        ],
+    )
+    inline_mlp = BlockNode(
+        attr_name="mlp",
+        class_name="MLP",
+        role="ffn",
+        label="MLP",
+        children=[
+            BlockNode(attr_name="down_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
+        ],
+    )
+
+    assert forward_operation_count(embed) == 1
+    assert forward_operation_count(rope) == 1
+    assert forward_operation_count(attn) == 2
+    assert forward_operation_count(inline_mlp) == 1
+    assert not subgraph_expands_on_export(rope)
+    assert subgraph_expands_on_export(inline_mlp)
+    assert not subgraph_warrants_export(embed)
+    assert not subgraph_warrants_export(rope)
+    assert subgraph_warrants_export(attn)
+    assert subgraph_warrants_export(inline_mlp)
+
+
+def test_build_operator_export_deduplicates_same_shape_subgraphs():
+    from visualizer.shape_inference import ShapeInferencer, subgraph_boundary_signature
+
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        name="Custom MLA MoE",
+        detailed=True,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    payload = build_operator_export(spec)
+    section_titles = [section["title"] for section in payload["sections"]]
+    assert section_titles.count("RMSNorm") == 1
+    assert "RoPE" in section_titles
+    assert "Token Embedding" in section_titles
+    assert "Linear" in section_titles
+    assert "CustomLatent Attn" in section_titles
+    assert "CustomSharedExpertMoE" in section_titles
+
+    inferencer = ShapeInferencer(spec)
+    rmsnorm_signatures: list[tuple[Any, ...]] = []
+    for title, tree in spec.export_block_trees:
+        if title != "RMSNorm":
+            continue
+        operators = inferencer.export_operators(
+            build_model_graph(tree, title=title, basic_ops=BasicOpFilter.for_detailed()),
+            root=tree,
+        )
+        signature = subgraph_boundary_signature(operators, class_name=tree.class_name)
+        assert signature is not None
+        rmsnorm_signatures.append(signature)
+    assert len(rmsnorm_signatures) >= 2
+    assert len(set(rmsnorm_signatures)) == 1
 
 
 def test_infer_forward_steps_from_init():

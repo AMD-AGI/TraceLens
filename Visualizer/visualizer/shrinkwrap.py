@@ -26,6 +26,7 @@ from visualizer.computation_graph import (
     _graph_has_tensor_ports,
     _inline_frame_for_tail_node,
     _inline_frame_tail_indices,
+    _separate_parallel_merge_horiz_corridors,
     _shift_inline_frame_column_and_ports,
     compact_horizontal_shrink_wrap,
 )
@@ -69,6 +70,7 @@ def _shrinkwrap_vertical_layout(
     """Shorten vertical straight stubs by moving feeder columns toward merge buses."""
     del min_gap
     _compact_parallel_feeder_frame_exit_stubs(positions, graph)
+    _separate_parallel_merge_horiz_corridors(positions, graph)
 
 
 def _shrinkwrap_horizontal_layout(
