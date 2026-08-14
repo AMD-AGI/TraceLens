@@ -783,6 +783,11 @@ def _build_detailed_block_trees(spec: ArchitectureSpec, basic_ops: BasicOpFilter
     )
 
 
+def architecture_section_trees(spec: ArchitectureSpec) -> list[tuple[str, BlockNode]]:
+    """Return block trees for detailed SVG sections and operator/graph export."""
+    return spec.export_block_trees or spec.detailed_block_trees
+
+
 def parse_architecture(
     config: dict[str, Any],
     source: str,

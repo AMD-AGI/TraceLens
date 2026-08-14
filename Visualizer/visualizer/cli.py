@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from visualizer.basic_ops import DEFAULT_BASIC_OP_PATTERNS, BasicOpFilter
-from visualizer.extract import dump_model_ast, load_architecture
+from visualizer.extract import dump_model_ast, load_architecture, architecture_section_trees
 from visualizer.loader import build_detailed_basic_ops, resolve_checkpoint_arg
 from visualizer.model_graph import build_architecture_model_graphs, save_architecture_model_graphs
 from visualizer.render import render_diagram, _fact_lines
@@ -225,9 +225,9 @@ def main(argv: list[str] | None = None) -> int:
                 "Warning: --graph-json requires detailed block trees; re-run with --detailed",
                 file=sys.stderr,
             )
-        elif not spec.detailed_block_trees:
+        elif not architecture_section_trees(spec):
             print(
-                "Warning: no detailed block trees available; graph JSON not written",
+                "Warning: no block trees available; graph JSON not written",
                 file=sys.stderr,
             )
         else:
@@ -284,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
                     "is_basic": tree.is_basic,
                     "children": len(tree.children),
                 }
-                for title, tree in spec.detailed_block_trees
+                for title, tree in architecture_section_trees(spec)
             ],
             "basic_op_patterns": basic_ops.pattern_strings(),
         }

@@ -16,6 +16,7 @@ from typing import Any, TYPE_CHECKING
 
 from visualizer.basic_ops import BasicOpFilter, introspect_is_modeling_operation
 from visualizer.ast_analyze import is_functional_synthetic
+from visualizer.extract import architecture_section_trees
 
 if TYPE_CHECKING:
     from visualizer.block_tree import BlockNode
@@ -346,7 +347,7 @@ def build_architecture_model_graphs(
     """Build model graphs for every detailed section in an architecture spec."""
     resolved_basic_ops = basic_ops or spec.basic_ops
     sections: list[dict[str, Any]] = []
-    for section_title, block_tree in spec.detailed_block_trees:
+    for section_title, block_tree in architecture_section_trees(spec):
         graph = build_model_graph(
             block_tree,
             title=section_title,

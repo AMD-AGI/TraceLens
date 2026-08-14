@@ -10,6 +10,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from visualizer.extract import architecture_section_trees
 from visualizer.model_graph import (
     ModelGraph,
     ModelGraphNode,
@@ -341,7 +342,7 @@ class ShapeInferencer:
         """Export operators for every block-tree section in the loaded architecture."""
         from visualizer.basic_ops import BasicOpFilter
 
-        block_trees = self.spec.export_block_trees or self.spec.detailed_block_trees
+        block_trees = architecture_section_trees(self.spec)
         basic_ops = self.spec.basic_ops or BasicOpFilter.for_detailed()
         sections: list[dict[str, Any]] = []
         lm_head_tensor: str | None = None

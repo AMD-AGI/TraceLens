@@ -68,7 +68,7 @@ from visualizer.computation_graph import (
     build_computation_graph,
     layout_computation_graph,
 )
-from visualizer.extract import ArchitectureSpec
+from visualizer.extract import ArchitectureSpec, architecture_section_trees
 
 COLORS = {
     "bg": "#e1e1e1",
@@ -10094,7 +10094,7 @@ def _detail_sections_to_render(spec: ArchitectureSpec) -> list[tuple[str, BlockN
     """Return titled block trees rendered as internal diagram subsections."""
     sections: list[tuple[str, BlockNode, str | None]] = []
     basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
-    for title, tree in spec.detailed_block_trees:
+    for title, tree in architecture_section_trees(spec):
         sections.append((title, tree, _format_input_source_sublabel(tree.input_source)))
         for sub_title, sub_tree in collect_nested_diagrams(tree, basic_ops=basic_ops):
             if is_single_function_tree(sub_tree):
@@ -10209,7 +10209,7 @@ def _render_detailed_internals(
     section_drop = 0.22 if compact_header else 0.35
     cursor = start_y - section_drop
 
-    if not spec.detailed_block_trees:
+    if not architecture_section_trees(spec):
         ax.text(
             cx,
             cursor,

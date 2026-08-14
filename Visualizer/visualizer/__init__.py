@@ -2,7 +2,7 @@
 
 from visualizer.ast_analyze import analyze_source, analyze_sources, dump_ast, parse_python_ast
 from visualizer.blocks import BlockComponent, CodeAnalysis
-from visualizer.extract import ArchitectureSpec, dump_model_ast, load_architecture
+from visualizer.extract import ArchitectureSpec, architecture_section_trees, dump_model_ast, load_architecture
 from visualizer.github import fetch_github_source, is_github_url, parse_github_url
 from visualizer.model_graph import (
     ModelGraph,
@@ -23,6 +23,7 @@ __all__ = [
     "ShapeInferencer",
     "analyze_source",
     "analyze_sources",
+    "architecture_section_trees",
     "build_architecture_model_graphs",
     "build_detailed_basic_ops",
     "build_model_graph",

@@ -154,7 +154,13 @@ def test_build_architecture_model_graphs_custom_model():
         graph = section["graph"]
         assert graph["nodes"]
         assert graph["edges"]
-        assert any(node["label"] == "hidden_states" for node in graph["nodes"])
+
+    labels = {
+        node["label"]
+        for section in payload["sections"]
+        for node in section["graph"]["nodes"]
+    }
+    assert "hidden_states" in labels or "input_ids" in labels
 
 
 def test_decoder_block_tree_graph_has_nn_and_functional_ops():
