@@ -120,6 +120,15 @@ def shrinkwrap_detail_link_paths(
     ).items():
         if _is_source_fanout_bus_y(bus_y, source_bus, merge_link_bus):
             continue
+        if _is_frame_tail_corridor_bus_y(
+            bus_y,
+            graph=graph,
+            positions=positions,
+            anchors=anchors,
+            merge_link_bus=merge_link_bus,
+            link_paths=shrunk,
+        ):
+            continue
         new_y = _max_upward_bus_shift(
             bus_y,
             shrunk,
@@ -333,6 +342,60 @@ def _shared_bus_y_groups(
     for (_src, tgt), bus_y in merge_link_bus.items():
         buses.setdefault(round(bus_y, 4), set()).add(tgt)
     return buses
+
+
+def _is_frame_tail_corridor_bus_y(
+    bus_y: float,
+    *,
+    graph: ComputationGraph,
+    positions: list,
+    anchors: dict,
+    merge_link_bus: dict[tuple[int, int], float],
+    link_paths: dict[tuple[int, int], list[tuple[float, float]]] | None = None,
+) -> bool:
+    """True when a merge bus sits in the below-frame corridor for a frame tail."""
+    from visualizer.render import (
+        _inline_frame_below_exit_y,
+        _inline_frame_draw_bounds,
+    )
+
+    for (src, _tgt), link_bus in merge_link_bus.items():
+        if src not in _inline_frame_tail_indices(graph):
+            continue
+        if abs(link_bus - bus_y) > PARALLEL_CONNECTOR_COORD_EPS:
+            continue
+        frame = _inline_frame_for_tail_node(graph, src)
+        source = anchors.get(src)
+        if frame is None or source is None:
+            continue
+        bounds = _inline_frame_draw_bounds(frame, positions, graph)
+        corridor_y = _inline_frame_below_exit_y(
+            bounds,
+            source_bottom=source.bottom,
+        )
+        if abs(link_bus - corridor_y) <= PARALLEL_CONNECTOR_COORD_EPS:
+            return True
+    if link_paths is None:
+        return False
+    for (src, _tgt), points in link_paths.items():
+        if src not in _inline_frame_tail_indices(graph):
+            continue
+        frame = _inline_frame_for_tail_node(graph, src)
+        source = anchors.get(src)
+        if frame is None or source is None:
+            continue
+        bounds = _inline_frame_draw_bounds(frame, positions, graph)
+        corridor_y = _inline_frame_below_exit_y(
+            bounds,
+            source_bottom=source.bottom,
+        )
+        if not any(
+            abs(y - corridor_y) <= PARALLEL_CONNECTOR_COORD_EPS for _x, y in points
+        ):
+            continue
+        if any(abs(y - bus_y) <= PARALLEL_CONNECTOR_COORD_EPS for _x, y in points):
+            return True
+    return False
 
 
 def _is_source_fanout_bus_y(

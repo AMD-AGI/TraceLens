@@ -274,6 +274,80 @@ def test_draw_path_uses_flat_line_caps():
         plt.close(fig)
 
 
+def test_spread_top_entry_ports_cluster_near_center():
+    from visualizer.render import (
+        TOP_ENTRY_PORT_GAP,
+        _RenderAnchor,
+        _assign_spread_merge_entry_x,
+    )
+
+    target = _RenderAnchor(cx=5.0, top=6.0, bottom=5.0, left=4.0, right=6.0)
+    positions = [
+        None,
+        type("Pos", (), {"cx": 3.0})(),
+        type("Pos", (), {"cx": 4.5})(),
+        type("Pos", (), {"cx": 6.5})(),
+    ]
+    merge_entry_x: dict[tuple[int, int], float] = {}
+    links = [(1, 2), (2, 2), (3, 2)]
+    _assign_spread_merge_entry_x(links, target, None, positions, {}, merge_entry_x)
+    xs = sorted(merge_entry_x[link] for link in links)
+    assert max(xs) - min(xs) >= TOP_ENTRY_PORT_GAP
+    assert all(abs(x - target.cx) <= TOP_ENTRY_PORT_GAP * 2 for x in xs)
+
+
+def test_combine_circle_connectors_attach_to_gray_circle_edge():
+    from visualizer.computation_graph import SYNTHETIC_COMBINE
+    from visualizer.render import (
+        COMBINE_OP_SIZE,
+        MERGE_CLEARANCE,
+        MERGE_RADIUS,
+        _RenderAnchor,
+        _combine_bottom_exit_y,
+        _combine_top_entry_y,
+        _combine_uses_box_anchor,
+        _snap_connector_path_endpoints,
+    )
+
+    cy = 10.0
+    pad = MERGE_RADIUS + MERGE_CLEARANCE
+    target = _RenderAnchor(
+        cx=5.0,
+        top=cy + pad,
+        bottom=cy - pad,
+        left=5.0 - pad,
+        right=5.0 + pad,
+    )
+    assert target.top - target.bottom == pytest.approx(COMBINE_OP_SIZE)
+    assert not _combine_uses_box_anchor(target)
+    assert _combine_top_entry_y(target) == cy + MERGE_RADIUS
+    assert _combine_bottom_exit_y(target) == cy - MERGE_RADIUS
+    assert _combine_top_entry_y(target) < target.top
+
+    source = _RenderAnchor(cx=5.0, top=12.0, bottom=11.5, left=4.5, right=5.5)
+    graph = type(
+        "Graph",
+        (),
+        {
+            "nodes": (
+                type("Node", (), {"synthetic": None})(),
+                type("Node", (), {"synthetic": SYNTHETIC_COMBINE})(),
+            ),
+            "links": (),
+            "side_entry_links": set(),
+            "inline_binary_operand_links": set(),
+        },
+    )()
+    snapped = _snap_connector_path_endpoints(
+        [(5.0, 11.5), (5.0, target.top)],
+        source=source,
+        target=target,
+        link_key=(0, 1),
+        graph=graph,
+    )
+    assert snapped[-1] == (5.0, cy + MERGE_RADIUS)
+
+
 def test_snap_connector_path_endpoints_keeps_paths_orthogonal():
     from visualizer.render import _RenderAnchor, _snap_connector_path_endpoints
 

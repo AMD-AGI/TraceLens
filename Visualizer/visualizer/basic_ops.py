@@ -245,10 +245,11 @@ _DETAIL_OPERATION_LABELS = _BASIC_DETAIL_LABELS | frozenset(
         "Renormalize",
         "Route scaling",
         "Score activation",
+        "MoE aggregation",
     }
 )
 
-_DETAIL_COMBINE_LABELS = frozenset({"×", "MoE aggregation", "+", "Elementwise ×"})
+_DETAIL_COMBINE_LABELS = frozenset({"×", "+", "Elementwise ×"})
 
 _DETAIL_OPERATION_CLASSES = frozenset(
     {

@@ -1819,21 +1819,22 @@ def test_moe_infer_graph_dashed_router_side_link():
         basic_ops=basic,
     )
     graph = build_computation_graph(moe)
-    combine_index = next(
+    agg_index = next(
         index
         for index, spec in enumerate(graph.nodes)
-        if spec.synthetic == SYNTHETIC_COMBINE and spec.label == "MoE aggregation"
+        if spec.label == "MoE aggregation"
     )
-    assert graph.nodes[combine_index].sublabel is None
+    assert graph.nodes[agg_index].sublabel is None
+    assert graph.nodes[agg_index].synthetic is None
     route_scaling_index = next(
         index
         for index, spec in enumerate(graph.nodes)
         if spec.block and spec.block.attr_name == SYNTHETIC_ROUTER_SCALE
     )
-    assert (route_scaling_index, combine_index) in graph.links
-    assert (route_scaling_index, combine_index) not in graph.dashed_links
-    assert (route_scaling_index, combine_index) in graph.side_entry_links
-    assert not any(spec.block and spec.block.attr_name == "moe_infer" for spec in graph.nodes)
+    assert (route_scaling_index, agg_index) in graph.links
+    assert (route_scaling_index, agg_index) not in graph.dashed_links
+    assert (route_scaling_index, agg_index) not in graph.side_entry_links
+    assert (route_scaling_index, agg_index) not in graph.link_port_labels
     down_proj_index = next(
         index
         for index, spec in enumerate(graph.nodes)
@@ -1841,7 +1842,7 @@ def test_moe_infer_graph_dashed_router_side_link():
     )
     input_index = next(index for index, spec in enumerate(graph.nodes) if spec.synthetic == SYNTHETIC_INPUT)
     assert (input_index, down_proj_index) in graph.links
-    assert (down_proj_index, combine_index) in graph.links
+    assert (down_proj_index, agg_index) in graph.links
     assert (route_scaling_index, down_proj_index) not in graph.links
 
 
@@ -2384,6 +2385,122 @@ def test_moe_gate_inline_frame_spacing_after_finalize():
         gap = positions[upper].bottom - positions[lower].top_y
         assert abs(gap - min_gap) <= 0.02, (
             f"{graph.nodes[upper].label} -> {graph.nodes[lower].label} gap {gap:.4f} != {min_gap:.4f}"
+        )
+
+
+def test_mla_attention_fanout_branch_spacing_after_finalize():
+    from pathlib import Path
+
+    import matplotlib.pyplot as plt
+
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        DETAIL_LAYER_GAP,
+        SYNTHETIC_INPUT,
+        _estimate_graph_height,
+        _fanout_branch_node_groups,
+        _node_content_left,
+        _node_content_right,
+        _ordered_inline_frame_chain,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.render import (
+        CONNECTOR_ATTACHED_BOX_MARGIN,
+        CONNECTOR_OBSTACLE_MARGIN,
+        COLORS,
+    )
+    from visualizer.render_validate import finalize_detail_layout
+    from visualizer.sizing import min_vertical_block_gap
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
+    mla = build_block_node(
+        attr_name="self_attn",
+        class_name="KimiMLAAttention",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    fig, ax = plt.subplots(figsize=(16, 13))
+    fig.canvas.draw()
+    graph = build_computation_graph(mla)
+    measure_graph_node_sizes(ax, graph)
+    positions, _ = layout_computation_graph(
+        graph,
+        cx=2.6,
+        top_y=10.0,
+        block_w=8.0,
+        block_h=_estimate_graph_height(graph),
+        content_left=0.6,
+    )
+    finalize_detail_layout(
+        ax,
+        graph,
+        positions,
+        input_sublabel=None,
+        cx=2.6,
+        top_y=10.0,
+        detail_fill=COLORS["detail_fill"],
+        min_left=0.6,
+    )
+    min_gap = min_vertical_block_gap()
+    min_h_gap = min_gap
+    branch_groups = _fanout_branch_node_groups(positions)
+    assert len(branch_groups) >= 3
+    for indices in branch_groups.values():
+        chain = _ordered_inline_frame_chain(graph, list(indices))
+        stack_chain = [
+            index
+            for index in chain
+            if graph.nodes[index].label in {"Linear", "RMSNorm"}
+        ]
+        if len(stack_chain) < 2:
+            continue
+        column_cx = positions[stack_chain[0]].cx
+        for index in stack_chain:
+            assert abs(positions[index].cx - column_cx) <= 0.02
+        for upper, lower in zip(stack_chain, stack_chain[1:]):
+            gap = positions[upper].bottom - positions[lower].top_y
+            assert abs(gap - min_gap) <= 0.02, (
+                f"{graph.nodes[upper].block.attr_name} -> {graph.nodes[lower].block.attr_name} "
+                f"gap {gap:.4f} != {min_gap:.4f}"
+            )
+
+    rms_indices = [index for index, spec in enumerate(graph.nodes) if spec.label == "RMSNorm"]
+    for left_index in range(len(rms_indices) - 1):
+        for right_index in range(left_index + 1, len(rms_indices)):
+            left = positions[rms_indices[left_index]]
+            right = positions[rms_indices[right_index]]
+            if abs(left.top_y - right.top_y) > 0.02:
+                continue
+            h_gap = _node_content_left(right) - _node_content_right(left)
+            if left.cx <= right.cx:
+                pass
+            else:
+                h_gap = _node_content_left(left) - _node_content_right(right)
+            assert h_gap >= min_h_gap - 0.02, (
+                f"RMSNorm tiles touch on row: h_gap={h_gap:.4f} < {min_h_gap:.4f}"
+            )
+
+    input_index = next(
+        index for index, spec in enumerate(graph.nodes) if spec.synthetic == SYNTHETIC_INPUT
+    )
+    targets = [target for source, target in graph.links if source == input_index]
+    fanout_gap = DETAIL_LAYER_GAP + CONNECTOR_OBSTACLE_MARGIN + CONNECTOR_ATTACHED_BOX_MARGIN
+    for target in targets:
+        clearance = positions[input_index].bottom - positions[target].top_y
+        assert clearance >= fanout_gap - 0.02, (
+            f"Input bus clearance {clearance:.4f} < {fanout_gap:.4f}"
         )
 
 
@@ -4198,12 +4315,60 @@ def test_moe_plus_is_spine_aligned_with_sigma():
     spine = [positions[index].cx for index in (by_label["MoE aggregation"], up_index, by_label["+"])]
     draw = {symbol: x for x, _, symbol, _ in plan.combine_ops}
     assert max(spine) - min(spine) < 0.02
-    assert abs(draw["MoE aggregation"] - positions[by_label["MoE aggregation"]].cx) < 0.02
+    assert abs(positions[by_label["MoE aggregation"]].cx - spine[0]) < 0.02
     assert abs(draw["+"] - positions[by_label["+"]].cx) < 0.02
     assert abs(anchors[by_label["+"]].cx - positions[by_label["+"]].cx) < 0.02
     gap = positions[up_index].bottom - positions[by_label["+"]].top_y
     assert abs(gap - DETAIL_LAYER_GAP) < 0.02
     plt.close()
+
+
+def test_top_level_block_centers_attention_under_rmsnorm():
+    from pathlib import Path
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from visualizer.extract import load_architecture
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.render import DiagramLayout, _block_content_widths, _layout_component_block
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    spec = load_architecture(
+        "moonshotai/Kimi-K3",
+        code_path=code_path,
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"]),
+    )
+    fig, ax = plt.subplots(figsize=(11, 13))
+    fig.canvas.draw()
+    norm_w, inner_w = _block_content_widths(ax, spec)
+    spine_cx = 2.0
+    layout = DiagramLayout()
+    _layout_component_block(
+        layout,
+        ax,
+        cx=spine_cx,
+        top_y=10.0,
+        block_w=4.0,
+        spec=spec,
+        norm_w=norm_w,
+        inner_w=inner_w,
+    )
+    by_id = {node.node_id: node for node in layout.nodes}
+    norm = by_id["input_layernorm"]
+    attn = by_id["self_attn"]
+    assert abs(norm.cx - spine_cx) <= 0.02
+    assert abs(attn.cx - spine_cx) <= 0.02
+    assert abs(norm.cx - attn.cx) <= 0.02
+    plt.close(fig)
 
 
 def test_layout_center_aligns_vertical_chains():

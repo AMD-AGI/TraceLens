@@ -126,7 +126,6 @@ def _kimi_mlp_layout(*, cx: float = 3.0, top_y: float = 10.0):
         merge_entry_x=buses[2],
         merge_link_bus=buses[3],
         input_index=input_index,
-        validate_layout=False,
     )
     return fig, graph, positions, anchors, plan, incoming, outgoing, input_index, buses, link_paths
 

@@ -24,8 +24,13 @@ from visualizer.computation_graph import (
     _compact_synthetic_input_spacing,
     _ensure_synthetic_input_clears_consumers,
     _fanout_branch_index,
+    _fanout_branch_node_groups,
     _layout_fork_join_branches,
+    _node_content_left,
+    _node_content_right,
     _resolve_layout_overlaps,
+    realign_fanout_branch_columns,
+    stack_fanout_branch_columns,
     stack_inline_frame_positions,
     _center_align_vertical_chains,
 )
@@ -465,10 +470,37 @@ def _resolve_same_row_tile_overlaps(
     positions: list[LayoutPosition],
     *,
     min_gap: float,
+    graph: ComputationGraph | None = None,
 ) -> None:
     """Separate tiles on the same row after measured resize widened box widths."""
     if not positions:
         return
+    if graph is not None:
+        from visualizer.computation_graph import _graph_has_tensor_ports
+
+        if _graph_has_tensor_ports(graph):
+            return
+    branch_groups = _fanout_branch_node_groups(positions)
+    index_to_branch = {
+        index: branch
+        for branch, indices in branch_groups.items()
+        for index in indices
+    }
+
+    def row_units(indices: list[int]) -> list[list[int]]:
+        ordered = sorted(indices, key=lambda index: positions[index].cx)
+        units: list[list[int]] = []
+        seen: set[int] = set()
+        for index in ordered:
+            if index in seen:
+                continue
+            branch = index_to_branch.get(index)
+            unit = list(branch_groups[branch]) if branch is not None else [index]
+            for member in unit:
+                seen.add(member)
+            units.append(unit)
+        return units
+
     for _pass in range(max(1, len(positions))):
         changed = False
         rows: dict[float, list[int]] = {}
@@ -477,20 +509,23 @@ def _resolve_same_row_tile_overlaps(
         for indices in rows.values():
             if len(indices) < 2:
                 continue
-            ordered = sorted(indices, key=lambda index: positions[index].cx)
-            for offset in range(1, len(ordered)):
-                left_index = ordered[offset - 1]
-                right_index = ordered[offset]
-                left = positions[left_index]
-                right = positions[right_index]
-                overlap = (left.cx + left.width / 2) + min_gap - (right.cx - right.width / 2)
+            units = row_units(indices)
+            for offset in range(1, len(units)):
+                left_unit = units[offset - 1]
+                right_unit = units[offset]
+                left_right = max(_node_content_right(positions[index]) for index in left_unit)
+                right_left = min(_node_content_left(positions[index]) for index in right_unit)
+                overlap = left_right + min_gap - right_left
                 if overlap <= 0:
                     continue
-                for shift_index in ordered[offset:]:
-                    positions[shift_index].cx += overlap
+                for unit in units[offset:]:
+                    for shift_index in unit:
+                        positions[shift_index].cx += overlap
                 changed = True
         if not changed:
             break
+    if branch_groups:
+        realign_fanout_branch_columns(positions, graph)
 
 
 def resolve_measured_overlaps(
@@ -509,11 +544,15 @@ def resolve_measured_overlaps(
         _topological_layers,
     )
 
-    if top_y is not None:
+    if top_y is not None and not _graph_has_tensor_ports(graph):
         layers = _topological_layers(graph)
         _assign_layered_vertical_positions(positions, layers, top_y=top_y)
         _order_fanout_branch_positions(positions)
-    _resolve_same_row_tile_overlaps(positions, min_gap=min_gap)
+    _resolve_same_row_tile_overlaps(
+        positions,
+        min_gap=min_gap,
+        graph=graph if not _graph_has_tensor_ports(graph) else None,
+    )
     _resolve_layout_overlaps(
         positions,
         graph,
@@ -522,7 +561,8 @@ def resolve_measured_overlaps(
     )
     if _graph_has_tensor_ports(graph):
         _align_tensor_port_columns(positions, graph)
-    _resolve_same_row_tile_overlaps(positions, min_gap=min_gap)
+    else:
+        _resolve_same_row_tile_overlaps(positions, min_gap=min_gap, graph=graph)
 
 
 def _frame_member_indices(graph: ComputationGraph) -> dict[int, str]:
@@ -1161,13 +1201,21 @@ def _align_and_stack_inline_frames(
     )
 
     stack_inline_frame_positions(positions, graph, min_gap=min_gap)
+    if not _graph_has_tensor_ports(graph):
+        stack_fanout_branch_columns(positions, graph, min_gap=min_gap)
     _align_merge_nodes(positions, graph)
     if _graph_has_tensor_ports(graph):
         finalize_tensor_port_pipeline_layout(positions, graph)
     elif graph.inline_frames:
         repack_inline_frame_columns(positions, graph)
         stack_inline_frame_positions(positions, graph, min_gap=min_gap)
+    if not _graph_has_tensor_ports(graph) and _fanout_branch_node_groups(positions):
+        stack_fanout_branch_columns(positions, graph, min_gap=min_gap)
+        _align_merge_nodes(positions, graph)
     _layout_fork_join_branches(positions, graph)
+    if not _graph_has_tensor_ports(graph):
+        realign_fanout_branch_columns(positions, graph)
+        _center_align_vertical_chains(positions, graph)
 
 
 def _layout_zone_gap(min_gap: float) -> float:
@@ -1611,7 +1659,7 @@ def _resolve_obstacle_layout(
             min_gap=min_gap,
         )
         resolve_measured_overlaps(positions, graph, min_gap=min_gap)
-        _resolve_same_row_tile_overlaps(positions, min_gap=min_gap)
+        _resolve_same_row_tile_overlaps(positions, min_gap=min_gap, graph=graph)
     _separate_overlapping_inline_frames(positions, graph, elements, min_gap=min_gap)
     if forbidden_regions:
         _shift_clear_forbidden_regions(positions, elements, forbidden_regions, min_gap=min_gap)
@@ -1628,6 +1676,7 @@ def _separate_parallel_tiles_from_inline_frames(
     fanout, _main, side, _input_hidden = _classify_layout_zones(positions, graph)
     parallel_indices = fanout | side
     frame_members = _frame_member_indices(graph)
+    branch_groups = _fanout_branch_node_groups(positions)
     frames = [element for element in elements if element.kind == "inline_frame"]
     boxes = [
         element
@@ -1649,12 +1698,16 @@ def _separate_parallel_tiles_from_inline_frames(
             if not box.bounds.overlaps(frame.bounds, min_gap=min_gap):
                 continue
             if _fanout_branch_index(pos.spec) is not None:
+                branch = _fanout_branch_index(pos.spec)
+                column = branch_groups.get(branch, [box_index]) if branch is not None else [box_index]
                 shift_left = frame.bounds.left - min_gap - box.bounds.right
                 shift_right = frame.bounds.right + min_gap - box.bounds.left
                 if shift_left < 0 and (shift_right <= 0 or abs(shift_left) <= shift_right):
-                    pos.cx += shift_left
+                    for index in column:
+                        positions[index].cx += shift_left
                 elif shift_right > 0:
-                    pos.cx += shift_right
+                    for index in column:
+                        positions[index].cx += shift_right
             else:
                 shift = frame.bounds.right + min_gap - box.bounds.left
                 if shift > 0:
@@ -2313,7 +2366,7 @@ def finalize_detail_layout(
     _anchor_detail_layout_to_top_y(positions, top_y=top_y)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
-    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP, graph=graph)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
     _separate_parallel_tiles_from_inline_frames(
@@ -2337,12 +2390,12 @@ def finalize_detail_layout(
         elements,
         min_gap=VALIDATE_MIN_GAP,
     )
-    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP, graph=graph)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     if positions:
         _align_and_stack_inline_frames(positions, graph)
-        _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+        _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP, graph=graph)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
@@ -2379,7 +2432,7 @@ def finalize_detail_layout(
     _ensure_synthetic_input_clears_consumers(positions, graph)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
-    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP, graph=graph)
     elements = _apply_inline_frame_label_layout(
         ax,
         graph,
@@ -2422,7 +2475,7 @@ def finalize_detail_layout(
         min_gap=VALIDATE_MIN_GAP,
     )
     _nudge_apart_remaining_tiles(positions, elements, graph, min_gap=VALIDATE_MIN_GAP)
-    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP, graph=graph)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = _apply_inline_frame_label_layout(
@@ -2451,7 +2504,7 @@ def finalize_detail_layout(
             graph,
             min_gap=VALIDATE_MIN_GAP,
         )
-        _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+        _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP, graph=graph)
         plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
         enforce_text_fit_node_sizes(ax, positions, plan)
         elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
@@ -2497,7 +2550,7 @@ def finalize_detail_layout(
         min_left=min_left,
     )
     if positions and not _graph_has_tensor_ports(graph):
-        _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+        _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP, graph=graph)
         _align_and_stack_inline_frames(positions, graph)
         plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
         enforce_text_fit_node_sizes(ax, positions, plan)
@@ -2514,7 +2567,7 @@ def finalize_detail_layout(
             graph,
             min_gap=VALIDATE_MIN_GAP,
         )
-        _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+        _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP, graph=graph)
         if min_left is not None:
             from visualizer.computation_graph import _align_positions_left
 
@@ -2530,7 +2583,7 @@ def finalize_detail_layout(
         graph,
         min_gap=VALIDATE_MIN_GAP,
     )
-    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
+    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP, graph=graph)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = _apply_inline_frame_label_layout(
@@ -2548,6 +2601,10 @@ def finalize_detail_layout(
         min_gap=VALIDATE_MIN_GAP,
         elements=elements,
     )
+    if positions and not _graph_has_tensor_ports(graph):
+        _align_and_stack_inline_frames(positions, graph)
+        realign_fanout_branch_columns(positions, graph)
+        _center_align_vertical_chains(positions, graph)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     elements = _apply_inline_frame_label_layout(

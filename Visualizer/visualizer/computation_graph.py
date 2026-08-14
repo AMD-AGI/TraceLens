@@ -1054,6 +1054,37 @@ def build_computation_graph(
             continue
 
         if isinstance(segment, SideCombineSegment):
+            if segment.consumer.attr_name == "moe_infer":
+                from visualizer.ast_analyze import MOE_AGGREGATION_LABEL
+
+                agg_index = _add_node(
+                    graph,
+                    key=f"moe_agg:{segment_index}:{segment.consumer.attr_name}",
+                    label=MOE_AGGREGATION_LABEL,
+                )
+                if last_index is not None:
+                    graph.links.append((last_index, agg_index))
+                elif input_index is not None:
+                    graph.links.append((input_index, agg_index))
+                for side in segment.sides:
+                    if side.source_kind == "forward_input":
+                        if input_index is not None:
+                            _link_forward_input(graph, input_index, agg_index)
+                        continue
+                    source_attr = side.source_chain[-1] if side.source_chain else None
+                    if source_attr is None:
+                        continue
+                    source_index = attr_last_index.get(source_attr)
+                    if source_index is None:
+                        continue
+                    link_key = (source_index, agg_index)
+                    graph.links.append(link_key)
+                    if side.port_label and side.port_label != "router":
+                        graph.link_port_labels[link_key] = side.port_label
+                last_index = agg_index
+                _track_attr_index(attr_last_index, segment.consumer.attr_name, agg_index)
+                continue
+
             combine_index = _add_node(
                 graph,
                 key=f"sidecombine:{segment_index}:{segment.consumer.attr_name}",
@@ -2046,6 +2077,16 @@ def _compact_synthetic_input_spacing(
         return
     highest_top = max(positions[target].top_y for target in targets)
     input_pos = positions[input_index]
+    if len(targets) >= 2:
+        from visualizer.render import (
+            CONNECTOR_ATTACHED_BOX_MARGIN,
+            CONNECTOR_OBSTACLE_MARGIN,
+        )
+
+        gap = max(
+            gap,
+            DETAIL_LAYER_GAP + CONNECTOR_OBSTACLE_MARGIN + CONNECTOR_ATTACHED_BOX_MARGIN,
+        )
     desired_bottom = highest_top + gap
     if elements:
         input_left = input_pos.cx - input_pos.width / 2
@@ -2105,7 +2146,7 @@ def _router_spine_column_indices(
         (
             index
             for index, spec in enumerate(graph.nodes)
-            if spec.label == MOE_AGGREGATION_LABEL and _is_combine_synthetic(spec.synthetic)
+            if spec.label == MOE_AGGREGATION_LABEL
         ),
         None,
     )
@@ -2147,6 +2188,13 @@ def _router_spine_column_indices(
     )
     if plus is not None:
         spine.add(plus)
+
+    shared_experts_frame = next(
+        (frame for frame in graph.inline_frames if frame.frame_id == "shared_experts"),
+        None,
+    )
+    if shared_experts_frame is not None:
+        spine -= set(shared_experts_frame.node_indices)
     return spine
 
 
@@ -2161,7 +2209,7 @@ def _align_router_spine_column(
         (
             index
             for index, spec in enumerate(graph.nodes)
-            if spec.label == MOE_AGGREGATION_LABEL and _is_combine_synthetic(spec.synthetic)
+            if spec.label == MOE_AGGREGATION_LABEL
         ),
         None,
     )
@@ -2326,6 +2374,58 @@ def _inline_frame_vertical_gap(graph, frame) -> float:
     if link_count >= 1 or _inline_frame_has_external_port_feed(graph, frame):
         return gap + INLINE_FRAME_SIDE_ENTRY_EXTRA_GAP
     return gap
+
+
+def stack_fanout_branch_columns(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float | None = None,
+) -> None:
+    """Re-stack each fan-out branch as a straight vertical chain on one column."""
+    from visualizer.sizing import min_vertical_block_gap
+
+    branch_groups = _fanout_branch_node_groups(positions)
+    if not branch_groups:
+        return
+    gap = min_vertical_block_gap() if min_gap is None else min_gap
+    for indices in branch_groups.values():
+        chain = _ordered_inline_frame_chain(graph, list(indices))
+        stack_chain = [
+            index
+            for index in chain
+            if graph.nodes[index].label in {"Linear", "RMSNorm"}
+        ]
+        if len(stack_chain) < 2:
+            if stack_chain:
+                positions[stack_chain[0]].cx = sum(
+                    positions[index].cx for index in indices
+                ) / len(indices)
+            continue
+        column_cx = sum(positions[index].cx for index in stack_chain) / len(stack_chain)
+        cursor_top = max(positions[index].top_y for index in stack_chain)
+        for index in stack_chain:
+            pos = positions[index]
+            pos.cx = column_cx
+            pos.top_y = cursor_top
+            cursor_top -= pos.height + gap
+        for index in chain:
+            if index not in stack_chain:
+                positions[index].cx = column_cx
+
+
+def realign_fanout_branch_columns(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph | None = None,
+) -> None:
+    """Restore fan-out column alignment after row-wise overlap nudges."""
+    if not _fanout_branch_node_groups(positions):
+        return
+    _align_fanout_branch_columns(positions)
+    _resolve_branch_column_overlaps(positions, min_gap=MIN_HORIZONTAL_BLOCK_GAP)
+    _align_fanout_branch_columns(positions)
+    if graph is not None:
+        _center_align_vertical_chains(positions, graph)
 
 
 def stack_inline_frame_positions(
@@ -3684,12 +3784,18 @@ def layout_computation_graph(
     )
     _resolve_layout_overlaps(positions, graph)
     stack_inline_frame_positions(positions, graph)
+    if not _graph_has_tensor_ports(graph):
+        stack_fanout_branch_columns(positions, graph)
     _layout_fork_join_branches(positions, graph)
     from visualizer.render_validate import _resolve_same_row_tile_overlaps
 
     for _ in range(max(1, len(positions))):
         snapshot = [(pos.cx, pos.width, pos.top_y) for pos in positions]
-        _resolve_same_row_tile_overlaps(positions, min_gap=MIN_HORIZONTAL_BLOCK_GAP)
+        _resolve_same_row_tile_overlaps(
+            positions,
+            min_gap=MIN_HORIZONTAL_BLOCK_GAP,
+            graph=graph if not _graph_has_tensor_ports(graph) else None,
+        )
         _resolve_layout_overlaps(positions, graph)
         if _graph_has_tensor_ports(graph):
             _align_inline_frame_column_cx(positions, graph)

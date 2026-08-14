@@ -25,12 +25,20 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _names_match,
     _stream_of,
     align_streams,
+    append_subtree_to_event,
+    build_execution_graph_root_map,
     capture_has_kernel_names,
+    find_capture_roots,
+    find_closest_batch_size,
+    find_execution_details,
+    finalize_non_gpu_paths,
     get_subtree_events,
     is_multistream,
+    make_connections,
+    update_subtree_uids_and_timestamps,
     verify_subtree_events,
 )
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
     apply_pseudo_op_extensions,
 )
@@ -55,11 +63,13 @@ from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
 from TraceLens.Trace2Tree.extensions.moe_flydsl_pseudo_ops import (
     FUSED_MOE_PARENT,
     _find_fused_moe_ancestor,
+    create_pseudo_ops_moe_flydsl,
 )
 from TraceLens.Trace2Tree.extensions.v4_paged_decode_pseudo_ops import (
     _detect_v4_mode,
     _parse_geometry,
     _safe_int,
+    create_pseudo_ops_v4_paged_decode,
 )
 
 
@@ -723,3 +733,465 @@ class TestTraceToTreeGpuMarker:
         tree = _build_tree(events)
         kernel = next(e for e in tree.events if e["cat"] == "kernel")
         assert kernel.get("parent") is not None
+
+
+class TestTraceToTreeExtended:
+    def test_get_gpu_events_and_apply_annotation(self):
+        events = [
+            _mk_event(
+                "user_annotation",
+                "phase_a",
+                ts=0,
+                dur=500,
+                pid=1,
+                tid=1,
+                args={},
+            ),
+            _mk_event("cpu_op", "root", ts=10, dur=100, pid=1, tid=1, args={}),
+        ]
+        corr = 500
+        gpu_op = _mk_event("cpu_op", "gpu_op", ts=20, dur=80, pid=1, tid=1, args={})
+        _add_gpu_chain(events, gpu_op, corr, "k1", 25, 40)
+        tree = _build_tree(events)
+        gpu_op_evt = next(e for e in tree.events if e["name"] == "gpu_op")
+        gpu_events = tree.get_gpu_events(gpu_op_evt)
+        assert len(gpu_events) == 1
+        tree.apply_annotation(name_filters=["gpu_op"])
+        assert tree.events[gpu_op_evt["UID"]]["annotation"] == "phase_a"
+
+    def test_link_fwd_bwd_and_subtree_bwd_events(self):
+        events = [
+            _mk_event(
+                "cpu_op",
+                "aten::mm",
+                ts=100,
+                dur=50,
+                pid=1,
+                tid=1,
+                args={"Sequence number": 7, "Input Dims": [[32, 64]]},
+            ),
+            _mk_event(
+                "cpu_op",
+                "autograd::engine::evaluate_function: MmBackward0",
+                ts=200,
+                dur=50,
+                pid=1,
+                tid=2,
+                args={"Sequence number": 7},
+            ),
+        ]
+        tree = _build_tree(events)
+        fwd = next(e for e in tree.events if e["name"] == "aten::mm")
+        bwd_uids = tree.get_subtree_bwd_events(fwd["UID"])
+        assert len(bwd_uids) == 1
+        bwd = tree.get_UID2event(bwd_uids[0])
+        assert bwd["fwd_event"] == fwd["UID"]
+        assert fwd["bwd_events"] == [bwd["UID"]]
+
+    def test_traverse_parents_and_get_callstack(self):
+        events: List[Dict] = []
+        root = _mk_event("cpu_op", "root", ts=0, dur=200, pid=1, tid=1, args={})
+        events.append(root)
+        corr = 600
+        child = _mk_event("cpu_op", "child_mm", ts=10, dur=50, pid=1, tid=1, args={})
+        _add_gpu_chain(events, child, corr, "k1", 15, 40)
+        tree = _build_tree(events)
+        child_evt = next(e for e in tree.events if e["name"] == "child_mm")
+        stack = tree.traverse_parents_and_get_callstack(child_evt, filter=None)
+        assert stack[0] == "child_mm"
+        assert "root" in stack
+
+    def test_get_node_by_ext_id_pid_tid(self):
+        events = [
+            _mk_event(
+                "cpu_op",
+                "op_a",
+                ts=0,
+                dur=10,
+                pid=1,
+                tid=1,
+                args={"External id": 42},
+            ),
+        ]
+        tree = TraceToTree(deepcopy(events))
+        found = tree.get_node_by_ext_id_pid_tid(42, 1, 1)
+        assert found is not None
+        assert found["name"] == "op_a"
+        assert tree.get_node_by_ext_id_pid_tid(99, 1, 1) is None
+
+    def test_traverse_subtree_and_print(self, capsys):
+        events = [
+            _mk_event("cpu_op", "root", ts=0, dur=100, pid=1, tid=1, args={}),
+            _mk_event(
+                "cpu_op",
+                "leaf",
+                ts=10,
+                dur=20,
+                pid=1,
+                tid=1,
+                args={"Input Dims": [[4, 8]]},
+            ),
+        ]
+        tree = _build_tree(events)
+        root = next(e for e in tree.events if e["name"] == "root")
+        tree.traverse_subtree_and_print(
+            root, prune_non_gpu=False, cpu_op_fields=("Input Dims",)
+        )
+        output = capsys.readouterr().out
+        assert "leaf" in output
+        assert "Input Dims" in output
+
+
+class TestJaxTraceToTree:
+    def test_is_gpu_event_static(self):
+        gpu_evt = {"process": {"process_name": "/device:GPU:0"}}
+        host_evt = {"process": {"process_name": "/host"}}
+        assert JaxTraceToTree._is_gpu_event(gpu_evt) is True
+        assert JaxTraceToTree._is_gpu_event(host_evt) is False
+
+    def test_linking_key_after_init(self):
+        events = [
+            {
+                "ph": "X",
+                "name": "host",
+                "pid": 701,
+                "tid": 1,
+                "ts": 0,
+                "dur": 10,
+                "args": {"correlation_id": 1},
+                "process": {"process_name": "/host"},
+            },
+            {
+                "ph": "X",
+                "name": "Cijk_gemm",
+                "pid": 2,
+                "tid": 1,
+                "ts": 5,
+                "dur": 5,
+                "parent": 0,
+                "args": {"correlation_id": 1},
+                "process": {"process_name": "/device:GPU:0"},
+            },
+        ]
+        tree = JaxTraceToTree(
+            events,
+            compute_end_times=True,
+            event_to_category=lambda e: "kernel"
+            if "/device:GPU" in e.get("process", {}).get("process_name", "")
+            else "cpu_op",
+        )
+        assert tree.linking_key == "correlation_id"
+        tree.add_gpu_ops_to_tree()
+        assert tree.events[0].get("gpu_events")
+
+
+class TestTraceCaptureMergeHelpers:
+    def test_find_closest_batch_size_and_execution_details(self):
+        assert find_closest_batch_size(32, [16, 32, 64]) == 32
+        assert find_closest_batch_size(40, [16, 32, 64]) == 64
+        assert find_closest_batch_size(100, [16, 32]) is None
+        root = {
+            "name": "execute_0_context_3(sq128sk256sqsq1sqsk1)_generation_2(sq1sk300sqsq1sqsk1)"
+        }
+        assert find_execution_details(root) == "129"
+
+    def test_update_subtree_uids_and_make_connections(self):
+        events = [
+            _mk_event("cpu_op", "graph_root", ts=0, dur=200, pid=1, tid=1, args={}),
+            _mk_event(
+                "kernel",
+                "k1",
+                ts=50,
+                dur=20,
+                pid=0,
+                tid=7,
+                args={"stream": 1, "correlation": 1},
+            ),
+        ]
+        tree = _build_tree(events)
+        root = next(e for e in tree.events if e["name"] == "graph_root")
+        kernel = next(e for e in tree.events if e["name"] == "k1")
+        capture_events = [
+            {
+                "UID": 100,
+                "name": "dispatch",
+                "ts": 10,
+                "dur": 5,
+                "cat": "cuda_runtime",
+                "args": {"kernel": "k1", "correlation": 99},
+                "children": [],
+            }
+        ]
+        updated, _, cpu_roots = update_subtree_uids_and_timestamps(
+            tree,
+            capture_events,
+            capture_events,
+            start_uid=len(tree.events),
+            new_start_ts=root["ts"],
+            c_root={"name": "CaptureRoot"},
+            g_root_dur=root["dur"],
+        )
+        assert updated[0]["UID"] == len(tree.events)
+        graph_filtered = [kernel]
+        capture_filtered = updated
+        tree = append_subtree_to_event(tree, updated, root, cpu_roots)
+        tree = make_connections(tree, graph_filtered, capture_filtered)
+        assert kernel["parent"] == updated[0]["UID"]
+        assert capture_filtered[0]["args"]["correlation"] == 99
+
+    def test_align_streams_multistream(self):
+        graph_events = [
+            {"name": "k1", "args": {"stream": 1}},
+            {"name": "k2", "args": {"stream": 2}},
+        ]
+        capture_events = [
+            {"name": "dispatch", "args": {"kernel": "k1"}},
+            {"name": "dispatch", "args": {"kernel": "k2"}},
+        ]
+        assert is_multistream(graph_events)
+        assert capture_has_kernel_names(capture_events)
+        aligned = align_streams(graph_events, capture_events)
+        assert aligned is not None
+        assert [_capture_kernel_name(e) for e in aligned] == ["k1", "k2"]
+
+    def test_verify_subtree_group_alignment(self):
+        capture = [
+            {"name": "dispatch", "args": {"kernel": "k2"}},
+            {"name": "dispatch", "args": {"kernel": "k1"}},
+        ]
+        graph = [
+            {"name": "k1", "args": {}},
+            {"name": "k2", "args": {}},
+        ]
+        success, _, aligned_graph = verify_subtree_events(capture, graph)
+        assert success == 3
+        assert [e["name"] for e in aligned_graph] == ["k2", "k1"]
+
+    def test_find_capture_roots_synthetic(self):
+        events = [
+            _mk_event(
+                "cuda_runtime",
+                "cudaStreamBeginCapture",
+                ts=0,
+                dur=10,
+                pid=1,
+                tid=1,
+                args={},
+            ),
+            _mk_event(
+                "cuda_runtime",
+                "cudaLaunchKernel",
+                ts=20,
+                dur=5,
+                pid=1,
+                tid=1,
+                args={"kernel": "k1"},
+            ),
+            _mk_event(
+                "cuda_runtime",
+                "cudaStreamEndCapture",
+                ts=30,
+                dur=5,
+                pid=1,
+                tid=1,
+                args={},
+            ),
+        ]
+        tree = TraceToTree(deepcopy(events))
+        tree.build_tree(add_python_func=True)
+        roots = find_capture_roots(tree)
+        assert len(roots) == 1
+        assert roots[0]["name"] == "CaptureRoot"
+
+
+class TestPseudoOpsExtensionsExtended:
+    def test_apply_triton_moe_extension(self):
+        events: List[Dict] = []
+        moe_fwd = _mk_event(
+            "cpu_op",
+            "vllm::moe_forward",
+            ts=0,
+            dur=300,
+            pid=1,
+            tid=1,
+            args={"Sequence number": 0},
+        )
+        topk_op = _mk_event(
+            "cpu_op",
+            "aten::topk",
+            ts=10,
+            dur=20,
+            pid=1,
+            tid=1,
+            args={"Concrete Inputs": ["", "6"]},
+        )
+        events.extend([moe_fwd, topk_op])
+        corr = 400
+        for idx, kernel_name in enumerate(
+            ["matmul_ogs_fwd_kernel", "matmul_ogs_down_kernel"]
+        ):
+            _add_gpu_chain(
+                events,
+                moe_fwd,
+                corr + idx,
+                kernel_name,
+                60 + idx * 100,
+                90 + idx * 100,
+            )
+        tree = _build_tree(events)
+        apply_pseudo_op_extensions(tree, verbose=True)
+        pseudo_ops = [
+            e for e in tree.events if e.get("args", {}).get("Pseudo op") is True
+        ]
+        assert any("moe_triton_unfused" in p["name"] for p in pseudo_ops)
+
+    def test_apply_gptq_awq_extension(self):
+        moe_op = _mk_event(
+            "cpu_op",
+            "vllm::outplace_fused_experts",
+            ts=100,
+            dur=200,
+            pid=1,
+            tid=1,
+            args={
+                "Input Dims": [
+                    [128, 4096],
+                    [8, 4096, 512],
+                    [8, 4096, 512],
+                    [128, 6],
+                    [128, 6],
+                ],
+                "Sequence number": 1,
+            },
+        )
+        events: List[Dict] = [moe_op]
+        corr = 501
+        for idx, kernel_name in enumerate(
+            ["fused_moe_kernel_gptq_awq_up", "fused_moe_kernel_gptq_awq_down"]
+        ):
+            pid = moe_op["pid"]
+            tid = moe_op["tid"]
+            events.extend(
+                [
+                    _mk_event(
+                        "cuda_runtime",
+                        "hipLaunchKernel",
+                        ts=110 + idx * 10,
+                        dur=5,
+                        pid=pid,
+                        tid=tid,
+                        args={"correlation": corr + idx},
+                    ),
+                    _mk_event(
+                        "kernel",
+                        kernel_name,
+                        ts=150 + idx * 10,
+                        dur=20,
+                        pid=0,
+                        tid=7,
+                        args={"correlation": corr + idx, "stream": 7},
+                    ),
+                    _mk_ac2g(corr + idx, pid=0, tid=7, ts=150 + idx * 10, phase="s"),
+                    _mk_ac2g(corr + idx, pid=0, tid=7, ts=150 + idx * 10, phase="f"),
+                ]
+            )
+        tree = _build_tree(events)
+        apply_pseudo_op_extensions(tree, verbose=True)
+        pseudo_ops = [
+            e for e in tree.events if e.get("args", {}).get("Pseudo op") is True
+        ]
+        assert any("moe_gptq_awq" in p["name"] for p in pseudo_ops)
+
+    def test_apply_flydsl_extension(self):
+        events = [
+            _mk_event("cpu_op", FUSED_MOE_PARENT, ts=0, dur=500, pid=1, tid=1, args={}),
+            _mk_event(
+                "python_function",
+                "flydsl.py(10): flydsl_moe_stage1",
+                ts=50,
+                dur=100,
+                pid=1,
+                tid=1,
+                args={"Python id": 1, "Input Dims": [[8, 1024]]},
+            ),
+            _mk_event(
+                "python_function",
+                "flydsl.py(20): flydsl_moe_stage2",
+                ts=160,
+                dur=100,
+                pid=1,
+                tid=1,
+                args={"Python id": 2, "Input Dims": [[8, 1024]]},
+            ),
+        ]
+        tree = _build_tree(events, add_python_func=True)
+        create_pseudo_ops_moe_flydsl(tree)
+        pseudo_ops = [
+            e for e in tree.events if e.get("args", {}).get("Pseudo op") is True
+        ]
+        assert len(pseudo_ops) == 2
+
+    def test_apply_v4_paged_decode_extension(self, monkeypatch):
+        monkeypatch.setenv("TL_MODEL", "deepseek-v4")
+        monkeypatch.setenv("TL_TP", "4")
+        events = [
+            _mk_event(
+                "cpu_op",
+                "aiter::v4_attention_with_output",
+                ts=0,
+                dur=500,
+                pid=1,
+                tid=1,
+                args={"Input Dims": [[1, 8, 128]]},
+            ),
+            _mk_event(
+                "python_function",
+                "paged_decode.py(12): sparse_attn_v4_paged_decode",
+                ts=50,
+                dur=200,
+                pid=1,
+                tid=1,
+                args={"Python id": 1},
+            ),
+        ]
+        corr = 700
+        child = _mk_event(
+            "cpu_op",
+            "child",
+            ts=60,
+            dur=80,
+            pid=1,
+            tid=1,
+            args={"Sequence number": 1},
+        )
+        _add_gpu_chain(
+            events,
+            child,
+            corr,
+            "qk_norm_rope_H8_D128_RD64",
+            70,
+            100,
+        )
+        tree = _build_tree(events, add_python_func=True)
+        attn_evt = next(
+            e for e in tree.events if e["name"] == "aiter::v4_attention_with_output"
+        )
+        py_evt = next(
+            e
+            for e in tree.events
+            if e.get("name", "").endswith("sparse_attn_v4_paged_decode")
+        )
+        child_evt = next(e for e in tree.events if e["name"] == "child")
+        py_evt["parent"] = attn_evt["UID"]
+        attn_evt.setdefault("children", []).append(py_evt["UID"])
+        child_evt["parent"] = py_evt["UID"]
+        py_evt.setdefault("children", []).append(child_evt["UID"])
+        attn_evt.setdefault("gpu_events", []).append(
+            next(e for e in tree.events if e["cat"] == "kernel")["UID"]
+        )
+        py_evt.setdefault("gpu_events", []).extend(attn_evt["gpu_events"])
+        create_pseudo_ops_v4_paged_decode(tree)
+        pseudo_ops = [
+            e for e in tree.events if e.get("args", {}).get("Pseudo op") is True
+        ]
+        assert any("pseudo_v4_paged_decode" in p["name"] for p in pseudo_ops)
