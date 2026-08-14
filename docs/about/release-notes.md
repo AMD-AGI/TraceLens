@@ -8,7 +8,7 @@ See LICENSE for license information.
 # TraceLens release notes
 ```{meta}
 :description: Release notes for TraceLens. Learn what features and SDK modules are available in each version, and see links to the compatibility matrix.
-:keywords: TraceLens, release notes, changelog, ROCm, GPU trace analysis, PyTorch, JAX, rocprofv3, SDK, performance report
+:keywords: TraceLens, TraceLens 1.0.0, release notes, GPU trace analysis, performance models, TraceLens Agent, PyTorch, JAX, rocprofv3
 ```
 
 This topic summarizes the features available in each TraceLens release. For the
@@ -17,37 +17,66 @@ hardware and software versions validated for a release, see the
 
 ## TraceLens 1.0.0
 
-Marks the first stable release: the Analysis Agent hardened for public use, continued perf-model and inference-framework expansion, a TraceDiff matching overhaul, and production-grade test coverage.
-
-### TraceLens Analysis Agent
-
-- Agent specs migrated to a portable `skills/` layout (#860).
-- Graph-capture trace comparison wired through the agent end-to-end (#860).
-- Comparative graph-capture analysis: comparative mode accepts a capture folder per trace, merging call-stack and shape info into both replay trees (#797).
-- Model identification now reads `nn.Module` names for more robust model detection (#799).
-- Kernel Path / Kernel Name columns check propagate into comparative-mode tables (#799).
-- Compute and system tiers emit default "no findings" messages instead of empty sections (#799).
-- Roofline classification deferred to TraceLens Core, removing a duplicated peak-resolution path (#860).
-- Local eval support: repeatability tests can run against a local Pi/vLLM/SGLang server for offline eval loops (#828).
+The release expands performance-model coverage; extends profiling support to
+newer vLLM/SGLang versions along with xDiT diffusion and Genesis
+physics-simulation workloads; strengthens the TraceLens Analysis Agent with a
+portable skill layout and comparative graph-capture support; and overhauls
+TraceDiff's name disambiguation. It also adds production-grade unit-test coverage.
 
 ### Performance models
 
-- **DeepSeek-V4** sparse paged-decode modes (SWA/CSA/HCA), the mHC operator family, and `aiter::pa_sparse_prefill_opus_fwd` (#802).
-- `aten::upsample_nearest` 1d/2d/3d modeled as a purely HBM-bound copy (#931).
-- `aten::_efficient_attention` classification (#719).
-- FP8 MoE precision fix for fp8/bf16 inputs (#737).
-- `mx_available()` helper for detecting block-scaled MXFP4/MXFP6 GEMM paths (#810).
+This release adds the following performance models and classifications:
 
-### TraceDiff
-
-- Name disambiguation added to Wagner-Fischer alignment so same-named sibling nodes no longer mismatch on position (#800).
-- Aggressive final matching pass in phase 5 for slightly-differing Python-function names (#820).
-- Rewrite of `_disambiguate_same_name_candidates` fixing three correctness issues in the candidate pool (#835).
-- Cleanup pass removing ~1200 lines of duplication/dead code, utilities moved to `util.py`, plus new regression tests (#840).
+- **DeepSeek-V4 support:** Sparse paged-decode modes (sliding-window,
+  compressed, and hybrid) and a sparse-prefill model, plus the
+  manifold-constrained Hyper-Connection operator family.
+- **Additional operators:** New models for nearest-neighbor upsampling (1D/2D/3D)
+  and fused RMSNorm with quantization, efficient-attention classification, and an
+  FP8 MoE precision fix for FP8/BF16 inputs.
+- **Block-scaled GEMM detection:** Detection of block-scaled MXFP4/MXFP6 GEMM
+  paths for roofline modeling.
 
 ### Frameworks and profiling
 
-- **xDiT** diffusion profiling via the same capture-merge infrastructure as vLLM/SGLang (#848).
-- SGLang patches through v0.5.17 (#853, #930, #936).
-- vLLM support through v0.26.0+, switching to the `--profiler-config.capture_torch_profiler` flag and stock upstream images for v0.26.0+ (#933).
-- **Genesis**: new `TraceLens_generate_perf_report_genesis` CLI for Genesis/Taichi physics-sim profiling, isolating the steady-state window from JIT/build overhead (#866).
+This release extends framework and profiling support:
+
+- **vLLM and SGLang:** Profiling support through recent vLLM and SGLang releases,
+  using stock upstream images where a patched image is no longer required.
+- **xDiT diffusion:** Diffusion-model profiling using the same capture-merge
+  infrastructure as vLLM/SGLang.
+- **Genesis physics simulation:** A `TraceLens_generate_perf_report_genesis`
+  report generator for Genesis/Taichi workloads that isolates the steady-state
+  simulation window from JIT and build overhead.
+
+### TraceLens Analysis Agent
+
+This release includes the following agent improvements:
+
+- **Portable skill layout:** Agent orchestrator, sub-agent, and template specs
+  ship in a portable `skills/` layout discoverable by any agentic runner that
+  supports skill-file discovery.
+- **Comparative graph-capture analysis:** Comparative mode accepts a capture
+  folder per trace, merging call-stack and shape information into both
+  graph-replay trees before analysis.
+- **Local evaluation:** Repeatability evals can run against a local serving
+  backend for fully offline eval loops.
+
+### TraceDiff
+
+This release overhauls trace-tree matching:
+
+- **Name disambiguation:** Same-named sibling nodes are matched by structure
+  rather than position, with an additional aggressive matching pass for
+  slightly-differing Python-function names.
+- **Correctness fixes:** The same-name candidate-matching path is rewritten to
+  fix several matching correctness issues.
+
+### Test coverage
+
+This release strengthens automated testing:
+
+- **Unit coverage:** New unit-test suites span every SDK subpackage, including
+  Trace2Tree, TreePerf, PerfModel, NcclAnalyser, TraceFusion, TraceDiff,
+  EventReplay, Reporting, and the shared utilities.
+- **Coverage reporting:** Coverage tracking and a coverage-regression gate run in
+  continuous integration to guard against regressions.
