@@ -735,9 +735,7 @@ def merge_capture_trace_into_graph(
             str_key = piece_key
         else:
             print(
-                "Warning: no capture trace for batch size {}".format(
-                    closest_batch_size
-                )
+                "Warning: no capture trace for batch size {}".format(closest_batch_size)
             )
             continue
         filepath = capture_map[str_key]
@@ -752,7 +750,7 @@ def merge_capture_trace_into_graph(
         if len(capture_roots) == 1:
             pairs = [(capture_roots[0], g) for g in graph_roots]
             data = [capture_root_data[0]] * len(graph_roots)
-        else: 
+        else:
             if len(capture_roots) == len(graph_roots):
                 pairs = list(zip(capture_roots, graph_roots))
                 data = capture_root_data

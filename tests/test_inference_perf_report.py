@@ -386,9 +386,7 @@ def test_xdit_capture_merge():
                 target_kernel_indices.append(cap_uid_to_idx[child_uid])
 
     graph_perf = TreePerfAnalyzer.from_file(profile_path, add_python_func=True)
-    exec_map = build_execution_graph_root_map(
-        graph_perf.tree
-    )
+    exec_map = build_execution_graph_root_map(graph_perf.tree)
     _, graph_roots = exec_map[0]
 
     replay_time_us = 0
@@ -448,6 +446,8 @@ def test_xdit_capture_merge():
     )
 
     _merge_mod._capture_tree_cache.clear()
+
+
 INFERENCE_ROOT = os.path.join(os.path.dirname(__file__), "traces/inference")
 
 
