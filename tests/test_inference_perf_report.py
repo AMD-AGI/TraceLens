@@ -24,9 +24,13 @@ import TraceLens.Trace2Tree.trace_capture_merge_experimental as _merge_mod
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _align_capture_to_graph,
     _align_graph_to_capture_by_group,
+    _capture_kernel_name,
     _capture_tree_cache,
+    _get_cached_capture_tree,
     align_streams,
+    build_execution_graph_root_map,
     capture_has_kernel_names,
+    get_subtree_events,
     merge_capture_trace_into_graph,
     verify_subtree_events,
 )
@@ -320,8 +324,8 @@ def test_inference_perf_report(
 # in the report for a specific GEMM shape.
 # ---------------------------------------------------------------------------
 
-XDIT_TRACE_DIR = os.path.join(INFERENCE_TRACES_ROOT, "xdit_flux_aiter")
-TARGET_GEMM_DIMS = ((4608, 15360), (15360, 3072), (4608, 3072))
+XDIT_TRACE_DIR = os.path.join(INFERENCE_TRACES_ROOT, "xdit_flux.1")
+TARGET_GEMM_DIMS = ((768, 15360), (15360, 3072), (768, 3072))
 
 
 def test_xdit_capture_merge():
@@ -387,7 +391,7 @@ def test_xdit_capture_merge():
 
     graph_perf = TreePerfAnalyzer.from_file(profile_path, add_python_func=True)
     exec_map = build_execution_graph_root_map(graph_perf.tree)
-    _, graph_roots = exec_map[0]
+    graph_roots = [gl_root for _, g_roots in exec_map for gl_root in g_roots]
 
     replay_time_us = 0
     replay_count = 0
