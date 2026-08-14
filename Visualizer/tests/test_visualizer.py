@@ -284,9 +284,9 @@ def test_spread_top_entry_ports_cluster_near_center():
     target = _RenderAnchor(cx=5.0, top=6.0, bottom=5.0, left=4.0, right=6.0)
     positions = [
         None,
-        type("Pos", (), {"cx": 3.0})(),
-        type("Pos", (), {"cx": 4.5})(),
-        type("Pos", (), {"cx": 6.5})(),
+        type("Pos", (), {"cx": 3.0, "bottom": 7.0})(),
+        type("Pos", (), {"cx": 4.5, "bottom": 7.0})(),
+        type("Pos", (), {"cx": 6.5, "bottom": 7.0})(),
     ]
     merge_entry_x: dict[tuple[int, int], float] = {}
     links = [(1, 2), (2, 2), (3, 2)]

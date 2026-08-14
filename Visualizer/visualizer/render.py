@@ -256,6 +256,7 @@ CONNECTOR_OBSTACLE_MARGIN = 0.06
 CONNECTOR_ATTACHED_BOX_MARGIN = 0.01
 TOP_ENTRY_PORT_GAP = PARALLEL_CONNECTOR_CHANNEL_GAP
 TOP_ENTRY_PORT_MAX_CENTER_BAND_FRACTION = 0.45
+SAME_COLUMN_BYPASS_CORRIDOR = CONNECTOR_EXIT_STUB + PARALLEL_CONNECTOR_CHANNEL_GAP
 CONNECTOR_SIDE_ENTRY_GAP = 0.06
 FANOUT_SHORT_CHANNEL_MAX = 0.80
 FANOUT_SHORT_TEE_FRACTION = 0.5
@@ -2687,6 +2688,9 @@ def _ensure_orthogonal_connector_path(
         x0, y0 = fixed[-1]
         if abs(x0 - x1) > eps and abs(y0 - y1) > eps:
             fixed.append((x0, y1))
+        elif abs(x0 - x1) > 0 and abs(x0 - x1) <= eps and abs(y0 - y1) > eps:
+            # A sub-eps horizontal offset would render as a slanted segment.
+            x1 = x0
         fixed.append((x1, y1))
     return _dedupe_polyline_points(fixed, eps=eps)
 
@@ -5168,6 +5172,35 @@ def _repair_connector_source_departure(
     )
 
 
+def _connector_source_exit_y(graph, src: int, source: _RenderAnchor) -> float:
+    """Y where a connector leaves its source, accounting for combine circles."""
+    nodes = getattr(graph, "nodes", ()) if graph is not None else ()
+    if src < len(nodes) and _is_combine_synthetic(nodes[src].synthetic):
+        return _combine_bottom_exit_y(source)
+    return _connector_source_bottom_exit_y(source)
+
+
+def _connector_turn_before_clearing_source(
+    points: list[tuple[float, float]],
+    *,
+    y_exit: float,
+    source_cx: float,
+) -> float | None:
+    """Y of a horizontal that turns off the source column before the exit stub ends."""
+    floor_y = y_exit - CONNECTOR_EXIT_STUB + PARALLEL_CONNECTOR_COORD_EPS
+    for (x1, y1), (x2, y2) in zip(points, points[1:]):
+        if abs(y1 - y2) > PARALLEL_CONNECTOR_COORD_EPS / 2:
+            continue
+        if abs(x1 - x2) <= PARALLEL_CONNECTOR_COORD_EPS / 2:
+            continue
+        if y1 < floor_y:
+            continue
+        if min(abs(x1 - source_cx), abs(x2 - source_cx)) > PARALLEL_CONNECTOR_COORD_EPS / 2:
+            continue
+        return y1
+    return None
+
+
 def _assert_connectors_avoid_block_edge_horizontal_jogs(
     link_paths: dict[tuple[int, int], list[tuple[float, float]]],
     *,
@@ -5177,6 +5210,10 @@ def _assert_connectors_avoid_block_edge_horizontal_jogs(
 ) -> None:
     """Runtime check: connectors never jog horizontally along source bottoms or target tops."""
     offenders: list[str] = []
+    side_entry_links = getattr(graph, "side_entry_links", set()) if graph is not None else set()
+    inline_binary_links = (
+        getattr(graph, "inline_binary_operand_links", set()) if graph is not None else set()
+    )
     for link_key, points in link_paths.items():
         if len(points) < 2:
             continue
@@ -5185,6 +5222,16 @@ def _assert_connectors_avoid_block_edge_horizontal_jogs(
         target = anchors.get(tgt)
         if source is None or target is None:
             continue
+        if link_key not in side_entry_links and link_key not in inline_binary_links:
+            early_turn = _connector_turn_before_clearing_source(
+                points,
+                y_exit=_connector_source_exit_y(graph, src, source),
+                source_cx=source.cx,
+            )
+            if early_turn is not None:
+                offenders.append(
+                    f"{link_key} horizontal before exit stub y={early_turn:.4f}@{stage}"
+                )
         y_exit = _connector_source_bottom_exit_y(source)
         y_entry = _connector_target_top_entry_y(target)
         if _connector_path_has_block_edge_horizontal_jog(
@@ -5389,6 +5436,258 @@ def _swap_merge_entry_x_if_crossing(
             entry_x[left_link], entry_x[right_link] = entry_x[right_link], entry_x[left_link]
 
 
+def _spread_link_port_order_key(positions: list):
+    """Order top-entry ports by source column, then by closeness to the target.
+
+    Sources stacked in one column feed the same port band, so the lowest source
+    takes the innermost port: it drops straight down while the ones above it have
+    to pass beside it.
+    """
+
+    def key(link: tuple[int, int]) -> tuple[float, float]:
+        source = positions[link[0]]
+        return (source.cx, source.bottom)
+
+    return key
+
+
+def _same_column_top_entry_links(
+    spread_links: list[tuple[int, int]],
+    target_anchor: _RenderAnchor,
+    positions: list,
+    anchors: dict[int, _RenderAnchor],
+) -> list[tuple[int, int]]:
+    """Top-entry links whose source sits in the target's own column, lowest first."""
+    same_column = [
+        link
+        for link in spread_links
+        if link[0] in anchors
+        and abs(positions[link[0]].cx - target_anchor.cx) < TOP_ENTRY_PORT_GAP
+    ]
+    return sorted(same_column, key=lambda link: anchors[link[0]].bottom)
+
+
+def _bypass_port_x_beside_blockers(
+    target_anchor: _RenderAnchor,
+    blockers: list[_RenderAnchor],
+) -> float | None:
+    """Top-entry port on the target edge that clears tiles stacked above it."""
+    if not blockers:
+        return None
+    right_low = max(blocker.right for blocker in blockers) + CONNECTOR_OBSTACLE_MARGIN
+    right_high = target_anchor.right - CONNECTOR_ATTACHED_BOX_MARGIN
+    if right_low <= right_high:
+        return (right_low + right_high) / 2
+    left_high = min(blocker.left for blocker in blockers) - CONNECTOR_OBSTACLE_MARGIN
+    left_low = target_anchor.left + CONNECTOR_ATTACHED_BOX_MARGIN
+    if left_low <= left_high:
+        return (left_low + left_high) / 2
+    return None
+
+
+def _same_column_bypass_corridor_y(
+    blocker: _RenderAnchor,
+    blocker_bus_y: float | None,
+) -> float | None:
+    """Channel between a passed-by tile's merge bus and its top edge."""
+    if blocker_bus_y is None:
+        return None
+    low = _connector_min_bus_y_above_target(blocker)
+    high = blocker_bus_y - PARALLEL_CONNECTOR_CHANNEL_GAP
+    if high < low:
+        return None
+    return (low + high) / 2
+
+
+def _same_column_bypass_assignments(
+    links: list[tuple[int, int]],
+    target_anchor: _RenderAnchor,
+    *,
+    positions: list,
+    anchors: dict[int, _RenderAnchor],
+    target_bus: dict[int, float],
+) -> dict[tuple[int, int], tuple[float, float]]:
+    """Bypass port column and tee level for feeders stacked in the target column.
+
+    The lowest feeder drops straight down the column; every feeder above it has
+    to pass beside that tile. Teeing below the passed tile's merge bus keeps the
+    bypass clear of the wires feeding it, and a port beside the tile keeps the
+    entry vertical.
+    """
+    ordered = _same_column_top_entry_links(links, target_anchor, positions, anchors)
+    if len(ordered) < 2:
+        return {}
+    assignments: dict[tuple[int, int], tuple[float, float]] = {}
+    for index, link in enumerate(ordered[1:], start=1):
+        source = anchors[link[0]]
+        blocked = [
+            lower
+            for lower in ordered[:index]
+            if anchors[lower[0]].top < source.bottom
+            and anchors[lower[0]].bottom > target_anchor.top
+        ]
+        if not blocked:
+            continue
+        topmost = max(blocked, key=lambda lower: anchors[lower[0]].top)
+        corridor_y = _same_column_bypass_corridor_y(
+            anchors[topmost[0]],
+            target_bus.get(topmost[0]),
+        )
+        if corridor_y is None or corridor_y >= source.bottom - CONNECTOR_EXIT_STUB:
+            continue
+        port_x = _bypass_port_x_beside_blockers(
+            target_anchor,
+            [anchors[lower[0]] for lower in blocked],
+        )
+        if port_x is None:
+            continue
+        assignments[link] = (port_x, corridor_y)
+    return assignments
+
+
+def _assign_same_column_bypass_entry(
+    spread_links: list[tuple[int, int]],
+    target_anchor: _RenderAnchor,
+    *,
+    positions: list,
+    anchors: dict[int, _RenderAnchor],
+    target_bus: dict[int, float],
+    merge_entry_x: dict[tuple[int, int], float],
+    merge_link_bus: dict[tuple[int, int], float],
+) -> None:
+    """Give stacked same-column feeders bypass ports beside the tiles they pass."""
+    assignments = _same_column_bypass_assignments(
+        spread_links,
+        target_anchor,
+        positions=positions,
+        anchors=anchors,
+        target_bus=target_bus,
+    )
+    if not assignments:
+        return
+    ordered = _same_column_top_entry_links(
+        spread_links,
+        target_anchor,
+        positions,
+        anchors,
+    )
+    merge_entry_x[ordered[0]] = target_anchor.cx
+    for link, (port_x, corridor_y) in assignments.items():
+        merge_entry_x[link] = port_x
+        merge_link_bus[link] = corridor_y
+
+
+def _same_column_bypass_top_entry_route(
+    source: _RenderAnchor,
+    target: _RenderAnchor,
+    entry_x: float,
+    corridor_y: float,
+    *,
+    gap: float = 0.04,
+) -> list[tuple[float, float]]:
+    """Tee below a passed tile's merge bus, then drop on the bypass port column."""
+    return _ensure_orthogonal_connector_path(
+        [
+            (source.cx, _connector_source_bottom_exit_y(source, gap=gap)),
+            (source.cx, corridor_y),
+            (entry_x, corridor_y),
+            (entry_x, _connector_target_top_entry_y(target, gap=gap)),
+        ]
+    )
+
+
+def _apply_same_column_bypass_routes(
+    link_paths: dict[tuple[int, int], list[tuple[float, float]]],
+    *,
+    graph,
+    positions: list,
+    anchors: dict[int, _RenderAnchor],
+    label_obstacles: list[_RenderAnchor],
+    incoming: dict[int, list[tuple[int, int]]],
+    merge_entry_x: dict[tuple[int, int], float],
+    target_bus: dict[int, float],
+) -> None:
+    """Route legs that pass beside a stacked sibling below that sibling's bus."""
+    for tgt, link_group in incoming.items():
+        target_anchor = anchors.get(tgt)
+        if target_anchor is None:
+            continue
+        assignments = _same_column_bypass_assignments(
+            [link for link in link_group if link in merge_entry_x],
+            target_anchor,
+            positions=positions,
+            anchors=anchors,
+            target_bus=target_bus,
+        )
+        for link, (port_x, corridor_y) in assignments.items():
+            source = anchors.get(link[0])
+            if source is None or link not in link_paths:
+                continue
+            if abs(merge_entry_x.get(link, target_anchor.cx) - port_x) > (
+                PARALLEL_CONNECTOR_COORD_EPS / 2
+            ):
+                continue
+            route = _same_column_bypass_top_entry_route(
+                source,
+                target_anchor,
+                port_x,
+                corridor_y,
+            )
+            obstacles = _connector_block_obstacles(
+                anchors,
+                src=link[0],
+                tgt=tgt,
+                label_obstacles=label_obstacles,
+                graph=graph,
+                positions=positions,
+                link_key=link,
+            )
+            if not _connector_path_clear_of_blocks(
+                route,
+                source=source,
+                target=target_anchor,
+                obstacles=obstacles,
+            ):
+                continue
+            if (
+                _connector_path_violates_inline_frame_bounds(
+                    route,
+                    graph,
+                    positions,
+                    src=link[0],
+                    tgt=tgt,
+                )
+                is not None
+            ):
+                continue
+            link_paths[link] = route
+
+
+def _target_blocks_same_column_bypass(
+    positions: list,
+    anchors: dict[int, _RenderAnchor],
+    *,
+    tgt: int,
+    incoming: dict[int, list[tuple[int, int]]],
+    outgoing: dict[int, list[tuple[int, int]]],
+) -> bool:
+    """True when a same-column feeder of this tile also feeds a tile below it."""
+    target_anchor = anchors.get(tgt)
+    if target_anchor is None:
+        return False
+    for src, _ in incoming.get(tgt, []):
+        if src not in anchors:
+            continue
+        if abs(positions[src].cx - target_anchor.cx) >= TOP_ENTRY_PORT_GAP:
+            continue
+        for _, below in outgoing.get(src, []):
+            if below == tgt or below not in anchors:
+                continue
+            if anchors[below].top <= target_anchor.bottom + PARALLEL_CONNECTOR_COORD_EPS:
+                return True
+    return False
+
+
 def _assign_spread_merge_entry_x(
     spread_links: list[tuple[int, int]],
     target_anchor: _RenderAnchor,
@@ -5405,7 +5704,7 @@ def _assign_spread_merge_entry_x(
         merge_entry_x[spread_links[0]] = target_anchor.cx
         return
 
-    sorted_links = sorted(spread_links, key=lambda link: positions[link[0]].cx)
+    sorted_links = sorted(spread_links, key=_spread_link_port_order_key(positions))
     span = _center_spread_top_entry_span(len(sorted_links), target_anchor)
     left = target_anchor.cx - span / 2
     source_cxs = [positions[link[0]].cx for link in sorted_links]
@@ -7121,6 +7420,16 @@ def _collect_detail_link_paths(
                     for key, reason in node_clearance[:4]
                 )
             )
+    _apply_same_column_bypass_routes(
+        validated,
+        graph=graph,
+        positions=positions,
+        anchors=anchors,
+        label_obstacles=label_obstacles,
+        incoming=incoming,
+        merge_entry_x=merge_entry_x,
+        target_bus=target_bus,
+    )
     if validate_layout and _graph_requires_strict_connector_validation(graph):
         _assert_connectors_avoid_block_edge_horizontal_jogs(
             validated,
@@ -9763,6 +10072,14 @@ def _compute_detail_connector_buses(
             [src for src, _ in main_links],
         )
         min_bus_y = _connector_min_bus_y_above_target(target_anchor)
+        if _target_blocks_same_column_bypass(
+            positions,
+            anchors,
+            tgt=tgt,
+            incoming=incoming,
+            outgoing=outgoing,
+        ):
+            min_bus_y += SAME_COLUMN_BYPASS_CORRIDOR
         if pipeline_bus is not None:
             bus_y = max(min_bus_y, min(bus_y, pipeline_bus))
         else:
@@ -9824,7 +10141,7 @@ def _compute_detail_connector_buses(
         target_anchor = anchors.get(tgt)
         if target_anchor is None:
             continue
-        sorted_links = sorted(top_main_links, key=lambda link: positions[link[0]].cx)
+        sorted_links = sorted(top_main_links, key=_spread_link_port_order_key(positions))
         if tgt in target_bus:
             base_bus = target_bus.get(tgt)
             for link in sorted_links:
@@ -9852,6 +10169,15 @@ def _compute_detail_connector_buses(
             positions,
             anchors,
             merge_entry_x,
+        )
+        _assign_same_column_bypass_entry(
+            spread_links,
+            target_anchor,
+            positions=positions,
+            anchors=anchors,
+            target_bus=target_bus,
+            merge_entry_x=merge_entry_x,
+            merge_link_bus=merge_link_bus,
         )
         base_bus = target_bus.get(tgt)
         if base_bus is None and len(spread_links) >= 2:

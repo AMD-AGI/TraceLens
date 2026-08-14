@@ -1325,6 +1325,220 @@ def test_kimi_mla_spread_attention_merge_routes():
     plt.close(fig)
 
 
+def _connector_segment_crossing(seg_a, seg_b):
+    """Point where one vertical and one horizontal connector segment intersect."""
+    (ax1, ay1), (ax2, ay2) = seg_a
+    (bx1, by1), (bx2, by2) = seg_b
+    a_vertical = abs(ax1 - ax2) < 0.005
+    b_vertical = abs(bx1 - bx2) < 0.005
+    if a_vertical == b_vertical:
+        return None
+    if b_vertical:
+        seg_a, seg_b = seg_b, seg_a
+        (ax1, ay1), (ax2, ay2) = seg_a
+        (bx1, by1), (bx2, by2) = seg_b
+    low_y, high_y = sorted((ay1, ay2))
+    low_x, high_x = sorted((bx1, bx2))
+    if low_y + 0.01 < by1 < high_y - 0.01 and low_x + 0.01 < ax1 < high_x - 0.01:
+        return (ax1, by1)
+    return None
+
+
+def _kimi_detail_section_link_paths(tmp_path, monkeypatch, node_label: str):
+    """Render the full detailed diagram and capture the section holding node_label."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    from visualizer import render as render_module
+    from visualizer.basic_ops import BasicOpFilter
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    spec = load_architecture(
+        "moonshotai/Kimi-K3",
+        code_path=code_path,
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"]),
+    )
+    captured: list[dict] = []
+    original = render_module._collect_detail_link_paths
+
+    def capture(**kwargs):
+        paths = original(**kwargs)
+        captured.append(
+            {
+                "graph": kwargs["graph"],
+                "anchors": dict(kwargs["anchors"]),
+                "link_paths": {key: list(points) for key, points in paths.items()},
+                "merge_entry_x": dict(kwargs["merge_entry_x"]),
+                "target_bus": dict(kwargs["target_bus"]),
+            }
+        )
+        return paths
+
+    monkeypatch.setattr(render_module, "_collect_detail_link_paths", capture)
+    render_diagram(spec, tmp_path / "kimi_sections.svg", detailed=True)
+    return next(
+        section
+        for section in captured
+        if any(node.label == node_label for node in section["graph"].nodes)
+    )
+
+
+def test_kimi_kda_stacked_feeders_enter_gated_delta_rule_without_crossing(
+    tmp_path, monkeypatch
+):
+    """CumSum passes beside Intra-chunk WY instead of crossing its merge bus."""
+    from visualizer.render import (
+        CONNECTOR_OBSTACLE_MARGIN,
+        _connector_source_exit_y,
+        _connector_turn_before_clearing_source,
+    )
+
+    section = _kimi_detail_section_link_paths(
+        tmp_path,
+        monkeypatch,
+        "chunk_gated_delta_rule_fwd_h",
+    )
+    graph = section["graph"]
+    anchors = section["anchors"]
+    link_paths = section["link_paths"]
+    index_of = {node.label: i for i, node in enumerate(graph.nodes)}
+    cumsum = index_of["CumSum"]
+    intra = index_of["chunk_kda_fwd_intra"]
+    gated = index_of["chunk_gated_delta_rule_fwd_h"]
+
+    intra_anchor = anchors[intra]
+    gated_anchor = anchors[gated]
+    intra_leg = link_paths[(intra, gated)]
+    cumsum_leg = link_paths[(cumsum, gated)]
+
+    for leg in (intra_leg, cumsum_leg):
+        assert abs(leg[-1][1] - gated_anchor.top) < 1e-6, "legs must land on the top edge"
+        assert abs(leg[-1][0] - leg[-2][0]) < 1e-6, "top entries must be vertical"
+
+    assert abs(intra_leg[-1][0] - gated_anchor.cx) < 1e-6, (
+        "the feeder directly above keeps the center port"
+    )
+    bypass_x = cumsum_leg[-1][0]
+    assert bypass_x >= intra_anchor.right + CONNECTOR_OBSTACLE_MARGIN - 1e-6, (
+        f"bypass port {bypass_x:.4f} must clear Intra-chunk WY at {intra_anchor.right:.4f}"
+    )
+    assert bypass_x <= gated_anchor.right, "bypass port must stay on the target's top edge"
+
+    intra_bus = section["target_bus"][intra]
+    tee_y = cumsum_leg[1][1]
+    assert tee_y < intra_bus, "bypass must tee below the merge bus it would otherwise cross"
+    assert tee_y > intra_anchor.top, "bypass must tee above the tile it passes"
+
+    all_segments = [
+        (link, list(zip(points, points[1:]))) for link, points in link_paths.items()
+    ]
+    for index, (link_a, segments_a) in enumerate(all_segments):
+        for link_b, segments_b in all_segments[index + 1 :]:
+            for seg_a in segments_a:
+                for seg_b in segments_b:
+                    crossing = _connector_segment_crossing(seg_a, seg_b)
+                    assert crossing is None, (
+                        f"{link_a} crosses {link_b} at "
+                        f"({crossing[0]:.4f}, {crossing[1]:.4f})"
+                    )
+
+    for (src, _tgt), points in link_paths.items():
+        if (src, _tgt) in graph.side_entry_links or (
+            src,
+            _tgt,
+        ) in graph.inline_binary_operand_links:
+            continue
+        assert (
+            _connector_turn_before_clearing_source(
+                points,
+                y_exit=_connector_source_exit_y(graph, src, anchors[src]),
+                source_cx=anchors[src].cx,
+            )
+            is None
+        ), f"{(src, _tgt)} turns horizontally before clearing its exit stub: {points}"
+
+
+def test_same_column_bypass_ports_and_corridor():
+    """Stacked same-column feeders get ordered ports and a tee below the passed bus."""
+    from visualizer.render import (
+        CONNECTOR_OBSTACLE_MARGIN,
+        _RenderAnchor,
+        _same_column_bypass_assignments,
+        _same_column_bypass_top_entry_route,
+    )
+
+    upper = _RenderAnchor(cx=2.0, top=-1.0, bottom=-1.4, left=1.6, right=2.4)
+    middle = _RenderAnchor(cx=2.0, top=-2.0, bottom=-2.4, left=1.5, right=2.5)
+    target = _RenderAnchor(cx=2.0, top=-3.0, bottom=-3.4, left=1.3, right=2.7)
+    anchors = {0: upper, 1: middle, 2: target}
+    positions = [
+        type("Pos", (), {"cx": anchor.cx, "bottom": anchor.bottom})()
+        for anchor in (upper, middle, target)
+    ]
+    middle_bus = middle.top + 0.3
+    assignments = _same_column_bypass_assignments(
+        [(0, 2), (1, 2)],
+        target,
+        positions=positions,
+        anchors=anchors,
+        target_bus={1: middle_bus},
+    )
+    assert list(assignments) == [(0, 2)], "only the feeder above the stack bypasses"
+    port_x, corridor_y = assignments[(0, 2)]
+    assert port_x >= middle.right + CONNECTOR_OBSTACLE_MARGIN - 1e-6
+    assert port_x <= target.right
+    assert middle.top < corridor_y < middle_bus
+
+    route = _same_column_bypass_top_entry_route(upper, target, port_x, corridor_y)
+    assert route == [
+        (upper.cx, upper.bottom),
+        (upper.cx, corridor_y),
+        (port_x, corridor_y),
+        (port_x, target.top),
+    ]
+
+
+def test_connector_turn_before_clearing_source_flags_short_stubs():
+    """A jog right below the source bottom counts as a horizontal exit."""
+    from visualizer.render import _connector_turn_before_clearing_source
+
+    jogged = [(2.0, -9.03), (2.0, -9.05), (2.1, -9.05), (2.1, -9.22)]
+    assert _connector_turn_before_clearing_source(
+        jogged,
+        y_exit=-9.03,
+        source_cx=2.0,
+    ) == pytest.approx(-9.05)
+
+    stubbed = [(2.0, -9.03), (2.0, -9.13), (2.1, -9.13), (2.1, -9.22)]
+    assert (
+        _connector_turn_before_clearing_source(stubbed, y_exit=-9.03, source_cx=2.0)
+        is None
+    )
+
+    trunk_tee = [(2.0, -9.13), (2.4, -9.13), (2.4, -9.22)]
+    assert (
+        _connector_turn_before_clearing_source(trunk_tee, y_exit=-9.03, source_cx=2.0)
+        is None
+    )
+
+
+def test_ensure_orthogonal_connector_path_squares_sub_eps_offsets():
+    """A tiny horizontal offset must not render as a slanted connector."""
+    from visualizer.render import _ensure_orthogonal_connector_path
+
+    points = _ensure_orthogonal_connector_path([(2.3516, -12.70), (2.3447, -13.30)])
+    assert len(points) == 2
+    assert points[0][0] == points[1][0] == pytest.approx(2.3516)
+
+
 def test_spread_merge_gutter_route_skips_overshoot_on_direct_drop():
     """A drop that already clears the stub must not detour right of the source."""
     from visualizer.render import (
