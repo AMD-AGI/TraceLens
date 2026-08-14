@@ -17,7 +17,6 @@ on:
       - ".coveragerc"
       - "codecov.yml"
       - ".github/workflows/unit-tests.yml"
-      - ".github/workflows/lint.yml"
   pull_request:
     branches: [ main ]
     paths:
@@ -28,7 +27,6 @@ on:
       - ".coveragerc"
       - "codecov.yml"
       - ".github/workflows/unit-tests.yml"
-      - ".github/workflows/lint.yml"
 
 jobs:
   unit-tests:

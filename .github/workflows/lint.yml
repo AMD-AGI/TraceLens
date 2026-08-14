@@ -17,7 +17,6 @@ on:
       - "MANIFEST.in"
       - ".importlinter"
       - ".github/workflows/lint.yml"
-      - ".github/workflows/unit-tests.yml"
   pull_request:
     branches:
       - main
@@ -28,7 +27,6 @@ on:
       - "MANIFEST.in"
       - ".importlinter"
       - ".github/workflows/lint.yml"
-      - ".github/workflows/unit-tests.yml"
 
 jobs:
   lint:
