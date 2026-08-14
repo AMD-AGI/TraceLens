@@ -39,7 +39,7 @@ Support depends on the execution mode of the traced workload:
 | Execution mode | Standalone | Comparative |
 |---|---|---|
 | Eager | Supported | Supported |
-| Graph + capture | Supported | Not supported |
+| Graph + capture | Supported | Supported |
 | Graph | Not supported | Not supported |
 
 ## Before you begin
@@ -131,7 +131,7 @@ standalone run on a remote node with a container:
 ```bash
 agent --model <model> --print --force --trust \
     "Follow the analysis orchestrator installed with the TraceLens pip package
-    (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package
+    (look under TraceLens/Agent/Analysis/skills/ in the package
     installation directory) and run the full agentic analysis workflow on
     <path_to_trace.json> with platform <platform>, analysis mode default,
     node <node>, container <container>, output to <output_dir>"
