@@ -7,15 +7,15 @@ See LICENSE for license information.
 
 # Generate a PyTorch inference performance report
 ```{meta}
-:description: Learn how to collect, split, and analyze PyTorch LLM-serving (vLLM/SGLang) traces with TraceLens, including graph-capture merging for graph-mode inference.
-:keywords: TraceLens, PyTorch profiler, inference, vLLM, SGLang, HIP graph, CUDA graph, graph capture, LLM serving, FusedMoE, roofline, trace splitting, steady state, ROCm
+:description: Learn how to collect, split, and analyze PyTorch inference traces (vLLM, SGLang, xDiT) with TraceLens, including graph-capture merging for graph-mode inference.
+:keywords: TraceLens, PyTorch profiler, inference, vLLM, SGLang, xDiT, diffusion, HIP graph, CUDA graph, graph capture, LLM serving, FusedMoE, roofline, trace splitting, steady state, ROCm
 ```
 
 `TraceLens_generate_perf_report_pytorch_inference` is the inference-oriented
-variant of the PyTorch report. It targets LLM-serving traces (for example, from
-vLLM or SGLang) that run in CUDA/HIP graph mode, and can merge the graph-capture
-traces back into the graph-replay trace to recover the call-stack and input-shape
-metadata that graph execution drops.
+variant of the PyTorch report. It targets inference traces from frameworks such
+as vLLM, SGLang, and xDiT that run in CUDA/HIP graph mode, and can merge the
+graph-capture traces back into the graph-replay trace to recover the call-stack
+and input-shape metadata that graph execution drops.
 
 This topic covers the end-to-end inference workflow: collecting traces, splitting
 them into steady-state windows, and generating the report. For training or
@@ -27,8 +27,8 @@ steady-state region), see
 
 ## Supported frameworks and execution modes
 
-TraceLens inference features are primarily tested with vLLM and SGLang. Feature
-coverage depends on how the model is executed:
+TraceLens inference analysis supports vLLM, SGLang, and xDiT. Feature coverage
+depends on the framework and how the model is executed:
 
 | Mode | Shapes / roofline analysis | Agent analysis | Limitations |
 |------|----------------------------|----------------|-------------|
@@ -38,7 +38,7 @@ coverage depends on how the model is executed:
 | Graph execution + graph capture [^1] | Yes | Yes (patches required) | |
 
 [^1]: Graph-mode analysis using graph-capture and graph-replay traces is
-supported for vLLM and SGLang (proposed patches required).
+supported for vLLM, SGLang, and xDiT (proposed patches required).
 
 ## Before you begin
 
@@ -87,6 +87,12 @@ image and patch file automatically:
 | `v22` | `vllm/vllm-openai-rocm:v0.22.0` | v0.22.0 | `config_vllm_v0.22.0.patch` |
 | `v23` | `vllm/vllm-openai-rocm:v0.23.0` | v0.23.0 | `config_vllm_v0.23.0.patch` |
 | `v24` | `vllm/vllm-openai-rocm:v0.24.0` | v0.24.0 | `config_vllm_v0.24.0.patch` |
+| `v25` | `vllm/vllm-openai-rocm:v0.25.0` | v0.25.0 | `config_vllm_v0.25.0.patch` |
+
+```{note}
+The profiler options these patches add
+([vllm-project/vllm#37524](https://github.com/vllm-project/vllm/pull/37524)) were merged into upstream vLLM and ship in **v0.26.0 and later**, so those versions need no patched image at all.
+```
 
 ```bash
 bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
@@ -126,6 +132,8 @@ the SGLang version (`--sglang-version`, default `0.5.9`), and the GPU type
 | `0.5.15` | MI350/MI355 | `lmsysorg/sglang:v0.5.15-rocm720-mi35x` |
 | `0.5.16` | MI300 | `lmsysorg/sglang:v0.5.16-rocm720-mi30x` |
 | `0.5.16` | MI350/MI355 | `lmsysorg/sglang:v0.5.16-rocm720-mi35x` |
+| `0.5.17` | MI300 | `lmsysorg/sglang:v0.5.17-rocm720-mi30x` |
+| `0.5.17` | MI350/MI355 | `lmsysorg/sglang:v0.5.17-rocm720-mi35x` |
 
 On SGLang **0.5.13 / 0.5.14**, kernel-shape wrapping is incompatible with the
 EAGLE/MTP speculative *overlap* decode, so the speculative patches disable capture
@@ -139,6 +147,22 @@ bash examples/custom_workflows/inference_analysis/build_docker_sglang.sh \
     --sglang-version 0.5.11 \
     --gpu-type mi350 \
     -t tracelens-sglang
+```
+
+**xDiT.** The xDiT build script supports diffusion model profiling with xDiT. It takes
+the xDiT version as its first argument, followed by the path to your local
+TraceLens clone and any standard `docker build` flags:
+
+| Version | Base image | Patch file |
+|---------|-----------|------------|
+| `v26.6` | `rocm/pytorch-xdit:v26.6` | `config_xdit_v26.6.patch` |
+| `v26.7` | `rocm/pytorch-xdit:v26.7` | `config_xdit_v26.7.patch` |
+
+```bash
+bash examples/custom_workflows/inference_analysis/build_docker_xdit.sh \
+    v26.7 \
+    /path/to/TraceLens \
+    -t tracelens-xdit:v26.7
 ```
 
 Create a container from the resulting image.
@@ -172,7 +196,9 @@ To apply them:
    vLLM patches are in
    [`vllm_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/vllm_patches);
    SGLang patches are in
-   [`sglang_roofline_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/sglang_roofline_patches).
+   [`sglang_roofline_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/sglang_roofline_patches);
+   xDiT patches are in
+   [`xdit_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/xdit_patches).
 
 #### Collection parameters
 
@@ -192,12 +218,14 @@ To apply them:
 
 #### Trace collection flags
 
-**vLLM.** The `config_vllm_v*.patch` patches (available for v0.14-v0.24) add two
-`ProfilerConfig` flags. Pass them as server arguments:
+**vLLM.** Two `ProfilerConfig` flags control graph-capture tracing and roofline
+annotations. They are added by the `config_vllm_v*.patch` patches on **v0.14-v0.25**
+and are built into upstream vLLM from **v0.26.0** onwards. Pass them as server
+arguments:
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--profiler-config.capture_torch_profiler_dir DIR` | `str` | `""` | Directory where a profiler trace of the HIP/CUDA-graph capture phase is saved (rank 0 only). Requires `--profiler-config.profiler torch`. Leave empty to disable graph-capture profiling. |
+| `--profiler-config.capture_torch_profiler` | `bool` | `False` | When `True`, a profiler trace of the HIP/CUDA-graph capture phase is written (rank 0 only) to a `capture_traces` subdirectory of `--profiler-config.torch_profiler_dir`. Requires `--profiler-config.profiler torch`. |
 | `--profiler-config.detailed_trace_annotation` | `bool` | `False` | When `True`, execution-step annotations include roofline metrics (`sk`, `sqsq`, `sqsk`) for context and generation requests. When `False`, annotations record only request and token counts. Enable for full roofline analysis. |
 
 Example - enable both flags alongside a steady-state window profile:
@@ -205,7 +233,7 @@ Example - enable both flags alongside a steady-state window profile:
 ```bash
 --profiler-config.profiler torch \
 --profiler-config.torch_profiler_dir /workspace/torch_trace \
---profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces \
+--profiler-config.capture_torch_profiler True \
 --profiler-config.detailed_trace_annotation True \
 --profiler-config.delay_iterations 5402 \
 --profiler-config.max_iterations 256 \
@@ -213,8 +241,16 @@ Example - enable both flags alongside a steady-state window profile:
 ```
 
 ```{note}
-`capture_torch_profiler_dir` is only available when `--profiler-config.profiler torch`
-is set. The capture trace is written once at server startup during HIP/CUDA-graph
+`capture_torch_profiler` is a boolean switch, not a path: the capture directory is
+always `<torch_profiler_dir>/capture_traces`. Earlier TraceLens releases exposed
+this as `capture_torch_profiler_dir DIR`, which took the destination directory
+explicitly; that name no longer exists in any patch or in upstream vLLM, so update
+older command lines to the boolean form. The flag is only available when
+`--profiler-config.profiler torch` is set.
+```
+
+```{note}
+The capture trace is written once at server startup during HIP/CUDA-graph
 construction; the steady-state replay trace is written to `torch_profiler_dir`
 during the benchmark. Pass both paths to the report generator using
 `--capture_folder` and `--profile_json_path` respectively.
@@ -224,14 +260,14 @@ during the benchmark. Pass both paths to the report generator using
 
 1. Pass `shape_discovery=True` to enable shape discovery and registration for
    operations not covered by the default SGLang profile.
-2. Pass `roofline_annotations=True` to annotate the trace with the detailed
+2. Pass `detailed_annotations=True` to annotate the trace with the detailed
    information used for roofline analysis.
 3. To profile the graph-capture phase, pass the `--enable-profile-cuda-graph`
    server argument at startup. This saves one trace file per batch size but misses
    shape information for some operations; add
    `--enable-shape-discovery-for-cuda-graph-profile` for more diverse coverage.
 4. On SGLang **0.5.13 and later**, writing the per-batch-size graph-capture trace
-   files to disk is opt-in via the `SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE=1`
+   files to disk is opt-in via the `SGLANG_GRAPH_BATCH_CAPTURE=1`
    environment variable (default off). Set it *in addition to*
    `--enable-profile-cuda-graph`; without it the capture profiler still runs (for
    the summary tables and memory snapshot) but no per-batch-size trace is written to
@@ -242,9 +278,20 @@ during the benchmark. Pass both paths to the report generator using
 On SGLang 0.5.13 / 0.5.14 the graph-capture shape profiling is intentionally
 disabled for the EAGLE/MTP speculative graphs (and, on 0.5.14, the target-verify
 graph) to avoid a GPU fault in the speculative overlap decode, so
-`SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE` only yields capture traces for the
+`SGLANG_GRAPH_BATCH_CAPTURE` only yields capture traces for the
 non-speculative graphs there. Full MTP graph-capture profiling works on 0.5.15+.
 ```
+
+**xDiT.** The `config_xdit_v*.patch` patches add two flags to the `xfuser`
+runner. Pass them via the `EXTRA_XDIT_ARGS` environment variable (or directly to
+the `xdit` CLI):
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--profile_capture_phase` | flag | disabled | Profile the graph-capture phase and write a capture trace to `<output_dir>/capture_traces/capture_rank_0.json.gz`. Required to recover shapes and call stacks in graph-mode analysis. |
+| `--profile_wait` | `int` | `0` | Number of profiler warm-up iterations before active collection during the replay phase. Set to `1` to work around a ROCTracer bug that causes empty traces when `wait=0`. |
+
+In addition, `--profile` must be set to enable xDiT profiling.
 
 ## Split inference traces (optional)
 

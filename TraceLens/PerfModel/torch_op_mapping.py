@@ -370,6 +370,12 @@ replication_pad_ops = [
     "aten::replication_pad3d",
 ]
 
+upsample_ops = [
+    "aten::upsample_nearest1d",
+    "aten::upsample_nearest2d",
+    "aten::upsample_nearest3d",
+]
+
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
 for op in binary_elemwise_ops:
@@ -380,6 +386,8 @@ for op in reduce_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_reduce
 for op in replication_pad_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_replication_pad
+for op in upsample_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_upsample_nearest
 
 # ---------------------------------------------------------------------------
 # Pattern-based matchers for perf models with generated kernel names.

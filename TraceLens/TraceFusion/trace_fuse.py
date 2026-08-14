@@ -142,10 +142,6 @@ class TraceFuse:
             for field, max_value in max_values.items()
         }
 
-    @staticmethod
-    def default_filter_fn(event):
-        return event.get("cat", None) != "Trace"
-
     _GPU_CATEGORIES = {"kernel", "gpu_memcpy", "gpu_memset"}
 
     def _generate_rank_metadata(self, merged_data):

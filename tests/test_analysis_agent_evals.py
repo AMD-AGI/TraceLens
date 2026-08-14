@@ -24,6 +24,7 @@ import pytest
 import yaml
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 _ANALYSIS_DIR = os.path.join(REPO_ROOT, "agent_evals", "Analysis")
 _EVAL_UTILS_DIR = os.path.join(_ANALYSIS_DIR, "eval_utils")
 _RULES_PATH = os.path.join(_EVAL_UTILS_DIR, "report_section_rules.yaml")

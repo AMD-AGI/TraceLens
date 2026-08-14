@@ -20,6 +20,7 @@ from TraceLens.PerfModel.torch_op_mapping import (
     categorize_torch_op,
     op_to_perf_model_class_map,
 )
+import pytest
 
 
 def _mamba_event(
@@ -318,7 +319,6 @@ def test_bytes_bwd_equals_fwd():
 
 def test_invalid_combined_dim_raises():
     """Tampered combined_dim that doesn't satisfy divisibility should raise."""
-    import pytest
 
     event = _mamba_event()
     event["args"]["Input Dims"][0][2] += 1  # break divisibility

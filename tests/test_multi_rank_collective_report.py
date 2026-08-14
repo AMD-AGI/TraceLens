@@ -6,12 +6,7 @@
 
 """Unit tests for generate_multi_rank_collective_report_pytorch."""
 
-import glob
-import os
-
-import pandas as pd
-import pytest
-
+import glob, os, pandas as pd, pytest, importlib, json, sys, TraceLens.Reporting.generate_multi_rank_collective_report_pytorch as mod
 from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
     DEFAULT_RANK_REGEX,
     _resolve_trace_files_glob,
@@ -120,3 +115,143 @@ def test_generate_collective_report_llama_traces(tmp_path):
     assert "nccl_summary_implicit_sync" in dfs
     assert isinstance(dfs["nccl_summary_implicit_sync"], pd.DataFrame)
     assert os.path.isfile(os.path.join(out_dir, "nccl_summary_implicit_sync.csv"))
+
+
+class TestCollectiveReportErrors:
+    def test_glob_rank_resolution_errors(self, tmp_path):
+        (tmp_path / "bad.json").write_text("{}")
+        with pytest.raises(ValueError, match="none matched"):
+            _resolve_trace_files_glob(str(tmp_path / "*.json"), world_size=2)
+        for rank in (0, 1):
+            (tmp_path / f"trace_rank_{rank}.json").write_text("{}")
+        paths = _resolve_trace_files_glob(str(tmp_path / "trace_rank_*.json"), 2)
+        assert len(paths) == 2
+
+    def test_collective_trace_pattern_and_all2allv(self, tmp_path):
+        for rank in (0, 1):
+            events = {
+                "traceEvents": [
+                    {
+                        "ph": "X",
+                        "cat": "kernel",
+                        "name": "ncclKernel_AllReduce",
+                        "pid": rank,
+                        "tid": 3,
+                        "ts": 1000,
+                        "dur": 40,
+                        "args": {
+                            "External id": 10,
+                            "Collective name": "allreduce",
+                            "stream": 3,
+                        },
+                    }
+                ]
+            }
+            (tmp_path / f"trace_{rank}_step.json").write_text(json.dumps(events))
+        dfs = generate_collective_report(
+            trace_pattern=str(tmp_path / "trace_*_step.json"),
+            world_size=2,
+            output_csvs_dir=str(tmp_path / "coll"),
+            use_multiprocessing=False,
+            strict_world_size_check=True,
+            all2allv_heatmap=True,
+        )
+        assert isinstance(dfs, dict)
+
+    def test_gpus_per_node_invalid(self, tmp_path):
+        for rank in (0,):
+            (tmp_path / f"rank{rank}_trace.json").write_text(
+                json.dumps({"traceEvents": []})
+            )
+        with pytest.raises(ValueError, match="gpus_per_node"):
+            generate_collective_report(
+                trace_dir=str(tmp_path),
+                world_size=1,
+                gpus_per_node=0,
+                strict_world_size_check=False,
+            )
+
+
+def test_collective_report_main(tmp_path):
+    for rank in (0, 1):
+        (tmp_path / f"trace_rank_{rank}.json").write_text(
+            json.dumps(
+                {
+                    "traceEvents": [
+                        {
+                            "ph": "X",
+                            "cat": "kernel",
+                            "name": "ncclKernel_AllReduce",
+                            "pid": rank,
+                            "tid": 3,
+                            "ts": 1000,
+                            "dur": 40,
+                            "args": {
+                                "External id": rank,
+                                "Collective name": "allreduce",
+                                "stream": 3,
+                            },
+                        }
+                    ]
+                }
+            )
+        )
+    out = tmp_path / "coll.xlsx"
+    mod = importlib.import_module(
+        "TraceLens.Reporting.generate_multi_rank_collective_report_pytorch"
+    )
+    old_argv = sys.argv
+    sys.argv = [
+        "generate_multi_rank_collective_report_pytorch",
+        "--trace_glob",
+        str(tmp_path / "trace_rank_*.json"),
+        "--world_size",
+        "2",
+        "--output_xlsx_path",
+        str(out),
+    ]
+    try:
+        mod.main()
+    finally:
+        sys.argv = old_argv
+    assert out.exists()
+
+
+def test_collective_report_main_trace_glob(tmp_path):
+    for rank in (0, 1):
+        events = {
+            "traceEvents": [
+                {
+                    "ph": "X",
+                    "cat": "kernel",
+                    "name": "ncclKernel_AllReduce",
+                    "pid": rank,
+                    "tid": 3,
+                    "ts": 1000,
+                    "dur": 40,
+                    "args": {
+                        "External id": rank,
+                        "Collective name": "allreduce",
+                        "stream": 3,
+                    },
+                }
+            ]
+        }
+        (tmp_path / f"trace_rank_{rank}.json").write_text(json.dumps(events))
+    out = tmp_path / "coll.xlsx"
+
+    old_argv = sys.argv
+    sys.argv = [
+        "generate_multi_rank_collective_report_pytorch",
+        "--trace_glob",
+        str(tmp_path / "trace_rank_*.json"),
+        "--world_size",
+        "2",
+        "--output_xlsx_path",
+        str(out),
+    ]
+    try:
+        mod.main()
+    finally:
+        sys.argv = old_argv
+    assert out.exists()
