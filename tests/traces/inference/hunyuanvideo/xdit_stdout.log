@@ -1,167 +1,0 @@
-Unable to import `torchao` Tensor objects. This may affect loading checkpoints serialized with `torchao`
-[aiter] WARNING: NUMA balancing is enabled, which may cause errors. It is recommended to disable NUMA balancing by running "sudo sh -c 'echo 0 > /proc/sys/kernel/numa_balancing'" for more details: https://rocm.docs.amd.com/en/latest/how-to/system-optimization/mi300x.html#disable-numa-auto-balancing
-[aiter] start build [module_aiter_core] under /app/external/aiter/aiter/jit/build/module_aiter_core
-[aiter] Current hipcc not support: -mllvm -amdgpu-coerce-illegal-types=1, skip it.
-[aiter] [32mfinish build [module_aiter_core], cost 15.5s [0m
-[aiter] import [module_aiter_core] under /app/external/aiter/aiter/jit/module_aiter_core.so
-INFO 08-05 00:09:25 [envs.py:412] Using AITER GroupNorm as torch.nn.GroupNorm
-Unable to import `torchao` Tensor objects. This may affect loading checkpoints serialized with `torchao`
-[aiter] WARNING: NUMA balancing is enabled, which may cause errors. It is recommended to disable NUMA balancing by running "sudo sh -c 'echo 0 > /proc/sys/kernel/numa_balancing'" for more details: https://rocm.docs.amd.com/en/latest/how-to/system-optimization/mi300x.html#disable-numa-auto-balancing
-[aiter] import [module_aiter_core] under /app/external/aiter/aiter/jit/module_aiter_core.so
-INFO 08-05 00:09:32 [envs.py:412] Using AITER GroupNorm as torch.nn.GroupNorm
-DEBUG 08-05 00:09:33 [runner_utils.py:290] torchao Float8Tensor FSDP2 patches applied: ['aten.split.Tensor', 'aten.new_empty.default', 'aten.new_zeros.default', 'aten.copy_.default', 'aten.view.default', 'aten.as_strided.default', '__torch_dispatch__ fallthrough', 'fsdp_pre_all_gather', 'fsdp_post_all_gather']
-WARNING 08-05 00:09:33 [args.py:847] Distributed environment is not initialized. Initializing...
-DEBUG 08-05 00:09:33 [parallel_state.py:239] world_size=-1 rank=-1 local_rank=-1 distributed_init_method=env:// backend=nccl
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-INFO 08-05 00:09:33 [config.py:201] Pipeline patch number not set, using default value 1
-INFO 08-05 00:09:33 [runner_utils.py:30] Model Runner Arguments:
-INFO 08-05 00:09:33 [runner_utils.py:30]   model: HunyuanVideo
-INFO 08-05 00:09:33 [runner_utils.py:30]   use_parallel_vae: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   use_torch_compile: True
-INFO 08-05 00:09:33 [runner_utils.py:30]   attention_backend: aiter
-INFO 08-05 00:09:33 [runner_utils.py:30]   cross_attention_backend: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   use_cfg_parallel: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   data_parallel_degree: 1
-INFO 08-05 00:09:33 [runner_utils.py:30]   ulysses_degree: 1
-INFO 08-05 00:09:33 [runner_utils.py:30]   ring_degree: 1
-INFO 08-05 00:09:33 [runner_utils.py:30]   pipefusion_parallel_degree: 1
-INFO 08-05 00:09:33 [runner_utils.py:30]   tensor_parallel_degree: 1
-INFO 08-05 00:09:33 [runner_utils.py:30]   fully_shard_degree: 1
-INFO 08-05 00:09:33 [runner_utils.py:30]   reshard_after_forward: True
-INFO 08-05 00:09:33 [runner_utils.py:30]   memory_efficient_sharding: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   height: 240
-INFO 08-05 00:09:33 [runner_utils.py:30]   width: 240
-INFO 08-05 00:09:33 [runner_utils.py:30]   num_frames: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   prompt: ['a photo of a cat']
-INFO 08-05 00:09:33 [runner_utils.py:30]   negative_prompt: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   num_inference_steps: 4
-INFO 08-05 00:09:33 [runner_utils.py:30]   max_sequence_length: 512
-INFO 08-05 00:09:33 [runner_utils.py:30]   seed: 42
-INFO 08-05 00:09:33 [runner_utils.py:30]   guidance_scale: 6.0
-INFO 08-05 00:09:33 [runner_utils.py:30]   guidance_scale_2: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   flow_shift: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   enable_sequential_cpu_offload: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   enable_model_cpu_offload: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   enable_tiling: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   enable_slicing: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   use_int8_gemms: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   use_fp8_gemms: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   use_fp4_gemms: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   fp8_precision_override_prefix_patterns: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   fp8_precision_override_suffix_patterns: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   num_iterations: 3
-INFO 08-05 00:09:33 [runner_utils.py:30]   profile: True
-INFO 08-05 00:09:33 [runner_utils.py:30]   profile_wait: 1
-INFO 08-05 00:09:33 [runner_utils.py:30]   profile_warmup: 2
-INFO 08-05 00:09:33 [runner_utils.py:30]   profile_active: 1
-INFO 08-05 00:09:33 [runner_utils.py:30]   profile_capture_phase: True
-INFO 08-05 00:09:33 [runner_utils.py:30]   warmup_calls: 1
-INFO 08-05 00:09:33 [runner_utils.py:30]   output_directory: /workspace/output/xdit_run.sTVpEL
-INFO 08-05 00:09:33 [runner_utils.py:30]   input_images: ['/app/data/flux_cat.png']
-INFO 08-05 00:09:33 [runner_utils.py:30]   resize_input_images: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   task: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   batch_size: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   dataset_path: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   use_hybrid_attn_schedule: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   hybrid_attn_low_precision_backend: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   hybrid_attn_high_precision_backend: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   num_hybrid_attn_high_precision_steps: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   hybrid_attn_schedule: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   use_hybrid_gemm_schedule: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   num_hybrid_gemm_high_precision_steps: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   use_vae_channels_last_format: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   use_ssta_sparse_text_to_image: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   spargeattn_simthreshold: 0.3
-INFO 08-05 00:09:33 [runner_utils.py:30]   spargeattn_cdfthreshold: 0.92
-INFO 08-05 00:09:33 [runner_utils.py:30]   spargeattn_reorder_sequence: True
-INFO 08-05 00:09:33 [runner_utils.py:30]   use_spargeattn_static_block_mask: True
-INFO 08-05 00:09:33 [runner_utils.py:30]   use_spargeattn_head_balance: False
-INFO 08-05 00:09:33 [runner_utils.py:30]   distilled_transformer_path: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   distilled_transformer_2_path: None
-INFO 08-05 00:09:33 [runner_utils.py:30]   use_fbcache: False
-INFO 08-05 00:09:33 [runner_utils.py:30] Parameter 'num_frames' not specified. Using model-specific default value: 129
-INFO 08-05 00:09:33 [runner_utils.py:30] Parameter 'num_hybrid_attn_high_precision_steps' not specified. Using model-specific default value: 5
-INFO 08-05 00:09:33 [runner_utils.py:30] Initializing model: HunyuanVideo
-INFO 08-05 00:09:33 [config.py:201] Pipeline patch number not set, using default value 1
-INFO 08-05 00:09:33 [runner_utils.py:30] Loading model pipeline...
-/venv/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py:205: UserWarning: The `local_dir_use_symlinks` argument is deprecated and ignored in `hf_hub_download`. Downloading to a local directory does not use symlinks anymore.
-  warnings.warn(
-INFO:httpx:HTTP Request: HEAD https://huggingface.co/tencent/HunyuanVideo/resolve/refs%2Fpr%2F18/transformer/config.json "HTTP/1.1 307 Temporary Redirect"
-INFO:httpx:HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/tencent/HunyuanVideo/2a15b5574ee77888e51ae6f593b2ceed8ce813e5/transformer%2Fconfig.json "HTTP/1.1 200 OK"
-INFO:httpx:HTTP Request: HEAD https://huggingface.co/tencent/HunyuanVideo/resolve/refs%2Fpr%2F18/transformer/diffusion_pytorch_model.safetensors.index.json "HTTP/1.1 307 Temporary Redirect"
-Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-WARNING:huggingface_hub.utils._http:Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-INFO:httpx:HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/tencent/HunyuanVideo/2a15b5574ee77888e51ae6f593b2ceed8ce813e5/transformer%2Fdiffusion_pytorch_model.safetensors.index.json "HTTP/1.1 200 OK"
-INFO:httpx:HTTP Request: GET https://huggingface.co/api/models/tencent/HunyuanVideo/revision/refs%2Fpr%2F18 "HTTP/1.1 200 OK"
-INFO:httpx:HTTP Request: GET https://huggingface.co/api/models/tencent/HunyuanVideo/revision/refs%2Fpr%2F18 "HTTP/1.1 200 OK"
-Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 4318.83it/s]
-Loading checkpoint shards:   0%|          | 0/6 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 6/6 [00:00<00:00, 94.41it/s]
-INFO:httpx:HTTP Request: GET https://huggingface.co/api/models/tencent/HunyuanVideo/revision/refs%2Fpr%2F18 "HTTP/1.1 200 OK"
-INFO:httpx:HTTP Request: HEAD https://huggingface.co/tencent/HunyuanVideo/resolve/refs%2Fpr%2F18/model_index.json "HTTP/1.1 307 Temporary Redirect"
-INFO:httpx:HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/tencent/HunyuanVideo/2a15b5574ee77888e51ae6f593b2ceed8ce813e5/model_index.json "HTTP/1.1 200 OK"
-Loading pipeline components...:   0%|          | 0/7 [00:00<?, ?it/s]
-Loading weights:   0%|          | 0/290 [00:00<?, ?it/s][A
-Loading weights:  26%|██▌       | 76/290 [00:00<00:00, 752.02it/s][A
-Loading weights:  63%|██████▎   | 183/290 [00:00<00:00, 922.87it/s][ALoading weights: 100%|██████████| 290/290 [00:00<00:00, 960.87it/s]
-Loading pipeline components...:  29%|██▊       | 2/7 [00:00<00:01,  2.84it/s]
-Loading weights:   0%|          | 0/196 [00:00<?, ?it/s][ALoading weights: 100%|██████████| 196/196 [00:00<00:00, 11360.24it/s]
-Loading pipeline components...:  86%|████████▌ | 6/7 [00:00<00:00,  8.05it/s]Loading pipeline components...: 100%|██████████| 7/7 [00:01<00:00,  4.80it/s]
-DEBUG 08-05 00:09:36 [runner_utils.py:28] Replacing tokenizer 'tokenizer' (type=LlamaTokenizer) with PreTrainedTokenizerFast...
-INFO:httpx:HTTP Request: HEAD https://huggingface.co/tencent/HunyuanVideo/resolve/refs%2Fpr%2F18/tokenizer/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
-INFO:httpx:HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/tencent/HunyuanVideo/2a15b5574ee77888e51ae6f593b2ceed8ce813e5/tokenizer%2Ftokenizer_config.json "HTTP/1.1 200 OK"
-INFO:httpx:HTTP Request: GET https://huggingface.co/api/models/tencent/HunyuanVideo/tree/refs%2Fpr%2F18/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
-INFO:httpx:HTTP Request: GET https://huggingface.co/api/models/tencent/HunyuanVideo/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
-INFO:httpx:HTTP Request: GET https://huggingface.co/api/models/tencent/HunyuanVideo "HTTP/1.1 200 OK"
-INFO 08-05 00:09:37 [runner_utils.py:30] Fixed tokenizer 'tokenizer': reloaded as PreTrainedTokenizerFast (transformers v5 LlamaTokenizer bug workaround)
-INFO 08-05 00:09:37 [runner_utils.py:30] Initializing runtime state...
-WARNING 08-05 00:09:37 [runtime_state.py:90] Model parallel is not initialized, initializing...
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-WARNING 08-05 00:09:37 [runtime_state.py:127] Using AITER as attention backend.
-INFO 08-05 00:09:46 [runner_utils.py:30] Torch.compile enabled. Warming up torch compiler ...
-WARNING 08-05 00:09:46 [inductor_passes.py:219] fix_sage_joint_cat_fusion: registered as post_grad_custom_post_pass
-/venv/lib/python3.12/site-packages/transformers/integrations/sdpa_attention.py:92: UserWarning: Using AOTriton backend for Efficient Attention forward... (Triggered internally at /app/TheRock/external-builds/pytorch/pytorch/aten/src/ATen/native/transformers/hip/attention.hip:1452.)
-  attn_output = torch.nn.functional.scaled_dot_product_attention(
-  0%|          | 0/2 [00:00<?, ?it/s]final peak_memory=39595008
-final peak_memory=39595008
-final peak_memory=39595008
-/venv/lib/python3.12/site-packages/torch/_dynamo/variables/functions.py:1692: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS="+dynamo" for a DEBUG stack trace.
-  torch._dynamo.utils.warn_once(msg)
-final peak_memory=501315456
-final peak_memory=501315456
-final peak_memory=501315456
-[aiter] start build [module_fmha_v3_fwd] under /app/external/aiter/aiter/jit/build/module_fmha_v3_fwd
-[aiter] Current hipcc not support: -mllvm -amdgpu-coerce-illegal-types=1, skip it.
-[aiter] [32mfinish build [module_fmha_v3_fwd], cost 38.6s [0m
-[aiter] import [module_fmha_v3_fwd] under /app/external/aiter/aiter/jit/module_fmha_v3_fwd.so
-[aiter] type hints mismatch, override to --> fmha_v3_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, dropout_p: float, softmax_scale: float, is_causal: bool, window_size_left: int, window_size_right: int, return_softmax_lse: bool, return_dropout_randval: bool, how_v3_bf16_cvt: int, out: Optional[torch.Tensor] = None, bias: Optional[torch.Tensor] = None, alibi_slopes: Optional[torch.Tensor] = None, q_descale: Optional[torch.Tensor] = None, k_descale: Optional[torch.Tensor] = None, v_descale: Optional[torch.Tensor] = None, gen: Optional[torch.Generator] = None) -> List[torch.Tensor]
-[aiter] pciChipId: 0x74a1, CU count: 304
-[aiter] LoadKernel: _ZN5aiter23fmha_fwd_hd128_bf16_rtzE hsaco: /app/external/aiter/hsa//gfx942/fmha_v3_fwd/MI300/fwd_hd128_bf16_rtz.co
- 50%|█████     | 1/2 [02:12<02:12, 132.30s/it]final peak_memory=39595008
-final peak_memory=39595008
-final peak_memory=39595008
-100%|██████████| 2/2 [02:16<00:00, 56.69s/it] 100%|██████████| 2/2 [02:16<00:00, 68.03s/it]
-[aiter] start build [module_groupnorm] under /app/external/aiter/aiter/jit/build/module_groupnorm
-[aiter] [32mfinish build [module_groupnorm], cost 32.8s [0m
-[aiter] import [module_groupnorm] under /app/external/aiter/aiter/jit/module_groupnorm.so
-[aiter] type hints mismatch, override to --> _groupnorm_run(arg0: torch.Tensor, arg1: int, arg2: torch.Tensor, arg3: torch.Tensor, arg4: float) -> torch.Tensor
-INFO 08-05 00:16:51 [runner_utils.py:30] Model initialization complete.
-INFO 08-05 00:16:51 [runner_utils.py:30] Profiling iteration 1/4
-  0%|          | 0/4 [00:00<?, ?it/s] 25%|██▌       | 1/4 [00:00<00:00,  3.22it/s] 75%|███████▌  | 3/4 [00:00<00:00,  4.85it/s]100%|██████████| 4/4 [00:00<00:00,  4.16it/s]100%|██████████| 4/4 [00:00<00:00,  4.19it/s]
-INFO 08-05 00:16:53 [runner_utils.py:30] Profiling iteration 1 completed in 2.20s
-INFO 08-05 00:16:53 [runner_utils.py:30] Profiling iteration 2/4
-  0%|          | 0/4 [00:00<?, ?it/s] 25%|██▌       | 1/4 [00:00<00:00,  3.22it/s] 75%|███████▌  | 3/4 [00:00<00:00,  4.82it/s]100%|██████████| 4/4 [00:00<00:00,  4.12it/s]100%|██████████| 4/4 [00:00<00:00,  4.16it/s]
-INFO 08-05 00:16:56 [runner_utils.py:30] Profiling iteration 2 completed in 2.22s
-INFO 08-05 00:16:56 [runner_utils.py:30] Profiling iteration 3/4
-  0%|          | 0/4 [00:00<?, ?it/s] 25%|██▌       | 1/4 [00:00<00:00,  3.22it/s] 75%|███████▌  | 3/4 [00:00<00:00,  4.81it/s]100%|██████████| 4/4 [00:00<00:00,  4.12it/s]100%|██████████| 4/4 [00:00<00:00,  4.15it/s]
-INFO 08-05 00:16:58 [runner_utils.py:30] Profiling iteration 3 completed in 2.21s
-INFO 08-05 00:16:58 [runner_utils.py:30] Profiling iteration 4/4
-  0%|          | 0/4 [00:00<?, ?it/s] 25%|██▌       | 1/4 [00:00<00:01,  2.67it/s] 50%|█████     | 2/4 [00:00<00:00,  2.69it/s] 75%|███████▌  | 3/4 [00:01<00:00,  2.70it/s]100%|██████████| 4/4 [00:01<00:00,  2.70it/s]100%|██████████| 4/4 [00:01<00:00,  2.70it/s]
-[rank0]:[W805 00:17:01.442987095 collection.cpp:1133] Warning: ROCTracer produced duplicate flow start: 78863 (function operator())
-INFO 08-05 00:17:02 [runner_utils.py:30] Profiling iteration 4 completed in 2.51s
-INFO 08-05 00:17:07 [runner_utils.py:30] Profile trace saved to /workspace/output/xdit_run.sTVpEL/profile_trace_rank_0.json.gz
-INFO 08-05 00:17:09 [runner_utils.py:30] Cleaned up resources.
