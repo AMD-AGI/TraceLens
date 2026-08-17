@@ -10,9 +10,23 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "**/*.py"
+      - "tests/**"
+      - "setup.py"
+      - "MANIFEST.in"
+      - ".importlinter"
+      - ".github/workflows/lint.yml"
   pull_request:
     branches:
       - main
+    paths:
+      - "**/*.py"
+      - "tests/**"
+      - "setup.py"
+      - "MANIFEST.in"
+      - ".importlinter"
+      - ".github/workflows/lint.yml"
 
 jobs:
   lint:
