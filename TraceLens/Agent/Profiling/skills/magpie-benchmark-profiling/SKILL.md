@@ -7,11 +7,11 @@ See LICENSE for license information.
 ---
 name: magpie-benchmark-profiling
 description: >-
-  Runs Magpie LLM inference benchmarks (vLLM or SGLang), applies TraceLens profiling
+  Runs Magpie LLM inference benchmarks (vLLM, SGLang, or ATOM), applies TraceLens profiling
   patches and profiler tuning, collects PyTorch profiler traces on remote GPU nodes,
   verifies trace quality, and splits traces for TraceLens inference analysis. Use when
   the user asks to follow the Magpie Benchmark + Profiling skill, profile LLM inference,
-  collect vLLM or SGLang traces, or prepare traces for the analysis orchestrator.
+  collect vLLM, SGLang, or ATOM traces, or prepare traces for the analysis orchestrator.
 ---
 
 <!--
@@ -26,13 +26,13 @@ Drive end-to-end **Magpie** benchmark runs with **PyTorch profiler** traces suit
 
 ## Full procedure
 
-Follow **[reference.md](reference.md)** for every step (SSH/conda prompts, `build_docker_*.sh` usage, `EXTRA_VLLM_ARGS` / SGLang flags, `benchmark_lib.sh` / `benchmark_serving.py` patches, cleanup, split command, and pitfalls).
+Follow **[reference.md](reference.md)** for every step (SSH/conda prompts, `build_docker_*.sh` usage, `EXTRA_VLLM_ARGS` / SGLang / `EXTRA_ATOM_ARGS` flags, `benchmark_lib.sh` / `benchmark_serving.py` patches, cleanup, split command, and pitfalls).
 
 ## Workflow index
 
 ```
 0. Gather execution environment (node, conda env, conda prefix)
-1. Read benchmark YAML; optionally build TraceLens-patched Docker image (vLLM or SGLang)
+1. Read benchmark YAML; optionally build TraceLens-patched Docker image (vLLM, SGLang, or ATOM)
 2. Ensure torch profiler enabled; apply common graph/capture flags; choose targeted vs full profiling
 3. Run: python -m Magpie benchmark --benchmark-config <yaml> (long-running; monitor via docker)
 4. Monitor container / logs on the remote node
@@ -43,7 +43,7 @@ Follow **[reference.md](reference.md)** for every step (SSH/conda prompts, `buil
 ## Rules
 
 - Do **not** guess node names or conda envs — ask the user (see reference Step 0).
-- Discover supported Docker image tags by **reading** `examples/custom_workflows/inference_analysis/build_docker_vllm.sh` / `build_docker_sglang.sh` at runtime; do not hardcode version matrices in chat.
+- Discover supported Docker image tags by **reading** `examples/custom_workflows/inference_analysis/build_docker_vllm.sh` / `build_docker_sglang.sh` / `build_docker_atom.sh` at runtime; do not hardcode version matrices in chat.
 - After Step 6, **print only** the suggested `generate_perf_report_pytorch_inference.py` invocation for the user; the skill does not substitute for their analysis run unless they ask.
 
 ## Primary outputs
