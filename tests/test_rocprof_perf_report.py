@@ -4,17 +4,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import os
-import tempfile
-
-import pandas as pd
-import pytest
-
+import os, tempfile, pandas as pd, pytest, importlib, sys
 from TraceLens.Reporting.generate_perf_report_rocprof import (
     generate_perf_report_rocprof,
 )
-from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
+from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer, _categorize_kernel
 from TraceLens.util import RocprofParser
+from tests.fixtures.traces import ROCprof_FILE
 
 
 def find_test_files(ref_root):
@@ -289,3 +285,150 @@ class TestGeneratePerfReport:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestRocprofAnalysisDeep:
+    def test_full_rocprof_pipeline(self):
+        if not os.path.isfile(ROCprof_FILE):
+            pytest.skip("rocprof fixture missing")
+        data = RocprofParser.load_rocprof_data(ROCprof_FILE)
+        kernels = RocprofParser.extract_kernel_events(data)
+        memory = RocprofParser.extract_memory_events(data)
+        api = RocprofParser.extract_api_events(data)
+        metadata = RocprofParser.get_metadata(data)
+        analyser = RocprofAnalyzer(kernels, memory, api, metadata)
+        timeline = analyser.get_df_gpu_timeline()
+        assert not timeline.empty
+        assert not analyser.get_df_kernel_summary().empty
+        assert isinstance(analyser.get_df_short_kernels(10), pd.DataFrame)
+        assert _categorize_kernel("Cijk_gemm") == "GEMM"
+
+    def test_synthetic_rocprof_timeline_and_timestamp_conversion(self):
+        kernels = [{"ts": 1000, "dur": 500, "name": "Cijk_gemm"}]
+        memory = [{"ts": 2000, "dur": 300, "name": "MemcpyHtoD"}]
+        api = [{"ts": 500, "dur": 100, "name": "hipLaunchKernel"}]
+        metadata = {"init_time": 0, "fini_time": 5_000_000}
+        analyser = RocprofAnalyzer(kernels, memory, api, metadata)
+        analyser._convert_timestamps_to_microseconds()
+        assert kernels[0]["ts"] == 1.0
+        timeline = analyser.get_df_gpu_timeline()
+        assert not timeline.empty
+        assert analyser.get_df_kernel_summary().iloc[0]["name"] == "Cijk_gemm"
+
+    def test_rocprof_main(self, tmp_path):
+        mod = importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_rocprof"
+        )
+        out = tmp_path / "roc.xlsx"
+        old_argv = sys.argv
+        sys.argv = [
+            "generate_perf_report_rocprof",
+            "--profile_json_path",
+            ROCprof_FILE,
+            "--output_xlsx_path",
+            str(out),
+            "--short_kernel_study",
+        ]
+        try:
+            mod.main()
+        finally:
+            sys.argv = old_argv
+        assert out.exists()
+
+
+class TestRocprofPhase6:
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            ("Cijk_gemm", "GEMM"),
+            ("vectorized_elementwise_kernel", "Elementwise"),
+            ("reduce_kernel_sum", "Reduction"),
+            ("conv2d_fwd", "Convolution"),
+            ("layer_norm_kernel", "Normalization"),
+            ("flash_attn_fwd", "Attention"),
+            ("MemcpyDtoD", "Memory"),
+            ("ncclBroadcast", "COMM"),
+            ("unknown_xyz", "Other"),
+        ],
+    )
+    def test_categorize_kernel_branches(self, name, expected):
+        assert _categorize_kernel(name) == expected
+
+    @pytest.mark.skipif(
+        not os.path.isfile(ROCprof_FILE), reason="rocprof fixture missing"
+    )
+    def test_rocprof_analyzer_all_dataframes(self):
+        data = RocprofParser.load_rocprof_data(ROCprof_FILE)
+        kernels = RocprofParser.extract_kernel_events(data)
+        memory = RocprofParser.extract_memory_events(data)
+        api = RocprofParser.extract_api_events(data)
+        metadata = RocprofParser.get_metadata(data)
+        analyser = RocprofAnalyzer(kernels, memory, api, metadata)
+        assert not analyser.get_df_gpu_timeline().empty
+        assert not analyser.get_df_kernel_summary().empty
+        assert isinstance(analyser.get_df_kernel_details(), pd.DataFrame)
+        assert isinstance(analyser.get_df_short_kernels(5), pd.DataFrame)
+        assert isinstance(analyser.get_df_short_kernel_histogram(), pd.DataFrame)
+        assert isinstance(analyser.get_df_kernel_summary_by_category(), pd.DataFrame)
+
+
+def test_rocprof_analyzer_synthetic():
+
+    kernels = [
+        {
+            "name": "gemm_kernel",
+            "ts": 1000,
+            "dur": 50,
+            "grid": (1, 1, 1),
+            "block": (256, 1, 1),
+            "stream": 0,
+        }
+    ]
+    memory = [{"name": "MemcpyHtoD", "ts": 900, "dur": 10, "bytes": 1024}]
+    api = [{"name": "hipLaunchKernel", "ts": 990, "dur": 5, "correlation": 1}]
+    analyzer = RocprofAnalyzer(kernels, memory, api, {})
+    assert not analyzer.get_df_gpu_timeline().empty
+    assert not analyzer.get_df_kernel_summary().empty
+    assert isinstance(analyzer.get_df_short_kernels(10), pd.DataFrame)
+
+
+def test_rocprof_analyzer_empty_and_short_kernel_paths():
+
+    empty = RocprofAnalyzer([], [], [], {})
+    assert empty.get_df_kernel_summary().empty
+    assert empty.get_df_kernel_summary_by_category().empty
+    assert empty.get_df_short_kernels().empty
+    assert empty.get_df_short_kernel_histogram().empty
+    assert empty.get_df_kernel_details().empty
+
+    kernels = [
+        {
+            "name": "tiny_kernel",
+            "ts": 100,
+            "dur": 5,
+            "grid": (1, 1, 1),
+            "block": (1, 1, 1),
+            "stream": 0,
+            "dispatch_id": 1,
+            "agent_id": 0,
+            "thread_id": 0,
+        },
+        {
+            "name": "tiny_kernel",
+            "ts": 200,
+            "dur": 3,
+            "grid": (1, 1, 1),
+            "block": (1, 1, 1),
+            "stream": 0,
+            "dispatch_id": 2,
+            "agent_id": 0,
+            "thread_id": 0,
+        },
+    ]
+    analyzer = RocprofAnalyzer(kernels, [], [], {})
+    short = analyzer.get_df_short_kernels(threshold_us=10.0)
+    assert not short.empty
+    hist = analyzer.get_df_short_kernel_histogram(threshold_us=10.0, bins=5)
+    assert not hist.empty
+    details = analyzer.get_df_kernel_details(topk=1)
+    assert len(details) == 1

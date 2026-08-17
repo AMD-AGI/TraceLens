@@ -61,6 +61,9 @@ ATOM_DETAILED_PATTERN = re.compile(r"^(prefill|decode)\[.*sqsq=\d+.*\]")
 # capture_256_mixed_prefill
 CAPTURE_PATTERN = re.compile(r"capture_(\d+)_(.*)")
 
+# execute_diffusion_1_1024x1024   (diffusion replay: batch_size, resolution)
+DIFFUSION_NATIVE_PATTERN = re.compile(r"execute_diffusion_(\d+)_(\d+x\d+)")
+
 # Root-discovery priority: PRIMARY (detailed) patterns are tried first and
 # BACKUP (native) patterns are used only when no primary root is found.
 ITERATION_PATTERNS = [
@@ -72,6 +75,7 @@ ITERATION_BACKUP_PATTERNS = [
     VLLM_NATIVE_PATTERN,
     SGLANG_NATIVE_PATTERN,
     ATOM_NATIVE_PATTERN,
+    DIFFUSION_NATIVE_PATTERN,
 ]
 
 ANNOTATION_CAT = "user_annotation"
@@ -205,6 +209,15 @@ def _fill_atom(ann, name):
     return True
 
 
+def _fill_diffusion(ann, name):
+    m = DIFFUSION_NATIVE_PATTERN.match(name)
+    if not m:
+        return False
+    ann.batch_size = int(m.group(1))
+    ann.resolution = m.group(2)
+    return True
+
+
 class IterationAnnotation:
     """Iteration/execution annotation.
 
@@ -221,6 +234,7 @@ class IterationAnnotation:
         ("sglang_native", SGLANG_NATIVE_PATTERN, _fill_sglang_native),
         ("atom_detailed", ATOM_DETAILED_PATTERN, _fill_atom),
         ("atom_native", ATOM_NATIVE_PATTERN, _fill_atom),
+        ("diffusion_native", DIFFUSION_NATIVE_PATTERN, _fill_diffusion),
     ]
 
     def __init__(self, annotation: str):
