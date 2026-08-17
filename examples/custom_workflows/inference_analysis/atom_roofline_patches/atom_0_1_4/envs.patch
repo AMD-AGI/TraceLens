@@ -1,0 +1,14 @@
+diff --git a/atom/utils/envs.py b/atom/utils/envs.py
+index 26282dd7..cba2c43a 100644
+--- a/atom/utils/envs.py
++++ b/atom/utils/envs.py
+@@ -74,6 +74,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
+     # --- Profiling & Logging ---
+     "ATOM_TORCH_PROFILER_DIR": lambda: os.getenv("ATOM_TORCH_PROFILER_DIR", None),
+     "ATOM_PROFILER_MORE": lambda: os.getenv("ATOM_PROFILER_MORE", "0") == "1",
++    "ATOM_ENABLE_DETAILED_ANNOTATION": lambda: (
++        os.getenv("ATOM_ENABLE_DETAILED_ANNOTATION", "0") == "1"
++    ),
+     "ATOM_LOG_MORE": lambda: int(os.getenv("ATOM_LOG_MORE", "0")) != 0,
+     # RTL (rocm-trace-lite) GPU kernel tracing — set to output directory to enable.
+     # When set, the server launch is wrapped with `rtl trace` to collect per-kernel
