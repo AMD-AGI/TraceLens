@@ -15,13 +15,7 @@ their ``gpu_op_uid``. There is no fallback to CPU-UID tree walks or to
 ``(name, args)`` string-key matching; tests below exercise that contract.
 """
 
-import json
-import math
-
-import numpy as np
-import pandas as pd
-import pytest
-
+import json, math, numpy as np, pandas as pd, pytest
 from TraceLens.Reporting.tracediff_comparison_extension import (
     _build_lca_metadata,
     _build_uid_to_row_idx,
@@ -30,6 +24,10 @@ from TraceLens.Reporting.tracediff_comparison_extension import (
     _trace2_gpu_op_uid_set_for_lca,
     enrich_perf_report_dict_inplace,
     tracediff_perf_summary_from_diff_stats,
+)
+from TraceLens import TraceDiff, TreePerfAnalyzer
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
 )
 
 
@@ -1129,11 +1127,6 @@ class TestIntegrationSyntheticTraces:
             json.dump(_build_synthetic_trace(trace1_specs), f)
         with open(trace2_path, "w") as f:
             json.dump(_build_synthetic_trace(trace2_specs), f)
-
-        from TraceLens import TraceDiff, TreePerfAnalyzer
-        from TraceLens.Reporting.generate_perf_report_pytorch import (
-            generate_perf_report_pytorch,
-        )
 
         perf1 = generate_perf_report_pytorch(trace1_path, collective_analysis=False)
         perf2 = generate_perf_report_pytorch(trace2_path, collective_analysis=False)

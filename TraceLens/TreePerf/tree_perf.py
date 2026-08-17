@@ -860,7 +860,9 @@ class TreePerfAnalyzer:
 
         for col in df_perf_metrics_summary.columns:
             if "overlap_pct" in col:
-                df_perf_metrics_summary[col] = df_perf_metrics_summary[col].round(2)
+                df_perf_metrics_summary[col] = pd.to_numeric(
+                    df_perf_metrics_summary[col], errors="coerce"
+                ).round(2)
                 if (
                     col.endswith("_std")
                     and "overlap_pct_mean" in df_perf_metrics_summary.columns
@@ -2601,7 +2603,9 @@ class TreePerfAnalyzer:
 
         for col in df_summary.columns:
             if "overlap_pct" in col:
-                df_summary[col] = df_summary[col].round(2)
+                df_summary[col] = pd.to_numeric(df_summary[col], errors="coerce").round(
+                    2
+                )
                 if col.endswith("_std") and "overlap_pct_mean" in df_summary.columns:
                     has_overlap = pd.notna(df_summary["overlap_pct_mean"])
                     df_summary.loc[has_overlap, col] = df_summary.loc[
