@@ -73,11 +73,11 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
    **`comparative`:** Ask: "Which platform is target trace (trace2)?" Assign `<platform2>` (`<platform2>` does not need to be one of the platform options)
 
 4. **Analysis Mode** → `<analysis_mode>`
-   - If the user's prompt explicitly specifies an analysis mode or mentions inference/vLLM/SGLang, use that. Otherwise, default to `default` without asking.
+   - If the user's prompt explicitly specifies an analysis mode or mentions inference/vLLM/SGLang/ATOM, use that. Otherwise, default to `default` without asking.
    - Options:
-     1. **Default (training and non-vLLM/SGLang eager inference)** (`<analysis_mode>` = `default`) — uses `TraceLens_generate_perf_report_pytorch`
-     2. **Inference analysis (vLLM/SGLang)** (`<analysis_mode>` = `inference`) — uses `TraceLens_generate_perf_report_pytorch_inference`
-   - If **Inference (vLLM/SGLang)** is selected, ask **Execution Mode** → `<inference_exec_mode>`:
+     1. **Default (training and non-vLLM/SGLang/ATOM eager inference)** (`<analysis_mode>` = `default`) — uses `TraceLens_generate_perf_report_pytorch`
+     2. **Inference analysis (vLLM/SGLang/ATOM)** (`<analysis_mode>` = `inference`) — uses `TraceLens_generate_perf_report_pytorch_inference`
+   - If **Inference (vLLM/SGLang/ATOM)** is selected, ask **Execution Mode** → `<inference_exec_mode>`:
      1. **Eager mode** (`<inference_exec_mode>` = `eager`) — only the trace file is needed
      2. **Graph replay + capture** (`<inference_exec_mode>` = `graph_capture`) — also requires a capture folder path
    - If **Graph replay + capture**, ask for **Capture Folder Path** → `<capture_folder_path_1>`:
@@ -208,7 +208,7 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 
 ---
 
-**Default (training and non-vLLM/SGLang eager inference)** (`<analysis_mode>` = `default`):
+**Default (training and non-vLLM/SGLang/ATOM eager inference)** (`<analysis_mode>` = `default`):
 
 ```bash
 <prefix> TraceLens_generate_perf_report_pytorch \

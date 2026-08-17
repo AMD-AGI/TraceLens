@@ -12,7 +12,7 @@ The TraceLens Agent is an agentic performance analysis tool that generates actio
 
 **Standalone**: Single-trace roofline analysis. Suitable when a single trace is available and the goal is to identify where performance falls short of hardware limits. Recommended default for performance analysis.
 
-**Comparative**: Two-trace gap analysis. The agent compares a primary trace against a reference trace (e.g. a different platform, a tuned config) and identifies inefficiencies in the primary trace relative to the reference. Suitable when the goal is to understand where the primary trace is slower than the reference. Comparative analysis works best when both traces are collected from the same framework (e.g. both from vLLM, or both from SGLang). Cross-framework comparisons may produce misleading gap estimates due to structural differences in operation call stacks.
+**Comparative**: Two-trace gap analysis. The agent compares a primary trace against a reference trace (e.g. a different platform, a tuned config) and identifies inefficiencies in the primary trace relative to the reference. Suitable when the goal is to understand where the primary trace is slower than the reference. Comparative analysis works best when both traces are collected from the same framework (e.g. both from vLLM, both from SGLang, or both from ATOM). Cross-framework comparisons may produce misleading gap estimates due to structural differences in operation call stacks.
 
 ### Supported Analyses
 
@@ -61,7 +61,7 @@ pip install -e .
 The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json.gz`). Collection is workload-specific:
 
 - **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling walkthrough](../../../docs/tutorials/torch-profiling.ipynb) walks through this end to end.
-- **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](../../../docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](../Profiling/README.md) automates vLLM/SGLang benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces. For graph-mode workloads you produce two artifacts: a graph-replay trace and a graph-capture folder. In inference mode with execution mode `graph replay + capture`, TraceLens merges call-stack and shape information from the capture folder into the replay tree before analysis.
+- **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](../../../docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](../Profiling/README.md) automates vLLM/SGLang/ATOM benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces. For graph-mode workloads you produce two artifacts: a graph-replay trace and a graph-capture folder. In inference mode with execution mode `graph replay + capture`, TraceLens merges call-stack and shape information from the capture folder into the replay tree before analysis.
 
 ### 3. Establish a hardware performance baseline
 
@@ -100,7 +100,7 @@ Roofline analysis compares each measured kernel against your GPU's max-achievabl
 2. **Provide if prompted:**
    - Trace file path
    - Platform (of first trace)
-   - Analysis mode: default (training and non-vLLM/SGLang eager inference) vs inference (vLLM/SGLang)
+   - Analysis mode: default (training and non-vLLM/SGLang/ATOM eager inference) vs inference (vLLM/SGLang/ATOM)
    - If inference: execution mode (eager or graph replay + capture) and capture folder path if applicable
    - Node name / container name / venv name
    - Output directory (optional)
@@ -125,21 +125,21 @@ curl https://cursor.com/install -fsS | bash
 This installs the `agent` command. If you only plan to run analysis interactively through the Cursor IDE chat, you can skip this step. 
 
 
-**Cluster + container — default (training and non-vLLM/SGLang eager inference), assuming standalone:**
+**Cluster + container — default (training and non-vLLM/SGLang/ATOM eager inference), assuming standalone:**
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
     "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
-**Cluster + container — inference (vLLM/SGLang eager mode):**
+**Cluster + container — inference (vLLM/SGLang/ATOM eager mode):**
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
     "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
 ```
 
-**Cluster + container — inference (vLLM/SGLang graph replay + capture):**
+**Cluster + container — inference (vLLM/SGLang/ATOM graph replay + capture):**
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
@@ -337,8 +337,8 @@ The orchestrator supports two analysis modes, selected during Step 0:
 
 | Mode | Script | Use Case |
 |------|--------|----------|
-| **Default (training and non-vLLM/SGLang eager inference)** | `TraceLens_generate_perf_report_pytorch` | Training and non-vLLM/SGLang eager inference traces |
-| **Inference (vLLM/SGLang)** | `TraceLens_generate_perf_report_pytorch_inference` | vLLM/SGLang traces in eager mode or graph replay + capture mode |
+| **Default (training and non-vLLM/SGLang/ATOM eager inference)** | `TraceLens_generate_perf_report_pytorch` | Training and non-vLLM/SGLang/ATOM eager inference traces |
+| **Inference (vLLM/SGLang/ATOM)** | `TraceLens_generate_perf_report_pytorch_inference` | vLLM/SGLang/ATOM traces in eager mode or graph replay + capture mode |
 
 For inference mode, the orchestrator also asks for the execution mode:
 - **Eager mode** — only the trace file is needed
