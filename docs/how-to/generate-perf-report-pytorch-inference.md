@@ -7,13 +7,13 @@ See LICENSE for license information.
 
 # Generate a PyTorch inference performance report
 ```{meta}
-:description: Learn how to collect, split, and analyze PyTorch LLM-serving (vLLM/SGLang) traces with TraceLens, including graph-capture merging for graph-mode inference.
-:keywords: TraceLens, PyTorch profiler, inference, vLLM, SGLang, HIP graph, CUDA graph, graph capture, LLM serving, FusedMoE, roofline, trace splitting, steady state, ROCm
+:description: Learn how to collect, split, and analyze PyTorch LLM-serving (vLLM/SGLang/ATOM) traces with TraceLens, including graph-capture merging for graph-mode inference.
+:keywords: TraceLens, PyTorch profiler, inference, vLLM, SGLang, ATOM, HIP graph, CUDA graph, graph capture, LLM serving, FusedMoE, roofline, trace splitting, steady state, ROCm
 ```
 
 `TraceLens_generate_perf_report_pytorch_inference` is the inference-oriented
 variant of the PyTorch report. It targets LLM-serving traces (for example, from
-vLLM or SGLang) that run in CUDA/HIP graph mode, and can merge the graph-capture
+vLLM, SGLang, or ATOM) that run in CUDA/HIP graph mode, and can merge the graph-capture
 traces back into the graph-replay trace to recover the call-stack and input-shape
 metadata that graph execution drops.
 
@@ -27,8 +27,8 @@ steady-state region), see
 
 ## Supported frameworks and execution modes
 
-TraceLens inference features are primarily tested with vLLM and SGLang. Feature
-coverage depends on how the model is executed:
+TraceLens inference features are primarily tested with vLLM, SGLang, and ATOM.
+Feature coverage depends on how the model is executed:
 
 | Mode | Shapes / roofline analysis | Agent analysis | Limitations |
 |------|----------------------------|----------------|-------------|
@@ -38,12 +38,12 @@ coverage depends on how the model is executed:
 | Graph execution + graph capture [^1] | Yes | Yes (patches required) | |
 
 [^1]: Graph-mode analysis using graph-capture and graph-replay traces is
-supported for vLLM and SGLang (proposed patches required).
+supported for vLLM, SGLang, and ATOM (proposed patches required).
 
 ## Before you begin
 
 - TraceLens installed (see [Install TraceLens](../install/install.md)).
-- An LLM inference setup to profile (this guide uses vLLM or SGLang on AMD Instinct™ MI300X).
+- An LLM inference setup to profile (this guide uses vLLM, SGLang, or ATOM on AMD Instinct™ MI300X).
 
 ## Collect inference traces
 
@@ -66,7 +66,7 @@ configure the profiler yourself, and run the benchmark by hand.
 
 #### Build a Docker image
 
-Build scripts for vLLM and SGLang are provided under
+Build scripts for vLLM, SGLang, and ATOM are provided under
 [`examples/custom_workflows/inference_analysis/`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis).
 
 **vLLM.** A unified build script supports multiple vLLM versions. It takes a
@@ -149,6 +149,38 @@ bash examples/custom_workflows/inference_analysis/build_docker_sglang.sh \
     -t tracelens-sglang
 ```
 
+**ATOM.** The ATOM build script takes a version tag as its first argument,
+followed by the path to your local TraceLens clone and any standard
+`docker build` flags. Every supported image runs on both MI300 and MI350, so
+there is no GPU-type argument:
+
+| Version | Base image | ATOM version | Patch directory |
+|---------|-----------|--------------|-----------------|
+| `v13` | `rocm/atom-dev:nightly_202605301523` | 0.1.3 | `atom_0_1_3` |
+| `v14` | `rocm/atom-dev:atom0.1.4-aiter0.1.15` | 0.1.4 | `atom_0_1_4` |
+| `v15` | `rocm/atom-dev:atom0.1.5-aiter0.1.16` | 0.1.5 | `atom_0_1_5` |
+| `v16rc` | `rocm/atom-dev:nightly_202607091539` | 0.1.6rc | `atom_0_1_6rc` |
+
+```{note}
+The annotations these patches add ([ROCm/ATOM#477](https://github.com/ROCm/ATOM/pull/477))
+were merged into ATOM `main` on **2026-07-21**, after `release/v0.1.6` was
+branched. No tagged release contains them, so all four versions above need a
+patched image; conversely, **nightly builds from 2026-07-22 onward** need no
+patched image at all - run a stock `rocm/atom-dev:nightly_*` image.
+```
+
+```{note}
+No image is published for `release/v0.1.6`, so `v16rc` builds on the closest
+nightly from `main` after that branch point.
+```
+
+```bash
+bash examples/custom_workflows/inference_analysis/build_docker_atom.sh \
+    v15 \
+    /path/to/TraceLens \
+    -t tracelens-atom
+```
+
 Create a container from the resulting image.
 
 #### Apply framework patches manually
@@ -169,6 +201,8 @@ To apply them:
    python -c "import vllm; import os; print(os.path.dirname(vllm.__file__))"
    # SGLang
    python -c "import sglang; import os; print(os.path.dirname(sglang.__file__))"
+   # ATOM
+   python -c "import atom; import os; print(os.path.dirname(atom.__file__))"
    ```
 
 2. Select the patch for your framework and version and apply it:
@@ -180,7 +214,10 @@ To apply them:
    vLLM patches are in
    [`vllm_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/vllm_patches);
    SGLang patches are in
-   [`sglang_roofline_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/sglang_roofline_patches).
+   [`sglang_roofline_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/sglang_roofline_patches);
+   ATOM patches are in
+   [`atom_roofline_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/atom_roofline_patches),
+   one directory per version, each applied in full.
 
 #### Collection parameters
 
@@ -264,13 +301,38 @@ graph) to avoid a GPU fault in the speculative overlap decode, so
 non-speculative graphs there. Full MTP graph-capture profiling works on 0.5.15+.
 ```
 
+**ATOM.** Two environment variables and two server arguments control roofline
+annotations and graph-capture tracing:
+
+| Setting | Type | Description |
+|---------|------|-------------|
+| `ATOM_ENABLE_DETAILED_ANNOTATION` | env var | When `1`, execution-step annotations carry roofline metrics (`sqsq`, `sqsk`, `sk`) alongside the batch and token counts. The aggregates are computed only while the profiler is running, so unprofiled steps pay nothing. |
+| `ATOM_PROFILER_MORE` | env var | When `1`, records shapes and CPU call stacks, which the report needs for shape-level analysis. |
+| `--torch-profiler-dir DIR` | server arg | Destination for the profiler traces. ATOM writes one subdirectory per rank (`rank_N/`). |
+| `--mark-trace` | server arg | Enables the graph-capture profiler, writing one trace per captured batch size to `capture_traces/bs_{bs}_rank{N}.json.gz`. Recent nightlies add a query-length field and use `bs_{bs}_q_{q}_rank{N}.json.gz` instead. |
+
+```bash
+export ATOM_PROFILER_MORE=1
+export ATOM_ENABLE_DETAILED_ANNOTATION=1
+python3 -m atom.entrypoints.openai_server \
+    --model "$MODEL" \
+    --torch-profiler-dir /workspace/torch_trace \
+    --mark-trace
+```
+
+ATOM has no server-side delay/duration equivalent to vLLM's
+`delay_iterations` / `max_iterations`. Bound the profiling window from the
+client instead, by posting to the `start_profile` and `stop_profile` endpoints
+around the region of interest (this is what `benchmark_serving --profile`
+does).
+
 ## Split inference traces (optional)
 
 Large traces can be split into steady-state windows or per-step files before
 report generation, using `TraceLens.TraceUtils.split_inference_trace_annotation`.
-Splitting assumes vLLM v0.14 or higher (tested through v0.24) or SGLang v0.5.9,
-or use of the provided patches, so that annotations (batch size, request counts,
-and so on) are present in the execution-step metadata.
+Splitting assumes vLLM v0.14 or higher (tested through v0.24), SGLang v0.5.9, or
+ATOM 0.1.3 or higher, or use of the provided patches, so that annotations (batch
+size, request counts, and so on) are present in the execution-step metadata.
 
 **Find the steady-state region** (highest concurrency) and separate
 prefill-decode from decode-only steps. This is the recommended option for large
@@ -315,7 +377,7 @@ python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz \
     --CONC 32 --OSL 1024 --R 0.8
 ```
 
-**One trace file per execution step** (vLLM v0.13+, SGLang v0.5.9, Atom 0.1.1) -
+**One trace file per execution step** (vLLM v0.13+, SGLang v0.5.9, ATOM 0.1.3+) -
 use when you want to analyze an isolated execution step:
 
 ```bash

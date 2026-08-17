@@ -45,7 +45,7 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 
 TraceLens analyses profiler traces from PyTorch, JAX, and AMD rocprofv3; see [Supported Profile Formats](#supported-profile-formats) for the full list. The instructions below cover collecting a PyTorch trace:
 - **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling walkthrough](docs/tutorials/torch-profiling.ipynb) walks through this end to end.
-- **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](TraceLens/Agent/Profiling/README.md) automates vLLM/SGLang benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces.
+- **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](TraceLens/Agent/Profiling/README.md) automates vLLM/SGLang/ATOM benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces.
 
 To try out TraceLens without collecting your own trace, use the [demo traces](tests/traces) bundled in the repository.
 
