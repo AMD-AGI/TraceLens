@@ -47,7 +47,7 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 
 ### To run via Cursor chat:
 
-1. **In a Cursor chat with Claude Opus 4.7 High, invoke:**
+1. **In a Cursor chat with Claude Opus 4.7 High with context length 1M, invoke:**
    ```
    "Follow the Magpie Benchmark + Profiling skill installed with TraceLens and run the benchmark + trace collection workflow on <path_to_config.yaml>"
    ```
