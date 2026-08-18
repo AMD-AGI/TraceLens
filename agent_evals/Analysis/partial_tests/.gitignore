@@ -1,0 +1,8 @@
+# Expanded fixtures -- regenerated from fixtures/*.tar.gz by run_partial_tests.sh.
+# Only the tarballs under fixtures/ are committed (matches the e2e_tests_* convention).
+/semantic_purity_deepseek_r1/
+/semantic_purity_qwen3_30b_a3b/
+# Run outputs and scratch
+/partial_results/
+_gold_scratch_*/
+eval_utils/__pycache__/
