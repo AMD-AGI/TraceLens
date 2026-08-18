@@ -77,7 +77,7 @@ Roofline analysis compares each measured kernel against your GPU's max-achievabl
 
 ### To run manually:
 
-1. **In an agent chat with a capable frontier model, invoke one of:**
+1. **In an agent chat with a capable frontier model that has a context length of 1M, invoke one of:**
    - Standalone (single eager trace):
     ```
     "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json>"
