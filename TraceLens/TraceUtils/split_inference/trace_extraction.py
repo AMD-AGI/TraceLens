@@ -10,7 +10,6 @@ import gzip
 import json
 import os
 import zipfile
-from typing import List, Optional, Set, Tuple
 
 from tqdm import tqdm
 
@@ -42,7 +41,7 @@ def get_filename(filepath: str) -> dict:
     return filepath
 
 
-def preprocess_trace(events: List[dict]):
+def preprocess_trace(events: list[dict]):
     gpu_corr_map = {}
     flow_corr_map = {}
     meta_events = []
@@ -67,12 +66,12 @@ def preprocess_trace(events: List[dict]):
 
 
 def extract_iteration(
-    iteration_roots: List[dict],
-    events: List[dict],
+    iteration_roots: list[dict],
+    events: list[dict],
     trace_json: dict,
     gpu_corr_map: dict,
     flow_corr_map: dict,
-    meta_events: List[dict],
+    meta_events: list[dict],
 ) -> dict:
     """Extract a single iteration trace."""
 
@@ -92,7 +91,7 @@ def extract_iteration(
         root.get("ts", 0) + root.get("dur", 0) for root in iteration_roots
     )
     # Collect all relevant tid/pid pairs
-    tid_pid_set = set((root.get("tid"), root.get("pid")) for root in iteration_roots)
+    tid_pid_set = {(root.get("tid"), root.get("pid")) for root in iteration_roots}
 
     # Pre-filter all CPU events in the global window and by tid/pid
     cpu_events = []
@@ -120,7 +119,7 @@ def extract_iteration(
         iter_ts = iteration_root.get("ts", 0)
         iter_end = iter_ts + iteration_root.get("dur", 0)
 
-        correlation_ids: Set[int] = set()
+        correlation_ids: set[int] = set()
 
         # CPU events: filter from pre-filtered list
         for e in cpu_events:
@@ -141,8 +140,7 @@ def extract_iteration(
 
         # Add matching flow events
         for corr in correlation_ids:
-            for e in flow_corr_map.get(corr, []):
-                filtered_events.append(e)
+            filtered_events.extend(flow_corr_map.get(corr, []))
         # Add matching GPU events
         for corr in correlation_ids:
             for e in gpu_corr_map.get(corr, []):
@@ -169,7 +167,7 @@ def extract_iteration(
     return output, list(set(batch_list)), num_gpu_events, gpu_dur, gpu_busy
 
 
-def parse_range(range_str: str, max_len: int) -> Tuple[int, int]:
+def parse_range(range_str: str, max_len: int) -> tuple[int, int]:
     """Parse a range string like '10:20' or 'all'."""
     if range_str == "all":
         return 0, max_len
@@ -180,8 +178,8 @@ def parse_range(range_str: str, max_len: int) -> Tuple[int, int]:
 
 
 def extract_and_save(
-    roots: List[List[dict]],
-    events: List[dict],
+    roots: list[list[dict]],
+    events: list[dict],
     trace_json: dict,
     output_dir: str,
     base_name: str,
@@ -190,8 +188,8 @@ def extract_and_save(
     end: int,
     gpu_corr_map: dict,
     flow_corr_map: dict,
-    meta_events: List[dict],
-    output_label: Optional[str] = None,
+    meta_events: list[dict],
+    output_label: str | None = None,
 ):
     """Extract and save a range of iterations/dummy runs.
 
@@ -221,10 +219,11 @@ def extract_and_save(
         # --store-single-iteration keep their literal step name.
         is_structured = is_annotation and (output_label is not None or len(root) > 1)
 
-        if is_structured or not is_annotation:
-            if len(batch_list) == len(iter_details):
-                for bs, iteration in zip(batch_list, iter_details):
-                    iteration["batch_size"] = bs
+        if (is_structured or not is_annotation) and len(batch_list) == len(
+            iter_details
+        ):
+            for bs, iteration in zip(batch_list, iter_details):
+                iteration["batch_size"] = bs
 
         phase_details = find_phase_from_window(iter_details)
 
@@ -288,8 +287,8 @@ def extract_and_save(
 
 
 def extract_phases_and_save(
-    roots: List[List[dict]],
-    events: List[dict],
+    roots: list[list[dict]],
+    events: list[dict],
     trace_json: dict,
     output_dir: str,
     base_name: str,
@@ -298,7 +297,7 @@ def extract_phases_and_save(
     end: int,
     gpu_corr_map: dict,
     flow_corr_map: dict,
-    meta_events: List[dict],
+    meta_events: list[dict],
 ):
     """Extract and save a range of iterations/dummy runs."""
     extraction_summary = []
@@ -315,7 +314,7 @@ def extract_phases_and_save(
             iter_details = iteration_details(prefilldecode_steps)
             phase_details = find_phase_from_window(iter_details)
 
-            iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = (
+            iter_trace, _batch_list, num_gpu_events, gpu_dur, gpu_busy = (
                 extract_iteration(
                     prefilldecode_steps,
                     events,
@@ -347,7 +346,7 @@ def extract_phases_and_save(
         if len(decode_steps) > 0:
             iter_details = iteration_details(decode_steps)
             phase_details = find_phase_from_window(iter_details)
-            iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = (
+            iter_trace, _batch_list, num_gpu_events, gpu_dur, gpu_busy = (
                 extract_iteration(
                     decode_steps,
                     events,
@@ -380,16 +379,16 @@ def extract_phases_and_save(
 
 
 def divide_phases_and_save(
-    iteration_roots: List[dict],
-    events: List[dict],
+    iteration_roots: list[dict],
+    events: list[dict],
     trace_json: dict,
     output_dir: str,
     base_name: str,
     gpu_corr_map: dict,
     flow_corr_map: dict,
-    meta_events: List[dict],
-    steady_state_regions: List[Tuple[int, int]],
-) -> List[dict]:
+    meta_events: list[dict],
+    steady_state_regions: list[tuple[int, int]],
+) -> list[dict]:
     """
     Group contiguous steps of the same phase within steady-state regions and
     save each contiguous run as a single trace file into one of two sub-folders:
@@ -411,7 +410,7 @@ def divide_phases_and_save(
     print(f"[divide-phases] Steady-state regions: {regions}")
 
     # Build an ordered list of (phase_label, root) for all steady-state steps
-    steady_steps: List[Tuple[str, dict]] = []
+    steady_steps: list[tuple[str, dict]] = []
     for s, e in regions:
         for idx in range(s, e):
             detail = iter_details[idx]
@@ -423,7 +422,7 @@ def divide_phases_and_save(
             # steps that are neither (e.g. idle) are skipped
 
     # Group into contiguous runs of the same phase
-    runs: List[Tuple[str, List[dict]]] = []  # (phase, [roots])
+    runs: list[tuple[str, list[dict]]] = []  # (phase, [roots])
     for phase, root in steady_steps:
         if runs and runs[-1][0] == phase:
             runs[-1][1].append(root)

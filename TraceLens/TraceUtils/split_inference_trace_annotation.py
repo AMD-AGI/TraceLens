@@ -154,17 +154,18 @@ After splitting traces, analyze them with:
 import argparse
 import json
 import os
-from typing import List, Tuple
 
 import pandas as pd
 
 from ..util import DataLoader
 from .annotation_utils import (
-    ITERATION_BACKUP_PATTERNS,
-    ITERATION_PATTERNS,
+    ITERATION_BACKUP_PATTERNS,  # noqa: F401
+    ITERATION_PATTERNS,  # noqa: F401
     iteration_details,
 )
-from .split_inference import (
+
+# Re-exports for tests and downstream callers.
+from .split_inference import (  # noqa: F401
     compute_reference_pd_ratio,
     divide_phases_and_save,
     extract_and_save,
@@ -290,10 +291,10 @@ def main():
 
         # Determine the working set and compute steady-state regions once,
         # shared across all downstream calls.
-        steady_state_regions: List[Tuple[int, int]] = []
+        steady_state_regions: list[tuple[int, int]] = []
         if args.iterations != "all":
             working_roots = iteration_roots[start:end]
-            steady_state_regions: List[Tuple[int, int]] = [(0, end - start)]
+            steady_state_regions: list[tuple[int, int]] = [(0, end - start)]
             print(
                 f"\nUsing explicit iteration range [{start}, {end}) as the working region."
             )
@@ -384,7 +385,7 @@ def main():
         rows = []
         for entry in execution_details:
             row = {k: v for k, v in entry.items() if k not in ("steps", "phase")}
-            if "phase" in entry and entry["phase"]:
+            if entry.get("phase"):
                 for pk, pv in entry["phase"].items():
                     row[f"phase_{pk}"] = pv
             row["num_steps"] = len(entry.get("steps", []))

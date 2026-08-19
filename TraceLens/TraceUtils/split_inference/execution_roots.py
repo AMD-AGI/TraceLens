@@ -6,8 +6,6 @@
 
 """Stage 1: find iteration execution roots in an inference trace."""
 
-from typing import List, Optional
-
 from ..annotation_utils import (
     ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
@@ -15,7 +13,7 @@ from ..annotation_utils import (
 )
 
 
-def find_iteration_roots(events: List[dict]) -> Optional[List[dict]]:
+def find_iteration_roots(events: list[dict]) -> list[dict] | None:
     """Return iteration-root events.
 
     Tries the primary annotation pattern first, then backup patterns, then

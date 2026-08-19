@@ -8,7 +8,6 @@
 
 import math
 from statistics import mean
-from typing import List, Optional, Tuple
 
 from ..annotation_utils import (
     has_context,
@@ -19,8 +18,8 @@ from ..annotation_utils import (
 
 
 def identify_steady_state_regions(
-    iter_details: List[dict], num_steps: int
-) -> Tuple[List[Tuple[int, int]], int]:
+    iter_details: list[dict], num_steps: int
+) -> tuple[list[tuple[int, int]], int]:
     """Detect contiguous steady-state regions based on num_requests proximity to global max.
 
     Returns ``(regions, global_max)`` where ``regions`` is a list of
@@ -81,8 +80,8 @@ def identify_steady_state_regions(
 
 
 def compute_reference_pd_ratio(
-    regions: List[Tuple[int, int]], iter_details: List[dict]
-) -> Tuple[Tuple[int, int], float, float]:
+    regions: list[tuple[int, int]], iter_details: list[dict]
+) -> tuple[tuple[int, int], float, float]:
     """
     Return the largest steady-state region, a reference PD ratio, and the
     median PD ratio across all regions.
@@ -119,14 +118,14 @@ def compute_reference_pd_ratio(
 
 
 def find_steady_state_window(
-    iteration_roots: List[dict],
+    iteration_roots: list[dict],
     num_steps: int,
-    steady_state_regions: List[Tuple[int, int]],
+    steady_state_regions: list[tuple[int, int]],
     mode: str = "mixed",
-    CONC: Optional[int] = None,
-    OSL: Optional[float] = None,
-    R: Optional[float] = None,
-) -> List[dict]:
+    CONC: int | None = None,
+    OSL: float | None = None,
+    R: float | None = None,
+) -> list[dict]:
     """
     Find the best contiguous window of up to ``num_steps`` iterations.
 
@@ -168,12 +167,12 @@ def find_steady_state_window(
     regions = steady_state_regions
     global_max = max(t["num_requests"] for t in iter_details)
 
-    (largest_start, largest_end), reference_ratio, largest_window_ratio = (
+    (largest_start, largest_end), reference_ratio, _largest_window_ratio = (
         compute_reference_pd_ratio(regions, iter_details)
     )
 
     # --- Optional: CONC / OSL / R validation and ideal ratio override ----------
-    ideal_pd_ratio: Optional[float] = None
+    ideal_pd_ratio: float | None = None
 
     if CONC is not None and global_max != CONC:
         print(
@@ -210,7 +209,7 @@ def find_steady_state_window(
         print(
             f"Using ideal prefilldecodemix_to_totalsteps_ratio={ideal_pd_ratio:.4f} as reference (overrides empirical {reference_ratio:.4f})"
         )
-    print(f"\n --------------------------------")
+    print("\n --------------------------------")
     # ---------------------------------------------------------------------------
 
     divider = max(1, min(int(num_steps / 2), 10))
@@ -220,7 +219,7 @@ def find_steady_state_window(
     candidates = []
     s, e = largest_start, largest_end
 
-    def _count_mixed(window: List[dict]) -> int:
+    def _count_mixed(window: list[dict]) -> int:
         """Count truly-mixed steps (both context and generation requests > 0)."""
         return sum(1 for t in window if is_mixed(t))
 
@@ -290,8 +289,8 @@ def find_steady_state_window(
         # Find the longest contiguous run of pure decode-only steps (active
         # generation with no context requests) in the largest steady-state
         # region, capped at num_steps.
-        do_runs: List[Tuple[int, int]] = []  # (start, end) in iter_details coords
-        run_start: Optional[int] = None
+        do_runs: list[tuple[int, int]] = []  # (start, end) in iter_details coords
+        run_start: int | None = None
         for idx in range(largest_start, largest_end):
             if is_decode_only(iter_details[idx]):
                 if run_start is None:
@@ -324,8 +323,8 @@ def find_steady_state_window(
     elif mode == "max_prefilldecode":
         # Find the longest contiguous run of pure PD steps (no decode-only) in
         # the largest steady-state region, capped at num_steps.
-        pd_runs: List[Tuple[int, int]] = []  # (start, end) in iter_details coords
-        run_start: Optional[int] = None
+        pd_runs: list[tuple[int, int]] = []  # (start, end) in iter_details coords
+        run_start: int | None = None
         for idx in range(largest_start, largest_end):
             if has_context(iter_details[idx]):
                 if run_start is None:
