@@ -31,6 +31,11 @@ Options:
                            - 0.5.17 / v0517 : sglang_roofline_patches/sglang_0_5_17/
   --gpu-type <type>        mi300 | mi350 | mi355 (default: mi350)
   --base-image <image>     Override the default base image
+  --patch-dir <name>       Patch directory under sglang_roofline_patches/
+                           instead of the one derived from --sglang-version.
+                           Use for bases that have drifted from a release tag,
+                           e.g. --patch-dir sglang_0_5_17_sgldev for the
+                           rocm/sgl-dev nightly.
   -h, --help               Show this help
 
 Legacy positional (still supported):
@@ -72,6 +77,7 @@ EOF
 SGLANG_VERSION="0.5.9"
 GPU_TYPE="mi350"
 CUSTOM_BASE_IMAGE=""
+CUSTOM_PATCH_DIR=""
 TRACELENS_PATH=""
 DOCKER_ARGS=()
 
@@ -101,6 +107,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --base-image)
             CUSTOM_BASE_IMAGE="$2"
+            shift 2
+            ;;
+        --patch-dir)
+            CUSTOM_PATCH_DIR="$2"
             shift 2
             ;;
         -h|--help)
@@ -246,7 +256,7 @@ if [ -n "${CUSTOM_BASE_IMAGE}" ]; then
     BASE_IMAGE="${CUSTOM_BASE_IMAGE}"
 fi
 
-PATCH_DIR="sglang_$(echo "${SGLANG_VERSION}" | tr '.' '_')"
+PATCH_DIR="${CUSTOM_PATCH_DIR:-sglang_$(echo "${SGLANG_VERSION}" | tr '.' '_')}"
 PATCH_DIR_PATH="${PATCHES_ROOT}/${PATCH_DIR}"
 if [ ! -d "${PATCH_DIR_PATH}" ]; then
     echo "Error: patch directory not found: ${PATCH_DIR_PATH}"
