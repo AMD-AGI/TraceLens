@@ -364,6 +364,12 @@ reduce_ops = [
     "aten::amax",
 ]
 
+replication_pad_ops = [
+    "aten::replication_pad1d",
+    "aten::replication_pad2d",
+    "aten::replication_pad3d",
+]
+
 upsample_ops = [
     "aten::upsample_nearest1d",
     "aten::upsample_nearest2d",
@@ -378,6 +384,8 @@ for op_name, op_class in norm_ops.items():
     op_to_perf_model_class_map[op_name] = op_class
 for op in reduce_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_reduce
+for op in replication_pad_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_replication_pad
 for op in upsample_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_upsample_nearest
 
