@@ -14,6 +14,7 @@ back to ``0.0`` if unsupported.
 
 from __future__ import annotations
 
+import logging
 from typing import Tuple
 
 import torch
@@ -31,6 +32,18 @@ except Exception:  # pragma: no cover
 # OCP Microscaling Formats (MX) v1.0, Section 5.2:
 # https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
 MX_BLOCK = 32
+
+logger = logging.getLogger(__name__)
+
+
+def mx_available() -> bool:
+    """True if any block-scaled MX GEMM path is usable.
+    Covers the Triton ``tl.dot_scaled`` MXFP4/MXFP6 path as well as aiter's
+    gfx950 CK ``gemm_a4w4`` MXFP4 path
+    """
+    return (
+        triton_available() and (_MXFP4_SUPPORTED or bool(_MXFP6_DTYPE))
+    ) or _aiter_mxfp4_ready()
 
 
 def triton_available() -> bool:
@@ -222,7 +235,12 @@ if triton_available() and torch.cuda.is_available():
     try:
         _resolve_support()
     except Exception:  # pragma: no cover
-        pass
+        logger.debug("MXFP4/MXFP6 support probe failed", exc_info=True)
+
+
+def get_mxfp6_kind() -> str:
+    """Return the resolved MXFP6 implementation kind for benchmarking."""
+    return _MXFP6_KIND
 
 
 def _launch_scaled_gemm(

@@ -34,9 +34,11 @@ Set ``TRACELENS_VERBOSE_NATIVE_LOGS=1`` to keep the raw native XLA/xprof logs.
 from __future__ import annotations
 
 import argparse
+import inspect
 import enum
 import functools
 import json
+import logging
 import math
 import os
 import statistics
@@ -48,6 +50,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from TraceLens import GPUEventAnalyser
 from TraceLens.util import DataLoader
+
+logger = logging.getLogger(__name__)
 
 FRAMEWORK_PYTORCH = "pytorch"
 FRAMEWORK_JAX = "jax"
@@ -370,7 +374,7 @@ def _coerce_numeric(event: dict) -> None:
             try:
                 event[key] = float(val)
             except ValueError:
-                pass
+                logger.debug("Skipping non-numeric %s value: %r", key, val)
 
 
 def make_jax_analyzer(xplane_path: str):
@@ -865,14 +869,12 @@ def find_megatron_extension() -> Optional[str]:
     if override and os.path.exists(override):
         return override
     try:
-        import TraceLens
-
-        base = os.path.dirname(os.path.dirname(os.path.abspath(TraceLens.__file__)))
+        base = os.path.dirname(os.path.dirname(inspect.getfile(GPUEventAnalyser)))
         candidate = os.path.join(base, "examples", "example_megatron_extension.py")
         if os.path.exists(candidate):
             return candidate
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("Megatron extension lookup failed", exc_info=True)
     return None
 
 

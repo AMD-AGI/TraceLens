@@ -1,0 +1,45 @@
+op category,parent_module,Count,call_stack_first,total_direct_kernel_time_ms,Percentage (%),Cumulative Percentage (%)
+GEMM,nn.Module: xFuserHunyuanVideoTransformer3DWrapper,2188,"['aten::mm', 'nn.Module: xFuserHunyuanVideoTransformer3DWrapper_0']",741.2650151367187,35.13695869069835,35.13695869069835
+CONV_fwd,nn.Module: Conv3d,396,"['aten::miopen_convolution', 'nn.Module: Conv3d_0']",612.1654331054688,29.017464868395397,64.15442355909374
+SDPA_fwd,nn.Module: xFuserHunyuanVideoTransformer3DWrapper,248,"['aten::_efficient_attention_forward', 'nn.Module: xFuserHunyuanVideoTransformer3DWrapper_0']",321.82386572265625,15.254884076098204,79.40930763519195
+triton,nn.Module: xFuserHunyuanVideoTransformer3DWrapper,3100,"['triton_red_fused_addmm_native_layer_norm_view_0', 'nn.Module: xFuserHunyuanVideoTransformer3DWrapper_0']",159.1116826171875,7.5421077552088125,86.95141539040077
+other,nn.Module: HunyuanVideoCausalConv3d,385,"['aten::replication_pad3d', 'nn.Module: HunyuanVideoCausalConv3d_0', 'nn.Module: HunyuanVideoDecoder3D_0']",110.90469482421875,5.257031697259241,92.20844708766
+elementwise,nn.Module: Conv3d,407,"['aten::copy_', 'nn.Module: Conv3d_0']",29.71872412109375,1.4087074938920934,93.6171545815521
+NORM_fwd,nn.Module: GroupNorm,330,"['aiter::_groupnorm_run', 'nn.Module: GroupNorm_0', 'nn.Module: HunyuanVideoResnetBlockCausal3D_0', 'nn.Module: HunyuanVideoMidBlock3D_0', 'nn.Module: HunyuanVideoDecoder3D_0']",28.42794873046875,1.3475230043327209,94.96467758588481
+elementwise,nn.Module: HunyuanVideoUpsampleCausal3D,165,"['aten::upsample_nearest2d', 'nn.Module: HunyuanVideoUpsampleCausal3D_0', 'nn.Module: HunyuanVideoUpBlock3D_0', 'nn.Module: HunyuanVideoDecoder3D_0']",25.1998505859375,1.1945068106128618,96.15918439649768
+elementwise,nn.Module: SiLU,319,"['aten::silu', 'nn.Module: SiLU_0', 'nn.Module: HunyuanVideoResnetBlockCausal3D_0', 'nn.Module: HunyuanVideoMidBlock3D_0', 'nn.Module: HunyuanVideoDecoder3D_0']",20.5771474609375,0.9753844651281919,97.13456886162587
+GEMM,nn.Module: Linear,340,"['aten::mm', 'nn.Module: Linear_0', 'nn.Module: LlamaAttention_0', 'nn.Module: LlamaDecoderLayer_0', 'nn.Module: LlamaModel_0']",16.29271044921875,0.7722963883680942,97.90686524999396
+SDPA_fwd,nn.Module: Attention,11,"['aten::_efficient_attention_forward', 'nn.Module: Attention_0', 'nn.Module: HunyuanVideoMidBlock3D_0', 'nn.Module: HunyuanVideoDecoder3D_0']",15.92249267578125,0.7547475679783494,98.66161281797231
+elementwise,nn.Module: HunyuanVideoResnetBlockCausal3D,165,"['aten::add', 'nn.Module: HunyuanVideoResnetBlockCausal3D_0', 'nn.Module: HunyuanVideoMidBlock3D_0', 'nn.Module: HunyuanVideoDecoder3D_0']",8.07239404296875,0.3826423346993086,99.04425515267162
+elementwise,NA,203,['aten::copy_'],7.887646484375,0.3738850519435338,99.41814020461516
+elementwise,nn.Module: LlamaAttention,480,"['aten::mul', 'nn.Module: LlamaAttention_0', 'nn.Module: LlamaDecoderLayer_0', 'nn.Module: LlamaModel_0']",2.69003173828125,0.12751112238478246,99.54565132699994
+elementwise,nn.Module: LlamaRMSNorm,455,"['aten::copy_', 'nn.Module: LlamaRMSNorm_0', 'nn.Module: LlamaDecoderLayer_0', 'nn.Module: LlamaModel_0']",2.51821728515625,0.11936688622276072,99.66501821322271
+SDPA_fwd,nn.Module: LlamaAttention,32,"['aten::_efficient_attention_forward', 'nn.Module: LlamaAttention_0', 'nn.Module: LlamaDecoderLayer_0', 'nn.Module: LlamaModel_0']",1.4376220703125,0.06814521967975222,99.73316343290246
+elementwise,nn.Module: HunyuanVideoMidBlock3D,66,"['aten::copy_', 'nn.Module: HunyuanVideoMidBlock3D_0', 'nn.Module: HunyuanVideoDecoder3D_0']",1.06916064453125,0.05067965253113436,99.78384308543359
+other,nn.Module: LlamaAttention,128,"['aten::cat', 'nn.Module: LlamaAttention_0', 'nn.Module: LlamaDecoderLayer_0', 'nn.Module: LlamaModel_0']",0.927484375,0.04396400680616564,99.82780709223975
+elementwise,nn.Module: Attention,44,"['aten::fill_', 'nn.Module: Attention_0', 'nn.Module: HunyuanVideoMidBlock3D_0', 'nn.Module: HunyuanVideoDecoder3D_0']",0.58598583984375,0.027776516937233913,99.85558360917699
+reduce,nn.Module: LlamaRMSNorm,65,"['aten::mean', 'nn.Module: LlamaRMSNorm_0', 'nn.Module: LlamaDecoderLayer_0', 'nn.Module: LlamaModel_0']",0.54281884765625,0.02573034344958573,99.88131395262657
+elementwise,nn.Module: SiLUActivation,32,"['aten::silu', 'nn.Module: SiLUActivation_0', 'nn.Module: LlamaMLP_0', 'nn.Module: LlamaDecoderLayer_0', 'nn.Module: LlamaModel_0']",0.38882275390625,0.01843072148695383,99.89974467411352
+elementwise,nn.Module: LlamaMLP,32,"['aten::mul', 'nn.Module: LlamaMLP_0', 'nn.Module: LlamaDecoderLayer_0', 'nn.Module: LlamaModel_0']",0.37224169921875,0.017644757193879184,99.9173894313074
+elementwise,nn.Module: LlamaDecoderLayer,64,"['aten::add', 'nn.Module: LlamaDecoderLayer_0', 'nn.Module: LlamaModel_0']",0.285482421875,0.01353225075986121,99.93092168206726
+elementwise,nn.Module: Linear,33,"['aten::add_', 'nn.Module: Linear_296', 'nn.Module: Attention_0', 'nn.Module: HunyuanVideoMidBlock3D_0', 'nn.Module: HunyuanVideoDecoder3D_0']",0.26980712890625,0.012789220790470335,99.94371090285773
+elementwise,nn.Module: QuickGELUActivation,36,"['aten::mul', 'nn.Module: QuickGELUActivation_0', 'nn.Module: CLIPMLP_0', 'nn.Module: CLIPEncoderLayer_0', 'nn.Module: CLIPEncoder_0', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.2204580078125,0.010450006077937935,99.95416090893566
+CONV_fwd,nn.Module: xFuserHunyuanVideoTransformer3DWrapper,4,"['aten::miopen_convolution', 'nn.Module: xFuserHunyuanVideoTransformer3DWrapper_0']",0.21186767578125,0.010042812785987225,99.96420372172165
+other,nn.Module: CLIPAttention,12,"['aten::_flash_attention_forward', 'nn.Module: CLIPAttention_0', 'nn.Module: CLIPEncoderLayer_0', 'nn.Module: CLIPEncoder_0', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.16567431640625,0.007853185423302914,99.97205690714495
+elementwise,nn.Module: CLIPEncoderLayer,24,"['aten::add', 'nn.Module: CLIPEncoderLayer_0', 'nn.Module: CLIPEncoder_0', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.12696728515625,0.006018420082569853,99.97807532722751
+NORM_fwd,nn.Module: LayerNorm,25,"['aten::native_layer_norm', 'nn.Module: LayerNorm_0', 'nn.Module: CLIPEncoderLayer_0', 'nn.Module: CLIPEncoder_0', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.1179951171875,0.005593127253626847,99.98366845448115
+other,nn.Module: xFuserHunyuanVideoTransformer3DWrapper,8,"['aten::index', 'nn.Module: xFuserHunyuanVideoTransformer3DWrapper_0']",0.07336279296875,0.0034774950568816276,99.98714594953803
+other,nn.Module: HunyuanVideoMidBlock3D,11,"['aten::arange', 'nn.Module: HunyuanVideoMidBlock3D_0', 'nn.Module: HunyuanVideoDecoder3D_0']",0.0489013671875,0.002317990575164196,99.9894639401132
+elementwise,nn.Module: LlamaRotaryEmbedding,7,"['aten::copy_', 'nn.Module: LlamaRotaryEmbedding_0', 'nn.Module: LlamaModel_0']",0.04490087890625,0.002128362050128547,99.99159230216333
+elementwise,nn.Module: LlamaModel,10,"['aten::add', 'nn.Module: LlamaModel_0']",0.04273193359375,0.0020255511251671956,99.9936178532885
+elementwise,nn.Module: CLIPAttention,12,"['aten::fill_', 'nn.Module: CLIPAttention_0', 'nn.Module: CLIPEncoderLayer_0', 'nn.Module: CLIPEncoder_0', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.0403251953125,0.0019114684936646063,99.99552932178216
+other,NA,3,['aten::cat'],0.02274609375,0.0010781954363799195,99.99660751721854
+other,nn.Module: LlamaModel,6,"['aten::arange', 'nn.Module: LlamaModel_0']",0.01321240234375,0.0006262856412717722,99.99723380285981
+other,nn.Module: Embedding,3,"['aten::gather', 'nn.Module: Embedding_0', 'nn.Module: LlamaModel_0']",0.013056640625,0.0006189023263094419,99.99785270518612
+elementwise,nn.Module: CLIPTextTransformer,2,"['aten::copy_', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.0105341796875,0.0004993342852580366,99.99835203947137
+other,nn.Module: LlamaRotaryEmbedding,1,"['aten::cat', 'nn.Module: LlamaRotaryEmbedding_0', 'nn.Module: LlamaModel_0']",0.007490234375,0.0003550471834550052,99.99870708665483
+reduce,nn.Module: LlamaModel,1,"['aten::all', 'nn.Module: LlamaModel_0']",0.00696923828125,0.0003303512678913487,99.99903743792272
+GEMM,nn.Module: LlamaRotaryEmbedding,1,"['aten::bmm', 'nn.Module: LlamaRotaryEmbedding_0', 'nn.Module: LlamaModel_0']",0.00676904296875,0.00032086174082377687,99.99935829966354
+elementwise,nn.Module: CLIPTextEmbeddings,1,"['aten::add', 'nn.Module: CLIPTextEmbeddings_0', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.0059677734375,0.0002828804873655198,99.9996411801509
+reduce,nn.Module: CLIPTextTransformer,1,"['aten::argmax', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.00572802734375,0.0002715162000724032,99.99991269635098
+other,nn.Module: CLIPTextTransformer,1,"['aten::arange', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.001841796875,8.730364902166099e-05,100.0

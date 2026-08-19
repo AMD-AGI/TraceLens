@@ -43,7 +43,7 @@ Origami's wheels and bindings expect a ROCm runtime on the machine (a GPU isn't
 required for pure Python simulation in many cases, but library loading may
 depend on your setup). The project's continuous integration (CI) uses an AMD
 ROCm container and installs `rocm-origami` alongside TraceLens (see
-[`.github/workflows/regression-tests.yml`](https://github.com/AMD-AGI/TraceLens/blob/main/.github/workflows/regression-tests.yml)).
+[`.github/workflows/unit-tests.yml`](https://github.com/AMD-AGI/TraceLens/blob/main/.github/workflows/unit-tests.yml)).
 
 If `import origami` fails after `pip install`, check:
 

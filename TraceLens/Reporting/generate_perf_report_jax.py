@@ -4,7 +4,10 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import argparse, os, sys
+import argparse
+import importlib.util
+import os
+import sys
 from typing import Optional, Dict
 import pandas as pd
 import logging
@@ -16,8 +19,7 @@ logging.basicConfig(
     format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
 )
 
-from TraceLens.PerfModel import jax_op_mapping
-from TraceLens.TreePerf import TreePerfAnalyzer, JaxTreePerfAnalyzer
+from TraceLens.TreePerf import JaxTreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
     request_install,
@@ -175,10 +177,8 @@ def generate_perf_report_jax(
             # split input path at 'xplane.pb' and take the first part and append '.xlsx'
             base_path = profile_path.rsplit(".xplane.pb", 1)[0]
             output_xlsx_path = base_path + "_perf_report.xlsx"
-        try:
-            import openpyxl
-        except (ImportError, ModuleNotFoundError) as e:
-            print(f"Error importing openpyxl: {e}")
+        if importlib.util.find_spec("openpyxl") is None:
+            print("Error importing openpyxl")
             request_install("openpyxl")
 
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:

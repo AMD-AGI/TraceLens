@@ -53,6 +53,7 @@ def gemm_name_parser(kernel_name):
         return parse_cutlass_gemm(kernel_name)
     elif is_nvjet_gemm(kernel_name):
         return parse_nvjet_gemm(kernel_name)
+    return None
 
 
 def is_tensile_gemm(kernel_name):

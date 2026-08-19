@@ -7,7 +7,7 @@ See LICENSE for license information.
 # Inference performance analysis in TraceLens
 ```{meta}
 :description: Understand the concepts behind TraceLens inference analysis - the roofline model for paged attention (prefill and decode), and the steady-state region that trace splitting targets.
-:keywords: TraceLens, inference, roofline, paged attention, prefill, decode, chunked prefill, FLOPS, arithmetic intensity, steady state, vLLM, SGLang, LLM serving, ROCm, MI300X
+:keywords: TraceLens, inference, roofline, paged attention, prefill, decode, chunked prefill, FLOPS, arithmetic intensity, steady state, vLLM, SGLang, ATOM, LLM serving, ROCm, MI300X
 ```
 
 This topic explains the concepts behind TraceLens's inference-serving analysis:

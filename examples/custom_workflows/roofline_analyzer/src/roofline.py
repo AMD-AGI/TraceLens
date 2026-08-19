@@ -7,8 +7,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import Dict, Any, Tuple, List
-from io import BytesIO
+from typing import Dict, Any, Tuple
 
 
 def calculate_ridge_points(config: Dict[str, Any]) -> Tuple[float, float]:

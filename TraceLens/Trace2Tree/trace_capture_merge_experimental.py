@@ -15,25 +15,15 @@ information (optimized execution paths), producing a complete execution
 model suitable for performance analysis.
 """
 
-import sys
-import time
 from collections import OrderedDict, deque, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
-import re
 import warnings
 import TraceLens
 
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
-
-EXECUTE_CONTEXT_PATTERNS = (
-    re.compile(
-        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
-    ),
-    re.compile(r"execute_context_\d+\([\d_]+\)_generation_\d+\([\d_]+\)"),
-)
 
 
 def get_subtree_events(tree, event, cat_filter=None, name_filter=None):
@@ -85,7 +75,8 @@ def _align_capture_to_graph(capture_events, graph_events):
             c_name = _capture_kernel_name(c_event)
             # Memcpy/Memset events carry no kernel arg — match when both sides agree
             if ("Memcpy" in c_event["name"] and "Memcpy" in g_name) or (
-                "Memset" in c_event["name"] and "Memset" in g_name
+                "Memset" in c_event["name"]
+                and ("Memset" in g_name or "fillBuffer" in g_name)
             ):
                 aligned.append(c_event)
                 matched = True
@@ -146,7 +137,7 @@ def _stream_of(event):
 def _names_match(c_event, g_name):
     """Pair a capture dispatch to a graph kernel by name (Memcpy/Memset carry no kernel arg)."""
     if ("Memcpy" in c_event["name"] and "Memcpy" in g_name) or (
-        "Memset" in c_event["name"] and "Memset" in g_name
+        "Memset" in c_event["name"] and ("Memset" in g_name or "fillBuffer" in g_name)
     ):
         return True
     return _capture_kernel_name(c_event) == g_name
@@ -321,8 +312,7 @@ def update_subtree_uids_and_timestamps(
     # Update timestamps
     original_start_ts = subtree_events[0]["ts"]
     ts_offset = new_start_ts - original_start_ts
-    # for event in subtree_filtered_events:
-    #    event[UID]=uid_mapping[event[UID]]
+    # UID remapping handled when rebuilding the merged capture subtree.
     for event in subtree_events:
         event["ts"] += ts_offset
         event["ts"] = new_start_ts
@@ -436,7 +426,25 @@ _CAPTURE_TREE_CACHE_MAX_SIZE = 8
 _capture_tree_cache: OrderedDict = OrderedDict()
 
 
-def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
+def _load_trace_tree_from_file(
+    profile_filepath: str, add_python_func: bool = False
+) -> TraceToTree:
+    """Load a trace file into a built TraceToTree without TreePerfAnalyzer."""
+    from ..util import DataLoader
+
+    data = DataLoader.load_data(profile_filepath)
+    trace_metadata = {key: value for key, value in data.items() if key != "traceEvents"}
+    events = data["traceEvents"]
+    tree = TraceToTree(
+        events,
+        event_to_category=TraceToTree.default_categorizer,
+        trace_metadata=trace_metadata,
+    )
+    tree.build_tree(add_python_func=add_python_func)
+    return tree
+
+
+def _get_cached_capture_tree(key, filepath):
     """Load a capture tree, returning a cached copy when *key* has been seen.
 
     Uses LRU eviction with at most ``_CAPTURE_TREE_CACHE_MAX_SIZE`` entries.
@@ -455,8 +463,7 @@ def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
         return _capture_tree_cache[key]
 
     print("Loading capture trace: {} (key={})".format(filepath, key[0]))
-    capture_perf_analyzer = TreePerfAnalyzer.from_file(filepath, add_python_func=True)
-    capture_tree = capture_perf_analyzer.tree
+    capture_tree = _load_trace_tree_from_file(filepath, add_python_func=True)
     capture_roots = find_capture_roots(capture_tree)
 
     capture_root_data = []
@@ -528,15 +535,13 @@ def find_capture_roots(capture_tree):
 
 
 def find_execution_roots(graph_tree):
-    """Find execution root events matching ``execute_context_*`` in the graph tree."""
-    roots = [
-        event
-        for event in graph_tree.events
-        if any(p.match(event.get("name", "")) for p in EXECUTE_CONTEXT_PATTERNS)
-        and event.get("cat") == "user_annotation"
-    ]
-    roots.sort(key=lambda x: x.get("ts", 0))
-    return roots
+    """Find iteration-annotation root events (vLLM / SGLang / ATOM) in the graph tree.
+
+    Primary (detailed) patterns are tried first, and native (backup) patterns are used only when no primary root is found.
+    """
+    from ..TraceUtils.annotation_utils import find_iteration_roots_by_priority
+
+    return find_iteration_roots_by_priority(graph_tree.events)
 
 
 def find_graph_roots_under_execution(execution_root, graphlaunch_events):
@@ -595,7 +600,6 @@ def load_capture_folder(
         Dictionary keyed by ``"{batch_size}_{mode}"`` whose values are lists of
         ``(capture_tree, capture_roots)`` tuples.
     """
-    from ..TreePerf.tree_perf import TreePerfAnalyzer
 
     with open(metadata_json_path, "r") as f:
         metadata_list = json.load(f)
@@ -641,49 +645,50 @@ def find_closest_batch_size(
     return min(candidates)
 
 
-def find_execution_details(execution_root):
+def find_execution_details(execution_root) -> Optional[str]:
+    """Effective batch size for the iteration annotation root.
+
+    Returns ``None`` when no integer batch size can be determined.
+    """
     name = execution_root["name"]
-    if name.startswith("execute_context_"):
-        paren_values = re.findall(r"\((\d+)\)", name)
-        return str(sum(int(v) for v in paren_values))
-    return name.split("_")[1]
+    from ..TraceUtils.annotation_utils import IterationAnnotation
+
+    ann = IterationAnnotation(name)
+    if ann.matched and ann.batch_size is not None:
+        return str(ann.batch_size)
+    parts = name.split("_")
+    if len(parts) > 1 and parts[1].lstrip("-").isdigit():
+        return parts[1]
+    return None
 
 
 def merge_capture_trace_into_graph(
-    capture_folder: str,
-    metadata_json_path: str,
-    graph_tree_filepath: str,
+    capture_folder: str = None,
+    metadata_json_path: str = None,
+    graph_tree_filepath: str = None,
 ) -> "TraceToTree":
-    """
-    Merge capture trace information into a graph replay trace.
-
-    Extracts matching subtrees from capture and graph trees, validates alignment,
-    remaps UIDs/timestamps, and integrates capture events into the graph tree.
-    The result is a single augmented TraceToTree that combines both traces,
-    suitable for standard performance analysis APIs.
+    """Merge capture trace information into a graph replay trace.
 
     Args:
-        capture_tree: TraceToTree from actual/capture execution
-        graph_tree: TraceToTree from graph/replay execution
-        add_python_func: If True, include python function events in tree structure (default: False)
+        capture_folder: Directory containing capture trace files.
+        metadata_json_path: Path to ``execution_details.json`` metadata
+            index.
+        graph_tree_filepath: Path to the graph-replay timing trace.
 
     Returns:
-        Augmented graph_tree with capture information merged in
+        Augmented graph_tree with capture information merged in, or ``None``
+        if the merge failed.
     """
-    # Lazy import to avoid circular dependency
-    from ..TreePerf.tree_perf import TreePerfAnalyzer
-
-    graph_perf_analyzer = TreePerfAnalyzer.from_file(
-        graph_tree_filepath, add_python_func=True
-    )
-
-    graph_tree = graph_perf_analyzer.tree
+    graph_tree = _load_trace_tree_from_file(graph_tree_filepath, add_python_func=True)
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
-    ##Use cuda graph APIs to find the root node for capture subtrees
+
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
+
     capture_map, capture_batch_sizes = load_capture_folder(
         capture_folder, metadata_json_path
     )
+
+    # ── Per-execution-root merge loop ──
     merge_failed = False
     for execution_root, graph_roots in execution_graph_root_map:
         print("Processing execution root: {}".format(execution_root["name"]))
@@ -694,7 +699,16 @@ def merge_capture_trace_into_graph(
                 )
             )
             continue
+
+        # ── Resolve capture tree + roots for this execution root ──
         batch_size = find_execution_details(execution_root)
+        if batch_size is None:
+            print(
+                "Warning: could not determine batch size for execution root {}".format(
+                    execution_root["name"]
+                )
+            )
+            continue
         closest_batch_size = find_closest_batch_size(
             int(batch_size), capture_batch_sizes
         )
@@ -705,26 +719,54 @@ def merge_capture_trace_into_graph(
                 )
             )
             continue
-        num_graph_roots = len(graph_roots)
-        if num_graph_roots != 1:
-            mode = "PIECEWISE"
+        # Look up the capture trace by batch_size.  The mode (FULL vs
+        # PIECEWISE) is already determined in execution_details.json from
+        # the capture trace's StreamBeginCapture count.  Try both modes
+        # and use whichever is available; when both exist, prefer the one
+        # matching the graph launch count.
+        full_key = "{}_FULL".format(closest_batch_size)
+        piece_key = "{}_PIECEWISE".format(closest_batch_size)
+        if full_key in capture_map and piece_key in capture_map:
+            str_key = piece_key if len(graph_roots) != 1 else full_key
+        elif full_key in capture_map:
+            str_key = full_key
+        elif piece_key in capture_map:
+            str_key = piece_key
         else:
-            mode = "FULL"
-        str_key = "{}_{}".format(closest_batch_size, mode)
+            print(
+                "Warning: no capture trace for batch size {}".format(closest_batch_size)
+            )
+            continue
         filepath = capture_map[str_key]
         key = (str_key, os.path.abspath(filepath))
         capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
-            key, filepath, TreePerfAnalyzer
+            key, filepath
         )
+
+        # Build (capture_root, graph_root) pairs. When there is a single
+        # capture root , map it to every graph root.
+        # Otherwise pair 1:1 positionally.
+        if len(capture_roots) == 1:
+            pairs = [(capture_roots[0], g) for g in graph_roots]
+            data = [capture_root_data[0]] * len(graph_roots)
+        else:
+            if len(capture_roots) == len(graph_roots):
+                pairs = list(zip(capture_roots, graph_roots))
+                data = capture_root_data
+            else:
+                print(
+                    "Warning: number of capture roots ({}) does not match number of graph roots ({}), merging may be incorrect".format(
+                        len(capture_roots), len(graph_roots)
+                    )
+                )
+                continue
 
         print(
             "Found {} capture roots and {} graph roots".format(
                 len(capture_roots), len(graph_roots)
             )
         )
-        for (c_root, g_root), (cached_events, filtered_uids) in zip(
-            zip(capture_roots, graph_roots), capture_root_data
-        ):
+        for (c_root, g_root), (cached_events, filtered_uids) in zip(pairs, data):
             # Shallow-copy each event dict: every mutation downstream replaces
             # top-level keys (UID, ts, dur, parent, children) or adds new ones
             # (gpu_events). No nested structure is ever mutated in-place, so a

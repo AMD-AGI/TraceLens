@@ -18,17 +18,18 @@ import re
 import sys
 import traceback
 from collections import defaultdict
-from typing import Any
+
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from category_analyses.analysis_utils import parse_first_shape, shape_aware_lookup
 from utils.arch_utils import list_platforms, load_arch
-from TraceLens.TreePerf import TreePerfAnalyzer
-from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
+
 from TraceLens.Agent.Analysis.utils.classify_kernels import (
     classify_kernel,
 )
+from TraceLens.TreePerf import TreePerfAnalyzer
+from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
 
 CATEGORY_SKILL_MAP = {
     "cpu_idle": "cpu-idle-analyzer",
@@ -62,7 +63,6 @@ FUSION_ALREADY_FUSED = [
     "flash_attn",
     "flash_fwd",
     "silu_and_mul",
-    "SiluAndMul",
 ]
 _NORM_KERNEL_PATTERNS = [
     "batchnorm",
@@ -511,7 +511,7 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
                         }
                     )
             except (KeyError, IndexError):
-                pass
+                continue
         if len(kernels) < 2:
             continue
 
@@ -563,7 +563,7 @@ def _extract_standalone_fusion_candidates(analyzer, tree, trace1_csv_dir: str) -
                 }
             )
         except (KeyError, IndexError):
-            pass
+            continue
 
     sibling_seqs = []
     seen_sibling_bases = {}
@@ -845,7 +845,7 @@ def main():
     print(f"Pseudo Ops: {'Enabled' if enable_pseudo_ops else 'Disabled'}")
     print("=" * 80)
 
-    # Create directory structure (chmod 777 so host user can write when running in container as root)
+    # Create directory structure
     for d in [
         output_dir,
         f"{output_dir}/metadata",
@@ -854,7 +854,6 @@ def main():
         f"{output_dir}/system_findings",
     ]:
         os.makedirs(d, exist_ok=True)
-        os.chmod(d, 0o777)
 
     platform_specs = load_arch(platform)
 
@@ -867,6 +866,8 @@ def main():
     gpu_utilization_metrics = _gpu_utilization_metrics_from_gpu_timeline_df(
         gpu_timeline
     )
+    trace2_gpu_utilization = None
+    trace2_ops_summary_by_category = None
 
     if comparison_scope == "comparative" and trace2_csv_dir is not None:
         trace2_gpu_utilization = _gpu_utilization_metrics_from_gpu_timeline_df(
@@ -1217,7 +1218,6 @@ def main():
         except Exception as ex:
             print(f"  ⚠️  Error during fusion candidate extraction: {ex}")
             traceback.print_exc()
-            fusion_candidates = []
             with open(fusion_candidates_file, "w") as f:
                 json.dump([], f)
 

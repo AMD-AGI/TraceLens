@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import importlib.util
 import os
 import argparse
 import sys
@@ -150,13 +151,11 @@ def generate_perf_report_rocprof(
                 output_xlsx_path = base_path + "_perf_report.xlsx"
 
         logger.info(f"Writing Excel file to: {output_xlsx_path}")
-        try:
-            import openpyxl
-        except (ImportError, ModuleNotFoundError) as e:
+        if importlib.util.find_spec("openpyxl") is None:
             logger.error(
-                f"Error importing openpyxl: {e}. Please install it with: pip install openpyxl"
+                "Error importing openpyxl. Please install it with: pip install openpyxl"
             )
-            raise
+            raise ImportError("openpyxl is required for Excel output")
 
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
             for sheet_name, df in dict_name2df.items():
