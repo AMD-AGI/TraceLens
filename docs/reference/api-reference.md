@@ -172,7 +172,7 @@ Split an inference trace into per-iteration or per-phase sub-traces.
 | `trace_path` | required | Path to the trace (`.json` or `.json.gz`). |
 | `-o`, `--output-dir` | required | Output directory. |
 | `-i`, `--iterations` | `all` | Iteration range: `all`, a single index (`50`), or a range (`10:20`). |
-| `-d`, `--dummy` | `all` | Dummy-run range. |
+| `--store-single-iteration` | off | Write each iteration as a separate trace file. |
 | `--find-steady-state` / `--num-steps` | off / 32 | Extract a steady-state region of N iterations. |
 | `--divide-phases` | off | Store steady-state steps into `prefilldecodemix/` and `decode_only/` sub-folders. |
 | `--CONC`, `--OSL`, `--R` | None | Expected concurrency and output-sequence-length window parameters. |

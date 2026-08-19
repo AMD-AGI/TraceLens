@@ -191,7 +191,7 @@ def extract_and_save(
     meta_events: list[dict],
     output_label: str | None = None,
 ):
-    """Extract and save a range of iterations/dummy runs.
+    """Extract and save a range of iterations.
 
     If ``output_label`` is provided the output filename becomes
     ``{output_label}_{name_append}_{base_name}.json.gz`` instead of the
@@ -299,7 +299,7 @@ def extract_phases_and_save(
     flow_corr_map: dict,
     meta_events: list[dict],
 ):
-    """Extract and save a range of iterations/dummy runs."""
+    """Extract and save a range of iterations."""
     extraction_summary = []
 
     if "annotation_iteration" not in prefix:
