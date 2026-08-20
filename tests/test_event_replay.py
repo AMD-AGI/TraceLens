@@ -4,18 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import time
-import pandas as pd
-import argparse
-import json
-import subprocess
+import time, pandas as pd, argparse, json, subprocess, pytest, os
 
-import pytest
-import torch
-import torchvision.models as torchvision_models
-from torch.profiler import profile, ProfilerActivity
-import os
-from TraceLens import EventReplayer, TreePerfAnalyzer, GPUEventAnalyser
+torch = pytest.importorskip("torch")
+torchvision_models = pytest.importorskip("torchvision").models
+from torch.profiler import ProfilerActivity, profile
+from TraceLens import EventReplay, EventReplayer, GPUEventAnalyser, TreePerfAnalyzer
 
 
 def profile_resnet(path=None):
@@ -237,6 +231,7 @@ def compare_event_replay(perf_analyzer, list_unique_evts, verbose=False):
     return df, list_replay_ir
 
 
+@pytest.mark.gpu
 def test_resnet(full_run_trace_path=None, output_csv_path=None):
     """
     Run and profile a simple ResNet model
@@ -293,7 +288,6 @@ def test_resnet(full_run_trace_path=None, output_csv_path=None):
         json.dump(list_replay_ir, f, indent=4)
 
     # now we test the batched replay
-    from TraceLens import EventReplay
 
     dir_batched_replay = os.path.dirname(EventReplay.__file__)
     batched_replay_file = os.path.join(dir_batched_replay, "batched_replay.py")

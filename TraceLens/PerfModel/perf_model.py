@@ -113,7 +113,7 @@ class GEMM:
         bytes_bias = (N if bias else 0) * bpe_bias
         return bytes_mat1 + bytes_mat2 + bytes_output + bytes_bias
 
-    def bytes(self, bpe_mat1, bpe_mat2, bpe_bias, bpe_output):
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         return self.bytes_func(
             self.M, self.N, self.K, self.bias, bpe_mat1, bpe_mat2, bpe_bias, bpe_output
         )
@@ -988,7 +988,7 @@ class CONV:
         )
         return total_elems_moved * bytes_per_element
 
-    def bytes(self, bytes_per_element):
+    def bytes(self, bytes_per_element=None):
         return self.bytes_func(
             self.x_shape, self.w_shape, self.out_shape, self.bias, bytes_per_element
         )
@@ -2319,9 +2319,6 @@ class flash_attention_backward(SDPA):
 
     def __init__(self, event, arch=None, python_path=None, enable_origami=False):
         super().__init__(event, arch, python_path, enable_origami=enable_origami)
-        self.d_h = (
-            self.d_h_qk
-        )  # head dimension for simulation (used by get_simulation_time_bwd_func)
 
     @staticmethod
     def get_param_details(event):
@@ -3236,6 +3233,86 @@ class aten_unary_elementwise(UnaryElementwise):
             "stride_input": stride_input,
             "stride_output": stride_output,
         }
+
+
+class aten_replication_pad(UnaryElementwise):
+    category = "elementwise"
+    sheet_category = "UnaryElementwise"
+
+    @staticmethod
+    def get_param_details(event):
+        input_shape = tuple(event["args"]["Input Dims"][0])
+        dtype = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+
+        # Parse padding from Concrete Inputs: '[left, right, ...]'
+        pad_str = event["args"]["Concrete Inputs"][1]
+        padding = [int(x) for x in pad_str.strip("[]").replace(" ", "").split(",")]
+
+        # Compute output shape: padding is ordered innermost-first
+        # e.g. 3d input (N,C,D,H,W) with padding [l,r,t,b,f,bk]:
+        #   W -> W+l+r, H -> H+t+b, D -> D+f+bk
+        output_shape = list(input_shape)
+        num_spatial = len(padding) // 2
+        for i in range(num_spatial):
+            # padding pairs are innermost-first: pair 0 -> last dim (W),
+            # pair 1 -> second-to-last (H), pair 2 -> third-to-last (D)
+            dim_idx = len(input_shape) - 1 - i
+            output_shape[dim_idx] += padding[2 * i] + padding[2 * i + 1]
+        output_shape = tuple(output_shape)
+
+        return {
+            "input_shape": input_shape,
+            "output_shape": output_shape,
+            "padding": padding,
+            "op_shape": output_shape,
+            "dtype_in_out": (dtype, dtype),
+            "stride_input": stride_input,
+            "stride_output": None,
+        }
+
+    def bytes(self):
+        """Input read + output write."""
+        nelems_in = prod(self.param_details["input_shape"])
+        nelems_out = self.nelems  # prod(output_shape) from base class
+        return nelems_in * self.bpe_in + nelems_out * self.bpe_out
+
+
+class aten_upsample_nearest(UnaryElementwise):
+    # Nearest-neighbor upsampling (F.interpolate mode='nearest'), 1d/2d/3d.
+    # Each output element copies the nearest input element — pure bandwidth-bound.
+    # Output shape from Concrete Inputs[1], e.g. '[16, 240, 240]'.
+    # bytes = nelems_in * bpe (read) + nelems_out * bpe (write).
+
+    category = "elementwise"
+    sheet_category = "UnaryElementwise"
+
+    @staticmethod
+    def get_param_details(event):
+        input_shape = tuple(event["args"]["Input Dims"][0])
+        dtype = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+
+        # Parse output spatial size from Concrete Inputs[1]: '[16, 240, 240]'
+        out_spatial = ast.literal_eval(event["args"]["Concrete Inputs"][1])
+
+        # Output shape: (N, C, *out_spatial)
+        output_shape = input_shape[:2] + tuple(out_spatial)
+
+        return {
+            "input_shape": input_shape,
+            "output_shape": output_shape,
+            "op_shape": output_shape,
+            "dtype_in_out": (dtype, dtype),
+            "stride_input": stride_input,
+            "stride_output": None,
+        }
+
+    def bytes(self):
+        """Input read + output write."""
+        nelems_in = prod(self.param_details["input_shape"])
+        nelems_out = self.nelems  # prod(output_shape) from base class
+        return nelems_in * self.bpe_in + nelems_out * self.bpe_out
 
 
 class BinaryElementwise:
@@ -5906,3 +5983,6 @@ class aiter_gemm_a4w4(GEMM):
         # param_details (dtype_A_B, dtype_scaleA, dtype_scaleB), all of which
         # this class populates identically.
         return hipblaslt_gemm_fp4.bytes(self)
+
+
+__all__ = [name for name in globals() if not name.startswith("_")]

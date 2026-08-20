@@ -4,12 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import json
-import os
-import pytest
-import tempfile
-import pandas as pd
-
+import json, os, pytest, tempfile, pandas as pd, re
 from TraceLens.util import PftraceParser
 from TraceLens.Reporting.pftrace_hip_api_analysis import PftraceHipApiAnalyzer
 from TraceLens.Reporting.generate_perf_report_pftrace_hip_api import (
@@ -120,7 +115,6 @@ class TestPftraceHipApiAnalyzer:
 
     def test_exclude_kernel_regex(self):
         """Excluded kernel names are omitted from summary."""
-        import re
 
         events = _make_minimal_pftrace_events()
         events[1]["args"]["kernel_name"] = "redzone_checker_kernel"

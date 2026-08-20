@@ -15,13 +15,7 @@ their ``gpu_op_uid``. There is no fallback to CPU-UID tree walks or to
 ``(name, args)`` string-key matching; tests below exercise that contract.
 """
 
-import json
-import math
-
-import numpy as np
-import pandas as pd
-import pytest
-
+import json, math, numpy as np, pandas as pd, pytest
 from TraceLens.Reporting.tracediff_comparison_extension import (
     _build_lca_metadata,
     _build_uid_to_row_idx,
@@ -31,16 +25,35 @@ from TraceLens.Reporting.tracediff_comparison_extension import (
     enrich_perf_report_dict_inplace,
     tracediff_perf_summary_from_diff_stats,
 )
+from TraceLens import TraceDiff, TreePerfAnalyzer
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    generate_perf_report_pytorch,
+)
 
 
 def _diff_to_summary_report(df: pd.DataFrame) -> dict:
     return {"tracediff_perf_summary": tracediff_perf_summary_from_diff_stats(df)}
 
 
-def _enrich_perf_from_diff(diff_df, perf1) -> dict:
+def _df_unified_perf_from_perf(perf1: dict) -> pd.DataFrame:
+    """Collect pre-summary rows with kernel_details from a perf report dict."""
+    frames = [
+        df
+        for df in perf1.values()
+        if isinstance(df, pd.DataFrame) and "kernel_details" in df.columns
+    ]
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def _enrich_perf_from_diff(diff_df, perf1, df_unified_perf=None) -> dict:
+    if df_unified_perf is None:
+        df_unified_perf = _df_unified_perf_from_perf(perf1)
     return enrich_perf_report_dict_inplace(
         {k: v.copy() for k, v in perf1.items()},
         diff_df,
+        df_unified_perf=df_unified_perf,
     )
 
 
@@ -312,6 +325,9 @@ class TestNaNLCADropped:
 class TestBuildUidToRowIdx:
     def test_empty_frame(self):
         assert _build_uid_to_row_idx(pd.DataFrame(), pd.DataFrame()) == {}
+
+    def test_none_frame(self):
+        assert _build_uid_to_row_idx(None, pd.DataFrame()) == {}
 
     def test_no_kernel_details_column(self):
         df = pd.DataFrame({"name": ["aten::mm"]})
@@ -983,6 +999,12 @@ class TestGpuOpUidWithPseudoOp:
                     "Kernel Time (µs)_sum": [200.0],
                 }
             ),
+            "GEMM": pd.DataFrame(
+                {
+                    "name": ["aten::mm"],
+                    "kernel_details": [_kd_list((7001, 200.0))],
+                }
+            ),
         }
         enriched = _enrich_perf_from_diff(diff_df, perf1)
         ups = enriched["unified_perf_summary"]
@@ -1106,11 +1128,6 @@ class TestIntegrationSyntheticTraces:
         with open(trace2_path, "w") as f:
             json.dump(_build_synthetic_trace(trace2_specs), f)
 
-        from TraceLens import TraceDiff, TreePerfAnalyzer
-        from TraceLens.Reporting.generate_perf_report_pytorch import (
-            generate_perf_report_pytorch,
-        )
-
         perf1 = generate_perf_report_pytorch(trace1_path, collective_analysis=False)
         perf2 = generate_perf_report_pytorch(trace2_path, collective_analysis=False)
 
@@ -1120,9 +1137,11 @@ class TestIntegrationSyntheticTraces:
         td = TraceDiff(pa1.tree, pa2.tree)
         td.generate_tracediff_report()
 
+        df_unified_perf = pa1.build_df_unified_perf_table()
         enriched = enrich_perf_report_dict_inplace(
             {k: v.copy() for k, v in perf1.items()},
             td.diff_stats_df,
+            df_unified_perf=df_unified_perf,
         )
         summary = tracediff_perf_summary_from_diff_stats(td.diff_stats_df)
 

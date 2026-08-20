@@ -1,0 +1,113 @@
+###############################################################################
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+name: Unit Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "**/*.py"
+      - "tests/**"
+      - "setup.py"
+      - "MANIFEST.in"
+      - ".coveragerc"
+      - "codecov.yml"
+      - ".github/workflows/unit-tests.yml"
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "**/*.py"
+      - "tests/**"
+      - "setup.py"
+      - "MANIFEST.in"
+      - ".coveragerc"
+      - "codecov.yml"
+      - ".github/workflows/unit-tests.yml"
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    # rocm-origami is required by roofline / Origami perf-model tests.
+    container: rocm/dev-ubuntu-24.04:7.2.1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          apt update && apt install -y python3-venv git
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install . pytest pytest-xdist pytest-cov openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
+
+      - name: Run unit tests
+        run: |
+          . .venv/bin/activate
+          python -m pytest tests/ -v --tb=short -n auto --dist loadgroup \
+            -m "not gpu" \
+            --cov=./TraceLens --cov-config=.coveragerc \
+            --cov-report=xml --cov-fail-under=95 \
+            --junitxml=junit.xml -o junit_family=legacy
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-report
+          path: coverage.xml
+          if-no-files-found: error
+
+      - name: Upload junit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: junit-report
+          path: junit.xml
+          if-no-files-found: error
+
+  codecov:
+    name: Codecov
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v8
+        with:
+          name: coverage-report
+
+      - name: Download junit report
+        uses: actions/download-artifact@v8
+        with:
+          name: junit-report
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          flags: unit
+          fail_ci_if_error: true
+          verbose: true
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: junit.xml
+          report_type: test_results
+          flags: unit
+          fail_ci_if_error: true
+          verbose: true

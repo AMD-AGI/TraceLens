@@ -36,6 +36,16 @@ MX_BLOCK = 32
 logger = logging.getLogger(__name__)
 
 
+def mx_available() -> bool:
+    """True if any block-scaled MX GEMM path is usable.
+    Covers the Triton ``tl.dot_scaled`` MXFP4/MXFP6 path as well as aiter's
+    gfx950 CK ``gemm_a4w4`` MXFP4 path
+    """
+    return (
+        triton_available() and (_MXFP4_SUPPORTED or bool(_MXFP6_DTYPE))
+    ) or _aiter_mxfp4_ready()
+
+
 def triton_available() -> bool:
     return triton is not None and tl is not None
 
@@ -226,6 +236,11 @@ if triton_available() and torch.cuda.is_available():
         _resolve_support()
     except Exception:  # pragma: no cover
         logger.debug("MXFP4/MXFP6 support probe failed", exc_info=True)
+
+
+def get_mxfp6_kind() -> str:
+    """Return the resolved MXFP6 implementation kind for benchmarking."""
+    return _MXFP6_KIND
 
 
 def _launch_scaled_gemm(

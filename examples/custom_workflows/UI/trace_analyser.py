@@ -57,9 +57,11 @@ def download_file_button(label: str, path: str) -> None:
     if not os.path.exists(path):
         return
 
+    with open(path, "rb") as download_file:
+        file_data = download_file.read()
     st.download_button(
         label=label,
-        data=open(path, "rb"),
+        data=file_data,
         file_name=Path(path).name,
         icon=":material/download:",
         use_container_width=True,

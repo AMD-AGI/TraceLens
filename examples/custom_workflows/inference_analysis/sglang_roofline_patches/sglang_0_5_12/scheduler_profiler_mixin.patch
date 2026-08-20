@@ -23,7 +23,7 @@ index 559997280..977ee1e73 100644
          self.merge_profiles = False
  
 +        self.shape_discovery: bool = False
-+        self.roofline_annotations: bool = False
++        self.detailed_annotations: bool = False
 +
          # For ROCM
          self.rpd_profiler = None
@@ -34,7 +34,7 @@ index 559997280..977ee1e73 100644
          profile_prefix: str = "",
 -        profile_stages: Optional[List[str]] = None,
 +        shape_discovery: bool = False,
-+        roofline_annotations: bool = False,
++        detailed_annotations: bool = False,
 +        profile_stages: Optional[List[str]] = None
      ) -> ProfileReqOutput:
          if envs.SGLANG_PROFILE_V2.get():
@@ -44,7 +44,7 @@ index 559997280..977ee1e73 100644
                  profile_prefix=profile_prefix,
                  profile_stages=profile_stages,
 +                shape_discovery=shape_discovery,
-+                roofline_annotations=roofline_annotations,
++                detailed_annotations=detailed_annotations,
              )
  
          if self.profile_in_progress:
@@ -53,7 +53,7 @@ index 559997280..977ee1e73 100644
          self.profile_id = profile_id
          self.profile_prefix = profile_prefix
 +        self.shape_discovery = shape_discovery
-+        self.roofline_annotations = roofline_annotations
++        self.detailed_annotations = detailed_annotations
  
          if start_step:
              self.profiler_start_forward_ct = max(start_step, self.forward_ct + 1)
@@ -127,7 +127,7 @@ index 559997280..977ee1e73 100644
 +                and getattr(self._profile_manager, "profiler", None) is not None
 +            )
 +        )
-+        if not has_profiler or not self.roofline_annotations:
++        if not has_profiler or not self.detailed_annotations:
 +            return nullcontext()
 +
 +        # ── Roofline aggregates ──────────────────────────────────────
@@ -214,7 +214,7 @@ index 559997280..977ee1e73 100644
                      recv_req.merge_profiles,
                      recv_req.profile_prefix,
 +                    recv_req.shape_discovery,
-+                    recv_req.roofline_annotations,
++                    recv_req.detailed_annotations,
                      recv_req.profile_stages,
 +
                  )
@@ -225,7 +225,7 @@ index 559997280..977ee1e73 100644
                      recv_req.merge_profiles,
                      recv_req.profile_prefix,
 +                    recv_req.shape_discovery,
-+                    recv_req.roofline_annotations,
++                    recv_req.detailed_annotations,
                  )
                  return self.start_profile()
          else:

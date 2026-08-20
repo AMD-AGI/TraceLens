@@ -48,7 +48,7 @@ Key fields:
 
 ```yaml
 benchmark:
-  framework: vllm | sglang
+  framework: vllm | sglang | atom
   model: <HuggingFace model name>
   precision: fp8 | fp16 | bf16 | fp4
 
@@ -71,11 +71,15 @@ benchmark:
 
 ### Step 1b: Check Docker Image for Profiling Patches
 
-After reading the config, ask the user whether their Docker image already includes TraceLens profiling patches. These patches are required for capturing kernel-level detail (shapes, roofline data, call stacks) in both eager and graph-mode traces.
+After reading the config, work out whether the image needs profiling patches at all. The patches only exist to expose the profiler options used in Step 2b; TraceLens itself does **not** need to be installed inside the container, because the server only writes traces and every analysis step in this workflow runs on the host against the mounted output directory.
 
-Ask:
+**For vLLM, check the version first.** Both profiler options ship in upstream vLLM from **v0.26.0** onwards ([vllm-project/vllm#37524](https://github.com/vllm-project/vllm/pull/37524)), so a stock v0.26.0+ image is ready as-is — skip the rest of this step and go to Step 2. Only **v0.14-v0.25** need a patched image.
 
-> "Does the Docker image in your config (or the default image Magpie will select) already have TraceLens profiling patches applied? If you're unsure, I can build a patched image for you."
+**For ATOM, check the build date first.** The detailed annotations and the graph-capture profiler ship in upstream ATOM on **nightly builds from 2026-07-22 onward** ([ROCm/ATOM#477](https://github.com/ROCm/ATOM/pull/477) merged 2026-07-21), so a stock `rocm/atom-dev:nightly_*` image from that date onward is ready as-is — skip the rest of this step and go to Step 2. The merge landed after `release/v0.1.6` was branched, so **every tagged release (0.1.3 through 0.1.6rc) needs a patched image**.
+
+If the framework is SGLang, the vLLM version is below v0.26.0 or unknown, or the ATOM build predates 2026-07-22 or is unknown, ask:
+
+> "Does the Docker image in your config (or the default image Magpie will select) already have the profiling patches applied? If you're unsure, I can build a patched image for you."
 
 #### If the user's image is already patched
 
@@ -108,6 +112,8 @@ ssh <node> "cd <TraceLens_repo> && \
 
 Where `<version_tag>` is one of the `vXX` tags listed in the script's `case` statement.
 
+The script only carries arms for versions that still need a patch, and rejects anything newer with a message saying the options are upstream. If the user asks for a version it does not list, do not look for a workaround — tell them to run the stock upstream image for that version. The profiler flags in Step 2b are identical for patched and upstream images, so nothing else in this workflow changes.
+
 **For SGLang (`framework: sglang`):**
 
 Read `examples/custom_workflows/inference_analysis/build_docker_sglang.sh`. The script supports two dimensions selected via flags: `--sglang-version` and `--gpu-type`. Discover the currently supported combinations by parsing the script (do **not** hardcode the lists in this skill — they change as new versions land):
@@ -137,12 +143,35 @@ ssh <node> "cd <TraceLens_repo> && \
 
 The script starts a container from the resolved base image, applies the matching sglang roofline patches from `sglang_roofline_patches/sglang_<ver_with_underscores>/` (auto-derived from `--sglang-version`), and installs TraceLens inside it.
 
+**For ATOM (`framework: atom`):**
+
+Read `examples/custom_workflows/inference_analysis/build_docker_atom.sh` and extract each arm of the `case "${ATOM_VERSION}" in` block along with its `BASE_IMAGE`. Every supported image runs on both MI300 and MI350, so there is no GPU-type dimension. Present the result as a table and ask the user to pick one:
+
+> "Which ATOM version would you like to build a patched image for?
+>
+> | Option | Version Tag | Base Image |
+> |--------|-------------|------------|
+> | 1 | `<tag>` | `<base image from script>` |
+> | ... | ... | ... |"
+
+Once the user selects a version, build the patched image on the remote node:
+
+```bash
+ssh <node> "cd <TraceLens_repo> && \
+  bash examples/custom_workflows/inference_analysis/build_docker_atom.sh \
+    <version_tag> \
+    <TraceLens_repo> \
+    -t tracelens-atom"
+```
+
+The script applies every patch in `atom_roofline_patches/atom_0_1_*/` (auto-derived from the version tag) to the atom package inside the image. As with vLLM, it only carries arms for versions that still need a patch; if the user asks for a newer nightly, tell them to run the stock image instead.
+
 **After building:** Update the `docker_image` field in the benchmark YAML config to use the newly built image:
 
 ```yaml
 benchmark:
-  framework: vllm  # or sglang
-  docker_image: tracelens-vllm  # or the sglang container name
+  framework: vllm  # or sglang, or atom
+  docker_image: tracelens-vllm  # or the sglang / atom container name
   ...
 ```
 
@@ -165,7 +194,7 @@ No manual env var configuration is needed.
 
 ### Step 2b: Ask About Profiler Tuning
 
-Before running the benchmark, ask the user whether they want to profile a targeted steady-state window or the entire benchmark run. This applies to **both vLLM and SGLang** frameworks (the mechanism differs but the formulas are the same).
+Before running the benchmark, ask the user whether they want to profile a targeted steady-state window or the entire benchmark run. This applies to **vLLM, SGLang, and ATOM** (the mechanism differs but the formulas are the same).
 
 #### Common profiler flags (apply for both Option A and Option B)
 
@@ -184,13 +213,13 @@ Add these flags to `EXTRA_VLLM_ARGS` in the user's YAML config (append to any ex
 ```yaml
 benchmark:
   envs:
-    EXTRA_VLLM_ARGS: "... --profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces --profiler-config.detailed_trace_annotation True"
+    EXTRA_VLLM_ARGS: "... --profiler-config.capture_torch_profiler True --profiler-config.detailed_trace_annotation True"
 ```
 
-Use the literal path `/workspace/torch_trace/capture_traces` rather than `${TRACE_DIR}/capture_traces`. Bash does not recursively expand variables — `$EXTRA_VLLM_ARGS` is word-split but its contents are not re-evaluated for variable references, so `${TRACE_DIR}` would be passed as a literal string to vLLM. For `--run-mode local`, replace `/workspace/torch_trace` with the actual host-side trace directory.
-
-- `--profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces` — enables graph-capture tracing. vLLM writes separate traces for CUDA graph capture phases into this directory, which are needed for downstream TraceLens analysis of graph-replayed operations.
+- `--profiler-config.capture_torch_profiler True` — enables graph-capture tracing. vLLM writes separate traces for the CUDA graph capture phases into `<torch_profiler_dir>/capture_traces` (i.e. `/workspace/torch_trace/capture_traces` under Magpie's container mount), which are needed for downstream TraceLens analysis of graph-replayed operations.
 - `--profiler-config.detailed_trace_annotation True` — enables detailed annotations in the trace (iteration boundaries, phase labels, scheduling metadata). These annotations are required by `split_inference_trace_annotation` for accurate trace splitting.
+
+Both flags take the same form on every supported version: they come from the TraceLens patch on vLLM **v0.14-v0.25** and from upstream vLLM on **v0.26.0 and later**.
 
 ##### Common SGLang flags
 
@@ -202,10 +231,18 @@ Apply **three** edits regardless of profiling mode:
 benchmark:
   envs:
     SGLANG_PROFILE_WITH_STACK: "True"
-    SGLANG_PROFILE_RECORD_SHAPE: "True"
+    SGLANG_PROFILE_RECORD_SHAPES: "True"
+    SGLANG_GRAPH_BATCH_CAPTURE: "True"
 ```
 
 These enable call-stack capture and tensor shape recording in the profiler trace, which are required for TraceLens roofline analysis and kernel attribution.
+
+`SGLANG_GRAPH_BATCH_CAPTURE` writes one graph-capture trace per captured batch size to `capture_traces/bs_{bs}_rank{N}.json.gz`, the SGLang equivalent of vLLM's `--profiler-config.capture_torch_profiler`. It only takes effect together with `--enable-profile-cuda-graph` below.
+
+- On **0.5.13 and later** the patches gate per-batch capture behind this variable, so omitting it leaves `capture_traces/` empty even with the CLI flags set.
+- On **0.5.9 through 0.5.12** capture traces are written unconditionally by `--enable-profile-cuda-graph`, and the variable does not exist. Setting it there is harmless.
+
+Note the plural in `SGLANG_PROFILE_RECORD_SHAPES` — the singular form is silently ignored, and since upstream defaults the real variable to `True`, a misspelling is easy to miss.
 
 **2. Add graph-capture profiling flags as `EXTRA_SGLANG_ARGS` in the user's YAML config.**
 
@@ -222,15 +259,47 @@ If the YAML already has an `EXTRA_SGLANG_ARGS` field with existing flags, **appe
 
 **3. Patch `benchmark_serving.py` to enable shape discovery and roofline annotations in the profile request body.**
 
-The file is at `<magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py`. The existing code has `"num_steps": 1` hardcoded in the `extra_body` dict. Add `shape_discovery` and `roofline_annotations` flags:
+The file is at `<magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py`. The existing code has `"num_steps": 1` hardcoded in the `extra_body` dict. Add `shape_discovery` and `detailed_annotations` flags:
 
 ```bash
-ssh <node> "sed -i 's/\"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/\"shape_discovery\": True, \"roofline_annotations\": True, \"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/' \
+ssh <node> "sed -i 's/\"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/\"shape_discovery\": True, \"detailed_annotations\": True, \"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/' \
   <magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py"
 ```
 
 - `shape_discovery: True` — enables tensor shape recording for CUDA graph operations during profiling.
-- `roofline_annotations: True` — adds FLOPs and memory bandwidth annotations needed for roofline analysis.
+- `detailed_annotations: True` — adds FLOPs and memory bandwidth annotations needed for roofline analysis.
+
+##### Common ATOM flags
+
+Apply **two** edits regardless of profiling mode.
+
+**1. Add the profiling env vars to the user's YAML config.**
+
+```yaml
+benchmark:
+  envs:
+    ATOM_PROFILER_MORE: "1"
+    ATOM_ENABLE_DETAILED_ANNOTATION: "1"
+```
+
+- `ATOM_PROFILER_MORE: "1"` — records call stacks and tensor shapes, required for roofline analysis and kernel attribution.
+- `ATOM_ENABLE_DETAILED_ANNOTATION: "1"` — appends the roofline aggregates (`sqsq`, `sqsk`, `sk`) to the `prefill[]` / `decode[]` step annotations that `split_inference_trace_annotation` consumes. The aggregates are computed only while the profiler is running.
+
+**2. Add the graph-capture flag as `EXTRA_ATOM_ARGS` in the user's YAML config.**
+
+```yaml
+benchmark:
+  envs:
+    EXTRA_ATOM_ARGS: "--mark-trace"
+```
+
+`--mark-trace` enables the graph-capture profiler, writing one trace per captured batch size to `capture_traces/`. Append to any existing `EXTRA_ATOM_ARGS` value rather than replacing it.
+
+```{note}
+Do **not** add `--torch-profiler-dir` to `EXTRA_ATOM_ARGS`. Magpie sets `ATOM_TORCH_PROFILER_DIR` automatically when `torch_profiler.enabled: true`, and the built-in runner script already appends the flag when `PROFILE=1`; passing it twice duplicates the argument.
+```
+
+ATOM is **single-node only** in Magpie — the cross-node Ray branch logs and skips it, so do not propose a multi-node ATOM run.
 
 #### Profiling mode
 
@@ -301,11 +370,11 @@ Replace `10` with a different multiplier if the user requests it.
 
 ###### SGLang targeted window
 
-SGLang profiling is controlled **client-side** via the `/start_profile` HTTP endpoint, not via server CLI args. The benchmark client (`benchmark_serving.py`) sends a POST to `/start_profile` with an `extra_body` dict. The common SGLang flags (env vars, `EXTRA_SGLANG_ARGS`, `shape_discovery`, `roofline_annotations`) were already applied in the shared section above. Apply **two** additional edits for targeted windowing:
+SGLang profiling is controlled **client-side** via the `/start_profile` HTTP endpoint, not via server CLI args. The benchmark client (`benchmark_serving.py`) sends a POST to `/start_profile` with an `extra_body` dict. The common SGLang flags (env vars, `EXTRA_SGLANG_ARGS`, `shape_discovery`, `detailed_annotations`) were already applied in the shared section above. Apply **two** additional edits for targeted windowing:
 
 **1. Patch `benchmark_serving.py` to set `start_step` and `num_steps`.**
 
-The common section already patched `benchmark_serving.py` to add `shape_discovery` and `roofline_annotations`. Now apply a second sed to set the targeted window parameters:
+The common section already patched `benchmark_serving.py` to add `shape_discovery` and `detailed_annotations`. Now apply a second sed to set the targeted window parameters:
 
 ```bash
 ssh <node> "sed -i 's/\"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/\"start_step\": <DELAY>, \"num_steps\": <MAX>, \"merge_profiles\": False, \"profile_by_stage\": False/' \
@@ -331,11 +400,23 @@ Replace `10` with a different multiplier if the user requests it. Without this f
 
 ---
 
+###### ATOM targeted window
+
+ATOM has **no server-side equivalent** to vLLM's `delay_iterations` / `max_iterations` or SGLang's `start_step` / `num_steps`. The profiling window is bounded entirely by the client, which posts to the `start_profile` and `stop_profile` endpoints around the region of interest — this is what `benchmark_serving --profile` already does. The common ATOM flags from the shared section above are what make the resulting trace analysable; there is no extra windowing edit to apply.
+
+Two consequences worth stating to the user before the run:
+
+- **The `benchmark_lib.sh` `num_prompts` patch is not needed.** The built-in ATOM runner script already defaults `NUM_PROMPTS` to `CONC * 10`, so the benchmark is long enough to reach steady state without patching. Do not apply the sed used for vLLM and SGLang.
+- **The window cannot be narrowed to a fixed iteration count.** The trace covers the whole profiled request phase, so it will be larger than a comparable vLLM or SGLang targeted window. Use Step 6's `split_inference_trace_annotation --find-steady-state` to extract the steady-state region on the host afterwards.
+
+---
+
 ##### Option B: Profile the entire benchmark
 
 Do **not** add `start_step`/`delay_iterations` args or increase `num_prompts`. The common flags from the shared section above **still apply** and must be present:
-- **vLLM:** No `delay_iterations` / `max_iterations` — the profiler captures everything from start to finish. The common vLLM flags (`capture_torch_profiler_dir`, `detailed_trace_annotation`) must be in `EXTRA_VLLM_ARGS`.
-- **SGLang:** `num_steps` stays at `1` (or user can manually increase it without setting `start_step`). The common SGLang flags (env vars `SGLANG_PROFILE_WITH_STACK`/`SGLANG_PROFILE_RECORD_SHAPE`, `EXTRA_SGLANG_ARGS` with graph-capture flags, and the `shape_discovery`/`roofline_annotations` patch to `benchmark_serving.py`) must all be applied.
+- **vLLM:** No `delay_iterations` / `max_iterations` — the profiler captures everything from start to finish. The common vLLM flags (`capture_torch_profiler`, `detailed_trace_annotation`) must be in `EXTRA_VLLM_ARGS`.
+- **SGLang:** `num_steps` stays at `1` (or user can manually increase it without setting `start_step`). The common SGLang flags (env vars `SGLANG_PROFILE_WITH_STACK`/`SGLANG_PROFILE_RECORD_SHAPES`, `EXTRA_SGLANG_ARGS` with graph-capture flags, and the `shape_discovery`/`detailed_annotations` patch to `benchmark_serving.py`) must all be applied.
+- **ATOM:** No change from Option A — ATOM has no targeted-window mechanism either way. The common ATOM flags (`ATOM_PROFILER_MORE`, `ATOM_ENABLE_DETAILED_ANNOTATION`, and `EXTRA_ATOM_ARGS` with `--mark-trace`) must be applied.
 - `num_prompts` stays at `CONC` — keeps the trace to a manageable size since every iteration is profiled.
 
 Warn the user that full-benchmark traces will be very large (potentially several GB per rank for large models).
@@ -376,7 +457,9 @@ ssh <node> "cd <magpie_repo>/InferenceX && \
   mv utils/bench_serving/benchmark_serving.py.bak utils/bench_serving/benchmark_serving.py"
 ```
 
-Then edit the user's YAML config to remove the profiling env vars (`SGLANG_PROFILE_WITH_STACK`, `SGLANG_PROFILE_RECORD_SHAPE`) and the `EXTRA_SGLANG_ARGS` profiler flags (or restore the original values if they had pre-existing content).
+Then edit the user's YAML config to remove the profiling env vars (`SGLANG_PROFILE_WITH_STACK`, `SGLANG_PROFILE_RECORD_SHAPES`, `SGLANG_GRAPH_BATCH_CAPTURE`) and the `EXTRA_SGLANG_ARGS` profiler flags (or restore the original values if they had pre-existing content).
+
+**For ATOM:** Only the YAML config was modified (to add `ATOM_PROFILER_MORE`, `ATOM_ENABLE_DETAILED_ANNOTATION`, and `EXTRA_ATOM_ARGS`). No remote script is patched in either profiling mode, so there is nothing to back up or restore — just remove those entries from the YAML (or restore the original values if they had pre-existing content).
 
 Alternatively, if InferenceX is a git checkout, use `git checkout -- <file>` to discard changes. Or delete the entire `InferenceX` directory — Magpie re-clones it on the next run.
 
@@ -452,6 +535,7 @@ for cat, cnt in sorted(cats.items(), key=lambda x: -x[1])[:10]:
 - `<id>-TP-{rank}-DECODE.trace.json.gz` — decode phase per rank
 - `<id>-TP-{rank}-EXTEND.trace.json.gz` — prefill/extend phase per rank
 - `merged-<id>.trace.json.gz` — combined view across all ranks
+- `capture_traces/bs_{bs}_rank{N}.json.gz` — one graph-capture trace per captured batch size (needs `SGLANG_GRAPH_BATCH_CAPTURE` on 0.5.13+)
 - Expect `2 * TP` per-rank files + 1 merged file
 
 **vLLM trace naming convention:**
@@ -460,9 +544,14 @@ for cat, cnt in sorted(cats.items(), key=lambda x: -x[1])[:10]:
 - `profiler_out_{N}.txt` — profiler summary text per rank
 - Expect `TP` rank files + 1 async_llm file + `TP` profiler_out files
 
+**ATOM trace naming convention:**
+- `rank_{N}/*.pt.trace.json.gz` — one GPU trace per rank, each in its own subdirectory
+- `capture_traces/bs_{bs}_rank{N}.json.gz` — one graph-capture trace per captured batch size (only with `--mark-trace`). Current nightlies add a query-length field and name these `bs_{bs}_q_{q}_rank{N}.json.gz` instead. The rename landed between `nightly_202607221602` (old form) and `nightly_202608141640`, and is still in place as of `nightly_202608171540`, so treat it as the current convention. Match on the `bs_` prefix rather than the exact pattern. TraceLens itself is unaffected: `classify_graph_capture_trace` discovers capture files by extension, not by filename pattern.
+- Expect `TP` rank subdirectories. Magpie collects these with `rglob`, so the nesting is handled automatically.
+
 ### Step 6: Split Traces for Analysis
 
-All vLLM and sglang traces — regardless of whether they were collected in eager mode or graph-replay mode — must be split before running TraceLens analysis. The raw per-rank traces are large (vLLM: ~100-150MB, 5-9M events; sglang: smaller but still benefit from splitting) and `TraceLens_generate_perf_report_pytorch` cannot handle them efficiently without preprocessing (it will hang or run for 10+ minutes with no output).
+All vLLM, sglang, and ATOM traces — regardless of whether they were collected in eager mode or graph-replay mode — must be split before running TraceLens analysis. The raw per-rank traces are large (vLLM: ~100-150MB, 5-9M events; sglang: smaller but still benefit from splitting) and `TraceLens_generate_perf_report_pytorch` cannot handle them efficiently without preprocessing (it will hang or run for 10+ minutes with no output).
 
 Run trace preprocessing on the rank-0 trace file:
 

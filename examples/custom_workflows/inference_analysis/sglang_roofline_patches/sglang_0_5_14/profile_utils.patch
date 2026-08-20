@@ -46,7 +46,7 @@ index 84e8db0b92..b8b049cbd3 100644
          merge_profiles: bool,
          profile_prefix: str,
          profile_stages: Optional[List[str]] = None,
-+        roofline_annotations: bool = False,
++        detailed_annotations: bool = False,
 +        shape_discovery: bool = False,
      ):
          # not supported yet

@@ -32,6 +32,8 @@ subtrees:
       title: JAX performance report
     - file: how-to/generate-perf-report-rocprof
       title: rocprof performance report
+    - file: how-to/generate-perf-report-genesis
+      title: Genesis / Taichi performance report
     - file: how-to/collective-report
       title: Collective-communication report
     - file: how-to/compare-perf-reports
@@ -83,6 +85,8 @@ subtrees:
     title: API reference
   - file: reference/perf-report-columns
     title: Performance report columns
+  - url: https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html
+    title: Hyperloom
 
 - caption: About
   entries:

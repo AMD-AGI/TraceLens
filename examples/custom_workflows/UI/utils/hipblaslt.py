@@ -279,6 +279,6 @@ if __name__ == "__main__":
     record_bench_commands(kernes_to_tune, args.output_log_file)
     if not args.output_tuning_file:
         logging.info("Skipping tuning")
-        exit()
+        sys.exit(0)
 
     run_tuning(args.output_log_file, args.output_tuning_file)

@@ -635,6 +635,8 @@ def generate_perf_report_pytorch(
     df_kernel_launchers_summary = pd.DataFrame()
     df_kernel_launchers_summary_by_category = pd.DataFrame()
     df_kernel_launchers_unique_args = pd.DataFrame()
+    df_kernel_launchers_unique_args_overlapping_kernels = pd.DataFrame()
+    df_kernel_launchers = pd.DataFrame()
     perf_metrics_dfs = {}
     df_hist = pd.DataFrame()
     df_short_kernels = pd.DataFrame()
@@ -766,6 +768,7 @@ def generate_perf_report_pytorch(
                 # For now, flash_attention_varlen_backward and aten::convolution_backward are processed with bwd=True,
                 # so we need a workaround to extract them from the fwd df and append them to the bwd df.
                 filtered_df_bwd_ops = None
+                df_ops_bwd_raw = None
                 if not df_ops_fwd.empty:
                     # Filter out backward operations that were incorrectly included in forward
                     bwd_op_names = [
@@ -1358,21 +1361,25 @@ def main():
     if args.comparison_capture_folder and not args.comparison_json_path:
         parser.error("--comparison_capture_folder requires --comparison_json_path.")
     if args.capture_folder:
-        classify_graph_capture_trace(args.capture_folder)
         metadata_json_path = os.path.join(args.capture_folder, "execution_details.json")
+        classify_graph_capture_trace(args.capture_folder)
         graph_tree = merge_capture_trace_into_graph(
-            args.capture_folder, metadata_json_path, args.profile_json_path
+            args.capture_folder,
+            metadata_json_path,
+            args.profile_json_path,
         )
     else:
         graph_tree = None
     comparison_graph_tree = None
     if args.comparison_capture_folder:
-        classify_graph_capture_trace(args.comparison_capture_folder)
         comp_metadata = os.path.join(
             args.comparison_capture_folder, "execution_details.json"
         )
+        classify_graph_capture_trace(args.comparison_capture_folder)
         comparison_graph_tree = merge_capture_trace_into_graph(
-            args.comparison_capture_folder, comp_metadata, args.comparison_json_path
+            args.comparison_capture_folder,
+            comp_metadata,
+            args.comparison_json_path,
         )
     generate_perf_report_pytorch(
         profile_json_path=args.profile_json_path,

@@ -752,12 +752,6 @@ class TraceToTree(BaseTraceToTree):
             if seq_num is not None:
                 self.seq_num2event_uids_map.setdefault(seq_num, []).append(event[UID])
 
-            # # Process python_function events (Commented out: dict_pythonID2UID never read)
-            # if cat == "python_function":
-            #     python_id = args.get("Python id")
-            #     if python_id is not None:
-            #         self.dict_pythonID2UID[python_id] = event[UID]
-
     def _nn_module_stack_name_for_event(self, event: Dict[str, Any]) -> str:
         name = event.get(TraceEventUtils.TraceKeys.Name, "")
         return re.sub(r"_\d+$", "", name)
