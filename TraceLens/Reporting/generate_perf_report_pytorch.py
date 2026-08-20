@@ -553,6 +553,9 @@ def generate_perf_report_pytorch(
                 for event in perf_analyzer.tree.events
                 if event["name"] in op_names
             ]
+            if not op_events:
+                # No events for this category in the trace
+                continue
 
             if sheet_category in [
                 "GEMM",
