@@ -35,9 +35,11 @@ nb_execution_mode = "off"
 html_theme = "rocm_docs_theme"
 # fmt: off
 html_theme_options = {
-    "flavor": "generic",
+    "flavor": "hyperloom",
     "header_title": f"TraceLens {version}",
     "header_link": False,
+    "use_repository_button": True,
+    "use_issues_button": True,
     "version_list_link": False,
     "nav_secondary_items": {
         "Support": "https://github.com/AMD-AGI/TraceLens/issues/new/choose",
