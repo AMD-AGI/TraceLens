@@ -641,19 +641,27 @@ def generate_perf_report_pytorch(
                     for event in op_events
                     if event["name"] != "vllm::unified_attention_with_output"
                 ]
-                df_ops_bwd_raw = perf_analyzer.build_df_perf_metrics(
-                    op_events, bwd=True, include_kernel_details=True, include_args=True
-                )
-                df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
-                    df_ops_bwd_raw,
-                    agg_metrics,
-                    group_by_num_kernels=group_by_num_kernels,
-                )
-                df_ops_bwd = add_truncated_kernel_details(
-                    df_ops_bwd,
-                    source_col="kernel_details__summarize_kernel_stats",
-                    new_col_name="trunc_kernel_details",
-                )
+                has_bwd_events = any(event.get("bwd_events") for event in op_events)
+                if has_bwd_events:
+                    df_ops_bwd_raw = perf_analyzer.build_df_perf_metrics(
+                        op_events,
+                        bwd=True,
+                        include_kernel_details=True,
+                        include_args=True,
+                    )
+                    df_ops_bwd = perf_analyzer.summarize_df_perf_metrics(
+                        df_ops_bwd_raw,
+                        agg_metrics,
+                        group_by_num_kernels=group_by_num_kernels,
+                    )
+                    df_ops_bwd = add_truncated_kernel_details(
+                        df_ops_bwd,
+                        source_col="kernel_details__summarize_kernel_stats",
+                        new_col_name="trunc_kernel_details",
+                    )
+                else:
+                    df_ops_bwd_raw = pd.DataFrame()
+                    df_ops_bwd = pd.DataFrame()
                 if filtered_df_bwd_ops is not None:
                     df_ops_bwd = pd.concat([df_ops_bwd, filtered_df_bwd_ops])
                 # Filter out forward operations that were incorrectly included in backward
@@ -709,24 +717,27 @@ def generate_perf_report_pytorch(
                             ~df_ops_fwd_overlapping_kernels["name"].isin(bwd_op_names)
                         ]
 
-                    df_ops_bwd_overlapping_kernels = (
-                        perf_analyzer.summarize_df_perf_metrics(
-                            df_ops_bwd_raw,
-                            agg_metrics,
-                            group_by_num_kernels=group_by_num_kernels,
-                            include_overlapping_kernels=True,
+                    if has_bwd_events:
+                        df_ops_bwd_overlapping_kernels = (
+                            perf_analyzer.summarize_df_perf_metrics(
+                                df_ops_bwd_raw,
+                                agg_metrics,
+                                group_by_num_kernels=group_by_num_kernels,
+                                include_overlapping_kernels=True,
+                            )
                         )
-                    )
-                    df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
-                        df_ops_bwd_overlapping_kernels,
-                        source_col="kernel_details__summarize_kernel_stats",
-                        new_col_name="trunc_kernel_details",
-                    )
-                    df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
-                        df_ops_bwd_overlapping_kernels,
-                        source_col="overlapping_kernels_details__summarize_kernel_stats",
-                        new_col_name="trunc_overlapping_kernels_details",
-                    )
+                        df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
+                            df_ops_bwd_overlapping_kernels,
+                            source_col="kernel_details__summarize_kernel_stats",
+                            new_col_name="trunc_kernel_details",
+                        )
+                        df_ops_bwd_overlapping_kernels = add_truncated_kernel_details(
+                            df_ops_bwd_overlapping_kernels,
+                            source_col="overlapping_kernels_details__summarize_kernel_stats",
+                            new_col_name="trunc_overlapping_kernels_details",
+                        )
+                    else:
+                        df_ops_bwd_overlapping_kernels = pd.DataFrame()
                     if filtered_df_bwd_ops_overlapping_kernels is not None:
                         df_ops_bwd_overlapping_kernels = pd.concat(
                             [
