@@ -203,6 +203,16 @@ KERNEL_TYPE_RULES = [
     (r"(?i)\bnorm\b", "Normalization", 1),
     (r"(?i)rocprim|hipcub", "Elementwise", 1),
     (r"(?i)cub::DeviceScan|DeviceRadixSort|DeviceReduce", "Elementwise", 1),
+    # ---- Triton fused ops near collectives (NOT actual collectives) ----
+    (r"(?i)^triton_.*(?:all_to_all|allreduce|all_reduce|allgather|all_gather|reduce_scatter)", "Elementwise", 21),
+    # ---- Communication (priority 20) ----
+    (r"(?i)nccl|rccl", "Communication", 20),
+    (r"(?i)allreduce|all_reduce|allgather|all_gather|reduce_scatter|all_to_all|alltoall", "Communication", 20),
+    (r"(?i)broadcast|bcast|send_recv|sendrecv|isend|irecv|cross_device_reduce", "Communication", 20),
+    # ---- Layout / data-movement elementwise ----
+    (r"(?i)permute|transpose|nchwToNhwc|nhwcToNchw|clone|_unsafe_view|slice|copy|_cat_|clamp|indexSelect", "Elementwise", 10),
+    # ---- addmm into GEMM catch-all (source had gemm|matmul|bmm|addmm) ----
+    (r"(?i)addmm", "GEMM", 5),
 ]
 
 COMPILED_RULES = [
@@ -232,6 +242,7 @@ KERNEL_TYPE_TO_PERF_CATEGORY = {
     "Quantization": "Quantization",
     "Elementwise": "Elementwise",
     "MemCpy": "MemCpy",
+    "Communication": "Communication",
     "Unknown": "Others",
 }
 
