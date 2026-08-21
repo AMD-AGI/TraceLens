@@ -116,8 +116,21 @@ def torch_dtype_map(dtype):
         "mxfp4": "fp4",
         "c10::float4_e2m1fn_x2": "fp4",
         "c10::float8_e4m3fn": "fp8",
+        # c10 names with the namespace already stripped
+        "half": "fp16",
+        "bfloat16": "bf16",
+        "float16": "fp16",
+        "float32": "fp32",
+        "float64": "fp64",
+        # already-canonical values, so normalising twice is a no-op
+        "fp16": "fp16",
+        "bf16": "bf16",
+        "fp32": "fp32",
+        "fp64": "fp64",
     }
-    return dict_dtype2simulation.get(dtype.lower(), None)
+    if dtype is None:
+        return None
+    return dict_dtype2simulation.get(str(dtype).lower(), None)
 
 
 def parse_bool(input):

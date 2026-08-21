@@ -169,6 +169,103 @@ def capture_has_kernel_names(capture_filtered_events):
     return True
 
 
+_GRAPH_NODE_ID_KEY = "graph node id"
+_NODE_ORDINAL_MASK = 0xFFFFFFFF
+_COMPILED_OP_PREFIX = "triton_"
+_MAX_ANCESTOR_WALK = 64
+
+
+def _node_ordinal(event):
+    """Ordinal of a graph kernel within its CUDA graph, or None.
+
+    CUPTI packs the node id as ``(graph_id << 32) | ordinal``. Kineto only
+    emits the field from torch 2.12 onward, so it is absent on older traces.
+    """
+    node_id = event.get("args", {}).get(_GRAPH_NODE_ID_KEY)
+    if not isinstance(node_id, int):
+        return None
+    return node_id & _NODE_ORDINAL_MASK
+
+
+def graph_has_node_ids(graph_filtered_events):
+    """True when every graph event carries a node ordinal."""
+    return all(_node_ordinal(e) is not None for e in graph_filtered_events)
+
+
+def _enclosing_op_name(capture_tree, event):
+    """Name of the nearest cpu_op ancestor of a capture dispatch, or None."""
+    parent_uid = event.get("parent")
+    for _ in range(_MAX_ANCESTOR_WALK):
+        if parent_uid is None:
+            return None
+        parent = capture_tree.events_by_uid.get(parent_uid)
+        if parent is None:
+            return None
+        if capture_tree.event_to_category(parent) == "cpu_op":
+            return parent.get("name")
+        parent_uid = parent.get("parent")
+    return None
+
+
+def align_by_node_ordinal(graph_filtered_events, capture_filtered_events, capture_tree):
+    """Pair capture dispatches to graph kernels via CUDA graph node ordinals.
+
+    Ordinals are assigned in graph construction order, which is the order the
+    dispatches occur inside the stream-capture window. That is a total order
+    across streams, so unlike :func:`align_streams` this is unaffected by
+    graphs spanning several streams and needs no ``args.kernel`` on the
+    capture side.
+
+    Torch-compiled kernels are named identically on both sides, so they serve
+    as checkpoints confirming the two sequences really are in step.
+
+    Returns capture events permuted into *graph_filtered_events* order, or
+    None when the join cannot be trusted.
+    """
+    ordinals = [_node_ordinal(e) for e in graph_filtered_events]
+    if len(set(ordinals)) != len(ordinals):
+        print(
+            "Node-id merge declined: {} graph kernels carry only {} distinct "
+            "node ordinals (subtree may span more than one replay)".format(
+                len(ordinals), len(set(ordinals))
+            )
+        )
+        return None
+    if len(ordinals) != len(capture_filtered_events):
+        print(
+            "Node-id merge declined: {} graph nodes but {} capture "
+            "dispatches".format(len(ordinals), len(capture_filtered_events))
+        )
+        return None
+
+    rank_of = {ordinal: i for i, ordinal in enumerate(sorted(ordinals))}
+    aligned = [capture_filtered_events[rank_of[ordinal]] for ordinal in ordinals]
+
+    checked = 0
+    mismatched = 0
+    for c_event, g_event in zip(aligned, graph_filtered_events):
+        op_name = _enclosing_op_name(capture_tree, c_event)
+        if op_name is None or not op_name.startswith(_COMPILED_OP_PREFIX):
+            continue
+        checked += 1
+        if op_name != g_event["name"]:
+            mismatched += 1
+
+    if mismatched:
+        print(
+            "Node-id merge declined: {} of {} compiled-kernel name checkpoints "
+            "disagree".format(mismatched, checked)
+        )
+        return None
+
+    print(
+        "Node-id merge: aligned {} graph nodes, {} name checkpoints verified".format(
+            len(aligned), checked
+        )
+    )
+    return aligned
+
+
 def _best_stream_by_run(candidates, stream_queues, capture_events, ci):
     """Tie-break: pick the stream matching the longest forward run of capture dispatches from ci."""
     best_stream = candidates[0]
@@ -712,13 +809,36 @@ def merge_capture_trace_into_graph(
                 )
             )
             continue
+        if closest_batch_size != int(batch_size):
+            # Rounding up mirrors graph padding and is normally correct, but it
+            # also silently absorbs a missing shard. Shapes then come from a
+            # larger batch than actually ran, inflating derived FLOPs.
+            print(
+                "Warning: no capture shard for batch size {}; rounding up to {}. "
+                "Derived work quantities will reflect the larger batch.".format(
+                    batch_size, closest_batch_size
+                )
+            )
         num_graph_roots = len(graph_roots)
         if num_graph_roots != 1:
             mode = "PIECEWISE"
         else:
             mode = "FULL"
         str_key = "{}_{}".format(closest_batch_size, mode)
-        filepath = capture_map[str_key]
+        filepath = capture_map.get(str_key)
+        if filepath is None:
+            # The batch size is rounded up against the union of both modes, so a
+            # size present only as FULL still yields a PIECEWISE key, and vice
+            # versa. Skip the root rather than aborting the whole report.
+            print(
+                "Warning: no capture shard for key {} (execution root {}); "
+                "skipping merge for this root. Available keys: {}".format(
+                    str_key,
+                    execution_root["name"],
+                    ", ".join(sorted(capture_map)),
+                )
+            )
+            continue
         key = (str_key, os.path.abspath(filepath))
         capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
             key, filepath, TreePerfAnalyzer
@@ -754,7 +874,15 @@ def merge_capture_trace_into_graph(
                 )
                 continue
 
-            if is_multistream(graph_filtered_events):
+            node_id_aligned = None
+            if graph_has_node_ids(graph_filtered_events):
+                node_id_aligned = align_by_node_ordinal(
+                    graph_filtered_events, capture_filtered_events, capture_tree
+                )
+
+            if node_id_aligned is not None:
+                capture_filtered_events = node_id_aligned
+            elif is_multistream(graph_filtered_events):
                 if not capture_has_kernel_names(capture_filtered_events):
                     print(
                         "Graph capture merge failed: multistream graph root {} but "
