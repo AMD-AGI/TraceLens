@@ -187,7 +187,7 @@ PyTorch's `.stride()` method provides insight into a tensor's memory arrangement
 
 The core BLAS GEMM routine typically computes $C = \alpha \cdot op(A) \cdot op(B) + \beta \cdot C$, where $op(X)$ is either $X$ or $X^T$ depending on the `transA` and `transB` flags (`'N'` for no transpose, `'T'` for transpose) passed to the function. By default, BLAS expects input matrices corresponding to the `'N'` flag to be in column-major layout. Crucially, the resulting matrix $C$ is written into the output buffer in *column-major* format by default.
 
-PyTorch, however, uses row-major layout internally and desires the result of a GEMM operation to also be in row-major layout *without* an extra copy or transpose step outside of the BLAS call. PyTorch achieves this by cleverly leveraging the `trans` flags and the relationship between row-major and column-major layouts.
+PyTorch, however, uses row-major layout internally and desires the result of a GEMM operation to also be in row-major layout *without* an extra copy or transpose step outside of the BLAS call. PyTorch achieves this by using the `trans` flags and the relationship between row-major and column-major layouts.
 
 A matrix $M$ stored in row-major memory has the exact same element ordering as the matrix $M^T$ stored in column-major memory. PyTorch uses this identity. To get a row-major result $C$ from a BLAS call that outputs in column-major, PyTorch requests BLAS to compute $C^T$ and write it in column-major. Since $C^T$ in column-major is $C$ in row-major, the output buffer will contain the desired row-major $C$.
 
@@ -276,7 +276,7 @@ def get_blas_transpose_flags(A, B):
 One common assumption is that flattening a tensor shape like `[B, L, d_model]` to `[B⋅L, d_model]` is a cost-free metadata operation. This is only true if the last dimension (`d_model`) is contiguous.
 ```
 
-- If the last dimension is not contiguous, PyTorch may be forced to insert a *copy* or *transpose* operation to create a physically contiguous tensor that BLAS can work with efficiently.
+- If the last dimension is not contiguous, PyTorch might be forced to insert a *copy* or *transpose* operation to create a physically contiguous tensor that BLAS can work with efficiently.
 - Furthermore, even if the tensor layout *could* theoretically be used by BLAS (for example, certain striding patterns), some highly tuned BLAS libraries might lack kernels optimized for those specific layouts. In such instances, a *copy* or *transpose buffer* is inserted behind the scenes by PyTorch or the BLAS wrapper. Consequently, what the BLAS routine actually operates on might not be the original tensor directly, but rather a *temporary buffer* created for compatibility or performance.
 
 ## GEMM dimension efficiency
@@ -371,7 +371,7 @@ GEMM tuning can help improve these metrics to a certain extent.
 
 However, these are just part of the picture. Even when tiling and wave quantization are optimal, there can still be performance degradation due to:
 
-- Shader clock (`sclk`) throttling: Some workloads may not run at peak clock speeds due to power or thermal constraints.
+- Shader clock (`sclk`) throttling: Some workloads might not run at peak clock speeds due to power or thermal constraints.
 - Cache behavior: Cache misses can occur even for compute-bound GEMMs, affecting throughput and instruction efficiency.
 
 These factors should be analyzed alongside the dimension efficiency metrics to get a complete performance picture.
@@ -461,7 +461,7 @@ dim_eff ≈ 0.935
 - Scope: This analysis assumes standard tiled GEMMs. Techniques like Stream-K or Split-K are not yet modeled.
 - Relevance: These metrics are most useful for compute-bound GEMMs. Use FLOPS/Byte to determine whether a GEMM is compute- or memory-bound.
 
-For hands-on usage, work through the [`examples/gemm_dim_eff.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/gemm_dim_eff.ipynb) notebook. This is a new feature, so please report any issues or suggestions to the TraceLens team.
+For hands-on usage, work through the [`examples/gemm_dim_eff.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/gemm_dim_eff.ipynb) notebook. This is a new feature; report any issues or suggestions to the TraceLens team.
 
 ## Related topics
 
