@@ -16,7 +16,7 @@ When you run a PyTorch model on a GPU, there's a hidden interplay between the CP
 
 ## The execution model: host, GPU, and asynchronous launches
 
-![Async execution example](./imgs/profiling_analysis_fig1.png)
+![Async execution example](../images/profiling_analysis_fig1.png)
 
 *Figure 1: Asynchronous execution example.*
 
@@ -34,7 +34,7 @@ A kernel itself is just a GPU function that runs across thousands of lightweight
 
 To dig deeper into what a trace shows, consider the snippet below.
 
-![Perfetto trace showing idle time between kernels](./imgs/profiling_analysis_fig2.png)
+![Perfetto trace showing idle time between kernels](../images/profiling_analysis_fig2.png)
 
 *Figure 2: Perfetto trace highlighting idle time between convolution and batch normalization kernels.*
 
@@ -61,7 +61,7 @@ Another important detail is tensor metadata. Python-level operations in the trac
 
 For example, in the figure below the first tensor is the activation (`[5, 64, 56, 56]`) and the second tensor is the convolution filter (`[64, 64, 3, 3]`).
 
-![Perfetto trace showing recorded input shapes](./imgs/profiling_analysis_fig3.png)
+![Perfetto trace showing recorded input shapes](../images/profiling_analysis_fig3.png)
 
 *Figure 3: Shapes recorded on the backend op when `record_shapes=True`.*
 
@@ -71,7 +71,7 @@ That's all you need for a clean first pass: know what the host and GPU are doing
 
 The appendix below covers UI shortcuts, how memory copies show up, and the structure of the raw trace file.
 
-## Appendix
+## Perfetto tips and trace internals
 
 ### Perfetto UI tips
 
@@ -84,13 +84,13 @@ Perfetto also links host launches and GPU execution with arrows called *flows*. 
 
 When you select a runtime launch event such as `hipExtModuleLaunchKernel`, the *Following Flow* jumps you forward to the GPU kernel it triggered:
 
-![Following flow from host launch to GPU kernel](./imgs/profiling_analysis_fig4.png)
+![Following flow from host launch to GPU kernel](../images/profiling_analysis_fig4.png)
 
 *Figure 4: Following flow from a host launch (`hipExtModuleLaunchKernel`) to the corresponding GPU kernel event.*
 
 Conversely, when you select a GPU kernel event, the *Preceding Flow* takes you back to the runtime call on the host that launched it:
 
-![Preceding flow from GPU kernel back to host launch](./imgs/profiling_analysis_fig5.png)
+![Preceding flow from GPU kernel back to host launch](../images/profiling_analysis_fig5.png)
 
 *Figure 5: Preceding flow from a GPU kernel (`SubTensorOpWithScalar1d`) back to its launch on the host.*
 
@@ -129,16 +129,16 @@ Autograd introduces another dimension to the trace: the forward and backward pas
 
 These are linked at the `aten::convolution` layer of the call stack. Perfetto uses flows to connect the forward convolution op to its corresponding backward node.
 
-![Forward and backward convolution linked in the trace](./imgs/profiling_analysis_fig6.png)
+![Forward and backward convolution linked in the trace](../images/profiling_analysis_fig6.png)
 
-*Figure 6: Example of `aten::convolution` (forward) linked to `ConvolutionBackward0` (backward) via flows.*
+*Figure 6: Example of `aten::convolution` (forward) linked to `ConvolutionBackward0` (backward) through flows.*
 
 Key points:
 
 - The linkage happens at `aten::convolution`, not `aten::conv2d`. The higher-level `aten::conv2d` call funnels into `aten::convolution` before reaching the backend.
 - Forward and backward both eventually call into the same GPU backend (MIOpen or cuDNN), so you see similar kernel launches in both directions.
 - The backward pass typically runs more kernels, since it must compute gradients for both activations and weights, making it more expensive than the forward pass.
-- Because autograd runs on its own thread, you can easily separate model execution (forward path) from gradient computation (backward path) when analyzing traces.
+- Because autograd runs on its own thread, you can separate model execution (forward path) from gradient computation (backward path) when analyzing traces.
 
 Together with the flows discussed earlier, this lets you connect a forward convolution op to its exact backward counterpart and then follow the chain down to GPU kernels.
 

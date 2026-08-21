@@ -33,9 +33,9 @@ depends on the framework and how the model is executed:
 
 | Mode | Shapes / roofline analysis | Agent analysis | Limitations |
 |------|----------------------------|----------------|-------------|
-| Eager only | Yes | Supported; proposed patches are recommended to include roofline information for attention operations | Eager execution may use different compilation strategies, resulting in different kernels and fusions than graph execution. |
+| Eager only | Yes | Supported; proposed patches are recommended to include roofline information for attention operations | Eager execution might use different compilation strategies, resulting in different kernels and fusions than graph execution. |
 | Graph execution only | Non-graph kernels | Limited | Categorization, call stacks, and shapes are available only for attention kernels if `full_and_piecewise` mode is used. |
-| Graph execution + eager-mode trace | Limited | Limited | Kernel categorization may be less accurate than eager or graph+capture. |
+| Graph execution + eager-mode trace | Limited | Limited | Kernel categorization might be less accurate than eager or graph+capture. |
 | Graph execution + graph capture [^1] | Yes | Yes (patches required) | |
 
 [^1]: Graph-mode analysis using graph-capture and graph-replay traces is
@@ -239,7 +239,7 @@ To apply them:
   `((R+1)/2) * 5 * OSL ± (16 * OSL / CONC)` execution steps to capture peak
   concurrency with a prefill-decode mix. See
   [Steady-state region](../conceptual/inference-analysis.md#steady-state-region)
-  for the derivation. You may need to raise the trace-store timeout in some
+  for the derivation. You might need to raise the trace-store timeout in some
   frameworks to allow writing the trace mid-execution (for example
   `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200` for vLLM).
 - **Graph-capture mode**: The recommended patch traces the graph-capture phase and
@@ -299,7 +299,7 @@ during the benchmark. Pass both paths to the report generator using
    shape information for some operations; add
    `--enable-shape-discovery-for-cuda-graph-profile` for more diverse coverage.
 4. On SGLang **0.5.13 and later**, writing the per-batch-size graph-capture trace
-   files to disk is opt-in via the `SGLANG_GRAPH_BATCH_CAPTURE=1`
+   files to disk is opt-in using the `SGLANG_GRAPH_BATCH_CAPTURE=1`
    environment variable (default off). Set it *in addition to*
    `--enable-profile-cuda-graph`; without it the capture profiler still runs (for
    the summary tables and memory snapshot) but no per-batch-size trace is written to
@@ -340,7 +340,7 @@ around the region of interest (this is what `benchmark_serving --profile`
 does).
 
 **xDiT.** The `config_xdit_v*.patch` patches add two flags to the `xfuser`
-runner. Pass them via the `EXTRA_XDIT_ARGS` environment variable (or directly to
+runner. Pass them using the `EXTRA_XDIT_ARGS` environment variable (or directly to
 the `xdit` CLI):
 
 | Flag                        | Type    | Default  | Description                                                                                                                                                                            |

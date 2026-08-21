@@ -70,7 +70,7 @@ fall into two categories:
   the current chunk.
 - **Generation (decode) requests** generate new tokens; attention is non-causal
   (queries attend to all past KV tokens). Typically N_Q = 1, but approaches like
-  speculative decoding may produce multiple query tokens per request.
+  speculative decoding might produce multiple query tokens per request.
 
 #### FLOPS: prefill (context) requests
 
@@ -137,7 +137,7 @@ This works because:
 
 Generation requests attend to all cached KV tokens (N_KV = context length so
 far). Typically N_Q = 1 (autoregressive decoding), but techniques like
-speculative decoding may have N_Q > 1. The attention is non-causal:
+speculative decoding might have N_Q > 1. The attention is non-causal:
 
 ```
                      R_G

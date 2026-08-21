@@ -4,13 +4,19 @@ Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
-# Generate Performance Report for Genesis / Taichi Physics Simulation
+# Generate a Genesis or Taichi physics simulation performance report
+```{meta}
+:description: Learn how to generate a TraceLens performance report for Genesis and Taichi physics-simulation workloads, including steady-state isolation, kernel categorization, and HIP activity analysis.
+:keywords: TraceLens, Genesis, Taichi, physics simulation, rocprofv3, pftrace, steady-state, kernel categorization, ROCm, AMD Instinct
+```
 
-Extension for **Genesis/Taichi physics-simulation workloads** — combines rocprof kernel analysis with pftrace HIP activity and memory copy reports, adds physics kernel categorization, and isolates the steady-state simulation window (excluding JIT/build overhead).
+Generate a performance report for **Genesis and Taichi physics-simulation workloads**. The report combines rocprof kernel analysis with pftrace HIP activity and memory copy reports, adds physics kernel categorization, and isolates the steady-state simulation window (excluding JIT and build overhead).
 
 ---
 
-## Quick Start
+## Generate the report
+
+Run the following command, pointing at the capture directory written by `rocprofv3`:
 
 ```bash
 TraceLens_generate_perf_report_genesis \
@@ -20,7 +26,7 @@ TraceLens_generate_perf_report_genesis \
 
 ---
 
-## Trace Capture
+## Capture traces
 
 Capture traces with `rocprofv3` while running a Genesis benchmark:
 
@@ -32,7 +38,9 @@ rocprofv3 --hip-trace --kernel-trace --memory-copy-trace \
 
 ---
 
-## Expected Directory Layout
+## Expected directory layout
+
+The tool expects the following structure under `--capture-dir`:
 
 ```
 profile_output/<timestamp>/
@@ -48,10 +56,10 @@ profile_output/<timestamp>/
 
 ---
 
-## Output
+## Output files
 
 - **`genesis_perf_report.xlsx`** — Excel workbook with:
-  - GPU timeline (steady-state window only, excluding JIT/build)
+  - GPU timeline (steady-state window only, excluding JIT and build)
   - Kernel summary by physics category (Rigid Body Solver, Collision, Time Integration, etc.)
   - HIP activity summary (from pftrace)
   - Memory copy summary (from pftrace)
@@ -60,7 +68,7 @@ profile_output/<timestamp>/
 
 ---
 
-## Physics Kernel Categories
+## Physics kernel categories
 
 Kernels are automatically categorized into Genesis-specific physics roles:
 
@@ -80,7 +88,7 @@ Kernels are automatically categorized into Genesis-specific physics roles:
 
 ---
 
-## Steady-State Detection
+## Steady-state detection
 
 Genesis workloads have a distinctive two-phase pattern:
 1. **JIT / Build phase** — Taichi compiles kernels on first invocation (large inter-kernel gaps)
@@ -92,13 +100,15 @@ If no large gap is found, the tool falls back to using the last N seconds of the
 
 ---
 
-## CLI Options
+## CLI options
+
+The following table describes all available options.
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--capture-dir` | (required) | Path to `profile_output/<timestamp>/` directory |
 | `--output-dir` | `analysis_output` | Where to write the report |
-| `--steady-state-gap-ms` | 1000 | Min gap (ms) to split JIT/build from simulation burst |
+| `--steady-state-gap-ms` | 1000 | Min gap (ms) to split JIT and build from simulation burst |
 | `--steady-state-fallback-s` | auto | Timed benchmark window (default: auto from `run.log`, else 5s) |
 | `--include-api` | off | Include HIP/HSA API events in rocprof JSON |
 | `--kernel-details` | off | Include per-dispatch kernel details sheet |
@@ -108,7 +118,9 @@ If no large gap is found, the tool falls back to using the last N seconds of the
 
 ---
 
-## Python API
+## Python API usage
+
+Import and call the generator directly to receive pandas DataFrames instead of writing files:
 
 ```python
 from TraceLens.Reporting.generate_perf_report_genesis import generate_perf_report_genesis
