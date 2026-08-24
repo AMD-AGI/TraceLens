@@ -154,6 +154,19 @@ class TestMicrobenchHelpers:
         assert payload["max_achievable_tflops"]["matrix_fp16"] == 123
         assert payload["max_achievable_tflops"]["vector_fp16"] == 46
         assert set(mb.ARCH_TLOPS_KEYS) <= set(payload["max_achievable_tflops"])
+        assert "mem_latency_us" not in payload
+
+    def test_build_measured_arch_json_includes_mem_latency(self):
+        mb = _import_microbench()
+        payload = mb._build_measured_arch_json(
+            gpu_name="MI210",
+            mem_gb=64.0,
+            read_bw_gbps=1600.0,
+            matrix_results={},
+            vector_results={},
+            mem_latency_us=0.412,
+        )
+        assert payload["mem_latency_us"] == 0.41
 
     def test_gemm_shapes_non_empty(self):
         mb = _import_microbench()
