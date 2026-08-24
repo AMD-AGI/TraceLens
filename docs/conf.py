@@ -18,8 +18,8 @@ https://rocm.docs.amd.com/projects/rocm-docs-core/en/latest/
 project = "TraceLens"
 author = "Advanced Micro Devices, Inc."
 copyright = "Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved."
-version = "0.1.0"
-release = "0.1.0"
+version = "1.0.0"
+release = "1.0.0"
 
 # rocm-docs-core provides the ROCm theme, the table-of-contents handling,
 # and the shared "external project" cross-references.
