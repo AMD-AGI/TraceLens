@@ -15,7 +15,6 @@ from TraceLens.TraceIndex.importer import generate_report_and_import, import_rep
 from TraceLens.TraceIndex.scanner import scan_traces
 from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
 
-
 DEFAULT_DB = Path("trace_index.sqlite")
 
 
@@ -38,7 +37,14 @@ def scan_cmd(args: argparse.Namespace) -> int:
             peek_mb=args.peek_mb,
             compute_md5=args.compute_md5,
         )
-        print_json({"backend": args.backend, "db": args.db, "root": args.root, "candidate_traces": count})
+        print_json(
+            {
+                "backend": args.backend,
+                "db": args.db,
+                "root": args.root,
+                "candidate_traces": count,
+            }
+        )
         return 0
     finally:
         store.close()
@@ -53,7 +59,14 @@ def import_report_cmd(args: argparse.Namespace) -> int:
             trace_path=args.trace_path,
             root=args.root,
         )
-        print_json({"backend": args.backend, "db": args.db, "trace_id": trace_id, "report_dir": args.report_dir})
+        print_json(
+            {
+                "backend": args.backend,
+                "db": args.db,
+                "trace_id": trace_id,
+                "report_dir": args.report_dir,
+            }
+        )
         return 0
     finally:
         store.close()
@@ -70,7 +83,14 @@ def build_cmd(args: argparse.Namespace) -> int:
             force=args.force,
             enable_pseudo_ops=args.enable_pseudo_ops,
         )
-        print_json({"backend": args.backend, "db": args.db, "trace_id": trace_id, "trace_path": args.trace_path})
+        print_json(
+            {
+                "backend": args.backend,
+                "db": args.db,
+                "trace_id": trace_id,
+                "trace_path": args.trace_path,
+            }
+        )
         return 0
     finally:
         store.close()
@@ -80,7 +100,10 @@ def search_cmd(args: argparse.Namespace) -> int:
     store = create_store(args)
     try:
         store.init_schema()
-        rows = [hit._asdict() for hit in store.search(" ".join(args.terms), limit=args.limit)]
+        rows = [
+            hit._asdict()
+            for hit in store.search(" ".join(args.terms), limit=args.limit)
+        ]
         print_json({"backend": args.backend, "rows": rows})
         return 0
     finally:
@@ -115,7 +138,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build and query a TraceIndex catalog of TraceLens reports."
     )
-    parser.add_argument("--backend", choices=["sqlite"], default="sqlite", help="TraceIndex storage backend")
+    parser.add_argument(
+        "--backend",
+        choices=["sqlite"],
+        default="sqlite",
+        help="TraceIndex storage backend",
+    )
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="SQLite DB path")
     sub = parser.add_subparsers(dest="command")
 

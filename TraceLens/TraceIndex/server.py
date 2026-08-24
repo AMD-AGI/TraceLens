@@ -22,14 +22,18 @@ def json_bytes(payload: object) -> bytes:
     return json.dumps(payload, indent=2, default=str).encode("utf-8")
 
 
-def make_handler(db_path: Path, default_limit: int, max_limit: int) -> Type[BaseHTTPRequestHandler]:
+def make_handler(
+    db_path: Path, default_limit: int, max_limit: int
+) -> Type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "TraceIndexQuery/0.1"
 
         def log_message(self, fmt: str, *args: Any) -> None:
             print("%s - %s" % (self.address_string(), fmt % args), flush=True)
 
-        def send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
+        def send_json(
+            self, payload: object, status: HTTPStatus = HTTPStatus.OK
+        ) -> None:
             body = json_bytes(payload)
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -59,7 +63,11 @@ def make_handler(db_path: Path, default_limit: int, max_limit: int) -> Type[Base
                         "endpoints": {
                             "GET /health": "server and DB status",
                             "GET /tables": "table row counts",
-                            "POST /query": {"sql": "SELECT ...", "params": [], "limit": 500},
+                            "POST /query": {
+                                "sql": "SELECT ...",
+                                "params": [],
+                                "limit": 500,
+                            },
                         }
                     }
                 )
@@ -98,16 +106,17 @@ def make_handler(db_path: Path, default_limit: int, max_limit: int) -> Type[Base
                 {
                     "ok": db_path.exists(),
                     "db_path": str(db_path),
-                    "db_size_mb": round(db_path.stat().st_size / 1048576, 2) if db_path.exists() else None,
+                    "db_size_mb": (
+                        round(db_path.stat().st_size / 1048576, 2)
+                        if db_path.exists()
+                        else None
+                    ),
                 }
             )
 
         def handle_tables(self) -> None:
             with self.connect() as conn:
-                tables = [
-                    row["name"]
-                    for row in conn.execute(
-                        """
+                tables = [row["name"] for row in conn.execute("""
                         SELECT name
                         FROM sqlite_master
                         WHERE type IN ('table', 'view')
@@ -117,20 +126,25 @@ def make_handler(db_path: Path, default_limit: int, max_limit: int) -> Type[Base
                           AND name NOT LIKE '%_docsize'
                           AND name NOT LIKE '%_config'
                         ORDER BY name
-                        """
-                    )
-                ]
+                        """)]
                 counts = {}
                 for table in tables:
                     try:
-                        counts[table] = conn.execute('SELECT COUNT(*) AS n FROM "%s"' % table).fetchone()["n"]
+                        counts[table] = conn.execute(
+                            'SELECT COUNT(*) AS n FROM "%s"' % table
+                        ).fetchone()["n"]
                     except sqlite3.DatabaseError as exc:
                         counts[table] = repr(exc)
                 self.send_json({"tables": counts})
 
         def handle_query(self, sql: str, params: List[Any], limit: int) -> None:
             if not is_read_only_sql(sql):
-                self.send_json({"error": "only single read-only SELECT/WITH/PRAGMA statements are allowed"}, HTTPStatus.BAD_REQUEST)
+                self.send_json(
+                    {
+                        "error": "only single read-only SELECT/WITH/PRAGMA statements are allowed"
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
                 return
             limit = max(1, min(limit, max_limit))
             start = time.perf_counter()
@@ -150,7 +164,13 @@ def make_handler(db_path: Path, default_limit: int, max_limit: int) -> Type[Base
     return Handler
 
 
-def serve(db_path: Path, host: str = "127.0.0.1", port: int = 8765, default_limit: int = 500, max_limit: int = 5000) -> None:
+def serve(
+    db_path: Path,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    default_limit: int = 500,
+    max_limit: int = 5000,
+) -> None:
     handler = make_handler(db_path, default_limit, max_limit)
     server = ThreadingHTTPServer((host, port), handler)
     print("serving db=%s on http://%s:%s" % (db_path, host, port), flush=True)

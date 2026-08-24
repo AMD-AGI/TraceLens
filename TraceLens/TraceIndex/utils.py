@@ -66,6 +66,20 @@ def as_int(value: Any) -> Optional[int]:
     return int(number) if number is not None else None
 
 
+def as_duration_us(
+    row: Dict[str, Any],
+    us_names: Sequence[str],
+    ms_names: Sequence[str] = (),
+) -> Optional[float]:
+    us_value = as_float(first_value(row, us_names))
+    if us_value is not None:
+        return us_value
+    ms_value = as_float(first_value(row, ms_names))
+    if ms_value is not None:
+        return ms_value * 1000.0
+    return None
+
+
 def as_bool_int(value: Any) -> int:
     if isinstance(value, bool):
         return int(value)

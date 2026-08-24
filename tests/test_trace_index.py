@@ -6,6 +6,7 @@
 
 import csv
 import json
+from pathlib import Path
 
 import pytest
 
@@ -15,9 +16,17 @@ from TraceLens.TraceIndex.core import (
     scan_traces,
     search_index,
 )
-from TraceLens.TraceIndex.importer import import_report_dir as import_report_dir_with_store
+from TraceLens.TraceIndex.importer import (
+    import_report_dir as import_report_dir_with_store,
+)
 from TraceLens.TraceIndex.scanner import scan_traces as scan_traces_with_store
 from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
+
+FIXTURES = Path(__file__).resolve().parent / "traces"
+TRAINING_REPORT_DIR = (
+    FIXTURES / "mi300" / "Qwen_Qwen1.5-0.5B-Chat__1016005_perf_report_csvs"
+)
+INFERENCE_REPORT_DIR = FIXTURES / "inference" / "sglang_decode" / "perf_csvs"
 
 
 def write_csv(path, rows):
@@ -82,7 +91,9 @@ def test_trace_index_scan_import_and_search(tmp_path):
         ],
     )
 
-    trace_id = import_report_dir(db_path, report_dir, trace_path=trace_path, root=trace_root)
+    trace_id = import_report_dir(
+        db_path, report_dir, trace_path=trace_path, root=trace_root
+    )
     assert trace_id == 1
 
     rows = execute_read_query(
@@ -138,3 +149,53 @@ def test_trace_index_store_boundary_supports_scan_import_and_search(tmp_path):
         assert hits[0].kind == "op"
     finally:
         store.close()
+
+
+@pytest.mark.skipif(
+    not TRAINING_REPORT_DIR.exists(),
+    reason="checked-in Qwen training report CSVs are missing",
+)
+def test_import_real_training_report_maps_kernel_stream_and_times(tmp_path):
+    db_path = tmp_path / "trace_index.sqlite"
+    trace_id = import_report_dir(db_path, TRAINING_REPORT_DIR)
+
+    unified = execute_read_query(
+        db_path,
+        "SELECT name, kernel_time_sum_us FROM unified_perf_rows WHERE name = 'aten::mm'",
+    )
+    assert unified
+    assert unified[0]["kernel_time_sum_us"] > 0
+
+    kernels = execute_read_query(
+        db_path,
+        "SELECT kernel_name, stream, total_duration_us FROM kernel_summary "
+        "WHERE kernel_name LIKE 'Cijk%' LIMIT 1",
+    )
+    assert kernels
+    assert kernels[0]["stream"] == 0
+    assert kernels[0]["total_duration_us"] > 0
+
+    categories = execute_read_query(
+        db_path,
+        "SELECT category, kernel_time_sum_us FROM op_category_rows "
+        "WHERE kernel_time_sum_us IS NOT NULL ORDER BY kernel_time_sum_us DESC",
+    )
+    assert categories
+    assert categories[0]["kernel_time_sum_us"] > 0
+    assert trace_id == 1
+
+
+@pytest.mark.skipif(
+    not INFERENCE_REPORT_DIR.exists(),
+    reason="checked-in inference report CSVs are missing",
+)
+def test_import_real_inference_report_converts_category_kernel_time_ms(tmp_path):
+    db_path = tmp_path / "trace_index.sqlite"
+    import_report_dir(db_path, INFERENCE_REPORT_DIR)
+    rows = execute_read_query(
+        db_path,
+        "SELECT category, kernel_time_sum_us FROM op_category_rows "
+        "WHERE category = 'GEMM'",
+    )
+    assert rows
+    assert rows[0]["kernel_time_sum_us"] > 1000

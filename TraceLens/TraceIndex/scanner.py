@@ -17,7 +17,6 @@ from TraceLens.TraceIndex.models import TraceRecord
 from TraceLens.TraceIndex.store import TraceIndexStore
 from TraceLens.TraceIndex.utils import normalize_path, rel_to
 
-
 TRACE_NAME_RE = re.compile(r"trace|profile|pytorch_profile|rocprof", re.IGNORECASE)
 RANK_RE = re.compile(r"(?:^|[^A-Za-z])rank[-_]?(\d+)(?:[^0-9]|$)", re.IGNORECASE)
 

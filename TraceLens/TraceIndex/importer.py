@@ -15,7 +15,6 @@ from TraceLens.TraceIndex.scanner import trace_record_from_path
 from TraceLens.TraceIndex.store import TraceIndexStore
 from TraceLens.TraceIndex.utils import normalize_path, read_csv_rows
 
-
 REPORT_SHEETS = (
     "unified_perf_summary",
     "kernel_summary",

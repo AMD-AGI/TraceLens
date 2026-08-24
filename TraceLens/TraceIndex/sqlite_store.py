@@ -15,6 +15,7 @@ from TraceLens.TraceIndex.models import SearchHit, TraceRecord, TraceReport
 from TraceLens.TraceIndex.store import TraceIndexStore
 from TraceLens.TraceIndex.utils import (
     as_bool_int,
+    as_duration_us,
     as_float,
     as_int,
     as_text,
@@ -49,8 +50,7 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         return conn
 
     def init_schema(self) -> None:
-        self.conn.executescript(
-            """
+        self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS traces (
                 id INTEGER PRIMARY KEY,
                 root TEXT,
@@ -177,8 +177,7 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 text,
                 tokenize='unicode61'
             );
-            """
-        )
+            """)
         self.conn.commit()
 
     def upsert_trace(self, trace: TraceRecord) -> int:
@@ -221,16 +220,26 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 now,
             ),
         )
-        row = self.conn.execute("SELECT id FROM traces WHERE path = ?", (trace.path,)).fetchone()
+        row = self.conn.execute(
+            "SELECT id FROM traces WHERE path = ?", (trace.path,)
+        ).fetchone()
         self.conn.commit()
         return int(row["id"])
 
     def import_report(self, trace_id: int, report: TraceReport) -> None:
         self._clear_trace_payload(trace_id)
-        unified_summary = self._import_unified_rows(trace_id, report.sheets.get("unified_perf_summary", []))
-        self._import_kernel_summary_rows(trace_id, report.sheets.get("kernel_summary", []))
-        top_categories_json = self._import_category_rows(trace_id, report.sheets.get("ops_summary_by_category", []))
-        total_duration_us = self._import_gpu_timeline_rows(trace_id, report.sheets.get("gpu_timeline", []))
+        unified_summary = self._import_unified_rows(
+            trace_id, report.sheets.get("unified_perf_summary", [])
+        )
+        self._import_kernel_summary_rows(
+            trace_id, report.sheets.get("kernel_summary", [])
+        )
+        top_categories_json = self._import_category_rows(
+            trace_id, report.sheets.get("ops_summary_by_category", [])
+        )
+        total_duration_us = self._import_gpu_timeline_rows(
+            trace_id, report.sheets.get("gpu_timeline", [])
+        )
 
         self.conn.execute(
             """
@@ -258,7 +267,10 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 trace_id,
                 report.report_dir,
                 utc_now(),
-                json.dumps([name for name, rows in report.sheets.items() if rows], sort_keys=True),
+                json.dumps(
+                    [name for name, rows in report.sheets.items() if rows],
+                    sort_keys=True,
+                ),
             ),
         )
         self._insert_search(trace_id, "trace", [report.report_dir])
@@ -293,7 +305,9 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         limit: int = 500,
     ) -> List[Dict[str, Any]]:
         if not is_read_only_sql(sql):
-            raise ValueError("only a single read-only SELECT/WITH/PRAGMA statement is allowed")
+            raise ValueError(
+                "only a single read-only SELECT/WITH/PRAGMA statement is allowed"
+            )
         self.conn.execute("PRAGMA query_only=ON")
         rows = self.conn.execute(sql, params or ()).fetchmany(limit)
         return [dict(row) for row in rows]
@@ -311,7 +325,9 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             "trace_summary",
         ):
             self.conn.execute("DELETE FROM %s WHERE trace_id = ?" % table, (trace_id,))
-        self.conn.execute("DELETE FROM trace_search_FTS5 WHERE trace_id = ?", (trace_id,))
+        self.conn.execute(
+            "DELETE FROM trace_search_FTS5 WHERE trace_id = ?", (trace_id,)
+        )
 
     def _insert_search(self, trace_id: int, kind: str, parts: Iterable[Any]) -> None:
         text = search_text(*parts)
@@ -330,14 +346,36 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         max_sdpa_tflops = None
         for source_row, row in enumerate(rows):
             name = as_text(first_value(row, ["name", "Name", "op_name"]))
-            op_category = as_text(first_value(row, ["op category", "op_category", "category", "Categories"]))
-            tflops_mean = as_float(first_value(row, ["TFLOPS/s_mean", "tflops_mean", "TFLOPS_mean"]))
-            tflops_median = as_float(first_value(row, ["TFLOPS/s_median", "tflops_median", "TFLOPS_median"]))
-            tflops_for_summary = tflops_mean if tflops_mean is not None else tflops_median
-            if op_category and "gemm" in op_category.lower() and tflops_for_summary is not None:
-                max_gemm_tflops = max(max_gemm_tflops or tflops_for_summary, tflops_for_summary)
-            if op_category and "sdpa" in op_category.lower() and tflops_for_summary is not None:
-                max_sdpa_tflops = max(max_sdpa_tflops or tflops_for_summary, tflops_for_summary)
+            op_category = as_text(
+                first_value(
+                    row, ["op category", "op_category", "category", "Categories"]
+                )
+            )
+            tflops_mean = as_float(
+                first_value(row, ["TFLOPS/s_mean", "tflops_mean", "TFLOPS_mean"])
+            )
+            tflops_median = as_float(
+                first_value(row, ["TFLOPS/s_median", "tflops_median", "TFLOPS_median"])
+            )
+            tflops_for_summary = (
+                tflops_mean if tflops_mean is not None else tflops_median
+            )
+            if (
+                op_category
+                and "gemm" in op_category.lower()
+                and tflops_for_summary is not None
+            ):
+                max_gemm_tflops = max(
+                    max_gemm_tflops or tflops_for_summary, tflops_for_summary
+                )
+            if (
+                op_category
+                and "sdpa" in op_category.lower()
+                and tflops_for_summary is not None
+            ):
+                max_sdpa_tflops = max(
+                    max_sdpa_tflops or tflops_for_summary, tflops_for_summary
+                )
             self.conn.execute(
                 """
                 INSERT INTO unified_perf_rows(
@@ -357,13 +395,66 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                     name,
                     op_category,
                     as_int(first_value(row, ["operation_count", "Count", "count"])),
-                    as_float(first_value(row, ["Kernel Time (us)_sum", "Kernel Time (µs)_sum", "total_direct_kernel_time_sum", "total_subtree_kernel_time_sum"])),
-                    as_float(first_value(row, ["Kernel Time (us)_mean", "Kernel Time (µs)_mean", "total_direct_kernel_time_mean", "total_subtree_kernel_time_mean"])),
-                    as_float(first_value(row, ["Kernel Time (us)_median", "Kernel Time (µs)_median", "total_direct_kernel_time_median", "total_subtree_kernel_time_median"])),
-                    as_float(first_value(row, ["Kernel Time (us)_std", "Kernel Time (µs)_std"])),
-                    as_float(first_value(row, ["Kernel Time (us)_min", "Kernel Time (µs)_min"])),
-                    as_float(first_value(row, ["Kernel Time (us)_max", "Kernel Time (µs)_max"])),
-                    as_float(first_value(row, ["op_duration_us", "CPU duration (us)", "CPU duration (µs)"])),
+                    as_duration_us(
+                        row,
+                        [
+                            "Kernel Time (us)_sum",
+                            "Kernel Time (µs)_sum",
+                            "total_direct_kernel_time_sum",
+                            "total_subtree_kernel_time_sum",
+                        ],
+                        [
+                            "total_direct_kernel_time_ms",
+                            "total_subtree_kernel_time_ms",
+                        ],
+                    ),
+                    as_float(
+                        first_value(
+                            row,
+                            [
+                                "Kernel Time (us)_mean",
+                                "Kernel Time (µs)_mean",
+                                "total_direct_kernel_time_mean",
+                                "total_subtree_kernel_time_mean",
+                            ],
+                        )
+                    ),
+                    as_float(
+                        first_value(
+                            row,
+                            [
+                                "Kernel Time (us)_median",
+                                "Kernel Time (µs)_median",
+                                "total_direct_kernel_time_median",
+                                "total_subtree_kernel_time_median",
+                            ],
+                        )
+                    ),
+                    as_float(
+                        first_value(
+                            row, ["Kernel Time (us)_std", "Kernel Time (µs)_std"]
+                        )
+                    ),
+                    as_float(
+                        first_value(
+                            row, ["Kernel Time (us)_min", "Kernel Time (µs)_min"]
+                        )
+                    ),
+                    as_float(
+                        first_value(
+                            row, ["Kernel Time (us)_max", "Kernel Time (µs)_max"]
+                        )
+                    ),
+                    as_float(
+                        first_value(
+                            row,
+                            [
+                                "op_duration_us",
+                                "CPU duration (us)",
+                                "CPU duration (µs)",
+                            ],
+                        )
+                    ),
                     tflops_mean,
                     tflops_median,
                     as_float(first_value(row, ["TB/s_mean", "tbs_mean"])),
@@ -375,11 +466,25 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                     as_bool_int(first_value(row, ["has_perf_model", "Has Perf Model"])),
                     as_float(first_value(row, ["overlap_pct", "Overlap (%)"])),
                     as_text(first_value(row, ["perf_params", "Perf Params"])),
-                    as_text(first_value(row, ["kernel_details_summary", "trunc_kernel_details"])),
+                    as_text(
+                        first_value(
+                            row, ["kernel_details_summary", "trunc_kernel_details"]
+                        )
+                    ),
                     json.dumps(row, sort_keys=True),
                 ),
             )
-            self._insert_search(trace_id, "op", [name, op_category, first_value(row, ["kernel_details_summary", "trunc_kernel_details"])])
+            self._insert_search(
+                trace_id,
+                "op",
+                [
+                    name,
+                    op_category,
+                    first_value(
+                        row, ["kernel_details_summary", "trunc_kernel_details"]
+                    ),
+                ],
+            )
         return {"max_gemm_tflops": max_gemm_tflops, "max_sdpa_tflops": max_sdpa_tflops}
 
     def _import_kernel_summary_rows(
@@ -388,11 +493,17 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         rows: Sequence[Dict[str, str]],
     ) -> None:
         for row in rows:
-            kernel_name = as_text(first_value(row, ["Kernel name", "kernel_name", "name"]))
+            kernel_name = as_text(
+                first_value(row, ["Kernel name", "kernel_name", "name"])
+            )
             if not kernel_name:
                 continue
-            parent_op_name = as_text(first_value(row, ["Parent cpu_op", "parent_op_name", "Launcher"]))
-            op_category = as_text(first_value(row, ["Parent op category", "op_category", "category"]))
+            parent_op_name = as_text(
+                first_value(row, ["Parent cpu_op", "parent_op_name", "Launcher"])
+            )
+            op_category = as_text(
+                first_value(row, ["Parent op category", "op_category", "category"])
+            )
             self.conn.execute(
                 """
                 INSERT INTO kernel_summary(
@@ -408,20 +519,82 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                     kernel_name,
                     parent_op_name,
                     op_category,
-                    as_int(first_value(row, ["stream", "Stream"])),
-                    as_int(first_value(row, ["Kernel duration (us)_count", "Kernel duration (µs)_count", "count"])),
-                    as_float(first_value(row, ["Kernel duration (us)_sum", "Kernel duration (µs)_sum", "total_us"])),
-                    as_float(first_value(row, ["Kernel duration (us)_mean", "Kernel duration (µs)_mean", "mean_us"])),
-                    as_float(first_value(row, ["Kernel duration (us)_median", "Kernel duration (µs)_median", "median_us"])),
-                    as_float(first_value(row, ["Kernel duration (us)_min", "Kernel duration (µs)_min", "min_us"])),
-                    as_float(first_value(row, ["Kernel duration (us)_max", "Kernel duration (µs)_max", "max_us"])),
-                    int("cijk" in kernel_name.lower() or "tensile" in kernel_name.lower()),
+                    as_int(first_value(row, ["Kernel stream", "stream", "Stream"])),
+                    as_int(
+                        first_value(
+                            row,
+                            [
+                                "Kernel duration (us)_count",
+                                "Kernel duration (µs)_count",
+                                "count",
+                            ],
+                        )
+                    ),
+                    as_float(
+                        first_value(
+                            row,
+                            [
+                                "Kernel duration (us)_sum",
+                                "Kernel duration (µs)_sum",
+                                "total_us",
+                            ],
+                        )
+                    ),
+                    as_float(
+                        first_value(
+                            row,
+                            [
+                                "Kernel duration (us)_mean",
+                                "Kernel duration (µs)_mean",
+                                "mean_us",
+                            ],
+                        )
+                    ),
+                    as_float(
+                        first_value(
+                            row,
+                            [
+                                "Kernel duration (us)_median",
+                                "Kernel duration (µs)_median",
+                                "median_us",
+                            ],
+                        )
+                    ),
+                    as_float(
+                        first_value(
+                            row,
+                            [
+                                "Kernel duration (us)_min",
+                                "Kernel duration (µs)_min",
+                                "min_us",
+                            ],
+                        )
+                    ),
+                    as_float(
+                        first_value(
+                            row,
+                            [
+                                "Kernel duration (us)_max",
+                                "Kernel duration (µs)_max",
+                                "max_us",
+                            ],
+                        )
+                    ),
+                    int(
+                        "cijk" in kernel_name.lower()
+                        or "tensile" in kernel_name.lower()
+                    ),
                     int("transpose" in kernel_name.lower()),
-                    int("layout" in kernel_name.lower() or "permute" in kernel_name.lower()),
+                    int(
+                        "layout" in kernel_name.lower()
+                        or "permute" in kernel_name.lower()
+                    ),
                     json.dumps(row, sort_keys=True),
                 ),
             )
-            self._insert_search(trace_id, "kernel", [kernel_name, parent_op_name, op_category])
+            self._insert_search(
+                trace_id, "kernel", [kernel_name, parent_op_name, op_category]
+            )
 
     def _import_category_rows(
         self,
@@ -430,10 +603,24 @@ class SQLiteTraceIndexStore(TraceIndexStore):
     ) -> str:
         top_categories = []
         for row in rows:
-            category = as_text(first_value(row, ["op category", "category", "Categories", "name"]))
+            category = as_text(
+                first_value(row, ["op category", "category", "Categories", "name"])
+            )
             if not category:
                 continue
-            kernel_time = as_float(first_value(row, ["Kernel Time (us)_sum", "Kernel Time (µs)_sum", "total_direct_kernel_time_sum", "total_subtree_kernel_time_sum"]))
+            kernel_time = as_duration_us(
+                row,
+                [
+                    "Kernel Time (us)_sum",
+                    "Kernel Time (µs)_sum",
+                    "total_direct_kernel_time_sum",
+                    "total_subtree_kernel_time_sum",
+                ],
+                [
+                    "total_direct_kernel_time_ms",
+                    "total_subtree_kernel_time_ms",
+                ],
+            )
             self.conn.execute(
                 """
                 INSERT INTO op_category_rows(
@@ -446,11 +633,18 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                     category,
                     as_int(first_value(row, ["operation_count", "Count", "count"])),
                     kernel_time,
-                    as_float(first_value(row, ["Percentage (%)", "percent", "Percent of total time (%)"])),
+                    as_float(
+                        first_value(
+                            row,
+                            ["Percentage (%)", "percent", "Percent of total time (%)"],
+                        )
+                    ),
                     json.dumps(row, sort_keys=True),
                 ),
             )
-            top_categories.append({"category": category, "kernel_time_sum_us": kernel_time or 0.0})
+            top_categories.append(
+                {"category": category, "kernel_time_sum_us": kernel_time or 0.0}
+            )
             self._insert_search(trace_id, "category", [category])
         top_categories.sort(key=lambda item: item["kernel_time_sum_us"], reverse=True)
         return json.dumps(top_categories[:5], sort_keys=True)

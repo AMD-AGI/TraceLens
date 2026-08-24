@@ -12,9 +12,11 @@ from typing import Any, Dict, List, Optional, Sequence
 from TraceLens.TraceIndex.importer import (
     generate_report_and_import as generate_report_and_import_with_store,
 )
-from TraceLens.TraceIndex.importer import import_report_dir as import_report_dir_with_store
+from TraceLens.TraceIndex.importer import (
+    import_report_dir as import_report_dir_with_store,
+)
 from TraceLens.TraceIndex.scanner import scan_traces as scan_traces_with_store
-from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore, is_read_only_sql
+from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
 
 
 def scan_traces(
