@@ -1,0 +1,40 @@
+diff --git a/python/sglang/srt/speculative/frozen_kv_mtp_cuda_graph_runner.py b/python/sglang/srt/speculative/frozen_kv_mtp_cuda_graph_runner.py
+index ae30ece640..9af034947d 100644
+--- a/python/sglang/srt/speculative/frozen_kv_mtp_cuda_graph_runner.py
++++ b/python/sglang/srt/speculative/frozen_kv_mtp_cuda_graph_runner.py
+@@ -32,6 +32,10 @@ from sglang.srt.utils import (
+     require_mlp_sync,
+     require_mlp_tp_gather,
+ )
++from sglang.srt.utils.kernel_shape_profiler import enable as enable_kernel_shape_profiler
++from sglang.srt.utils.kernel_shape_profiler import (
++    is_enabled as is_kernel_shape_profiler_enabled,
++)
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.speculative.frozen_kv_mtp_worker import FrozenKVMTPWorker
+@@ -75,6 +79,9 @@ class FrozenKVMTPCudaGraphRunner:
+         self.enable_profile_cuda_graph = (
+             model_runner.server_args.enable_profile_cuda_graph
+         )
++        self.enable_shape_discovery_for_cuda_graph_profile = (
++            model_runner.server_args.enable_shape_discovery_for_cuda_graph_profile
++        )
+         self.enable_pdmux = False
+         self.deepep_adapter = DeepEPCudaGraphRunnerAdapter()
+ 
+@@ -182,6 +189,14 @@ class FrozenKVMTPCudaGraphRunner:
+             torch.cuda.synchronize()
+             self.model_runner.tp_group.barrier()
+             run_once_fn()
++        # Enable kernel shape discovery after warmup (so lazily-imported kernel
++        # modules are already loaded) and before the profiled graph capture.
++        if (
++            self.enable_profile_cuda_graph
++            and self.enable_shape_discovery_for_cuda_graph_profile
++            and not is_kernel_shape_profiler_enabled()
++        ):
++            enable_kernel_shape_profiler()
+ 
+     def _capture_graph(self, graph, pool, stream, run_once_fn):
+         with torch.cuda.graph(graph, pool=pool, stream=stream):

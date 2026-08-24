@@ -5,19 +5,179 @@
 ###############################################################################
 
 import argparse
+import ast
 import importlib.util
-import json
 import os
-import subprocess
-import sys
+import re
 import warnings
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
 
-from TraceLens import NcclAnalyser, TraceToTree, TreePerfAnalyzer
-from TraceLens.Reporting.reporting_utils import request_install
+from TraceLens import NcclAnalyser, TraceDiff, TreePerfAnalyzer
+from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
+from TraceLens.Reporting.reporting_utils import (
+    add_gpu_arch_cli_args,
+    request_install,
+    resolve_gpu_arch,
+)
+
+_WRAPPER_FILE_PATTERNS = frozenset(
+    {
+        "torch/_ops.py",
+        "torch/nn/modules/module.py",
+        "torch/utils/_contextlib.py",
+        "torch/utils/_device.py",
+        "torch/_tensor.py",
+        "torch/functional.py",
+        "torch/overrides.py",
+        "torch/_inductor/",
+        "torch/_functorch/",
+        "torch/distributed/c10d_logger.py",
+        "triton/backends/",
+    }
+)
+
+_WRAPPER_NAME_PREFIXES = frozenset(
+    {
+        "<built-in",
+        "pybind11_builtins",
+        "nn.Module:",
+    }
+)
+
+_WRAPPER_FUNC_NAMES = frozenset(
+    {
+        "__torch_function__",
+        "_call_impl",
+        "_wrapped_call_impl",
+        "decorate_context",
+        "dispatch_wrapper",
+        "handle_torch_function",
+        "wrapper",
+        "custom_wrapper",
+        "wrapper_custom",
+        "outer_wrapper",
+    }
+)
+
+
+def _is_wrapper_frame(frame):
+    """Return True if *frame* is a wrapper/dispatch function that should be
+    skipped when searching outward for the dispatch entry point."""
+    for prefix in _WRAPPER_NAME_PREFIXES:
+        if frame.startswith(prefix):
+            return True
+    for pat in _WRAPPER_FILE_PATTERNS:
+        if pat in frame:
+            return True
+    # Extract function name from "path.py(line): func_name" format
+    if "): " in frame:
+        func_name = frame.split("): ")[-1]
+        if func_name in _WRAPPER_FUNC_NAMES:
+            return True
+    return False
+
+
+def _find_entry_point(call_stack_value, op_name):
+    """Find the dispatch entry point for a CPU op from its call stack.
+
+    Returns a dict with keys:
+    - ``entry_point``: the matched frame string, or ``""``
+    - ``num_wrappers``: number of frames between entry point and the CPU op
+    - ``traversal``: ``"inward"`` or ``"outward"`` (which strategy matched)
+    - ``wrappers``: list of frames between the CPU op and the entry point
+
+    Strategy:
+    1. **Inward matching** – search the call stack for a .py frame whose
+       function name contains the op name (part after '::').
+    2. **Outward matching** (fallback) – if inward matching fails, walk the
+       call stack from innermost frame outward, skip wrapper/dispatch
+       functions, and return the first non-wrapper .py frame.
+    """
+    empty = {
+        "entry_point": "Not found",
+        "num_wrappers": -1,
+        "traversal": "",
+        "wrappers": "",
+    }
+    try:
+        stack = ast.literal_eval(str(call_stack_value))
+        if not isinstance(stack, list):
+            return empty
+    except Exception:
+        return empty
+
+    def flatten(frames):
+        flat = []
+        for frame in frames:
+            if isinstance(frame, list):
+                flat.extend(flatten(frame))
+            else:
+                flat.append(frame)
+        return flat
+
+    flat_stack = flatten(stack)
+
+    # Use the local name part after '::' if present
+    local_name = op_name.split("::")[-1].lower() if "::" in op_name else op_name.lower()
+
+    # Find the CPU op position in the flat stack (search from end for exact match).
+    # If exact match fails, try with trailing numeric suffix stripped — the call
+    # stack builder applies re.sub(r"_\d+", "") to frame names for deduplication,
+    # so e.g. "sglang_profiler::foo_triton_340" is stored as "sglang_profiler::foo_triton".
+    op_idx = -1
+    for i in range(len(flat_stack) - 1, -1, -1):
+        if flat_stack[i] == op_name:
+            op_idx = i
+            break
+    if op_idx == -1:
+        stripped_op_name = re.sub(r"_\d+$", "", op_name)
+        if stripped_op_name != op_name:
+            for i in range(len(flat_stack) - 1, -1, -1):
+                if flat_stack[i] == stripped_op_name:
+                    op_idx = i
+                    break
+    if op_idx == -1:
+        return empty
+
+    # --- Inward matching: from CPU op toward leaf (children), find a .py frame
+    #     whose function name contains the op name ---
+    for i in range(op_idx + 1, len(flat_stack)):
+        frame = flat_stack[i]
+        if ".py" in frame:
+            func_name = (
+                frame.split("): ")[-1].lower() if "): " in frame else frame.lower()
+            )
+            if local_name in func_name:
+                between = flat_stack[op_idx + 1 : i]
+                wrappers_list = [op_name] + between + [frame]
+                return {
+                    "entry_point": frame,
+                    "num_wrappers": len(between),
+                    "traversal": "inward",
+                    "wrappers": str(wrappers_list),
+                }
+
+    # --- Outward matching (fallback): from CPU op toward root (parents),
+    #     skip wrappers, return first non-wrapper .py frame ---
+    for i in range(op_idx - 1, -1, -1):
+        frame = flat_stack[i]
+        if ".py" not in frame:
+            continue
+        if _is_wrapper_frame(frame):
+            continue
+        between = flat_stack[i + 1 : op_idx]
+        wrappers_list = [frame] + between + [op_name]
+        return {
+            "entry_point": frame,
+            "num_wrappers": len(between),
+            "traversal": "outward",
+            "wrappers": str(wrappers_list),
+        }
+
+    return empty
 
 
 def get_dfs_short_kernels(
@@ -119,6 +279,12 @@ def apply_extension(perf_analyzer, extension_path):
     extension_path = os.path.abspath(extension_path)
     extension_name = os.path.splitext(os.path.basename(extension_path))[0]
 
+    from TraceLens.PerfModel.torch_op_mapping import (
+        OP_CATEGORY_REGISTRY,
+        register_op_categories,
+        register_perf_model_categories,
+    )
+
     spec = importlib.util.spec_from_file_location(extension_name, extension_path)
     extension = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(extension)
@@ -137,20 +303,27 @@ def apply_extension(perf_analyzer, extension_path):
                 f"Expected perf_model_extension to be a dict, got {type(perf_model_extension)}"
             )
         perf_analyzer.op_to_perf_model_class_map.update(perf_model_extension)
-    if hasattr(extension, "dict_cat2names_extension"):
-        print(f"Updating dict_cat2names with extension from {extension_path}")
-        if not isinstance(extension.dict_cat2names_extension, dict):
+        register_perf_model_categories(
+            perf_model_extension,
+            OP_CATEGORY_REGISTRY,
+        )
+    if hasattr(extension, "op_category_extension"):
+        print(f"Applying op category extension from {extension_path}")
+        op_category_extension = getattr(extension, "op_category_extension")
+        if not isinstance(op_category_extension, dict):
             raise ValueError(
-                f"Expected dict_cat2names_extension to be a dict, got {type(extension.dict_cat2names_extension)}"
+                f"Expected op_category_extension to be a dict, got {type(op_category_extension)}"
             )
-
-        # defaultdict(<class 'list'>,
-        for cat, names in extension.dict_cat2names_extension.items():
-            if cat not in perf_analyzer.dict_cat2names:
-                perf_analyzer.dict_cat2names[cat] = []
-            if not isinstance(names, list):
-                raise ValueError(f"Expected names to be a list, got {type(names)}")
-            perf_analyzer.dict_cat2names[cat].extend(names)
+        register_op_categories(
+            op_category_extension,
+            OP_CATEGORY_REGISTRY,
+        )
+    if hasattr(extension, "dict_cat2names_extension"):
+        warnings.warn(
+            "dict_cat2names_extension is deprecated and ignored. Use "
+            "perf_model_extension for modeled ops or op_category_extension for "
+            "category-only ops."
+        )
 
 
 def trunc_kernel_details(row, kernel_detail_col, trunc_length=64):
@@ -248,21 +421,25 @@ def generate_perf_report_pytorch(
     topk_short_kernels: Optional[int] = None,  # include all below thresh by default
     topk_ops: Optional[int] = None,
     topk_roofline_ops: Optional[int] = None,
+    comparison_json_path: Optional[str] = None,
     extension_file: Optional[str] = None,
-    # for gemm simulator / Origami (Origami requires --enable_origami when using gpu_arch_json_path)
+    # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
     python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
+    gpu_arch_platform: Optional[str] = None,
+    gpu_arch: Optional[dict] = None,
+    inductor_cache_dir: Optional[str] = None,
     group_by_num_kernels: bool = False,
     enable_origami: bool = False,
     # activation recompute detection
     detect_recompute: bool = False,
     include_call_stack: bool = False,
 ) -> Dict[str, pd.DataFrame]:
-    if gpu_arch_json_path:
-        with open(gpu_arch_json_path, "r") as f:
-            gpu_arch_json = json.load(f)
-    else:
-        gpu_arch_json = None
+    gpu_arch_json = resolve_gpu_arch(
+        gpu_arch_json_path=gpu_arch_json_path,
+        gpu_arch_platform=gpu_arch_platform,
+        gpu_arch=gpu_arch,
+    )
     add_python_func = True if include_call_stack else False
     perf_analyzer = TreePerfAnalyzer.from_file(
         profile_filepath=profile_json_path,
@@ -273,6 +450,7 @@ def generate_perf_report_pytorch(
         add_python_func=add_python_func,
         detect_recompute=detect_recompute,
         enable_origami=enable_origami,
+        inductor_cache_dir=inductor_cache_dir,
     )
 
     ## Apply annotation for vLLM eager and replay phase
@@ -305,6 +483,7 @@ def generate_perf_report_pytorch(
     df_kernel_launchers_summary = pd.DataFrame()
     df_kernel_launchers_summary_by_category = pd.DataFrame()
     df_kernel_launchers_unique_args = pd.DataFrame()
+    df_kernel_launchers_unique_args_overlapping_kernels = pd.DataFrame()
     perf_metrics_dfs = {}
     df_hist = pd.DataFrame()
     df_short_kernels = pd.DataFrame()
@@ -363,16 +542,19 @@ def generate_perf_report_pytorch(
             )
         # Dictionary to hold the op-specific DataFrames
         perf_metrics_dfs = {}
+        sheet_category_to_op_names = build_sheet_category_to_op_names(
+            perf_analyzer.op_to_perf_model_class_map
+        )
 
-        for op_cat, op_names in perf_analyzer.dict_cat2names.items():
-            # Filter events belonging to the current category
+        for sheet_category, op_names in sheet_category_to_op_names.items():
+            # Filter events belonging to the current legacy sheet category
             op_events = [
                 event
                 for event in perf_analyzer.tree.events
                 if event["name"] in op_names
             ]
 
-            if op_cat in [
+            if sheet_category in [
                 "GEMM",
                 "UnaryElementwise",
                 "BinaryElementwise",
@@ -393,7 +575,7 @@ def generate_perf_report_pytorch(
                     new_col_name="trunc_kernel_details",
                 )
                 if not df_ops.empty:
-                    perf_metrics_dfs[op_cat] = df_ops
+                    perf_metrics_dfs[sheet_category] = df_ops
                 if include_overlap_info:
                     df_ops_overlapping_kernels = (
                         perf_analyzer.summarize_df_perf_metrics(
@@ -414,7 +596,7 @@ def generate_perf_report_pytorch(
                         new_col_name="trunc_overlapping_kernels_details",
                     )
                     if not df_ops_overlapping_kernels.empty:
-                        perf_metrics_dfs[f"{op_cat}_kl_overlap"] = (
+                        perf_metrics_dfs[f"{sheet_category}_kl_overlap"] = (
                             df_ops_overlapping_kernels
                         )
             else:
@@ -482,9 +664,9 @@ def generate_perf_report_pytorch(
                     ]
                     df_ops_bwd = df_ops_bwd[~df_ops_bwd["name"].isin(fwd_op_names)]
                 if not df_ops_fwd.empty:
-                    perf_metrics_dfs[f"{op_cat}_fwd"] = df_ops_fwd
+                    perf_metrics_dfs[f"{sheet_category}_fwd"] = df_ops_fwd
                 if not df_ops_bwd.empty:
-                    perf_metrics_dfs[f"{op_cat}_bwd"] = df_ops_bwd
+                    perf_metrics_dfs[f"{sheet_category}_bwd"] = df_ops_bwd
 
                 if include_overlap_info:
                     df_ops_fwd_overlapping_kernels = (
@@ -561,11 +743,11 @@ def generate_perf_report_pytorch(
                             ~df_ops_bwd_overlapping_kernels["name"].isin(fwd_op_names)
                         ]
                     if not df_ops_fwd_overlapping_kernels.empty:
-                        perf_metrics_dfs[f"{op_cat}_fwd_kl_overlap"] = (
+                        perf_metrics_dfs[f"{sheet_category}_fwd_kl_overlap"] = (
                             df_ops_fwd_overlapping_kernels
                         )
                     if not df_ops_bwd_overlapping_kernels.empty:
-                        perf_metrics_dfs[f"{op_cat}_bwd_kl_overlap"] = (
+                        perf_metrics_dfs[f"{sheet_category}_bwd_kl_overlap"] = (
                             df_ops_bwd_overlapping_kernels
                         )
 
@@ -580,6 +762,7 @@ def generate_perf_report_pytorch(
 
     # Build dict_name2df - only include sheets that have data
     dict_name2df = {"gpu_timeline": df_gpu_timeline}
+    df_unified_perf: pd.DataFrame = pd.DataFrame()
 
     # Add CPU-dependent sheets only if not GPU-only
     if not perf_analyzer.gpu_only:
@@ -601,6 +784,24 @@ def generate_perf_report_pytorch(
 
         # Add unified perf metrics table (ops with perf models + leaf ops with GPU kernels)
         df_unified_perf = perf_analyzer.build_df_unified_perf_table()
+
+        # Run TraceDiff when a comparison trace is provided. diff_stats_df is generated
+        _tracediff_diff_stats: Optional[pd.DataFrame] = None
+        if comparison_json_path and not df_unified_perf.empty:
+            perf_analyzer2 = TreePerfAnalyzer.from_file(
+                profile_filepath=comparison_json_path,
+                python_path=perf_analyzer.python_path,
+                include_unlinked_kernels=perf_analyzer.include_unlinked_kernels,
+                enable_pseudo_ops=enable_pseudo_ops,
+                add_python_func=perf_analyzer.add_python_func,
+            )
+            perf_analyzer2.tree.apply_annotation(
+                name_filters=["vllm::unified_attention_with_output"]
+            )
+            td = TraceDiff(perf_analyzer.tree, perf_analyzer2.tree)
+            td.generate_tracediff_report()
+            _tracediff_diff_stats = td.diff_stats_df
+
         if not df_unified_perf.empty:
             df_unified_perf_summary = perf_analyzer.summarize_df_unified_perf_table(
                 df_unified_perf,
@@ -616,26 +817,48 @@ def generate_perf_report_pytorch(
                     source_col="kernel_details_summary",
                     new_col_name="trunc_kernel_details",
                 )
-                if "call_stack" in df_unified_perf_summary.columns:
-                    df_callstacks = df_unified_perf_summary[
-                        ["name", "op category", "call_stack"]
-                    ].copy()
-                    df_callstacks.insert(0, "row_id", range(len(df_callstacks)))
-                    dict_name2df["unified_perf_callstacks"] = df_callstacks
-
-                    n_frames = 4  # op name + 3 parent frames
-                    cs_col = df_unified_perf_summary.columns.get_loc("call_stack")
+                if "call_stack_full" in df_unified_perf_summary.columns:
+                    cs_col = df_unified_perf_summary.columns.get_loc("call_stack_full")
+                    ep_results = df_unified_perf_summary.apply(
+                        lambda row: _find_entry_point(
+                            row["call_stack_full"], row["name"]
+                        ),
+                        axis=1,
+                    )
                     df_unified_perf_summary.insert(
                         cs_col,
-                        "trunc_call_stack",
-                        df_unified_perf_summary["call_stack"].apply(
-                            lambda s: " => ".join(str(s).split(" => ")[:n_frames])
-                        ),
+                        "entry_point",
+                        ep_results.apply(lambda x: x["entry_point"]),
                     )
-                    df_unified_perf_summary = df_unified_perf_summary.drop(
-                        columns=["call_stack"]
-                    )
+                    if os.environ.get("TRACELENS_DEBUG"):
+                        df_unified_perf_summary.insert(
+                            cs_col + 1,
+                            "num_wrappers",
+                            ep_results.apply(lambda x: x["num_wrappers"]),
+                        )
+                        df_unified_perf_summary.insert(
+                            cs_col + 2,
+                            "traversal",
+                            ep_results.apply(lambda x: x["traversal"]),
+                        )
+                        df_unified_perf_summary.insert(
+                            cs_col + 3,
+                            "wrappers",
+                            ep_results.apply(lambda x: x["wrappers"]),
+                        )
                 dict_name2df["unified_perf_summary"] = df_unified_perf_summary
+
+            if _tracediff_diff_stats is not None and not _tracediff_diff_stats.empty:
+                from TraceLens.Reporting.tracediff_comparison_extension import (
+                    enrich_perf_report_dict_inplace,
+                )
+
+                dict_name2df = enrich_perf_report_dict_inplace(
+                    dict_name2df,
+                    _tracediff_diff_stats,
+                    df_unified_perf=df_unified_perf,
+                )
+                dict_name2df["diff_stats"] = _tracediff_diff_stats
 
             if include_overlap_info:
                 df_unified_perf_summary_overlapping_kernels = (
@@ -674,7 +897,7 @@ def generate_perf_report_pytorch(
     if kernel_summary:
         try:
             df_kernels = perf_analyzer.get_df_kernels(launcher_detail=True)
-        except Exception as e:
+        except Exception:
             df_kernels = pd.DataFrame()
         if not df_kernels.empty and "Kernel duration (µs)" in df_kernels.columns:
             # Fallback: If Parent cpu_op is missing, fill it from Launcher (for display purposes)
@@ -803,10 +1026,8 @@ def generate_perf_report_pytorch(
         if output_xlsx_path is None:
             base_path = profile_json_path.rsplit(".json", 1)[0]
             output_xlsx_path = base_path + "_perf_report.xlsx"
-        try:
-            import openpyxl
-        except (ImportError, ModuleNotFoundError) as e:
-            print(f"Error importing openpyxl: {e}")
+        if importlib.util.find_spec("openpyxl") is None:
+            print("Error importing openpyxl")
             request_install("openpyxl")
 
         with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
@@ -911,6 +1132,17 @@ def main():
     )
 
     parser.add_argument(
+        "--comparison_json_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to a second trace to compare against the primary trace. "
+            "Runs TraceDiff and adds speedup, delta, and LCA columns to "
+            "unified_perf_summary, plus a diff_stats sheet."
+        ),
+    )
+
+    parser.add_argument(
         "--extension_file",
         type=str,
         default=None,
@@ -923,12 +1155,7 @@ def main():
         default=None,
         help="Path to the python executable for gemm simulator",
     )
-    parser.add_argument(
-        "--gpu_arch_json_path",
-        type=str,
-        default=None,
-        help="Path to the GPU architecture JSON file",
-    )
+    add_gpu_arch_cli_args(parser)
     parser.add_argument(
         "--group_by_num_kernels",
         action="store_true",
@@ -940,6 +1167,13 @@ def main():
         action="store_true",
         default=False,
         help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+    )
+    parser.add_argument(
+        "--inductor_cache_dir",
+        type=str,
+        default=None,
+        help="Path to the TorchInductor cache directory for Triton kernel metadata (V1 fallback). "
+        "Defaults to $TORCHINDUCTOR_CACHE_DIR, ~/.cache/torchinductor, or /tmp/torchinductor_<user>.",
     )
     parser.add_argument(
         "--include_overlap_info",
@@ -968,7 +1202,7 @@ def main():
         "--include_call_stack",
         action="store_true",
         default=False,
-        help="Add trunc_call_stack to unified_perf_summary and write unified_perf_callstacks with full call stacks.",
+        help="Add call_stack_trimmed and call_stack_full columns to unified_perf_summary.",
     )
 
     args = parser.parse_args()
@@ -989,14 +1223,20 @@ def main():
         topk_short_kernels=args.topk_short_kernels,
         topk_ops=args.topk_ops,
         topk_roofline_ops=args.topk_roofline_ops,
+        comparison_json_path=args.comparison_json_path,
         extension_file=args.extension_file,
         python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
+        gpu_arch_platform=args.gpu_arch_platform,
         group_by_num_kernels=args.group_by_num_kernels,
         enable_origami=args.enable_origami,
         detect_recompute=args.detect_recompute,
+        inductor_cache_dir=args.inductor_cache_dir,
         include_call_stack=args.include_call_stack,
     )
+
+
+__all__ = [name for name in globals() if not name.startswith("_")]
 
 
 if __name__ == "__main__":

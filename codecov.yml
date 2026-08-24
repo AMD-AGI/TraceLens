@@ -1,0 +1,52 @@
+###############################################################################
+# Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+# Codecov configuration for TraceLens.
+# Unit CI excludes @pytest.mark.gpu tests; GPU-only paths use the gpu flag with
+# carryforward from optional GPU runners.
+coverage:
+  status:
+    project:
+      default:
+        target: 95%
+        threshold: 1%
+        base: auto
+        informational: false
+        flags:
+          - unit
+    patch:
+      default:
+        target: 95%
+        threshold: 1%
+        informational: false
+        flags:
+          - unit
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+  require_base: true
+  require_head: true
+  hide_project_coverage: false
+  show_carryforward_flags: true
+
+github_checks:
+  annotations: true
+
+flags:
+  unit:
+    paths:
+      - TraceLens/
+    carryforward: false
+  gpu:
+    paths:
+      - TraceLens/EventReplay/
+      - TraceLens/PerfModel/benchmarking/
+    carryforward: true
+
+fixes:
+  - "/__w/TraceLens/TraceLens/::"

@@ -4,19 +4,43 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import subprocess
+from datetime import datetime
 from setuptools import setup, find_packages
+
+_BASE_VERSION = "0.1.0"
+
+
+def _wheel_version():
+    """Produce TraceLens-<date>+<commithash> wheel names (PEP 440)."""
+    try:
+        short_sha = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
+        date_stamp = datetime.now().strftime("%Y%m%d")
+        return f"{_BASE_VERSION}.dev{date_stamp}+g{short_sha}"
+    except (OSError, subprocess.CalledProcessError):
+        return _BASE_VERSION
+
+
+with open("README.md", encoding="utf-8") as _readme:
+    _LONG_DESCRIPTION = _readme.read()
 
 setup(
     name="TraceLens",
-    version="0.1.0",
+    version=_wheel_version(),
     packages=find_packages(where="."),  # Will pick up 'TraceLens' automatically
     package_dir={"": "."},
     include_package_data=True,
     package_data={
         "TraceLens": [
             "**/*.md",
-            "Agent/**/.cursor/skills/*",
-            "Agent/**/.cursor/agents/*",
+            "Agent/**/skills/**/*",
             "Agent/Analysis/utils/arch/*.json",
         ],
     },
@@ -30,6 +54,7 @@ setup(
         "msal",
         "tabulate",
         "orjson",
+        "PyYAML",
         "matplotlib",
         "xprof==2.20.1",  # Last version with HLO sidecar generation; supports JAX 0.8+ (with benign INT_MAX warnings)
         "protobuf>=6.31.1,<7.0.0",  # Required by xprof's grpcio-status dependency
@@ -37,14 +62,16 @@ setup(
         # 'tensorflow',
     ],
     extras_require={
-        # To install slodels, use a custom index:
-        # pip install "slodels[openai,anthropic,google-genai]"
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
         ],
+        "dev": [
+            "pytest",
+            "black==26.3.1",
+        ],
     },
-    description="A library for Automating analysis from PyTorch trace files",
-    long_description=open("README.md").read(),
+    description="A library for automating the analysis of ML model performance traces",
+    long_description=_LONG_DESCRIPTION,
     long_description_content_type="text/markdown",
     url="https://github.com/AMD-AGI/TraceLens",
     classifiers=[
@@ -64,6 +91,7 @@ setup(
             "TraceLens_generate_perf_report_pftrace_hip_api = TraceLens.Reporting.generate_perf_report_pftrace_hip_api:main",
             "TraceLens_generate_perf_report_pftrace_hip_activity = TraceLens.Reporting.generate_perf_report_pftrace_hip_activity:main",
             "TraceLens_generate_perf_report_pftrace_memory_copy = TraceLens.Reporting.generate_perf_report_pftrace_memory_copy:main",
+            "TraceLens_generate_perf_report_genesis = TraceLens.Reporting.generate_perf_report_genesis:main",
             "TraceLens_split_inference_trace = TraceLens.TraceUtils.split_inference_trace_annotation:main",
         ],
     },

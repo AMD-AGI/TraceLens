@@ -15,25 +15,15 @@ information (optimized execution paths), producing a complete execution
 model suitable for performance analysis.
 """
 
-import sys
-import time
-from collections import OrderedDict
+from collections import OrderedDict, deque, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
-import re
 import warnings
 import TraceLens
 
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
-
-EXECUTE_CONTEXT_PATTERNS = (
-    re.compile(
-        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
-    ),
-    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
-)
 
 
 def get_subtree_events(tree, event, cat_filter=None, name_filter=None):
@@ -58,37 +48,227 @@ def get_subtree_events(tree, event, cat_filter=None, name_filter=None):
     return list_events, list_filtered_events
 
 
+def _capture_kernel_name(event):
+    return event.get("args", {}).get("kernel", event["name"])
+
+
+def _align_capture_to_graph(capture_events, graph_events):
+    """
+    Robust greedy alignment of capture dispatch events to graph kernel
+    events in case of minor mismatch due to profiler error.
+
+    For each graph kernel, scan forward through capture_events until a
+    dispatch whose args.kernel matches is found, skipping any unmatched
+    dispatches along the way.  Unmatched capture events at the tail are
+    discarded.  Returns the aligned capture list (same length as
+    graph_events), or None if any graph kernel cannot be matched.
+    """
+
+    aligned = []
+    ci = 0
+    for g_event in graph_events:
+        g_name = g_event["name"]
+        matched = False
+        while ci < len(capture_events):
+            c_event = capture_events[ci]
+            ci += 1
+            c_name = _capture_kernel_name(c_event)
+            # Memcpy/Memset events carry no kernel arg — match when both sides agree
+            if ("Memcpy" in c_event["name"] and "Memcpy" in g_name) or (
+                "Memset" in c_event["name"]
+                and ("Memset" in g_name or "fillBuffer" in g_name)
+            ):
+                aligned.append(c_event)
+                matched = True
+                break
+            if c_name == g_name:
+                aligned.append(c_event)
+                matched = True
+                break
+        if not matched:
+            return None
+    return aligned
+
+
+def _align_graph_to_capture_by_group(capture_events, graph_events):
+    """
+    Align capture dispatch events to graph kernel events by grouping on kernel
+    name and matching positionally within each group.
+    Returns the graph_events reordered to match capture_events order, or None
+    if any kernel name has a count mismatch between capture and graph.
+    """
+    capture_groups = defaultdict(list)
+    for e in capture_events:
+        capture_groups[_capture_kernel_name(e)].append(e)
+
+    graph_groups = defaultdict(list)
+    for e in graph_events:
+        graph_groups[e["name"]].append(e)
+
+    # Verify per-name counts match
+    all_names = set(capture_groups) | set(graph_groups)
+    for name in all_names:
+        if len(capture_groups[name]) != len(graph_groups[name]):
+            print(
+                "Group alignment: count mismatch for kernel '{}': "
+                "capture={} graph={}".format(
+                    name, len(capture_groups[name]), len(graph_groups[name])
+                )
+            )
+            return None
+
+    # Reassemble graph events in capture order using per-group position
+    group_idx = defaultdict(int)
+    aligned = []
+    for c_event in capture_events:
+        name = _capture_kernel_name(c_event)
+        idx = group_idx[name]
+        aligned.append(graph_groups[name][idx])
+        group_idx[name] += 1
+
+    return aligned
+
+
+def _stream_of(event):
+    """Return the CUDA stream id a graph kernel executed on, or None."""
+    return event.get("args", {}).get("stream")
+
+
+def _names_match(c_event, g_name):
+    """Pair a capture dispatch to a graph kernel by name (Memcpy/Memset carry no kernel arg)."""
+    if ("Memcpy" in c_event["name"] and "Memcpy" in g_name) or (
+        "Memset" in c_event["name"] and ("Memset" in g_name or "fillBuffer" in g_name)
+    ):
+        return True
+    return _capture_kernel_name(c_event) == g_name
+
+
+def is_multistream(graph_filtered_events):
+    """True when the graph root's kernels span more than one CUDA stream."""
+    streams = set()
+    for e in graph_filtered_events:
+        streams.add(_stream_of(e))
+        if len(streams) > 1:
+            return True
+    return False
+
+
+def capture_has_kernel_names(capture_filtered_events):
+    """False if any non-Memcpy/Memset capture dispatch lacks args.kernel."""
+    for e in capture_filtered_events:
+        if "Memcpy" in e["name"] or "Memset" in e["name"]:
+            continue
+        if "kernel" not in e.get("args", {}):
+            return False
+    return True
+
+
+def _best_stream_by_run(candidates, stream_queues, capture_events, ci):
+    """Tie-break: pick the stream matching the longest forward run of capture dispatches from ci."""
+    best_stream = candidates[0]
+    best_run = -1
+    for s in candidates:
+        q = stream_queues[s]
+        run = 0
+        while (
+            run < len(q)
+            and ci + run < len(capture_events)
+            and _names_match(capture_events[ci + run], q[run]["name"])
+        ):
+            run += 1
+        if run > best_run:
+            best_run = run
+            best_stream = s
+    return best_stream
+
+
+def align_streams(graph_filtered_events, capture_filtered_events):
+    """Pair capture dispatches (CPU program order) to graph kernels (GPU order across
+    streams) via per-stream FIFO queues. Returns capture reordered into graph order, or
+    None if any graph kernel is unmatched."""
+    stream_queues = OrderedDict()
+    for g_event in graph_filtered_events:
+        stream_queues.setdefault(_stream_of(g_event), deque()).append(g_event)
+
+    mapping = {}
+    for ci, c_event in enumerate(capture_filtered_events):
+        candidates = [
+            s
+            for s, q in stream_queues.items()
+            if q and _names_match(c_event, q[0]["name"])
+        ]
+        if not candidates:
+            continue
+        if len(candidates) > 1:
+            chosen = _best_stream_by_run(
+                candidates, stream_queues, capture_filtered_events, ci
+            )
+        else:
+            chosen = candidates[0]
+        g_event = stream_queues[chosen].popleft()
+        mapping[id(g_event)] = c_event
+
+    if any(id(g) not in mapping for g in graph_filtered_events):
+        return None
+    return [mapping[id(g)] for g in graph_filtered_events]
+
+
 def verify_subtree_events(capture_events, graph_events):
+    """
+    Verify that capture dispatch events align 1-to-1 with graph kernel events.
+
+    Alignment is attempted in three stages:
+      1. Direct positional match — succeeds when both sequences are already
+         in the same order (return code 1).
+      2. Greedy forward-scan by name — handles count mismatches by discarding
+         extra capture dispatches (return code 2).
+      3. Group-by-name positional match — handles cases graph replay events
+         and capture events are in different order (return code 3).
+
+    Returns:
+        (success, aligned_capture_events, aligned_graph_events) where success
+        is 1, 2, or 3 on success and 0 on failure.
+    """
     if len(capture_events) != len(graph_events):
         print(
             "Mismatch in number of events: Capture {}, Graph {}".format(
                 len(capture_events), len(graph_events)
             )
         )
-        return 0
-    else:
-        # print("=========matching ========")
-        for j, i in zip(capture_events, graph_events):
-            if "kernel" not in j.get("args", {}).keys():
-                if "Memcpy" in j["name"] or "Memset" in j["name"]:
-                    continue
-                warnings.warn(
-                    "Kernel name missing in capture event args, "
-                    "alignment has not been verified",
-                    stacklevel=2,
+        aligned = _align_capture_to_graph(capture_events, graph_events)
+        if aligned is not None:
+            print(
+                "Greedy alignment succeeded: matched {} capture events to {} graph kernels "
+                "({} capture events discarded).".format(
+                    len(aligned),
+                    len(graph_events),
+                    len(capture_events) - len(aligned),
                 )
+            )
+            return 2, aligned, graph_events
+        return 0, capture_events, graph_events
+
+    for j, i in zip(capture_events, graph_events):
+        if "kernel" not in j.get("args", {}).keys():
+            if "Memcpy" in j["name"] or "Memset" in j["name"]:
                 continue
-            if i["name"] != j.get("args", {}).get("kernel", j["name"]):
-                print(
-                    "Mismatch in kernel name: {} vs {}".format(
-                        i["name"], j.get("args", {}).get("kernel", j["name"])
-                    )
-                )
-                return 0
-    # print(
-    #    "Subtree events match successfully with {} events".format(len(capture_events))
-    # )
-    return 1
+            warnings.warn(
+                "Kernel name missing in capture event args, "
+                "alignment has not been verified",
+                stacklevel=2,
+            )
+            continue
+        if i["name"] != _capture_kernel_name(j):
+            # Counts match but order differs
+            aligned_graph = _align_graph_to_capture_by_group(
+                capture_events, graph_events
+            )
+            if aligned_graph is not None:
+                print("Group-by-name alignment succeeded.")
+                return 3, capture_events, aligned_graph
+            return 0, capture_events, graph_events
+
+    return 1, capture_events, graph_events
 
 
 def update_subtree_uids_and_timestamps(
@@ -132,8 +312,7 @@ def update_subtree_uids_and_timestamps(
     # Update timestamps
     original_start_ts = subtree_events[0]["ts"]
     ts_offset = new_start_ts - original_start_ts
-    # for event in subtree_filtered_events:
-    #    event[UID]=uid_mapping[event[UID]]
+    # UID remapping handled when rebuilding the merged capture subtree.
     for event in subtree_events:
         event["ts"] += ts_offset
         event["ts"] = new_start_ts
@@ -247,7 +426,25 @@ _CAPTURE_TREE_CACHE_MAX_SIZE = 8
 _capture_tree_cache: OrderedDict = OrderedDict()
 
 
-def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
+def _load_trace_tree_from_file(
+    profile_filepath: str, add_python_func: bool = False
+) -> TraceToTree:
+    """Load a trace file into a built TraceToTree without TreePerfAnalyzer."""
+    from ..util import DataLoader
+
+    data = DataLoader.load_data(profile_filepath)
+    trace_metadata = {key: value for key, value in data.items() if key != "traceEvents"}
+    events = data["traceEvents"]
+    tree = TraceToTree(
+        events,
+        event_to_category=TraceToTree.default_categorizer,
+        trace_metadata=trace_metadata,
+    )
+    tree.build_tree(add_python_func=add_python_func)
+    return tree
+
+
+def _get_cached_capture_tree(key, filepath):
     """Load a capture tree, returning a cached copy when *key* has been seen.
 
     Uses LRU eviction with at most ``_CAPTURE_TREE_CACHE_MAX_SIZE`` entries.
@@ -262,12 +459,11 @@ def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
     """
     if key in _capture_tree_cache:
         _capture_tree_cache.move_to_end(key)
-        print("Cache hit for capture tree (key={})".format(key))
+        print("Cache hit for capture tree (key={})".format(key[0]))
         return _capture_tree_cache[key]
 
-    print("Loading capture trace: {} (key={})".format(filepath, key))
-    capture_perf_analyzer = TreePerfAnalyzer.from_file(filepath, add_python_func=True)
-    capture_tree = capture_perf_analyzer.tree
+    print("Loading capture trace: {} (key={})".format(filepath, key[0]))
+    capture_tree = _load_trace_tree_from_file(filepath, add_python_func=True)
     capture_roots = find_capture_roots(capture_tree)
 
     capture_root_data = []
@@ -284,7 +480,7 @@ def _get_cached_capture_tree(key, filepath, TreePerfAnalyzer):
     _capture_tree_cache[key] = (capture_tree, capture_roots, capture_root_data)
     if len(_capture_tree_cache) > _CAPTURE_TREE_CACHE_MAX_SIZE:
         evicted_key, _ = _capture_tree_cache.popitem(last=False)
-        print("Evicted capture tree cache entry (key={})".format(evicted_key))
+        print("Evicted capture tree cache entry (key={})".format(evicted_key[0]))
 
     return capture_tree, capture_roots, capture_root_data
 
@@ -339,15 +535,13 @@ def find_capture_roots(capture_tree):
 
 
 def find_execution_roots(graph_tree):
-    """Find execution root events matching ``execute_context_*`` in the graph tree."""
-    roots = [
-        event
-        for event in graph_tree.events
-        if any(p.match(event.get("name", "")) for p in EXECUTE_CONTEXT_PATTERNS)
-        and event.get("cat") == "user_annotation"
-    ]
-    roots.sort(key=lambda x: x.get("ts", 0))
-    return roots
+    """Find iteration-annotation root events (vLLM / SGLang / ATOM) in the graph tree.
+
+    Primary (detailed) patterns are tried first, and native (backup) patterns are used only when no primary root is found.
+    """
+    from ..TraceUtils.annotation_utils import find_iteration_roots_by_priority
+
+    return find_iteration_roots_by_priority(graph_tree.events)
 
 
 def find_graph_roots_under_execution(execution_root, graphlaunch_events):
@@ -406,7 +600,6 @@ def load_capture_folder(
         Dictionary keyed by ``"{batch_size}_{mode}"`` whose values are lists of
         ``(capture_tree, capture_roots)`` tuples.
     """
-    from ..TreePerf.tree_perf import TreePerfAnalyzer
 
     with open(metadata_json_path, "r") as f:
         metadata_list = json.load(f)
@@ -452,49 +645,51 @@ def find_closest_batch_size(
     return min(candidates)
 
 
-def find_execution_details(execution_root):
+def find_execution_details(execution_root) -> Optional[str]:
+    """Effective batch size for the iteration annotation root.
+
+    Returns ``None`` when no integer batch size can be determined.
+    """
     name = execution_root["name"]
-    if name.startswith("execute_context_"):
-        paren_values = re.findall(r"\((\d+)\)", name)
-        return str(sum(int(v) for v in paren_values))
-    return name.split("_")[1]
+    from ..TraceUtils.annotation_utils import IterationAnnotation
+
+    ann = IterationAnnotation(name)
+    if ann.matched and ann.batch_size is not None:
+        return str(ann.batch_size)
+    parts = name.split("_")
+    if len(parts) > 1 and parts[1].lstrip("-").isdigit():
+        return parts[1]
+    return None
 
 
 def merge_capture_trace_into_graph(
-    capture_folder: str,
-    metadata_json_path: str,
-    graph_tree_filepath: str,
+    capture_folder: str = None,
+    metadata_json_path: str = None,
+    graph_tree_filepath: str = None,
 ) -> "TraceToTree":
-    """
-    Merge capture trace information into a graph replay trace.
-
-    Extracts matching subtrees from capture and graph trees, validates alignment,
-    remaps UIDs/timestamps, and integrates capture events into the graph tree.
-    The result is a single augmented TraceToTree that combines both traces,
-    suitable for standard performance analysis APIs.
+    """Merge capture trace information into a graph replay trace.
 
     Args:
-        capture_tree: TraceToTree from actual/capture execution
-        graph_tree: TraceToTree from graph/replay execution
-        add_python_func: If True, include python function events in tree structure (default: False)
+        capture_folder: Directory containing capture trace files.
+        metadata_json_path: Path to ``execution_details.json`` metadata
+            index.
+        graph_tree_filepath: Path to the graph-replay timing trace.
 
     Returns:
-        Augmented graph_tree with capture information merged in
+        Augmented graph_tree with capture information merged in, or ``None``
+        if the merge failed.
     """
-    # Lazy import to avoid circular dependency
-    from ..TreePerf.tree_perf import TreePerfAnalyzer
-
-    graph_perf_analyzer = TreePerfAnalyzer.from_file(
-        graph_tree_filepath, add_python_func=True
-    )
-
-    graph_tree = graph_perf_analyzer.tree
+    graph_tree = _load_trace_tree_from_file(graph_tree_filepath, add_python_func=True)
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
-    ##Use cuda graph APIs to find the root node for capture subtrees
+
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
+
     capture_map, capture_batch_sizes = load_capture_folder(
         capture_folder, metadata_json_path
     )
+
+    # ── Per-execution-root merge loop ──
+    merge_failed = False
     for execution_root, graph_roots in execution_graph_root_map:
         print("Processing execution root: {}".format(execution_root["name"]))
         if len(graph_roots) == 0:
@@ -504,7 +699,16 @@ def merge_capture_trace_into_graph(
                 )
             )
             continue
+
+        # ── Resolve capture tree + roots for this execution root ──
         batch_size = find_execution_details(execution_root)
+        if batch_size is None:
+            print(
+                "Warning: could not determine batch size for execution root {}".format(
+                    execution_root["name"]
+                )
+            )
+            continue
         closest_batch_size = find_closest_batch_size(
             int(batch_size), capture_batch_sizes
         )
@@ -515,25 +719,54 @@ def merge_capture_trace_into_graph(
                 )
             )
             continue
-        num_graph_roots = len(graph_roots)
-        if num_graph_roots != 1:
-            mode = "PIECEWISE"
+        # Look up the capture trace by batch_size.  The mode (FULL vs
+        # PIECEWISE) is already determined in execution_details.json from
+        # the capture trace's StreamBeginCapture count.  Try both modes
+        # and use whichever is available; when both exist, prefer the one
+        # matching the graph launch count.
+        full_key = "{}_FULL".format(closest_batch_size)
+        piece_key = "{}_PIECEWISE".format(closest_batch_size)
+        if full_key in capture_map and piece_key in capture_map:
+            str_key = piece_key if len(graph_roots) != 1 else full_key
+        elif full_key in capture_map:
+            str_key = full_key
+        elif piece_key in capture_map:
+            str_key = piece_key
         else:
-            mode = "FULL"
-        key = "{}_{}".format(closest_batch_size, mode)
-        filepath = capture_map[key]
+            print(
+                "Warning: no capture trace for batch size {}".format(closest_batch_size)
+            )
+            continue
+        filepath = capture_map[str_key]
+        key = (str_key, os.path.abspath(filepath))
         capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
-            key, filepath, TreePerfAnalyzer
+            key, filepath
         )
+
+        # Build (capture_root, graph_root) pairs. When there is a single
+        # capture root , map it to every graph root.
+        # Otherwise pair 1:1 positionally.
+        if len(capture_roots) == 1:
+            pairs = [(capture_roots[0], g) for g in graph_roots]
+            data = [capture_root_data[0]] * len(graph_roots)
+        else:
+            if len(capture_roots) == len(graph_roots):
+                pairs = list(zip(capture_roots, graph_roots))
+                data = capture_root_data
+            else:
+                print(
+                    "Warning: number of capture roots ({}) does not match number of graph roots ({}), merging may be incorrect".format(
+                        len(capture_roots), len(graph_roots)
+                    )
+                )
+                continue
 
         print(
             "Found {} capture roots and {} graph roots".format(
                 len(capture_roots), len(graph_roots)
             )
         )
-        for (c_root, g_root), (cached_events, filtered_uids) in zip(
-            zip(capture_roots, graph_roots), capture_root_data
-        ):
+        for (c_root, g_root), (cached_events, filtered_uids) in zip(pairs, data):
             # Shallow-copy each event dict: every mutation downstream replaces
             # top-level keys (UID, ts, dur, parent, children) or adds new ones
             # (gpu_events). No nested structure is ever mutated in-place, so a
@@ -548,17 +781,47 @@ def merge_capture_trace_into_graph(
                 graph_tree, g_root, cat_filter=["kernel", "gpu_memset", "gpu_memcpy"]
             )
 
-            verify_success = verify_subtree_events(
-                capture_filtered_events, graph_filtered_events
-            )
-
-            if verify_success == 0:
+            if len(graph_filtered_events) == 0:
                 print(
-                    "Warning: subtree events verification failed for capture root {} and graph root {}".format(
-                        c_root["name"], g_root["name"]
+                    "Warning: no kernel events in graph root {}; skipping merge".format(
+                        g_root["name"]
                     )
                 )
                 continue
+
+            if is_multistream(graph_filtered_events):
+                if not capture_has_kernel_names(capture_filtered_events):
+                    print(
+                        "Graph capture merge failed: multistream graph root {} but "
+                        "capture kernel names are absent".format(g_root["name"])
+                    )
+                    merge_failed = True
+                    continue
+                aligned = align_streams(graph_filtered_events, capture_filtered_events)
+                if aligned is None:
+                    print(
+                        "Warning: multistream alignment failed for capture root {} and graph root {}".format(
+                            c_root["name"], g_root["name"]
+                        )
+                    )
+                    continue
+                capture_filtered_events = aligned
+            else:
+                (
+                    verify_success,
+                    capture_filtered_events,
+                    graph_filtered_events,
+                ) = verify_subtree_events(
+                    capture_filtered_events, graph_filtered_events
+                )
+
+                if verify_success == 0:
+                    print(
+                        "Warning: subtree events verification failed for capture root {} and graph root {}".format(
+                            c_root["name"], g_root["name"]
+                        )
+                    )
+                    continue
 
             start_uid = graph_tree.events[-1][UID] + 1
             capture_events, _, cpu_root_nodes = update_subtree_uids_and_timestamps(
@@ -580,5 +843,10 @@ def merge_capture_trace_into_graph(
             graph_tree = make_connections(
                 graph_tree, graph_filtered_events, capture_filtered_events
             )
+    if merge_failed:
+        print(
+            "Graph capture merge failed; returning None (report will be unaugmented)."
+        )
+        return None
     finalize_non_gpu_paths(graph_tree)
     return graph_tree

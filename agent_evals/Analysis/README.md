@@ -15,6 +15,8 @@ The framework uses a hybrid approach:
 
 All eval results use a 7-column CSV schema: `index, category, issue_summary, result, details, root_cause, recommended_fix`. See [EVAL_RUBRICS.md](EVAL_RUBRICS.md) for the full rubric reference.
 
+LLM and post-processing **agent skills** ship under `agent_evals/Analysis/skills/<skill-name>/` (`SKILL.md` + `reference.md`). Cursor’s default skill discovery uses `.cursor/skills/` at the workspace root — symlink or copy those folders if you need automatic attachment.
+
 ## Prerequisites / Setup
 
 ### 1. Clone TraceLens
@@ -49,11 +51,11 @@ curl https://cursor.com/install -fsS | bash
 ```
 Verify with `agent --version`
 
-### 4. Set Model to Claude Opus 4.7
+### 4. Set Model to Claude Opus 4.8 (Thinking, Medium)
 
-The `agent` invocations in this repo require model `claude-opus-4-7-high`. The eval shell scripts under `eval_scripts/` pass `--model claude-opus-4-7-high` explicitly so they work regardless of your CLI default, but for ad-hoc `agent` runs it is convenient to set the same default in `~/.cursor/cli-config.json` (or via the Cursor IDE model picker).
+The `agent` invocations in this repo use model `claude-opus-4-8-thinking-medium`. The eval shell scripts under `eval_scripts/` pass `--model claude-opus-4-8-thinking-medium` explicitly so they work regardless of your CLI default, but for ad-hoc `agent` runs it is convenient to set the same default in `~/.cursor/cli-config.json` (or via the Cursor IDE model picker).
 
-The orchestrator and all 13 sub-agents currently inherit `claude-opus-4-7-high` (declared in each agent file's front matter under `TraceLens/Agent/Analysis/.cursor/agents/`).
+The eval scripts pass `--model claude-opus-4-8-thinking-medium` to the top-level orchestrator agent. The 13 sub-agents still declare `claude-opus-4-7-high` in their own front matter under ``TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/``; update those separately if you want the sub-agents on the same model.
 
 ## Running Scripts
 
@@ -61,7 +63,7 @@ All scripts run **on the node** from the repo root. They use `docker exec` to ru
 
 ### Repeatability Study
 
-Dispatches all `(test_case, repeat)` jobs concurrently with a configurable concurrency limit. After all jobs finish, the harness automatically invokes a Cursor agent to aggregate results and generate reports (see [Post-Processing Skill](#post-processing-skill)). For a single-pass eval, set `NUM_REPEATS=1`.
+Dispatches all `(test_case, repeat)` jobs concurrently with a configurable concurrency limit. After all jobs finish, the harness automatically invokes a Cursor agent to aggregate results and generate reports (see [Post-Processing Skill](#post-processing-skill)). `NUM_REPEATS=3` is the recommended setting (good stability signal at lower cost than the default 5); for a single-pass eval, set `NUM_REPEATS=1`.
 
 ```bash
 CONTAINER=my_container bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh
@@ -82,12 +84,12 @@ Environment variables:
 | `TEST_IDS` | (empty = all) | Space-separated trace IDs to run (filter) |
 | `SKIP_POST_PROCESSING` | (empty) | Set to `1` to skip report generation after the eval loop |
 
-Example (subset of traces, 3 repeats, 2 parallel):
+Example (subset of traces, 3 repeats, 5 parallel):
 
 ```bash
 CONTAINER=my_container \
 TEST_IDS="qwen1.5_mi300 06_llama3_2_mi300" \
-NUM_REPEATS=3 MAX_PARALLEL=2 \
+NUM_REPEATS=3 MAX_PARALLEL=5 \
     bash agent_evals/Analysis/eval_scripts/run_repeatability_parallel.sh
 ```
 
@@ -122,15 +124,15 @@ You can run each stage independently using the `agent` CLI. Examples:
 
 ```bash
 cd TraceLens/Agent/Analysis
-agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <trace_path> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
+agent --model claude-opus-4-8-thinking-medium --print --force --trust \
+    "Follow the analysis orchestrator installed with the TraceLens pip package (look under raceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on <trace_path> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
 ```
 
 **Workflow Eval:**
 
 ```bash
 cd agent_evals/Analysis
-agent --model claude-opus-4-7-high --print --force --trust \
+agent --model claude-opus-4-8-thinking-medium --print --force --trust \
     "Run the workflow eval skill on <output_dir> for test case <id>. Write results to <results_path>"
 ```
 
@@ -138,13 +140,13 @@ agent --model claude-opus-4-7-high --print --force --trust \
 
 ```bash
 cd agent_evals/Analysis
-agent --model claude-opus-4-7-high --print --force --trust \
+agent --model claude-opus-4-8-thinking-medium --print --force --trust \
     "Run the quality eval skill on <output_dir> with reference <reference_dir> for test case <id>. Write results to <results_path>"
 ```
 
 ## Post-Processing Skill
 
-After the repeatability harness finishes, a Cursor agent is automatically invoked to aggregate results and generate reports. This is defined in `.cursor/skills/eval-post-processing.md`.
+After the repeatability harness finishes, a Cursor agent is automatically invoked to aggregate results and generate reports. The skill lives under `agent_evals/Analysis/skills/eval-post-processing/` (`SKILL.md` + `reference.md`).
 
 The skill performs four steps:
 
@@ -159,7 +161,7 @@ You can re-run the post-processing skill on any previous results without re-runn
 
 ```bash
 cd agent_evals/Analysis
-agent --model claude-opus-4-7-high --print --force --trust \
+agent --model claude-opus-4-8-thinking-medium --print --force --trust \
     "Run eval post processing on results_root=<results_root> suite=<suite> test_traces_csv=<csv_path> report_dir=<report_dir> container=<container>"
 ```
 
@@ -167,7 +169,7 @@ Example:
 
 ```bash
 cd agent_evals/Analysis
-agent --model claude-opus-4-7-high --print --force --trust \
+agent --model claude-opus-4-8-thinking-medium --print --force --trust \
     "Run eval post processing on results_root=agent_evals/Analysis/eval_reports/my_run/results/repeatability_results suite=eval test_traces_csv=agent_evals/Analysis/analysis_tests/combined_traces.csv report_dir=agent_evals/Analysis/eval_reports/my_run/reports container=modular_evals"
 ```
 
@@ -220,7 +222,7 @@ For each test case in the traces CSV, the scripts run two phases:
 
 ### Eval Skills
 
-Three Cursor agent skills in `.cursor/skills/` define the eval and pipeline logic:
+Three Cursor agent skills under `agent_evals/Analysis/skills/` define the eval and pipeline logic:
 
 **eval-post-processing** -- Aggregates repeatability results, classifies failures using `report_section_rules.yaml`, and generates PR + fix-ticket reports with reproducer packages. Invoked automatically by `run_repeatability_parallel.sh` or manually on existing results.
 
@@ -237,7 +239,7 @@ The remaining two skills define the per-case eval logic:
 | 12 | LLM | Hardware Reference in Appendix — platform, HBM BW, MAF values. Multi-dimensional weighted scoring: correctness (50%) + completeness (50%), pass threshold ≥ 7.0 |
 | 13 | Scripted | Model identification in Appendix — all 4 `model_info.json` fields present. Per-field sub-indices (`_model`, `_architecture`, `_scale`, `_precision`) |
 
-Scripted evals (1–11, 13–14) run via `eval_utils/workflow_scripted_evals.py`. LLM eval (12) runs via `.cursor/skills/workflow-llm-eval.md`.
+Scripted evals (1–11, 13–14) run via `eval_utils/workflow_scripted_evals.py`. LLM eval (12) runs via `skills/workflow-llm-eval/` (`SKILL.md` + `reference.md`).
 
 All scripted evals include **pre-check gates** that immediately FAIL all evals with a clear message if the output directory is missing, `analysis.md` is absent/garbled, or other fundamental prerequisites are unmet.
 
@@ -249,7 +251,7 @@ All scripted evals include **pre-check gates** that immediately FAIL all evals w
 | 2 | LLM | Compute Issue Title Alignment — semantic comparison of P-item titles against reference. Multi-dimensional scoring: correctness (40%) + completeness (30%) + precision (30%), pass threshold ≥ 7.0 |
 | 3 | LLM | Compute Issue Content Alignment — performance numbers, shapes, efficiency, gains against reference. Same 3-dimension scoring as eval 2 |
 
-LLM evals (2–3) run via `.cursor/skills/quality-llm-eval.md`. System-level P-items are skipped (no Impact field to compare).
+LLM evals (2–3) run via `skills/quality-llm-eval/` (`SKILL.md` + `reference.md`). System-level P-items are skipped (no Impact field to compare).
 
 ## Results
 

@@ -28,11 +28,17 @@ forward + ``jax.value_and_grad``, BS3HD, causal mask, dropout 0.1).
 
 import os
 
+import pytest
+
 from TraceLens.TreePerf.jax_analyses import JaxAnalyses
 from TraceLens.util import DataLoader, TraceEventUtils
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURE_DIR = os.path.join(HERE, "test_data_jax_te_fused_attn_categorization")
+
+# xprof writes SSTABLE cache files next to the trace; parallel xdist workers
+# loading the same .xplane.pb must not race on that path.
+pytestmark = pytest.mark.xdist_group("jax_traces")
 
 
 def _trace_path():
@@ -42,7 +48,8 @@ def _trace_path():
     raise FileNotFoundError(f"no xplane.pb under {FIXTURE_DIR}")
 
 
-def _bucket_compute_events():
+@pytest.fixture(scope="module")
+def bucket_compute_events():
     data = DataLoader.load_data(filename_path=_trace_path(), save_preprocessed=False)
     events = data["traceEvents"]
     # GPU-stream compute events: pid/tid within JaxAnalyses stream bounds.
@@ -60,10 +67,10 @@ def _bucket_compute_events():
     return cat, uncat, compute
 
 
-def test_te_fused_attn_ffi_events_land_in_te():
+def test_te_fused_attn_ffi_events_land_in_te(bucket_compute_events):
     """`te_fused_attn_{forward,backward}_ffi` events should match TEKeys
     via their event name (not via metadata fallback)."""
-    cat, uncat, _ = _bucket_compute_events()
+    cat, uncat, _ = bucket_compute_events
     # Both directions of TE FFI host events.
     leaked = [n for n in uncat if n.startswith("te_fused_attn_")]
     assert leaked == [], (
@@ -73,10 +80,10 @@ def test_te_fused_attn_ffi_events_land_in_te():
     assert "TE" in cat, "expected TE bucket to be populated"
 
 
-def test_fillbuffer_aligned_routed_to_te_via_metadata():
+def test_fillbuffer_aligned_routed_to_te_via_metadata(bucket_compute_events):
     """`__amd_rocclr_fillBufferAligned.kd` events sit inside TE custom
     calls and must be routed to TE via the args["hlo_op"] fallback."""
-    _, uncat, compute = _bucket_compute_events()
+    _, uncat, compute = bucket_compute_events
     assert "__amd_rocclr_fillBufferAligned.kd" not in uncat, (
         "fillBufferAligned still uncategorized after #422 fix; "
         "expected metadata-aware fallback to route via args['hlo_op']"

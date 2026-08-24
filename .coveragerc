@@ -1,0 +1,26 @@
+[run]
+relative_files = true
+source = TraceLens
+omit =
+    TraceLens/EventReplay/*
+    TraceLens/PerfModel/benchmarking/*
+    TraceLens/PerfModel/origami_helper.py
+    TraceLens/PerfModel/run_perf_model.py
+
+[paths]
+source =
+    TraceLens/
+    */TraceLens/
+    /__w/TraceLens/TraceLens/TraceLens/
+
+[report]
+show_missing = true
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    if __name__ == .__main__.:
+    raise NotImplementedError
+    if TYPE_CHECKING:
+
+[xml]
+output = coverage.xml

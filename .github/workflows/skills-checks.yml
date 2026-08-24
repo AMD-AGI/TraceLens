@@ -1,0 +1,27 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+# Reuse the amd/skills lychee gate on federated TraceLens skills so link rot is
+# caught in this repo before the catalog nightly run.
+# See: https://github.com/amd/skills/blob/main/docs/federating-your-repo.md#catch-failures-before-nightly
+
+name: skills-checks
+
+on:
+  pull_request:
+    paths:
+      - "TraceLens/Agent/Analysis/skills/analysis-orchestrator/**"
+      - ".github/workflows/skills-checks.yml"
+  workflow_dispatch:
+
+jobs:
+  analysis-orchestrator-external-references:
+    uses: amd/skills/.github/workflows/external-reference-check.yml@main
+    with:
+      markdown_glob: "./TraceLens/Agent/Analysis/skills/analysis-orchestrator/**/*.md"
+    permissions:
+      contents: read
+      issues: write

@@ -1,15 +1,15 @@
 diff --git a/vllm/config/profiler.py b/vllm/config/profiler.py
-index 76cc546f3..74a021f10 100644
+index 76cc546..d4c019d 100644
 --- a/vllm/config/profiler.py
 +++ b/vllm/config/profiler.py
 @@ -53,6 +53,17 @@ class ProfilerConfig:
      """If `True`, enables memory profiling in the torch profiler.
      Disabled by default."""
  
-+    capture_torch_profiler_dir: str = ""
-+    """Directory to save profiler traces captured during CUDA graph capture.
-+    If set and non-empty, a torch profiler will be enabled during graph capture
-+    on rank 0. Must be an absolute path."""
++    capture_torch_profiler: bool = False
++    """If `True`, enables a torch profiler during CUDA graph capture on rank 0.
++    Traces are saved to a `capture_traces` subdirectory under `torch_profiler_dir`.
++    Requires `profiler` to be set to 'torch'."""
 +
 +    detailed_trace_annotation: bool = False
 +    """If `True`, uses detailed annotations with roofline metrics (sk, sqsq,
@@ -20,29 +20,19 @@ index 76cc546f3..74a021f10 100644
      ignore_frontend: bool = False
      """If `True`, disables the front-end profiling of AsyncLLM when using the 
      'torch' profiler. This is needed to reduce overhead when using delay/limit options,
-@@ -196,4 +207,20 @@ class ProfilerConfig:
+@@ -196,4 +207,10 @@ class ProfilerConfig:
                      os.path.expanduser(profiler_dir)
                  )
  
-+        capture_dir = self.capture_torch_profiler_dir
-+        if capture_dir and self.profiler != "torch":
++        if self.capture_torch_profiler and self.profiler != "torch":
 +            raise ValueError(
-+                "capture_torch_profiler_dir is only applicable when profiler is set to 'torch'"
++                "capture_torch_profiler is only applicable when profiler is "
++                "set to 'torch'"
 +            )
-+        if capture_dir:
-+            is_capture_gs_path = (
-+                capture_dir.startswith("gs://")
-+                and capture_dir[5:]
-+                and capture_dir[5] != "/"
-+            )
-+            if not is_capture_gs_path:
-+                self.capture_torch_profiler_dir = os.path.abspath(
-+                    os.path.expanduser(capture_dir)
-+                )
 +
          return self
 diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
-index 525ad5db4..bb182e02e 100644
+index 525ad5d..742a1e9 100644
 --- a/vllm/v1/worker/gpu_model_runner.py
 +++ b/vllm/v1/worker/gpu_model_runner.py
 @@ -7,7 +7,7 @@ import itertools
@@ -62,10 +52,10 @@ index 525ad5db4..bb182e02e 100644
 +        # Setup torch profiler for graph capture traces (conditional)
 +        from vllm.distributed.parallel_state import get_world_group
 +        local_rank = get_world_group().local_rank
-+        enable_profiler = (local_rank == 0) and self.vllm_config.profiler_config.capture_torch_profiler_dir
++        enable_profiler = (local_rank == 0) and self.vllm_config.profiler_config.capture_torch_profiler
 +
 +        if enable_profiler:
-+            trace_dir = self.vllm_config.profiler_config.capture_torch_profiler_dir
++            trace_dir = self.vllm_config.profiler_config.torch_profiler_dir + "/capture_traces"
 +            profiler = torch.profiler.profile(
 +                activities=[
 +                    torch.profiler.ProfilerActivity.CPU,
@@ -145,7 +135,7 @@ index 525ad5db4..bb182e02e 100644
  
      def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
-index 562664524..d92867007 100644
+index 5626645..d928670 100644
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
 @@ -556,19 +556,87 @@ class Worker(WorkerBase):
