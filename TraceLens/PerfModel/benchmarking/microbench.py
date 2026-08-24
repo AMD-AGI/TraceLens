@@ -64,32 +64,48 @@ except Exception:  # pragma: no cover
     triton = None
     tl = None
 
-try:
-    from .fp4fp6_helpers import (
-        MX_BLOCK,
-        bench_int8_ck_gemm,
-        bench_mxfp4_ck_gemm,
-        bench_mxfp4_gemm,
-        bench_mxfp6_gemm,
-        mx_available,
-    )
-except Exception:  # pragma: no cover
-    MX_BLOCK = 32
+MX_BLOCK = 32
+_FP4FP6_HELPERS = None
 
-    def mx_available() -> bool:
-        return False
 
-    def bench_mxfp4_gemm(*_a, **_k):
-        return 0.0
+def _load_fp4fp6_helpers():
+    """Import fp4fp6_helpers on demand (Triton JIT can abort on older gfx)."""
+    global _FP4FP6_HELPERS
+    if _FP4FP6_HELPERS is not None:
+        return _FP4FP6_HELPERS
 
-    def bench_mxfp4_ck_gemm(*_a, **_k):
-        return 0.0
+    try:
+        from . import fp4fp6_helpers as helpers
+    except Exception as exc:  # pragma: no cover
+        logger.debug("fp4fp6_helpers unavailable: %s", exc)
 
-    def bench_mxfp6_gemm(*_a, **_k):
-        return 0.0
+        class _Stub:
+            MX_BLOCK = 32
 
-    def bench_int8_ck_gemm(*_a, **_k):
-        return 0.0
+            @staticmethod
+            def mx_available() -> bool:
+                return False
+
+            @staticmethod
+            def bench_mxfp4_gemm(*_a, **_k):
+                return 0.0
+
+            @staticmethod
+            def bench_mxfp4_ck_gemm(*_a, **_k):
+                return 0.0
+
+            @staticmethod
+            def bench_mxfp6_gemm(*_a, **_k):
+                return 0.0
+
+            @staticmethod
+            def bench_int8_ck_gemm(*_a, **_k):
+                return 0.0
+
+        helpers = _Stub()
+
+    _FP4FP6_HELPERS = helpers
+    return helpers
 
 
 WARMUP = 30
@@ -338,14 +354,17 @@ def _bench_mx_matrix_peak(
     device: int,
     shapes: List[Tuple[int, int, int]],
 ) -> float:
-    print(f"\n  [{label}]  (Triton MX block-scaled GEMM; K divisible by {MX_BLOCK})")
-    if not mx_available():
+    fp = _load_fp4fp6_helpers()
+    print(
+        f"\n  [{label}]  (Triton MX block-scaled GEMM; K divisible by {fp.MX_BLOCK})"
+    )
+    if not fp.mx_available():
         print("    Not measured (Triton unavailable).")
         return 0.0
     best = 0.0
     measured = False
     for M, N, K in shapes:
-        if K % MX_BLOCK != 0 or ("mxfp4" in label and K % 2 != 0):
+        if K % fp.MX_BLOCK != 0 or ("mxfp4" in label and K % 2 != 0):
             print(f"    ({M:>5},{N:>5},{K:>5}) → skipped (K alignment)")
             continue
         try:
@@ -366,6 +385,7 @@ def _bench_mx_matrix_peak(
 
 def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
     """Benchmark matrix (tensor core) TFLOPS across dtypes."""
+    fp = _load_fp4fp6_helpers()
     results = {}
 
     dtype_map = {
@@ -399,10 +419,16 @@ def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
     print(f"    Best: {best:.1f}")
 
     triton_mxfp4 = _bench_mx_matrix_peak(
-        "matrix_fp4 (triton dot_scaled)", bench_mxfp4_gemm, device, GEMM_SHAPES
+        "matrix_fp4 (triton dot_scaled)",
+        fp.bench_mxfp4_gemm,
+        device,
+        GEMM_SHAPES,
     )
     ck_mxfp4 = _bench_mx_matrix_peak(
-        "matrix_fp4 (aiter CK gemm_a4w4)", bench_mxfp4_ck_gemm, device, GEMM_SHAPES
+        "matrix_fp4 (aiter CK gemm_a4w4)",
+        fp.bench_mxfp4_ck_gemm,
+        device,
+        GEMM_SHAPES,
     )
     results["matrix_fp4"] = round(max(triton_mxfp4, ck_mxfp4), 1)
     results["matrix_fp4_triton"] = triton_mxfp4
@@ -425,7 +451,7 @@ def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
     elif _mxfp6_kind == "native":
         mxfp6_label = f"matrix_fp6 (triton dot_scaled, native {_mxfp6_dt})"
     results["matrix_fp6"] = _bench_mx_matrix_peak(
-        mxfp6_label, bench_mxfp6_gemm, device, GEMM_SHAPES
+        mxfp6_label, fp.bench_mxfp6_gemm, device, GEMM_SHAPES
     )
 
     # INT8: torch._int_mm + aiter CK gemm_a8w8; take max.
@@ -441,7 +467,7 @@ def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
     print("\n  [matrix_int8]  (aiter CK gemm_a8w8 → bf16 out)")
     ck_results = []
     for M, N, K in GEMM_SHAPES:
-        tflops = bench_int8_ck_gemm(
+        tflops = fp.bench_int8_ck_gemm(
             M, N, K, device, warmup=WARMUP, rep=REP, do_bench_fn=do_bench
         )
         print(f"    ({M:>5},{N:>5},{K:>5}) → {tflops:8.1f} TFLOPS")
@@ -802,18 +828,20 @@ def _sweep_gemm_at_shape(
 
     try:
         torch.cuda.empty_cache()
+        fp = _load_fp4fp6_helpers()
         tflops_torch = bench_gemm_int8(M, N, K, device)
-        tflops_ck = bench_int8_ck_gemm(
+        tflops_ck = fp.bench_int8_ck_gemm(
             M, N, K, device, warmup=WARMUP, rep=REP, do_bench_fn=do_bench
         )
         rows.append(row("matrix_int8", max(tflops_torch, tflops_ck)))
     except RuntimeError as e:
         rows.append(row("matrix_int8", 0.0, "oom" if _is_oom(e) else str(e)))
 
-    if mx_available() and K % MX_BLOCK == 0 and K % 2 == 0:
+    fp = _load_fp4fp6_helpers()
+    if fp.mx_available() and K % fp.MX_BLOCK == 0 and K % 2 == 0:
         for label, fn in (
-            ("matrix_fp4", bench_mxfp4_gemm),
-            ("matrix_fp6", bench_mxfp6_gemm),
+            ("matrix_fp4", fp.bench_mxfp4_gemm),
+            ("matrix_fp6", fp.bench_mxfp6_gemm),
         ):
             try:
                 torch.cuda.empty_cache()
