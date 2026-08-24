@@ -13,8 +13,16 @@ from .core import (
     scan_traces,
     search_index,
 )
+from .models import SearchHit, TraceRecord, TraceReport
+from .sqlite_store import SQLiteTraceIndexStore
+from .store import TraceIndexStore
 
 __all__ = [
+    "TraceIndexStore",
+    "SQLiteTraceIndexStore",
+    "SearchHit",
+    "TraceRecord",
+    "TraceReport",
     "execute_read_query",
     "generate_report_and_import",
     "import_report_dir",

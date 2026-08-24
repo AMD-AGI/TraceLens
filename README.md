@@ -31,7 +31,7 @@ TraceLens is a Python library for **automated performance analysis of training a
 
 **TraceLens Agent**: Receive a prioritized human-readable optimization report, derived through an agentic workflow, covering compute kernels, system bottlenecks, and kernel fusion opportunities with root-cause reasoning and concrete resolutions.
 
-**Trace corpus indexing**: Build a searchable SQLite catalog of TraceLens reports so you can find traces by op, category, or kernel name without reopening every raw file.
+**Trace corpus indexing**: Build a searchable SQLite catalog of TraceLens reports so you can find traces by op, category, or kernel name without reopening every raw file. Scanner and importer sit behind a storage interface; SQLite is the first backend.
 
 ---
 

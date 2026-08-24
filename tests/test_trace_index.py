@@ -15,6 +15,9 @@ from TraceLens.TraceIndex.core import (
     scan_traces,
     search_index,
 )
+from TraceLens.TraceIndex.importer import import_report_dir as import_report_dir_with_store
+from TraceLens.TraceIndex.scanner import scan_traces as scan_traces_with_store
+from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
 
 
 def write_csv(path, rows):
@@ -99,3 +102,39 @@ def test_trace_index_rejects_write_sql(tmp_path):
     db_path = tmp_path / "trace_index.sqlite"
     with pytest.raises(ValueError):
         execute_read_query(db_path, "DELETE FROM traces")
+
+
+def test_trace_index_store_boundary_supports_scan_import_and_search(tmp_path):
+    db_path = tmp_path / "trace_index.sqlite"
+    trace_root = tmp_path / "traces"
+    trace_path = trace_root / "rank0_trace.json"
+    trace_path.parent.mkdir(parents=True)
+    trace_path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
+
+    report_dir = tmp_path / "reports" / "trace_1"
+    write_csv(
+        report_dir / "unified_perf_summary.csv",
+        [
+            {
+                "name": "aten::scaled_dot_product_attention",
+                "op category": "SDPA_fwd",
+                "operation_count": "1",
+                "Kernel Time (us)_sum": "10.0",
+            }
+        ],
+    )
+
+    store = SQLiteTraceIndexStore(db_path)
+    try:
+        assert scan_traces_with_store(store, trace_root) == 1
+        trace_id = import_report_dir_with_store(
+            store,
+            report_dir,
+            trace_path=trace_path,
+            root=trace_root,
+        )
+        assert trace_id == 1
+        hits = store.search("scaled", limit=10)
+        assert hits[0].kind == "op"
+    finally:
+        store.close()

@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Read-only HTTP query server for TraceIndex SQLite databases."""
+"""Read-only HTTP query server for the SQLite TraceIndex backend."""
 
 import json
 import sqlite3
@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, List, Type
 from urllib.parse import parse_qs, urlparse
 
-from TraceLens.TraceIndex.core import is_read_only_sql
+from TraceLens.TraceIndex.sqlite_store import is_read_only_sql
 
 
 def json_bytes(payload: object) -> bytes:
