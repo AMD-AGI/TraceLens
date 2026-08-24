@@ -56,7 +56,7 @@ TraceLens requires the following software:
 |-----------|-------------|-------|
 | Python | 3.6 or later (3.10 recommended) | `python_requires>=3.6`; the 3.10 toolchain is used for documentation and CI builds. |
 | Operating system | N/A | TraceLens analysis and report generation are pure Python and run on any OS. Capturing ROCm-based traces requires a Linux ROCm environment; TraceLens only reads those traces afterward. |
-| TraceLens package | 0.1.0 | Installed from [github.com/AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens). |
+| TraceLens package | 1.0.0 | Installed from [github.com/AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens). |
 
 ### Python dependencies
 
