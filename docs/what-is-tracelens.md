@@ -34,51 +34,67 @@ The TraceLens source code is hosted at
 
 TraceLens provides these capabilities:
 
-- **Hierarchical performance breakdowns** — Pinpoint bottlenecks with a
+- **Hierarchical performance breakdowns:** Pinpoint bottlenecks with a
   top-down view, moving from the overall GPU timeline (idle/busy) to operator
   categories, individual operators, and right down to unique argument shapes.
-- **Compute and roofline modeling** — Translate raw timings into efficiency
+- **Compute and roofline modeling:** Translate raw timings into efficiency
   metrics such as TFLOP/s and TB/s. Determine whether an operation is compute-
   or memory-bound and see how effectively your code uses the hardware.
-- **Multi-GPU communication analysis** — Diagnose scaling issues by dissecting
+- **Multi-GPU communication analysis:** Diagnose scaling issues by dissecting
   collective operations. TraceLens separates pure communication time from
   synchronization skew and calculates effective bandwidth on your real
   workload.
-- **Trace comparison** — Quantify the impact of changes with trace diffing at
+- **Trace comparison:** Quantify the impact of changes with trace diffing at
   the CPU-dispatch level, enabling meaningful side-by-side comparisons across
   hardware and software versions.
-- **Event replay** — Isolate any operation for focused debugging. TraceLens
+- **Event replay:** Isolate any operation for focused debugging. TraceLens
   generates minimal, self-contained replay scripts from trace metadata, making
   it straightforward to share IP-safe reproducers with kernel developers.
-- **Extensible SDK** — Start with ready-to-use scripts, then build custom
+- **Extensible SDK:** Start with ready-to-use scripts, then build custom
   workflows with a flexible Python API.
+- **Agentic analysis:** Turn a raw trace into a prioritized, human-readable
+  optimization report with the TraceLens Agent. The agent ranks compute-kernel,
+  kernel-fusion, and system-level bottlenecks, each backed by root-cause
+  reasoning and a concrete resolution.
 
 ## Use cases
 
 TraceLens is suited to these scenarios:
 
-- **Performance debugging** — Find the operators and kernels responsible for low
+- **Performance debugging:** Find the operators and kernels responsible for low
   GPU utilization in a training or inference workload.
-- **Roofline efficiency analysis** — Measure how close each operator runs to the
+- **Roofline efficiency analysis:** Measure how close each operator runs to the
   hardware's compute and memory-bandwidth limits on a given accelerator.
-- **Distributed scaling analysis** — Quantify exposed communication and
+- **Distributed scaling analysis:** Quantify exposed communication and
   synchronization skew across ranks in multi-GPU and multi-node runs.
-- **Regression testing** — Compare a baseline trace against a candidate to
+- **Regression testing:** Compare a baseline trace against a candidate to
   quantify the effect of a code, library, or hardware change.
-- **Reproducer generation** — Extract a single operator into a standalone replay
+- **Reproducer generation:** Extract a single operator into a standalone replay
   script to share with kernel or framework developers.
+- **Autonomous bottleneck triage:** Hand a trace to the TraceLens Agent and get
+  back a ranked action list of the highest-impact optimizations, ready for
+  review or for feeding into automated performance-tuning platforms.
 
 ## Supported profile formats
 
-TraceLens supports these trace formats:
+TraceLens supports the following trace formats:
 
 | Format | Source tool | Report CLI |
 |--------|-------------|------------|
 | PyTorch | `torch.profiler` | `TraceLens_generate_perf_report_pytorch` |
 | PyTorch (inference) | `torch.profiler` | `TraceLens_generate_perf_report_pytorch_inference` |
 | JAX | XPlane protobuf | `TraceLens_generate_perf_report_jax` |
-| rocprofv3 JSON | AMD ROCm rocprofiler-sdk | `TraceLens_generate_perf_report_rocprof` |
+| rocprofv3 JSON | AMD ROCm ROCprofiler-SDK | `TraceLens_generate_perf_report_rocprof` |
 | rocprofv3 pftrace (Perfetto-style) | `rocprofv3 --output-format pftrace` | `TraceLens_generate_perf_report_pftrace_hip_activity`, `..._pftrace_hip_api`, `..._pftrace_memory_copy` |
+
+```{note}
+TraceLens analyzes trace files and does not execute GPU kernels, so report
+generation runs on any host with a supported Python version: no GPU or ROCm
+installation is required. The PyTorch report is well tested on traces across platforms. GPU hardware is only needed by the profiling tools that capture the traces. Roofline bound classification additionally requires an architecture specification; bundled specs cover AMD
+Instinct accelerators, and custom JSON specs can be supplied for other
+hardware. See the [compatibility matrix](./reference/compatibility.md) for
+details.
+```
 
 ## Example notebooks
 
@@ -96,9 +112,3 @@ Hands-on notebooks in the repository walk through the core features:
 | [`examples/roofline_plots_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/roofline_plots_example.ipynb) | Roofline-style visualizations for specific operators |
 | [`examples/jax_nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/jax_nccl_analyser_example.ipynb) | Bandwidth analysis for JAX collectives from XPlane traces |
 
-## Related topics
-
-- [Install TraceLens](./install/installation.md)
-- [API reference](./reference/api-reference.md)
-- [Compatibility matrix](./reference/compatibility.md)
-- [Release notes](./about/release-notes.md)

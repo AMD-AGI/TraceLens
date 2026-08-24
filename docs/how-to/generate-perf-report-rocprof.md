@@ -7,22 +7,22 @@ See LICENSE for license information.
 
 # Generate a rocprof performance report
 ```{meta}
-:description: Learn how to build a performance report from AMD ROCm rocprofiler-sdk traces (rocprofv3 JSON and Perfetto pftrace) using TraceLens.
-:keywords: TraceLens, rocprofv3, rocprofiler-sdk, ROCm, pftrace, Perfetto, GPU trace, kernel summary, performance report, AMD Instinct, HIP
+:description: Learn how to build a performance report from AMD ROCm ROCprofiler-SDK traces (rocprofv3 JSON and Perfetto pftrace) using TraceLens.
+:keywords: TraceLens, rocprofv3, ROCprofiler-SDK, ROCm, pftrace, Perfetto, GPU trace, kernel summary, performance report, AMD Instinct, HIP
 ```
 
-Build a performance report from AMD ROCm rocprofiler-sdk traces. TraceLens
+Build a performance report from AMD ROCm ROCprofiler-SDK traces. TraceLens
 supports both `rocprofv3` JSON results and Perfetto-style `.pftrace` files.
 
-## Prerequisites
+## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
-- A `rocprofv3` trace — either a `*_results.json` file or a `.pftrace` file.
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
+- A `rocprofv3` trace: either a `*_results.json` file or a `.pftrace` file.
 
 ## rocprofv3 JSON
 
 Generate a report from a rocprofv3 `*_results.json` trace captured with the AMD
-ROCm rocprofiler-sdk:
+ROCm ROCprofiler-SDK:
 
 ```bash
 TraceLens_generate_perf_report_rocprof \
@@ -61,7 +61,7 @@ compare as follows:
 
 | Feature | rocprofv3 | PyTorch profiler |
 |---------|-----------|------------------|
-| Format | rocprofiler-sdk JSON | Chrome Trace Event |
+| Format | ROCprofiler-SDK JSON | Chrome Trace Event |
 | Kernel names | Direct from ROCm | Via PyTorch ops |
 | Grid/block dims | Available | Available |
 | CPU operations | Limited | Full trace |
@@ -70,11 +70,11 @@ compare as follows:
 
 **Troubleshooting**:
 
-- `"Not a valid rocprofv3 file"` — ensure the input is a `*_results.json` file
+- `"Not a valid rocprofv3 file":` ensure the input is a `*_results.json` file
   from rocprofv3, not another format.
-- `"No kernel events found"` — the trace captured no GPU activity; check that the GPU
+- `"No kernel events found":` the trace captured no GPU activity; check that the GPU
   work ran during profiling and that rocprofv3 recorded kernel dispatches.
-- `openpyxl not installed` — install it for the Excel output (`pip install openpyxl`)
+- `openpyxl not installed:` install it for the Excel output (`pip install openpyxl`)
   or use `--output_csvs_dir` for CSV output instead.
 
 ## rocprofv3 pftrace
@@ -134,7 +134,7 @@ Each pftrace generator can also be imported and called with a trace path,
 returning a dictionary of pandas DataFrames (for example `api_kernel_summary`,
 `category_summary`, `kernel_summary`, `hip_summary`).
 
-## Next steps
+## Related topics
 
 - Quantify the effect of a change by [comparing two traces](./compare-traces.md).
 - Analyze multi-GPU collectives with a

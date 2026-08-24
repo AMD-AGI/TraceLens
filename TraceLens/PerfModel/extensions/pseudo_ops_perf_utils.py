@@ -8,6 +8,7 @@
 Utils. for perf. model pseudo-op extensions.
 """
 
+from .. import perf_model as _core_perf_model
 from . import (
     moe_perf_model_extensions,
     attention_perf_model_extensions,
@@ -148,6 +149,8 @@ def get_pseudo_op_mappings():
         "aiter::topk_softplus": perf_model_extensions.topk_softplus,
         ## Fused RMSNorm + per-group dynamic FP8 quant.
         "aiter::rmsnorm_quant": rmsnorm_perf_model_extensions.aiter_rmsnorm_quant,
+        ## AITER GroupNorm (same math as aten::group_norm, different event layout)
+        "aiter::_groupnorm_run": _core_perf_model.GroupNorm,
     }
 
     return pseudo_op_mappings

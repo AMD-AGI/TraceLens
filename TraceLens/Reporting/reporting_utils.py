@@ -9,12 +9,12 @@ import ast
 import json
 import logging
 import re
+import subprocess
+import sys
+from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 import pandas as pd
-from pathlib import Path
-import sys
-import subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -178,9 +178,8 @@ def _parse_pg_ranks(value: Union[str, List[int], tuple]) -> List[int]:
             parsed = ast.literal_eval(value)
             if isinstance(parsed, (list, tuple)):
                 return [int(x) for x in parsed]
-        except Exception:
-            pass
-        return [int(s) for s in re.findall(r"\d+", value)]
+        except (ValueError, SyntaxError):
+            return [int(s) for s in re.findall(r"\d+", value)]
     return []
 
 

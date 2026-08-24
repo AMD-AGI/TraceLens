@@ -74,24 +74,15 @@ def _check_amd_gpu_idle(
         mem_total_mib = _int_metric(vram.get("vram_total"))
         mem_pct = 100.0 * mem_used_mib / mem_total_mib if mem_total_mib > 0 else None
 
-        other_pids: list[int] = []
-        for proc in amdsmi.amdsmi_get_gpu_process_list(device):
-            if not isinstance(proc, dict):
-                continue
-            pid = proc.get("pid")
-            if pid is not None and int(pid) != os.getpid():
-                other_pids.append(int(pid))
-
         mem_busy = mem_pct is not None and mem_pct > mem_threshold_pct
         mem_str = (
             f"{mem_pct:.1f}% of {mem_total_mib}MiB"
             if mem_pct is not None
             else "total unknown"
         )
-        if util > util_threshold or mem_busy or other_pids:
+        if util > util_threshold or mem_busy:
             return False, (
-                f"amdsmi {dev_tag}: util={util}% mem={mem_used_mib}MiB "
-                f"({mem_str}) other_pids={other_pids}"
+                f"amdsmi {dev_tag}: util={util}% mem={mem_used_mib}MiB " f"({mem_str})"
             )
         return True, (
             f"amdsmi {dev_tag}: idle (util={util}% mem={mem_used_mib}MiB {mem_str})"
@@ -147,33 +138,16 @@ def check_gpu_idle(
             mem_pct = (
                 100.0 * mem_used_mib / mem_total_mib if mem_total_mib > 0 else None
             )
-            r2 = subprocess.run(
-                [
-                    "nvidia-smi",
-                    "--query-compute-apps=pid",
-                    "--format=csv,noheader",
-                    "-i",
-                    str(phys),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            other_pids = [
-                p.strip()
-                for p in (r2.stdout or "").splitlines()
-                if p.strip() and p.strip() != str(os.getpid())
-            ]
             mem_busy = mem_pct is not None and mem_pct > mem_threshold_pct
             mem_str = (
                 f"{mem_pct:.1f}% of {mem_total_mib}MiB"
                 if mem_pct is not None
                 else "total unknown"
             )
-            if util > util_threshold or mem_busy or other_pids:
+            if util > util_threshold or mem_busy:
                 return False, (
                     f"nvidia-smi {dev_tag}: util={util}% mem={mem_used_mib}MiB "
-                    f"({mem_str}) other_pids={other_pids}"
+                    f"({mem_str})"
                 )
             return True, (
                 f"nvidia-smi {dev_tag}: idle (util={util}% mem={mem_used_mib}MiB {mem_str})"

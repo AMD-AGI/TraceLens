@@ -21,11 +21,21 @@ Positional:
 
 Options:
   --sglang-version <ver>   SGLang version to patch (default: 0.5.9)
-                           - 0.5.9  / v059   : sglang_roofline_patches/sglang_0_5_9/
+                           - 0.5.9  / v059  : sglang_roofline_patches/sglang_0_5_9/
                            - 0.5.11 / v0511 : sglang_roofline_patches/sglang_0_5_11/
                            - 0.5.12 / v0512 : sglang_roofline_patches/sglang_0_5_12/
+                           - 0.5.13 / v0513 : sglang_roofline_patches/sglang_0_5_13/
+                           - 0.5.14 / v0514 : sglang_roofline_patches/sglang_0_5_14/
+                           - 0.5.15 / v0515 : sglang_roofline_patches/sglang_0_5_15/
+                           - 0.5.16 / v0516 : sglang_roofline_patches/sglang_0_5_16/
+                           - 0.5.17 / v0517 : sglang_roofline_patches/sglang_0_5_17/
   --gpu-type <type>        mi300 | mi350 | mi355 (default: mi350)
   --base-image <image>     Override the default base image
+  --patch-dir <name>       Patch directory under sglang_roofline_patches/
+                           instead of the one derived from --sglang-version.
+                           Use for bases that have drifted from a release tag,
+                           e.g. --patch-dir sglang_0_5_17_sgldev for the
+                           rocm/sgl-dev nightly.
   -h, --help               Show this help
 
 Legacy positional (still supported):
@@ -38,9 +48,27 @@ Base images:
   0.5.11 MI355X : lmsysorg/sglang:v0.5.11-rocm720-mi35x
   0.5.12 MI300X : lmsysorg/sglang:v0.5.12-rocm720-mi30x
   0.5.12 MI355X : lmsysorg/sglang:v0.5.12-rocm720-mi35x
+  0.5.13 MI300X : lmsysorg/sglang:v0.5.13-rocm720-mi30x
+  0.5.13 MI355X : lmsysorg/sglang:v0.5.13-rocm720-mi35x
+  0.5.14 MI300X : lmsysorg/sglang:v0.5.14-rocm720-mi30x
+  0.5.14 MI355X : lmsysorg/sglang:v0.5.14-rocm720-mi35x
+  0.5.15 MI300X : lmsysorg/sglang:v0.5.15-rocm720-mi30x
+  0.5.15 MI355X : lmsysorg/sglang:v0.5.15-rocm720-mi35x
+  0.5.16 MI300X : lmsysorg/sglang:v0.5.16-rocm720-mi30x
+  0.5.16 MI355X : lmsysorg/sglang:v0.5.16-rocm720-mi35x
+  0.5.17 MI300X : lmsysorg/sglang:v0.5.17-rocm720-mi30x
+  0.5.17 MI355X : lmsysorg/sglang:v0.5.17-rocm720-mi35x
+
+Note:
+  On SGLang 0.5.13 and 0.5.14 the kernel-shape wrapping is incompatible with the
+  EAGLE/MTP speculative *overlap* decode, so the speculative patches disable
+  capture profiling on the speculative graph runners (and, on 0.5.14, the
+  target-verify graph) to keep MTP fault-free. Non-MTP shape profiling is
+  unaffected. Full MTP shape profiling (capture + execution) works on 0.5.15+.
 
 Examples:
   $0 /path/to/TraceLens --sglang-version 0.5.11 --gpu-type mi300 -t tracelens-sglang:0.5.11-mi300
+  $0 /path/to/TraceLens --sglang-version 0.5.16 --gpu-type mi355 -t tracelens-sglang:0.5.16-mi355
   $0 /path/to/TraceLens mi350 -t tracelens-sglang:0.5.9-mi350
 EOF
     exit 1
@@ -49,6 +77,7 @@ EOF
 SGLANG_VERSION="0.5.9"
 GPU_TYPE="mi350"
 CUSTOM_BASE_IMAGE=""
+CUSTOM_PATCH_DIR=""
 TRACELENS_PATH=""
 DOCKER_ARGS=()
 
@@ -78,6 +107,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --base-image)
             CUSTOM_BASE_IMAGE="$2"
+            shift 2
+            ;;
+        --patch-dir)
+            CUSTOM_PATCH_DIR="$2"
             shift 2
             ;;
         -h|--help)
@@ -120,6 +153,21 @@ normalize_version() {
         0.5.12|v0512|0512|5.12)
             echo "0.5.12"
             ;;
+        0.5.13|v0513|0513|5.13)
+            echo "0.5.13"
+            ;;
+        0.5.14|v0514|0514|5.14)
+            echo "0.5.14"
+            ;;
+        0.5.15|v0515|0515|5.15)
+            echo "0.5.15"
+            ;;
+        0.5.16|v0516|0516|5.16)
+            echo "0.5.16"
+            ;;
+        0.5.17|v0517|0517|5.17)
+            echo "0.5.17"
+            ;;
         *)
             echo ""
             ;;
@@ -128,7 +176,7 @@ normalize_version() {
 
 SGLANG_VERSION="$(normalize_version "${SGLANG_VERSION}")"
 if [ -z "${SGLANG_VERSION}" ]; then
-    echo "Error: unsupported --sglang-version. Use 0.5.9, 0.5.11, or 0.5.12."
+    echo "Error: unsupported --sglang-version. Use 0.5.9, 0.5.11, 0.5.12, 0.5.13, 0.5.14, 0.5.15, 0.5.16, or 0.5.17."
     exit 1
 fi
 
@@ -154,6 +202,36 @@ resolve_base_image() {
         0.5.12:mi350|0.5.12:mi355)
             echo "lmsysorg/sglang:v0.5.12-rocm720-mi35x"
             ;;
+        0.5.13:mi300)
+            echo "lmsysorg/sglang:v0.5.13-rocm720-mi30x"
+            ;;
+        0.5.13:mi350|0.5.13:mi355)
+            echo "lmsysorg/sglang:v0.5.13-rocm720-mi35x"
+            ;;
+        0.5.14:mi300)
+            echo "lmsysorg/sglang:v0.5.14-rocm720-mi30x"
+            ;;
+        0.5.14:mi350|0.5.14:mi355)
+            echo "lmsysorg/sglang:v0.5.14-rocm720-mi35x"
+            ;;
+        0.5.15:mi300)
+            echo "lmsysorg/sglang:v0.5.15-rocm720-mi30x"
+            ;;
+        0.5.15:mi350|0.5.15:mi355)
+            echo "lmsysorg/sglang:v0.5.15-rocm720-mi35x"
+            ;;
+        0.5.16:mi300)
+            echo "lmsysorg/sglang:v0.5.16-rocm720-mi30x"
+            ;;
+        0.5.16:mi350|0.5.16:mi355)
+            echo "lmsysorg/sglang:v0.5.16-rocm720-mi35x"
+            ;;
+        0.5.17:mi300)
+            echo "lmsysorg/sglang:v0.5.17-rocm720-mi30x"
+            ;;
+        0.5.17:mi350|0.5.17:mi355)
+            echo "lmsysorg/sglang:v0.5.17-rocm720-mi35x"
+            ;;
         *)
             echo ""
             ;;
@@ -178,7 +256,7 @@ if [ -n "${CUSTOM_BASE_IMAGE}" ]; then
     BASE_IMAGE="${CUSTOM_BASE_IMAGE}"
 fi
 
-PATCH_DIR="sglang_$(echo "${SGLANG_VERSION}" | tr '.' '_')"
+PATCH_DIR="${CUSTOM_PATCH_DIR:-sglang_$(echo "${SGLANG_VERSION}" | tr '.' '_')}"
 PATCH_DIR_PATH="${PATCHES_ROOT}/${PATCH_DIR}"
 if [ ! -d "${PATCH_DIR_PATH}" ]; then
     echo "Error: patch directory not found: ${PATCH_DIR_PATH}"
@@ -207,7 +285,7 @@ RUN SGLANG_DIR=\$(pip show sglang | grep "Editable project location" | cut -d' '
             { echo "Failed to apply \$patch"; exit 1; }; \\
         fi \\
     done && \\
-    pip install --no-deps /tmp/TraceLens && \\
+    pip install --upgrade /tmp/TraceLens && \\
     rm -rf /tmp/TraceLens
 
 WORKDIR /workspace

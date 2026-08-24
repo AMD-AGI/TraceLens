@@ -8,96 +8,75 @@ See LICENSE for license information.
 # TraceLens release notes
 ```{meta}
 :description: Release notes for TraceLens. Learn what features and SDK modules are available in each version, and see links to the compatibility matrix.
-:keywords: TraceLens, release notes, changelog, ROCm, GPU trace analysis, PyTorch, JAX, rocprofv3, SDK, performance report
+:keywords: TraceLens, TraceLens 1.0.0, release notes, GPU trace analysis, performance models, TraceLens Agent, PyTorch, JAX, rocprofv3
 ```
 
 This topic summarizes the features available in each TraceLens release. For the
 hardware and software versions validated for a release, see the
 [Compatibility matrix](../reference/compatibility.md).
 
-## TraceLens 0.1.0 (initial release)
+## TraceLens 1.0.0
 
-The initial release establishes TraceLens as an end-to-end toolkit for
-automated GPU trace analysis, available as command-line tools and a Python SDK.
+The release expands performance-model coverage; extends profiling support to
+newer vLLM and SGLang versions along with xDiT diffusion and Genesis
+physics-simulation workloads; strengthens the TraceLens Analysis Agent with a
+portable skill layout and comparative graph-capture support; and overhauls
+TraceDiff's name disambiguation. It also adds production-grade unit-test coverage.
 
-### Report generation
+### Performance models
 
-- **PyTorch profiler reports** — `TraceLens_generate_perf_report_pytorch`
-  builds a multi-sheet Excel report from a `torch.profiler` Chrome trace,
-  including a GPU-timeline breakdown, operator-category and operator summaries,
-  a unique-argument table, roofline metrics, and an optional short-kernel study.
-  Compressed traces (`.zip`, `.gz`) are supported.
-- **PyTorch inference reports** — `TraceLens_generate_perf_report_pytorch_inference`
-  adds analysis for LLM-serving traces (vLLM/SGLang). It merges CUDA-graph
-  capture traces into graph-replay traces (`--capture_folder`) to recover
-  call-stack and shape information lost in graph mode, and uses per-step request
-  annotations (prefill/decode counts and token statistics) to drive
-  inference-specific roofline models for paged attention and fused MoE.
-- **JAX reports** — `TraceLens_generate_perf_report_jax` builds reports from JAX
-  XPlane protobuf traces, with optional kernel-metadata keyword filtering.
-- **rocprofv3 JSON reports** — `TraceLens_generate_perf_report_rocprof` builds
-  reports from rocprofv3 `*_results.json` traces, with kernel summaries,
-  automatic categorization (GEMM, attention, elementwise, and others),
-  short-kernel analysis, and optional grid/block detail.
-- **rocprofv3 pftrace reports** — for Perfetto-style traces produced with
-  `rocprofv3 --output-format pftrace`:
-  - `TraceLens_generate_perf_report_pftrace_hip_activity` — per-GPU category
-    summary plus kernel/HIP/XLA summaries (NSYS-style), with optional Markdown.
-  - `TraceLens_generate_perf_report_pftrace_hip_api` — HIP API ↔ kernel
-    correlation with the latency breakdown `T = A + Q + K`.
-  - `TraceLens_generate_perf_report_pftrace_memory_copy` — memory-copy counts
-    per `copy_bytes` with direction (h2d/d2h/d2d) and the GPUs involved.
+This release adds the following performance models and classifications:
 
-### Analysis features
+- **DeepSeek-V4 support:** Sparse paged-decode modes (sliding-window,
+  compressed, and hybrid) and a sparse-prefill model, plus the
+  manifold-constrained Hyper-Connection operator family.
+- **Additional operators:** New models for nearest-neighbor upsampling (1D/2D/3D)
+  and fused RMSNorm with quantization, efficient-attention classification, and an
+  FP8 MoE precision fix for FP8/BF16 inputs.
+- **Block-scaled GEMM detection:** Detection of block-scaled MXFP4/MXFP6 GEMM
+  paths for roofline modeling.
 
-- **Hierarchical GPU-timeline breakdown** — Splits GPU time into computation,
-  communication, memory copy, and idle time, with optional micro-idle
-  classification.
-- **Operator categorization** — Groups CPU operations that launch kernels into
-  categories for a portable, reproducible view.
-- **Unique-argument analysis** — Groups operations by name plus input shapes,
-  dtypes, strides, and concrete inputs to isolate problematic input patterns.
-- **Roofline modeling** — Computes arithmetic intensity (FLOPs/byte) and
-  classifies operations as compute- or memory-bound relative to a target
-  accelerator's roofline knee point. Optional Origami-based simulated GEMM/SDPA
-  timings are available when a GPU architecture specification is provided.
-- **Activation-recompute detection** and **kernel-overlap** sheets for deeper
-  PyTorch analysis.
+### Frameworks and profiling
 
-### Multi-GPU and comparison
+This release extends framework and profiling support:
 
-- **Collective communication analysis** —
-  `TraceLens_generate_multi_rank_collective_report_pytorch` reports time spent
-  in collectives across ranks, including aggregation metrics, intra- and inter-node
-  labeling, and an optional all-to-all-v heatmap.
-- **Trace comparison** — `TraceLens_compare_perf_reports_pytorch` diffs two
-  generated reports at the CPU-dispatch level to quantify the impact of a change
-  across hardware or software versions.
-- **Trace diff** — `TraceDiff` provides morphological comparison of two trace
-  trees to pinpoint structural divergences (also available inline in the
-  PyTorch report using `--comparison_json_path`).
+- **vLLM and SGLang:** Profiling support through recent vLLM and SGLang releases,
+  using stock upstream images where a patched image is no longer required.
+- **xDiT diffusion:** Diffusion-model profiling using the same capture-merge
+  infrastructure as vLLM and SGLang.
+- **Genesis physics simulation:** A `TraceLens_generate_perf_report_genesis`
+  report generator for Genesis/Taichi workloads that isolates the steady-state
+  simulation window from JIT and build overhead.
 
-### SDK modules
+### TraceLens Analysis Agent
 
-- **Trace2Tree** — Build and navigate the hierarchical event tree.
-- **TreePerf** — GPU-timeline breakdown, per-op performance, and roofline
-  metrics through the SDK.
-- **PerfModel** — Compute and roofline performance models.
-- **NcclAnalyser** — Multi-rank collective latency/bandwidth/skew analysis.
-- **TraceDiff** — Tree-based trace comparison.
-- **EventReplay** — Extract and replay isolated operations.
-- **TraceFusion** — Merge multi-rank traces for Perfetto visualization.
-- **TraceUtils** — Trace utilities, including inference-trace splitting
-  (`TraceLens_split_inference_trace`).
+This release includes the following agent improvements:
 
-```{note}
-Version numbers, dates, and per-release validated configurations should be
-updated in this page and in the [Compatibility matrix](../reference/compatibility.md)
-with each new TraceLens release.
-```
+- **Portable skill layout:** Agent orchestrator, sub-agent, and template specs
+  ship in a portable `skills/` layout discoverable by any agentic runner that
+  supports skill-file discovery.
+- **Comparative graph-capture analysis:** Comparative mode accepts a capture
+  folder per trace, merging call-stack and shape information into both
+  graph-replay trees before analysis.
+- **Local evaluation:** Repeatability evals can run against a local serving
+  backend for fully offline eval loops.
 
-## Related topics
+### TraceDiff
 
-- [What is TraceLens?](../what-is-tracelens.md)
-- [Compatibility matrix](../reference/compatibility.md)
-- [Install TraceLens](../install/installation.md)
+This release overhauls trace-tree matching:
+
+- **Name disambiguation:** Same-named sibling nodes are matched by structure
+  rather than position, with an additional aggressive matching pass for
+  slightly-differing Python-function names.
+- **Correctness fixes:** The same-name candidate-matching path is rewritten to
+  fix several matching correctness issues.
+
+### Test coverage
+
+This release strengthens automated testing:
+
+- **Unit coverage:** New unit-test suites span every SDK subpackage, including
+  Trace2Tree, TreePerf, PerfModel, NcclAnalyser, TraceFusion, TraceDiff,
+  EventReplay, Reporting, and the shared utilities.
+- **Coverage reporting:** Coverage tracking and a coverage-regression gate run in
+  continuous integration to guard against regressions.

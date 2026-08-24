@@ -6,9 +6,7 @@ See LICENSE for license information.
 
 # TraceLens Agent: Magpie Benchmark + Profiling
 
-> **⚠️ Experimental**: This feature is under active development and may change.
-
-The TraceLens Agentic Profiling module drives LLM inference benchmarking and PyTorch profiler trace collection using the [Magpie](https://github.com/AMD-AGI/Magpie) framework. A skill coordinates environment setup, Docker image patching, profiler-window tuning, benchmark execution, trace verification, and trace splitting — producing traces that are ready for the [TraceLens Analysis Orchestrator](../Analysis/README.md). Supports vLLM and SGLang, in eager or graph-replay + capture mode.
+The TraceLens Agentic Profiling module drives LLM inference benchmarking and PyTorch profiler trace collection using the [Magpie](https://github.com/AMD-AGI/Magpie) framework. A skill coordinates environment setup, Docker image patching, profiler-window tuning, benchmark execution, trace verification, and trace splitting — producing traces that are ready for the [TraceLens Analysis Orchestrator](../Analysis/README.md). Supports vLLM, SGLang, and ATOM, in eager or graph-replay + capture mode.
 
 ---
 
@@ -45,16 +43,18 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 
 > **Note**: The instructions below use the Cursor IDE and CLI (`agent`), but the skill is portable. It also works with Claude Code CLI (`claude`) and other agentic runners that support skill file discovery.
 
+> **Skill paths in the package:** The profiling skill lives under `TraceLens/Agent/Profiling/skills/magpie-benchmark-profiling/` (`SKILL.md` + `reference.md`). Cursor’s default project skill discovery uses `.cursor/skills/`; symlink or copy `skills/magpie-benchmark-profiling` there if your workflow relies on automatic skill pickup.
+
 ### To run via Cursor chat:
 
-1. **In a Cursor chat with Claude Opus 4.7 High, invoke:**
+1. **In a Cursor chat with Claude Opus 4.7 High with context length 1M, invoke:**
    ```
    "Follow the Magpie Benchmark + Profiling skill installed with TraceLens and run the benchmark + trace collection workflow on <path_to_config.yaml>"
    ```
 
 2. **Provide if prompted:**
    - Target node, conda env name, conda install path
-   - Whether the Docker image is already patched, or a vLLM version tag / SGLang GPU type to build a patched image
+   - Whether the Docker image is already patched, or a vLLM version tag / SGLang GPU type / ATOM version tag to build a patched image (nothing to build on vLLM v0.26.0+, or on ATOM nightlies from 2026-07-22 onward)
    - Profiling mode: targeted steady-state window (recommended) vs full benchmark
 
 3. **Results:**
@@ -74,7 +74,7 @@ Then pass all parameters inline so no prompts are needed:
 
 ```bash
 agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the Magpie Benchmark + Profiling skill installed with TraceLens and run the benchmark + trace collection workflow on <path_to_config.yaml>, node <node>, conda env <env>, Docker image patched <yes|no, vllm_version=vXX or sglang gpu_type=<gpu_type> if no>, profiling mode <targeted|full>, output to <workspace_dir>"
+    "Follow the Magpie Benchmark + Profiling skill installed with the TraceLens pip package (look under TraceLens/Agent/Profiling/skills/magpie-benchmark-profiling/ in the package installation directory) and run the benchmark + trace collection workflow on <path_to_config.yaml>, node <node>, conda env <env>, Docker image patched <yes|no, vllm_version=vXX or sglang gpu_type=<gpu_type> if no>, profiling mode <targeted|full>, output to <workspace_dir>"
 ```
 
 If you only plan to run profiling interactively through the Cursor IDE chat, you can skip installing the CLI.
@@ -96,6 +96,7 @@ results/benchmark_{framework}_{timestamp}/
     ├── merged-*.trace.json.gz                   # SGLang merged trace
     ├── *-rank-{N}.*.pt.trace.json.gz            # vLLM per-rank traces
     ├── *async_llm.*.pt.trace.json.gz            # vLLM CPU-side AsyncLLM trace
+    ├── rank_{N}/*.pt.trace.json.gz              # ATOM per-rank traces (one subdir per rank)
     ├── capture_traces/                          # Graph-capture traces (graph mode)
     └── trace_split/                             # Step 6 output (ready for analysis)
 ```
@@ -131,9 +132,14 @@ The **Magpie Benchmark + Profiling** skill coordinates the entire trace-collecti
 | Framework | Build Script (patched image) | Targeted-Window Mechanism |
 |-----------|------------------------------|---------------------------|
 | **vLLM** (`framework: vllm`) | `examples/custom_workflows/inference_analysis/build_docker_vllm.sh <version_tag>` | `EXTRA_VLLM_ARGS` profiler-config flags + `benchmark_lib.sh` `num_prompts` patch |
-| **SGLang** (`framework: sglang`) | `examples/custom_workflows/inference_analysis/build_docker_sglang_v059.sh <gpu_type>` | `benchmark_serving.py` `start_step`/`num_steps` patch + `benchmark_lib.sh` `num_prompts` patch |
+| **SGLang** (`framework: sglang`) | `examples/custom_workflows/inference_analysis/build_docker_sglang.sh` (`--sglang-version`, `--gpu-type`) | `benchmark_serving.py` `start_step`/`num_steps` patch + `benchmark_lib.sh` `num_prompts` patch |
+| **ATOM** (`framework: atom`) | `examples/custom_workflows/inference_analysis/build_docker_atom.sh <version_tag>` | `benchmark_serving --profile` window via the `start_profile`/`stop_profile` endpoints (no `num_prompts` patch needed) |
 
 The skill parses the `case` blocks of these scripts at runtime to discover currently supported tags.
+
+For vLLM, the two profiler options the workflow relies on — `--profiler-config.capture_torch_profiler` (graph-capture traces) and `--profiler-config.detailed_trace_annotation` (roofline annotations) — come from a TraceLens patch on **v0.14-v0.25** and from upstream vLLM on **v0.26.0 and later** ([vllm-project/vllm#37524](https://github.com/vllm-project/vllm/pull/37524)). A patched image is therefore only needed for **v0.14-v0.25**; on **v0.26.0 and later** a stock upstream image works unchanged, since this workflow never needs TraceLens inside the container — the server only writes traces, and all analysis runs on the host against the mounted output directory. The server flags are identical either way. `capture_torch_profiler` is a boolean, and traces always land in `<torch_profiler_dir>/capture_traces`.
+
+For ATOM, the equivalent knobs are the `ATOM_ENABLE_DETAILED_ANNOTATION` environment variable (roofline annotations) and the `--mark-trace` server flag (graph-capture traces). These come from a TraceLens patch on **0.1.3 through 0.1.6rc** and from upstream ATOM on **nightly builds from 2026-07-22 onward** ([ROCm/ATOM#477](https://github.com/ROCm/ATOM/pull/477), merged 2026-07-21 — after `release/v0.1.6` was branched, so no tagged release contains it). Magpie treats ATOM as a first-class framework: it sets `ATOM_TORCH_PROFILER_DIR` automatically when `torch_profiler.enabled: true`, and forwards `EXTRA_ATOM_ARGS` to the server launch. Two ATOM-specific constraints: it is **single-node only**, and the `benchmark_lib.sh` `num_prompts` patch is **not** needed because the built-in runner script already defaults `NUM_PROMPTS` to `CONC * 10`.
 
 ### Profiling Modes
 
@@ -151,7 +157,7 @@ The skill parses the `case` blocks of these scripts at runtime to discover curre
 
 ## Trace Splitting and Handoff to Analysis
 
-Step 6 produces split traces in `torch_trace/trace_split/` via `TraceLens.TraceUtils.split_inference_trace_annotation`. The skill then prints (but does **not** run) a `generate_perf_report_pytorch_inference.py` command that the user can launch to feed the split traces into the [Analysis Orchestrator](../Analysis/README.md). See [`docs_original/Inference_analysis.md`](../../../docs_original/Inference_analysis.md) for splitting heuristics and prefill/decode mix selection.
+Step 6 produces split traces in `torch_trace/trace_split/` via `TraceLens.TraceUtils.split_inference_trace_annotation`. The skill then prints (but does **not** run) a `generate_perf_report_pytorch_inference.py` command that the user can launch to feed the split traces into the [TraceLens Agent](../Analysis/README.md). See [Generate a PyTorch inference performance report](../../../docs/how-to/generate-perf-report-pytorch-inference.md) for splitting heuristics and prefill/decode mix selection.
 
 ## Bug Reporting
 

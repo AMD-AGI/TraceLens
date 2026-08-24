@@ -5,9 +5,9 @@
 ###############################################################################
 
 import pandas as pd
-import itertools
 import tqdm
-from TraceLens.util import TraceEventUtils
+
+from ..util import TraceEventUtils
 
 
 class GPUEventAnalyser:
@@ -72,7 +72,7 @@ class GPUEventAnalyser:
     gpu_event_keys = [all_gpu_key, computation_key, communication_key, memcpy_key]
     cpu_event_keys = [all_cpu_key]
 
-    def get_gpu_event_lists(self):
+    def get_gpu_event_lists(self, gpu_pid=None, event_filter=None):
         """
         Return a dictionary of lists of events, categorized by event types
         Event types are all gpu events, computation, communication, and memcpy.
@@ -321,7 +321,9 @@ class GPUEventAnalyser:
                 "total_memcpy_time": total_memcpy_time,
             }
 
-    def compute_metrics(self, micro_idle_thresh_us=None):
+    def compute_metrics(
+        self, micro_idle_thresh_us=None, gpu_pid=None, event_filter=None
+    ):
         """
         Compute various metrics from the GPU event data.
         Computation is defined as the time spent in computation kernels.
@@ -350,8 +352,14 @@ class GPUEventAnalyser:
         df = df.drop(columns=["time"])
         return df
 
-    def get_breakdown_df(self, micro_idle_thresh_us=None):
-        dict_metrics = self.compute_metrics(micro_idle_thresh_us=micro_idle_thresh_us)
+    def get_breakdown_df(
+        self, micro_idle_thresh_us=None, gpu_pid=None, event_filter=None
+    ):
+        dict_metrics = self.compute_metrics(
+            micro_idle_thresh_us=micro_idle_thresh_us,
+            gpu_pid=gpu_pid,
+            event_filter=event_filter,
+        )
         return GPUEventAnalyser.get_breakdown_df_from_dict(dict_metrics)
 
 
@@ -427,7 +435,7 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
             return return_dict
         return return_dict.get(gpu_pid, {})
 
-    def compute_metrics(self, gpu_pid=1, event_filter=None):
+    def compute_metrics(self, micro_idle_thresh_us=None, gpu_pid=1, event_filter=None):
         # Default: use GPU0 (PID 1) for Jax
         dict_gpu_event_lists = self.get_gpu_event_lists(
             gpu_pid=gpu_pid, event_filter=event_filter
@@ -478,7 +486,9 @@ class JaxGPUEventAnalyser(GPUEventAnalyser):
             average_gpu_metrics[k] /= num_gpus
         return average_gpu_metrics
 
-    def get_breakdown_df(self, gpu_pid=None, event_filter=None):
+    def get_breakdown_df(
+        self, micro_idle_thresh_us=None, gpu_pid=None, event_filter=None
+    ):
         """
         Return performance breakdown across GPUs or one gpu, if gpu_pid is provided.
 

@@ -172,7 +172,7 @@ Split an inference trace into per-iteration or per-phase sub-traces.
 | `trace_path` | required | Path to the trace (`.json` or `.json.gz`). |
 | `-o`, `--output-dir` | required | Output directory. |
 | `-i`, `--iterations` | `all` | Iteration range: `all`, a single index (`50`), or a range (`10:20`). |
-| `-d`, `--dummy` | `all` | Dummy-run range. |
+| `--store-single-iteration` | off | Write each iteration as a separate trace file. |
 | `--find-steady-state` / `--num-steps` | off / 32 | Extract a steady-state region of N iterations. |
 | `--divide-phases` | off | Store steady-state steps into `prefilldecodemix/` and `decode_only/` sub-folders. |
 | `--CONC`, `--OSL`, `--R` | None | Expected concurrency and output-sequence-length window parameters. |
@@ -180,23 +180,23 @@ Split an inference trace into per-iteration or per-phase sub-traces.
 ## Python SDK
 
 The SDK modules live under the `TraceLens` package and can be imported to build
-custom workflows. Each module has a dedicated guide in the repository `docs_original/`
-directory and an example notebook under `examples/`.
+custom workflows. Each module has a dedicated topic in the documentation and an
+example notebook under `examples/`.
 
 | Module | Purpose | Reference |
 |--------|---------|-----------|
-| `Trace2Tree` | Build and navigate the hierarchical event tree (Python ops → CPU dispatch → GPU kernels). | `docs_original/Trace2Tree.md`, `examples/trace2tree_example.ipynb` |
-| `TreePerf` | GPU-timeline breakdown, per-op performance, and roofline metrics. | `docs_original/TreePerf.md`, `examples/tree_perf_example.ipynb` |
-| `PerfModel` | Compute and roofline performance models for operators. | `docs_original/gemm_dim_eff.md`, `docs_original/triton_perf_model_walkthrough.md` |
-| `NcclAnalyser` | Multi-rank collective latency/bandwidth/skew analysis. | `docs_original/NcclAnalyser.md`, `examples/nccl_analyser_example.ipynb` |
-| `TraceDiff` | Morphological comparison of two trace trees. | `docs_original/TraceDiff.md`, `examples/trace_diff_example.ipynb` |
-| `EventReplay` | Extract and replay isolated operations. | `docs_original/EventReplay.md`, `examples/event_replayer_example.ipynb` |
-| `TraceFusion` | Merge multi-rank traces for Perfetto visualization. | `docs_original/TraceFusion.md`, `examples/trace_fusion_example.py` |
-| `Reporting` | The report generators behind the CLI tools; importable to return pandas data frames. | `docs_original/generate_perf_report.md` |
+| `Trace2Tree` | Build and navigate the hierarchical event tree (Python ops → CPU dispatch → GPU kernels). | [Trace2Tree data model](../conceptual/trace2tree.md), [`trace2tree_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace2tree_example.ipynb) |
+| `TreePerf` | GPU-timeline breakdown, per-op performance, and roofline metrics. | [Analyze traces with the TraceLens SDK](../how-to/sdk-analysis.md), [`tree_perf_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/tree_perf_example.ipynb) |
+| `PerfModel` | Compute and roofline performance models for operators. | [GEMM analysis](../conceptual/gemm-analysis.md), [Triton kernel performance model](../conceptual/triton-perf-model-walkthrough.md) |
+| `NcclAnalyser` | Multi-rank collective latency/bandwidth/skew analysis. | [Analyze collectives with NcclAnalyser](../how-to/nccl-analysis.md), [`nccl_analyser_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/nccl_analyser_example.ipynb) |
+| `TraceDiff` | Morphological comparison of two trace trees. | [Compare two traces](../how-to/compare-traces.md), [`trace_diff_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace_diff_example.ipynb) |
+| `EventReplay` | Extract and replay isolated operations. | [Replay a single operation](../how-to/event-replay.md), [`event_replayer_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/event_replayer_example.ipynb) |
+| `TraceFusion` | Merge multi-rank traces for Perfetto visualization. | [Fuse multi-rank traces](../how-to/trace-fusion.md), [`trace_fusion_example.py`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace_fusion_example.py) |
+| `Reporting` | The report generators behind the CLI tools; importable to return pandas data frames. | [Generate a PyTorch performance report](../how-to/generate-perf-report-pytorch.md) |
 | `TraceUtils` | Trace utilities, including inference-trace splitting. | — |
 
-For report-column definitions across all sheets, see
-`docs_original/perf_report_columns.md` in the repository.
+For report-column definitions across all sheets, see the
+[Performance report column reference](./perf-report-columns.md).
 
 ```{note}
 For a class- and function-level SDK reference generated directly from
@@ -207,6 +207,6 @@ autodoc/autosummary extension.
 ## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
-- [Install TraceLens](../install/installation.md)
+- [Install TraceLens](../install/install.md)
 - [Compatibility matrix](../reference/compatibility.md)
 - [Release notes](../about/release-notes.md)

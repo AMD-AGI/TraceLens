@@ -6,20 +6,20 @@ See LICENSE for license information.
 
 # TraceLens Agent
 
-The TraceLens Agent is an agentic performance analysis tool that uses TraceLens to analyze PyTorch profiler traces and generate actionable optimization recommendations. The system supports automated analysis of training and inference traces supported by TraceLens. Skills have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability. The output is a single stakeholder-facing report (`analysis.md`) organized as a prioritized bottleneck list. Findings are ranked and grouped into three tiers (Compute Kernel Optimizations, Kernel Fusion Opportunities, and System-Level Optimizations), and each finding carries the supporting evidence, the reasoning behind the call-out and a possible concrete resolution.
+The TraceLens Agent is an agentic performance analysis tool that generates actionable optimization recommendations for training and inference workloads. The system supports automated analysis of training and inference traces supported by TraceLens. Skills have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability. The output is a single stakeholder-facing report (`analysis.md`) organized as a prioritized bottleneck list. Findings are ranked and grouped into three tiers (Compute Kernel Optimizations, Kernel Fusion Opportunities, and System-Level Optimizations), and each finding carries the supporting evidence, the reasoning behind the call-out and a possible concrete resolution.
 
 ## Analysis Modes
 
 **Standalone**: Single-trace roofline analysis. Suitable when a single trace is available and the goal is to identify where performance falls short of hardware limits. Recommended default for performance analysis.
 
-**Comparative**: Two-trace gap analysis. The agent compares a primary trace against a reference trace (e.g. a different platform, a tuned config) and identifies inefficiencies in the primary trace relative to the reference. Suitable when the goal is to understand where the primary trace is slower than the reference. Comparative analysis works best when both traces are collected from the same framework (e.g. both from vLLM, or both from SGLang). Cross-framework comparisons may produce misleading gap estimates due to structural differences in operation call stacks.
+**Comparative**: Two-trace gap analysis. The agent compares a primary trace against a reference trace (e.g. a different platform, a tuned config) and identifies inefficiencies in the primary trace relative to the reference. Suitable when the goal is to understand where the primary trace is slower than the reference. Comparative analysis works best when both traces are collected from the same framework (e.g. both from vLLM, both from SGLang, or both from ATOM). Cross-framework comparisons may produce misleading gap estimates due to structural differences in operation call stacks.
 
 ### Supported Analyses
 
 | | Standalone | Comparative |
 |---|---|---|
 | **Eager** | ✅ | ✅ |
-| **Graph + Capture** | ✅ | ❌ |
+| **Graph + Capture** | ✅ | ✅ |
 | **Graph** | ❌ | ❌ |
 
 ---
@@ -60,25 +60,39 @@ pip install -e .
 
 The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json.gz`). Collection is workload-specific:
 
-- **Training and eager inference traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of training/inference steps, post-warmup) and dump the trace via `prof.export_chrome_trace(...)`. A single rank's trace is sufficient for per-rank analysis.
-- **vLLM / SGLang inference traces**: Trace collection has framework-, version-, and execution-mode-specific requirements (custom Docker images or framework patches to add roofline annotations, profiler-config flags for graph-capture profiling, steady-state window selection, optional trace splitting). Follow the canonical guide in [Inference Analysis](../../../docs_original/Inference_analysis.md). For graph-mode workloads you will produce **two artifacts**: a graph-replay trace and a graph-capture folder; TraceLens (in inference mode with execution mode `graph replay + capture`) merges call-stack and shape information from the capture folder into the replay tree before analysis.
+- **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling walkthrough](../../../docs/tutorials/torch-profiling.ipynb) walks through this end to end.
+- **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](../../../docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](../Profiling/README.md) automates vLLM/SGLang/ATOM benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces. For graph-mode workloads you produce two artifacts: a graph-replay trace and a graph-capture folder. In inference mode with execution mode `graph replay + capture`, TraceLens merges call-stack and shape information from the capture folder into the replay tree before analysis.
+
+### 3. Establish a hardware performance baseline
+
+Roofline analysis compares each measured kernel against your GPU's max-achievable TFLOPS and HBM bandwidth, so the analysis needs a `<platform>.json` arch file for your hardware. Bundled arch files live in [`utils/arch/`](utils/arch/); if your platform is not already there (or you want stack-specific measured values instead of published specs), generate benchmark-derived peak TFLOPS and HBM with the GPU microbenchmarking suite. It measures matrix/vector TFLOPS and HBM bandwidth and writes the arch JSON in the exact shape the roofline expects. See the [Benchmarking README](../../PerfModel/benchmarking/README.md).
 
 ---
 
 ## Quick Start - How to Use
 
-> **Note**: The instructions below use the Cursor IDE and CLI (`agent`), but the orchestrator skills are portable. They also work with Claude Code CLI (`claude`) and other agentic runners that support skill file discovery.
+> **Note**: The orchestrator skills are portable and work with agentic runners that support skill-file discovery.
 
-### To run via Cursor chat:
+> **Skill paths in the package:** The orchestrator and its subagent prompts live under `TraceLens/Agent/Analysis/skills/analysis-orchestrator/` (`SKILL.md`, `reference.md`, and `agents/*.md`).
 
-1. **In a Cursor chat with Claude Opus 4.7 High, invoke one of:**
-   - Standalone (single trace):
+### To run manually:
+
+1. **In an agent chat with a capable frontier model that has a context length of 1M, invoke one of:**
+   - Standalone (single eager trace):
     ```
     "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json>"
     ```
-   - Comparative (two traces):
+   - Standalone (single graph replay trace with capture trace directory):
+    ```
+    "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace.json> with capture folder <path_to_capture_folder>"
+    ```
+   - Comparative (two eager traces):
     ```
     "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace1.json> and <path_to_trace2.json>"
+    ```
+   - Comparative (two graph replay traces with capture trace directories):
+    ```
+    "Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow on <path_to_trace1.json> with capture folder <path_to_capture1.json> and <path_to_trace2.json> with capture folder <path_to_capture2.json>"
     ```
     **NOTE**: Always pass **baseline** trace as trace1
 
@@ -86,7 +100,7 @@ The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json
 2. **Provide if prompted:**
    - Trace file path
    - Platform (of first trace)
-   - Analysis mode: default (training and non-vLLM/SGLang eager inference) vs inference (vLLM/SGLang)
+   - Analysis mode: default (training and non-vLLM/SGLang/ATOM eager inference) vs inference (vLLM/SGLang/ATOM)
    - If inference: execution mode (eager or graph replay + capture) and capture folder path if applicable
    - Node name / container name / venv name
    - Output directory (optional)
@@ -96,234 +110,36 @@ The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json
    - **User-facing output**: `analysis.md` is the only artifact intended for end-user review - a stakeholder report with prioritized recommendations organized into three sections: Compute Kernel Optimizations, Kernel Fusion Opportunities (experimental), and System-Level Optimizations. The Detailed Analysis section mirrors this order with detailed Compute Kernel Insights, Kernel Fusion Insights and System-Level Insights.
    - **Agent internals** (agent intermediates; review not recommended): `system_findings/`, `category_findings/`, `category_data/`, `metadata/`, `perf_report_csvs/`, `perf_report.xlsx`. See [Output Files](#output-files) for the full layout.
 
-### To run via CLI (headless):
+### To run headless (non-interactive):
 
-Use the Cursor `agent` CLI to run the orchestrator non-interactively. Specify your execution environment in the prompt.
-
-#### Install the Cursor CLI
-
-The `agent` CLI is required for headless (non-interactive) runs:
+Any agentic CLI runner that supports skill-file discovery and headless (print/non-interactive) execution can drive the orchestrator without prompts. Consult your runner's docs for its command, its non-interactive/auto-approve flags, and its model-selection flag, then pass every parameter inline in the prompt:
 
 ```bash
-curl https://cursor.com/install -fsS | bash
+<agent-cli> <headless-flags> --model <model> \
+    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode <default|inference>, [execution mode <eager|graph replay + capture>, capture folder <path_to_capture_folder>,] node <node>, container <container>, output to <output_dir>"
 ```
 
-This installs the `agent` command. If you only plan to run analysis interactively through the Cursor IDE chat, you can skip this step. 
-
-
-**Cluster + container — default (training and non-vLLM/SGLang eager inference), assuming standalone:**
-
-```bash
-agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode default, node <node>, container <container>, output to <output_dir>"
-```
-
-**Cluster + container — inference (vLLM/SGLang eager mode):**
-
-```bash
-agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode eager, node <node>, container <container>, output to <output_dir>"
-```
-
-**Cluster + container — inference (vLLM/SGLang graph replay + capture):**
-
-```bash
-agent --model claude-opus-4-7-high --print --force --trust \
-    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/.cursor/skills/ in the package installation directory) and run the full agentic analysis workflow on <path_to_trace.json> with platform <platform>, analysis mode inference, execution mode graph replay + capture, capture folder <path_to_capture_folder>, node <node>, container <container>, output to <output_dir>"
-```
-
-All parameters are passed inline so no interactive prompts are needed. This is useful for batch runs and CI pipelines (see `agent_evals/Analysis/eval_scripts/generate_ref.sh` for an example).
+Set `analysis mode inference` for vLLM/SGLang/ATOM traces (and include the `execution mode` / `capture folder` fields when using graph replay + capture); use `analysis mode default` for training and non-vLLM/SGLang eager inference. Passing all parameters inline avoids interactive prompts, which is useful for batch runs and CI pipelines (see `agent_evals/Analysis/eval_scripts/generate_ref.sh` for an example).
 
 ---
-
-### Output Files
-
-> **Only `analysis.md` is intended for end-user review.** Everything else under `analysis_output/` are agent internals: intermediates the orchestrator and sub-agents pass between steps.
-
-**Standalone** layout:
-
-```
-analysis_output/
-├── analysis.md                     # Stakeholder report (only user-facing output)
-├── perf_report.xlsx                # Excel export of TraceLens perf report (Internal)
-├── perf_report_csvs/               # CSV exports: gpu_timeline, ops_summary, ... (Internal)
-├── category_data/                  # Per-category CSVs, metrics JSONs, tree data, fusion inputs (Internal)
-│   ├── category_manifest.json          # Category metadata, GPU utilization, tier info
-│   ├── multi_kernel_data.json          # Pre-computed memcpy/comm./overlap data
-│   ├── fusion_candidates.json          # Kernel fusion candidate modules
-│   ├── kernel_fusion_metrics.json      # Roofline savings estimates for fusion candidates
-│   ├── <category>_ops.csv              # Filtered operations table for one compute-kernel category
-│   ├── <category>_metrics.json         # Per-op metrics consumed by sub-agents
-│   └── <category>_tree_data.json       # Pre-computed Trace2Tree slice for that category
-├── system_findings/                # Sub-agent outputs: CPU/idle, multi-kernel, fusion (Internal)
-│   ├── cpu_idle_findings.md            # CPU/idle (host-bound, GPU-idle) analysis output
-│   ├── multi_kernel_findings.md        # Memcpy / collective-comm / overlap analysis output
-│   └── kernel_fusion_findings.md       # Kernel fusion analysis output
-├── category_findings/              # Sub-agent outputs: per compute-kernel category (Internal)
-│   └── <category>_findings.md          # One file per compute-kernel category (gemm, sdpa, norm, ...)
-└── metadata/                       # Category metadata + model_info.json (Internal)
-    ├── <category>_metadata.json        # Platform specs, GPU utilization, config per category
-    └── model_info.json                 # Model identification (model, architecture, scale, precision)
-```
-
-**Comparative** layout:
-
-```
-analysis_output/
-├── analysis.md                     # Stakeholder report (only user-facing output)
-├── perf_report_trace1.xlsx         # Excel export of TraceLens perf report for trace 1 (Internal)
-├── perf_report_trace1_csvs/        # Trace 1 CSV exports: gpu_timeline, ops_summary, ... (Internal)
-├── perf_report_trace2.xlsx         # Excel export of TraceLens perf report for trace 2 (Internal)
-├── perf_report_trace2_csvs/        # Trace 2 CSV exports: gpu_timeline, ops_summary, ... (Internal)
-├── category_data/                  # Per-category CSVs, metrics JSONs, tree data, fusion inputs (Internal)
-│   ├── category_manifest.json          # Category metadata, GPU utilization, tier info
-│   ├── multi_kernel_data.json          # Pre-computed memcpy/comm./overlap data
-│   ├── fusion_candidates.json          # Kernel fusion candidate modules
-│   ├── kernel_fusion_metrics.json      # Gap-based savings estimates for fusion candidates
-│   ├── priority_data.json              # Globally ranked findings + impact scores
-│   ├── <category>_ops.csv              # Filtered operations table for one compute-kernel category
-│   ├── <category>_metrics.json         # Per-op metrics consumed by sub-agents
-│   └── <category>_tree_data.json       # Pre-computed Trace2Tree slice for that category
-├── system_findings/                # Sub-agent outputs: CPU/idle, multi-kernel, fusion (Internal)
-│   ├── cpu_idle_findings.md            # CPU/idle (host-bound, GPU-idle) analysis output
-│   ├── multi_kernel_findings.md        # Memcpy / collective-comm / overlap analysis output
-│   └── kernel_fusion_findings.md       # Kernel fusion analysis output
-├── category_findings/              # Sub-agent outputs: per compute-kernel category (Internal)
-│   └── <category>_findings.md          # One file per compute-kernel category (gemm, sdpa, norm, ...)
-└── metadata/                       # Category metadata + model_info.json (Internal)
-    ├── <category>_metadata.json        # Platform specs, GPU utilization, config per category
-    └── model_info.json                 # Model identification (model, architecture, scale, precision)
-```
-
----
-
-## Architecture
-
-### Analysis Overview
-
-The analysis is split into three independent tiers that can be composed separately:
-
-- **System-Level Optimizations** (Step 6): Issues that affect the GPU pipeline as a whole -- idle time, memcpy overhead, NCCL blocking, compute/comm overlap. These are not about individual kernel efficiency.
-- **Kernel Fusion Opportunities** (Steps 4b + 6, Experimental): Identifies multi-kernel modules that could be fused and estimates savings.
-- **Compute Kernel Optimizations** (Step 7): Per-category kernel analysis (GEMM, SDPA, elementwise, etc.) focused on individual operation efficiency.
-
-Each tier writes to a separate findings directory and produces an independently composable report section.
-
-```mermaid
-flowchart TD
-    Prep["Steps 0-5: Trace Processing, TraceLens Pre-Processing, Additional Pre-Computation"]
-    Prep --> Step6["Step 6: System-Level Analysis"]
-    Prep --> Step7["Step 7: Compute Kernel Analysis"]
-
-    Step6 --> CpuIdle["cpu-idle-analyzer"]
-    Step6 --> MultiKernel["multi-kernel-analyzer"]
-    Step6 --> KernelFusion["kernel-fusion-analyzer"]
-    CpuIdle --> SysFindings["system_findings/"]
-    MultiKernel --> SysFindings
-    KernelFusion --> SysFindings
-
-    Step7 --> Gemm["gemm-analyzer"]
-    Step7 --> Sdpa["sdpa-analyzer"]
-    Step7 --> Others["other analyzers..."]
-    Gemm --> CatFindings["category_findings/"]
-    Sdpa --> CatFindings
-    Others --> CatFindings
-
-    SysFindings --> Step8["Step 8: Validate"]
-    CatFindings --> Step8
-    Step8 --> Step9["Step 9: Aggregate"]
-    Step9 --> Step11["Step 11: Final Report"]
-```
-
-### Orchestrator
-
-The **Analysis Orchestrator** skill coordinates the entire analysis workflow.
-It queries user inputs, runs TraceLens to pre-compute trace data, and invokes system-level and compute kernel sub-agents in parallel. Finally, it validates outputs, aggregates findings, and generates a prioritized stakeholder report.
-
-### Workflow Steps
-
-```
-0.   Query User Inputs (Comparison scope, Trace path(s), Platform(s), Analysis Mode, Environment Setup)
-1.   Generate Performance Report (branches on analysis mode and comparison scope)
-2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json + kernel_fusion_metrics.json
-5.5. Model Identification (subagent) → metadata/model_info.json
-6.   System-Level Analysis (CPU/Idle + Multi-Kernel + Kernel Fusion, PARALLEL) → system_findings/
-7.   Compute Kernel Subagents (PARALLEL) → category_findings/
-8.   Validate Subagent Outputs (time sanity, efficiency anomalies, coverage)
-9.   Aggregate Results: System-Level + Kernel Fusion + Compute Kernel Recommendations
-10.  Generate Final Report (analysis.md)
-```
-
-### Sub-Agents
-
-**System-Level (Step 6):**
-
-| Agent | Purpose |
-|-------|---------|
-| `cpu-idle-analyzer` | Analyzes GPU idle time and CPU bottlenecks |
-| `multi-kernel-analyzer` | Analyzes memcpy D2H/H2D patterns, NCCL blocking, compute/comm overlap |
-| `kernel-fusion-analyzer` | Identifies multi-kernel fusion opportunities and estimates savings via roofline model |
-
-**Compute Kernel (Step 7):**
-
-| Agent | Purpose |
-|-------|---------|
-| `gemm-analyzer` | Analyzes matrix multiplication operations (mm, bmm, addmm) |
-| `sdpa-analyzer` | Analyzes scaled dot-product attention (Flash, Paged) |
-| `elementwise-analyzer` | Analyzes elementwise operations |
-| `reduce-analyzer` | Analyzes reduction operations |
-| `triton-analyzer` | Analyzes Triton-compiled kernels |
-| `moe-analyzer` | Analyzes Mixture-of-Experts fused operations |
-| `norm-analyzer` | Analyzes normalization operations (BatchNorm, LayerNorm, GroupNorm, etc.) |
-| `convolution-analyzer` | Analyzes convolution operations |
-| `generic-op-analyzer` | Analyzes uncategorized operations or operations without dedicated sub-agent |
-
-### Sub-agent model
-
-The orchestrator and all 13 sub-agents currently run on **`claude-opus-4-7-high`**, declared in each agent file's front matter under `.cursor/agents/`. The full set: `cpu-idle-analyzer`, `multi-kernel-analyzer`, `kernel-fusion-analyzer`, `model-identification-agent`, `gemm-analyzer`, `sdpa-analyzer`, `elementwise-analyzer`, `reduce-analyzer`, `triton-analyzer`, `moe-analyzer`, `norm-analyzer`, `convolution-analyzer`, `generic-op-analyzer`.
-
-### Supported Standalone Analysis Modes
-
-The orchestrator supports two analysis modes, selected during Step 0:
-
-| Mode | Script | Use Case |
-|------|--------|----------|
-| **Default (training and non-vLLM/SGLang eager inference)** | `TraceLens_generate_perf_report_pytorch` | Training and non-vLLM/SGLang eager inference traces |
-| **Inference (vLLM/SGLang)** | `TraceLens_generate_perf_report_pytorch_inference` | vLLM/SGLang traces in eager mode or graph replay + capture mode |
-
-For inference mode, the orchestrator also asks for the execution mode:
-- **Eager mode** — only the trace file is needed
-- **Graph replay + capture** — requires a capture folder path; the script automatically classifies graph capture traces and merges call-stack/shape information into the graph replay tree
-
-## Execution Environments
-
-The orchestrator supports three execution environments. During Step 0, you are asked whether you are running locally or on a cluster, and the orchestrator builds the appropriate command prefixes automatically.
-
-| Environment | When to use | What happens |
-|-------------|-------------|--------------|
-| **Local** | TraceLens is installed on the local machine | Commands run directly (no SSH, no Docker) |
-| **Local + venv** | TraceLens is installed in a virtual environment on the local machine | Commands are prefixed with `source <venv>/bin/activate` |
-| **Cluster (no container)** | TraceLens is installed natively on a remote node | Commands are wrapped with `ssh <node>` |
-| **Cluster + venv** | TraceLens is installed in a venv on a remote node | Commands are wrapped with `ssh <node> "source <venv>/bin/activate && ..."` |
-| **Cluster + container** | TraceLens is installed inside a Docker container on a remote node | Commands are wrapped with `ssh <node> "docker exec <container> ..."` 
 
 ## Integrating with Model Optimization Flows
 
-`analysis.md` is designed to be consumed by both readers and optimization systems to iteratively resolve bottlenecks (kernel tuning, fusion, batching, precision narrowing, etc.).
+`analysis.md` is designed to be consumed by both readers and optimization systems to iteratively resolve bottlenecks (kernel tuning, kernel fusion, model codebase updates, etc.).
 
 ### Anatomy of `analysis.md`
 
 Every report has the same top-level structure, in this order:
 
 1. **Executive Summary**: Narrative one-paragraph workload characterization, a metrics table (Total Time, Compute %, Idle %, Exposed Communication %, Top Bottleneck Category), and an embedded performance-improvement chart.
-2. **Compute Kernel Optimizations**: Top Operations table followed by per-category P-items (P1, P2, …) sorted by `impact_score`. Each P-item has an summarizing Insight / Action / Impact triplet.
+2. **Compute Kernel Optimizations**: Top Operations table followed by per-category P-items (P1, P2, …) sorted by `impact_score` (Score highlighting the impact of an optimization). Each P-item has an summarizing Insight / Action / Impact triplet.
 3. **Kernel Fusion Opportunities (Experimental)**: Kernel fusion candidates 
 4. **System-Level Optimizations (Experimental)**: System-level P-items (idle, memcpy, compute/comm overlap)
 5. **Detailed Analysis**: Per-P-item drill-down (`Compute Kernel Insights`, `Kernel Fusion Insights`, `System-Level Insights`) with identification rationale, data tables, and reasoning.
 
 ### Reference snippets
 
-The snippets below are illustrative excerpts showing the format of the agent's analysis report.
+The snippets below are illustrative excerpts showing the format of the agent's analysis report in the standalone mode.
 
 *Note: All performance data shown here are example outputs from TraceLens, intended to illustrate the agent's capabilities. They are not official performance benchmarks.*
 
@@ -399,3 +215,176 @@ Every report embeds HTML comment markers that a downstream system can leverage w
 1. Run the orchestrator on a baseline trace (see [Quick Start](#quick-start---how-to-use)).
 2. Study `analysis.md`, focusing on the `## Detailed Analysis` section. Within each tier subsection (`### Compute Kernel Insights`, `### Kernel Fusion Insights`, `### System-Level Insights`), follow the per-P-item anchors (`detailed-analysis-compute-pN`, `detailed-analysis-fusion-PN`, `detailed-analysis-system-pN`) and extract each P-item's Identification, Data, Reasoning, Resolution, and `impact-begin kind=detail_estimate` low/high bounds. The detailed cards carry the evidence and guidance an optimization agent needs to act on.
 3. Use the prioritization (P-item ordering, `impact_score`) to drive your model optimization workflow.
+
+---
+
+## Architecture
+
+### Analysis Overview
+
+The analysis is split into three independent tiers that can be composed separately:
+
+- **System-Level Optimizations** (Step 6): Issues that affect the GPU pipeline as a whole -- idle time, memcpy overhead, NCCL blocking, compute/comm overlap. These are not about individual kernel efficiency.
+- **Kernel Fusion Opportunities** (Steps 4b + 6, Experimental): Identifies multi-kernel modules that could be fused and estimates savings.
+- **Compute Kernel Optimizations** (Step 7): Per-category kernel analysis (GEMM, SDPA, elementwise, etc.) focused on individual operation efficiency.
+
+Each tier writes to a separate findings directory and produces an independently composable report section.
+
+```mermaid
+flowchart TD
+    Prep["Steps 0-5: Trace Processing, TraceLens Pre-Processing, Additional Pre-Computation"]
+    Prep --> Step6["Step 6: System-Level Analysis"]
+    Prep --> Step7["Step 7: Compute Kernel Analysis"]
+
+    Step6 --> CpuIdle["cpu-idle-analyzer"]
+    Step6 --> MultiKernel["multi-kernel-analyzer"]
+    Step6 --> KernelFusion["kernel-fusion-analyzer"]
+    CpuIdle --> SysFindings["system_findings/"]
+    MultiKernel --> SysFindings
+    KernelFusion --> SysFindings
+
+    Step7 --> Gemm["gemm-analyzer"]
+    Step7 --> Sdpa["sdpa-analyzer"]
+    Step7 --> Others["other analyzers..."]
+    Gemm --> CatFindings["category_findings/"]
+    Sdpa --> CatFindings
+    Others --> CatFindings
+
+    SysFindings --> Agg["Step 7.5: Aggregate"]
+    CatFindings --> Agg
+    Agg --> Step8["Step 8: Validate"]
+    Step8 --> Step9["Step 9: Report Prep + Model ID"]
+    Step9 --> Step10["Step 10: Final Report"]
+```
+
+### Orchestrator
+
+The **Analysis Orchestrator** skill coordinates the entire analysis workflow.
+It queries user inputs, runs TraceLens to pre-compute trace data, and invokes system-level and compute kernel sub-agents in parallel. Finally, it aggregates and validates findings, identifies the model, and generates a prioritized stakeholder report.
+
+### Workflow Steps
+
+```
+0.   Query User Inputs (Comparison scope, Trace path(s), Platform(s), Analysis Mode, Environment Setup)
+1.   Generate Performance Report (branches on analysis mode and comparison scope)
+2-5. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json + kernel_fusion_metrics.json
+6.   System-Level Analysis (CPU/Idle + Multi-Kernel + Kernel Fusion, PARALLEL) → system_findings/
+7.   Compute Kernel Subagents (PARALLEL) → category_findings/
+7.5. Aggregate per-category Compute Kernel findings → priority_data.json (globally ranked)
+8.   Validate Subagent Outputs (time sanity, efficiency anomalies, coverage)
+9.   Prepare Report Data + Model Identification (subagent) → metadata/model_info.json
+10.  Generate Final Report (analysis.md): compose System-Level + Kernel Fusion + Compute Kernel sections
+```
+
+### Sub-Agents
+
+**System-Level (Step 6):**
+
+| Agent | Purpose |
+|-------|---------|
+| `cpu-idle-analyzer` | Analyzes GPU idle time and CPU bottlenecks |
+| `multi-kernel-analyzer` | Analyzes memcpy D2H/H2D patterns, NCCL blocking, compute/comm overlap |
+| `kernel-fusion-analyzer` | Identifies multi-kernel fusion opportunities and estimates savings via roofline model |
+
+**Compute Kernel (Step 7):**
+
+| Agent | Purpose |
+|-------|---------|
+| `gemm-analyzer` | Analyzes matrix multiplication operations (mm, bmm, addmm) |
+| `sdpa-analyzer` | Analyzes scaled dot-product attention (Flash, Paged) |
+| `elementwise-analyzer` | Analyzes elementwise operations |
+| `reduce-analyzer` | Analyzes reduction operations |
+| `triton-analyzer` | Analyzes Triton-compiled kernels |
+| `moe-analyzer` | Analyzes Mixture-of-Experts fused operations |
+| `norm-analyzer` | Analyzes normalization operations (BatchNorm, LayerNorm, GroupNorm, etc.) |
+| `convolution-analyzer` | Analyzes convolution operations |
+| `generic-op-analyzer` | Analyzes uncategorized operations or operations without dedicated sub-agent |
+
+### Sub-agent model
+
+The orchestrator and all 13 sub-agents run on a capable frontier reasoning model, declared in each agent file's front matter under `skills/analysis-orchestrator/agents/`. The full set: `cpu-idle-analyzer`, `multi-kernel-analyzer`, `kernel-fusion-analyzer`, `model-identification-agent`, `gemm-analyzer`, `sdpa-analyzer`, `elementwise-analyzer`, `reduce-analyzer`, `triton-analyzer`, `moe-analyzer`, `norm-analyzer`, `convolution-analyzer`, `generic-op-analyzer`.
+
+### Supported Analysis Modes
+
+The orchestrator supports two analysis modes, selected during Step 0:
+
+| Mode | Script | Use Case |
+|------|--------|----------|
+| **Default (training and non-vLLM/SGLang/ATOM eager inference)** | `TraceLens_generate_perf_report_pytorch` | Training and non-vLLM/SGLang/ATOM eager inference traces |
+| **Inference (vLLM/SGLang/ATOM)** | `TraceLens_generate_perf_report_pytorch_inference` | vLLM/SGLang/ATOM traces in eager mode or graph replay + capture mode |
+
+For inference mode, the orchestrator also asks for the execution mode:
+- **Eager mode** — only the trace file is needed
+- **Graph replay + capture** — requires a capture folder path; the script automatically classifies graph capture traces and merges call-stack/shape information into the graph replay tree
+
+### Execution Environments
+
+The orchestrator supports three execution environments. During Step 0, you are asked whether you are running locally or on a cluster, and the orchestrator builds the appropriate command prefixes automatically.
+
+| Environment | When to use | What happens |
+|-------------|-------------|--------------|
+| **Local** | TraceLens is installed on the local machine | Commands run directly (no SSH, no Docker) |
+| **Local + venv** | TraceLens is installed in a virtual environment on the local machine | Commands are prefixed with `source <venv>/bin/activate` |
+| **Cluster (no container)** | TraceLens is installed natively on a remote node | Commands are wrapped with `ssh <node>` |
+| **Cluster + venv** | TraceLens is installed in a venv on a remote node | Commands are wrapped with `ssh <node> "source <venv>/bin/activate && ..."` |
+| **Cluster + container** | TraceLens is installed inside a Docker container on a remote node | Commands are wrapped with `ssh <node> "docker exec <container> ..."` 
+
+### Output Files
+
+> **Only `analysis.md` is intended for end-user review.** Everything else under `analysis_output/` are agent internals: intermediates the orchestrator and sub-agents pass between steps.
+
+**Standalone** layout:
+
+```
+analysis_output/
+├── analysis.md                     # Stakeholder report (only user-facing output)
+├── perf_report.xlsx                # Excel export of TraceLens perf report (Internal)
+├── perf_report_csvs/               # CSV exports: gpu_timeline, ops_summary, ... (Internal)
+├── category_data/                  # Per-category CSVs, metrics JSONs, tree data, fusion inputs (Internal)
+│   ├── category_manifest.json          # Category metadata, GPU utilization, tier info
+│   ├── multi_kernel_data.json          # Pre-computed memcpy/comm./overlap data
+│   ├── fusion_candidates.json          # Kernel fusion candidate modules
+│   ├── kernel_fusion_metrics.json      # Roofline savings estimates for fusion candidates
+│   ├── <category>_ops.csv              # Filtered operations table for one compute-kernel category
+│   ├── <category>_metrics.json         # Per-op metrics consumed by sub-agents
+│   └── <category>_tree_data.json       # Pre-computed Trace2Tree slice for that category
+├── system_findings/                # Sub-agent outputs: CPU/idle, multi-kernel, fusion (Internal)
+│   ├── cpu_idle_findings.md            # CPU/idle (host-bound, GPU-idle) analysis output
+│   ├── multi_kernel_findings.md        # Memcpy / collective-comm / overlap analysis output
+│   └── kernel_fusion_findings.md       # Kernel fusion analysis output
+├── category_findings/              # Sub-agent outputs: per compute-kernel category (Internal)
+│   └── <category>_findings.md          # One file per compute-kernel category (gemm, sdpa, norm, ...)
+└── metadata/                       # Category metadata + model_info.json (Internal)
+    ├── <category>_metadata.json        # Platform specs, GPU utilization, config per category
+    └── model_info.json                 # Model identification (model, architecture, scale, precision)
+```
+
+**Comparative** layout:
+
+```
+analysis_output/
+├── analysis.md                     # Stakeholder report (only user-facing output)
+├── perf_report_trace1.xlsx         # Excel export of TraceLens perf report for trace 1 (Internal)
+├── perf_report_trace1_csvs/        # Trace 1 CSV exports: gpu_timeline, ops_summary, ... (Internal)
+├── perf_report_trace2.xlsx         # Excel export of TraceLens perf report for trace 2 (Internal)
+├── perf_report_trace2_csvs/        # Trace 2 CSV exports: gpu_timeline, ops_summary, ... (Internal)
+├── category_data/                  # Per-category CSVs, metrics JSONs, tree data, fusion inputs (Internal)
+│   ├── category_manifest.json          # Category metadata, GPU utilization, tier info
+│   ├── multi_kernel_data.json          # Pre-computed memcpy/comm./overlap data
+│   ├── fusion_candidates.json          # Kernel fusion candidate modules
+│   ├── kernel_fusion_metrics.json      # Gap-based savings estimates for fusion candidates
+│   ├── priority_data.json              # Globally ranked findings + impact scores
+│   ├── <category>_ops.csv              # Filtered operations table for one compute-kernel category
+│   ├── <category>_metrics.json         # Per-op metrics consumed by sub-agents
+│   └── <category>_tree_data.json       # Pre-computed Trace2Tree slice for that category
+├── system_findings/                # Sub-agent outputs: CPU/idle, multi-kernel, fusion (Internal)
+│   ├── cpu_idle_findings.md            # CPU/idle (host-bound, GPU-idle) analysis output
+│   ├── multi_kernel_findings.md        # Memcpy / collective-comm / overlap analysis output
+│   └── kernel_fusion_findings.md       # Kernel fusion analysis output
+├── category_findings/              # Sub-agent outputs: per compute-kernel category (Internal)
+│   └── <category>_findings.md          # One file per compute-kernel category (gemm, sdpa, norm, ...)
+└── metadata/                       # Category metadata + model_info.json (Internal)
+    ├── <category>_metadata.json        # Platform specs, GPU utilization, config per category
+    └── model_info.json                 # Model identification (model, architecture, scale, precision)
+```
+---

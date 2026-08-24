@@ -26,6 +26,9 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     "aten::_scaled_dot_product_cudnn_attention_backward": "SDPA_bwd",
     "aten::_scaled_dot_product_efficient_attention_backward": "SDPA_bwd",
     "aten::_scaled_dot_product_flash_attention_backward": "SDPA_bwd",
+    # xFormers-style efficient attention (ROCm/older PyTorch backend).
+    "aten::_efficient_attention_forward": "SDPA_fwd",
+    "aten::_efficient_attention_backward": "SDPA_bwd",
     # SSM / Mamba category-only backward ops.
     "MambaSplitConv1dScanCombinedFnBackward": "SSM_bwd",
     "DaoAILab::_causal_conv1d_bwd_cpp": "SSM_bwd",
@@ -369,6 +372,18 @@ reduce_ops = [
     "aten::amax",
 ]
 
+replication_pad_ops = [
+    "aten::replication_pad1d",
+    "aten::replication_pad2d",
+    "aten::replication_pad3d",
+]
+
+upsample_ops = [
+    "aten::upsample_nearest1d",
+    "aten::upsample_nearest2d",
+    "aten::upsample_nearest3d",
+]
+
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
 for op in binary_elemwise_ops:
@@ -377,6 +392,10 @@ for op_name, op_class in norm_ops.items():
     op_to_perf_model_class_map[op_name] = op_class
 for op in reduce_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_reduce
+for op in replication_pad_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_replication_pad
+for op in upsample_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_upsample_nearest
 
 # ---------------------------------------------------------------------------
 # Pattern-based matchers for perf models with generated kernel names.

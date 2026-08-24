@@ -10,14 +10,11 @@ Performance models for custom collective operation extensions.
 
 from math import prod
 from TraceLens.PerfModel.utils import name2bpe
-from TraceLens.PerfModel.perf_model import RMSNorm
 
 
 class CustomCollective:
     category = "CustomCollective"
     bwd_category = None
-
-    pass
 
 
 class aiter_fused_allreduce_rmsnorm(CustomCollective):

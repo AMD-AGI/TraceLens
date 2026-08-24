@@ -15,9 +15,9 @@ This topic shows how to isolate an operation from a trace into a minimal,
 self-contained replay — useful for focused debugging and for sharing IP-safe
 reproducers with kernel or framework developers.
 
-## Prerequisites
+## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/installation.md)).
+- TraceLens installed (see [Install TraceLens](../install/install.md)).
 - A PyTorch profiler trace containing the operation you want to isolate.
 
 ## How it works
@@ -39,7 +39,10 @@ original run.
 Generate a PyTorch report (see
 [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)) and use the
 `ops_unique_args` sheet to find the operation and input shape you want to
-isolate, noting its UID.
+isolate, noting its UID. The UID is a unique integer identifier TraceLens
+assigns to each event. In the `ops_unique_args` sheet, each row aggregates a
+unique (operation, arguments) group, and a representative UID for the group
+appears in the `ex_UID` column.
 
 ## Step 2: Replay a single event (SDK)
 
@@ -74,39 +77,48 @@ with open("event_replay_ir.json", "w") as f:
     json.dump(repro_data, f, indent=4)
 ```
 
-```bash
-python batched_replay.py event_replay_ir.json
-```
+### Package standalone artifacts
 
-`batched_replay.py` accepts:
+Before running `batched_replay.py`, package the IR and its companion scripts
+into a self-contained bundle. The bundle can be run without TraceLens or the
+original model and is safe to share without exposing model IP. It contains:
 
-- `--device {cuda,cpu}` — device to run on (default `cuda`).
-- `--op-filter <substring>` — only replay ops whose name contains the substring
-  (for example, `aten::convolution`).
-- `--op-limit <N>` — replay at most `N` ops.
-- `--stop-on-error` — abort on the first failure instead of continuing.
-- `--verbose` / `-v` — print reconstructed arguments and per-op detail.
-
-Each replayed op prints its reconstructed arguments, average time, and result
-tensor, followed by a summary of attempted, successful, and failed replays.
-
-## Package standalone artifacts
-
-The IR plus the replay scripts can be zipped into a self-contained bundle that
-runs without TraceLens or the original model. The bundle contains:
-
-- `event_replay_ir.json` — serialized operator replay instructions.
-- `utils.py` — tensor-creation and helper utilities.
-- `batched_replay.py` — batch replay and benchmark script.
-- `batched_replay_readme.md` — run instructions.
+- `event_replay_ir.json:` serialized operator replay instructions.
+- `utils.py:` tensor-creation and helper utilities that `batched_replay.py` imports.
+- `batched_replay.py:` batch replay and benchmark script.
+- `batched_replay_readme.md:` run instructions.
 
 See the
 [`event_replayer_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/event_replayer_example.ipynb)
 notebook for end-to-end IR extraction and packaging.
 
+### Run the batch replay
+
+From the directory containing the unpacked bundle (or `TraceLens/EventReplay/`
+for a source checkout), run:
+
+```bash
+python batched_replay.py event_replay_ir.json
+```
+
+`batched_replay.py` imports `utils.py` from the same directory, so the command
+must be run from that location.
+
+`batched_replay.py` accepts:
+
+- `--device {cuda,cpu}:` device to run on (default `cuda`).
+- `--op-filter <substring>:` only replay ops whose name contains the substring
+  (for example, `aten::convolution`).
+- `--op-limit <N>:` replay at most `N` ops.
+- `--stop-on-error:` abort on the first failure instead of continuing.
+- `--verbose` / `-v:` print reconstructed arguments and per-op detail.
+
+Each replayed op prints its reconstructed arguments, average time, and result
+tensor, followed by a summary of attempted, successful, and failed replays.
+
 ## Related topics
 
 - [What is TraceLens?](../what-is-tracelens.md)
-- [Install TraceLens](../install/installation.md)
+- [Install TraceLens](../install/install.md)
 - [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 - [API reference](../reference/api-reference.md)
