@@ -31,6 +31,8 @@ TraceLens is a Python library for **automated performance analysis of training a
 
 **TraceLens Agent**: Receive a prioritized human-readable optimization report, derived through an agentic workflow, covering compute kernels, system bottlenecks, and kernel fusion opportunities with root-cause reasoning and concrete resolutions.
 
+**Trace corpus indexing**: Build a searchable SQLite catalog of TraceLens reports so you can find traces by op, category, or kernel name without reopening every raw file.
+
 ---
 
 ## Quick Start
@@ -77,6 +79,14 @@ TraceLens_compare_perf_reports_pytorch \
     --names baseline candidate \
     --sheets all \
     -o comparison.xlsx
+```
+
+Index a directory of traces and existing TraceLens CSV reports (see [TraceIndex](docs/TraceIndex.md)):
+
+```bash
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite scan --root /path/to/traces
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite import-report --report-dir path/to/perf_report_csvs
+TraceLens_trace_index --backend sqlite --db trace_index.sqlite search Cijk
 ```
 
 For multi-rank runs, generate a collective-communication report across ranks (see [Generate a collective-communication report](docs/how-to/collective-report.md)):
@@ -139,6 +149,7 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 | Multi-Rank Collective Report | [docs/how-to/collective-report.md](docs/how-to/collective-report.md)                                                             |
 | Performance Report Columns   | [docs/reference/perf-report-columns.md](docs/reference/perf-report-columns.md)                                                   |
 | TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
+| TraceIndex                   | [docs/TraceIndex.md](docs/TraceIndex.md)                                                                                         |
 
 ---
 
