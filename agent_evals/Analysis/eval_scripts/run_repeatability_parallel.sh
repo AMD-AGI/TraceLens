@@ -102,6 +102,7 @@ SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 CONTAINER="${CONTAINER:-}"
 TEST_IDS="${TEST_IDS:-}"
 SUITE_NAME="${SUITE_NAME:-eval}"
+SKIP_GENERATE_REF="${SKIP_GENERATE_REF:-}"
 SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 
 AGENT_MODEL="${AGENT_MODEL:-claude-opus-4-8-thinking-medium}"
@@ -202,10 +203,10 @@ should_run_id() {
 
 print_scheduled_tests() {
     local -a scheduled_ids=()
-    local id sub_category trace1_path trace2_path trace_path reference_dir platform platform2
+    local id sub_category trace1_path trace2_path trace_path reference_dir platform platform2 capture_folder1 capture_folder2
 
     if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
-        while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2; do
+        while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2 capture_folder1 capture_folder2; do
             [[ -z "$id" ]] && continue
             should_run_id "$id" && scheduled_ids+=("$id")
         done < <(tail -n +2 "$TEST_TRACES_CSV"; echo)
@@ -231,11 +232,13 @@ print_scheduled_tests() {
 # ---------------------------------------------------------------------------
 # Single job: one (test_case, repeat) iteration
 #
-# Args: id repeat trace1_path trace2_path reference_dir platform platform2 (comparative mode only)
+# Args: id repeat trace1_path trace2_path reference_dir platform platform2
+#       capture_folder1 capture_folder2  (comparative mode; empty string if absent)
 # ---------------------------------------------------------------------------
 
 run_single_job() {
     local id="$1" repeat="$2" trace1_path="$3" trace2_path="$4" reference_dir="$5" platform="$6" platform2="$7"
+    local capture_folder1="${8:-}" capture_folder2="${9:-}"
     local tag="[$id|run_$repeat]"
 
     log_status "  $tag [$(ts)] Running"
@@ -245,10 +248,24 @@ run_single_job() {
         trace2_path="$(repo_abs_path "$trace2_path")"
     fi
     reference_dir="$(repo_abs_path "$reference_dir")"
+    if [[ -n "$capture_folder1" ]]; then
+        capture_folder1="$(repo_abs_path "$capture_folder1")"
+    fi
+    if [[ -n "$capture_folder2" ]]; then
+        capture_folder2="$(repo_abs_path "$capture_folder2")"
+    fi
 
-    # Capture folders are not currently plumbed into the repeatability CSVs, so
-    # this stays empty; kept for parity with generate_ref.sh's prompt string.
     local capture_suffix=""
+    local analysis_mode="default"
+    if [[ -n "$capture_folder1" ]]; then
+        capture_suffix+=" capture folder for trace1 $capture_folder1"
+    fi
+    if [[ -n "$capture_folder2" ]]; then
+        capture_suffix+=" capture folder for trace2 $capture_folder2"
+    fi
+    if [[ -n "$capture_folder1" || -n "$capture_folder2" ]]; then
+        analysis_mode="inference"
+    fi
 
     local CASE_RESULTS="$RESULTS_ROOT/$id/run_${repeat}"
     local OUTPUT_DIR="$CASE_RESULTS/analysis_output"
@@ -269,7 +286,7 @@ run_single_job() {
             cd "$ANALYSIS_DIR" || exit
             if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
                 run_llm_agent \
-"Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path${capture_suffix} with platform $platform (trace1) and $platform2 (trace2), analysis mode default, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
+                    "Follow the analysis orchestrator installed with the TraceLens pip package (look under TraceLens/Agent/Analysis/skills/analysis-orchestrator/ in the package installation directory) and run the full agentic analysis workflow on $trace1_path and $trace2_path${capture_suffix} with platform $platform (trace1) and $platform2 (trace2), analysis mode $analysis_mode, $NODE_LABEL, $RUNTIME_LABEL, output to $OUTPUT_DIR" \
                     1
             else
                 run_llm_agent \
@@ -360,6 +377,7 @@ setup_semaphore() {
 
 _spawn_jobs() {
     local id="$1" trace1_path="$2" trace2_path="$3" reference_dir="$4" platform="$5" platform2="$6"
+    local capture_folder1="${7:-}" capture_folder2="${8:-}"
 
     should_run_id "$id" || return
     JOBS_SPAWNED=$((JOBS_SPAWNED + 1))
@@ -367,7 +385,7 @@ _spawn_jobs() {
     for ((i = 0; i < NUM_REPEATS; i++)); do
         read -r -u4  # acquire semaphore slot
         (
-            run_single_job "$id" "$i" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2" || true
+            run_single_job "$id" "$i" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2" "$capture_folder1" "$capture_folder2" || true
             echo >&4  # release semaphore slot
             sleep 2  # stagger agent startup to avoid ~/.cursor/cli-config.json rename race
         ) &
@@ -459,10 +477,10 @@ run_repeatability_for_scope() {
     JOBS_SPAWNED=0
 
     if [[ "$COMPARISON_SCOPE" == "comparative" ]]; then
-        # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform,platform2
-        while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2 <&3; do
+        # comparative CSV: id,sub_category,trace1_path,trace2_path,reference_dir,platform,platform2,capture_folder1,capture_folder2
+        while IFS=, read -r id sub_category trace1_path trace2_path reference_dir platform platform2 capture_folder1 capture_folder2 <&3; do
             [[ -z "$id" ]] && continue
-            _spawn_jobs "$id" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2"
+            _spawn_jobs "$id" "$trace1_path" "$trace2_path" "$reference_dir" "$platform" "$platform2" "${capture_folder1:-}" "${capture_folder2:-}"
         done 3< <(tail -n +2 "$TEST_TRACES_CSV"; echo)
     else
         # standalone CSV: id,sub_category,trace_path,reference_dir,platform
@@ -495,7 +513,7 @@ run_repeatability_for_scope() {
 
 build_combined_csv() {
     local out="$1"
-    local scope csv id sub t1 t2 ref plat plat2
+    local scope csv id sub t1 t2 ref plat plat2 cf1 cf2
 
     echo "id,sub_category,trace_path,reference_dir,platform" > "$out"
 
@@ -503,7 +521,7 @@ build_combined_csv() {
         csv="$EVALS_DIR/analysis_tests/combined_traces_${scope}.csv"
         [[ -f "$csv" ]] || continue
         if [[ "$scope" == "comparative" ]]; then
-            while IFS=, read -r id sub t1 t2 ref plat plat2; do
+            while IFS=, read -r id sub t1 t2 ref plat plat2 cf1 cf2; do
                 [[ -z "$id" ]] && continue
                 echo "$id,$sub,$t1,$ref,$plat" >> "$out"
             done < <(tail -n +2 "$csv"; echo)
@@ -594,14 +612,22 @@ echo "  Max parallel: $MAX_PARALLEL"
 if [[ -n "$TEST_IDS" ]]; then
     echo "  Test filter:  $TEST_IDS"
 fi
+if [[ "$SKIP_GENERATE_REF" == "1" ]]; then
+    echo "  Skip reference generation: TRUE"
+fi
 echo "  Report dir:   $REPORT_DIR"
 echo "========================================="
 echo ""
 
 # Stage 1: regenerate golden references from scratch for each scope.
-for scope in "${SCOPES[@]}"; do
-    generate_refs_for_scope "$scope"
-done
+if [[ "$SKIP_GENERATE_REF" == "1" ]]; then
+    echo "  Stage 1 skipped -- SKIP_GENERATE_REF=1."
+    echo ""
+else
+    for scope in "${SCOPES[@]}"; do
+        generate_refs_for_scope "$scope"
+    done
+fi
 
 # Stage 2: run repeatability evals for each scope against the fresh references.
 for scope in "${SCOPES[@]}"; do

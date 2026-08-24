@@ -10,4 +10,4 @@ ancestors =
 depth = 10
 ignore_imports =
     TraceLens.Trace2Tree.trace_capture_merge_experimental -> TraceLens.TraceUtils.annotation_utils
-    TraceLens.TraceUtils.split_inference_trace_annotation -> TraceLens.Trace2Tree.inference_iteration_roots
+    TraceLens.TraceUtils.split_inference.execution_roots -> TraceLens.Trace2Tree.inference_iteration_roots

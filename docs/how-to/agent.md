@@ -70,7 +70,7 @@ The orchestrator runs against a single `torch.profiler` trace (`.json` or
   requirements. Follow
   [Generate a PyTorch inference performance report](./generate-perf-report-pytorch-inference.md).
   The Profiling Skill automates
-  vLLM/SGLang/ATOM benchmarking and PyTorch profiler trace collection using
+  vLLM, SGLang, and ATOM benchmarking and PyTorch profiler trace collection using
   Magpie, producing analysis-ready traces. For
   graph-mode workloads you produce two artifacts: a graph-replay trace and a
   graph-capture folder. In inference mode with execution mode
@@ -111,7 +111,7 @@ In a chat with a capable model, invoke one of:
 
 If prompted, provide the trace file path, the platform of the first trace, the
 analysis mode (`default` for training and non-vLLM/SGLang/ATOM eager inference,
-or `inference` for vLLM/SGLang/ATOM), the execution mode and capture-folder path for
+or `inference` for vLLM, SGLang, or ATOM), the execution mode and capture-folder path for
 inference, environment details (node, container, or virtual environment), and an
 optional output directory.
 
