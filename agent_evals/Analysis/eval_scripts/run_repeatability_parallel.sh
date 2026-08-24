@@ -512,7 +512,7 @@ run_repeatability_for_scope() {
 
 build_combined_csv() {
     local out="$1"
-    local scope csv id sub t1 t2 ref plat plat2
+    local scope csv id sub t1 t2 ref plat plat2 cf1 cf2
 
     echo "id,sub_category,trace_path,reference_dir,platform" > "$out"
 
