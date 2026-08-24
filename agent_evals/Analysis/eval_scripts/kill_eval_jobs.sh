@@ -9,35 +9,7 @@ set -uo pipefail
 
 # ---------------------------------------------------------------------------
 # Kill every process the eval pipeline may have spawned.
-#
-# Covers jobs started by either entrypoint -- generate_ref.sh (golden reference
-# generation) and run_repeatability_parallel.sh (the full pipeline) -- plus the
-# analysis/eval agent calls and scripted eval processes underneath them.
-#
-# How processes are found: the TRACELENS_EVAL_JOB=1 environment marker. Both
-# entrypoints set it and re-exec so the marker is present at exec() time, which
-# means it appears in /proc/<pid>/environ for the scripts themselves, their
-# subshells, and every descendant (agent/pi and their node/python workers,
-# scripted evals). We scan /proc/<pid>/environ for it. This is stable
-# (independent of process names, prompt wording, parentage, or process groups)
-# and precise (unrelated agent/claude/python sessions never have the marker).
-#
-# Bounded rescan loop: killing is not atomic. A process caught mid-run can fork
-# a child (e.g. a retry-backoff `sleep`, or a fresh agent) in the window between
-# scan and kill; that child inherits the marker but was not in the snapshot. So
-# we scan+kill repeatedly until a scan comes back empty (or MAX_PASSES is hit).
-# Because the orchestrator scripts are themselves tagged, they die on the first
-# pass and stop respawning; later passes just mop up any orphaned stragglers.
-#
-# Note: only jobs launched by a build of the scripts that sets the marker are
-# tagged. A pipeline started by an older build won't be found here -- kill those
-# by hand (e.g. `pkill -f generate_ref.sh`).
-#
-# Why not a process-group kill: when a top-level script exits its children
-# reparent to init, and the Cursor `agent` CLI runs in its own process group,
-# so `kill -- -PGID` misses exactly the processes we need to clean up.
-#
-# Linux-only (reads /proc). Fine for this ROCm/AMD tooling.
+# Covers jobs started by generate_ref.sh and run_repeatability_parallel.sh.
 #
 # Usage:
 #   bash kill_eval_jobs.sh          # SIGTERM, then SIGKILL, rescanning until clear

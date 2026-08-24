@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Tag this process and every descendant (agent/pi, their workers, python evals,
-# subshells) with TRACELENS_EVAL_JOB=1 so kill_eval_jobs.sh can find the whole
-# subtree via /proc/*/environ, independent of process names, parentage, or
-# process groups. The marker must be present at exec() time to appear in this
-# process's own /proc/<pid>/environ (that file is frozen at exec; a runtime
-# `export` alone would tag children but NOT this script or its subshells), so we
-# set it and re-exec once. Nested invocations (already tagged) skip the re-exec.
+# Tags this process and all descendants with TRACELENS_EVAL_JOB=1.
 if [[ "${TRACELENS_EVAL_JOB:-}" != 1 ]]; then
     export TRACELENS_EVAL_JOB=1
     exec bash "$0" "$@"
