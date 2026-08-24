@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from visualizer.basic_ops import BasicOpFilter, introspect_is_modeling_operation
-from visualizer.ast_analyze import is_functional_synthetic
+from visualizer.ast_analyze import is_forward_operation, is_functional_synthetic
 from visualizer.extract import architecture_section_trees
 
 if TYPE_CHECKING:
@@ -158,7 +158,11 @@ def classify_operation(
         return OperationKind.UNKNOWN
 
     details = list(block.details or [])
-    if is_functional_synthetic(block.attr_name) or any(_TORCH_FUNCTIONAL_RE.search(line) for line in details):
+    if (
+        is_functional_synthetic(block.attr_name)
+        or is_forward_operation(block.attr_name)
+        or any(_TORCH_FUNCTIONAL_RE.search(line) for line in details)
+    ):
         return OperationKind.TORCH_FUNCTIONAL
 
     if block.class_name in _KERNEL_CLASS_NAMES or any(line.lower().startswith("kernel:") for line in details):
@@ -204,6 +208,12 @@ def _minimal_metadata(spec: GraphNodeSpec) -> dict[str, Any]:
     block = spec.block
     if block is not None and block.class_name and block.class_name not in {spec.label, block.label}:
         metadata["class_name"] = block.class_name
+    if block is not None and is_forward_operation(block.attr_name):
+        metadata["attr_name"] = block.attr_name
+        if block.details:
+            metadata["details"] = list(block.details)
+        if block.external_inputs:
+            metadata["external_inputs"] = list(block.external_inputs)
     if spec.port_label:
         metadata["port_label"] = spec.port_label
     if spec.port_style:

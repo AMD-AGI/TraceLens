@@ -106,6 +106,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--all-tensor-ops",
+        action="store_true",
+        help=(
+            "Include tensor housekeeping operations such as view/reshape, casts, "
+            "unsqueeze, and expand in AST-derived detailed graphs"
+        ),
+    )
+    parser.add_argument(
         "--basic-op-add",
         action="append",
         default=[],
@@ -200,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
             analyze_code=analyze_code,
             detailed=args.detailed,
             basic_ops=basic_ops,
+            all_tensor_ops=args.all_tensor_ops,
         )
     except Exception as exc:  # noqa: BLE001 - surface clear CLI errors
         print(f"Error loading architecture: {exc}", file=sys.stderr)

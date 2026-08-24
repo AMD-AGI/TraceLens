@@ -31,9 +31,8 @@ _MODELING_CLASS_PATTERNS: tuple[str, ...] = (
     r"(?i)KernelOutput",
     r"(?i)AttentionOp",
     r"(?i)ActivationOp",
-    r"(?i)RouterOp",
-    r"(?i)SituAndMul",
-    r"(?i)SituActivation",
+    r"(?i)si[tl]u_?and_?mul",
+    r"(?i)si[tl]uactivation",
     r"(?i)Split",
     r"(?i)Multiply",
     r"(?i)FusedRMSNormGated",
@@ -48,6 +47,14 @@ _MODELING_ATTR_PATTERNS: tuple[str, ...] = (
     r"(?i)_conv2d$",
     r"(?i)^conv1d$",
 )
+
+_FUSED_SILU_MUL_CLASS_RE = re.compile(r"(?i)si[tl]u_?and_?mul")
+
+
+def is_fused_silu_mul_class(class_name: str | None) -> bool:
+    """True for fused SiLU/SiTU-and-multiply modules (e.g. SituAndMul, SiluAndMul)."""
+    return bool(class_name) and bool(_FUSED_SILU_MUL_CLASS_RE.search(class_name))
+
 
 # Parallel output-gate attrs detected by AST (`g_proj`, etc.) — not MoE routers.
 _OUTPUT_GATE_ATTR_PATTERNS: tuple[str, ...] = (
@@ -238,13 +245,6 @@ _DETAIL_OPERATION_LABELS = _BASIC_DETAIL_LABELS | frozenset(
         "Token Embedding",
         "Embedding",
         "×",
-        "Expert bias",
-        "Group routing",
-        "Top-k experts",
-        "Gather weights",
-        "Renormalize",
-        "Route scaling",
-        "Score activation",
         "MoE aggregation",
     }
 )
@@ -262,7 +262,6 @@ _DETAIL_OPERATION_CLASSES = frozenset(
         "ShortConvolution",
         "RotaryEmbedding",
         "ApplyRotary",
-        "RouterOp",
         "Multiply",
         "SituActivation",
     }

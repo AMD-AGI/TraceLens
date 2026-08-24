@@ -435,20 +435,30 @@ def _add_linear_pipeline_chain(
         if attr_last_index is not None:
             _track_attr_index(attr_last_index, sub_step.attr_name, step_index)
 
-        if sub_index == 0:
-            if branch_from_input_dashed and input_index is not None:
-                _link_forward_input(graph, input_index, step_index)
-            else:
-                use_fork = fork_from_input and input_index is not None
-                _append_step_link(
-                    graph,
-                    input_index=input_index,
-                    last_index=chain_last,
-                    step_index=step_index,
-                    fork_from_input=use_fork,
-                )
-        else:
-            graph.links.append((indices[-1], step_index))
+        explicit_sources: list[int] = []
+        if attr_last_index is not None:
+            for predecessor in sub_step.operation_predecessors:
+                source_index = attr_last_index.get(predecessor)
+                if source_index is not None and source_index not in explicit_sources:
+                    explicit_sources.append(source_index)
+        for source_index in explicit_sources:
+            graph.links.append((source_index, step_index))
+
+        if not explicit_sources:
+            if sub_index == 0:
+                if branch_from_input_dashed and input_index is not None:
+                    _link_forward_input(graph, input_index, step_index)
+                else:
+                    use_fork = fork_from_input and input_index is not None
+                    _append_step_link(
+                        graph,
+                        input_index=input_index,
+                        last_index=chain_last,
+                        step_index=step_index,
+                        fork_from_input=use_fork,
+                    )
+            elif not sub_step.external_inputs:
+                graph.links.append((indices[-1], step_index))
 
         if _is_binary_kernel_op_label(sub_step.label) and len(indices) >= 2:
             _append_inline_binary_operand_link(
@@ -1054,8 +1064,9 @@ def build_computation_graph(
             continue
 
         if isinstance(segment, SideCombineSegment):
-            if segment.consumer.attr_name == "moe_infer":
-                from visualizer.ast_analyze import MOE_AGGREGATION_LABEL
+            from visualizer.ast_analyze import MOE_AGGREGATION_LABEL, combine_op_from_step_details
+
+            if combine_op_from_step_details(list(segment.consumer.details or [])) == MOE_AGGREGATION_LABEL:
 
                 agg_index = _add_node(
                     graph,
@@ -1610,9 +1621,12 @@ def _center_align_vertical_chains(
         indices = _ordered_inline_frame_chain(graph, list(frame.node_indices))
         if len(indices) < 2:
             continue
-        frame_cx = sum(positions[index].cx for index in indices) / len(indices)
+        side_nodes = _operation_dag_side_nodes(graph, frame)
+        center_indices = [index for index in indices if index not in side_nodes] or indices
+        frame_cx = sum(positions[index].cx for index in center_indices) / len(center_indices)
         for index in indices:
             positions[index].cx = frame_cx
+        _layout_operation_dag_frame(positions, graph, frame)
 
 
 def _pack_ordered_layer_row(
@@ -1927,6 +1941,75 @@ def _ordered_inline_frame_chain(
     if len(ordered) == len(frame_indices):
         return ordered
     return sorted(frame_indices, key=lambda index: index)
+
+
+def _operation_dag_side_nodes(
+    graph: ComputationGraph,
+    frame: InlineFrameSpec,
+) -> set[int]:
+    """Nodes on the long arm of an ancestor-bypass join inside an op frame."""
+    if not any(
+        graph.nodes[index].block is not None
+        and graph.nodes[index].block.operation_predecessors
+        for index in frame.node_indices
+    ):
+        return set()
+    members = set(frame.node_indices)
+    incoming: dict[int, list[int]] = {index: [] for index in members}
+    for source, target in graph.links:
+        if source in members and target in members:
+            incoming[target].append(source)
+
+    def path_to_ancestor(start: int, ancestor: int, visited: set[int]) -> list[int] | None:
+        if start == ancestor:
+            return []
+        if start in visited:
+            return None
+        visited.add(start)
+        for predecessor in incoming.get(start, []):
+            path = path_to_ancestor(predecessor, ancestor, visited)
+            if path is not None:
+                return [start, *path]
+        return None
+
+    side_nodes: set[int] = set()
+    for join, predecessors in incoming.items():
+        if len(predecessors) < 2:
+            continue
+        for direct in predecessors:
+            for branch_tail in predecessors:
+                if branch_tail == direct:
+                    continue
+                path = path_to_ancestor(branch_tail, direct, set())
+                if path:
+                    side_nodes.update(path)
+                    break
+                branch_block = graph.nodes[branch_tail].block
+                if branch_block is not None and branch_block.external_inputs:
+                    side_nodes.add(branch_tail)
+                    break
+    return side_nodes
+
+
+def _layout_operation_dag_frame(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    frame: InlineFrameSpec,
+) -> None:
+    side_nodes = _operation_dag_side_nodes(graph, frame)
+    if not side_nodes:
+        return
+    central = [index for index in frame.node_indices if index not in side_nodes]
+    if not central:
+        return
+    frame_cx = sum(positions[index].cx for index in central) / len(central)
+    central_half = max(positions[index].width for index in central) / 2
+    side_half = max(positions[index].width for index in side_nodes) / 2
+    side_cx = frame_cx - central_half - side_half - min_horizontal_block_gap()
+    for index in central:
+        positions[index].cx = frame_cx
+    for index in side_nodes:
+        positions[index].cx = side_cx
 
 
 def _shared_fork_predecessors(
@@ -2443,7 +2526,9 @@ def _align_inline_frame_column_cx(
         indices = _ordered_inline_frame_chain(graph, list(frame.node_indices))
         if not indices:
             continue
-        frame_cx = sum(positions[index].cx for index in indices) / len(indices)
+        side_nodes = _operation_dag_side_nodes(graph, frame)
+        center_indices = [index for index in indices if index not in side_nodes] or indices
+        frame_cx = sum(positions[index].cx for index in center_indices) / len(center_indices)
         for index in indices:
             positions[index].cx = frame_cx
 
@@ -2552,11 +2637,38 @@ def stack_inline_frame_positions(
         frame_cx = sum(positions[index].cx for index in indices) / len(indices)
         frame_gap = _inline_frame_vertical_gap(graph, frame) if min_gap is None else min_gap
         cursor_top = max(positions[index].top_y for index in indices)
+        frame_members = set(frame.node_indices)
+        internal_outgoing = {
+            index: sum(
+                source == index and target in frame_members
+                for source, target in graph.links
+            )
+            for index in indices
+        }
+        internal_incoming = {
+            index: sum(
+                target == index and source in frame_members
+                for source, target in graph.links
+            )
+            for index in indices
+        }
         for index in indices:
             pos = positions[index]
             pos.cx = frame_cx
             pos.top_y = cursor_top
-            cursor_top -= pos.height + frame_gap
+            feeds_join = any(
+                source == index
+                and target in frame_members
+                and internal_incoming[target] > 1
+                for source, target in graph.links
+            )
+            next_gap = (
+                max(frame_gap, DETAIL_LAYER_GAP + 0.04)
+                if internal_outgoing[index] > 1 or feeds_join
+                else frame_gap
+            )
+            cursor_top -= pos.height + next_gap
+        _layout_operation_dag_frame(positions, graph, frame)
 
 
 def _align_k_proj_adjacent_to_chunk_pipeline(
@@ -2623,6 +2735,21 @@ def finalize_tensor_port_pipeline_layout(
     for pos in positions:
         pos.cx += shift
     stack_inline_frame_positions(positions, graph)
+
+
+def clear_merge_feeder_columns(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+) -> None:
+    """Align routed-expert output with its aggregation spine."""
+    for source, target in graph.links:
+        source_pos = positions[source]
+        target_pos = positions[target]
+        if (
+            "routed_expert" in graph.nodes[source].key
+            and graph.nodes[target].label == "MoE aggregation"
+        ):
+            source_pos.cx = target_pos.cx
 
 
 def _inline_frame_internal_pairs(graph: ComputationGraph) -> set[tuple[int, int]]:
@@ -4535,6 +4662,7 @@ def layout_computation_graph(
         graph,
         min_left=content_left if align_left else None,
     )
+    clear_merge_feeder_columns(positions, graph)
 
     return positions, graph.links
 

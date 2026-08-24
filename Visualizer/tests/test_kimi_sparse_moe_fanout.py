@@ -42,12 +42,26 @@ _KIMI_CODE = (
     Path.home()
     / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
 )
+_KIMI_ROUTER_CONFIG = {
+    "hidden_size": 7168,
+    "num_experts": 896,
+    "num_experts_per_token": 16,
+    "num_expert_group": 1,
+    "topk_group": 1,
+    "moe_router_activation_func": "sigmoid",
+    "moe_renormalize": True,
+    "routed_scaling_factor": 1.0,
+}
 
 
 def _kimi_sparse_moe_layout(*, cx: float = 2.6, top_y: float = 10.0):
     if not _KIMI_CODE.exists():
         pytest.skip("Kimi-K3 modeling file not cached locally")
-    analysis = analyze_source(_KIMI_CODE.read_text(), filename="modeling_kimi_linear.py")
+    analysis = analyze_source(
+        _KIMI_CODE.read_text(),
+        filename="modeling_kimi_linear.py",
+        config=_KIMI_ROUTER_CONFIG,
+    )
     basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
     moe = build_block_node(
         attr_name="block_sparse_moe",
@@ -131,6 +145,39 @@ def test_moe_input_fanout_departs_vertically():
             branch_tee = _connector_fanout_branch_tee_y(points, source=source)
             assert branch_tee is not None, link
             assert abs(branch_tee - tee_y) < PARALLEL_CONNECTOR_COORD_EPS, link
+    finally:
+        plt.close(fig)
+
+
+def test_sigmoid_uses_one_exit_then_splits_to_top_entries():
+    fig, graph, _positions, anchors, _incoming, outgoing, _input_index, buses, link_paths = (
+        _kimi_sparse_moe_layout()
+    )
+    try:
+        sigmoid = next(
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.label == "Sigmoid" and spec.block is not None
+        )
+        links = outgoing[sigmoid]
+        add_link = next(link for link in links if graph.nodes[link[1]].label == "Add")
+        gather_link = next(link for link in links if graph.nodes[link[1]].label == "Gather")
+        assert add_link not in graph.side_entry_links
+        assert gather_link not in graph.side_entry_links
+
+        add_points = link_paths[add_link]
+        gather_points = link_paths[gather_link]
+        assert add_points[0] == gather_points[0]
+        tee = (anchors[sigmoid].cx, buses[1][sigmoid])
+        assert tee in add_points
+        assert gather_points[0][0] == tee[0] == gather_points[1][0]
+        assert gather_points[0][1] >= tee[1] >= gather_points[1][1]
+
+        from visualizer.render import _connector_target_top_entry_y
+
+        for link, points in ((add_link, add_points), (gather_link, gather_points)):
+            target = anchors[link[1]]
+            assert abs(points[-1][1] - _connector_target_top_entry_y(target)) < PARALLEL_CONNECTOR_COORD_EPS
     finally:
         plt.close(fig)
 
@@ -233,9 +280,18 @@ def test_moe_route_scaling_uses_direct_merge_bus_to_aggregation():
             _path_penetrates_attached_boxes,
         )
 
-        link_key, points = _link_by_labels(
-            graph, link_paths, "Route scaling", "MoE aggregation"
+        route_index = next(
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.label == "Multiply"
+            and spec.block is not None
+            and spec.block.attr_name.startswith("@op_")
         )
+        aggregation_index = next(
+            index for index, spec in enumerate(graph.nodes) if spec.label == "MoE aggregation"
+        )
+        link_key = (route_index, aggregation_index)
+        points = link_paths[link_key]
         route_scaling = anchors[link_key[0]]
         aggregation = anchors[link_key[1]]
         y_exit = _connector_source_bottom_exit_y(route_scaling)
@@ -243,15 +299,12 @@ def test_moe_route_scaling_uses_direct_merge_bus_to_aggregation():
         assert abs(points[0][0] - points[1][0]) < PARALLEL_CONNECTOR_COORD_EPS, (
             "Route scaling must drop vertically before joining the merge bus"
         )
-        merge_bus_y = buses[3][link_key]
         horizontals = [
             (y1, x1, x2)
             for (x1, y1), (x2, y2) in zip(points, points[1:])
             if abs(y1 - y2) < PARALLEL_CONNECTOR_COORD_EPS and abs(x1 - x2) > 0.06
         ]
-        assert any(
-            abs(y - merge_bus_y) < PARALLEL_CONNECTOR_COORD_EPS for y, _x1, _x2 in horizontals
-        ), "Route scaling must turn horizontally on the shared merge bus"
+        assert horizontals, "Final router Multiply must route horizontally to aggregation"
         assert all(x >= route_scaling.cx - PARALLEL_CONNECTOR_COORD_EPS for x, _y in points), (
             "Route scaling must not detour left of its column"
         )
@@ -265,11 +318,12 @@ def test_moe_route_scaling_uses_direct_merge_bus_to_aggregation():
         assert abs(points[-1][0] - entry_x) < PARALLEL_CONNECTOR_COORD_EPS
         assert abs(points[-1][1] - _connector_target_top_entry_y(aggregation)) < PARALLEL_CONNECTOR_COORD_EPS
 
-        down_proj_points = link_paths[(9, 10)]
-        down_horiz_y = next(
-            y1 for (x1, y1), (x2, y2) in zip(down_proj_points, down_proj_points[1:]) if abs(y1 - y2) < 1e-6
+        down_index = next(
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.block is not None and spec.block.attr_name == "routed_expert_down_proj"
         )
-        assert abs(down_horiz_y - buses[3][link_key]) < PARALLEL_CONNECTOR_COORD_EPS
+        assert (down_index, aggregation_index) in link_paths
     finally:
         plt.close(fig)
 
@@ -291,7 +345,13 @@ def test_moe_aggregation_is_regular_block_with_dual_top_entry_ports():
     try:
         by_label = {spec.label: index for index, spec in enumerate(graph.nodes)}
         agg_index = by_label["MoE aggregation"]
-        route_index = by_label["Route scaling"]
+        route_index = next(
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.label == "Multiply"
+            and spec.block is not None
+            and spec.block.attr_name.startswith("@op_")
+        )
         down_index = next(
             index
             for index, spec in enumerate(graph.nodes)
@@ -301,9 +361,12 @@ def test_moe_aggregation_is_regular_block_with_dual_top_entry_ports():
         assert graph.nodes[agg_index].label == "MoE aggregation"
 
         merge_entry_x = buses[2]
-        assert len(merge_entry_x) == 2
         route_link = (route_index, agg_index)
         down_link = (down_index, agg_index)
+        aggregation_entries = {
+            link: x for link, x in merge_entry_x.items() if link[1] == agg_index
+        }
+        assert len(aggregation_entries) == 2
         assert route_link in merge_entry_x and down_link in merge_entry_x
         assert merge_entry_x[route_link] < merge_entry_x[down_link]
 

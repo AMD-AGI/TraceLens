@@ -80,13 +80,6 @@ def first_functional_synthetic_index(forward_calls: list[str]) -> int | None:
         if is_functional_synthetic(call):
             return index
     return None
-SYNTHETIC_ROUTER_ACTIVATION = "@router_activation"
-SYNTHETIC_ROUTER_BIAS = "@router_bias"
-SYNTHETIC_ROUTER_GROUP = "@router_group"
-SYNTHETIC_ROUTER_TOPK = "@router_topk"
-SYNTHETIC_ROUTER_GATHER = "@router_gather"
-SYNTHETIC_ROUTER_RENORM = "@router_renorm"
-SYNTHETIC_ROUTER_SCALE = "@router_scale"
 SYNTHETIC_GATE_ACTIVATION = "@gate_activation"
 SYNTHETIC_GATE_RESHAPE = "@gate_reshape"
 _GATE_ACTIVATION_NAMES = {
@@ -94,15 +87,7 @@ _GATE_ACTIVATION_NAMES = {
     "softmax": "Softmax",
     "tanh": "Tanh",
 }
-_ROUTER_SYNTHETICS = (
-    SYNTHETIC_ROUTER_ACTIVATION,
-    SYNTHETIC_ROUTER_BIAS,
-    SYNTHETIC_ROUTER_GROUP,
-    SYNTHETIC_ROUTER_TOPK,
-    SYNTHETIC_ROUTER_GATHER,
-    SYNTHETIC_ROUTER_RENORM,
-    SYNTHETIC_ROUTER_SCALE,
-)
+FORWARD_OPERATION_PREFIX = "@op_"
 _SYNTHETIC_ATTENTION_NAMES = {
     "eager_attention_forward",
     "flash_attention_forward",
@@ -208,12 +193,20 @@ def _assign_target(stmt: ast.AST) -> str | None:
 
 
 def _if_has_competing_assigns(if_node: ast.If) -> bool:
-    if_targets = {_assign_target(stmt) for stmt in if_node.body if isinstance(stmt, ast.Assign)}
+    if_targets = {
+        _assign_target(stmt)
+        for branch_stmt in if_node.body
+        for stmt in ast.walk(branch_stmt)
+        if isinstance(stmt, ast.Assign)
+    }
     if_targets.discard(None)
-    for stmt in if_node.orelse:
-        target = _assign_target(stmt)
-        if target is not None and target in if_targets:
-            return True
+    for branch_stmt in if_node.orelse:
+        for stmt in ast.walk(branch_stmt):
+            if not isinstance(stmt, ast.Assign):
+                continue
+            target = _assign_target(stmt)
+            if target is not None and target in if_targets:
+                return True
     return False
 
 
@@ -323,51 +316,6 @@ def _is_moe_gate_class(class_name: str, forward_calls: list[str]) -> bool:
     return bool(MOE_CLASS_RE.search(class_name) and re.search(r"gate|router", class_name, re.I))
 
 
-def _call_uses_attr(node: ast.AST, attr: str) -> bool:
-    for call in ast.walk(node):
-        if not isinstance(call, ast.Call):
-            continue
-        func = call.func
-        if isinstance(func, ast.Attribute) and func.attr == attr:
-            return True
-    return False
-
-
-def _call_uses_self_attr(node: ast.AST, attr: str) -> bool:
-    for call in ast.walk(node):
-        if not isinstance(call, ast.Call):
-            continue
-        func = call.func
-        if isinstance(func, ast.Attribute) and _is_self_attr(func, attr):
-            return True
-    if isinstance(node, ast.BinOp):
-        for side in (node.left, node.right):
-            if isinstance(side, ast.Attribute) and _is_self_attr(side, attr):
-                return True
-    return False
-
-
-def _detect_router_activation(func: ast.FunctionDef) -> str | None:
-    for node in func.body:
-        if isinstance(node, ast.If):
-            for branch in (node.body, node.orelse):
-                for stmt in branch:
-                    src = _stmt_value(stmt)
-                    if src is None:
-                        continue
-                    if _call_uses_attr(src, "sigmoid"):
-                        return "Sigmoid"
-                    if _call_uses_attr(src, "softmax"):
-                        return "Softmax"
-        src = _stmt_value(node)
-        if src is not None:
-            if _call_uses_attr(src, "sigmoid"):
-                return "Sigmoid"
-            if _call_uses_attr(src, "softmax"):
-                return "Softmax"
-    return None
-
-
 def _stmt_value(stmt: ast.AST) -> ast.AST | None:
     if isinstance(stmt, ast.Assign):
         return stmt.value
@@ -376,100 +324,6 @@ def _stmt_value(stmt: ast.AST) -> ast.AST | None:
     if isinstance(stmt, ast.Return) and stmt.value is not None:
         return stmt.value
     return None
-
-
-def _forward_has_expert_bias(func: ast.FunctionDef) -> bool:
-    return any(
-        isinstance(node, ast.Attribute) and _is_self_attr(node, "e_score_correction_bias")
-        for node in ast.walk(func)
-    )
-
-
-def _forward_has_group_routing(func: ast.FunctionDef) -> bool:
-    for node in ast.walk(func):
-        if not isinstance(node, ast.If):
-            continue
-        test_src = ast.unparse(node.test) if hasattr(ast, "unparse") else ""
-        if "num_expert_group" not in test_src:
-            continue
-        if any(_call_uses_attr(stmt, "masked_fill") for stmt in node.body):
-            return True
-    return False
-
-
-def _forward_has_topk(func: ast.FunctionDef) -> bool:
-    return any(_call_uses_attr(node, "topk") for node in func.body)
-
-
-def _forward_has_gather(func: ast.FunctionDef) -> bool:
-    return any(_call_uses_attr(node, "gather") for node in func.body)
-
-
-def _forward_has_renormalize(func: ast.FunctionDef) -> bool:
-    for node in ast.walk(func):
-        if not isinstance(node, ast.If):
-            continue
-        test_src = ast.unparse(node.test) if hasattr(ast, "unparse") else ""
-        if "moe_renormalize" in test_src or "renormalize" in test_src:
-            return True
-    return False
-
-
-def _forward_has_route_scale(func: ast.FunctionDef) -> bool:
-    return any(
-        isinstance(node, ast.Attribute) and _is_self_attr(node, "routed_scaling_factor")
-        for node in ast.walk(func)
-    )
-
-
-def _router_pipeline_from_forward(func: ast.FunctionDef) -> list[tuple[str, list[str]]]:
-    """Synthetic MoE router steps after F.linear."""
-    pipeline: list[tuple[str, list[str]]] = []
-
-    activation = _detect_router_activation(func)
-    if activation:
-        pipeline.append((SYNTHETIC_ROUTER_ACTIVATION, [activation]))
-
-    if _forward_has_expert_bias(func):
-        pipeline.append((SYNTHETIC_ROUTER_BIAS, ["Expert bias"]))
-
-    if _forward_has_group_routing(func):
-        pipeline.append((SYNTHETIC_ROUTER_GROUP, ["Group routing"]))
-
-    if _forward_has_topk(func):
-        pipeline.append((SYNTHETIC_ROUTER_TOPK, ["Top-k experts"]))
-
-    if _forward_has_gather(func):
-        pipeline.append((SYNTHETIC_ROUTER_GATHER, ["Gather weights"]))
-
-    if _forward_has_renormalize(func):
-        pipeline.append((SYNTHETIC_ROUTER_RENORM, ["Renormalize"]))
-
-    if _forward_has_route_scale(func):
-        pipeline.append((SYNTHETIC_ROUTER_SCALE, ["Route scaling"]))
-
-    return pipeline
-
-
-def _router_forward_step_details(
-    class_name: str,
-    func: ast.FunctionDef,
-    forward_calls: list[str],
-) -> dict[str, list[str]]:
-    if not _is_moe_gate_class(class_name, forward_calls):
-        return {}
-
-    pipeline = _router_pipeline_from_forward(func)
-    if not pipeline:
-        return {}
-
-    functional_index = first_functional_synthetic_index(forward_calls)
-    assert functional_index is not None
-    details: dict[str, list[str]] = {}
-    for offset, (step, step_details) in enumerate(pipeline, start=1):
-        forward_calls.insert(functional_index + offset, step)
-        details[step] = step_details
-    return details
 
 
 COMBINE_DETAIL_PREFIX = "combine:"
@@ -517,10 +371,9 @@ def _expr_is_weighted_sum(node: ast.AST) -> bool:
     return False
 
 
-def _detect_method_combine_op(func: ast.FunctionDef) -> str | None:
+def _detect_method_combine_op(func: ast.FunctionDef, *, class_name: str = "") -> str | None:
     """Infer a combine-operator symbol from a helper method body."""
-    if func.name == "moe_infer":
-        return MOE_AGGREGATION_LABEL
+    weighted = False
     for node in ast.walk(func):
         value: ast.AST | None = None
         if isinstance(node, ast.Return):
@@ -530,7 +383,13 @@ def _detect_method_combine_op(func: ast.FunctionDef) -> str | None:
         elif isinstance(node, ast.AnnAssign):
             value = node.value
         if value is not None and _expr_is_weighted_sum(value):
-            return "Σ"
+            weighted = True
+            break
+    moe_like = bool(re.search(r"(?i)moe", func.name) or MOE_CLASS_RE.search(class_name))
+    if moe_like and (weighted or re.search(r"(?i)(?:infer|combin|aggregat)", func.name)):
+        return MOE_AGGREGATION_LABEL
+    if weighted:
+        return "Σ"
     return None
 
 
@@ -554,7 +413,7 @@ def _method_forward_step_details(
         func = method_funcs.get(call_attr)
         if func is None:
             continue
-        combine_op = _detect_method_combine_op(func)
+        combine_op = _detect_method_combine_op(func, class_name=class_node.name)
         if combine_op is None:
             continue
         details[call_attr] = [
@@ -732,6 +591,18 @@ class SideInputSpec:
     source_kind: SideInputSource = "prior_step"
 
 
+@dataclass(frozen=True)
+class ForwardOperation:
+    """One primitive tensor operation recovered from a forward expression."""
+
+    attr_name: str
+    label: str
+    class_name: str
+    predecessors: tuple[str, ...] = ()
+    external_inputs: tuple[str, ...] = ()
+    details: tuple[str, ...] = ()
+
+
 @dataclass
 class ClassStructure:
     name: str
@@ -747,6 +618,7 @@ class ClassStructure:
     side_inputs: dict[str, list[SideInputSpec]] = field(default_factory=dict)
     init_assignment_options: dict[str, list[str]] = field(default_factory=dict)
     forward_input_name: str | None = None
+    forward_operations: dict[str, ForwardOperation] = field(default_factory=dict)
 
 
 def infer_forward_steps_from_init(cls: ClassStructure) -> list[str]:
@@ -775,13 +647,422 @@ def effective_forward_calls(cls: ClassStructure) -> list[str]:
     return infer_forward_steps_from_init(cls)
 
 
+_UNKNOWN = object()
+_HOUSEKEEPING_METHODS = frozenset(
+    {"view", "reshape", "flatten", "type", "float", "to", "unsqueeze", "squeeze", "expand", "contiguous"}
+)
+_TENSOR_METHOD_LABELS = {
+    "sigmoid": "Sigmoid",
+    "softmax": "Softmax",
+    "gather": "Gather",
+    "sum": "Sum",
+    "masked_fill": "Masked fill",
+    "scatter": "Scatter",
+    "scatter_": "Scatter",
+    "view": "View",
+    "reshape": "Reshape",
+    "flatten": "Flatten",
+    "type": "Cast",
+    "float": "Cast",
+    "to": "Cast",
+    "unsqueeze": "Unsqueeze",
+    "squeeze": "Squeeze",
+    "expand": "Expand",
+    "contiguous": "Contiguous",
+}
+_FUNCTION_LABELS = {
+    "linear": "Linear",
+    "topk": "TopK",
+    "zeros_like": "Zeros like",
+}
+_BINOP_LABELS = {
+    ast.Add: "Add",
+    ast.Sub: "Subtract",
+    ast.Mult: "Multiply",
+    ast.Div: "Divide",
+    ast.FloorDiv: "Floor divide",
+    ast.Pow: "Power",
+}
+
+
+def is_forward_operation(attr_name: str) -> bool:
+    return attr_name.startswith(FORWARD_OPERATION_PREFIX)
+
+
+def _config_value(node: ast.AST, config: dict[str, Any], self_values: dict[str, Any]) -> Any:
+    """Evaluate the small literal/config expression subset used by model constructors."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id == "config":
+            return config
+        return _UNKNOWN
+    if isinstance(node, ast.Attribute):
+        if isinstance(node.value, ast.Name) and node.value.id == "config":
+            return config.get(node.attr, _UNKNOWN)
+        if isinstance(node.value, ast.Name) and node.value.id == "self":
+            return self_values.get(node.attr, _UNKNOWN)
+        base = _config_value(node.value, config, self_values)
+        if isinstance(base, dict):
+            return base.get(node.attr, _UNKNOWN)
+        return _UNKNOWN
+    if isinstance(node, ast.Call):
+        name = _expr_name(node.func)
+        if name == "getattr" and len(node.args) >= 2:
+            base = _config_value(node.args[0], config, self_values)
+            key = _config_value(node.args[1], config, self_values)
+            default = _config_value(node.args[2], config, self_values) if len(node.args) >= 3 else _UNKNOWN
+            if isinstance(base, dict) and isinstance(key, str):
+                return base.get(key, default)
+        return _UNKNOWN
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        value = _config_value(node.operand, config, self_values)
+        return not value if value is not _UNKNOWN else _UNKNOWN
+    if isinstance(node, ast.BoolOp):
+        values = [_config_value(value, config, self_values) for value in node.values]
+        if isinstance(node.op, ast.And):
+            if any(value is False for value in values):
+                return False
+            return all(values) if all(value is not _UNKNOWN for value in values) else _UNKNOWN
+        if isinstance(node.op, ast.Or):
+            if any(value is True for value in values):
+                return True
+            return any(values) if all(value is not _UNKNOWN for value in values) else _UNKNOWN
+    if isinstance(node, ast.Compare):
+        left = _config_value(node.left, config, self_values)
+        comparators = [_config_value(item, config, self_values) for item in node.comparators]
+        if left is _UNKNOWN or any(item is _UNKNOWN for item in comparators):
+            return _UNKNOWN
+        values = [left, *comparators]
+        for index, op in enumerate(node.ops):
+            a, b = values[index], values[index + 1]
+            if isinstance(op, ast.Eq) and not (a == b):
+                return False
+            if isinstance(op, ast.NotEq) and not (a != b):
+                return False
+            if isinstance(op, ast.Gt) and not (a > b):
+                return False
+            if isinstance(op, ast.GtE) and not (a >= b):
+                return False
+            if isinstance(op, ast.Lt) and not (a < b):
+                return False
+            if isinstance(op, ast.LtE) and not (a <= b):
+                return False
+            if isinstance(op, ast.Is) and not (a is b):
+                return False
+            if isinstance(op, ast.IsNot) and not (a is not b):
+                return False
+        return True
+    return _UNKNOWN
+
+
+def _self_config_values(init_func: ast.FunctionDef | None, config: dict[str, Any]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    if init_func is None:
+        return values
+    for stmt in init_func.body:
+        if not isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        value_node = stmt.value
+        if value_node is None:
+            continue
+        value = _config_value(value_node, config, values)
+        for target in targets:
+            if isinstance(target, ast.Attribute) and _is_self_attr(target, target.attr):
+                if value is not _UNKNOWN or any(
+                    isinstance(item, ast.Name) and item.id == "config"
+                    for item in ast.walk(value_node)
+                ):
+                    values[target.attr] = value
+    return values
+
+
+class _ForwardOperationExtractor:
+    """Recover primitive tensor operations and their data dependencies."""
+
+    def __init__(
+        self,
+        *,
+        self_values: dict[str, Any],
+        all_tensor_ops: bool,
+    ) -> None:
+        self.self_values = self_values
+        self.all_tensor_ops = all_tensor_ops
+        self.operations: list[ForwardOperation] = []
+        self.var_producer: dict[str, str] = {}
+        self._used_ids: set[str] = set()
+
+    @staticmethod
+    def _dedupe(values: list[str]) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(value for value in values if value))
+
+    def _operation_id(self, node: ast.AST, label: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+        line = getattr(node, "lineno", 0)
+        col = getattr(node, "col_offset", 0)
+        base = f"{FORWARD_OPERATION_PREFIX}l{line}_c{col}_{slug}"
+        candidate = base
+        counter = 2
+        while candidate in self._used_ids:
+            candidate = f"{base}_{counter}"
+            counter += 1
+        self._used_ids.add(candidate)
+        return candidate
+
+    def _emit(
+        self,
+        node: ast.AST,
+        label: str,
+        predecessors: list[str],
+        external_inputs: list[str],
+        *,
+        details: list[str] | None = None,
+    ) -> str:
+        attr_name = self._operation_id(node, label)
+        self.operations.append(
+            ForwardOperation(
+                attr_name=attr_name,
+                label=label,
+                class_name=label,
+                predecessors=self._dedupe(predecessors),
+                external_inputs=self._dedupe(external_inputs),
+                details=tuple(details or ()),
+            )
+        )
+        return attr_name
+
+    def _self_attr_input(self, node: ast.Attribute) -> tuple[str | None, list[str]]:
+        if isinstance(node.value, ast.Name) and node.value.id == "self":
+            if node.attr in self.self_values:
+                return None, []
+            return None, [node.attr]
+        return None, []
+
+    def expression(self, node: ast.AST) -> tuple[str | None, list[str]]:
+        if isinstance(node, ast.Name):
+            return self.var_producer.get(node.id), []
+        if isinstance(node, ast.Attribute):
+            return self._self_attr_input(node)
+        if isinstance(node, ast.Constant):
+            return None, []
+        if isinstance(node, ast.Subscript):
+            return self.expression(node.value)
+        if isinstance(node, ast.UnaryOp):
+            return self.expression(node.operand)
+        if isinstance(node, ast.IfExp):
+            left, left_external = self.expression(node.body)
+            right, right_external = self.expression(node.orelse)
+            return right or left, [*left_external, *right_external]
+        if isinstance(node, (ast.Tuple, ast.List)):
+            producers: list[str] = []
+            external: list[str] = []
+            for item in node.elts:
+                producer, item_external = self.expression(item)
+                if producer:
+                    producers.append(producer)
+                external.extend(item_external)
+            return (producers[-1] if producers else None), external
+        if isinstance(node, ast.BinOp):
+            left, left_external = self.expression(node.left)
+            right, right_external = self.expression(node.right)
+            label = _BINOP_LABELS.get(type(node.op))
+            if label is None:
+                return right or left, [*left_external, *right_external]
+            details: list[str] = []
+            for operand in (node.left, node.right):
+                if isinstance(operand, ast.Constant):
+                    details.append(f"scalar: {operand.value!r}")
+                elif isinstance(operand, ast.Attribute) and _is_self_attr(operand, operand.attr):
+                    if operand.attr in self.self_values:
+                        details.append(f"scalar: self.{operand.attr}={self.self_values[operand.attr]!r}")
+            producer = self._emit(
+                node,
+                label,
+                [value for value in (left, right) if value],
+                [*left_external, *right_external],
+                details=details,
+            )
+            return producer, []
+        if not isinstance(node, ast.Call):
+            return None, []
+
+        method_name: str | None = None
+        base_producer: str | None = None
+        external: list[str] = []
+        if isinstance(node.func, ast.Attribute):
+            method_name = node.func.attr
+            owner_name = _expr_name(node.func.value)
+            is_namespace_call = owner_name in {"torch", "F", "torch.nn.functional", "nn.functional"}
+            if not is_namespace_call:
+                base_producer, base_external = self.expression(node.func.value)
+                external.extend(base_external)
+
+        call_name = (_expr_name(node.func) or method_name or "").split(".")[-1]
+        functional_name = _functional_call_name(node.func)
+        label = _FUNCTION_LABELS.get(functional_name or call_name) or _TENSOR_METHOD_LABELS.get(call_name)
+        housekeeping = call_name in _HOUSEKEEPING_METHODS or call_name == "zeros_like"
+        arg_producers: list[str] = []
+        if not (housekeeping and method_name is not None):
+            for arg in node.args:
+                producer, arg_external = self.expression(arg)
+                if producer:
+                    arg_producers.append(producer)
+                external.extend(arg_external)
+            for keyword in node.keywords:
+                producer, arg_external = self.expression(keyword.value)
+                if producer:
+                    arg_producers.append(producer)
+                external.extend(arg_external)
+        if label is None:
+            producers = [value for value in (base_producer, *arg_producers) if value]
+            return (producers[-1] if producers else None), external
+
+        if housekeeping and not self.all_tensor_ops:
+            return base_producer or (arg_producers[0] if arg_producers else None), external
+
+        details: list[str] = []
+        if call_name == "topk":
+            for keyword in node.keywords:
+                if keyword.arg == "k":
+                    value = _config_value(keyword.value, {}, self.self_values)
+                    if value is not _UNKNOWN:
+                        details.append(f"k={value}")
+        if call_name == "linear" and any(
+            isinstance(item, ast.Call)
+            and isinstance(item.func, ast.Attribute)
+            and item.func.attr in {"type", "float", "to"}
+            for arg in node.args
+            for item in ast.walk(arg)
+        ):
+            details.append("dtype: torch.float32")
+        if call_name in {"view", "reshape"}:
+            details.append("shape: " + ", ".join(ast.unparse(arg) for arg in node.args))
+        if call_name in {"unsqueeze", "squeeze", "sum", "gather"}:
+            if node.args:
+                details.append(f"dim: {ast.unparse(node.args[0])}")
+            for keyword in node.keywords:
+                if keyword.arg in {"dim", "keepdim"}:
+                    details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
+        if call_name in {"type", "float", "to"}:
+            dtype = ast.unparse(node.args[0]) if node.args else ("float32" if call_name == "float" else "")
+            details.append(f"dtype: {dtype}" if dtype else "dtype cast")
+        producer = self._emit(
+            node,
+            label,
+            [value for value in (base_producer, *arg_producers) if value],
+            external,
+            details=details,
+        )
+        return producer, []
+
+    @staticmethod
+    def _target_names(stmt: ast.Assign | ast.AnnAssign) -> list[str]:
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        names: list[str] = []
+        for target in targets:
+            if isinstance(target, ast.Name):
+                names.append(target.id)
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                names.extend(item.id for item in target.elts if isinstance(item, ast.Name))
+        return names
+
+    def _bind(self, stmt: ast.Assign | ast.AnnAssign, producer: str | None) -> None:
+        if producer is None:
+            return
+        for name in self._target_names(stmt):
+            self.var_producer[name] = producer
+
+    def statements(self, statements: list[ast.stmt], *, condition: str | None = None) -> None:
+        for stmt in statements:
+            if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
+                producer, _ = self.expression(stmt.value)
+                self._bind(stmt, producer)
+                continue
+            if isinstance(stmt, ast.AugAssign):
+                left, left_external = self.expression(stmt.target)
+                right, right_external = self.expression(stmt.value)
+                label = _BINOP_LABELS.get(type(stmt.op))
+                if label:
+                    producer = self._emit(
+                        stmt,
+                        label,
+                        [value for value in (left, right) if value],
+                        [*left_external, *right_external],
+                    )
+                    if isinstance(stmt.target, ast.Name):
+                        self.var_producer[stmt.target.id] = producer
+                continue
+            if isinstance(stmt, ast.Expr):
+                producer, _ = self.expression(stmt.value)
+                if producer and isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Attribute):
+                    owner = stmt.value.func.value
+                    if isinstance(owner, ast.Name):
+                        self.var_producer[owner.id] = producer
+                continue
+            if isinstance(stmt, ast.Return) and stmt.value is not None:
+                self.expression(stmt.value)
+                continue
+            if isinstance(stmt, ast.If):
+                outcome = _config_value(stmt.test, {}, self.self_values)
+                if outcome is True:
+                    self.statements(stmt.body, condition=condition)
+                elif outcome is False:
+                    self.statements(stmt.orelse, condition=condition)
+                else:
+                    test = ast.unparse(stmt.test)
+                    before_env = dict(self.var_producer)
+                    before = len(self.operations)
+                    self.statements(stmt.body, condition=test)
+                    body_env = dict(self.var_producer)
+                    for index in range(before, len(self.operations)):
+                        op = self.operations[index]
+                        self.operations[index] = ForwardOperation(
+                            **{**op.__dict__, "details": (*op.details, f"condition: {test}")}
+                        )
+                    self.var_producer = dict(before_env)
+                    before_else = len(self.operations)
+                    self.statements(stmt.orelse, condition=f"not ({test})")
+                    else_env = dict(self.var_producer)
+                    for index in range(before_else, len(self.operations)):
+                        op = self.operations[index]
+                        self.operations[index] = ForwardOperation(
+                            **{**op.__dict__, "details": (*op.details, f"condition: not ({test})")}
+                        )
+                    self.var_producer = else_env if stmt.orelse else body_env
+                continue
+            if isinstance(stmt, (ast.For, ast.With)):
+                self.statements(stmt.body, condition=condition)
+
+
+def _forward_operations_from_forward(
+    func: ast.FunctionDef,
+    *,
+    self_values: dict[str, Any],
+    all_tensor_ops: bool,
+) -> list[ForwardOperation]:
+    extractor = _ForwardOperationExtractor(
+        self_values=self_values,
+        all_tensor_ops=all_tensor_ops,
+    )
+    extractor.statements(func.body)
+    return extractor.operations
+
+
 # Backwards-compatible alias used internally.
 _ClassInfo = ClassStructure
 
 
 class _ModelAstVisitor(ast.NodeVisitor):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        config: dict[str, Any] | None = None,
+        all_tensor_ops: bool = False,
+    ) -> None:
         self.classes: dict[str, ClassStructure] = {}
+        self.config = dict(config or {})
+        self.all_tensor_ops = all_tensor_ops
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         init_assignments: dict[str, str] = {}
@@ -795,32 +1076,52 @@ class _ModelAstVisitor(ast.NodeVisitor):
         forward_step_details: dict[str, list[str]] = {}
         side_inputs: dict[str, list[SideInputSpec]] = {}
         forward_input_name: str | None = None
+        forward_operations: dict[str, ForwardOperation] = {}
+        init_func = next(
+            (item for item in node.body if isinstance(item, ast.FunctionDef) and item.name == "__init__"),
+            None,
+        )
+        forward_func = next(
+            (item for item in node.body if isinstance(item, ast.FunctionDef) and item.name == "forward"),
+            None,
+        )
 
-        for item in node.body:
-            if isinstance(item, ast.FunctionDef) and item.name == "__init__":
-                init_assignments, init_details, init_assignment_options = _parse_init(item)
-            if isinstance(item, ast.FunctionDef) and item.name == "forward":
-                forward_input_name = _primary_forward_input_name(item)
-                (
-                    forward_calls,
-                    norm_before,
-                    attention_inputs,
-                    side_inputs,
-                    parsed_step_details,
-                ) = _parse_forward(item)
-                alternate = _alternate_forward_dispatches(item)
-                if alternate:
-                    forward_calls = [call for call in forward_calls if call not in alternate]
-                parallel_gates = _parallel_gates_from_forward(item)
-                if forward_calls and parallel_gates:
-                    # Routers like MoE `gate` run on hidden_states as the main path, not in parallel.
-                    parallel_gates = [gate for gate in parallel_gates if gate != forward_calls[0]]
-                gate_activations = _parallel_gate_activations_from_forward(item, parallel_gates)
-                forward_step_details = _router_forward_step_details(node.name, item, forward_calls)
-                forward_step_details.update(parsed_step_details)
-                forward_step_details.update(
-                    _method_forward_step_details(node, forward_calls, init_assignments)
+        if init_func is not None:
+            init_assignments, init_details, init_assignment_options = _parse_init(init_func)
+        if forward_func is not None:
+            forward_input_name = _primary_forward_input_name(forward_func)
+            (
+                forward_calls,
+                norm_before,
+                attention_inputs,
+                side_inputs,
+                parsed_step_details,
+            ) = _parse_forward(forward_func)
+            alternate = _alternate_forward_dispatches(forward_func)
+            if alternate:
+                forward_calls = [call for call in forward_calls if call not in alternate]
+            parallel_gates = _parallel_gates_from_forward(forward_func)
+            if forward_calls and parallel_gates:
+                # Routers like MoE `gate` run on hidden_states as the main path, not in parallel.
+                parallel_gates = [gate for gate in parallel_gates if gate != forward_calls[0]]
+            gate_activations = _parallel_gate_activations_from_forward(forward_func, parallel_gates)
+            forward_step_details = dict(parsed_step_details)
+            if _is_moe_gate_class(node.name, forward_calls):
+                values = _self_config_values(init_func, self.config)
+                parsed_operations = _forward_operations_from_forward(
+                    forward_func,
+                    self_values=values,
+                    all_tensor_ops=self.all_tensor_ops,
                 )
+                if parsed_operations:
+                    forward_operations = {op.attr_name: op for op in parsed_operations}
+                    forward_calls = [op.attr_name for op in parsed_operations]
+                    forward_step_details.update(
+                        {op.attr_name: list(op.details) for op in parsed_operations}
+                    )
+            forward_step_details.update(
+                _method_forward_step_details(node, forward_calls, init_assignments)
+            )
 
         self.classes[node.name] = ClassStructure(
             name=node.name,
@@ -836,6 +1137,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             forward_step_details=forward_step_details,
             side_inputs=side_inputs,
             forward_input_name=forward_input_name,
+            forward_operations=forward_operations,
         )
         self.generic_visit(node)
 
@@ -2343,10 +2645,16 @@ def build_layer_repeat_lines(
     return lines
 
 
-def build_class_registry(source: str, *, filename: str = "<model>") -> dict[str, ClassStructure]:
+def build_class_registry(
+    source: str,
+    *,
+    filename: str = "<model>",
+    config: dict[str, Any] | None = None,
+    all_tensor_ops: bool = False,
+) -> dict[str, ClassStructure]:
     """Return all class structures discovered in one modeling file."""
     tree = parse_python_ast(source, filename=filename)
-    visitor = _ModelAstVisitor()
+    visitor = _ModelAstVisitor(config=config, all_tensor_ops=all_tensor_ops)
     visitor.visit(tree)
     return visitor.classes
 
@@ -2358,11 +2666,17 @@ def merge_class_registries(*registries: dict[str, ClassStructure]) -> dict[str, 
     return merged
 
 
-def analyze_source(source: str, *, filename: str = "<model>") -> CodeAnalysis:
+def analyze_source(
+    source: str,
+    *,
+    filename: str = "<model>",
+    config: dict[str, Any] | None = None,
+    all_tensor_ops: bool = False,
+) -> CodeAnalysis:
     """Analyze one modeling file and return extracted block structure."""
     tree = parse_python_ast(source, filename=filename)
     external_imports = _collect_external_imports(tree)
-    visitor = _ModelAstVisitor()
+    visitor = _ModelAstVisitor(config=config, all_tensor_ops=all_tensor_ops)
     visitor.visit(tree)
     _enrich_kernel_import_details(visitor.classes, external_imports)
 
@@ -2449,12 +2763,22 @@ def analyze_source(source: str, *, filename: str = "<model>") -> CodeAnalysis:
     return analysis
 
 
-def analyze_sources(sources: dict[Path, str]) -> CodeAnalysis:
+def analyze_sources(
+    sources: dict[Path, str],
+    *,
+    config: dict[str, Any] | None = None,
+    all_tensor_ops: bool = False,
+) -> CodeAnalysis:
     """Analyze multiple files and merge into one CodeAnalysis."""
     merged = CodeAnalysis()
     registries: list[dict[str, ClassStructure]] = []
     for path, text in sources.items():
-        partial = analyze_source(text, filename=str(path))
+        partial = analyze_source(
+            text,
+            filename=str(path),
+            config=config,
+            all_tensor_ops=all_tensor_ops,
+        )
         registries.append(partial.class_registry)
         merged.source_files.extend(partial.source_files)
         merged.notes.extend(partial.notes)

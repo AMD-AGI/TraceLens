@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from visualizer.block_tree import BlockNode
+from visualizer.block_tree import BlockNode, is_fused_silu_mul_class
 
 PIXELS_PER_UNIT = 80.0
 DEFAULT_TITLE_FONT = 7.6
@@ -170,7 +170,7 @@ def estimate_block_size(
         text_w = max(text_w, len(line) * char_w_sub)
 
     width = max(min_box_width(), box_width_for_text_width(text_w, pad_x=box_pad_x))
-    if label == "SituAndMul" or label == "Gated multiply":
+    if is_fused_silu_mul_class(label) or label == "Gated multiply":
         width += BLOCK_PAD_X
     if sub_lines:
         return width, titled_box_height(len(sub_lines))

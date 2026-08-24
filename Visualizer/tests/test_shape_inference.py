@@ -6,10 +6,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from visualizer.ast_analyze import SYNTHETIC_ATTENTION
+from visualizer.ast_analyze import SYNTHETIC_ATTENTION, analyze_source
 from visualizer.basic_ops import BasicOpFilter
-from visualizer.block_tree import BlockNode
-from visualizer.extract import load_architecture
+from visualizer.block_tree import BlockNode, build_block_node
+from visualizer.extract import ArchitectureSpec, load_architecture
 from visualizer.model_graph import build_model_graph
 from visualizer.shape_inference import (
     ModuleDimRegistry,
@@ -274,3 +274,53 @@ def test_export_block_trees_expand_init_only_modules():
 
     attn_tree = next(tree for title, tree in spec.export_block_trees if "CustomLatent" in title)
     assert [child.attr_name for child in attn_tree.children] == ["q_proj", "kv_proj"]
+
+
+def test_kimi_router_export_uses_real_ops_and_topk_shapes():
+    config = {
+        "hidden_size": 7168,
+        "num_experts": 896,
+        "num_experts_per_token": 16,
+        "num_expert_group": 1,
+        "topk_group": 1,
+        "moe_router_activation_func": "sigmoid",
+        "moe_renormalize": True,
+        "routed_scaling_factor": 1.0,
+    }
+    analysis = analyze_source(
+        (FIXTURES / "kimi_moe_gate.py").read_text(),
+        config=config,
+    )
+    basic = BasicOpFilter.for_detailed()
+    gate = build_block_node(
+        attr_name="gate",
+        class_name="KimiMoEGate",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    spec = ArchitectureSpec(
+        name="Kimi gate",
+        model_type="kimi",
+        hidden_size=7168,
+        num_experts=896,
+        num_experts_per_tok=16,
+        raw_config=config,
+        class_registry=analysis.class_registry,
+        basic_ops=basic,
+        export_block_trees=[("KimiMoEGate", gate)],
+    )
+    exported = build_operator_export(spec)
+    operators = exported["sections"][0]["operators"]
+    by_computation = {item["computation"]: item for item in operators}
+    assert by_computation["Linear"]["output"]["shape"] == ["B", "T", 896]
+    assert by_computation["TopK"]["output"] == {
+        "shape": ["B", "T", 16],
+        "dtype": "int64",
+    }
+    assert by_computation["Gather"]["output"]["shape"] == ["B", "T", 16]
+    assert by_computation["Sum"]["output"]["shape"] == ["B", "T", 1]
+    assert all(
+        item["operation"] == "torch_functional"
+        for item in operators
+        if item["name"].startswith("@op_")
+    )

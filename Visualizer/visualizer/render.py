@@ -759,12 +759,13 @@ def _attention_label(spec: ArchitectureSpec) -> str:
 
 
 def _ffn_class_display_name(class_name: str) -> str:
-    """Short display names for FFN/MoE classes on the main decoder spine."""
-    aliases = {
-        "KimiSparseMoeBlock": "KimiMoE",
-        "KimiMLP": "KimiMLP",
-    }
-    return aliases.get(class_name, class_name)
+    """Compact FFN/MoE class names for the main decoder spine."""
+    stripped = re.sub(r"(?i)(?:sparse_?)?moe_?block$", "", class_name)
+    if stripped == class_name:
+        return class_name
+    if re.search(r"(?i)moe$", stripped):
+        return re.sub(r"(?i)moe$", "MoE", stripped)
+    return f"{stripped}MoE"
 
 
 def _ffn_label(spec: ArchitectureSpec) -> tuple[str, str | None]:
@@ -5404,10 +5405,21 @@ def _assign_merge_link_bus_for_spread(
     positions: list,
     anchors: dict[int, _RenderAnchor],
     merge_link_bus: dict[tuple[int, int], float],
+    graph,
 ) -> None:
     for link in spread_links:
         src = link[0]
         if _is_same_column_feed(positions, anchors, src, tgt):
+            continue
+        source_block = graph.nodes[src].block if hasattr(graph, "nodes") else None
+        target_block = graph.nodes[tgt].block if hasattr(graph, "nodes") else None
+        if (
+            source_block is not None
+            and target_block is not None
+            and source_block.attr_name.startswith("@op_")
+            and target_block.attr_name.startswith("@op_")
+        ):
+            merge_link_bus[link] = _connector_min_bus_y_above_target(anchors[tgt])
             continue
         merge_link_bus[link] = _merge_bus_y_clearing_same_column_feeds(
             base_bus,
@@ -10209,6 +10221,7 @@ def _compute_detail_connector_buses(
                 positions=positions,
                 anchors=anchors,
                 merge_link_bus=merge_link_bus,
+                graph=graph,
             )
 
     for src, link_group in outgoing.items():

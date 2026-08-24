@@ -1194,6 +1194,7 @@ def _align_and_stack_inline_frames(
     from visualizer.computation_graph import (
         _align_merge_nodes,
         _graph_has_tensor_ports,
+        clear_merge_feeder_columns,
         finalize_tensor_port_pipeline_layout,
         repack_inline_frame_columns,
     )
@@ -1214,6 +1215,7 @@ def _align_and_stack_inline_frames(
     if not _graph_has_tensor_ports(graph):
         realign_fanout_branch_columns(positions, graph)
         _center_align_vertical_chains(positions, graph)
+    clear_merge_feeder_columns(positions, graph)
 
 
 def _layout_zone_gap(min_gap: float) -> float:
@@ -2678,6 +2680,10 @@ def finalize_detail_layout(
             min_gap=VALIDATE_MIN_GAP,
             graph=graph,
         )
+    if min_left is not None:
+        from visualizer.computation_graph import _align_positions_left
+
+        _align_positions_left(positions, min_left)
     saved_inline_frame_labels = plan.inline_frame_labels
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     plan.inline_frame_labels = saved_inline_frame_labels

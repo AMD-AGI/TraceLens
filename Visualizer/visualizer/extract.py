@@ -275,6 +275,7 @@ def _infer_ffn_and_moe(config: dict[str, Any], spec: ArchitectureSpec) -> None:
     experts_per_tok = _as_int(
         _get(
             config,
+            "num_experts_per_token",
             "num_experts_per_tok",
             "moe_k",
             "num_selected_experts",
@@ -853,6 +854,7 @@ def load_architecture(
     analyze_code: bool = True,
     detailed: bool = False,
     basic_ops: BasicOpFilter | None = None,
+    all_tensor_ops: bool = False,
 ) -> ArchitectureSpec:
     """Load architecture metadata from an HF checkpoint and/or GitHub modeling code."""
     resolved_checkpoint = checkpoint or source
@@ -872,7 +874,11 @@ def load_architecture(
             github=github,
         )
         if source_files:
-            code_analysis = analyze_sources(read_sources(source_files))
+            code_analysis = analyze_sources(
+                read_sources(source_files),
+                config=config,
+                all_tensor_ops=all_tensor_ops,
+            )
 
     spec = parse_architecture(config, config_label, name=name, code_analysis=code_analysis)
     spec.checkpoint_source = config_label

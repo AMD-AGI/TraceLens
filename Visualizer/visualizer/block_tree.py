@@ -9,14 +9,6 @@ from typing import Literal
 from visualizer.ast_analyze import (
     SYNTHETIC_ATTENTION,
     SYNTHETIC_GATE_ACTIVATION,
-    SYNTHETIC_ROUTER_ACTIVATION,
-    SYNTHETIC_ROUTER_BIAS,
-    SYNTHETIC_ROUTER_GATHER,
-    SYNTHETIC_ROUTER_GROUP,
-    SYNTHETIC_ROUTER_RENORM,
-    SYNTHETIC_ROUTER_SCALE,
-    SYNTHETIC_ROUTER_TOPK,
-    _ROUTER_SYNTHETICS,
     ClassStructure,
     SideInputSpec,
     attention_kernel_details,
@@ -26,6 +18,7 @@ from visualizer.ast_analyze import (
     expand_conditional_block_components,
     functional_display_label,
     is_functional_synthetic,
+    is_forward_operation,
     is_kernel_pipeline_step,
     kernel_kwarg_ports,
     kernel_name_from_step_details,
@@ -34,7 +27,7 @@ from visualizer.ast_analyze import (
     _classify_role,
     _label_for,
 )
-from visualizer.basic_ops import BasicOpFilter, introspect_is_modeling_operation, resolve_is_basic
+from visualizer.basic_ops import BasicOpFilter, introspect_is_modeling_operation, is_fused_silu_mul_class, resolve_is_basic
 from visualizer.blocks import BlockComponent, input_sources_from_forward_sequence, upstream_input_sources
 
 _SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "getattr"})
@@ -135,10 +128,10 @@ def block_purpose(node: BlockNode) -> str | None:
         return node.details[0]
     if class_name in {"KernelOp", "KernelOutput"}:
         return None
-    if class_name == "RouterOp":
-        return node.details[0] if node.details else node.label
-    if class_name == "SituAndMul":
-        return "Situ(gate) × up branch"
+    if is_fused_silu_mul_class(class_name):
+        match = re.match(r"(?i)si[tl]u", class_name)
+        stem = class_name[: match.end()] if match else "SiLU"
+        return f"{stem}(gate) × up branch"
     if class_name == "FusedRMSNormGated":
         return "RMSNorm × gated activation"
     if class_name == "Split" or node.attr_name == "split_gate_up":
@@ -413,11 +406,16 @@ def linear_pipeline_steps(node: BlockNode) -> list[BlockNode]:
 
 def inline_block_frame_label(block: BlockNode) -> str:
     """Display label for a dotted inline frame around an expanded sub-block."""
-    if block.class_name in {"KernelPipeline", "KimiMoEGate"}:
-        return block.label if block.class_name == "KernelPipeline" else block.class_name
+    if block.class_name == "KernelPipeline":
+        return block.label
     if block.class_name == "KernelOp" and block.children:
         return block.label
-    if block.class_name == "SituAndMul":
+    inner = straight_line_steps(block) if is_straight_line_module(block) else []
+    if len(inner) > 1 and (
+        block.role == "router" or re.search(r"(?i)(?:gate|router)", block.class_name)
+    ):
+        return block.class_name
+    if is_fused_silu_mul_class(block.class_name):
         return block.class_name
     return block.attr_name
 
@@ -448,21 +446,6 @@ def inline_composite_steps(
     if len(inner_steps) == 1 and _is_output_gate_node(step):
         return inner_steps, None
     return [step], None
-
-
-def _router_synthetic_label(attr_name: str, details: list[str]) -> str:
-    if details:
-        return details[0]
-    defaults = {
-        SYNTHETIC_ROUTER_ACTIVATION: "Score activation",
-        SYNTHETIC_ROUTER_BIAS: "Expert bias",
-        SYNTHETIC_ROUTER_GROUP: "Group routing",
-        SYNTHETIC_ROUTER_TOPK: "Top-k experts",
-        SYNTHETIC_ROUTER_GATHER: "Gather weights",
-        SYNTHETIC_ROUTER_RENORM: "Renormalize",
-        SYNTHETIC_ROUTER_SCALE: "Route scaling",
-    }
-    return defaults.get(attr_name, attr_name.strip("@").replace("_", " "))
 
 
 _OMIT_DETAILED_TREES = frozenset({"tokenization", "tokenizer"})
@@ -563,6 +546,8 @@ class BlockNode:
     tensor_input_labels: list[str] = field(default_factory=list)
     tensor_step_targets: dict[str, str] = field(default_factory=dict)
     kernel_predecessors: list[str] = field(default_factory=list)
+    operation_predecessors: list[str] = field(default_factory=list)
+    external_inputs: list[str] = field(default_factory=list)
 
 
 PortStyle = Literal["floating", "inline"]
@@ -732,6 +717,8 @@ def _leaf_node(
     basic: bool = True,
     label: str | None = None,
     kernel_predecessors: list[str] | None = None,
+    operation_predecessors: list[str] | None = None,
+    external_inputs: list[str] | None = None,
 ) -> BlockNode:
     role = _classify_role(attr_name, class_name)
     return BlockNode(
@@ -743,6 +730,8 @@ def _leaf_node(
         details=list(details or []),
         is_basic=basic,
         kernel_predecessors=list(kernel_predecessors or []),
+        operation_predecessors=list(operation_predecessors or []),
+        external_inputs=list(external_inputs or []),
     )
 
 
@@ -1080,8 +1069,9 @@ def _situ_and_mul_block_node(
     details: list[str] | None = None,
     role: str = "ffn",
     prior_steps: list[BlockNode] | None = None,
+    class_name: str = "SituAndMul",
 ) -> BlockNode:
-    """Expand SituAndMul into a small internal pipeline for its own nested diagram."""
+    """Expand a fused SiLU/SiTU-and-multiply module into a small internal pipeline."""
     prior_steps = list(prior_steps or [])
     children: list[BlockNode] = []
     step_order = 0
@@ -1096,13 +1086,16 @@ def _situ_and_mul_block_node(
             )
         )
         step_order += 1
+    match = re.match(r"(?i)si[tl]u", class_name)
+    stem = class_name[: match.end()] if match else "SiLU"
+    purpose = f"{stem}(gate) × up branch"
     children.extend(
         [
             _leaf_node(
                 attr_name="situ_activation",
-                class_name="SituActivation",
+                class_name=f"{stem}Activation",
                 forward_order=step_order,
-                label="Situ",
+                label=stem,
                 details=["activation on gate half"],
                 basic=False,
             ),
@@ -1118,11 +1111,11 @@ def _situ_and_mul_block_node(
     )
     return BlockNode(
         attr_name=attr_name,
-        class_name="SituAndMul",
+        class_name=class_name,
         role=role,
         label="Gated multiply",
         forward_order=forward_order,
-        details=list(details or ["Situ(gate) × up branch"]),
+        details=list(details or [purpose]),
         is_basic=False,
         input_label="gate_up",
         children=children,
@@ -1131,13 +1124,14 @@ def _situ_and_mul_block_node(
 
 def _nested_input_source(parent: BlockNode, child: BlockNode) -> str:
     """Describe where a nested block's primary input comes from."""
-    if child.class_name == "KimiMLP" and parent.class_name == "KimiSparseMoeBlock":
-        return "Linear in KimiSparseMoeBlock"
-    if child.class_name == "SituAndMul":
-        return "gate_up in KimiMLP"
+    parent_cls = parent.class_name or parent.label
+    if child.role == "ffn" and parent.role == "moe":
+        return f"Linear in {parent_cls}"
+    if is_fused_silu_mul_class(child.class_name):
+        return f"gate_up in {parent_cls}"
     if child.input_label and child.input_label not in {"hidden_states", "x"}:
-        return f"{child.input_label} in {parent.class_name}"
-    return f"{parent.class_name}"
+        return f"{child.input_label} in {parent_cls}"
+    return f"{parent_cls}"
 
 
 def _append_branch_followups(steps: list[BlockNode], pre_merge: list[BlockNode]) -> list[BlockNode]:
@@ -1242,7 +1236,7 @@ def _situ_gated_mlp_parts(
         return None
     by_attr = {child.attr_name: child for child in node.children}
     act_fn = by_attr.get("act_fn")
-    if act_fn is None or act_fn.class_name != "SituAndMul":
+    if act_fn is None or not is_fused_silu_mul_class(act_fn.class_name):
         return None
     gate = by_attr.get("gate_proj") or by_attr.get("w1")
     up = by_attr.get("up_proj") or by_attr.get("w3")
@@ -1250,7 +1244,7 @@ def _situ_gated_mlp_parts(
     if gate is None or up is None or down is None:
         return None
     situ = next(
-        (child for child in act_fn.children if child.class_name == "SituActivation"),
+        (child for child in act_fn.children if re.search(r"(?i)si[tl]uactivation", child.class_name)),
         None,
     )
     if situ is None:
@@ -1259,7 +1253,7 @@ def _situ_gated_mlp_parts(
 
 
 def is_situ_gated_mlp(node: BlockNode) -> bool:
-    """True when a block is a gate/up projection pair feeding SituAndMul."""
+    """True when a block is a gate/up projection pair feeding a fused SiLU-and-multiply."""
     return _situ_gated_mlp_parts(node) is not None
 
 
@@ -1617,6 +1611,24 @@ def build_block_node(
                 )
             continue
 
+        if is_forward_operation(call_attr):
+            operation = cls.forward_operations.get(call_attr)
+            if operation is None:
+                continue
+            child_nodes.append(
+                _leaf_node(
+                    attr_name=operation.attr_name,
+                    class_name=operation.class_name,
+                    forward_order=child_order,
+                    details=list(operation.details),
+                    label=operation.label,
+                    basic=True,
+                    operation_predecessors=list(operation.predecessors),
+                    external_inputs=list(operation.external_inputs),
+                )
+            )
+            continue
+
         if is_functional_synthetic(call_attr):
             op_label = functional_display_label(call_attr)
             child_nodes.append(
@@ -1624,19 +1636,6 @@ def build_block_node(
                     attr_name=call_attr,
                     class_name=op_label,
                     forward_order=child_order,
-                )
-            )
-            continue
-
-        if call_attr in _ROUTER_SYNTHETICS:
-            child_nodes.append(
-                _leaf_node(
-                    attr_name=call_attr,
-                    class_name="RouterOp",
-                    forward_order=child_order,
-                    details=child_details,
-                    label=_router_synthetic_label(call_attr, child_details),
-                    basic=False,
                 )
             )
             continue
@@ -1655,7 +1654,7 @@ def build_block_node(
             )
             continue
 
-        if child_class == "SituAndMul":
+        if is_fused_silu_mul_class(child_class):
             child_nodes.append(
                 _situ_and_mul_block_node(
                     attr_name=call_attr,
@@ -1663,6 +1662,7 @@ def build_block_node(
                     details=child_details,
                     role=role,
                     prior_steps=child_nodes,
+                    class_name=child_class,
                 )
             )
             continue

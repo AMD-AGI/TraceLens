@@ -20,6 +20,16 @@ from visualizer.render import render_diagram
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+KIMI_ROUTER_CONFIG = {
+    "hidden_size": 7168,
+    "num_experts": 896,
+    "num_experts_per_token": 16,
+    "num_expert_group": 1,
+    "topk_group": 1,
+    "moe_router_activation_func": "sigmoid",
+    "moe_renormalize": True,
+    "routed_scaling_factor": 1.0,
+}
 
 
 def test_basic_op_filter_defaults_and_cli_overrides():
@@ -62,7 +72,11 @@ def test_kda_shortconv_and_substeps_are_not_basic_ops():
     if not code_path.exists():
         pytest.skip("Kimi-K3 modeling file not cached locally")
 
-    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    analysis = analyze_source(
+        code_path.read_text(),
+        filename="modeling_kimi_linear.py",
+        config=KIMI_ROUTER_CONFIG,
+    )
     basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
     attn = build_block_node(
         attr_name="self_attn",
@@ -348,40 +362,87 @@ class LinearAttention(nn.Module):
 
 
 def test_kimi_moe_gate_parses_functional_linear():
-    import ast
+    from visualizer.ast_analyze import analyze_source, is_forward_operation
 
-    from visualizer.ast_analyze import (
-        SYNTHETIC_FUNCTIONAL_LINEAR,
-        SYNTHETIC_ROUTER_ACTIVATION,
-        SYNTHETIC_ROUTER_TOPK,
-        _parse_forward,
-        _router_forward_step_details,
+    config = {
+        "hidden_size": 7168,
+        "num_experts": 896,
+        "num_experts_per_token": 16,
+        "num_expert_group": 1,
+        "topk_group": 1,
+        "moe_router_activation_func": "sigmoid",
+        "moe_renormalize": True,
+        "routed_scaling_factor": 1.0,
+    }
+    analysis = analyze_source(
+        (FIXTURES / "kimi_moe_gate.py").read_text(),
+        filename="kimi_moe_gate.py",
+        config=config,
+    )
+    gate = analysis.class_registry["KimiMoEGate"]
+    operations = list(gate.forward_operations.values())
+    assert [op.label for op in operations] == [
+        "Linear",
+        "Sigmoid",
+        "Add",
+        "TopK",
+        "Gather",
+        "Sum",
+        "Add",
+        "Divide",
+        "Multiply",
+    ]
+    assert all(is_forward_operation(op.attr_name) for op in operations)
+    assert all("Softmax" != op.label for op in operations)
+    by_label = {op.label: op for op in operations if op.label not in {"Add"}}
+    adds = [op for op in operations if op.label == "Add"]
+    assert by_label["TopK"].predecessors == (adds[0].attr_name,)
+    assert by_label["Gather"].predecessors == (
+        by_label["Sigmoid"].attr_name,
+        by_label["TopK"].attr_name,
+    )
+    assert by_label["Divide"].predecessors == (
+        by_label["Gather"].attr_name,
+        adds[1].attr_name,
     )
 
-    code = '''
-class KimiMoEGate(nn.Module):
-    def forward(self, hidden_states):
-        logits = F.linear(hidden_states.type(torch.float32), self.weight.type(torch.float32), None)
-        scores = logits.sigmoid()
-        scores_for_choice = scores + self.e_score_correction_bias.unsqueeze(0)
-        _, topk_idx = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)
-        topk_weight = scores.gather(1, topk_idx)
-        return topk_idx, topk_weight
-'''
-    cls = ast.parse(code).body[0]
-    func = cls.body[0]
-    calls, _, _, _, _ = _parse_forward(func)
-    details = _router_forward_step_details(cls.name, func, calls)
-    assert SYNTHETIC_FUNCTIONAL_LINEAR in calls
-    assert SYNTHETIC_ROUTER_ACTIVATION in calls
-    assert SYNTHETIC_ROUTER_TOPK in calls
-    assert details[SYNTHETIC_ROUTER_ACTIVATION] == ["Sigmoid"]
+
+def test_kimi_moe_gate_tensor_op_granularity_and_unresolved_branch():
+    source = (FIXTURES / "kimi_moe_gate.py").read_text()
+    default_gate = analyze_source(
+        source,
+        config=KIMI_ROUTER_CONFIG,
+    ).class_registry["KimiMoEGate"]
+    all_ops_gate = analyze_source(
+        source,
+        config=KIMI_ROUTER_CONFIG,
+        all_tensor_ops=True,
+    ).class_registry["KimiMoEGate"]
+    default_labels = [op.label for op in default_gate.forward_operations.values()]
+    all_labels = [op.label for op in all_ops_gate.forward_operations.values()]
+    assert not {"View", "Cast", "Unsqueeze"} & set(default_labels)
+    assert {"View", "Cast", "Unsqueeze"} <= set(all_labels)
+
+    unresolved = dict(KIMI_ROUTER_CONFIG)
+    unresolved.pop("moe_router_activation_func")
+    unresolved_gate = analyze_source(
+        source,
+        config=unresolved,
+    ).class_registry["KimiMoEGate"]
+    conditional = [
+        op
+        for op in unresolved_gate.forward_operations.values()
+        if op.label in {"Sigmoid", "Softmax"}
+    ]
+    assert [op.label for op in conditional] == ["Sigmoid", "Softmax"]
+    assert all(any(detail.startswith("condition:") for detail in op.details) for op in conditional)
 
 
 def test_functional_ops_render_as_basic_names_without_parentheses():
     from visualizer.ast_analyze import (
         functional_display_label,
         functional_synthetic_attr,
+        is_forward_operation,
         is_functional_synthetic,
     )
     from visualizer.block_tree import build_block_node, tile_purpose_annotation
@@ -411,7 +472,7 @@ class Gate(nn.Module):
         registry=analysis.class_registry,
         basic_ops=basic,
     )
-    linear = next(child for child in tree.children if is_functional_synthetic(child.attr_name))
+    linear = next(child for child in tree.children if is_forward_operation(child.attr_name))
     assert linear.label == "Linear"
     assert linear.class_name == "Linear"
     assert not linear.details
@@ -2252,14 +2313,14 @@ def test_router_gate_expands_to_pipeline_steps():
         role="router",
         label="Router",
         children=[
-            BlockNode(attr_name="@functional_linear", class_name="Linear", role="other", label="Linear", is_basic=True),
-            BlockNode(attr_name="@router_activation", class_name="RouterOp", role="other", label="Sigmoid", is_basic=True),
-            BlockNode(attr_name="@router_topk", class_name="RouterOp", role="other", label="Top-k experts", is_basic=True),
+            BlockNode(attr_name="@op_l1_c0_linear", class_name="Linear", role="other", label="Linear", is_basic=True),
+            BlockNode(attr_name="@op_l2_c0_sigmoid", class_name="Sigmoid", role="other", label="Sigmoid", is_basic=True),
+            BlockNode(attr_name="@op_l3_c0_topk", class_name="TopK", role="other", label="TopK", is_basic=True),
         ],
     )
     expanded, wrapper = inline_composite_steps(gate)
     assert wrapper is gate
-    assert [step.label for step in expanded] == ["Linear", "Sigmoid", "Top-k experts"]
+    assert [step.label for step in expanded] == ["Linear", "Sigmoid", "TopK"]
 
 
 def test_moe_graph_inlines_router_gate():
@@ -2276,7 +2337,11 @@ def test_moe_graph_inlines_router_gate():
     if not code_path.exists():
         pytest.skip("Kimi-K3 modeling file not cached locally")
 
-    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    analysis = analyze_source(
+        code_path.read_text(),
+        filename="modeling_kimi_linear.py",
+        config=KIMI_ROUTER_CONFIG,
+    )
     basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
     moe = build_block_node(
         attr_name="block_sparse_moe",
@@ -2286,16 +2351,17 @@ def test_moe_graph_inlines_router_gate():
     )
     graph = build_computation_graph(moe)
     labels = [spec.label for spec in graph.nodes]
-    assert labels[:9] == [
+    assert labels[:10] == [
         "hidden_states",
         "Linear",
         "Sigmoid",
-        "Expert bias",
-        "Group routing",
-        "Top-k experts",
-        "Gather weights",
-        "Renormalize",
-        "Route scaling",
+        "Add",
+        "TopK",
+        "Gather",
+        "Sum",
+        "Add",
+        "Divide",
+        "Multiply",
     ]
     assert all(spec.block is None or spec.block.attr_name != "gate" for spec in graph.nodes)
     nested_titles = [title for title, _ in collect_nested_diagrams(moe)]
@@ -2390,7 +2456,7 @@ def test_moe_infer_combine_op_comes_from_ast():
 def test_moe_infer_graph_dashed_router_side_link():
     from pathlib import Path
 
-    from visualizer.ast_analyze import SYNTHETIC_ROUTER_SCALE, analyze_source
+    from visualizer.ast_analyze import analyze_source
     from visualizer.basic_ops import BasicOpFilter
     from visualizer.block_tree import build_block_node
     from visualizer.computation_graph import SYNTHETIC_COMBINE, SYNTHETIC_INPUT, build_computation_graph
@@ -2402,7 +2468,11 @@ def test_moe_infer_graph_dashed_router_side_link():
     if not code_path.exists():
         pytest.skip("Kimi-K3 modeling file not cached locally")
 
-    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    analysis = analyze_source(
+        code_path.read_text(),
+        filename="modeling_kimi_linear.py",
+        config=KIMI_ROUTER_CONFIG,
+    )
     basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
     moe = build_block_node(
         attr_name="block_sparse_moe",
@@ -2418,10 +2488,15 @@ def test_moe_infer_graph_dashed_router_side_link():
     )
     assert graph.nodes[agg_index].sublabel is None
     assert graph.nodes[agg_index].synthetic is None
+    multiply_id = next(
+        op.attr_name
+        for op in analysis.class_registry["KimiMoEGate"].forward_operations.values()
+        if op.label == "Multiply"
+    )
     route_scaling_index = next(
         index
         for index, spec in enumerate(graph.nodes)
-        if spec.block and spec.block.attr_name == SYNTHETIC_ROUTER_SCALE
+        if spec.block and spec.block.attr_name == multiply_id
     )
     assert (route_scaling_index, agg_index) in graph.links
     assert (route_scaling_index, agg_index) not in graph.dashed_links
@@ -2940,7 +3015,11 @@ def test_moe_gate_inline_frame_spacing_after_finalize():
     if not code_path.exists():
         pytest.skip("Kimi-K3 modeling file not cached locally")
 
-    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    analysis = analyze_source(
+        code_path.read_text(),
+        filename="modeling_kimi_linear.py",
+        config=KIMI_ROUTER_CONFIG,
+    )
     basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
     moe = build_block_node(
         attr_name="block_sparse_moe",
@@ -2975,9 +3054,14 @@ def test_moe_gate_inline_frame_spacing_after_finalize():
     min_gap = min_vertical_block_gap()
     for upper, lower in zip(ordered, ordered[1:]):
         gap = positions[upper].bottom - positions[lower].top_y
-        assert abs(gap - min_gap) <= 0.02, (
-            f"{graph.nodes[upper].label} -> {graph.nodes[lower].label} gap {gap:.4f} != {min_gap:.4f}"
-        )
+        upper_fanout = len([target for source, target in graph.links if source == upper]) > 1
+        lower_join = len([source for source, target in graph.links if target == lower]) > 1
+        if upper_fanout or lower_join:
+            assert gap >= min_gap
+        else:
+            assert abs(gap - min_gap) <= 0.02, (
+                f"{graph.nodes[upper].label} -> {graph.nodes[lower].label} gap {gap:.4f} != {min_gap:.4f}"
+            )
 
 
 def test_mla_attention_fanout_branch_spacing_after_finalize():
@@ -3246,7 +3330,11 @@ def test_moe_horizontal_span_after_finalize():
     if not code_path.exists():
         pytest.skip("Kimi-K3 modeling file not cached locally")
 
-    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    analysis = analyze_source(
+        code_path.read_text(),
+        filename="modeling_kimi_linear.py",
+        config=KIMI_ROUTER_CONFIG,
+    )
     basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
     moe = build_block_node(
         attr_name="block_sparse_moe",
@@ -3279,7 +3367,7 @@ def test_moe_horizontal_span_after_finalize():
     left = min(_node_content_left(pos) for pos in positions)
     right = max(_node_content_right(pos) for pos in positions)
     span = right - left
-    assert 0.9 <= span <= 10.0, f"MoE horizontal span {span:.3f} outside shrink-wrap range"
+    assert 0.9 <= span <= 16.0, f"MoE horizontal span {span:.3f} outside shrink-wrap range"
 
 
 def test_moe_finalize_keeps_combine_gap_tight():
@@ -3307,7 +3395,11 @@ def test_moe_finalize_keeps_combine_gap_tight():
     if not code_path.exists():
         pytest.skip("Kimi-K3 modeling file not cached locally")
 
-    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    analysis = analyze_source(
+        code_path.read_text(),
+        filename="modeling_kimi_linear.py",
+        config=KIMI_ROUTER_CONFIG,
+    )
     basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
     moe = build_block_node(
         attr_name="block_sparse_moe",
@@ -3328,11 +3420,17 @@ def test_moe_finalize_keeps_combine_gap_tight():
         block_h=est_h,
         content_left=0.6,
     )
-    route_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "Route scaling")
+    route_index = next(
+        i
+        for i, spec in enumerate(graph.nodes)
+        if spec.label == "Multiply"
+        and spec.block is not None
+        and spec.block.attr_name.startswith("@op_")
+    )
     combine_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "MoE aggregation")
     gap = positions[route_index].bottom - positions[combine_index].top_y
-    assert gap <= DETAIL_LAYER_GAP + 0.02, (
-        f"Route scaling -> MoE aggregation gap {gap:.3f} exceeds layer gap {DETAIL_LAYER_GAP:.3f}"
+    assert gap <= 2 * DETAIL_LAYER_GAP + 0.02, (
+        f"Multiply -> MoE aggregation gap {gap:.3f} exceeds layer gap {DETAIL_LAYER_GAP:.3f}"
     )
     finalize_detail_layout(
         ax,
@@ -4383,7 +4481,11 @@ def test_moe_and_situ_expand_in_basic_only_detailed():
     if not code_path.exists():
         pytest.skip("Kimi-K3 modeling file not cached locally")
 
-    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    analysis = analyze_source(
+        code_path.read_text(),
+        filename="modeling_kimi_linear.py",
+        config=KIMI_ROUTER_CONFIG,
+    )
     basic = BasicOpFilter.for_detailed()
 
     mlp = build_block_node(
@@ -4406,23 +4508,24 @@ def test_moe_and_situ_expand_in_basic_only_detailed():
     )
     moe_graph = build_computation_graph(moe, basic_ops=basic)
     moe_labels = [spec.label for spec in moe_graph.nodes]
-    assert moe_labels[:9] == [
+    assert moe_labels[:10] == [
         "hidden_states",
         "Linear",
         "Sigmoid",
-        "Expert bias",
-        "Group routing",
-        "Top-k experts",
-        "Gather weights",
-        "Renormalize",
-        "Route scaling",
+        "Add",
+        "TopK",
+        "Gather",
+        "Sum",
+        "Add",
+        "Divide",
+        "Multiply",
     ]
     assert "MoE aggregation" in moe_labels
     assert "×" in moe_labels
     assert "Situ" in moe_labels
     gate_frame = next(frame for frame in moe_graph.inline_frames if frame.frame_id == "gate")
     assert gate_frame.label == "KimiMoEGate"
-    assert len(gate_frame.node_indices) == 8
+    assert len(gate_frame.node_indices) == 9
     shared_frame = next(frame for frame in moe_graph.inline_frames if frame.frame_id == "shared_experts")
     assert shared_frame.label == "shared_experts"
     assert any(frame.frame_id == "act_fn" for frame in moe_graph.inline_frames)

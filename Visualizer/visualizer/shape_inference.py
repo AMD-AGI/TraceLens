@@ -288,6 +288,7 @@ class ShapeInferencer:
                 for edge in graph.edges
                 if edge.target == node.id and edge.source in self._tensor_names
             ]
+            inputs.extend(str(item) for item in node.metadata.get("external_inputs", []))
             if node.metadata.get("synthetic") == "@input":
                 operators.append(
                     OperatorRecord(
@@ -426,25 +427,107 @@ class ShapeInferencer:
             hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
             return TensorSpec(shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype)
 
+        if synthetic == "@tensor":
+            label = (node.metadata.get("port_label") or node.label or "").lower()
+            experts = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
+            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+            if "weight" in label:
+                return TensorSpec(shape=(experts, hidden), dtype="float32")
+            if "bias" in label:
+                return TensorSpec(shape=(experts,), dtype=dtype)
+            return TensorSpec(shape=(), dtype=dtype)
+
         if node.label in {"×", "+", "Elementwise ×"} or synthetic == "@combine":
             if inputs:
                 return inputs[0]
             hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
             return TensorSpec(shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype)
 
+        operation_label = (node.label or class_name).strip().lower()
+        details = [str(item) for item in node.metadata.get("details", [])]
+        external_inputs = [str(item).lower() for item in node.metadata.get("external_inputs", [])]
+
+        def external_spec() -> TensorSpec | None:
+            experts = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
+            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+            if any("weight" in item for item in external_inputs):
+                return TensorSpec((experts, hidden), "float32")
+            if any("bias" in item for item in external_inputs):
+                return TensorSpec((experts,), dtype)
+            return None
+
+        if operation_label in {"view", "reshape", "flatten"}:
+            source = inputs[0] if inputs else external_spec() or TensorSpec(_default_hidden_shape(self.context), dtype)
+            shape_detail = next((item.split(":", 1)[1].strip() for item in details if item.startswith("shape:")), "")
+            if "-1" in shape_detail:
+                return TensorSpec(shape=("B*T", source.shape[-1]), dtype=source.dtype)
+            return source
+
+        if operation_label == "unsqueeze":
+            source = inputs[0] if inputs else external_spec() or TensorSpec((), dtype)
+            return TensorSpec(shape=(1, *source.shape), dtype=source.dtype)
+
+        if operation_label in {"cast", "contiguous", "squeeze", "expand"}:
+            source = inputs[0] if inputs else external_spec() or TensorSpec(_default_hidden_shape(self.context), dtype)
+            cast_dtype = source.dtype
+            dtype_detail = next((item.split(":", 1)[1].strip() for item in details if item.startswith("dtype:")), "")
+            if "float32" in dtype_detail:
+                cast_dtype = "float32"
+            return TensorSpec(shape=source.shape, dtype=cast_dtype)
+
+        if operation_label == "topk":
+            source = inputs[0] if inputs else TensorSpec(_default_hidden_shape(self.context), dtype)
+            top_k = self.context.dims.get(Symbol.EXPERTS_PER_TOK.value, Symbol.EXPERTS_PER_TOK.value)
+            return TensorSpec(shape=_replace_last_dim(source.shape, top_k), dtype="int64")
+
+        if operation_label == "gather":
+            source = next((item for item in inputs if item.dtype != "int64"), inputs[0] if inputs else None)
+            index = next((item for item in inputs if item.dtype == "int64"), None)
+            if source is None:
+                source = TensorSpec(_default_hidden_shape(self.context), dtype)
+            shape = index.shape if index is not None else _replace_last_dim(
+                source.shape,
+                self.context.dims.get(Symbol.EXPERTS_PER_TOK.value, Symbol.EXPERTS_PER_TOK.value),
+            )
+            return TensorSpec(shape=shape, dtype=source.dtype)
+
+        if operation_label == "sum":
+            source = inputs[0] if inputs else TensorSpec(_default_hidden_shape(self.context), dtype)
+            return TensorSpec(shape=_replace_last_dim(source.shape, 1), dtype=source.dtype)
+
+        if operation_label in {"add", "subtract", "multiply", "divide", "floor divide", "power", "sigmoid", "softmax", "masked fill", "scatter"}:
+            if inputs:
+                source = max(inputs, key=lambda item: len(item.shape))
+                return TensorSpec(shape=source.shape, dtype=source.dtype)
+            return TensorSpec(shape=_default_hidden_shape(self.context), dtype=dtype)
+
         linear_spec = self._lookup_linear_spec(node, root=root)
         if linear_spec is not None or _is_linear(node):
-            in_shape = inputs[0].shape if inputs else _default_hidden_shape(self.context)
+            hidden_dim = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+            activation_input = next(
+                (
+                    item
+                    for item in inputs
+                    if item.shape and item.shape[-1] == hidden_dim and not (len(item.shape) == 2 and item.shape[0] == self.context.dims.get(Symbol.EXPERTS.value))
+                ),
+                inputs[-1] if inputs else None,
+            )
+            in_shape = activation_input.shape if activation_input is not None else _default_hidden_shape(self.context)
             out_features = (
                 linear_spec.out_features
                 if linear_spec is not None
                 else _heuristic_linear_out_features(_node_attr_name(node), self.context)
             )
+            if out_features is None and root is not None and re.search(r"(?i)(MoE)?Gate|Router", root.class_name):
+                out_features = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
+            if out_features is None and operation_label == "linear" and str(node.metadata.get("attr_name", "")).startswith("@op_"):
+                out_features = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
             if out_features is None and inputs:
                 out_features = in_shape[-1]
             if out_features is None:
                 out_features = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            return TensorSpec(shape=_replace_last_dim(in_shape, out_features), dtype=dtype)
+            output_dtype = "float32" if any("float32" in item for item in details) else dtype
+            return TensorSpec(shape=_replace_last_dim(in_shape, out_features), dtype=output_dtype)
 
         embedding_spec = self._lookup_embedding_spec(node, root=root)
         if embedding_spec is not None or _is_embedding(block_class, node):
@@ -741,6 +824,9 @@ def _output_tensor_name(node: ModelGraphNode) -> str:
 
 
 def _node_attr_name(node: ModelGraphNode) -> str | None:
+    metadata_attr = node.metadata.get("attr_name")
+    if isinstance(metadata_attr, str) and metadata_attr:
+        return metadata_attr
     node_id = node.id
     if node_id.startswith("@"):
         return None
@@ -792,7 +878,7 @@ def _is_norm(class_name: str, node: ModelGraphNode) -> bool:
 
 
 def _is_linear(node: ModelGraphNode) -> bool:
-    if node.operation != OperationKind.NN_MODULE:
+    if node.operation not in {OperationKind.NN_MODULE, OperationKind.TORCH_FUNCTIONAL}:
         return False
     class_name = node.metadata.get("class_name") or node.label or ""
     return bool(re.search(r"(?i)^Linear$", str(class_name)))
@@ -818,7 +904,7 @@ def _heuristic_linear_out_features(attr: str | None, context: ShapeContext) -> D
 
 
 def _is_router(class_name: str, node: ModelGraphNode) -> bool:
-    return class_name == "RouterOp" or "router" in _operator_name(node).lower()
+    return "router" in class_name.lower() or "router" in _operator_name(node).lower()
 
 
 __all__ = [
