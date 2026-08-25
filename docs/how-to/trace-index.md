@@ -90,6 +90,20 @@ plus a full-text search (FTS) virtual table. SQLite holds this comfortably for
 typical TraceLens corpora (hundreds of traces, hundreds of thousands of kernel
 rows). The practical limit is one writer at a time, not row count.
 
+The following diagram shows how those tables relate. Every fact table points at
+`traces`.
+
+```mermaid
+erDiagram
+    traces ||--o{ report_imports : "trace_id"
+    traces ||--o{ unified_perf_rows : "trace_id"
+    traces ||--o{ kernel_summary : "trace_id"
+    traces ||--o{ op_category_rows : "trace_id"
+    traces ||--o{ gpu_timeline_rows : "trace_id"
+    traces ||--o| trace_summary : "trace_id"
+    traces ||--o{ trace_search_FTS5 : "trace_id"
+```
+
 | Table | Contents |
 |---|---|
 | `traces` | One row per indexed trace |
