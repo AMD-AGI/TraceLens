@@ -19,7 +19,6 @@ DEFAULT_REPORT_ROOT = Path("trace_index_reports")
 
 REPORT_SHEETS = (
     "unified_perf_summary",
-    "kernel_summary",
     "ops_summary_by_category",
     "gpu_timeline",
 )

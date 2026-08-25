@@ -6,10 +6,15 @@
 
 """Shared TraceIndex helpers that are independent of a storage backend."""
 
+import ast
 import csv
+import json
+import math
+import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 def utc_now() -> str:
@@ -25,6 +30,19 @@ def rel_to(path: Path, root: Path) -> str:
         return normalize_path(path.relative_to(root))
     except ValueError:
         return normalize_path(path)
+
+
+def _set_csv_field_size_limit() -> None:
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return
+        except OverflowError:
+            limit = int(limit / 10)
+
+
+_set_csv_field_size_limit()
 
 
 def read_csv_rows(path: Path) -> List[Dict[str, str]]:
@@ -81,16 +99,93 @@ def as_duration_us(
 
 
 def as_bool_int(value: Any) -> int:
+    optional = as_optional_bool_int(value)
+    return 0 if optional is None else optional
+
+
+def as_optional_bool_int(value: Any) -> Optional[int]:
     if isinstance(value, bool):
         return int(value)
     if value in (None, "", "nan", "NaN"):
-        return 0
+        return None
     text = str(value).strip().lower()
-    return int(text in {"1", "true", "yes", "y"})
+    if text in {"1", "true", "yes", "y"}:
+        return 1
+    if text in {"0", "false", "no", "n"}:
+        return 0
+    return None
 
 
 def search_text(*parts: Any) -> str:
     return " ".join(str(part) for part in parts if part not in (None, "", "nan", "NaN"))
+
+
+NP_SCALAR_RE = re.compile(r"\b(?:np|numpy)\.(?:float|int)(?:16|32|64)?\(([^()]+)\)")
+
+
+def clean_python_repr(text: str) -> str:
+    cleaned = NP_SCALAR_RE.sub(r"\1", text)
+    return cleaned.replace("nan", "None")
+
+
+def parse_repr(text: Any) -> Any:
+    if not text:
+        return None
+    if not isinstance(text, str):
+        return text
+    try:
+        return ast.literal_eval(clean_python_repr(text))
+    except (SyntaxError, ValueError, MemoryError):
+        return None
+
+
+def json_safe(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return json_safe(item())
+        except Exception:
+            pass
+    return str(value)
+
+
+def to_json(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    return json.dumps(json_safe(value), sort_keys=True)
+
+
+def kernel_flags(name: str) -> Tuple[Optional[str], int, int, int]:
+    low = name.lower()
+    is_tensile = int("cijk" in low or "tensile" in low)
+    is_transpose = int("transpose" in low or "permute" in low)
+    is_layout = int(
+        is_transpose
+        or "contiguous" in low
+        or "copy" in low
+        or "cast" in low
+        or "convert" in low
+    )
+    library = None
+    if is_tensile:
+        library = "Tensile"
+    elif "triton" in low:
+        library = "Triton"
+    elif "ck" in low or "composable" in low:
+        library = "CK"
+    elif "nccl" in low or "rccl" in low:
+        library = "RCCL/NCCL"
+    return library, is_tensile, is_transpose, is_layout
 
 
 def read_traces_file(path: Path) -> List[Path]:

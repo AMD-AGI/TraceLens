@@ -22,7 +22,12 @@ from TraceLens.TraceIndex.importer import (
     import_report_dir as import_report_dir_with_store,
 )
 from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
-from TraceLens.TraceIndex.utils import collect_trace_paths, read_traces_file
+from TraceLens.TraceIndex.utils import (
+    collect_trace_paths,
+    parse_repr,
+    read_traces_file,
+    to_json,
+)
 
 FIXTURES = Path(__file__).resolve().parent / "traces"
 TRAINING_REPORT_DIR = (
@@ -37,6 +42,15 @@ def write_csv(path, rows):
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def test_parse_repr_strips_numpy_scalars_and_to_json():
+    parsed = parse_repr("[{'name': 'k', 'total_duration_us': np.float64(1.5)}]")
+    assert parsed[0]["name"] == "k"
+    assert parsed[0]["total_duration_us"] == 1.5
+    encoded = to_json(parse_repr("{'M': 128, 'bias': False}"))
+    assert encoded is not None
+    assert json.loads(encoded) == {"M": 128, "bias": False}
 
 
 def test_trace_index_append_from_report_and_search(tmp_path):
@@ -56,20 +70,41 @@ def test_trace_index_append_from_report_and_search(tmp_path):
                 "operation_count": "2",
                 "Kernel Time (us)_sum": "123.5",
                 "TFLOPS/s_mean": "98.1",
-                "kernel_details_summary": "Cijk_test_kernel",
-            }
-        ],
-    )
-    write_csv(
-        report_dir / "kernel_summary.csv",
-        [
+                "perf_params": (
+                    "{'M': 128, 'N': 64, 'K': 32, 'B': 1, 'bias': False, "
+                    "'dtype_A_B': ('c10::BFloat16', 'c10::BFloat16'), "
+                    "'transpose': (True, False)}"
+                ),
+                "kernel_details_summary": (
+                    "[{'name': 'Cijk_test_kernel', 'stream': 0, 'count': 2, "
+                    "'total_duration_us': 123.5, 'mean_duration_us': 61.75, "
+                    "'median_duration_us': 61.75, 'min_duration_us': 60.0, "
+                    "'max_duration_us': 63.5}]"
+                ),
+            },
             {
-                "Kernel name": "Cijk_test_kernel",
-                "Parent cpu_op": "aten::mm",
-                "Parent op category": "GEMM",
-                "Kernel duration (us)_count": "2",
-                "Kernel duration (us)_sum": "123.5",
-            }
+                "name": "aten::scaled_dot_product_attention",
+                "op category": "SDPA_fwd",
+                "operation_count": "1",
+                "Kernel Time (us)_sum": "10.0",
+                "TFLOPS/s_mean": "40.0",
+                "perf_params": (
+                    "{'B': 2, 'H_Q': 8, 'N_Q': 128, 'N_KV': 128, "
+                    "'d_h_qk': 64, 'd_h_v': 64, 'causal': True, "
+                    "'dtype_A_B': ('c10::BFloat16', 'c10::BFloat16')}"
+                ),
+            },
+            {
+                "name": "aten::convolution",
+                "op category": "CONV",
+                "operation_count": "1",
+                "Kernel Time (us)_sum": "20.0",
+                "perf_params": (
+                    "{'convNd': 'conv2d', 'input_shape': (2, 32, 56, 56), "
+                    "'filter_shape': (32, 1, 3, 3), 'groups': 32, "
+                    "'transposed_conv': False}"
+                ),
+            },
         ],
     )
     write_csv(
@@ -96,11 +131,45 @@ def test_trace_index_append_from_report_and_search(tmp_path):
 
     rows = execute_read_query(
         db_path,
-        "SELECT name, op_category, kernel_time_sum_us FROM unified_perf_rows",
+        "SELECT name, op_category, kernel_time_sum_us FROM unified_perf_rows "
+        "ORDER BY source_row",
     )
-    assert rows == [
-        {"name": "aten::mm", "op_category": "GEMM", "kernel_time_sum_us": 123.5}
-    ]
+    assert rows[0] == {
+        "name": "aten::mm",
+        "op_category": "GEMM",
+        "kernel_time_sum_us": 123.5,
+    }
+
+    gemm = execute_read_query(db_path, "SELECT m, n, k, batch FROM gemm_perf")
+    assert gemm == [{"m": 128, "n": 64, "k": 32, "batch": 1}]
+
+    params = execute_read_query(
+        db_path,
+        "SELECT json_extract(perf_params_json, '$.M') AS m "
+        "FROM unified_perf_rows WHERE name = 'aten::mm'",
+    )
+    assert params[0]["m"] == 128
+
+    kernels = execute_read_query(
+        db_path,
+        "SELECT kernel_name, unified_row_id, library, stream, parent_op_name "
+        "FROM kernel_summary",
+    )
+    assert kernels[0]["kernel_name"] == "Cijk_test_kernel"
+    assert kernels[0]["unified_row_id"] is not None
+    assert kernels[0]["library"] == "Tensile"
+    assert kernels[0]["stream"] == 0
+    assert kernels[0]["parent_op_name"] == "aten::mm"
+
+    sdpa = execute_read_query(
+        db_path, "SELECT seq_q, seq_kv, head_dim, causal FROM sdpa_perf"
+    )
+    assert sdpa == [{"seq_q": 128, "seq_kv": 128, "head_dim": 64, "causal": 1}]
+
+    conv = execute_read_query(
+        db_path, "SELECT groups, is_depthwise, is_transposed_conv FROM conv_perf"
+    )
+    assert conv == [{"groups": 32, "is_depthwise": 1, "is_transposed_conv": 0}]
 
     search_rows = search_index(db_path, "Cijk", limit=10)
     assert search_rows
@@ -165,12 +234,41 @@ def test_import_real_training_report_maps_kernel_stream_and_times(tmp_path):
 
     kernels = execute_read_query(
         db_path,
-        "SELECT kernel_name, stream, total_duration_us FROM kernel_summary "
-        "WHERE kernel_name LIKE 'Cijk%' LIMIT 1",
+        "SELECT k.kernel_name, k.stream, k.total_duration_us, k.unified_row_id, "
+        "k.library FROM kernel_summary k "
+        "JOIN unified_perf_rows u ON u.id = k.unified_row_id "
+        "WHERE k.kernel_name LIKE 'Cijk%' LIMIT 1",
     )
     assert kernels
     assert kernels[0]["stream"] == 0
     assert kernels[0]["total_duration_us"] > 0
+    assert kernels[0]["unified_row_id"] is not None
+    assert kernels[0]["library"] == "Tensile"
+
+    gemm = execute_read_query(
+        db_path,
+        "SELECT g.m, g.n, g.k FROM gemm_perf g "
+        "JOIN unified_perf_rows u ON u.id = g.unified_row_id "
+        "WHERE u.name = 'aten::mm' AND g.n = 2816 AND g.k = 1024 LIMIT 1",
+    )
+    assert gemm
+    assert gemm[0]["m"] == 8944
+    assert gemm[0]["n"] == 2816
+    assert gemm[0]["k"] == 1024
+
+    params = execute_read_query(
+        db_path,
+        "SELECT json_extract(perf_params_json, '$.M') AS m "
+        "FROM unified_perf_rows WHERE name = 'aten::mm' LIMIT 1",
+    )
+    assert params[0]["m"] == 8944
+
+    sdpa = execute_read_query(
+        db_path,
+        "SELECT seq_q, seq_kv, head_dim FROM sdpa_perf LIMIT 1",
+    )
+    assert sdpa
+    assert sdpa[0]["seq_q"] is not None
 
     categories = execute_read_query(
         db_path,

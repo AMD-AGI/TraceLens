@@ -85,13 +85,14 @@ TraceLens_trace_index --backend sqlite --db trace_index.sqlite sqlite-sql \
 
 ## What the catalog stores
 
-The following tables are the catalog schema. There are seven relational tables
+The following tables are the catalog schema. There are ten relational tables
 plus a full-text search (FTS) virtual table. SQLite holds this comfortably for
 typical TraceLens corpora (hundreds of traces, hundreds of thousands of kernel
 rows). The practical limit is one writer at a time, not row count.
 
 The following diagram shows how those tables relate. Every fact table points at
-`traces`.
+`traces`. Kernel rows and GEMM / SDPA / convolution satellites also point at
+the `unified_perf_rows` row they came from.
 
 ```mermaid
 erDiagram
@@ -101,19 +102,34 @@ erDiagram
     traces ||--o{ op_category_rows : "trace_id"
     traces ||--o{ gpu_timeline_rows : "trace_id"
     traces ||--o| trace_summary : "trace_id"
+    traces ||--o{ gemm_perf : "trace_id"
+    traces ||--o{ sdpa_perf : "trace_id"
+    traces ||--o{ conv_perf : "trace_id"
     traces ||--o{ trace_search_FTS5 : "trace_id"
+    unified_perf_rows ||--o{ kernel_summary : "unified_row_id"
+    unified_perf_rows ||--o| gemm_perf : "unified_row_id"
+    unified_perf_rows ||--o| sdpa_perf : "unified_row_id"
+    unified_perf_rows ||--o| conv_perf : "unified_row_id"
 ```
 
 | Table | Contents |
 |---|---|
 | `traces` | One row per indexed trace |
 | `report_imports` | Import history for TraceLens CSV report directories |
-| `unified_perf_rows` | Rows from `unified_perf_summary.csv` |
-| `kernel_summary` | Rows from `kernel_summary.csv`, including Tensile and layout flags |
+| `unified_perf_rows` | Rows from `unified_perf_summary.csv`. `perf_params_json` and `kernel_details_json` are parsed JSON, not the Python `repr` from the CSV |
+| `kernel_summary` | One row per kernel exploded from `kernel_details_summary` on a unified row, with `unified_row_id` and Tensile / layout flags |
+| `gemm_perf` | GEMM shapes (`M` / `N` / `K` / batch / dtype / transpose) parsed from `perf_params` |
+| `sdpa_perf` | Attention shapes (`B`, `H_Q`, `N_Q`, `N_KV`, head dim, causal) parsed from `perf_params` |
+| `conv_perf` | Convolution shapes, groups, and depthwise / transposed flags parsed from `perf_params` |
 | `op_category_rows` | Rows from `ops_summary_by_category.csv` |
 | `gpu_timeline_rows` | Rows from `gpu_timeline.csv` |
 | `trace_summary` | Per-trace summary metrics derived during import |
 | `trace_search_FTS5` | Full-text search over traces, ops, kernels, categories, and timeline labels |
+
+Query GEMM / SDPA / convolution shapes from the satellite tables, or with
+`json_extract` on the parsed JSON columns. For example
+`SELECT m, n, k FROM gemm_perf` or
+`SELECT json_extract(perf_params_json, '$.M') FROM unified_perf_rows`.
 
 ## Serve read-only SQL
 

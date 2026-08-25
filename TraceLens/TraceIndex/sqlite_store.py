@@ -18,9 +18,13 @@ from TraceLens.TraceIndex.utils import (
     as_duration_us,
     as_float,
     as_int,
+    as_optional_bool_int,
     as_text,
     first_value,
+    kernel_flags,
+    parse_repr,
     search_text,
+    to_json,
     utc_now,
 )
 
@@ -118,6 +122,7 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             CREATE TABLE IF NOT EXISTS kernel_summary (
                 id INTEGER PRIMARY KEY,
                 trace_id INTEGER NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
+                unified_row_id INTEGER REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
                 kernel_name TEXT NOT NULL,
                 parent_op_name TEXT,
                 op_category TEXT,
@@ -128,15 +133,67 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 median_duration_us REAL,
                 min_duration_us REAL,
                 max_duration_us REAL,
+                library TEXT,
                 is_tensile INTEGER NOT NULL DEFAULT 0,
                 is_transpose INTEGER NOT NULL DEFAULT 0,
                 is_layout_conversion INTEGER NOT NULL DEFAULT 0,
-                raw_row_json TEXT
+                details_json TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_trace_index_kernel_trace ON kernel_summary(trace_id);
+            CREATE INDEX IF NOT EXISTS idx_trace_index_kernel_unified ON kernel_summary(unified_row_id);
             CREATE INDEX IF NOT EXISTS idx_trace_index_kernel_name ON kernel_summary(kernel_name);
             CREATE INDEX IF NOT EXISTS idx_trace_index_kernel_tensile ON kernel_summary(is_tensile);
+
+            CREATE TABLE IF NOT EXISTS gemm_perf (
+                unified_row_id INTEGER PRIMARY KEY REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
+                trace_id INTEGER NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
+                m INTEGER,
+                n INTEGER,
+                k INTEGER,
+                batch INTEGER,
+                dtype TEXT,
+                transpose TEXT,
+                tflops_mean REAL,
+                tflops_median REAL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_trace_index_gemm_trace ON gemm_perf(trace_id);
+            CREATE INDEX IF NOT EXISTS idx_trace_index_gemm_tflops ON gemm_perf(tflops_mean);
+
+            CREATE TABLE IF NOT EXISTS sdpa_perf (
+                unified_row_id INTEGER PRIMARY KEY REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
+                trace_id INTEGER NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
+                batch INTEGER,
+                heads INTEGER,
+                seq_q INTEGER,
+                seq_kv INTEGER,
+                head_dim INTEGER,
+                dtype TEXT,
+                causal INTEGER,
+                tflops_mean REAL,
+                tflops_median REAL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_trace_index_sdpa_trace ON sdpa_perf(trace_id);
+
+            CREATE TABLE IF NOT EXISTS conv_perf (
+                unified_row_id INTEGER PRIMARY KEY REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
+                trace_id INTEGER NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
+                conv_nd TEXT,
+                input_shape_json TEXT,
+                filter_shape_json TEXT,
+                input_channels INTEGER,
+                output_channels INTEGER,
+                groups INTEGER,
+                kernel_h INTEGER,
+                kernel_w INTEGER,
+                is_depthwise INTEGER,
+                is_transposed_conv INTEGER
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_trace_index_conv_trace ON conv_perf(trace_id);
+            CREATE INDEX IF NOT EXISTS idx_trace_index_conv_depthwise ON conv_perf(is_depthwise);
 
             CREATE TABLE IF NOT EXISTS op_category_rows (
                 id INTEGER PRIMARY KEY,
@@ -231,9 +288,6 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         unified_summary = self._import_unified_rows(
             trace_id, report.sheets.get("unified_perf_summary", [])
         )
-        self._import_kernel_summary_rows(
-            trace_id, report.sheets.get("kernel_summary", [])
-        )
         top_categories_json = self._import_category_rows(
             trace_id, report.sheets.get("ops_summary_by_category", [])
         )
@@ -318,11 +372,14 @@ class SQLiteTraceIndexStore(TraceIndexStore):
     def _clear_trace_payload(self, trace_id: int) -> None:
         for table in (
             "report_imports",
-            "unified_perf_rows",
+            "gemm_perf",
+            "sdpa_perf",
+            "conv_perf",
             "kernel_summary",
             "op_category_rows",
             "gpu_timeline_rows",
             "trace_summary",
+            "unified_perf_rows",
         ):
             self.conn.execute("DELETE FROM %s WHERE trace_id = ?" % table, (trace_id,))
         self.conn.execute(
@@ -376,7 +433,11 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 max_sdpa_tflops = max(
                     max_sdpa_tflops or tflops_for_summary, tflops_for_summary
                 )
-            self.conn.execute(
+            params = parse_repr(first_value(row, ["perf_params", "Perf Params"]))
+            kernel_details = parse_repr(
+                first_value(row, ["kernel_details_summary", "trunc_kernel_details"])
+            )
+            cursor = self.conn.execute(
                 """
                 INSERT INTO unified_perf_rows(
                     trace_id, source_row, name, op_category, operation_count,
@@ -465,15 +526,22 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                     as_text(first_value(row, ["Compute Spec", "compute_spec"])),
                     as_bool_int(first_value(row, ["has_perf_model", "Has Perf Model"])),
                     as_float(first_value(row, ["overlap_pct", "Overlap (%)"])),
-                    as_text(first_value(row, ["perf_params", "Perf Params"])),
-                    as_text(
-                        first_value(
-                            row, ["kernel_details_summary", "trunc_kernel_details"]
-                        )
-                    ),
-                    json.dumps(row, sort_keys=True),
+                    to_json(params),
+                    to_json(kernel_details),
+                    to_json(dict(row)),
                 ),
             )
+            unified_row_id = int(cursor.lastrowid)
+            self._import_kernels_from_details(
+                trace_id, unified_row_id, name, op_category, kernel_details
+            )
+            self._maybe_insert_gemm(
+                trace_id, unified_row_id, params, tflops_mean, tflops_median
+            )
+            self._maybe_insert_sdpa(
+                trace_id, unified_row_id, params, tflops_mean, tflops_median
+            )
+            self._maybe_insert_conv(trace_id, unified_row_id, params)
             self._insert_search(
                 trace_id,
                 "op",
@@ -487,114 +555,197 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             )
         return {"max_gemm_tflops": max_gemm_tflops, "max_sdpa_tflops": max_sdpa_tflops}
 
-    def _import_kernel_summary_rows(
+    def _import_kernels_from_details(
         self,
         trace_id: int,
-        rows: Sequence[Dict[str, str]],
+        unified_row_id: int,
+        parent_op_name: Optional[str],
+        op_category: Optional[str],
+        kernel_details: Any,
     ) -> None:
-        for row in rows:
-            kernel_name = as_text(
-                first_value(row, ["Kernel name", "kernel_name", "name"])
-            )
+        if not isinstance(kernel_details, list):
+            return
+        for detail in kernel_details:
+            if not isinstance(detail, dict):
+                continue
+            kernel_name = as_text(detail.get("name") or detail.get("Kernel name"))
             if not kernel_name:
                 continue
-            parent_op_name = as_text(
-                first_value(row, ["Parent cpu_op", "parent_op_name", "Launcher"])
-            )
-            op_category = as_text(
-                first_value(row, ["Parent op category", "op_category", "category"])
-            )
+            library, is_tensile, is_transpose, is_layout = kernel_flags(kernel_name)
             self.conn.execute(
                 """
                 INSERT INTO kernel_summary(
-                    trace_id, kernel_name, parent_op_name, op_category, stream, count,
-                    total_duration_us, mean_duration_us, median_duration_us,
-                    min_duration_us, max_duration_us, is_tensile, is_transpose,
-                    is_layout_conversion, raw_row_json
+                    trace_id, unified_row_id, kernel_name, parent_op_name, op_category,
+                    stream, count, total_duration_us, mean_duration_us,
+                    median_duration_us, min_duration_us, max_duration_us, library,
+                    is_tensile, is_transpose, is_layout_conversion, details_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trace_id,
+                    unified_row_id,
                     kernel_name,
                     parent_op_name,
                     op_category,
-                    as_int(first_value(row, ["Kernel stream", "stream", "Stream"])),
-                    as_int(
-                        first_value(
-                            row,
-                            [
-                                "Kernel duration (us)_count",
-                                "Kernel duration (µs)_count",
-                                "count",
-                            ],
-                        )
-                    ),
-                    as_float(
-                        first_value(
-                            row,
-                            [
-                                "Kernel duration (us)_sum",
-                                "Kernel duration (µs)_sum",
-                                "total_us",
-                            ],
-                        )
-                    ),
-                    as_float(
-                        first_value(
-                            row,
-                            [
-                                "Kernel duration (us)_mean",
-                                "Kernel duration (µs)_mean",
-                                "mean_us",
-                            ],
-                        )
-                    ),
-                    as_float(
-                        first_value(
-                            row,
-                            [
-                                "Kernel duration (us)_median",
-                                "Kernel duration (µs)_median",
-                                "median_us",
-                            ],
-                        )
-                    ),
-                    as_float(
-                        first_value(
-                            row,
-                            [
-                                "Kernel duration (us)_min",
-                                "Kernel duration (µs)_min",
-                                "min_us",
-                            ],
-                        )
-                    ),
-                    as_float(
-                        first_value(
-                            row,
-                            [
-                                "Kernel duration (us)_max",
-                                "Kernel duration (µs)_max",
-                                "max_us",
-                            ],
-                        )
-                    ),
-                    int(
-                        "cijk" in kernel_name.lower()
-                        or "tensile" in kernel_name.lower()
-                    ),
-                    int("transpose" in kernel_name.lower()),
-                    int(
-                        "layout" in kernel_name.lower()
-                        or "permute" in kernel_name.lower()
-                    ),
-                    json.dumps(row, sort_keys=True),
+                    as_int(detail.get("stream")),
+                    as_int(detail.get("count")),
+                    as_float(detail.get("total_duration_us")),
+                    as_float(detail.get("mean_duration_us")),
+                    as_float(detail.get("median_duration_us")),
+                    as_float(detail.get("min_duration_us")),
+                    as_float(detail.get("max_duration_us")),
+                    library,
+                    is_tensile,
+                    is_transpose,
+                    is_layout,
+                    to_json(detail),
                 ),
             )
             self._insert_search(
-                trace_id, "kernel", [kernel_name, parent_op_name, op_category]
+                trace_id,
+                "kernel",
+                [kernel_name, library, parent_op_name, op_category],
             )
+
+    def _maybe_insert_gemm(
+        self,
+        trace_id: int,
+        unified_row_id: int,
+        params: Any,
+        tflops_mean: Optional[float],
+        tflops_median: Optional[float],
+    ) -> None:
+        if not isinstance(params, dict):
+            return
+        if not {"M", "N", "K"}.intersection(params):
+            return
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO gemm_perf(
+                unified_row_id, trace_id, m, n, k, batch, dtype, transpose,
+                tflops_mean, tflops_median
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                unified_row_id,
+                trace_id,
+                as_int(params.get("M")),
+                as_int(params.get("N")),
+                as_int(params.get("K")),
+                as_int(params.get("B")),
+                (
+                    str(params.get("dtype_A_B"))
+                    if params.get("dtype_A_B") is not None
+                    else None
+                ),
+                (
+                    str(params.get("transpose"))
+                    if params.get("transpose") is not None
+                    else None
+                ),
+                tflops_mean,
+                tflops_median,
+            ),
+        )
+
+    def _maybe_insert_sdpa(
+        self,
+        trace_id: int,
+        unified_row_id: int,
+        params: Any,
+        tflops_mean: Optional[float],
+        tflops_median: Optional[float],
+    ) -> None:
+        if not isinstance(params, dict):
+            return
+        if not {"N_Q", "N_KV", "d_h_qk", "d_h_v"}.intersection(params):
+            return
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO sdpa_perf(
+                unified_row_id, trace_id, batch, heads, seq_q, seq_kv,
+                head_dim, dtype, causal, tflops_mean, tflops_median
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                unified_row_id,
+                trace_id,
+                as_int(params.get("B")),
+                as_int(params.get("H_Q")),
+                as_int(params.get("N_Q")),
+                as_int(params.get("N_KV")),
+                as_int(params.get("d_h_qk") or params.get("d_h_v")),
+                (
+                    str(params.get("dtype_A_B"))
+                    if params.get("dtype_A_B") is not None
+                    else None
+                ),
+                as_optional_bool_int(params.get("causal")),
+                tflops_mean,
+                tflops_median,
+            ),
+        )
+
+    def _maybe_insert_conv(
+        self,
+        trace_id: int,
+        unified_row_id: int,
+        params: Any,
+    ) -> None:
+        if not isinstance(params, dict):
+            return
+        if "convNd" not in params and "filter_shape" not in params:
+            return
+        input_shape = params.get("input_shape")
+        filter_shape = params.get("filter_shape")
+        groups = as_int(params.get("groups")) or 1
+        input_channels = None
+        output_channels = None
+        kernel_h = None
+        kernel_w = None
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) >= 2:
+            input_channels = as_int(input_shape[1])
+        if isinstance(filter_shape, (list, tuple)) and len(filter_shape) >= 4:
+            output_channels = as_int(filter_shape[0])
+            kernel_h = as_int(filter_shape[-2])
+            kernel_w = as_int(filter_shape[-1])
+        filter_c_per_group = None
+        if isinstance(filter_shape, (list, tuple)) and len(filter_shape) >= 2:
+            filter_c_per_group = as_int(filter_shape[1])
+        is_depthwise = int(
+            bool(input_channels)
+            and groups == input_channels
+            and filter_c_per_group == 1
+            and bool(output_channels)
+            and output_channels % input_channels == 0
+        )
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO conv_perf(
+                unified_row_id, trace_id, conv_nd, input_shape_json, filter_shape_json,
+                input_channels, output_channels, groups, kernel_h, kernel_w,
+                is_depthwise, is_transposed_conv
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                unified_row_id,
+                trace_id,
+                params.get("convNd"),
+                to_json(input_shape),
+                to_json(filter_shape),
+                input_channels,
+                output_channels,
+                groups,
+                kernel_h,
+                kernel_w,
+                is_depthwise,
+                as_optional_bool_int(params.get("transposed_conv")),
+            ),
+        )
 
     def _import_category_rows(
         self,
