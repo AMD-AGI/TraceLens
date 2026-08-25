@@ -1914,33 +1914,17 @@ class TreePerfAnalyzer:
             if self._has_descendant_cpu_op_with_own_perf_model(event):
                 _recurse(event, call_stack, child_nearest_cpu_op, is_cpu_op)
                 return
-            # Exit condition 3: Leaf cpu_op (direct kernel launcher). Collect it
-            # as one op owning its whole subtree, unless a finer perf-modeled
-            # cpu_op child should win (e.g. injected pseudo ops from extensions).
+            # Exit condition 3: Leaf cpu_op (direct kernel launcher). It owns its
+            # whole subtree, so collect it as one op. A leaf cpu_op that had a
+            # perf-modeled cpu_op child (e.g. an injected pseudo op) would already
+            # have recursed at the descendant-prefers check above, so such a child
+            # can never be seen here.
             if self._is_leaf_cpu_op(event):
-                cpu_op_children_with_perf_model = [
-                    cuid
-                    for cuid in event.get("children", [])
-                    if (child := self.tree.get_UID2event(cuid))
-                    and self.event_to_category(child) == "cpu_op"
-                    and self._has_perf_model(child)
-                    and self._launches_gpu_kernels(child)
-                ]
-                if cpu_op_children_with_perf_model:
-                    # Prefer the finer perf-modeled children; this leaf's own
-                    # kernels become fragments.
-                    for cuid in cpu_op_children_with_perf_model:
-                        traverse(cuid, call_stack, child_nearest_cpu_op)
-                    for kernel in _direct_kernels(event):
-                        _create_synthetic_op(event["name"], kernel, event)
-                else:
-                    # No perf-modeled children - collect this leaf as one op
-                    # owning its whole subtree.
-                    if not include_nccl and self._is_nccl_event(event):
-                        return
-                    if self.add_python_func:
-                        event["_call_stack"] = call_stack
-                    collected.append(event)
+                if not include_nccl and self._is_nccl_event(event):
+                    return
+                if self.add_python_func:
+                    event["_call_stack"] = call_stack
+                collected.append(event)
                 return
 
             # Exit condition 4: no cpu_op anywhere on the path (orphan launcher,
