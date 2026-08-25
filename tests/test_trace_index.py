@@ -153,7 +153,7 @@ def test_trace_index_append_from_report_and_search(tmp_path):
     kernels = execute_read_query(
         db_path,
         "SELECT kernel_name, unified_row_id, library, stream, parent_op_name "
-        "FROM kernel_summary",
+        "FROM op_kernels",
     )
     assert kernels[0]["kernel_name"] == "Cijk_test_kernel"
     assert kernels[0]["unified_row_id"] is not None
@@ -235,7 +235,7 @@ def test_import_real_training_report_maps_kernel_stream_and_times(tmp_path):
     kernels = execute_read_query(
         db_path,
         "SELECT k.kernel_name, k.stream, k.total_duration_us, k.unified_row_id, "
-        "k.library FROM kernel_summary k "
+        "k.library FROM op_kernels k "
         "JOIN unified_perf_rows u ON u.id = k.unified_row_id "
         "WHERE k.kernel_name LIKE 'Cijk%' LIMIT 1",
     )

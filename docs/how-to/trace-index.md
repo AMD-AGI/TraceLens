@@ -98,7 +98,7 @@ the `unified_perf_rows` row they came from.
 erDiagram
     traces ||--o{ report_imports : "trace_id"
     traces ||--o{ unified_perf_rows : "trace_id"
-    traces ||--o{ kernel_summary : "trace_id"
+    traces ||--o{ op_kernels : "trace_id"
     traces ||--o{ op_category_rows : "trace_id"
     traces ||--o{ gpu_timeline_rows : "trace_id"
     traces ||--o| trace_summary : "trace_id"
@@ -106,7 +106,7 @@ erDiagram
     traces ||--o{ sdpa_perf : "trace_id"
     traces ||--o{ conv_perf : "trace_id"
     traces ||--o{ trace_search_FTS5 : "trace_id"
-    unified_perf_rows ||--o{ kernel_summary : "unified_row_id"
+    unified_perf_rows ||--o{ op_kernels : "unified_row_id"
     unified_perf_rows ||--o| gemm_perf : "unified_row_id"
     unified_perf_rows ||--o| sdpa_perf : "unified_row_id"
     unified_perf_rows ||--o| conv_perf : "unified_row_id"
@@ -117,7 +117,7 @@ erDiagram
 | `traces` | One row per indexed trace |
 | `report_imports` | Import history for TraceLens CSV report directories |
 | `unified_perf_rows` | Rows from `unified_perf_summary.csv`. `perf_params_json` and `kernel_details_json` are parsed JSON, not the Python `repr` from the CSV |
-| `kernel_summary` | One row per kernel exploded from `kernel_details_summary` on a unified row, with `unified_row_id` and Tensile / layout flags |
+| `op_kernels` | One row per kernel exploded from `kernel_details_summary` on a unified row, with `unified_row_id` and Tensile / layout flags |
 | `gemm_perf` | GEMM shapes (`M` / `N` / `K` / batch / dtype / transpose) parsed from `perf_params` |
 | `sdpa_perf` | Attention shapes (`B`, `H_Q`, `N_Q`, `N_KV`, head dim, causal) parsed from `perf_params` |
 | `conv_perf` | Convolution shapes, groups, and depthwise / transposed flags parsed from `perf_params` |

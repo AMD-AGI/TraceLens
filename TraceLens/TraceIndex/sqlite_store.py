@@ -119,7 +119,7 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             CREATE INDEX IF NOT EXISTS idx_trace_index_unified_category ON unified_perf_rows(op_category);
             CREATE INDEX IF NOT EXISTS idx_trace_index_unified_name ON unified_perf_rows(name);
 
-            CREATE TABLE IF NOT EXISTS kernel_summary (
+            CREATE TABLE IF NOT EXISTS op_kernels (
                 id INTEGER PRIMARY KEY,
                 trace_id INTEGER NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
                 unified_row_id INTEGER REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
@@ -140,10 +140,10 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 details_json TEXT
             );
 
-            CREATE INDEX IF NOT EXISTS idx_trace_index_kernel_trace ON kernel_summary(trace_id);
-            CREATE INDEX IF NOT EXISTS idx_trace_index_kernel_unified ON kernel_summary(unified_row_id);
-            CREATE INDEX IF NOT EXISTS idx_trace_index_kernel_name ON kernel_summary(kernel_name);
-            CREATE INDEX IF NOT EXISTS idx_trace_index_kernel_tensile ON kernel_summary(is_tensile);
+            CREATE INDEX IF NOT EXISTS idx_trace_index_op_kernels_trace ON op_kernels(trace_id);
+            CREATE INDEX IF NOT EXISTS idx_trace_index_op_kernels_unified ON op_kernels(unified_row_id);
+            CREATE INDEX IF NOT EXISTS idx_trace_index_op_kernels_name ON op_kernels(kernel_name);
+            CREATE INDEX IF NOT EXISTS idx_trace_index_op_kernels_tensile ON op_kernels(is_tensile);
 
             CREATE TABLE IF NOT EXISTS gemm_perf (
                 unified_row_id INTEGER PRIMARY KEY REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
@@ -375,7 +375,7 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             "gemm_perf",
             "sdpa_perf",
             "conv_perf",
-            "kernel_summary",
+            "op_kernels",
             "op_category_rows",
             "gpu_timeline_rows",
             "trace_summary",
@@ -574,7 +574,7 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             library, is_tensile, is_transpose, is_layout = kernel_flags(kernel_name)
             self.conn.execute(
                 """
-                INSERT INTO kernel_summary(
+                INSERT INTO op_kernels(
                     trace_id, unified_row_id, kernel_name, parent_op_name, op_category,
                     stream, count, total_duration_us, mean_duration_us,
                     median_duration_us, min_duration_us, max_duration_us, library,
