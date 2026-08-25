@@ -1637,6 +1637,7 @@ def _pack_ordered_layer_row(
     align_left: bool,
     min_gap: float,
     graph: ComputationGraph | None = None,
+    column_cx: float | None = None,
 ) -> None:
     """Place one layer left-to-right using a fixed index order."""
     if not layer_indices:
@@ -1654,7 +1655,10 @@ def _pack_ordered_layer_row(
         unit_positions.sort(key=lambda item: item[1])
         if len(unit_positions) == 1:
             unit, _center, width = unit_positions[0]
-            target_cx = anchor_x + width / 2 if align_left else anchor_x
+            if align_left:
+                target_cx = column_cx if column_cx is not None else anchor_x + width / 2
+            else:
+                target_cx = anchor_x
             shift = target_cx - unit_positions[0][1]
             for index in unit:
                 positions[index].cx += shift
@@ -1674,7 +1678,10 @@ def _pack_ordered_layer_row(
     layer_positions = [positions[index] for index in layer_indices]
     if len(layer_positions) == 1:
         pos = layer_positions[0]
-        pos.cx = anchor_x + pos.width / 2 if align_left else anchor_x
+        if align_left:
+            pos.cx = column_cx if column_cx is not None else anchor_x + pos.width / 2
+        else:
+            pos.cx = anchor_x
         return
     total_w = sum(pos.width for pos in layer_positions) + min_gap * (len(layer_positions) - 1)
     cursor = anchor_x if align_left else anchor_x - total_w / 2
@@ -2442,6 +2449,12 @@ def _clear_side_branches_from_gate_frame(
 
     fork_join_joins = {cluster.join for cluster in _find_fork_join_clusters(graph)}
     spine_indices = _router_spine_column_indices(positions, graph)
+    if spine_indices and gate_frame is not None:
+        spine_left = min(_node_content_left(positions[index]) for index in spine_indices)
+        if spine_left < min_left:
+            delta = min_left - spine_left
+            for index in spine_indices:
+                positions[index].cx += delta
     if spine_indices:
         min_left = max(
             min_left,
@@ -2475,7 +2488,12 @@ def _clear_side_branches_from_gate_frame(
                 {cluster.main_source, cluster.main_branch, cluster.join, cluster.tail}
             ):
                 continue
-            frame_right = max(_node_content_right(positions[index]) for index in frame.node_indices)
+            # Members that travel with the cluster cannot constrain where the cluster
+            # goes: shifting it would carry them along and demand the same shift again.
+            anchors = [index for index in frame.node_indices if index not in cluster_indices]
+            if not anchors:
+                continue
+            frame_right = max(_node_content_right(positions[index]) for index in anchors)
             required_left = frame_right + INLINE_FRAME_PAD + min_horizontal_block_gap()
             if frame.frame_id == "shared_experts" or side_left < required_left:
                 cluster_min_left = max(cluster_min_left, required_left)
@@ -2634,7 +2652,11 @@ def stack_inline_frame_positions(
                 positions[indices[0]].cx = sum(positions[index].cx for index in indices) / len(indices)
             continue
 
-        frame_cx = sum(positions[index].cx for index in indices) / len(indices)
+        # An operation-DAG frame keeps a side column offset left of its spine, so averaging
+        # it in would drag the whole frame left a little further on every pass.
+        side_nodes = _operation_dag_side_nodes(graph, frame)
+        column_indices = [index for index in indices if index not in side_nodes] or indices
+        frame_cx = sum(positions[index].cx for index in column_indices) / len(column_indices)
         frame_gap = _inline_frame_vertical_gap(graph, frame) if min_gap is None else min_gap
         cursor_top = max(positions[index].top_y for index in indices)
         frame_members = set(frame.node_indices)
@@ -2910,6 +2932,21 @@ def compact_horizontal_shrink_wrap(
         _align_positions_left(positions, min_left)
 
 
+def _outermost_inline_frames(graph: ComputationGraph) -> list:
+    """Frames that no other frame encloses; nested frames ride along with their parent."""
+    member_sets = [(frame, frozenset(frame.node_indices)) for frame in graph.inline_frames]
+    outermost = []
+    seen: set[frozenset[int]] = set()
+    for frame, members in member_sets:
+        if not members or members in seen:
+            continue
+        if any(members < other_members for _other, other_members in member_sets):
+            continue
+        seen.add(members)
+        outermost.append(frame)
+    return outermost
+
+
 def repack_inline_frame_columns(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
@@ -2927,7 +2964,7 @@ def repack_inline_frame_columns(
     pad = INLINE_FRAME_PAD
 
     frame_columns: list[list[int]] = []
-    for frame in graph.inline_frames:
+    for frame in _outermost_inline_frames(graph):
         indices = _ordered_inline_frame_chain(graph, list(frame.node_indices))
         if indices:
             frame_columns.append(indices)
@@ -3542,11 +3579,11 @@ def _ensure_top_entry_clearance_below_inline_frames(
     graph: ComputationGraph,
 ) -> None:
     """Leave corridor space below dotted inline frames for dual top-entry merge buses."""
-    from visualizer.ast_analyze import MOE_AGGREGATION_LABEL
     from visualizer.render import (
         CONNECTOR_ATTACHED_BOX_MARGIN,
         CONNECTOR_EXIT_STUB,
         CONNECTOR_OBSTACLE_MARGIN,
+        PARALLEL_CONNECTOR_COORD_EPS,
         PIPELINE_MERGE_BUS_BELOW_FRAME_GAP,
         _inline_frame_draw_bounds,
     )
@@ -3560,13 +3597,18 @@ def _ensure_top_entry_clearance_below_inline_frames(
         + CONNECTOR_ATTACHED_BOX_MARGIN
     )
 
-    for target, sources in incoming.items():
-        if graph.nodes[target].label != MOE_AGGREGATION_LABEL:
-            continue
+    for target in incoming:
         top_sources = _top_entry_incoming_sources(graph, incoming, target)
         if len(top_sources) < 2:
             continue
-        tail_sources = [source for source in top_sources if source in frame_tails]
+        # Only tails offset from the target need a corridor: their connector jogs
+        # horizontally below the frame, whereas an aligned tail drops straight through.
+        tail_sources = [
+            source
+            for source in top_sources
+            if source in frame_tails
+            and abs(positions[source].cx - positions[target].cx) > PARALLEL_CONNECTOR_COORD_EPS
+        ]
         if not tail_sources:
             continue
         frame_bottom = float("-inf")
@@ -3820,6 +3862,7 @@ def _dock_single_consumer_tensor_ports(
     side_gap = MIN_HORIZONTAL_BLOCK_GAP
     outgoing = _tensor_port_outgoing(graph)
     frame_tails = _inline_frame_tail_indices(graph)
+    docked_above: dict[int, list[int]] = {}
     for index, spec in enumerate(graph.nodes):
         if spec.synthetic != SYNTHETIC_TENSOR:
             continue
@@ -3864,8 +3907,27 @@ def _dock_single_consumer_tensor_ports(
 
         port_pos.cx = target_pos.cx
         port_pos.top_y = target_pos.top_y + row_gap + port_pos.height
+        docked_above.setdefault(target_index, []).append(index)
 
+    _spread_ports_sharing_a_consumer(positions, docked_above)
     _align_module_input_ports_row(positions, graph, gap=row_gap)
+
+
+def _spread_ports_sharing_a_consumer(
+    positions: list[LayoutPosition],
+    docked_above: dict[int, list[int]],
+) -> None:
+    """Fan a consumer's inputs across its width, since docking alone stacks them."""
+    for target_index, port_indices in docked_above.items():
+        if len(port_indices) < 2:
+            continue
+        span = sum(positions[index].width for index in port_indices) + MIN_HORIZONTAL_BLOCK_GAP * (
+            len(port_indices) - 1
+        )
+        cursor = positions[target_index].cx - span / 2
+        for port_index in port_indices:
+            positions[port_index].cx = cursor + positions[port_index].width / 2
+            cursor += positions[port_index].width + MIN_HORIZONTAL_BLOCK_GAP
 
 
 def _align_module_input_ports_row(
@@ -4093,6 +4155,11 @@ def _compact_layer_positions(
     graph: ComputationGraph | None = None,
 ) -> None:
     """Pack each topological layer to minimum width using the given node order."""
+    column_cx = (
+        _left_aligned_column_cx(positions, layers, anchor_x, min_gap=min_gap, graph=graph)
+        if align_left
+        else None
+    )
     for layer_indices in layers:
         _pack_ordered_layer_row(
             positions,
@@ -4101,7 +4168,41 @@ def _compact_layer_positions(
             align_left=align_left,
             min_gap=min_gap,
             graph=graph,
+            column_cx=column_cx,
         )
+
+
+def _left_aligned_column_cx(
+    positions: list[LayoutPosition],
+    layers: list[list[int]],
+    anchor_x: float,
+    *,
+    min_gap: float,
+    graph: ComputationGraph | None = None,
+) -> float | None:
+    """Shared centre for an unbranched column, so its spine runs straight.
+
+    Left-aligning each row on its own centres every row at half its own width, slanting
+    the connectors of a chain whose tiles differ in width. Only a column that branches
+    nowhere can adopt one centre; elsewhere rows must stay free to align with the
+    neighbours they feed.
+    """
+    widths: list[float] = []
+    for layer_indices in layers:
+        if not layer_indices:
+            continue
+        if graph is not None and graph.inline_frames:
+            units = _layer_packing_units(graph, layer_indices)
+            if len(units) != 1:
+                return None
+            widths.append(_packing_unit_width(graph, units[0], positions, min_gap=min_gap))
+        elif len(layer_indices) != 1:
+            return None
+        else:
+            widths.append(positions[layer_indices[0]].width)
+    if not widths:
+        return None
+    return anchor_x + max(widths) / 2
 
 
 def _fanout_branch_index(spec: GraphNodeSpec) -> int | None:

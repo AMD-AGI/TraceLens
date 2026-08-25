@@ -874,6 +874,14 @@ def load_architecture(
             github=github,
         )
         if source_files:
+            from visualizer.kernel_pipeline import register_kernel_search_root
+
+            # The caller's own path first: resolving a checkpoint file follows HF's
+            # symlink into its blob store, where sibling kernel modules do not exist.
+            if code_path is not None:
+                register_kernel_search_root(code_path)
+            for source_file in source_files:
+                register_kernel_search_root(source_file)
             code_analysis = analyze_sources(
                 read_sources(source_files),
                 config=config,

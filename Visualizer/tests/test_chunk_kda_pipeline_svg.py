@@ -12,6 +12,8 @@ KIMI_CODE_PATH = (
     / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
 )
 OUTPUT_SVG = Path(__file__).resolve().parent.parent / "chunk_kda_pipeline.svg"
+# Shrinkwrap lands exit stubs on exactly 0.55, so compare with float tolerance.
+MAX_SHRINKWRAPPED_STUB = 0.55 + 1e-6
 
 
 def _load_chunk_kda_pipeline():
@@ -1004,7 +1006,7 @@ def test_parallel_feeder_frame_exit_stubs_are_shrinkwrapped():
                     f"{frame_id} must tee onto the shared merge bus"
                 )
                 if same_column_bus_tee:
-                    assert points[0][1] - points[1][1] < 0.55, (
+                    assert points[0][1] - points[1][1] <= MAX_SHRINKWRAPPED_STUB, (
                         f"{frame_id} output stub should be short after shrinkwrap"
                     )
                     continue
@@ -1020,7 +1022,7 @@ def test_parallel_feeder_frame_exit_stubs_are_shrinkwrapped():
             assert abs(points[1][1] - bus_y) < 0.03, (
                 f"{frame_id} should drop straight onto the merge bus"
             )
-            assert points[0][1] - points[1][1] < 0.55, (
+            assert points[0][1] - points[1][1] <= MAX_SHRINKWRAPPED_STUB, (
                 f"{frame_id} output stub should be short after shrinkwrap"
             )
     finally:

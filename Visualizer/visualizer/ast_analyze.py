@@ -423,6 +423,40 @@ def _method_forward_step_details(
     return details
 
 
+def _single_op_forward_methods(
+    class_node: ast.ClassDef,
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+    *,
+    self_values: dict[str, Any],
+    all_tensor_ops: bool,
+) -> dict[str, ForwardOperation]:
+    """Forward helper methods whose body is one primitive op, keyed by method name.
+
+    Such a method has no internals worth a frame of its own, so callers render the op
+    it performs instead of an opaque tile named after the method.
+    """
+    method_funcs = {item.name: item for item in class_node.body if isinstance(item, ast.FunctionDef)}
+    single: dict[str, ForwardOperation] = {}
+    for call_attr in forward_calls:
+        if call_attr in init_assignments or call_attr.startswith("@") or call_attr == SYNTHETIC_ATTENTION:
+            continue
+        func = method_funcs.get(call_attr)
+        if func is None:
+            continue
+        # Combine-op methods drive side-input merge rendering, so leave them named.
+        if _detect_method_combine_op(func, class_name=class_node.name) is not None:
+            continue
+        operations = _forward_operations_from_forward(
+            func,
+            self_values=self_values,
+            all_tensor_ops=all_tensor_ops,
+        )
+        if len(operations) == 1:
+            single[call_attr] = operations[0]
+    return single
+
+
 def _register_forward_calls(
     stmt_calls: list[str],
     calls: list[str],
@@ -500,15 +534,18 @@ def _classify_role(attr_name: str, class_name: str) -> str:
     attr_key = attr_name.lower()
     if attr_key in ATTR_ROLE_HINTS:
         return ATTR_ROLE_HINTS[attr_key]
-    for token in re.split(r"[_\W]+", attr_key):
+    tokens = [token for token in re.split(r"[_\W]+", attr_key) if token]
+    # `attn_norm` / `ffn_norm` must be norms. Matching attn/ffn first left the
+    # transformer overview with no (norm, module) pairs, so the block drew empty.
+    if any("norm" in token for token in tokens):
+        return "norm"
+    for token in tokens:
         if token in {"attn", "attention"}:
             return "attention"
         if token in {"mlp", "ffn"}:
             return "ffn"
         if token in {"moe", "experts"}:
             return "moe"
-        if "norm" in token:
-            return "norm"
         if token in {"router"}:
             return "router"
         if token in {"embed", "embedding"}:
@@ -619,6 +656,7 @@ class ClassStructure:
     init_assignment_options: dict[str, list[str]] = field(default_factory=dict)
     forward_input_name: str | None = None
     forward_operations: dict[str, ForwardOperation] = field(default_factory=dict)
+    single_op_methods: dict[str, ForwardOperation] = field(default_factory=dict)
 
 
 def infer_forward_steps_from_init(cls: ClassStructure) -> list[str]:
@@ -1077,6 +1115,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         side_inputs: dict[str, list[SideInputSpec]] = {}
         forward_input_name: str | None = None
         forward_operations: dict[str, ForwardOperation] = {}
+        single_op_methods: dict[str, ForwardOperation] = {}
         init_func = next(
             (item for item in node.body if isinstance(item, ast.FunctionDef) and item.name == "__init__"),
             None,
@@ -1122,6 +1161,13 @@ class _ModelAstVisitor(ast.NodeVisitor):
             forward_step_details.update(
                 _method_forward_step_details(node, forward_calls, init_assignments)
             )
+            single_op_methods = _single_op_forward_methods(
+                node,
+                forward_calls,
+                init_assignments,
+                self_values=_self_config_values(init_func, self.config),
+                all_tensor_ops=self.all_tensor_ops,
+            )
 
         self.classes[node.name] = ClassStructure(
             name=node.name,
@@ -1138,6 +1184,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             side_inputs=side_inputs,
             forward_input_name=forward_input_name,
             forward_operations=forward_operations,
+            single_op_methods=single_op_methods,
         )
         self.generic_visit(node)
 

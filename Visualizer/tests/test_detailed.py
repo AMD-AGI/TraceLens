@@ -109,6 +109,86 @@ def test_kda_shortconv_and_substeps_are_not_basic_ops():
     assert linears, "projections should remain basic Linear tiles"
 
 
+def test_detail_section_title_matches_overview_attention_tile():
+    from visualizer.block_tree import BlockNode
+    from visualizer.blocks import LayerVariant
+    from visualizer.extract import ArchitectureSpec
+    from visualizer.render import _attention_label, _detail_section_title
+
+    attn_tree = BlockNode(
+        attr_name="attn",
+        class_name="Attention",
+        role="attention",
+        label="Attn",
+    )
+    ffn_tree = BlockNode(attr_name="ffn", class_name="MoE", role="ffn", label="MoE")
+
+    single = ArchitectureSpec(name="DeepSeek-like", model_type="deepseek_v4")
+    single.attention_type = "MLA"
+    single.attention_notes = ["Multi-head Latent Attention (compressed KV)"]
+    # The overview tile names this block MLA, so its expanded section must agree.
+    assert _attention_label(single).startswith("MLA")
+    assert _detail_section_title(single, "Attn", attn_tree) == "MLA"
+    assert _detail_section_title(single, "MoE", ffn_tree) == "MoE"
+
+    hybrid = ArchitectureSpec(name="Kimi-like", model_type="kimi_linear")
+    hybrid.attention_type = "Hybrid"
+    hybrid.layer_variants = [
+        LayerVariant(label="a", count=68, attention_label="KimiDelta Attn"),
+        LayerVariant(label="b", count=24, attention_label="KimiMLA Attn"),
+    ]
+    for variant_title in ("KimiDelta Attn", "KimiMLA Attn"):
+        assert _detail_section_title(hybrid, variant_title, attn_tree) == variant_title
+
+
+def test_section_content_stays_anchored_when_ports_share_a_consumer():
+    """Docking two ports onto one row must not leave a vacant row under the title."""
+    import matplotlib.pyplot as plt
+
+    from visualizer.computation_graph import (
+        SYNTHETIC_TENSOR,
+        ComputationGraph,
+        GraphNodeSpec,
+        LayoutPosition,
+    )
+    from visualizer.render import COLORS, _detail_content_extents
+    from visualizer.render_validate import finalize_detail_layout
+
+    graph = ComputationGraph()
+    graph.nodes.append(GraphNodeSpec(key="kv", label="kv", synthetic=SYNTHETIC_TENSOR))
+    graph.nodes.append(GraphNodeSpec(key="topk_idxs", label="topk_idxs", synthetic=SYNTHETIC_TENSOR))
+    graph.nodes.append(GraphNodeSpec(key="kernel", label="Sparse attn kernel"))
+    graph.nodes.append(GraphNodeSpec(key="contiguous", label="Contiguous"))
+    graph.links.extend([(0, 2), (1, 2), (2, 3)])
+
+    top_y = 10.0
+    cx = 1.3
+    # The layered pass gives each port its own row; docking later collapses them onto one.
+    positions = [
+        LayoutPosition(spec=graph.nodes[0], cx=cx, top_y=top_y, width=0.85, height=0.51),
+        LayoutPosition(spec=graph.nodes[1], cx=cx + 0.9, top_y=top_y - 0.69, width=0.82, height=0.51),
+        LayoutPosition(spec=graph.nodes[2], cx=cx, top_y=top_y - 1.39, width=1.39, height=0.32),
+        LayoutPosition(spec=graph.nodes[3], cx=cx, top_y=top_y - 1.90, width=0.93, height=0.32),
+    ]
+
+    fig, ax = plt.subplots(figsize=(6, 8))
+    try:
+        finalize_detail_layout(
+            ax,
+            graph,
+            positions,
+            input_sublabel=None,
+            cx=cx,
+            top_y=top_y,
+            detail_fill=COLORS["detail_fill"],
+        )
+    finally:
+        plt.close(fig)
+
+    _left, _right, _bottom, max_top = _detail_content_extents(positions)
+    assert max_top == pytest.approx(top_y, abs=1e-6)
+
+
 def test_upstream_input_sources_pair_conditional_variants():
     from visualizer.blocks import BlockComponent, upstream_input_sources
 

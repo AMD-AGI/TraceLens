@@ -114,6 +114,8 @@ _WHITE_TEXT_GROUP = re.compile(
 WHITE_TEXT_OUTLINE_PX = 2.0
 _BASIC_OP_EDGE = "#000000"
 _INPUT_NODE_EDGE = "#000000"
+# Fills too pale to read as their own border.
+_PALE_FILLS = frozenset({COLORS["basic_op"], COLORS["head"]})
 
 
 def white_text_has_black_outline_in_svg(svg: str) -> bool:
@@ -134,8 +136,8 @@ def white_text_has_black_outline_in_svg(svg: str) -> bool:
 
 
 def _default_box_edgecolor(node: Node) -> str:
-    """Pick a visible border; basic-op tiles use black instead of matching gray fill."""
-    if node.facecolor == COLORS["basic_op"]:
+    """Pick a visible border; pale tiles use black instead of matching their own fill."""
+    if node.facecolor in _PALE_FILLS:
         return _BASIC_OP_EDGE
     return node.facecolor
 
@@ -243,6 +245,7 @@ MERGE_OUTPUT_GAP = 0.06
 RESIDUAL_BRANCH_LIFT = 0.07
 FLOW_CONNECTOR_ZORDER = 2
 DETAIL_CONNECTOR_ZORDER = 5.5
+INLINE_FRAME_CAPTION_ZORDER = DETAIL_CONNECTOR_ZORDER + 0.1
 CONNECTOR_JUNCTION_DOT_RADIUS = 0.025
 CONNECTOR_JUNCTION_HALO_RADIUS = 0.038
 CONNECTOR_JUNCTION_ZORDER = 5.85
@@ -326,6 +329,10 @@ FRAME_EXIT_LAYOUT_BELOW_GAP = 0.03
 INLINE_FRAME_LABEL_GAP = 0.04
 INLINE_FRAME_LABEL_CHAR_W = 6.4 * 0.0078
 INLINE_FRAME_LABEL_LINE_H = 0.11
+# Shorter captions read better overhanging their frame than broken across lines.
+INLINE_FRAME_LABEL_WRAP_MIN = 15
+# Advance per character as actually rendered; INLINE_FRAME_LABEL_CHAR_W runs ~1.4x narrow.
+INLINE_FRAME_LABEL_RENDERED_CHAR_W = 0.075
 # Extra space reserved above an expanded spine block for its dotted-frame label.
 SPINE_EXPANDED_BLOCK_TOP_RESERVE = 0.44
 
@@ -662,8 +669,17 @@ def _merge_anchor(cx: float, merge_y: float) -> _RenderAnchor:
 def _connect_from_merge(ax, merge_x: float, merge_y: float, target: Node, *, gap: float = 0.06) -> None:
     """Connect downward from a residual merge node to the next block."""
     del gap
-    start_y = merge_y - MERGE_RADIUS - MERGE_CLEARANCE
-    _arrow(ax, merge_x, start_y, target.cx, target.top)
+    _arrow(ax, merge_x, _merge_edge_below(merge_y), target.cx, target.top)
+
+
+def _merge_edge_above(merge_y: float) -> float:
+    """Top of the merge glyph, where an incoming connector should land."""
+    return merge_y + MERGE_RADIUS
+
+
+def _merge_edge_below(merge_y: float) -> float:
+    """Bottom of the merge glyph, where an outgoing connector should start."""
+    return merge_y - MERGE_RADIUS
 
 
 def _merge_y_for_module(module_bottom: float) -> float:
@@ -687,7 +703,7 @@ def _residual_merge(
 ) -> float:
     """Merge module output with the residual skip. Returns y of the merge node."""
     merge_y = _merge_y_for_module(module_bottom)
-    merge_top = merge_y + MERGE_RADIUS + MERGE_CLEARANCE
+    merge_top = _merge_edge_above(merge_y)
     branch_y = _residual_branch_y(skip_from_y)
     bus_y = (module_bottom + merge_top) / 2
     merge_left = spine_x - MERGE_RADIUS
@@ -742,20 +758,43 @@ def _residual_branch_x(cx: float, block_w: float, *, inset: float = 0.28) -> flo
     return cx - block_w / 2 + inset
 
 
+def _connect_block_frame_boundaries(
+    ax,
+    *,
+    cx: float,
+    frame_top: float,
+    entry_top: float,
+    exit_from_y: float | None,
+    frame_bottom: float,
+) -> None:
+    """Carry the spine across the block frame's reserved header and footer.
+
+    The inbound arrow stops at the frame edge while the first sublayer starts below the
+    header, and the last row stops at its own clearance, so both ends of the block
+    read as connectors that do not reach.
+    """
+    if entry_top < frame_top:
+        _line(ax, cx, frame_top, cx, entry_top, color=COLORS["flow"])
+    if exit_from_y is not None and frame_bottom < exit_from_y:
+        _line(ax, cx, exit_from_y, cx, frame_bottom, color=COLORS["flow"])
+
+
+def _attention_label_base(spec: ArchitectureSpec) -> str:
+    """The attention name the overview tile shows, without its note sub-line."""
+    labels: list[str] = []
+    for variant in spec.layer_variants:
+        if variant.attention_label not in labels:
+            labels.append(variant.attention_label)
+    if labels:
+        return " / ".join(labels)
+    return spec.attention_type
+
+
 def _attention_label(spec: ArchitectureSpec) -> str:
-    if spec.layer_variants:
-        labels: list[str] = []
-        for variant in spec.layer_variants:
-            if variant.attention_label not in labels:
-                labels.append(variant.attention_label)
-        if len(labels) > 1:
-            return " / ".join(labels)
-        if len(labels) == 1:
-            return labels[0]
-    attn = spec.attention_type
-    if spec.attention_notes:
-        return f"{attn}\n{spec.attention_notes[0][:28]}"
-    return attn
+    base = _attention_label_base(spec)
+    if not spec.layer_variants and spec.attention_notes:
+        return f"{base}\n{spec.attention_notes[0][:28]}"
+    return base
 
 
 def _ffn_class_display_name(class_name: str) -> str:
@@ -918,11 +957,38 @@ def _wrap_fact_text(text: str, *, width: int = 48) -> list[str]:
     return textwrap.wrap(text, width=width, break_long_words=False, break_on_hyphens=False) or [text]
 
 
+def _wrap_snake_case_label(label: str, wrap_width: int) -> list[str]:
+    """Break a snake_case name into lines at its underscores."""
+    words = [word + "_" for word in label.split("_")]
+    words[-1] = words[-1][:-1]
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if current and len(current) + len(word) > wrap_width:
+            lines.append(current)
+            current = word
+        else:
+            current += word
+    if current:
+        lines.append(current)
+    return lines
+
+
 def _inline_frame_label_lines(label: str, frame_width: float) -> list[str]:
     """Wrap an inline-frame caption to stay inside the dotted frame width."""
+    usable = max(0.35, frame_width - 0.04)
+    if (
+        "_" in label
+        and not any(char.isspace() for char in label)
+        and len(label) > INLINE_FRAME_LABEL_WRAP_MIN
+    ):
+        # A snake_case name has no spaces to wrap on, so its underscores are the breaks.
+        snake_width = max(8, int(usable / INLINE_FRAME_LABEL_RENDERED_CHAR_W))
+        if len(label) > snake_width:
+            return _wrap_snake_case_label(label, snake_width)
+        return [label]
     if len(label) <= 40:
         return [label]
-    usable = max(0.35, frame_width - 0.04)
     wrap_width = max(8, int(usable / INLINE_FRAME_LABEL_CHAR_W))
     if len(label) <= wrap_width:
         return [label]
@@ -1723,6 +1789,51 @@ def _connect_into_block(
     _arrow(ax, cx, below_text, cx, frame_top)
 
 
+def _layout_component_chain(
+    layout: DiagramLayout,
+    ax,
+    *,
+    cx: float,
+    entry_top: float,
+    sequence: list[BlockComponent],
+    norm_w: float,
+    inner_w: float,
+    gap: float,
+) -> float | None:
+    """Stack the block's own modules when no norm pairs with a compute module.
+
+    Role matching can miss a block's conventions entirely. Falling back to the modules
+    the AST actually found keeps the block faithful to the model rather than drawing it
+    empty or with generic tiles.
+    """
+    previous: Node | None = None
+    cursor = entry_top
+    for comp in sequence:
+        is_norm = comp.role == "norm"
+        sublabel = None if is_norm else _component_sublabel(comp)
+        node = _make_node(
+            comp.attr_name,
+            cx,
+            cursor,
+            norm_w if is_norm else inner_w,
+            single_line_box_height() if is_norm else box_height_for_content(sublabel),
+            _component_display_label(comp),
+            COLORS["norm"] if is_norm else ROLE_COLORS.get(comp.role, ROLE_COLORS["other"]),
+            text_color=COLORS["text"] if is_norm else "white",
+            sublabel=sublabel,
+            fontsize=8 if is_norm else 8.8,
+        )
+        layout.add(node)
+        _fit_spine_node_to_label(ax, node)
+        _center_spine_node(node, cx)
+        _draw_box(ax, node)
+        if previous is not None:
+            _connect_down(ax, previous, node)
+        previous = node
+        cursor = node.bottom - gap
+    return previous.bottom if previous is not None else None
+
+
 def _layout_component_block(
     layout: DiagramLayout,
     ax,
@@ -1776,14 +1887,39 @@ def _layout_component_block(
         )
         merge_ys.append(spine_y)
 
+    chain_bottom: float | None = None
+    if not merge_ys:
+        chain_bottom = _layout_component_chain(
+            layout,
+            ax,
+            cx=cx,
+            entry_top=entry_top,
+            sequence=sequence,
+            norm_w=norm_w,
+            inner_w=inner_w,
+            gap=gap,
+        )
+
     merge_pad = MERGE_RADIUS + MERGE_CLEARANCE + 0.10
     if merge_ys:
         content_bottom = min(merge_ys) - merge_pad
-        frame_bottom = _block_frame_bottom(content_bottom)
+        exit_from_y: float | None = _merge_edge_below(min(merge_ys))
+    elif chain_bottom is not None:
+        content_bottom = chain_bottom - 0.10
+        exit_from_y = chain_bottom
     else:
         content_bottom = top_y - 0.2
-        frame_bottom = _block_frame_bottom(content_bottom)
+        exit_from_y = None
+    frame_bottom = _block_frame_bottom(content_bottom)
 
+    _connect_block_frame_boundaries(
+        ax,
+        cx=cx,
+        frame_top=_block_frame_top(top_y, repeat_label),
+        entry_top=entry_top,
+        exit_from_y=exit_from_y,
+        frame_bottom=frame_bottom,
+    )
     _draw_block_frame(
         ax,
         cx=cx,
@@ -1794,8 +1930,6 @@ def _layout_component_block(
         label=spec.decoder_class or "Transformer block",
     )
 
-    if merge_ys:
-        return content_bottom
     return content_bottom
 
 
@@ -1858,6 +1992,14 @@ def _layout_default_block(
 
     merge_pad = MERGE_RADIUS + MERGE_CLEARANCE + 0.10
     content_bottom = merge2 - merge_pad
+    _connect_block_frame_boundaries(
+        ax,
+        cx=cx,
+        frame_top=_block_frame_top(top_y, repeat_label),
+        entry_top=entry_top,
+        exit_from_y=_merge_edge_below(merge2),
+        frame_bottom=_block_frame_bottom(content_bottom),
+    )
     _draw_block_frame(
         ax,
         cx=cx,
@@ -10553,6 +10695,19 @@ def _spine_expanded_block_top_y(cursor_y: float) -> float:
     return cursor_y - SPINE_EXPANDED_BLOCK_TOP_RESERVE
 
 
+def _caption_mask_bbox() -> dict[str, object]:
+    """Backing that hides the connector running beneath an inline frame caption.
+
+    A frame caption starts at the frame's left edge and can be wider than the frame
+    itself, so it has nowhere to sit clear of the spine entering the frame.
+    """
+    return {
+        "boxstyle": "square,pad=0.15",
+        "facecolor": COLORS["detail_fill"],
+        "edgecolor": "none",
+    }
+
+
 def _render_inline_linear_frames(
     ax,
     graph,
@@ -10602,11 +10757,15 @@ def _render_inline_linear_frames(
                     color=COLORS["muted"],
                     fontweight=line.fontweight,
                     style=line.style or "normal",
+                    bbox=_caption_mask_bbox(),
+                    zorder=INLINE_FRAME_CAPTION_ZORDER,
                 )
             continue
 
-        caption_top = bounds.top + INLINE_FRAME_LABEL_GAP
+        from visualizer.render_validate import _caption_top_offset
+
         label_lines = _inline_frame_label_lines(frame.label, frame_w)
+        caption_top = bounds.top + _caption_top_offset(label_lines, frame.sublabel)
         for line_index, line in enumerate(label_lines):
             ax.text(
                 frame_left + 0.02,
@@ -10616,19 +10775,23 @@ def _render_inline_linear_frames(
                 va="bottom",
                 fontsize=6.4,
                 color=COLORS["muted"],
+                bbox=_caption_mask_bbox(),
+                zorder=INLINE_FRAME_CAPTION_ZORDER,
             )
         if frame.sublabel:
             sub_lines = [line for line in frame.sublabel.split("\n") if line.strip()]
             for line_index, line in enumerate(sub_lines):
                 ax.text(
                     frame_left + 0.02,
-                    bounds.top + INLINE_FRAME_LABEL_GAP - 0.11 - line_index * 0.11,
+                    caption_top - 0.11 - line_index * 0.11,
                     line,
                     ha="left",
                     va="bottom",
                     fontsize=5.6,
                     color=COLORS["muted"],
                     style="italic",
+                    bbox=_caption_mask_bbox(),
+                    zorder=INLINE_FRAME_CAPTION_ZORDER,
                 )
 
 
@@ -10719,13 +10882,16 @@ def _build_detail_draw_plan(
                 pos.height,
                 display_label,
                 COLORS["detail_fill"],
+                text_color=COLORS["text"],
                 sublabel=None,
                 fontsize=7.4,
             )
+            # A method wrapper has no submodule internals, so a dashed border would promise
+            # an expansion that does not exist; dashed strokes stay reserved for inline frames.
             plan.node_draws.append(
                 (
                     leaf,
-                    {"edgecolor": COLORS["detail_border"], "linestyle": "dashed"},
+                    {"edgecolor": COLORS["detail_border"], "linestyle": "solid"},
                 )
             )
             if spec.port_label and spec.port_style == "inline":
@@ -11156,6 +11322,18 @@ def _render_block_tree_node(
     return bottom, frame_right
 
 
+def _detail_section_title(spec: ArchitectureSpec, title: str, tree: BlockNode) -> str:
+    """Name a section after the block it expands, as the overview tile labels it."""
+    if tree.role != "attention":
+        return title
+    variant_labels = {variant.attention_label for variant in spec.layer_variants}
+    # With several attention variants the overview tile lists them all, so there is no
+    # single name to share and each section keeps its own class-derived one.
+    if len(variant_labels) > 1:
+        return title
+    return _attention_label_base(spec) or title
+
+
 def _detail_sections_to_render(spec: ArchitectureSpec) -> list[tuple[str, BlockNode, str | None]]:
     """Return titled block trees rendered as internal diagram subsections."""
     sections: list[tuple[str, BlockNode, str | None]] = []
@@ -11165,6 +11343,7 @@ def _detail_sections_to_render(spec: ArchitectureSpec) -> list[tuple[str, BlockN
         basic_ops=basic_ops,
     )
     for title, tree in section_trees:
+        title = _detail_section_title(spec, title, tree)
         if subgraph_warrants_export(tree, basic_ops=basic_ops):
             sections.append((title, tree, _format_input_source_sublabel(tree.input_source)))
         for sub_title, sub_tree in collect_nested_diagrams(tree, basic_ops=basic_ops):
@@ -11592,6 +11771,7 @@ def render_diagram(
             _spine_box_height(comp),
             _spine_display_label(comp, spec),
             _spine_color(comp.role),
+            text_color=COLORS["text"],
             sublabel=_spine_sublabel(comp),
         )
         layout.add(tail_node)

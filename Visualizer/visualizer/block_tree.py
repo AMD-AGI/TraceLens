@@ -790,7 +790,7 @@ def _kernel_pipeline_block_nodes(
     details: list[str],
     attention_inputs: dict[str, list[str]] | None = None,
     parent_class_name: str | None = None,
-) -> tuple[BlockNode, BlockNode]:
+) -> tuple[BlockNode, BlockNode | None]:
     """Expand a multi-input kernel attention step into pipeline and output sibling nodes."""
     from visualizer.kernel_pipeline import compute_tensor_step_targets, introspect_kernel_pipeline
 
@@ -841,7 +841,8 @@ def _kernel_pipeline_block_nodes(
                 )
             )
 
-    if not pipeline_children:
+    opaque_kernel = not pipeline_children
+    if opaque_kernel:
         pipeline_children.append(
             _leaf_node(
                 attr_name="@attn_pipeline_core",
@@ -869,6 +870,7 @@ def _kernel_pipeline_block_nodes(
         tensor_step_targets=step_targets,
     )
 
+    output_node: BlockNode | None
     if output_steps:
         output = output_steps[0]
         output_node = _leaf_node(
@@ -880,6 +882,10 @@ def _kernel_pipeline_block_nodes(
             basic=False,
             kernel_predecessors=list(output.predecessors),
         )
+    elif opaque_kernel:
+        # One opaque kernel call with no parsed stages: the pipeline tile is the whole call,
+        # so a separate output tile would just repeat the kernel name.
+        output_node = None
     else:
         output_node = _leaf_node(
             attr_name="@attn_output",
@@ -1597,7 +1603,9 @@ def build_block_node(
                     attention_inputs=cls.attention_inputs,
                     parent_class_name=class_name,
                 )
-                child_nodes.extend([pipeline_node, output_node])
+                child_nodes.append(pipeline_node)
+                if output_node is not None:
+                    child_nodes.append(output_node)
             else:
                 child_nodes.append(
                     _leaf_node(
@@ -1643,6 +1651,22 @@ def build_block_node(
         child_class = cls.init_assignments.get(call_attr)
         if child_class is None or child_class in _SKIP_INIT_CLASS_NAMES:
             if child_class in _SKIP_INIT_CLASS_NAMES:
+                continue
+            single_op = cls.single_op_methods.get(call_attr)
+            if single_op is not None:
+                # Keep the method's attr_name so forward wiring still resolves the step.
+                child_nodes.append(
+                    _leaf_node(
+                        attr_name=call_attr,
+                        class_name=single_op.class_name,
+                        forward_order=child_order,
+                        details=list(single_op.details),
+                        label=single_op.label,
+                        basic=True,
+                        operation_predecessors=list(single_op.predecessors),
+                        external_inputs=list(single_op.external_inputs),
+                    )
+                )
                 continue
             child_nodes.append(
                 _leaf_node(

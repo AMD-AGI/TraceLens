@@ -658,6 +658,137 @@ def test_basic_op_labels_export_as_dark_text_without_stroke(tmp_path: Path):
             assert "paint-order: stroke fill" not in body
 
 
+def test_attn_norm_and_ffn_norm_classify_as_norm():
+    from visualizer.ast_analyze import _classify_role
+    from visualizer.blocks import BlockComponent, collect_norm_module_pairs
+
+    assert _classify_role("attn_norm", "RMSNorm") == "norm"
+    assert _classify_role("ffn_norm", "RMSNorm") == "norm"
+    assert _classify_role("post_attention_layernorm", "RMSNorm") == "norm"
+    assert _classify_role("attn", "Attention") == "attention"
+
+    pairs = collect_norm_module_pairs(
+        [
+            BlockComponent("hc_pre", "hc_pre", "other", "hc pre", forward_order=0),
+            BlockComponent("attn_norm", "RMSNorm", "norm", "RMSNorm", forward_order=1),
+            BlockComponent("attn", "Attention", "attention", "Attn", forward_order=2),
+            BlockComponent("hc_post", "hc_post", "other", "hc post", forward_order=3),
+            BlockComponent("hc_pre", "hc_pre", "other", "hc pre", forward_order=4),
+            BlockComponent("ffn_norm", "RMSNorm", "norm", "RMSNorm", forward_order=5),
+            BlockComponent("ffn", "MoE", "ffn", "MoE", forward_order=6),
+            BlockComponent("hc_post", "hc_post", "other", "hc post", forward_order=7),
+        ]
+    )
+    assert [(norm.attr_name, module.attr_name) for norm, module in pairs] == [
+        ("attn_norm", "attn"),
+        ("ffn_norm", "ffn"),
+    ]
+
+
+def _drawn_block_boxes(spec, tmp_path: Path, name: str):
+    """Render a diagram and return the (label, bottom, top) of every box drawn."""
+    import visualizer.render as render_module
+
+    boxes: list[tuple[str, float, float]] = []
+    original = render_module._draw_box
+
+    def record(ax, node, **kwargs):
+        boxes.append((node.label, node.bottom, node.top))
+        return original(ax, node, **kwargs)
+
+    render_module._draw_box = record
+    try:
+        render_module.render_diagram(spec, tmp_path / name)
+    finally:
+        render_module._draw_box = original
+    return boxes
+
+
+def test_block_interior_falls_back_to_model_components_when_pairing_fails(tmp_path: Path):
+    from visualizer.blocks import BlockComponent, collect_norm_module_pairs
+
+    config_path = FIXTURES / "llama_like" / "config.json"
+    spec = load_architecture(config_path, name="Test Llama", analyze_code=False)
+    # Roles the classifier failed to recognise: nothing pairs, but the modules are known.
+    spec.block_components = [
+        BlockComponent("hc_pre", "hc_pre", "other", "hc pre", forward_order=0),
+        BlockComponent("attn", "Attention", "other", "Attn", forward_order=1),
+        BlockComponent("hc_post", "hc_post", "other", "hc post", forward_order=2),
+    ]
+    assert collect_norm_module_pairs(spec.block_components) == []
+
+    labels = [label for label, _bottom, _top in _drawn_block_boxes(spec, tmp_path, "fallback.svg")]
+    for expected in ("hc pre", "Attn", "hc post"):
+        assert expected in labels, f"{expected} missing; block drew empty instead of the model"
+
+
+def test_block_spine_connectors_span_the_frame_boundary(tmp_path: Path):
+    import visualizer.render as render_module
+
+    config_path = FIXTURES / "llama_like" / "config.json"
+    spec = load_architecture(config_path, name="Test Llama", analyze_code=False)
+
+    boxes: list[tuple[str, float, float, float]] = []
+    segments: list[tuple[float, float, float, float]] = []
+    original_box = render_module._draw_box
+    original_line = render_module._line
+    original_path = render_module._draw_path
+
+    def record_box(ax, node, **kwargs):
+        boxes.append((node.label, node.cx, node.bottom, node.top))
+        return original_box(ax, node, **kwargs)
+
+    def record_line(ax, x1, y1, x2, y2, **kwargs):
+        segments.append((x1, y1, x2, y2))
+        return original_line(ax, x1, y1, x2, y2, **kwargs)
+
+    def record_path(ax, points, **kwargs):
+        for start, end in zip(points, points[1:]):
+            segments.append((*start, *end))
+        return original_path(ax, points, **kwargs)
+
+    render_module._draw_box = record_box
+    render_module._line = record_line
+    render_module._draw_path = record_path
+    try:
+        render_module.render_diagram(spec, tmp_path / "spine.svg")
+    finally:
+        render_module._draw_box = original_box
+        render_module._line = original_line
+        render_module._draw_path = original_path
+
+    spine_cx = next(box[1] for box in boxes if box[0].startswith("Tokenized"))
+    column = sorted(
+        (box for box in boxes if abs(box[1] - spine_cx) < 0.08),
+        key=lambda box: -box[3],
+    )
+    verticals = [
+        (min(y1, y2), max(y1, y2))
+        for x1, y1, x2, y2 in segments
+        if abs(x1 - x2) < 1e-6 and abs(x1 - spine_cx) < 0.08
+    ]
+    # A residual merge glyph legitimately fills a gap of its own diameter.
+    merge_span = 2 * (render_module.MERGE_RADIUS + render_module.MERGE_CLEARANCE)
+
+    for upper, lower in zip(column, column[1:]):
+        gap_top, gap_bottom = upper[2], lower[3]
+        if gap_top - gap_bottom <= 1e-9:
+            continue
+        spans = sorted(seg for seg in verticals if seg[1] > gap_bottom and seg[0] < gap_top)
+        cursor = gap_bottom
+        holes: list[tuple[float, float]] = []
+        for low, high in spans:
+            if low > cursor + 1e-6:
+                holes.append((cursor, low))
+            cursor = max(cursor, high)
+        if cursor < gap_top - 1e-6:
+            holes.append((cursor, gap_top))
+        unexplained = [hole for hole in holes if hole[1] - hole[0] > merge_span + 1e-3]
+        assert not unexplained, (
+            f"spine breaks between {upper[0]!r} and {lower[0]!r}: {unexplained}"
+        )
+
+
 def test_basic_rmsnorm_has_no_box_sublabel():
     from visualizer.block_tree import BlockNode
     from visualizer.sizing import block_sublabel

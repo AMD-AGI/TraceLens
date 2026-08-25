@@ -18,6 +18,9 @@ from visualizer.ast_analyze import kernel_kwarg_ports, kernel_name_from_step_det
 _KERNEL_SOURCE_CACHE = Path.home() / ".cache" / "tracelens" / "kernel_sources"
 _KERNEL_FIXTURE_ROOT = os.environ.get("TRACELENS_KERNEL_FIXTURE_ROOT")
 
+# Directories of the modeling files under analysis, searched for imported kernel sources.
+_KERNEL_SEARCH_ROOTS: list[Path] = []
+
 # Top-level import roots -> (github org/repo, branch) for source fetch when the package is not installed.
 _PACKAGE_SOURCE_REPOS: dict[str, tuple[str, str]] = {
     "fla": ("fla-org/flash-linear-attention", "main"),
@@ -51,6 +54,36 @@ _BUILTIN_SKIP_CALLS = frozenset(
         "TypeError",
         "RuntimeError",
         "NotImplementedError",
+    }
+)
+
+# Allocations produce an output buffer that a later kernel call writes into.
+_ALLOCATION_CALLS = frozenset(
+    {
+        "empty",
+        "empty_like",
+        "zeros",
+        "zeros_like",
+        "ones",
+        "ones_like",
+        "full",
+        "full_like",
+        "new_empty",
+        "new_zeros",
+        "new_ones",
+        "new_full",
+    }
+)
+
+# Tensor metadata queries: they read shape or layout rather than producing a stage.
+_SKIP_TENSOR_QUERY_CALLS = frozenset(
+    {
+        "size",
+        "dim",
+        "numel",
+        "stride",
+        "element_size",
+        "get_default_dtype",
     }
 )
 
@@ -219,14 +252,44 @@ def _collect_import_map(module: ast.Module, module_name: str) -> dict[str, _Impo
     return imports
 
 
-def _module_file_path(module: str) -> Path | None:
+def register_kernel_search_root(path: str | Path) -> None:
+    """Resolve kernel imports that ship beside the modeling source being analyzed.
+
+    A checkpoint like ``inference/model.py`` does ``from kernel import sparse_attn``,
+    naming a sibling file that is on no import path, so without its directory the
+    kernel reads as opaque and its pipeline never expands.
+    """
+    root = Path(path).expanduser()
+    if root.is_file():
+        root = root.parent
+    if root.is_dir() and root not in _KERNEL_SEARCH_ROOTS:
+        _KERNEL_SEARCH_ROOTS.insert(0, root)
+
+
+def _kernel_search_roots() -> list[Path]:
+    roots = list(_KERNEL_SEARCH_ROOTS)
     if _KERNEL_FIXTURE_ROOT:
-        fixture = Path(_KERNEL_FIXTURE_ROOT) / Path(*module.split(".")).with_suffix(".py")
-        if fixture.is_file():
-            return fixture
-        package_init = Path(_KERNEL_FIXTURE_ROOT) / Path(*module.split(".")) / "__init__.py"
+        roots.insert(0, Path(_KERNEL_FIXTURE_ROOT))
+    return roots
+
+
+def _search_root_module_file(module: str) -> Path | None:
+    """Locate a module file within a registered search root."""
+    relative = Path(*module.split("."))
+    for root in _kernel_search_roots():
+        candidate = root / relative.with_suffix(".py")
+        if candidate.is_file():
+            return candidate
+        package_init = root / relative / "__init__.py"
         if package_init.is_file():
             return package_init
+    return None
+
+
+def _module_file_path(module: str) -> Path | None:
+    from_root = _search_root_module_file(module)
+    if from_root is not None:
+        return from_root
 
     try:
         spec = importlib.util.find_spec(module)
@@ -272,6 +335,11 @@ def _module_file_path(module: str) -> Path | None:
 
 
 def _read_module_source(module: str) -> tuple[str, str] | None:
+    # A sibling of the modeling file outranks any same-named installed module.
+    from_root = _search_root_module_file(module)
+    if from_root is not None:
+        return from_root.read_text(encoding="utf-8"), module
+
     try:
         imported = importlib.import_module(module)
         file_path = inspect.getfile(imported)
@@ -638,6 +706,22 @@ def _bind_assignment(stmt: ast.stmt, step_attr: str, var_producer: dict[str, str
         var_producer[name] = step_attr
 
 
+def _bind_out_parameters(
+    call: ast.Call,
+    buffer_names: set[str],
+    step_attr: str,
+    var_producer: dict[str, str],
+) -> None:
+    """Credit a step with the pre-allocated buffers it writes into.
+
+    Kernels return their result through an out-parameter, so without this the stages
+    reading that buffer have no producer and the pipeline lays out as disconnected.
+    """
+    for arg in call.args:
+        if isinstance(arg, ast.Name) and arg.id in buffer_names:
+            var_producer[arg.id] = step_attr
+
+
 def _predecessor_attr_names(call: ast.Call, var_producer: dict[str, str]) -> frozenset[str]:
     predecessors: set[str] = set()
     for node in ast.walk(call):
@@ -771,6 +855,47 @@ def _port_predecessor_attr_names(
     return frozenset(predecessors)
 
 
+def _invoked_local_names(func: ast.FunctionDef) -> dict[str, str]:
+    """Local names that are called, mapped to the call that produced them.
+
+    ``kernel = sparse_attn_kernel(...)`` followed by ``kernel(...)`` names a compiled
+    kernel, so the build is not a pipeline stage and the invocation carries its name.
+    """
+    produced: dict[str, str] = {}
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        producer = _call_name(node.value)
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                produced[target.id] = producer
+
+    invoked: dict[str, str] = {}
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            producer = produced.get(node.func.id)
+            if producer is not None:
+                invoked[node.func.id] = producer
+    return invoked
+
+
+def _assigns_invoked_name(stmt: ast.stmt, factory_names: dict[str, str]) -> bool:
+    """True when this statement builds a value that is later called."""
+    if not isinstance(stmt, ast.Assign):
+        return False
+    return any(
+        isinstance(target, ast.Name) and target.id in factory_names
+        for target in stmt.targets
+    )
+
+
+def _factory_for_invocation(call: ast.Call, factory_names: dict[str, str]) -> str | None:
+    """The builder call name when ``call`` invokes a value built earlier."""
+    if isinstance(call.func, ast.Name):
+        return factory_names.get(call.func.id)
+    return None
+
+
 def _extract_pipeline_from_function(
     func: ast.FunctionDef,
     *,
@@ -787,6 +912,8 @@ def _extract_pipeline_from_function(
     used_attr_names: set[str] = set()
     imports = _collect_import_map(_parse_module(source), owning_module)
     var_producer: dict[str, str] = {}
+    factory_names = _invoked_local_names(func)
+    buffer_names: set[str] = set()
     active_flags = dict(flags or {})
     shared_port_producer = port_producer if port_producer is not None else {}
     active_ports = tensor_ports or set()
@@ -817,10 +944,21 @@ def _extract_pipeline_from_function(
                 continue
 
             call_name = _call_name(call)
+            if call_name in _ALLOCATION_CALLS:
+                buffer_names.update(_assignment_target_names(stmt))
             if call_name in _SKIP_KERNEL_CALLS or call_name in _BUILTIN_SKIP_CALLS:
+                continue
+            if call_name in _SKIP_TENSOR_QUERY_CALLS:
                 continue
             if call_name in skip_calls:
                 continue
+            # A call whose result gets invoked builds the kernel rather than running it,
+            # so the stage is the invocation below, named after the builder.
+            if _assigns_invoked_name(stmt, factory_names):
+                continue
+            factory = _factory_for_invocation(call, factory_names)
+            if factory is not None:
+                call_name = factory
             if call_name.endswith("_bwd"):
                 continue
             if call_name.startswith("compress_"):
@@ -883,6 +1021,7 @@ def _extract_pipeline_from_function(
             )
             steps.append(created)
             _bind_assignment(stmt, attr_name, var_producer)
+            _bind_out_parameters(call, buffer_names, attr_name, var_producer)
             _register_port_outputs(created)
 
     walk(func.body, ())

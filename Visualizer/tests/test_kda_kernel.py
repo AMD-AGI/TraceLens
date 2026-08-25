@@ -27,6 +27,44 @@ def _kernel_fixture_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRACELENS_KERNEL_FIXTURE_ROOT", str(_FIXTURE_ROOT))
 
 
+def test_kernel_search_root_expands_kernel_module_beside_modeling_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import visualizer.kernel_pipeline as kernel_pipeline
+
+    (tmp_path / "model.py").write_text("from sibling_kernel import sibling_attn\n", encoding="utf-8")
+    (tmp_path / "sibling_kernel.py").write_text(
+        "import torch\n"
+        "\n"
+        "def build_attn_kernel(h, d):\n"
+        "    return lambda *args: None\n"
+        "\n"
+        "def sibling_attn(q, kv):\n"
+        "    b, s, h, d = q.size()\n"
+        "    o = torch.empty_like(q)\n"
+        "    kernel = build_attn_kernel(q.size(2), d)\n"
+        "    kernel(q, kv, o)\n"
+        "    o = o.narrow(2, 0, h).contiguous()\n"
+        "    return o\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(kernel_pipeline, "_KERNEL_SEARCH_ROOTS", [])
+    monkeypatch.setattr(kernel_pipeline, "_KERNEL_FIXTURE_ROOT", None)
+
+    details = ["kernel: sibling_attn", "import: sibling_kernel#sibling_attn"]
+    # A kernel module on no import path reads as opaque until its directory is known.
+    assert introspect_kernel_pipeline(details) == ([], [])
+
+    kernel_pipeline.register_kernel_search_root(tmp_path / "model.py")
+    pipeline_steps, _output_steps = introspect_kernel_pipeline(details)
+    labels = [step.call_name for step in pipeline_steps]
+
+    assert "build_attn_kernel" in labels, "the compiled kernel call takes its builder's name"
+    assert "contiguous" in labels
+    assert "size" not in labels, "shape queries are not pipeline stages"
+
+
 def test_parse_kernel_call_flags_reads_modeling_kwargs():
     details = [
         "kernel: chunk_kda",

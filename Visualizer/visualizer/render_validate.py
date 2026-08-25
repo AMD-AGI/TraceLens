@@ -46,6 +46,10 @@ DEFAULT_MIN_GAP = 0.02
 VALIDATE_MIN_GAP = 0.02
 LAYOUT_MIN_TOP_Y = 2.5
 INLINE_FRAME_SEPARATION_EPS = 1e-3
+# Vertical reach above a frame border that a top-side caption can occupy.
+CAPTION_CONNECTOR_BAND = 0.5
+CAPTION_CONNECTOR_PENALTY = 5.0
+CAPTION_MAX_WRAP_LINES = 2
 _TILE_KINDS = frozenset({"box", "combine"})
 _OBSTACLE_KINDS = _TILE_KINDS | frozenset({"inline_frame", "frame_label", "frame_sublabel", "floating_label"})
 
@@ -307,7 +311,7 @@ def collect_measured_elements(
             frame_bounds = tile_bounds
         else:
             label_lines = _inline_frame_label_lines(frame.label, frame_width)
-            caption_top = tile_bounds.top + INLINE_FRAME_LABEL_GAP
+            caption_top = tile_bounds.top + _caption_top_offset(label_lines, frame.sublabel)
             for line_index, line in enumerate(label_lines):
                 caption = measure_text_bounds(
                     ax,
@@ -572,6 +576,14 @@ def _frame_member_indices(graph: ComputationGraph) -> dict[int, str]:
     return members
 
 
+def _caption_top_offset(label_lines: list[str], sublabel: str | None) -> float:
+    """Height to lift a frame caption above the border so its last line still clears it."""
+    from visualizer.render import INLINE_FRAME_LABEL_GAP, INLINE_FRAME_LABEL_LINE_H
+
+    stacked = len(label_lines) + len([line for line in (sublabel or "").split("\n") if line.strip()])
+    return INLINE_FRAME_LABEL_GAP + max(0, stacked - 1) * INLINE_FRAME_LABEL_LINE_H
+
+
 def _inline_frame_tile_bounds(
     frame,
     positions: list[LayoutPosition],
@@ -598,6 +610,157 @@ def _inline_frame_tile_bounds(
         bottom=min_bottom - pad,
         top=max_top + pad,
     )
+
+
+def _shares_inline_frame_column(
+    box: ContentBounds,
+    frame_bounds: ContentBounds,
+) -> bool:
+    """True when a tile sits in the frame's column, so overlaps must be resolved vertically."""
+    overlap = min(box.right, frame_bounds.right) - max(box.left, frame_bounds.left)
+    if overlap <= 0:
+        return False
+    narrower = min(box.width, frame_bounds.width)
+    return narrower <= 0 or overlap >= narrower / 2
+
+
+def _caption_band_heights(
+    ax: Axes,
+    graph: ComputationGraph,
+    positions: list[LayoutPosition],
+    *,
+    min_gap: float,
+) -> dict[str, float]:
+    """Space each frame caption needs above its border, from measured caption text."""
+    from visualizer.render import (
+        INLINE_FRAME_LABEL_GAP,
+        INLINE_FRAME_PAD,
+        _inline_frame_label_lines,
+    )
+
+    bands: dict[str, float] = {}
+    for frame in graph.inline_frames:
+        bounds = _inline_frame_tile_bounds(frame, positions, pad=INLINE_FRAME_PAD, graph=graph)
+        _lines, label_bounds = _stack_inline_frame_label_lines(
+            ax,
+            label_lines=_inline_frame_label_lines(frame.label, bounds.width),
+            sublabel_lines=[
+                line for line in (frame.sublabel or "").split("\n") if line.strip()
+            ],
+            anchor_x=bounds.left,
+            anchor_y=0.0,
+            ha="left",
+        )
+        # A wrapped caption is raised so its last line clears the border, so the band it
+        # needs is the whole measured stack, not just the first line.
+        bands[frame.frame_id] = max(INLINE_FRAME_LABEL_GAP, min_gap) + max(
+            0.0, label_bounds.height
+        )
+    return bands
+
+
+def _clear_inline_frame_vertical_neighbors(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float,
+    ax: Axes | None = None,
+    max_passes: int = 6,
+) -> None:
+    """Keep tiles above and below an inline frame outside its border and caption band.
+
+    Vertical stacking measures tile to tile, so a neighbour in the frame's own
+    column can land inside the dotted border. Shifting along the column keeps the
+    fix local; a horizontal nudge would drag the whole column sideways instead.
+    """
+    if not graph.inline_frames:
+        return
+
+    from visualizer.computation_graph import (
+        DETAIL_LAYER_GAP,
+        _ordered_inline_frame_chain,
+        _shift_node_subtree,
+    )
+    from visualizer.render import (
+        INLINE_FRAME_LABEL_GAP,
+        INLINE_FRAME_LABEL_LINE_H,
+        INLINE_FRAME_PAD,
+        _inline_frame_draw_bounds,
+    )
+    from visualizer.text_measure import box_bounds_at
+
+    def _shift_keeps_tiles_apart(root: int, delta: float) -> bool:
+        """True when shifting ``root``'s subtree down does not land it on another tile.
+
+        Row-mates outside the subtree stay put, so an unchecked shift can collide with a
+        side branch. Better to leave a tight border than to break the layout.
+        """
+        moved: set[int] = set()
+        queue = [root]
+        while queue:
+            index = queue.pop(0)
+            if index in moved:
+                continue
+            moved.add(index)
+            queue.extend(target for source, target in graph.links if source == index)
+        for index in moved:
+            pos = positions[index]
+            shifted = box_bounds_at(pos.cx, pos.top_y - delta, pos.width, pos.height)
+            for other_index, other in enumerate(positions):
+                if other_index in moved:
+                    continue
+                other_box = box_bounds_at(other.cx, other.top_y, other.width, other.height)
+                if shifted.overlaps(other_box, min_gap=min_gap):
+                    return False
+        return True
+
+    default_band = INLINE_FRAME_LABEL_GAP + INLINE_FRAME_LABEL_LINE_H
+    # Room a standard layer gap leaves outside the border once the member tile's pad is taken;
+    # anything less and the border reads as touching the neighbouring tile.
+    border_clearance = max(DETAIL_LAYER_GAP - INLINE_FRAME_PAD, min_gap + INLINE_FRAME_SEPARATION_EPS)
+    caption_bands = (
+        _caption_band_heights(ax, graph, positions, min_gap=min_gap)
+        if ax is not None
+        else {}
+    )
+
+    for _ in range(max_passes):
+        changed = False
+        for frame in graph.inline_frames:
+            members = {index for index in frame.node_indices if index < len(positions)}
+            if not members:
+                continue
+            chain = _ordered_inline_frame_chain(graph, sorted(members))
+            head = chain[0] if chain else None
+            frame_bounds = _inline_frame_draw_bounds(frame, positions, graph)
+            frame_center_y = (frame_bounds.top + frame_bounds.bottom) / 2
+            caption_band = caption_bands.get(frame.frame_id, default_band)
+
+            for index, pos in enumerate(positions):
+                if index in members:
+                    continue
+                box = box_bounds_at(pos.cx, pos.top_y, pos.width, pos.height)
+                if not _shares_inline_frame_column(box, frame_bounds):
+                    continue
+                above = (box.top + box.bottom) / 2 > frame_center_y
+                if above:
+                    deficit = (
+                        frame_bounds.top + caption_band + border_clearance - box.bottom
+                    )
+                    if deficit > 1e-6 and head is not None and _shift_keeps_tiles_apart(head, deficit):
+                        _shift_node_subtree(positions, graph, head, deficit)
+                        changed = True
+                        break
+                else:
+                    deficit = box.top + border_clearance - frame_bounds.bottom
+                    if deficit > 1e-6 and _shift_keeps_tiles_apart(index, deficit):
+                        _shift_node_subtree(positions, graph, index, deficit)
+                        changed = True
+                        break
+            if changed:
+                break
+        if not changed:
+            return
 
 
 def _stack_inline_frame_label_lines(
@@ -800,11 +963,19 @@ def _layout_inline_frame_labels(
     links: list[tuple[int, int]] | None = None,
     min_gap: float,
     min_left: float | None = None,
+    avoid_connectors: bool = False,
 ) -> dict[str, object]:
-    """Place inline-frame captions to avoid tiles, other captions, and connector corridors."""
+    """Place inline-frame captions to avoid tiles, other captions, and connector corridors.
+
+    ``avoid_connectors`` additionally steers captions out of the columns where connectors
+    cross a frame border. It is only safe once tile positions have settled, because earlier
+    passes derive tile movements from where captions landed.
+    """
     from visualizer.render import (
         INLINE_FRAME_LABEL_GAP,
+        INLINE_FRAME_LABEL_LINE_H,
         INLINE_FRAME_PAD,
+        PARALLEL_CONNECTOR_COORD_EPS,
         InlineFrameLabelPlacement,
         _inline_frame_label_lines,
     )
@@ -867,6 +1038,36 @@ def _layout_inline_frame_labels(
             if placed_frame_id not in enclosing
         ]
 
+    def _border_connector_strips(
+        frame_members: set[int],
+        tile_bounds: ContentBounds,
+    ) -> list[ContentBounds]:
+        """Columns where a connector drops straight down across the frame's top border.
+
+        A top-side caption shares that band. Connectors that jog on the way in are left
+        out, since their path is only known once routed.
+        """
+        strips: list[ContentBounds] = []
+        for source, target in graph.links:
+            if target not in frame_members or source in frame_members:
+                continue
+            if max(source, target) >= len(positions):
+                continue
+            source_pos, target_pos = positions[source], positions[target]
+            if source_pos.top_y < tile_bounds.top:
+                continue
+            if abs(source_pos.cx - target_pos.cx) > PARALLEL_CONNECTOR_COORD_EPS:
+                continue
+            strips.append(
+                ContentBounds(
+                    left=target_pos.cx - min_gap,
+                    right=target_pos.cx + min_gap,
+                    bottom=tile_bounds.top,
+                    top=tile_bounds.top + CAPTION_CONNECTOR_BAND,
+                )
+            )
+        return strips
+
     def _side_near_frame(side: str, bounds: ContentBounds, tile_bounds: ContentBounds) -> bool:
         label_center_y = (bounds.top + bounds.bottom) / 2
         frame_center_y = (tile_bounds.top + tile_bounds.bottom) / 2
@@ -888,6 +1089,24 @@ def _layout_inline_frame_labels(
         label_lines = _inline_frame_label_lines(frame.label, frame_width)
         sublabel_lines = [line for line in (frame.sublabel or "").split("\n") if line.strip()]
         obstacles = _external_obstacles(frame.frame_id, frame_members)
+        connector_strips = _border_connector_strips(frame_members, tile_bounds) if avoid_connectors else []
+        if connector_strips:
+            # Wrapping to the frame width lets a caption run the full span, and a connector
+            # enters near the middle of it, so wrap to the room ahead of the corridor instead.
+            room = min(strip.left for strip in connector_strips) - (tile_bounds.left + 0.02) - min_gap
+            narrowed = _inline_frame_label_lines(frame.label, room + 0.04)
+            # Past a couple of lines the caption reads worse broken up than crossing a line.
+            if len(label_lines) < len(narrowed) <= CAPTION_MAX_WRAP_LINES:
+                label_lines = narrowed
+        # A caption nudged off its frame's left edge no longer sits safely above its own
+        # members, so shifted candidates have to clear those too.
+        shifted_obstacles = obstacles + [
+            element.bounds
+            for element in elements
+            if element.kind in {"box", "combine"}
+            and element.node_index is not None
+            and element.node_index in frame_members
+        ]
         caption_obstacles = [
             element.bounds
             for element in elements
@@ -914,33 +1133,57 @@ def _layout_inline_frame_labels(
             min_gap=min_gap,
         )
 
-        def _candidate_score(side: str, dx: float, dy: float, overlaps: bool) -> float:
+        def _candidate_score(
+            side: str,
+            dx: float,
+            dy: float,
+            overlaps: bool,
+            crosses_connector: bool = False,
+        ) -> float:
             side_penalty = {"top": 0.0, "left": 25.0, "right": 30.0}[side]
             if side == "left" and has_left_neighbor:
                 side_penalty += 40.0
             if side == "right" and has_right_neighbor:
                 side_penalty += 40.0
-            return side_penalty + abs(dx) + abs(dy) + (1000.0 if overlaps else 0.0)
+            # Crossing a connector costs more than any nudge but less than moving to a side,
+            # so a caption slides over when it can and holds its place when it cannot.
+            connector_penalty = CAPTION_CONNECTOR_PENALTY if crosses_connector else 0.0
+            return side_penalty + connector_penalty + abs(dx) + abs(dy) + (1000.0 if overlaps else 0.0)
 
         best: tuple[float, list, ContentBounds, str] | None = None
 
         top_anchor_x = tile_bounds.left + 0.02
-        top_anchor_y = tile_bounds.top + max(INLINE_FRAME_LABEL_GAP, min_gap)
+        # Lines stack downward from the anchor, so a wrapped caption has to start high
+        # enough that its last line still clears the border.
+        stacked_lines = len(label_lines) + len(sublabel_lines)
+        top_anchor_y = (
+            tile_bounds.top
+            + max(INLINE_FRAME_LABEL_GAP, min_gap)
+            + max(0, stacked_lines - 1) * INLINE_FRAME_LABEL_LINE_H
+        )
+        # Sliding sideways lets a caption clear a connector column while staying on top,
+        # which reads better than banishing it to the side of the frame.
+        dx_candidates = (0.0, -0.06, -0.12, -0.18, -0.24, -0.30) if connector_strips else (0.0,)
         for dy in (0.0, 0.05, 0.10, 0.15, 0.20, 0.25):
-            lines, bounds = _stack_inline_frame_label_lines(
-                ax,
-                label_lines=label_lines,
-                sublabel_lines=sublabel_lines,
-                anchor_x=top_anchor_x,
-                anchor_y=top_anchor_y + dy,
-                ha="left",
-            )
-            overlaps = _label_block_overlaps(bounds, obstacles, min_gap=min_gap)
-            near_frame = bounds.bottom >= tile_bounds.top - 0.04 and bounds.bottom <= tile_bounds.top + 0.45
-            if near_frame and not overlaps:
-                score = _candidate_score("top", 0.0, dy, False)
-                if best is None or score < best[0]:
-                    best = (score, lines, bounds, "top")
+            for dx in dx_candidates:
+                lines, bounds = _stack_inline_frame_label_lines(
+                    ax,
+                    label_lines=label_lines,
+                    sublabel_lines=sublabel_lines,
+                    anchor_x=top_anchor_x + dx,
+                    anchor_y=top_anchor_y + dy,
+                    ha="left",
+                )
+                if dx != 0.0 and min_left is not None and bounds.left < min_left:
+                    continue
+                candidate_obstacles = obstacles if dx == 0.0 else shifted_obstacles
+                overlaps = _label_block_overlaps(bounds, candidate_obstacles, min_gap=min_gap)
+                near_frame = bounds.bottom >= tile_bounds.top - 0.04 and bounds.bottom <= tile_bounds.top + 0.45
+                if near_frame and not overlaps:
+                    crosses = _label_block_overlaps(bounds, connector_strips, min_gap=min_gap)
+                    score = _candidate_score("top", dx, dy, False, crosses)
+                    if best is None or score < best[0]:
+                        best = (score, lines, bounds, "top")
 
         side_center_y = (tile_bounds.top + tile_bounds.bottom) / 2
         if has_left_neighbor and not has_right_neighbor:
@@ -1049,6 +1292,7 @@ def _apply_inline_frame_label_layout(
     detail_fill: str,
     min_gap: float,
     min_left: float | None = None,
+    avoid_connectors: bool = False,
 ) -> list[MeasuredElement]:
     """Resolve inline-frame caption positions and refresh measured elements."""
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=detail_fill)
@@ -1061,6 +1305,7 @@ def _apply_inline_frame_label_layout(
         links=list(graph.links),
         min_gap=min_gap,
         min_left=min_left,
+        avoid_connectors=avoid_connectors,
     )
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=detail_fill)
     _reserve_frame_caption_space(
@@ -1080,6 +1325,7 @@ def _apply_inline_frame_label_layout(
         links=list(graph.links),
         min_gap=min_gap,
         min_left=min_left,
+        avoid_connectors=avoid_connectors,
     )
     return collect_measured_elements(ax, graph, positions, plan, detail_fill=detail_fill)
 
@@ -1216,6 +1462,7 @@ def _align_and_stack_inline_frames(
         realign_fanout_branch_columns(positions, graph)
         _center_align_vertical_chains(positions, graph)
     clear_merge_feeder_columns(positions, graph)
+    _clear_inline_frame_vertical_neighbors(positions, graph, min_gap=VALIDATE_MIN_GAP)
 
 
 def _layout_zone_gap(min_gap: float) -> float:
@@ -2253,6 +2500,12 @@ def finalize_detail_layout(
             graph,
             min_gap=VALIDATE_MIN_GAP,
         )
+        _clear_inline_frame_vertical_neighbors(
+            positions,
+            graph,
+            min_gap=VALIDATE_MIN_GAP,
+            ax=ax,
+        )
         plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
         elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
         report = validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden)
@@ -2498,6 +2751,12 @@ def finalize_detail_layout(
     for _ in range(4):
         elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
         _nudge_clear_frame_caption_overlaps(positions, graph, elements, min_gap=VALIDATE_MIN_GAP)
+        _clear_inline_frame_vertical_neighbors(
+            positions,
+            graph,
+            min_gap=VALIDATE_MIN_GAP,
+            ax=ax,
+        )
         _ensure_tensor_ports_clear_frame_captions(
             positions,
             elements,
@@ -2684,6 +2943,23 @@ def finalize_detail_layout(
         from visualizer.computation_graph import _align_positions_left
 
         _align_positions_left(positions, min_left)
+    # Re-docking tensor ports beside a shared consumer vacates the row they were
+    # packed into, so the content has to be re-hung from the section anchor.
+    _anchor_detail_layout_to_top_y(positions, top_y=top_y)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    # Tile positions are settled from here on, so captions can finally be steered clear
+    # of the connector columns without the shift feeding back into tile placement.
+    _apply_inline_frame_label_layout(
+        ax,
+        graph,
+        positions,
+        plan,
+        detail_fill=fill,
+        min_gap=VALIDATE_MIN_GAP,
+        min_left=min_left,
+        avoid_connectors=True,
+    )
     saved_inline_frame_labels = plan.inline_frame_labels
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     plan.inline_frame_labels = saved_inline_frame_labels
