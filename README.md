@@ -81,12 +81,14 @@ TraceLens_compare_perf_reports_pytorch \
     -o comparison.xlsx
 ```
 
-Index a directory of traces and existing TraceLens CSV reports (see [Index a corpus of traces](docs/how-to/trace-index.md)):
+Index traces and existing TraceLens CSV reports (see [Index a corpus of traces](docs/how-to/trace-index.md)):
 
 ```bash
-TraceLens_trace_index --backend sqlite --db trace_index.sqlite scan --root /path/to/traces
-TraceLens_trace_index --backend sqlite --db trace_index.sqlite import-report --report-dir path/to/perf_report_csvs
-TraceLens_trace_index --backend sqlite --db trace_index.sqlite search Cijk
+TraceLens_trace_index --db trace_index.sqlite append \
+    --trace-path /path/to/rank0_trace.json.gz \
+    --report-dir path/to/perf_report_csvs
+TraceLens_trace_index --db trace_index.sqlite build --traces-file traces.txt
+TraceLens_trace_index --db trace_index.sqlite search Cijk
 ```
 
 For multi-rank runs, generate a collective-communication report across ranks (see [Generate a collective-communication report](docs/how-to/collective-report.md)):

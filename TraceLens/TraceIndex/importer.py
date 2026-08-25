@@ -8,12 +8,14 @@
 
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from TraceLens.TraceIndex.models import TraceRecord, TraceReport
 from TraceLens.TraceIndex.scanner import trace_record_from_path
 from TraceLens.TraceIndex.store import TraceIndexStore
 from TraceLens.TraceIndex.utils import normalize_path, read_csv_rows
+
+DEFAULT_REPORT_ROOT = Path("trace_index_reports")
 
 REPORT_SHEETS = (
     "unified_perf_summary",
@@ -69,6 +71,76 @@ def import_report_dir(
     return trace_id
 
 
+def report_dir_for_trace(trace_path: Path, report_root: Optional[Path] = None) -> Path:
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", trace_path.name)
+    return (report_root or DEFAULT_REPORT_ROOT) / safe_name
+
+
+def append_trace(
+    store: TraceIndexStore,
+    trace_path: Path,
+    report_dir: Optional[Path] = None,
+    root: Optional[Path] = None,
+    force: bool = False,
+    enable_pseudo_ops: bool = False,
+    report_root: Optional[Path] = None,
+) -> int:
+    """Append one trace to the catalog.
+
+    If ``report_dir`` is set, import that existing CSV report. Otherwise generate
+    a training PyTorch CSV report and import it.
+    """
+    if report_dir is not None:
+        return import_report_dir(store, report_dir, trace_path=trace_path, root=root)
+    return generate_report_and_import(
+        store,
+        trace_path=trace_path,
+        report_dir=report_dir_for_trace(trace_path, report_root),
+        root=root,
+        force=force,
+        enable_pseudo_ops=enable_pseudo_ops,
+    )
+
+
+def build_traces(
+    store: TraceIndexStore,
+    trace_paths: List[Path],
+    report_root: Optional[Path] = None,
+    root: Optional[Path] = None,
+    force: bool = False,
+    enable_pseudo_ops: bool = False,
+) -> Dict[str, Any]:
+    """Generate reports and append a batch of traces. Continues after failures."""
+    imported: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+    for trace_path in trace_paths:
+        report_dir = report_dir_for_trace(trace_path, report_root)
+        try:
+            trace_id = generate_report_and_import(
+                store,
+                trace_path=trace_path,
+                report_dir=report_dir,
+                root=root,
+                force=force,
+                enable_pseudo_ops=enable_pseudo_ops,
+            )
+            imported.append(
+                {
+                    "trace_id": trace_id,
+                    "trace_path": normalize_path(trace_path),
+                    "report_dir": normalize_path(report_dir),
+                }
+            )
+        except Exception as exc:
+            failed.append(
+                {
+                    "trace_path": normalize_path(trace_path),
+                    "error": repr(exc),
+                }
+            )
+    return {"imported": imported, "failed": failed}
+
+
 def generate_report_and_import(
     store: TraceIndexStore,
     trace_path: Path,
@@ -78,8 +150,7 @@ def generate_report_and_import(
     enable_pseudo_ops: bool = False,
 ) -> int:
     if report_dir is None:
-        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", trace_path.name)
-        report_dir = Path("trace_index_reports") / safe_name
+        report_dir = report_dir_for_trace(trace_path)
     report_dir = report_dir.resolve()
     unified_csv = report_dir / "unified_perf_summary.csv"
     if force or not unified_csv.exists():

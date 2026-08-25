@@ -7,8 +7,8 @@ See LICENSE for license information.
 
 # Index a corpus of traces in TraceLens
 ```{meta}
-:description: Learn how to catalog profiler traces and TraceLens CSV reports into a searchable SQLite index without reopening every raw trace.
-:keywords: TraceLens, TraceIndex, corpus search, SQLite, unified_perf_summary, kernel summary, full-text search, performance report
+:description: Learn how to catalog profiler traces and TraceLens CSV reports into a searchable index. SQLite is the first backend; the table schema is the shared query surface.
+:keywords: TraceLens, TraceIndex, corpus search, catalog schema, SQLite, unified_perf_summary, kernel summary, full-text search, performance report
 ```
 
 This topic shows how to build a queryable catalog of profiler traces and
@@ -16,52 +16,55 @@ TraceLens CSV reports so you can search a corpus without reopening every raw
 file. TraceIndex stores summaries and paths back to the source traces; it
 doesn't replace the traces themselves.
 
-The catalog is a SQLite file. It needs no extra service and works for local or
-single-team workflows.
+The tables below are the catalog schema — the shared query surface. Notebooks,
+SQL, and later storage backends should use these table and column names so
+catalogs stay interchangeable across users. SQLite is the first backend, not a
+prototype: it ships with Python, writes one file, and needs no extra service.
+Other backends can implement the same schema later.
 
 ## Before you begin
 
 - TraceLens installed (see [Install TraceLens](../install/install.md)).
-- A directory of profiler traces, or an existing TraceLens CSV report directory
+- Profiler traces, and optionally existing TraceLens CSV report directories
   (for example from
   [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)).
 
-## Catalog traces
+## Append a trace
 
-Scan a directory for trace-like files and record them in the catalog:
-
-```bash
-TraceLens_trace_index --backend sqlite --db trace_index.sqlite scan --root /path/to/traces
-```
-
-This pass peeks at file headers. It doesn't parse whole traces or run
-TraceLens analysis.
-
-## Import a report
-
-If you already have a TraceLens CSV report directory, import it. This is the
-usual ingest path, including for inference reports you generated separately:
+Append one trace to the catalog. Pass `--report-dir` when you already have a
+CSV report. This is the usual path for inference, rocprof, and pftrace
+reports you generated separately:
 
 ```bash
-TraceLens_trace_index --backend sqlite --db trace_index.sqlite import-report \
+TraceLens_trace_index --db trace_index.sqlite append \
   --trace-path /path/to/traces/rank0_trace.json.gz \
   --report-dir ./rank0_perf_report_csvs
 ```
 
-`--trace-path` is optional. If you omit it, the report directory is cataloged
-as its own row.
-
-To generate a training PyTorch CSV report and import it in one step:
+If you omit `--report-dir`, TraceIndex generates a training PyTorch CSV report
+and then imports it:
 
 ```bash
-TraceLens_trace_index --backend sqlite --db trace_index.sqlite build \
-  --trace-path /path/to/traces/rank0_trace.json.gz \
-  --report-dir ./trace_index_reports/rank0
+TraceLens_trace_index --db trace_index.sqlite append \
+  --trace-path /path/to/traces/rank0_trace.json.gz
 ```
 
-`build` calls the training PyTorch report generator. For inference, rocprof, or
-pftrace reports, generate the CSV directory with the matching report command,
-then use `import-report`.
+## Build a catalog from a list of traces
+
+`--db` creates the SQLite file if it doesn't exist. `build` walks a list of
+trace paths, generates a training PyTorch report for each, and appends it.
+Use a text file (one path per line; `#` starts a comment) and/or repeat
+`--trace-path`:
+
+```bash
+TraceLens_trace_index --db trace_index.sqlite build \
+  --traces-file traces.txt \
+  --report-root ./trace_index_reports
+```
+
+A failed trace is recorded and the rest of the list still runs. For inference,
+rocprof, or pftrace, generate the CSV reports first, then `append` each trace
+with `--report-dir`.
 
 ## Search and query
 
@@ -82,11 +85,14 @@ TraceLens_trace_index --backend sqlite --db trace_index.sqlite sqlite-sql \
 
 ## What the catalog stores
 
-The following table lists the SQLite tables filled on import.
+The following tables are the catalog schema. There are seven relational tables
+plus a full-text search (FTS) virtual table. SQLite holds this comfortably for
+typical TraceLens corpora (hundreds of traces, hundreds of thousands of kernel
+rows). The practical limit is one writer at a time, not row count.
 
 | Table | Contents |
 |---|---|
-| `traces` | One row per trace-like file or imported report directory |
+| `traces` | One row per indexed trace |
 | `report_imports` | Import history for TraceLens CSV report directories |
 | `unified_perf_rows` | Rows from `unified_perf_summary.csv` |
 | `kernel_summary` | Rows from `kernel_summary.csv`, including Tensile and layout flags |
@@ -120,11 +126,15 @@ behind your own access control.
 ```python
 from pathlib import Path
 
-from TraceLens.TraceIndex import import_report_dir, scan_traces, search_index
+from TraceLens.TraceIndex import append_trace, build_traces, search_index
 
 db = Path("trace_index.sqlite")
-scan_traces(db, Path("/path/to/traces"))
-import_report_dir(db, Path("rank0_perf_report_csvs"), trace_path=Path("rank0_trace.json.gz"))
+append_trace(
+    db,
+    Path("rank0_trace.json.gz"),
+    report_dir=Path("rank0_perf_report_csvs"),
+)
+build_traces(db, [Path("a.json.gz"), Path("b.json.gz")])
 rows = search_index(db, "Cijk", limit=20)
 ```
 

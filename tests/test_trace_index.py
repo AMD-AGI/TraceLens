@@ -11,16 +11,18 @@ from pathlib import Path
 import pytest
 
 from TraceLens.TraceIndex.core import (
+    append_trace,
     execute_read_query,
     import_report_dir,
-    scan_traces,
     search_index,
 )
+from TraceLens.TraceIndex.cli import main as trace_index_main
 from TraceLens.TraceIndex.importer import (
+    build_traces as build_traces_with_store,
     import_report_dir as import_report_dir_with_store,
 )
-from TraceLens.TraceIndex.scanner import scan_traces as scan_traces_with_store
 from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
+from TraceLens.TraceIndex.utils import collect_trace_paths, read_traces_file
 
 FIXTURES = Path(__file__).resolve().parent / "traces"
 TRAINING_REPORT_DIR = (
@@ -37,14 +39,12 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
-def test_trace_index_scan_import_and_search(tmp_path):
+def test_trace_index_append_from_report_and_search(tmp_path):
     db_path = tmp_path / "trace_index.sqlite"
     trace_root = tmp_path / "traces"
     trace_path = trace_root / "model_a" / "rank0_trace.json"
     trace_path.parent.mkdir(parents=True)
     trace_path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
-
-    assert scan_traces(db_path, trace_root) == 1
 
     report_dir = tmp_path / "reports" / "trace_1"
     write_csv(
@@ -91,9 +91,7 @@ def test_trace_index_scan_import_and_search(tmp_path):
         ],
     )
 
-    trace_id = import_report_dir(
-        db_path, report_dir, trace_path=trace_path, root=trace_root
-    )
+    trace_id = append_trace(db_path, trace_path, report_dir=report_dir, root=trace_root)
     assert trace_id == 1
 
     rows = execute_read_query(
@@ -115,7 +113,7 @@ def test_trace_index_rejects_write_sql(tmp_path):
         execute_read_query(db_path, "DELETE FROM traces")
 
 
-def test_trace_index_store_boundary_supports_scan_import_and_search(tmp_path):
+def test_trace_index_store_boundary_supports_append_and_search(tmp_path):
     db_path = tmp_path / "trace_index.sqlite"
     trace_root = tmp_path / "traces"
     trace_path = trace_root / "rank0_trace.json"
@@ -137,7 +135,6 @@ def test_trace_index_store_boundary_supports_scan_import_and_search(tmp_path):
 
     store = SQLiteTraceIndexStore(db_path)
     try:
-        assert scan_traces_with_store(store, trace_root) == 1
         trace_id = import_report_dir_with_store(
             store,
             report_dir,
@@ -199,3 +196,73 @@ def test_import_real_inference_report_converts_category_kernel_time_ms(tmp_path)
     )
     assert rows
     assert rows[0]["kernel_time_sum_us"] > 1000
+
+
+def test_read_traces_file_skips_comments_and_blanks(tmp_path):
+    traces_file = tmp_path / "traces.txt"
+    traces_file.write_text(
+        "# header\n" "\n" " /data/a.json.gz \n" "# skip me\n" "C:/traces/b.json\n",
+        encoding="utf-8",
+    )
+    paths = read_traces_file(traces_file)
+    assert paths == [Path("/data/a.json.gz"), Path("C:/traces/b.json")]
+    combined = collect_trace_paths(
+        traces_file, [Path("/data/a.json.gz"), Path("c.json")]
+    )
+    assert combined == [
+        Path("/data/a.json.gz"),
+        Path("C:/traces/b.json"),
+        Path("c.json"),
+    ]
+
+
+def test_cli_append_from_existing_report(tmp_path, capsys):
+    db_path = tmp_path / "trace_index.sqlite"
+    trace_path = tmp_path / "rank0_trace.json"
+    trace_path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
+    report_dir = tmp_path / "report"
+    write_csv(
+        report_dir / "unified_perf_summary.csv",
+        [
+            {
+                "name": "aten::mm",
+                "op category": "GEMM",
+                "operation_count": "1",
+                "Kernel Time (us)_sum": "10.0",
+            }
+        ],
+    )
+
+    rc = trace_index_main(
+        [
+            "--db",
+            str(db_path),
+            "append",
+            "--trace-path",
+            str(trace_path),
+            "--report-dir",
+            str(report_dir),
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["trace_id"] == 1
+    assert payload["generated_report"] is False
+    rows = execute_read_query(db_path, "SELECT name FROM unified_perf_rows")
+    assert rows[0]["name"] == "aten::mm"
+
+
+def test_build_traces_continues_after_failure(tmp_path):
+    db_path = tmp_path / "trace_index.sqlite"
+    store = SQLiteTraceIndexStore(db_path)
+    try:
+        result = build_traces_with_store(
+            store,
+            [tmp_path / "missing_a.json", tmp_path / "missing_b.json"],
+            report_root=tmp_path / "reports",
+        )
+    finally:
+        store.close()
+    assert result["imported"] == []
+    assert len(result["failed"]) == 2
+    assert "missing_a.json" in result["failed"][0]["trace_path"]

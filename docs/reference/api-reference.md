@@ -179,18 +179,17 @@ Split an inference trace into per-iteration or per-phase sub-traces.
 
 ### TraceLens_trace_index
 
-Catalog profiler traces and TraceLens CSV reports into a searchable SQLite
-index. See [Index a corpus of traces](../how-to/trace-index.md) for the full
-workflow.
+Catalog profiler traces and TraceLens CSV reports into a searchable index.
+SQLite is the first backend; the tables are the shared catalog schema. See
+[Index a corpus of traces](../how-to/trace-index.md) for the full workflow.
 
 Global options: `--backend` (default `sqlite`) and `--db` (default
 `trace_index.sqlite`).
 
 | Command | Description |
 |---------|-------------|
-| `scan --root PATH` | Record trace-like files under a directory. Doesn't parse whole traces. |
-| `import-report --report-dir DIR` | Import an existing CSV report directory. `--trace-path` is optional. |
-| `build --trace-path PATH` | Generate a training PyTorch CSV report, then import it. |
+| `append --trace-path PATH` | Append one trace. Pass `--report-dir` to load an existing CSV report; otherwise generate a training PyTorch report. |
+| `build --traces-file FILE` | Create or open the catalog and append a batch of traces (one path per line). Repeatable `--trace-path` is also accepted. |
 | `search TERMS` | Full-text search over indexed ops, kernels, categories, and timeline labels. |
 | `sqlite-sql SQL` | Run one read-only SQL statement. |
 | `serve` | HTTP SQL endpoint on `127.0.0.1:8765` by default. |
@@ -211,7 +210,7 @@ example notebook under `examples/`.
 | `EventReplay` | Extract and replay isolated operations. | [Replay a single operation](../how-to/event-replay.md), [`event_replayer_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/event_replayer_example.ipynb) |
 | `TraceFusion` | Merge multi-rank traces for Perfetto visualization. | [Fuse multi-rank traces](../how-to/trace-fusion.md), [`trace_fusion_example.py`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/trace_fusion_example.py) |
 | `Reporting` | The report generators behind the CLI tools; importable to return pandas data frames. | [Generate a PyTorch performance report](../how-to/generate-perf-report-pytorch.md) |
-| `TraceIndex` | Catalog traces and CSV reports into SQLite for search. | [Index a corpus of traces](../how-to/trace-index.md) |
+| `TraceIndex` | Catalog traces into a searchable index (SQLite first backend). | [Index a corpus of traces](../how-to/trace-index.md) |
 | `TraceUtils` | Trace utilities, including inference-trace splitting. | — |
 
 For report-column definitions across all sheets, see the

@@ -7,6 +7,8 @@
 """Trace corpus indexing helpers."""
 
 from .core import (
+    append_trace,
+    build_traces,
     execute_read_query,
     generate_report_and_import,
     import_report_dir,
@@ -23,6 +25,8 @@ __all__ = [
     "SearchHit",
     "TraceRecord",
     "TraceReport",
+    "append_trace",
+    "build_traces",
     "execute_read_query",
     "generate_report_and_import",
     "import_report_dir",

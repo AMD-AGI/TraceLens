@@ -6,7 +6,7 @@
 
 """Backend-neutral data objects for TraceIndex."""
 
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Dict, List, NamedTuple, Optional
 
 
 class TraceRecord(NamedTuple):

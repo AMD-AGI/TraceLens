@@ -91,3 +91,34 @@ def as_bool_int(value: Any) -> int:
 
 def search_text(*parts: Any) -> str:
     return " ".join(str(part) for part in parts if part not in (None, "", "nan", "NaN"))
+
+
+def read_traces_file(path: Path) -> List[Path]:
+    """Read one trace path per line. Blank lines and ``#`` comments are ignored."""
+    traces: List[Path] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        traces.append(Path(line).expanduser())
+    return traces
+
+
+def collect_trace_paths(
+    traces_file: Optional[Path] = None,
+    trace_paths: Optional[Sequence[Path]] = None,
+) -> List[Path]:
+    paths: List[Path] = []
+    if traces_file is not None:
+        paths.extend(read_traces_file(traces_file))
+    if trace_paths:
+        paths.extend(trace_paths)
+    unique: List[Path] = []
+    seen = set()
+    for path in paths:
+        key = normalize_path(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique

@@ -11,9 +11,13 @@ import json
 from pathlib import Path
 from typing import List, Optional
 
-from TraceLens.TraceIndex.importer import generate_report_and_import, import_report_dir
-from TraceLens.TraceIndex.scanner import scan_traces
+from TraceLens.TraceIndex.importer import (
+    append_trace,
+    build_traces,
+    report_dir_for_trace,
+)
 from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
+from TraceLens.TraceIndex.utils import collect_trace_paths
 
 DEFAULT_DB = Path("trace_index.sqlite")
 
@@ -28,43 +32,30 @@ def create_store(args: argparse.Namespace):
     return SQLiteTraceIndexStore(args.db)
 
 
-def scan_cmd(args: argparse.Namespace) -> int:
+def append_cmd(args: argparse.Namespace) -> int:
     store = create_store(args)
     try:
-        count = scan_traces(
+        report_dir = args.report_dir
+        generated = report_dir is None
+        if generated:
+            report_dir = report_dir_for_trace(args.trace_path, args.report_root)
+        trace_id = append_trace(
             store,
-            root=args.root,
-            peek_mb=args.peek_mb,
-            compute_md5=args.compute_md5,
-        )
-        print_json(
-            {
-                "backend": args.backend,
-                "db": args.db,
-                "root": args.root,
-                "candidate_traces": count,
-            }
-        )
-        return 0
-    finally:
-        store.close()
-
-
-def import_report_cmd(args: argparse.Namespace) -> int:
-    store = create_store(args)
-    try:
-        trace_id = import_report_dir(
-            store,
-            report_dir=args.report_dir,
             trace_path=args.trace_path,
+            report_dir=None if generated else report_dir,
             root=args.root,
+            force=args.force,
+            enable_pseudo_ops=args.enable_pseudo_ops,
+            report_root=args.report_root,
         )
         print_json(
             {
                 "backend": args.backend,
                 "db": args.db,
                 "trace_id": trace_id,
-                "report_dir": args.report_dir,
+                "trace_path": args.trace_path,
+                "report_dir": report_dir,
+                "generated_report": generated,
             }
         )
         return 0
@@ -73,12 +64,17 @@ def import_report_cmd(args: argparse.Namespace) -> int:
 
 
 def build_cmd(args: argparse.Namespace) -> int:
+    trace_paths = collect_trace_paths(args.traces_file, args.trace_path)
+    if not trace_paths:
+        raise SystemExit(
+            "build requires --traces-file and/or one or more --trace-path values"
+        )
     store = create_store(args)
     try:
-        trace_id = generate_report_and_import(
+        result = build_traces(
             store,
-            trace_path=args.trace_path,
-            report_dir=args.report_dir,
+            trace_paths,
+            report_root=args.report_root,
             root=args.root,
             force=args.force,
             enable_pseudo_ops=args.enable_pseudo_ops,
@@ -87,11 +83,11 @@ def build_cmd(args: argparse.Namespace) -> int:
             {
                 "backend": args.backend,
                 "db": args.db,
-                "trace_id": trace_id,
-                "trace_path": args.trace_path,
+                "imported": result["imported"],
+                "failed": result["failed"],
             }
         )
-        return 0
+        return 1 if result["failed"] else 0
     finally:
         store.close()
 
@@ -134,9 +130,25 @@ def serve_cmd(args: argparse.Namespace) -> int:
     return 0
 
 
+def add_generate_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--report-root",
+        type=Path,
+        default=None,
+        help="Directory for generated CSV reports (default: trace_index_reports/)",
+    )
+    parser.add_argument("--root", type=Path, default=None)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate CSV reports even if they already exist",
+    )
+    parser.add_argument("--enable-pseudo-ops", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Build and query a TraceIndex catalog of TraceLens reports."
+        description="Build and query a TraceIndex catalog of traces."
     )
     parser.add_argument(
         "--backend",
@@ -147,30 +159,38 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="SQLite DB path")
     sub = parser.add_subparsers(dest="command")
 
-    scan = sub.add_parser("scan", help="Catalog trace-like files under a root")
-    scan.add_argument("--root", type=Path, required=True)
-    scan.add_argument("--peek-mb", type=int, default=2)
-    scan.add_argument("--compute-md5", action="store_true")
-    scan.set_defaults(func=scan_cmd)
-
-    import_report = sub.add_parser(
-        "import-report",
-        help="Import an existing TraceLens CSV report directory",
+    append = sub.add_parser(
+        "append",
+        help="Append one trace to the catalog, optionally from an existing CSV report",
     )
-    import_report.add_argument("--report-dir", type=Path, required=True)
-    import_report.add_argument("--trace-path", type=Path, default=None)
-    import_report.add_argument("--root", type=Path, default=None)
-    import_report.set_defaults(func=import_report_cmd)
+    append.add_argument("--trace-path", type=Path, required=True)
+    append.add_argument(
+        "--report-dir",
+        type=Path,
+        default=None,
+        help="Existing TraceLens CSV report directory. If omitted, generate a training PyTorch report.",
+    )
+    add_generate_args(append)
+    append.set_defaults(func=append_cmd)
 
     build = sub.add_parser(
         "build",
-        help="Generate a TraceLens CSV report for one trace, then import it",
+        help="Create or open the catalog and append a batch of traces",
     )
-    build.add_argument("--trace-path", type=Path, required=True)
-    build.add_argument("--report-dir", type=Path, default=None)
-    build.add_argument("--root", type=Path, default=None)
-    build.add_argument("--force", action="store_true")
-    build.add_argument("--enable-pseudo-ops", action="store_true")
+    build.add_argument(
+        "--traces-file",
+        type=Path,
+        default=None,
+        help="Text file with one trace path per line (# comments allowed)",
+    )
+    build.add_argument(
+        "--trace-path",
+        type=Path,
+        action="append",
+        default=[],
+        help="Trace path to include. Repeatable, can be combined with --traces-file",
+    )
+    add_generate_args(build)
     build.set_defaults(func=build_cmd)
 
     search = sub.add_parser("search", help="Full-text search indexed traces")

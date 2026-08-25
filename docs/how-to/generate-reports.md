@@ -19,7 +19,8 @@ TraceLens generates structured performance reports from GPU trace files produced
 - [Generate a rocprof performance report](./generate-perf-report-rocprof.md)
 - [Generate a collective-communication report](./collective-report.md)
 
-After you have CSV report directories, you can catalog them for corpus search.
+After you have CSV report directories, append them with
+`TraceLens_trace_index append --trace-path … --report-dir …`.
 See [Index a corpus of traces](./trace-index.md).
 
 ## Related topics

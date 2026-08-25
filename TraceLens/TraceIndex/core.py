@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from TraceLens.TraceIndex.importer import (
+    append_trace as append_trace_with_store,
+    build_traces as build_traces_with_store,
     generate_report_and_import as generate_report_and_import_with_store,
-)
-from TraceLens.TraceIndex.importer import (
     import_report_dir as import_report_dir_with_store,
 )
 from TraceLens.TraceIndex.scanner import scan_traces as scan_traces_with_store
@@ -50,6 +50,52 @@ def import_report_dir(
             report_dir=report_dir,
             trace_path=trace_path,
             root=root,
+        )
+    finally:
+        store.close()
+
+
+def append_trace(
+    db_path: Path,
+    trace_path: Path,
+    report_dir: Optional[Path] = None,
+    root: Optional[Path] = None,
+    force: bool = False,
+    enable_pseudo_ops: bool = False,
+    report_root: Optional[Path] = None,
+) -> int:
+    store = SQLiteTraceIndexStore(db_path)
+    try:
+        return append_trace_with_store(
+            store,
+            trace_path=trace_path,
+            report_dir=report_dir,
+            root=root,
+            force=force,
+            enable_pseudo_ops=enable_pseudo_ops,
+            report_root=report_root,
+        )
+    finally:
+        store.close()
+
+
+def build_traces(
+    db_path: Path,
+    trace_paths: List[Path],
+    report_root: Optional[Path] = None,
+    root: Optional[Path] = None,
+    force: bool = False,
+    enable_pseudo_ops: bool = False,
+) -> Dict[str, Any]:
+    store = SQLiteTraceIndexStore(db_path)
+    try:
+        return build_traces_with_store(
+            store,
+            trace_paths,
+            report_root=report_root,
+            root=root,
+            force=force,
+            enable_pseudo_ops=enable_pseudo_ops,
         )
     finally:
         store.close()
