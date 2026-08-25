@@ -149,6 +149,9 @@ def make_handler(
             limit = max(1, min(limit, max_limit))
             start = time.perf_counter()
             with self.connect() as conn:
+                # The server is a read-only SQL endpoint. sql is gated by
+                # is_read_only_sql and the connection is opened with mode=ro.
+                # codeql[py/sql-injection]
                 rows = conn.execute(sql, params).fetchmany(limit + 1)
                 elapsed_ms = (time.perf_counter() - start) * 1000
                 returned = rows[:limit]

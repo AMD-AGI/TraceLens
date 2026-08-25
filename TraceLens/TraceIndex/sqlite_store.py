@@ -363,6 +363,8 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 "only a single read-only SELECT/WITH/PRAGMA statement is allowed"
             )
         self.conn.execute("PRAGMA query_only=ON")
+        # Callers pass a single SELECT/WITH/PRAGMA; writes are rejected above.
+        # codeql[py/sql-injection]
         rows = self.conn.execute(sql, params or ()).fetchmany(limit)
         return [dict(row) for row in rows]
 
