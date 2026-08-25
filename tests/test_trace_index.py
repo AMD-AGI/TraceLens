@@ -45,6 +45,8 @@ def write_csv(path, rows):
 
 
 def test_parse_repr_strips_numpy_scalars_and_to_json():
+    """parse_repr turns a CSV Python repr (with np scalars) into plain data that
+    to_json can serialize."""
     parsed = parse_repr("[{'name': 'k', 'total_duration_us': np.float64(1.5)}]")
     assert parsed[0]["name"] == "k"
     assert parsed[0]["total_duration_us"] == 1.5
@@ -54,6 +56,9 @@ def test_parse_repr_strips_numpy_scalars_and_to_json():
 
 
 def test_trace_index_append_from_report_and_search(tmp_path):
+    """Appending a report explodes kernels into op_kernels and fills the
+    gemm/sdpa/conv satellites, and the parsed perf_params are queryable via
+    json_extract and FTS."""
     db_path = tmp_path / "trace_index.sqlite"
     trace_root = tmp_path / "traces"
     trace_path = trace_root / "model_a" / "rank0_trace.json"
@@ -177,12 +182,15 @@ def test_trace_index_append_from_report_and_search(tmp_path):
 
 
 def test_trace_index_rejects_write_sql(tmp_path):
+    """The read-only query path refuses non-SELECT statements."""
     db_path = tmp_path / "trace_index.sqlite"
     with pytest.raises(ValueError):
         execute_read_query(db_path, "DELETE FROM traces")
 
 
 def test_trace_index_store_boundary_supports_append_and_search(tmp_path):
+    """Driving SQLiteTraceIndexStore directly (the storage boundary) imports a
+    report and returns an op-kind FTS hit."""
     db_path = tmp_path / "trace_index.sqlite"
     trace_root = tmp_path / "traces"
     trace_path = trace_root / "rank0_trace.json"
@@ -222,6 +230,8 @@ def test_trace_index_store_boundary_supports_append_and_search(tmp_path):
     reason="checked-in Qwen training report CSVs are missing",
 )
 def test_import_real_training_report_maps_kernel_stream_and_times(tmp_path):
+    """On the checked-in Qwen training report, op_kernels/gemm/sdpa are populated
+    from real perf_params and kernel_details with correct shapes and stream."""
     db_path = tmp_path / "trace_index.sqlite"
     trace_id = import_report_dir(db_path, TRAINING_REPORT_DIR)
 
@@ -285,6 +295,8 @@ def test_import_real_training_report_maps_kernel_stream_and_times(tmp_path):
     reason="checked-in inference report CSVs are missing",
 )
 def test_import_real_inference_report_converts_category_kernel_time_ms(tmp_path):
+    """On the checked-in inference report, category kernel time in ms is converted
+    to microseconds during import."""
     db_path = tmp_path / "trace_index.sqlite"
     import_report_dir(db_path, INFERENCE_REPORT_DIR)
     rows = execute_read_query(
@@ -297,6 +309,8 @@ def test_import_real_inference_report_converts_category_kernel_time_ms(tmp_path)
 
 
 def test_read_traces_file_skips_comments_and_blanks(tmp_path):
+    """A traces-file drops blank/comment lines and collect_trace_paths merges and
+    de-duplicates paths."""
     traces_file = tmp_path / "traces.txt"
     traces_file.write_text(
         "# header\n" "\n" " /data/a.json.gz \n" "# skip me\n" "C:/traces/b.json\n",
@@ -315,6 +329,8 @@ def test_read_traces_file_skips_comments_and_blanks(tmp_path):
 
 
 def test_cli_append_from_existing_report(tmp_path, capsys):
+    """The CLI append command imports an existing report dir without regenerating
+    it and reports the new trace_id."""
     db_path = tmp_path / "trace_index.sqlite"
     trace_path = tmp_path / "rank0_trace.json"
     trace_path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
@@ -351,6 +367,8 @@ def test_cli_append_from_existing_report(tmp_path, capsys):
 
 
 def test_build_traces_continues_after_failure(tmp_path):
+    """A batch build records per-trace failures and keeps processing the rest of
+    the list."""
     db_path = tmp_path / "trace_index.sqlite"
     store = SQLiteTraceIndexStore(db_path)
     try:
