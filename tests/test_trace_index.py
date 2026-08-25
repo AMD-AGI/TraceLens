@@ -13,7 +13,6 @@ import pytest
 from TraceLens.TraceIndex.core import (
     append_trace,
     execute_read_query,
-    import_report_dir,
     search_index,
 )
 from TraceLens.TraceIndex.cli import main as trace_index_main
@@ -233,7 +232,9 @@ def test_import_real_training_report_maps_kernel_stream_and_times(tmp_path):
     """On the checked-in Qwen training report, op_kernels/gemm/sdpa are populated
     from real perf_params and kernel_details with correct shapes and stream."""
     db_path = tmp_path / "trace_index.sqlite"
-    trace_id = import_report_dir(db_path, TRAINING_REPORT_DIR)
+    trace_path = tmp_path / "qwen_trace.json"
+    trace_path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
+    trace_id = append_trace(db_path, trace_path, report_dir=TRAINING_REPORT_DIR)
 
     unified = execute_read_query(
         db_path,
@@ -298,7 +299,9 @@ def test_import_real_inference_report_converts_category_kernel_time_ms(tmp_path)
     """On the checked-in inference report, category kernel time in ms is converted
     to microseconds during import."""
     db_path = tmp_path / "trace_index.sqlite"
-    import_report_dir(db_path, INFERENCE_REPORT_DIR)
+    trace_path = tmp_path / "decode_trace.json"
+    trace_path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
+    append_trace(db_path, trace_path, report_dir=INFERENCE_REPORT_DIR)
     rows = execute_read_query(
         db_path,
         "SELECT category, kernel_time_sum_us FROM op_category_rows "

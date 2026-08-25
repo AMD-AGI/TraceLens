@@ -15,8 +15,8 @@ from TraceLens.TraceIndex.models import SearchHit, TraceRecord, TraceReport
 class TraceIndexStore(ABC):
     """Persistence boundary for TraceIndex.
 
-    New backends should implement this interface without changing scanner,
-    importer, or CLI workflow code.
+    New backends should implement this interface without changing importer
+    or CLI workflow code.
     """
 
     @abstractmethod

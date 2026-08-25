@@ -13,46 +13,8 @@ from TraceLens.TraceIndex.importer import (
     append_trace as append_trace_with_store,
     build_traces as build_traces_with_store,
     generate_report_and_import as generate_report_and_import_with_store,
-    import_report_dir as import_report_dir_with_store,
 )
-from TraceLens.TraceIndex.scanner import scan_traces as scan_traces_with_store
 from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
-
-
-def scan_traces(
-    db_path: Path,
-    root: Path,
-    peek_mb: int = 2,
-    compute_md5: bool = False,
-) -> int:
-    store = SQLiteTraceIndexStore(db_path)
-    try:
-        return scan_traces_with_store(
-            store,
-            root=root,
-            peek_mb=peek_mb,
-            compute_md5=compute_md5,
-        )
-    finally:
-        store.close()
-
-
-def import_report_dir(
-    db_path: Path,
-    report_dir: Path,
-    trace_path: Optional[Path] = None,
-    root: Optional[Path] = None,
-) -> int:
-    store = SQLiteTraceIndexStore(db_path)
-    try:
-        return import_report_dir_with_store(
-            store,
-            report_dir=report_dir,
-            trace_path=trace_path,
-            root=root,
-        )
-    finally:
-        store.close()
 
 
 def append_trace(

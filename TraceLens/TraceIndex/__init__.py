@@ -11,8 +11,6 @@ from .core import (
     build_traces,
     execute_read_query,
     generate_report_and_import,
-    import_report_dir,
-    scan_traces,
     search_index,
 )
 from .models import SearchHit, TraceRecord, TraceReport
@@ -29,7 +27,5 @@ __all__ = [
     "build_traces",
     "execute_read_query",
     "generate_report_and_import",
-    "import_report_dir",
-    "scan_traces",
     "search_index",
 ]

@@ -4,20 +4,17 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Trace discovery and metadata extraction."""
+"""Trace metadata extraction for catalog ingest."""
 
 import gzip
 import hashlib
-import os
 import re
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 from TraceLens.TraceIndex.models import TraceRecord
-from TraceLens.TraceIndex.store import TraceIndexStore
 from TraceLens.TraceIndex.utils import normalize_path, rel_to
 
-TRACE_NAME_RE = re.compile(r"trace|profile|pytorch_profile|rocprof", re.IGNORECASE)
 RANK_RE = re.compile(r"(?:^|[^A-Za-z])rank[-_]?(\d+)(?:[^0-9]|$)", re.IGNORECASE)
 
 SKIP_PARTS_EXACT = {
@@ -39,42 +36,8 @@ SKIP_PARTS_CONTAINS = (
 )
 
 
-def iter_files(root: Path) -> Iterable[Path]:
-    stack = [root]
-    while stack:
-        current = stack.pop()
-        try:
-            with os.scandir(current) as entries:
-                dirs = []
-                for entry in entries:
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            dirs.append(Path(entry.path))
-                        elif entry.is_file(follow_symlinks=False):
-                            yield Path(entry.path)
-                    except OSError:
-                        continue
-                stack.extend(reversed(dirs))
-        except OSError:
-            continue
-
-
 def is_json_gz(path: Path) -> bool:
     return path.name.lower().endswith(".json.gz")
-
-
-def is_candidate(path: Path) -> bool:
-    name = path.name.lower()
-    suffix = path.suffix.lower()
-    if is_json_gz(path):
-        return True
-    if suffix in {".json", ".pftrace", ".rpd"}:
-        return True
-    if name.endswith(".xplane.pb"):
-        return True
-    if ".pt.trace" in name or ".trace." in name:
-        return True
-    return bool(TRACE_NAME_RE.search(path.name))
 
 
 def classify_skip(path: Path, root: Path) -> Optional[str]:
@@ -182,27 +145,3 @@ def trace_record_from_path(
         should_enrich=should_enrich,
         skip_reason=skip_reason,
     )
-
-
-def scan_traces(
-    store: TraceIndexStore,
-    root: Path,
-    peek_mb: int = 2,
-    compute_md5: bool = False,
-) -> int:
-    store.init_schema()
-    root = root.resolve()
-    count = 0
-    for path in iter_files(root):
-        if not is_candidate(path):
-            continue
-        store.upsert_trace(
-            trace_record_from_path(
-                path,
-                root=root,
-                peek_bytes=peek_mb * 1024 * 1024,
-                compute_md5=compute_md5,
-            )
-        )
-        count += 1
-    return count
