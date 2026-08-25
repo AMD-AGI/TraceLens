@@ -1632,14 +1632,20 @@ class TreePerfAnalyzer:
 
     def _is_leaf_cpu_op(self, event):
         """
-        Check if a cpu_op directly launches GPU kernels (is a kernel launcher).
+        Check if a cpu_op is the innermost kernel launcher.
 
-        A leaf cpu_op follows patterns:
+        A leaf cpu_op directly launches GPU kernels...
         - cpu_op -> runtime -> kernel
         - cpu_op -> python_function -> runtime -> kernel
-        This matches the definition used in get_kernel_launchers().
+        ...and has NO nested cpu_op that launches kernels. If a finer cpu_op below
+        it launches kernels, this op is not the innermost owner of its kernels, so
+        it is not a leaf (the traversal recurses instead, giving the nested cpu_op
+        its own row and turning this op's own kernels into fragments).
         """
         if self.event_to_category(event) != "cpu_op":
+            return False
+
+        if self._has_descendant_cpu_op_with_kernels(event):
             return False
 
         # Check if any descendant is a kernel within 3 levels
@@ -1759,14 +1765,15 @@ class TreePerfAnalyzer:
         except Exception:
             return False
 
-    def _has_descendant_cpu_op_with_own_perf_model(self, event):
+    def _has_descendant_cpu_op_with_kernels(self, event):
         """
-        True if some ``cpu_op`` strictly below ``event`` has a perf model and GPU work.
+        True if some ``cpu_op`` strictly below ``event`` launches GPU kernels.
 
         Walks descendants the same way as ``collect_unified_perf_events.traverse``
-        (``python_function`` nodes are transparent). Used so a parent that only
-        qualifies via ``_is_sole_bwd_with_fwd_perf_model`` does not win over a
-        deeper op with its own perf model.
+        (``python_function`` nodes are transparent). Used to decide recursion: a
+        cpu_op that contains a finer kernel-launching cpu_op is not the innermost
+        owner of its kernels, so it must recurse (its own directly-launched
+        kernels become fragments and the nested cpu_op gets its own row).
         """
         stack = list(event.get("children", []))
         while stack:
@@ -1780,7 +1787,7 @@ class TreePerfAnalyzer:
                 continue
             if cat != "cpu_op":
                 continue
-            if self._has_perf_model(node) and self._launches_gpu_kernels(node):
+            if self._launches_gpu_kernels(node):
                 return True
             stack.extend(node.get("children", []))
         return False
@@ -1823,7 +1830,7 @@ class TreePerfAnalyzer:
         collected = []
         visited = set()
         next_uid = max(self.tree.events_by_uid.keys()) + 1
-        _GPU = {"kernel", "gpu_memcpy", "gpu_memset"}
+        _GPU = frozenset(c.value for c in TraceEventUtils.GpuEventCategories)
 
         def _create_synthetic_op(prefix_name, kernel, donor):
             """Append one '<prefix_name>-><kernel> (Synthetic Op)' row owning
@@ -1904,21 +1911,19 @@ class TreePerfAnalyzer:
 
             # Exit condition 2: 1:1 backward op linked to a forward with a perf model.
             if self._is_sole_bwd_with_fwd_perf_model(event):
-                if self._has_descendant_cpu_op_with_own_perf_model(event):
+                if self._has_descendant_cpu_op_with_kernels(event):
                     _recurse(event, call_stack, child_nearest_cpu_op, is_cpu_op)
                     return
                 if self.add_python_func:
                     event["_call_stack"] = call_stack
                 collected.append(event)
                 return
-            if self._has_descendant_cpu_op_with_own_perf_model(event):
-                _recurse(event, call_stack, child_nearest_cpu_op, is_cpu_op)
-                return
-            # Exit condition 3: Leaf cpu_op (direct kernel launcher). It owns its
-            # whole subtree, so collect it as one op. A leaf cpu_op that had a
-            # perf-modeled cpu_op child (e.g. an injected pseudo op) would already
-            # have recursed at the descendant-prefers check above, so such a child
-            # can never be seen here.
+            # Exit condition 3: leaf cpu_op — the innermost cpu_op that launches
+            # kernels (directly, with no nested kernel-launching cpu_op). It owns
+            # its whole subtree, so collect it as one op. A cpu_op that has a nested
+            # kernel-launching cpu_op is NOT a leaf, so it falls through to the
+            # generic recurse below (the nested cpu_op gets its own row and this
+            # op's own kernels become fragments).
             if self._is_leaf_cpu_op(event):
                 if not include_nccl and self._is_nccl_event(event):
                     return
