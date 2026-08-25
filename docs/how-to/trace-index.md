@@ -131,6 +131,32 @@ Query GEMM / SDPA / convolution shapes from the satellite tables, or with
 `SELECT m, n, k FROM gemm_perf` or
 `SELECT json_extract(perf_params_json, '$.M') FROM unified_perf_rows`.
 
+## Example queries
+
+Because shapes are first-class columns in the satellite tables, questions that
+would otherwise mean reopening every trace become a single SQL filter. Run these
+with `sqlite-sql` or the HTTP server, and `JOIN traces` to get the file to open.
+
+Find depthwise convolutions (channels equal groups):
+
+```sql
+SELECT t.name, c.input_channels, c.output_channels, c.groups, c.kernel_h, c.kernel_w
+FROM conv_perf c
+JOIN traces t ON t.id = c.trace_id
+WHERE c.is_depthwise = 1 AND c.groups > 1
+ORDER BY c.groups DESC;
+```
+
+Find the longest-context attention shapes:
+
+```sql
+SELECT t.name, p.seq_q, p.seq_kv, p.heads, p.head_dim, p.dtype
+FROM sdpa_perf p
+JOIN traces t ON t.id = p.trace_id
+ORDER BY p.seq_q DESC
+LIMIT 8;
+```
+
 ## Serve read-only SQL
 
 For notebook or browser workflows, serve the SQLite catalog over HTTP:
