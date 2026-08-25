@@ -137,17 +137,31 @@ Because shapes are first-class columns in the satellite tables, questions that
 would otherwise mean reopening every trace become a single SQL filter. Run these
 with `sqlite-sql` or the HTTP server, and `JOIN traces` to get the file to open.
 
-Find depthwise convolutions (channels equal groups):
+### Do any traces have depthwise convolution?
 
 ```sql
-SELECT t.name, c.input_channels, c.output_channels, c.groups, c.kernel_h, c.kernel_w
+SELECT t.name, c.input_channels, c.output_channels, c.groups,
+       c.kernel_h, c.kernel_w, COUNT(*) AS rows
 FROM conv_perf c
 JOIN traces t ON t.id = c.trace_id
 WHERE c.is_depthwise = 1 AND c.groups > 1
-ORDER BY c.groups DESC;
+GROUP BY t.id, c.input_channels, c.output_channels, c.groups, c.kernel_h, c.kernel_w
+ORDER BY rows DESC;
 ```
 
-Find the longest-context attention shapes:
+| trace | Cin | Cout | groups | Kh | Kw | rows |
+|---|---:|---:|---:|---:|---:|---:|
+| `diffusion_model_trace.json.gz` | 3072 | 3072 | 3072 | 5 | 5 | 2 |
+| `diffusion_model_trace.json.gz` | 8192 | 8192 | 8192 | 3 | 3 | 2 |
+| `diffusion_model_trace.json.gz` | 1536 | 1536 | 1536 | 5 | 5 | 1 |
+| `diffusion_model_trace.json.gz` | 4096 | 4096 | 4096 | 3 | 3 | 1 |
+
+Channels equal groups (true depthwise) at 3×3 and 5×5 with widths 1536 / 3072 /
+4096 / 8192, all in a single diffusion capture. If you're looking for a
+depthwise-conv workload, that's the file to open — found without reopening any
+trace.
+
+### What are the longest attention sequences in the catalog?
 
 ```sql
 SELECT t.name, p.seq_q, p.seq_kv, p.heads, p.head_dim, p.dtype
@@ -156,6 +170,17 @@ JOIN traces t ON t.id = p.trace_id
 ORDER BY p.seq_q DESC
 LIMIT 8;
 ```
+
+| trace | seq_q | seq_kv | heads | d | dtype |
+|---|---:|---:|---:|---:|---|
+| `video_traces_rank_5_step_3.json` | 118872 | 118809 | 3 | 128 | BF16 |
+| `video_traces_rank_2_step_3.json` | 118872 | 118809 | 3 | 128 | BF16 |
+| `video_traces_rank_7_step_3.json` | 118872 | 118809 | 3 | 128 | BF16 |
+| `video_traces_rank_6_step_3.json` | 118872 | 118809 | 3 | 128 | BF16 |
+
+The longest attention here is a video/DiT-style shape: sequence ≈ 119k, 3 heads,
+head dim 128, BF16 — not LLM decode. Because `seq_q` / `seq_kv` / `heads` /
+`head_dim` are columns, "find long-context attention" is a range query.
 
 ## Serve read-only SQL
 
