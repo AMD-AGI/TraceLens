@@ -41,6 +41,7 @@ The TraceLens source code is hosted at `github.com/AMD-AGI/TraceLens <https://gi
       * :doc:`Replay a single operation <how-to/event-replay>`
       * :doc:`Fuse multi-rank traces <how-to/trace-fusion>`
       * :doc:`Analyze traces with the SDK <how-to/sdk-analysis>`
+      * :doc:`Index a corpus of traces <how-to/trace-index>`
       * :doc:`Model op performance without a trace <how-to/perf-model-without-trace>`
       * :doc:`Analyze collective communication <how-to/nccl-analysis>`
       * :doc:`Estimate kernel times with Origami <how-to/origami-integration>`

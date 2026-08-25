@@ -46,6 +46,8 @@ subtrees:
     title: Fuse multi-rank traces
   - file: how-to/sdk-analysis
     title: Analyze traces with the SDK
+  - file: how-to/trace-index
+    title: Index a corpus of traces
   - file: how-to/perf-model-without-trace
     title: Model op performance without a trace
   - file: how-to/nccl-analysis

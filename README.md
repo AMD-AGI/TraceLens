@@ -81,7 +81,7 @@ TraceLens_compare_perf_reports_pytorch \
     -o comparison.xlsx
 ```
 
-Index a directory of traces and existing TraceLens CSV reports (see [TraceIndex](docs/TraceIndex.md)):
+Index a directory of traces and existing TraceLens CSV reports (see [Index a corpus of traces](docs/how-to/trace-index.md)):
 
 ```bash
 TraceLens_trace_index --backend sqlite --db trace_index.sqlite scan --root /path/to/traces
@@ -149,7 +149,7 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 | Multi-Rank Collective Report | [docs/how-to/collective-report.md](docs/how-to/collective-report.md)                                                             |
 | Performance Report Columns   | [docs/reference/perf-report-columns.md](docs/reference/perf-report-columns.md)                                                   |
 | TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
-| TraceIndex                   | [docs/TraceIndex.md](docs/TraceIndex.md)                                                                                         |
+| TraceIndex                   | [docs/how-to/trace-index.md](docs/how-to/trace-index.md)                                                                         |
 
 ---
 
