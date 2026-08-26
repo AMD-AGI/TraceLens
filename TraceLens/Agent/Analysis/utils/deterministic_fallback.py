@@ -9,8 +9,9 @@
 A graph-under-recorded trace hides its whole workload behind a single
 graph-replay launch (`hipGraphLaunch` / `cudaGraphLaunch`) or a torch-compile
 region, so per-op decomposition fails and the normal LLM analysis path cannot
-run. `check_graph_replay_coverage` reads the already-written `perf_report_csvs/`
-and returns a structured verdict gating the fallback (it excludes benign
+run. `check_graph_replay_coverage` reads the already-written
+`unified_perf_summary.csv` and returns a structured verdict gating the fallback
+(it excludes benign
 eager-launch/memcpy plumbing wrappers, which appear in healthy traces too).
 
 On a bad verdict, `render_fallback_report` emits a minimal but
@@ -24,6 +25,7 @@ default-agent `analysis.md` contract that `parse_analysis_md` reads:
 
 import argparse
 import csv
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,26 +36,18 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
 )
 
-# Giant cells in real traces exceed csv's 131072-char default and crash the
-# trace-quality gate; raise the limit to the largest value this platform accepts.
-_field_size_limit = 2**31 - 1
-while True:
-    try:
-        csv.field_size_limit(_field_size_limit)
-        break
-    except OverflowError:
-        _field_size_limit //= 2
+# Real traces have CSV cells far larger than csv's 131072-char default, which
+# would crash the trace-quality gate; lift the limit to the platform maximum.
+csv.field_size_limit(sys.maxsize)
 
 # Constants
 
 GRAPH_REPLAY_FRACTION_MAX = 0.10
-
 MAX_KERNEL_NAME_LEN = 75  # display truncation length (75 + marker = 78-char cell)
 MIN_PITEM_PERCENT_E2E = 0.5  # drop P-items below this %E2E share
 MAX_PITEM_COUNT = 40  # defensive hard cap on emitted P-items
 
 _TRUNCATION_MARKER = "..."  # ASCII marker appended to a truncated display name
-
 _WEIGHT_COLUMN = "Kernel Time (µs)_sum"
 _PERCENT_COLUMN = "Percentage (%)"
 _SYNTHETIC_OP_SUFFIX = " (Synthetic Op)"
@@ -64,8 +58,8 @@ _EM_DASH = "—"
 _GRAPH_REPLAY_WRAPPER_PREFIXES = ("hipGraphLaunch", "cudaGraphLaunch")
 _TORCH_COMPILED_PREFIX = "Torch-Compiled Region"
 
-# Generic launch/memcpy shims that are Synthetic Ops but benign runtime plumbing
-# (~0.5% in healthy traces). Excluded from both the graph-replay signal and the
+# Generic launch/memcpy shims that are Synthetic Ops but benign runtime plumbing.
+# Excluded from both the graph-replay signal and the
 # fallback candidate list.
 _PLUMBING_WRAPPER_PREFIXES = frozenset(
     {"hipLaunchKernel", "hipModuleLaunchKernel", "hipMemcpyAsync"}
@@ -93,18 +87,13 @@ class GraphReplayCoverage:
     graph_under_recorded: bool
     reason: str
     graph_replay_fraction: float
-    other_category_fraction: float
 
 
-def check_graph_replay_coverage(perf_csvs_dir: Path) -> GraphReplayCoverage:
-    perf_csvs_dir = Path(perf_csvs_dir)
-
+def check_graph_replay_coverage(unified_perf_csv: Path) -> GraphReplayCoverage:
     total_time = 0.0
     graph_replay_time = 0.0
-    with open(
-        perf_csvs_dir / "unified_perf_summary.csv", newline="", encoding="utf-8"
-    ) as fh:
-        for row in csv.DictReader(fh):
+    with open(unified_perf_csv, newline="", encoding="utf-8") as csv_file:
+        for row in csv.DictReader(csv_file):
             weight = float(row[_WEIGHT_COLUMN])
             total_time += weight
             if _is_graph_replay_wrapper(row["name"]):
@@ -112,13 +101,11 @@ def check_graph_replay_coverage(perf_csvs_dir: Path) -> GraphReplayCoverage:
 
     graph_replay_fraction = graph_replay_time / total_time if total_time > 0 else 0.0
     graph_under_recorded = graph_replay_fraction > GRAPH_REPLAY_FRACTION_MAX
-    other_category_fraction = _other_category_fraction(perf_csvs_dir)
 
     if graph_under_recorded:
         reason = (
             f"graph-replay fraction {graph_replay_fraction:.1%} > "
-            f"{GRAPH_REPLAY_FRACTION_MAX:.0%} "
-            f"(other-category {other_category_fraction:.0%})"
+            f"{GRAPH_REPLAY_FRACTION_MAX:.0%}"
         )
     else:
         reason = "graph-replay fraction within bounds"
@@ -127,12 +114,12 @@ def check_graph_replay_coverage(perf_csvs_dir: Path) -> GraphReplayCoverage:
         graph_under_recorded=graph_under_recorded,
         reason=reason,
         graph_replay_fraction=graph_replay_fraction,
-        other_category_fraction=other_category_fraction,
     )
 
 
-def render_fallback_report(perf_csvs_dir: Path, graph_replay_fraction: float) -> str:
-    rows = _load_surviving_rows(Path(perf_csvs_dir))
+def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float) -> str:
+    with open(unified_perf_csv, newline="", encoding="utf-8") as csv_file:
+        rows = _surviving_rows(csv.DictReader(csv_file))
     rows.sort(key=lambda r: r["weight"], reverse=True)
 
     # Denominator is built over all surviving rows; the display filter below must
@@ -198,44 +185,26 @@ def _is_graph_replay_wrapper(name: str) -> bool:
     )
 
 
-def _other_category_fraction(perf_csvs_dir: Path) -> float:
-    # Optional corroborating cross-check; best-effort, never fatal.
-    path = perf_csvs_dir / "ops_summary_by_category.csv"
-    if not path.exists():
-        return 0.0
-    try:
-        with open(path, newline="", encoding="utf-8") as fh:
-            for row in csv.DictReader(fh):
-                if row.get("op category") == "other":
-                    return float(row["Percentage (%)"]) / 100.0
-    except (OSError, csv.Error, KeyError, ValueError):
-        return 0.0
-    return 0.0
-
-
-def _load_surviving_rows(perf_csvs_dir: Path):
+def _surviving_rows(csv_rows):
     rows = []
-    with open(
-        perf_csvs_dir / "unified_perf_summary.csv", newline="", encoding="utf-8"
-    ) as fh:
-        for row in csv.DictReader(fh):
-            name = row.get("name", "")
-            if "->" in name:
-                prefix, tail = name.split("->", 1)
-                if _is_plumbing_wrapper(prefix):
-                    continue
-                kernel = _strip_synthetic_suffix(tail)
-            else:
-                kernel = _strip_synthetic_suffix(name)
-            if _is_plumbing_wrapper(kernel):
+    for row in csv_rows:
+        name = row.get("name", "")
+        if "->" in name:
+            prefix, tail = name.split("->", 1)
+            if _is_plumbing_wrapper(prefix):
                 continue
-            rows.append(
-                {
-                    "kernel": kernel,
-                    "weight": float(row[_WEIGHT_COLUMN]),
-                    "percent": float(row[_PERCENT_COLUMN]),
-                }
-            )
+            kernel = _strip_synthetic_suffix(tail)
+        else:
+            kernel = _strip_synthetic_suffix(name)
+        if _is_plumbing_wrapper(kernel):
+            continue
+        rows.append(
+            {
+                "kernel": kernel,
+                "weight": float(row[_WEIGHT_COLUMN]),
+                "percent": float(row[_PERCENT_COLUMN]),
+            }
+        )
     return rows
 
 
@@ -265,16 +234,16 @@ def _normalize_kernel_name(raw: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--perf-csvs-dir", type=Path, required=True)
+    parser.add_argument("--unified-perf-csv", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--graph-replay-fraction", type=float, default=None)
     args = parser.parse_args()
 
     frac = args.graph_replay_fraction
     if frac is None:
-        frac = check_graph_replay_coverage(args.perf_csvs_dir).graph_replay_fraction
+        frac = check_graph_replay_coverage(args.unified_perf_csv).graph_replay_fraction
 
-    report = render_fallback_report(args.perf_csvs_dir, frac)
+    report = render_fallback_report(args.unified_perf_csv, frac)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "analysis.md").write_text(report, encoding="utf-8")
 

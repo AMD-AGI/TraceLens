@@ -4,19 +4,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Tier-1 unit tests for the deterministic graph-under-recorded fallback.
+"""Unit tests for the deterministic graph-under-recorded fallback.
 
-Covers the no-LLM fallback path in ``utils/deterministic_fallback``:
-- ``check_graph_replay_coverage`` (detector U1-U4)
-- ``render_fallback_report`` (writer U5-U9)
-
-Every fixture is a tiny SYNTHETIC ``unified_perf_summary.csv`` written under
-``tmp_path`` with hand-computed expected values, so a failing assertion points
-at the exact arithmetic. No GPU, no LLM, no network, no ``Local_Traces``.
-
-U7/U9 assert the downstream ``analysis.md`` parse contract using a LOCAL, vendored
-copy of the consumer's regexes (kept in sync manually, no external import) so the
-fallback md stays compatible with the default-agent contract.
+Covers the no-LLM fallback path in ``utils/deterministic_fallback``: the
+detector ``check_graph_replay_coverage`` and the ``render_fallback_report`` md
+writer. Every fixture is a tiny synthetic ``unified_perf_summary.csv`` written
+under ``tmp_path`` with hand-computed expected values, so a failing assertion
+points at the exact arithmetic. No GPU, no LLM, no network.
 """
 
 import csv
@@ -37,9 +31,8 @@ from TraceLens.Agent.Analysis.utils.deterministic_fallback import (
 )
 
 # ---------------------------------------------------------------------------
-# Vendored downstream-parser regexes (U7/U9). Copied verbatim from the
-# ``analysis.md`` consumer so the tests assert the exact parse contract without
-# an external import.
+# Structural regexes: match the markers/headings the producer emits, so the
+# tests assert the SHAPE of the fallback md directly.
 # ---------------------------------------------------------------------------
 _PITEM_MARKER_RE = re.compile(
     r"<!--\s*impact-begin\s+kind=p_item\s+([^>]*?)-->",
@@ -54,8 +47,8 @@ _HEADING_RE = re.compile(
     re.MULTILINE,
 )
 
-# 9 canonical column tokens the downstream parser requires in order; "Kernel
-# Name" is an extra column allowed to interleave.
+# The 9 canonical column tokens the producer emits in order; "Kernel Name" is an
+# extra column allowed to interleave.
 _DATA_TABLE_HEADER_TOKENS = (
     "operation",
     "args",
@@ -67,203 +60,28 @@ _DATA_TABLE_HEADER_TOKENS = (
     "efficiency",
     "bound",
 )
-_DATA_TABLE_CANONICAL_KEY_SET = frozenset(
-    tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS
-)
 
 _EM_DASH = "—"
-
-
-# ---------------------------------------------------------------------------
-# Vendored subset of the downstream ``analysis.md`` parser — kept in sync with
-# the consumer. This runs the REAL downstream parse path (reasoning-marker block
-# split -> **Data:** table extraction -> canonical 9-column validation -> one
-# candidate per data row) so U7 gates the exact class of contract bug that a
-# heading-count-only check would miss.
-# ---------------------------------------------------------------------------
-def _safe_float(value, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _parse_marker_attrs(blob: str) -> dict:
-    """Parse ``key=value`` attributes from an HTML-comment marker blob."""
-    return dict(re.findall(r"(\w+)=([^\s>]+)", blob))
-
-
-def _extract_pitem_categories(text: str) -> list:
-    """One dict per ``p_item`` marker (in order); markers must carry ``category=``."""
-    items = []
-    for match in _PITEM_MARKER_RE.finditer(text):
-        attrs = _parse_marker_attrs(match.group(1))
-        if "category" not in attrs:
-            continue
-        items.append(
-            {
-                "category": attrs.get("category", ""),
-                "impact_score_low": _safe_float(attrs.get("low")),
-                "impact_score": _safe_float(attrs.get("mid")),
-                "impact_score_high": _safe_float(attrs.get("high")),
-            }
-        )
-    return items
-
-
-def _split_data_blocks(text: str) -> list:
-    """Split into compute-tier reasoning blocks; drop any with no heading in slice."""
-    blocks = []
-    matches = list(_REASONING_MARKER_RE.finditer(text))
-    for idx, match in enumerate(matches):
-        tier = match.group(1).lower()
-        if tier != "compute":
-            continue
-        body_start = match.end()
-        body_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        body = text[body_start:body_end]
-        head_match = _HEADING_RE.search(body)
-        if not head_match:
-            continue
-        rank = int(head_match.group(1))
-        title = head_match.group(2).strip()
-        blocks.append((rank, title, body))
-    return blocks
-
-
-def _extract_data_table(body: str) -> list:
-    """Pull the markdown table after ``**Data:**``; ``[]`` when the marker is absent."""
-    marker = body.find("**Data:**")
-    if marker < 0:
-        return []
-    tail = body[marker + len("**Data:**") :]
-    rows = []
-    in_table = False
-    for line in tail.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            if in_table:
-                break
-            continue
-        if not stripped.startswith("|"):
-            if in_table:
-                break
-            continue
-        in_table = True
-        if set(stripped.replace("|", "").strip()) <= set("-: "):
-            continue
-        cells = [cell.strip() for cell in stripped.split("|")[1:-1]]
-        rows.append(cells)
-    return rows
-
-
-def _parse_candidates(md_text: str) -> list:
-    """Run the real downstream parse and return one candidate dict per data row.
-
-    Faithful subset of ``parse_analysis_md``: block split -> ``**Data:**`` table
-    extraction -> canonical 9-column (in-order, extras allowed) validation ->
-    one candidate per surviving data row carrying the P-item category.
-    """
-    pitems = _extract_pitem_categories(md_text)
-    blocks = _split_data_blocks(md_text)
-    if not blocks:
-        return []
-
-    headers_canonical = [tok.strip().lower() for tok in _DATA_TABLE_HEADER_TOKENS]
-    canonical_width = len(headers_canonical)
-
-    candidates = []
-    for rank, title, body in blocks:
-        rows = _extract_data_table(body)
-        if not rows:
-            continue
-        header_row = [cell.strip().lower() for cell in rows[0]]
-        if len(header_row) < canonical_width:
-            continue
-        normalized_header = []
-        for cell in header_row:
-            match = next(
-                (
-                    canon
-                    for canon in headers_canonical
-                    if canon == cell or canon in cell
-                ),
-                cell,
-            )
-            normalized_header.append(match)
-        canonical_in_header = [c for c in normalized_header if c in headers_canonical]
-        if canonical_in_header != headers_canonical:
-            continue
-        header_row = normalized_header
-        pitem_meta = pitems[rank - 1] if rank - 1 < len(pitems) else {}
-        category = pitem_meta.get("category", "")
-        impact_score = pitem_meta.get("impact_score", 0.0)
-        for cells in rows[1:]:
-            if len(cells) != len(header_row):
-                continue
-            record = dict(zip(header_row, cells))
-            name = record.get("operation", "").strip()
-            kernel_name = record.get("kernel name", "").strip()
-            # Relaxed-reader contract: a graph-collapsed row emits "—"
-            # for Operation because the python/aten op was never captured; the
-            # device kernel symbol is the identity. Substitute it rather than
-            # dropping the row. Drop only when there is no symbol either.
-            if not name or name in {"-", "—"}:
-                if not kernel_name or kernel_name in {"-", "—"}:
-                    continue
-                name = kernel_name
-            candidates.append(
-                {
-                    "rank": rank,
-                    "title": title,
-                    "operation": name,
-                    "kernel_name": kernel_name,
-                    "category": category,
-                    "impact_score": impact_score,
-                    "args": record.get("args", "").strip(),
-                    "time_ms": record.get("time (ms)", "").strip(),
-                    "percent_e2e": record.get("%e2e", "").strip(),
-                }
-            )
-    return candidates
 
 
 # ---------------------------------------------------------------------------
 # Fixture helpers
 # ---------------------------------------------------------------------------
 def _make_perf_csv(tmp_path, rows):
-    """Write a synthetic ``unified_perf_summary.csv`` and return its dir.
+    """Write a synthetic ``unified_perf_summary.csv`` and return its path.
 
     ``rows`` is a list of ``(name, weight, percent)`` tuples. Only the three
     columns the code reads are written; ``percent`` defaults to 0.0 if omitted.
     """
-    perf_dir = tmp_path / "perf_report_csvs"
-    perf_dir.mkdir(exist_ok=True)
-    with open(
-        perf_dir / "unified_perf_summary.csv", "w", newline="", encoding="utf-8"
-    ) as fh:
+    csv_path = tmp_path / "unified_perf_summary.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(["name", _WEIGHT_COLUMN, _PERCENT_COLUMN])
         for row in rows:
             name, weight = row[0], row[1]
             percent = row[2] if len(row) > 2 else 0.0
             writer.writerow([name, weight, percent])
-    return perf_dir
-
-
-def _make_category_csv(perf_dir, categories):
-    """Write an optional ``ops_summary_by_category.csv`` for the other-frac path.
-
-    ``categories`` is a list of ``(op_category, percent)`` tuples.
-    """
-    with open(
-        perf_dir / "ops_summary_by_category.csv", "w", newline="", encoding="utf-8"
-    ) as fh:
-        writer = csv.writer(fh)
-        writer.writerow(["op category", _PERCENT_COLUMN])
-        for cat, pct in categories:
-            writer.writerow([cat, pct])
-    return perf_dir
+    return csv_path
 
 
 def _data_row_cells(md, kernel):
@@ -282,7 +100,7 @@ def _strip_banner(md):
 
 
 # ---------------------------------------------------------------------------
-# U1 — detector fires on a graph-collapsed fixture
+# detector fires on a graph-collapsed fixture
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "wrapper",
@@ -291,7 +109,7 @@ def _strip_banner(md):
         ("Torch-Compiled Region: 0/0->k (Synthetic Op)", None),
     ],
 )
-def test_u1_detector_fires_on_graph_collapsed(tmp_path, wrapper):
+def test_detector_fires_on_graph_collapsed(tmp_path, wrapper):
     graph_rows = [(name, 47.5, 47.5) for name in wrapper if name]
     # Pad the graph weight to 95 total and add a benign plain kernel for the 5%.
     rows = graph_rows + [("plain_kernel", 5.0, 5.0)]
@@ -301,32 +119,32 @@ def test_u1_detector_fires_on_graph_collapsed(tmp_path, wrapper):
         ("plain_kernel", 5.0, 5.0)
     ]
 
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    verdict = check_graph_replay_coverage(perf_dir)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    verdict = check_graph_replay_coverage(perf_csv)
 
     assert verdict.graph_under_recorded is True
     assert verdict.graph_replay_fraction == pytest.approx(0.95)
 
 
 # ---------------------------------------------------------------------------
-# U2 — detector stays quiet on a healthy fixture
+# detector stays quiet on a healthy fixture
 # ---------------------------------------------------------------------------
-def test_u2_detector_quiet_on_healthy(tmp_path):
+def test_detector_quiet_on_healthy(tmp_path):
     rows = [
         ("aten::mm", 40.0, 40.0),
         ("aten::softmax", 30.0, 30.0),
         ("hipMemcpyAsync->copy_dtoh (Synthetic Op)", 15.0, 15.0),
         ("hipModuleLaunchKernel->some_kernel (Synthetic Op)", 15.0, 15.0),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    verdict = check_graph_replay_coverage(perf_dir)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    verdict = check_graph_replay_coverage(perf_csv)
 
     assert verdict.graph_under_recorded is False
     assert verdict.graph_replay_fraction == 0.0
 
 
 # ---------------------------------------------------------------------------
-# U3 — false-positive guard: benign launch/memcpy wrappers never count
+# false-positive guard: benign launch/memcpy wrappers never count
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "wrapper_name",
@@ -338,20 +156,20 @@ def test_u2_detector_quiet_on_healthy(tmp_path):
         "__amd_rocclr_copyBuffer->orphan (Synthetic Op)",
     ],
 )
-def test_u3_false_positive_guard(tmp_path, wrapper_name):
+def test_detector_ignores_plumbing_wrappers(tmp_path, wrapper_name):
     rows = [
         (wrapper_name, 40.0, 40.0),
         ("aten::mm", 60.0, 60.0),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    verdict = check_graph_replay_coverage(perf_dir)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    verdict = check_graph_replay_coverage(perf_csv)
 
     assert verdict.graph_under_recorded is False
     assert verdict.graph_replay_fraction == 0.0
 
 
 # ---------------------------------------------------------------------------
-# U4 — threshold boundary (strict `>` around 0.10)
+# threshold boundary (strict `>` around 0.10)
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "graph_weight, expected",
@@ -361,30 +179,30 @@ def test_u3_false_positive_guard(tmp_path, wrapper_name):
         (10.1, True),  # 0.101 > 0.10
     ],
 )
-def test_u4_threshold_boundary(tmp_path, graph_weight, expected):
+def test_detector_threshold_boundary(tmp_path, graph_weight, expected):
     assert GRAPH_REPLAY_FRACTION_MAX == 0.10
     rows = [
         ("hipGraphLaunch->k (Synthetic Op)", graph_weight, graph_weight),
         ("aten::mm", 100.0 - graph_weight, 100.0 - graph_weight),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    verdict = check_graph_replay_coverage(perf_dir)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    verdict = check_graph_replay_coverage(perf_csv)
 
     assert verdict.graph_under_recorded is expected
     assert verdict.graph_replay_fraction == pytest.approx(graph_weight / 100.0)
 
 
 # ---------------------------------------------------------------------------
-# U5 — wrapper-strip + exact-name grouping
+# wrapper-strip + exact-name grouping
 # ---------------------------------------------------------------------------
-def test_u5_wrapper_strip_and_exact_name_grouping(tmp_path):
+def test_writer_strips_wrapper_and_groups_by_name(tmp_path):
     rows = [
         ("hipGraphLaunch->foo (Synthetic Op)", 10.0, 10.0),
         ("hipGraphLaunch->foo (Synthetic Op)", 30.0, 30.0),
         ("hipGraphLaunch->bar (Synthetic Op)", 20.0, 20.0),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
 
     # Bare names recovered from the WRAPPER->K (Synthetic Op) form.
     headings = dict((int(rank), name) for rank, name in _HEADING_RE.findall(md))
@@ -404,13 +222,13 @@ def test_u5_wrapper_strip_and_exact_name_grouping(tmp_path):
     assert lows.count(bar_low) == 1
 
 
-def test_u5_tile_variants_stay_separate_groups(tmp_path):
+def test_writer_keeps_tile_variants_separate(tmp_path):
     rows = [
         ("hipGraphLaunch->f4gemm_192x128 (Synthetic Op)", 30.0, 30.0),
         ("hipGraphLaunch->f4gemm_32x128 (Synthetic Op)", 10.0, 10.0),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
 
     names = {name for _, name in _HEADING_RE.findall(md)}
     assert names == {"f4gemm_192x128", "f4gemm_32x128"}
@@ -426,7 +244,7 @@ def test_u5_tile_variants_stay_separate_groups(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# U5c — plumbing behind a graph-replay wrapper is dropped from the writer output.
+# plumbing behind a graph-replay wrapper is dropped from the writer output.
 # Guards the leak where the wrapper prefix is graph-replay but the bare kernel
 # behind it is runtime plumbing (e.g. `hipGraphLaunch->__amd_rocclr_copyBuffer`).
 # ---------------------------------------------------------------------------
@@ -434,14 +252,14 @@ def test_u5_tile_variants_stay_separate_groups(tmp_path):
     "plumbing_kernel",
     ["__amd_rocclr_copyBuffer", "__amd_rocclr_fillBufferAligned", "MemcpyDtoD"],
 )
-def test_u5c_plumbing_behind_graph_replay_wrapper_dropped(tmp_path, plumbing_kernel):
+def test_writer_drops_plumbing_behind_graph_wrapper(tmp_path, plumbing_kernel):
     rows = [
         ("hipGraphLaunch->real_kernel (Synthetic Op)", 90.0, 90.0),
         (f"hipGraphLaunch->{plumbing_kernel} (Synthetic Op)", 10.0, 10.0),
         (f"Torch-Compiled Region: 0/0->{plumbing_kernel} (Synthetic Op)", 5.0, 5.0),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
 
     names = {name for _, name in _HEADING_RE.findall(md)}
     assert names == {"real_kernel"}
@@ -449,16 +267,16 @@ def test_u5c_plumbing_behind_graph_replay_wrapper_dropped(tmp_path, plumbing_ker
 
 
 # ---------------------------------------------------------------------------
-# U6 — impact arithmetic (match the exact emitted string)
+# impact arithmetic (match the exact emitted string)
 # ---------------------------------------------------------------------------
-def test_u6_impact_arithmetic(tmp_path):
+def test_writer_impact_arithmetic(tmp_path):
     # Two equal-weight rows with distinct names -> each is its own group at 50%.
     rows = [
         ("hipGraphLaunch->foo (Synthetic Op)", 50.0, 50.0),
         ("hipGraphLaunch->bar (Synthetic Op)", 50.0, 50.0),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
 
     # 50 * 0.15/0.30/0.45 = 7.5 / 15.0 / 22.5 (round(...,2) prints 15.0, not 15).
     assert (
@@ -467,72 +285,74 @@ def test_u6_impact_arithmetic(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# U7 — parse contract (LOAD-BEARING) against vendored regexes
+# producer structural contract: heading order, marker-before-heading, the
+# canonical 9-column header, and one em-dash data row per P-item.
 # ---------------------------------------------------------------------------
-def test_u7_parse_contract(tmp_path):
-    # Two DISTINCT graph-replay kernels with distinct bare names and weights.
-    # Higher weight sorts first -> P1; the full downstream parse must yield one
-    # candidate per data row, i.e. TWO. This whole test drives the REAL parse
-    # path (_parse_candidates), not just a heading count, so it catches the
-    # class of contract bug where the md renders but parses to ZERO candidates.
+def test_writer_structure_contract(tmp_path):
+    # Two distinct graph-replay kernels; higher weight sorts first -> P1.
     rows = [
         ("hipGraphLaunch->foo (Synthetic Op)", 60.0, 60.0),
         ("hipGraphLaunch->bar (Synthetic Op)", 40.0, 40.0),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
 
-    candidates = _parse_candidates(md)
+    # Exactly two P-item headings, ranked by weight (foo=60 -> P1, bar=40 -> P2).
+    headings = _HEADING_RE.findall(md)
+    assert len(headings) == 2
+    assert {int(rank): title for rank, title in headings} == {1: "foo", 2: "bar"}
 
-    # (1) LOAD-BEARING: the full parse yields exactly two candidates. This is
-    #     the assertion that would have caught both prior contract bugs, each of
-    #     which rendered headings but collapsed to zero downstream candidates.
-    assert len(candidates) == 2
-
-    # (2) rank -> kernel mapping (P1 = highest weight) and category propagation.
-    by_rank = {c["rank"]: c for c in candidates}
-    assert by_rank[1]["kernel_name"] == "foo"
-    assert by_rank[2]["kernel_name"] == "bar"
-    for cand in candidates:
-        assert cand["category"] == "unknown"
-
-    # (3) name/time/%E2E populated in the row; Args cell is the em dash.
-    assert by_rank[1]["operation"] == "foo"
-    assert by_rank[1]["args"] == _EM_DASH  # Args intentionally unrecoverable
-    assert by_rank[1]["time_ms"] == "0.060"  # 60 us -> 0.060 ms
-    assert by_rank[1]["percent_e2e"] == "60.00"
-
-    # (4) NEGATIVE — ### regression guard: downgrading the headings to three
-    #     hashes makes every block vanish under _HEADING_RE -> zero candidates.
-    downgraded = md.replace("#### P", "### P")
-    assert len(_parse_candidates(downgraded)) == 0
-
-    # (5) NEGATIVE — **Data:** regression guard (catches C1): with the Data
-    #     marker deleted, _extract_data_table returns [] -> zero candidates.
-    no_data = "\n".join(line for line in md.splitlines() if line.strip() != "**Data:**")
-    assert len(_parse_candidates(no_data)) == 0
-
-    # (6) NEGATIVE — marker/heading ORDER guard (catches C2): moving each
-    #     heading BEFORE its reasoning-candidate marker breaks the block split
-    #     (the heading no longer falls in the marker's body slice), so the
-    #     candidate count is wrong (not two). The correct order is load-bearing.
-    reordered = re.sub(
-        r"(<!-- reasoning-candidate tier=compute rank=\d+ -->)\n(#### P\d+: [^\n]+)",
-        r"\2\n\1",
-        md,
-    )
-    assert len(_parse_candidates(reordered)) != 2
-    # And in the REAL md every marker precedes its matching heading.
+    # Each reasoning-candidate marker precedes its own #### PN heading.
     for rank in (1, 2):
         marker_idx = md.index(f"reasoning-candidate tier=compute rank={rank}")
         heading_idx = md.index(f"#### P{rank}:")
         assert marker_idx < heading_idx
 
+    # Each P-item carries a **Data:** line and a table header holding the 9
+    # canonical column tokens in order (Kernel Name may interleave).
+    assert md.count("**Data:**") == 2
+    for header_line in [
+        line for line in md.splitlines() if line.strip().startswith("| Operation |")
+    ]:
+        header_tokens = [c.strip().lower() for c in header_line.split("|")[1:-1]]
+        canonical = [t for t in header_tokens if t in _DATA_TABLE_HEADER_TOKENS]
+        assert canonical == list(_DATA_TABLE_HEADER_TOKENS)
+    assert (
+        len(
+            [
+                line
+                for line in md.splitlines()
+                if line.strip().startswith("| Operation |")
+            ]
+        )
+        == 2
+    )
+
+    # One data row per P-item: Operation cell is the em dash, Kernel Name is the
+    # raw symbol, with the expected time (µs -> ms) and %E2E.
+    for kernel, time_ms, pct in (("foo", "0.060", "60.00"), ("bar", "0.040", "40.00")):
+        cells = _data_row_cells(md, _EM_DASH)  # each row starts with the em dash
+        assert kernel in md
+        row = next(
+            [c.strip() for c in line.split("|")[1:-1]]
+            for line in md.splitlines()
+            if line.strip().startswith("| —") and f"| {kernel} |" in line
+        )
+        assert row[0] == _EM_DASH  # Operation cell
+        assert row[3] == kernel  # Kernel Name cell == raw symbol
+        assert row[4] == time_ms
+        assert row[5] == pct
+    assert cells is not None  # a data row exists
+
+    # NEGATIVE — downgrading #### P to ### P makes _HEADING_RE find no headings.
+    downgraded = md.replace("#### P", "### P")
+    assert len(_HEADING_RE.findall(downgraded)) == 0
+
 
 # ---------------------------------------------------------------------------
-# U8 — separate-row vs grouped invariant; plumbing dropped
+# separate-row vs grouped invariant; plumbing dropped
 # ---------------------------------------------------------------------------
-def test_u8_separate_rows_grouped_impact(tmp_path):
+def test_writer_separate_rows_grouped_impact(tmp_path):
     rows = [
         ("hipGraphLaunch->foo (Synthetic Op)", 30.0, 30.0),
         ("hipGraphLaunch->foo (Synthetic Op)", 10.0, 10.0),
@@ -540,8 +360,8 @@ def test_u8_separate_rows_grouped_impact(tmp_path):
         # Benign plumbing must be dropped from the candidate table entirely.
         ("hipMemcpyAsync->copy (Synthetic Op)", 5.0, 5.0),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
 
     headings = _HEADING_RE.findall(md)
     # One card per SURVIVING CSV kernel row (3), plumbing row dropped.
@@ -561,16 +381,16 @@ def test_u8_separate_rows_grouped_impact(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# U9 — degraded banner present and inert to the parser
+# degraded banner present and structurally inert
 # ---------------------------------------------------------------------------
-def test_u9_degraded_banner(tmp_path):
+def test_writer_degraded_banner(tmp_path):
     rows = [
         ("hipGraphLaunch->foo (Synthetic Op)", 95.0, 95.0),
         ("aten::mm", 5.0, 5.0),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
+    perf_csv = _make_perf_csv(tmp_path, rows)
     frac = 0.95
-    md = render_fallback_report(perf_dir, frac)
+    md = render_fallback_report(perf_csv, frac)
 
     # Visible call-out with the fraction rendered as a percent.
     assert "> **⚠ Degraded (deterministic fallback) report.**" in md
@@ -656,8 +476,8 @@ def test_group_independence_raw_key_not_display(tmp_path):
         (f"hipGraphLaunch->{name_a} (Synthetic Op)", 60.0, 60.0),
         (f"hipGraphLaunch->{name_b} (Synthetic Op)", 40.0, 40.0),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
 
     # Two P-items render even though their titles are byte-identical.
     headings = _HEADING_RE.findall(md)
@@ -681,8 +501,8 @@ def test_group_independence_raw_key_not_display(tmp_path):
 def test_n3_operation_em_dash_kernel_name_raw(tmp_path):
     raw = "void aiter::" + "x" * 100  # > cap -> display truncates, raw preserved
     rows = [(f"hipGraphLaunch->{raw} (Synthetic Op)", 100.0, 100.0)]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
 
     display = _normalize_kernel_name(raw)
     assert display != raw
@@ -697,18 +517,17 @@ def test_n3_operation_em_dash_kernel_name_raw(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Em-dash-Operation contract — every row emits an em-dash Operation cell, and the
-# relaxed reader recovers a candidate per row via the device kernel symbol.
+# Em-dash Operation contract — every rendered data row's Operation cell is the
+# em dash (the op is never captured on a graph-collapsed trace).
 # ---------------------------------------------------------------------------
-def test_option_b_operation_is_em_dash_reader_substitutes_kernel_name(tmp_path):
+def test_data_row_operation_is_em_dash(tmp_path):
     rows = [
         ("hipGraphLaunch->foo (Synthetic Op)", 60.0, 60.0),
         ("hipGraphLaunch->bar (Synthetic Op)", 40.0, 40.0),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
 
-    # Every rendered data row's Operation cell is the em dash (op never captured).
     data_rows = [
         line
         for line in md.splitlines()
@@ -716,19 +535,11 @@ def test_option_b_operation_is_em_dash_reader_substitutes_kernel_name(tmp_path):
     ]
     assert data_rows
     for line in data_rows:
-        first_cell = line.split("|")[1].strip()
-        assert first_cell == _EM_DASH
-
-    # The relaxed reader still yields one candidate per row, keyed on the symbol.
-    candidates = _parse_candidates(md)
-    assert len(candidates) == 2
-    assert {c["operation"] for c in candidates} == {"foo", "bar"}
-    for c in candidates:
-        assert c["operation"] == c["kernel_name"]
+        assert line.split("|")[1].strip() == _EM_DASH
 
 
 # ---------------------------------------------------------------------------
-# U10 — N4 %E2E floor + top-N cap + drop-logging.
+# N4 %E2E floor + top-N cap + drop-logging.
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "percent, expected_kept",
@@ -738,11 +549,11 @@ def test_option_b_operation_is_em_dash_reader_substitutes_kernel_name(tmp_path):
         (0.51, 1),  # above floor -> kept
     ],
 )
-def test_u10_floor_boundary(tmp_path, percent, expected_kept):
+def test_writer_pitem_floor_boundary(tmp_path, percent, expected_kept):
     assert MIN_PITEM_PERCENT_E2E == 0.5
     rows = [("hipGraphLaunch->k (Synthetic Op)", 100.0, percent)]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
 
     assert len(_HEADING_RE.findall(md)) == expected_kept
     dropped = 1 - expected_kept
@@ -752,7 +563,7 @@ def test_u10_floor_boundary(tmp_path, percent, expected_kept):
         assert "Dropped " not in md
 
 
-def test_u10_top_n_cap_and_drop_logging(tmp_path):
+def test_writer_pitem_cap_and_drop_logging(tmp_path):
     # MAX_PITEM_COUNT + 5 distinct kernels, all above the floor, descending weight.
     n = MAX_PITEM_COUNT + 5
     weights = [float(100 - i) for i in range(n)]
@@ -760,8 +571,8 @@ def test_u10_top_n_cap_and_drop_logging(tmp_path):
         (f"hipGraphLaunch->k{i:02d} (Synthetic Op)", w, 4.0)
         for i, w in enumerate(weights)
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
 
     # Exactly MAX_PITEM_COUNT render; the rest dropped, logged in the banner.
     assert len(_HEADING_RE.findall(md)) == MAX_PITEM_COUNT
@@ -782,72 +593,47 @@ def test_u10_top_n_cap_and_drop_logging(tmp_path):
     assert expected_p1_low != round(top_n_pct * 0.15, 2)
 
 
-def test_u10_no_drop_note_when_nothing_dropped(tmp_path):
+def test_writer_no_drop_note_when_nothing_dropped(tmp_path):
     rows = [("hipGraphLaunch->k (Synthetic Op)", 100.0, 60.0)]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
 
     assert "Dropped " not in md  # drop-note sentence suppressed at zero
 
 
-# ---------------------------------------------------------------------------
-# U9 extension — the banner drop-note stays inert to the parser.
-# ---------------------------------------------------------------------------
-def test_u9_drop_note_inert(tmp_path):
+def test_writer_drop_note_parser_inert(tmp_path):
     rows = [
         ("hipGraphLaunch->foo (Synthetic Op)", 60.0, 60.0),
         ("hipGraphLaunch->bar (Synthetic Op)", 40.0, 40.0),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
 
-    # Stripping the banner does not change the parsed candidate count.
-    assert len(_parse_candidates(md)) == 2
-    assert len(_parse_candidates(_strip_banner(md))) == 2
-
-
-# ---------------------------------------------------------------------------
-# U7 re-run — the Operation cell is the em dash, but the relaxed
-# reader substitutes the device kernel symbol, so candidates still parse with a
-# non-empty operation identity and `####` headings.
-# ---------------------------------------------------------------------------
-def test_u7_rerun_after_normalization(tmp_path):
-    long_raw = "void aiter::" + "y" * 90
-    rows = [
-        (f"hipGraphLaunch->{long_raw} (Synthetic Op)", 60.0, 60.0),
-        ("hipGraphLaunch->_fwd_kernel (Synthetic Op)", 40.0, 40.0),
-    ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
-    md = render_fallback_report(perf_dir, 0.95)
-
-    candidates = _parse_candidates(md)
-    assert len(candidates) == 2
-    for cand in candidates:
-        # Operation resolves to the device kernel symbol via reader substitution.
-        assert cand["operation"]
-        assert cand["operation"] not in ("", _EM_DASH)
-        assert cand["operation"] == cand["kernel_name"]
-    for line in md.splitlines():
-        if "P1:" in line or "P2:" in line:
-            assert line.startswith("####")
+    # Stripping the banner leaves heading and marker counts unchanged.
+    stripped = _strip_banner(md)
+    assert len(_HEADING_RE.findall(md)) == len(_HEADING_RE.findall(stripped))
+    assert len(_PITEM_MARKER_RE.findall(md)) == len(_PITEM_MARKER_RE.findall(stripped))
+    assert len(_REASONING_MARKER_RE.findall(md)) == len(
+        _REASONING_MARKER_RE.findall(stripped)
+    )
 
 
 # ---------------------------------------------------------------------------
-# U11 — field-size crash fix: a field larger than csv's 131072 default must not
+# field-size crash fix: a field larger than csv's 131072 default must not
 # raise in the detector or the loader/writer.
 # ---------------------------------------------------------------------------
-def test_u11_giant_field_does_not_crash(tmp_path):
+def test_detector_handles_giant_csv_field(tmp_path):
     giant = "hipGraphLaunch->" + ("k" * 200000) + " (Synthetic Op)"
     rows = [
         (giant, 90.0, 90.0),
         ("hipGraphLaunch->small (Synthetic Op)", 10.0, 10.0),
     ]
-    perf_dir = _make_perf_csv(tmp_path, rows)
+    perf_csv = _make_perf_csv(tmp_path, rows)
 
-    verdict = check_graph_replay_coverage(perf_dir)  # must not raise
+    verdict = check_graph_replay_coverage(perf_csv)  # must not raise
     assert verdict.graph_under_recorded is True
 
     md = render_fallback_report(
-        perf_dir, verdict.graph_replay_fraction
+        perf_csv, verdict.graph_replay_fraction
     )  # must not raise
     assert "#### P1:" in md
