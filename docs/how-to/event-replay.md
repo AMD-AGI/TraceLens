@@ -48,6 +48,8 @@ appears in the `ex_UID` column.
 
 ## Step 2: Replay a single event (SDK)
 
+Use the `EventReplayer` class to replay the event identified by its UID on the device of your choice.
+
 ```python
 from TraceLens import TreePerfAnalyzer, EventReplayer
 

@@ -55,6 +55,8 @@ notebook.
 
 ### Quick summary of implicit-sync collectives
 
+The following example initializes `NcclAnalyser` with per-rank trace files and generates a summarized dataframe for all implicit-sync collective operations.
+
 ```python
 from TraceLens import NcclAnalyser
 import os
@@ -82,6 +84,8 @@ The summarized dataframe:
 - For synchronization delay, computes metrics like skew in start times, which shows the wait time. This is based on the difference between the earliest and latest arrival across the ranks for a given collective.
 
 ### Example summarized dataframe
+
+The following table shows example output from `build_df_summary_nccl_implicit_sync_cat`, with one row per unique combination of collective type, message size, and data type.
 
 | Collective name | In msg size (MB) | dtype | comm latency (µs)_mean | count | Total latency (ms) | algo bw (GB/s)_mean | bus bw (GB/s)_mean | skew in start time (µs)_mean |
 |-----------------|------------------|-------|------------------------|-------|--------------------|---------------------|--------------------|------------------------------|

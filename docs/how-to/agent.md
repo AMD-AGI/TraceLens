@@ -89,6 +89,8 @@ expects.
 
 ## Run the agent from a chat
 
+Invoke the agent from any chat session with a capable model using one of the following prompts.
+
 ```{note}
 The orchestrator skills are portable and work with agentic runners that support skill-file discovery.
 ```

@@ -44,12 +44,16 @@ ops such as GEMM and SDPA in the roofline groups.
 
 ### Step 1: Generate the two reports
 
+Run the following commands to generate a performance report for each trace.
+
 ```bash
 TraceLens_generate_perf_report_pytorch --profile_json_path traces/baseline.json --output_xlsx_path baseline.xlsx
 TraceLens_generate_perf_report_pytorch --profile_json_path traces/candidate.json --output_xlsx_path candidate.xlsx
 ```
 
 ### Step 2: Run the comparison
+
+Pass the two generated reports to `TraceLens_compare_perf_reports_pytorch` to produce a side-by-side comparison workbook.
 
 ```bash
 TraceLens_compare_perf_reports_pytorch \
@@ -125,6 +129,8 @@ unrelated; TraceDiff matches them at the `convolution` level, making it suitable
 for comparing across hardware, libraries, or framework versions.
 
 ### Compare two traces with the SDK
+
+Use `TreePerfAnalyzer` and `TraceDiff` to build a morphological tree for each trace and generate the diff report.
 
 ```python
 from TraceLens import TreePerfAnalyzer, TraceDiff

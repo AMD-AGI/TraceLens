@@ -33,12 +33,16 @@ Confirm you have the following before continuing.
 
 ## What it takes in
 
+The script accepts the following inputs.
+
 | Input | Description |
 |-------|-------------|
 | `*.xlsx` files | TraceLens reports you want to compare. Provide at least two. |
 | Optional `--names` | Human-readable tags for each report. If omitted, the script falls back to the base filenames. |
 
 ## How to call it
+
+Pass the report files you want to compare along with any optional flags.
 
 ```bash
 python compare_perf_reports.py \
@@ -97,11 +101,13 @@ metric__<tag>_pct       # 100 * diff / baseline
 
 ## Design decisions to know
 
-- **Outer merge, never inner**: if an op vanished, you'll see it.
-- **Baseline is the first report**: choose its order deliberately.
-- **Column prefixing**: every metric becomes `<tag>::metric`, so you can safely concatenate arbitrary reports.
-- **Sheet-specific pruning**: the script aggressively hides noise (for example `median`, `UID`) to keep the output readable. You can always unhide these in Excel if you need them.
-- **Excel 31-char rule**: sheet names are truncated to fit; no data loss, just shorter labels.
+The following behaviors are intentional and affect how you interpret the output.
+
+- **Outer merge, never inner**: If an op vanished, you'll see it.
+- **Baseline is the first report**: Choose its order deliberately.
+- **Column prefixing**: Every metric becomes `<tag>::metric`, so you can safely concatenate arbitrary reports.
+- **Sheet-specific pruning**: The script aggressively hides noise (for example `median`, `UID`) to keep the output readable. You can always unhide these in Excel if you need them.
+- **Excel 31-char rule**: Sheet names are truncated to fit; no data loss, just shorter labels.
 
 ```{note}
 A planned enhancement is morphology-aware diffing: understanding the call-stack
