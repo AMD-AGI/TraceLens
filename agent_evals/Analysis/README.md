@@ -82,6 +82,7 @@ Environment variables:
 | `REPORT_DIR` | `<RESULTS_ROOT>/../reports` | Where reports and reproducers are written |
 | `SUITE_NAME` | `eval` | Suite label used in reports (e.g. `unit`, `e2e`) |
 | `TEST_IDS` | (empty = all) | Space-separated trace IDs to run (filter) |
+| `SKIP_GENERATE_REF` | (empty) | Set to `1` to skip golden reference generation |
 | `SKIP_POST_PROCESSING` | (empty) | Set to `1` to skip report generation after the eval loop |
 
 Example (subset of traces, 3 repeats, 5 parallel):
