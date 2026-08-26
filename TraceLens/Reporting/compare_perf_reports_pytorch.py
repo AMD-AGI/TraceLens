@@ -13,6 +13,8 @@ from typing import Dict, List, Optional, Sequence
 import pandas as pd
 from openpyxl.utils import get_column_letter
 
+from TraceLens.Reporting.reporting_utils import write_report_outputs
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────────────────────────────────────
@@ -589,30 +591,18 @@ def generate_compare_perf_reports_pytorch(
 
     # ── Write workbook ────────────────────────────────────────────────────────
     if output_csvs_dir:
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in results.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            print(
-                f"Wrote '{sheet_name}.csv' with {len(df)} rows × {len(df.columns)} columns"
-            )
+        write_report_outputs(results, csvs_dir=output_csvs_dir)
 
     if output is not None:
         with pd.ExcelWriter(output, engine="openpyxl") as xls:
             for sheet_name, df in results.items():
-                if df.empty:
-                    print(f"Sheet '{sheet_name}' is empty (no matching rows)")
-                df.to_excel(
-                    xls, sheet_name=sheet_name[:31], index=False
-                )  # Excel 31-char limit
+                safe = sheet_name[:31]
+                df.to_excel(xls, sheet_name=safe, index=False)
                 for col in cols_to_hide_xl.get(sheet_name, []):
                     col_idx = df.columns.get_loc(col) + 1
                     col_letter = get_column_letter(col_idx)
-                    worksheet = xls.sheets[sheet_name[:31]]
+                    worksheet = xls.sheets[safe]
                     worksheet.column_dimensions[col_letter].hidden = True
-                print(
-                    f"Wrote sheet '{sheet_name}' with {len(df)} rows × {len(df.columns)} columns"
-                )
 
     return results
 

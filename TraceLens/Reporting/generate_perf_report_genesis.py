@@ -45,30 +45,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _safe_sheet(name: str, used: set) -> str:
-    base = name[:31]
-    n = 0
-    while base in used:
-        n += 1
-        suffix = f"_{n}"
-        base = name[: 31 - len(suffix)] + suffix
-    used.add(base)
-    return base
-
-
 def write_excel(path: Path, sections: Dict[str, Dict[str, pd.DataFrame]]) -> None:
-    used: set = set()
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        for prefix, dfs in sections.items():
-            for sheet, df in dfs.items():
-                if df is None or df.empty:
-                    continue
-                # rocprof sheets use short names (no prefix); pftrace keeps prefix for clarity
-                sheet_label = sheet if prefix == "rocprof" else f"{prefix}_{sheet}"
-                df.to_excel(
-                    writer, sheet_name=_safe_sheet(sheet_label, used), index=False
-                )
-    logger.info("Wrote %s", path)
+    from TraceLens.Reporting.reporting_utils import write_report_outputs
+
+    flat: Dict[str, pd.DataFrame] = {}
+    for prefix, dfs in sections.items():
+        for sheet, df in dfs.items():
+            if df is None or df.empty:
+                continue
+            label = sheet if prefix == "rocprof" else f"{prefix}_{sheet}"
+            flat[label] = df
+    write_report_outputs(flat, xlsx_path=str(path))
 
 
 def _rocprof_sheets_for_excel(

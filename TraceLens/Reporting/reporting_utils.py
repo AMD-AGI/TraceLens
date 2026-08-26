@@ -8,6 +8,7 @@ import argparse
 import ast
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -122,6 +123,60 @@ def export_data_df(
             if verbose:
                 print(f"Exporting summary statistics to {output_path}")
             data_df.to_csv(output_path, index=False)
+
+
+def _safe_sheet_name(name: str, used: set) -> str:
+    """Truncate *name* to Excel's 31-char limit with collision avoidance.
+
+    If the truncated name already appears in *used*, a numeric suffix
+    (``_1``, ``_2``, ...) is appended while staying within the limit.
+    The final name is added to *used* before returning.
+    """
+    base = name[:31]
+    n = 0
+    while base in used:
+        n += 1
+        suffix = f"_{n}"
+        base = name[: 31 - len(suffix)] + suffix
+    used.add(base)
+    return base
+
+
+def write_report_outputs(
+    dfs: Dict[str, pd.DataFrame],
+    *,
+    xlsx_path: Optional[str] = None,
+    csvs_dir: Optional[str] = None,
+) -> None:
+    """Write report DataFrames to CSV files and/or an Excel workbook.
+
+    When both *xlsx_path* and *csvs_dir* are provided, both outputs are
+    written.  When neither is provided, nothing happens.  Sheet names
+    are truncated to 31 characters (Excel limit) with collision-safe
+    suffixes.
+    """
+    if csvs_dir:
+        os.makedirs(csvs_dir, exist_ok=True)
+        for sheet_name, df in dfs.items():
+            csv_path = os.path.join(csvs_dir, f"{sheet_name}.csv")
+            df.to_csv(csv_path, index=False)
+            logger.info("Wrote %s (%d rows)", csv_path, len(df))
+
+    if xlsx_path:
+        import importlib.util
+
+        if importlib.util.find_spec("openpyxl") is None:
+            raise ImportError(
+                "openpyxl is required for Excel output. Install with: "
+                "pip install openpyxl"
+            )
+
+        used: set = set()
+        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+            for sheet_name, df in dfs.items():
+                safe = _safe_sheet_name(sheet_name, used)
+                df.to_excel(writer, sheet_name=safe, index=False)
+        logger.info("Wrote %s", xlsx_path)
 
 
 def request_install(package_name):

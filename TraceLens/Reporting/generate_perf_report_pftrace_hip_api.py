@@ -4,7 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import importlib.util
 import os
 import re
 import argparse
@@ -24,7 +23,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from TraceLens.util import PftraceParser
-from TraceLens.Reporting.pftrace_utils import ensure_trace_json
+from TraceLens.Reporting.pftrace_utils import (
+    derive_pftrace_output_path,
+    ensure_trace_json,
+)
+from TraceLens.Reporting.reporting_utils import write_report_outputs
 from TraceLens.Reporting.pftrace_hip_api_analysis import PftraceHipApiAnalyzer
 
 
@@ -99,37 +102,15 @@ def generate_perf_report_pftrace_hip_api(
     )
 
     # Write output
-    if output_csvs_dir:
-        logger.info(f"Writing CSV files to: {output_csvs_dir}")
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in dict_name2df.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            logger.info(f"  - {sheet_name}.csv ({len(df)} rows)")
-    else:
-        if output_xlsx_path is None:
-            base = Path(trace_path).resolve()
-            if base.suffix.lower() == ".pftrace":
-                base = base.with_suffix("")
-            elif base.suffix.lower() == ".gz" and base.name.endswith(".json.gz"):
-                base = base.parent / base.name.replace(".json.gz", "")
-            else:
-                base = base.with_suffix("")
-            output_xlsx_path = str(base) + "_pftrace_hip_api_report.xlsx"
-
-        logger.info(f"Writing Excel file to: {output_xlsx_path}")
-        if importlib.util.find_spec("openpyxl") is None:
-            logger.error(
-                "Error importing openpyxl. Please install: pip install openpyxl"
-            )
-            raise ImportError("openpyxl is required for Excel output")
-
-        with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
-            for sheet_name, df in dict_name2df.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-                logger.info(f"  - Sheet '{sheet_name}' ({len(df)} rows)")
-
-        logger.info(f"Successfully written to {output_xlsx_path}")
+    if not output_csvs_dir and output_xlsx_path is None:
+        output_xlsx_path = derive_pftrace_output_path(
+            trace_path, "_pftrace_hip_api_report.xlsx"
+        )
+    write_report_outputs(
+        dict_name2df,
+        xlsx_path=output_xlsx_path if not output_csvs_dir else None,
+        csvs_dir=output_csvs_dir,
+    )
 
     return dict_name2df
 

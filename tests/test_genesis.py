@@ -41,10 +41,10 @@ from TraceLens.Reporting.genesis_rocprof_util import (
 from TraceLens.Reporting.generate_perf_report_genesis import (
     _resolve_steady_state_fallback_s,
     _rocprof_sheets_for_excel,
-    _safe_sheet,
     write_excel,
     write_genesis_summary_md,
 )
+from TraceLens.Reporting.reporting_utils import _safe_sheet_name as _safe_sheet
 
 ###############################################################################
 # Shared fixtures — realistic CSV content from actual MI300X genesis traces

@@ -11,7 +11,6 @@ pftrace_utils (traceconv) and PftraceHipActivityAnalyzer; does not duplicate
 API↔kernel correlation (see generate_perf_report_pftrace_hip_api for that).
 """
 
-import importlib.util
 import os
 import argparse
 import sys
@@ -29,7 +28,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from TraceLens.util import PftraceParser
-from TraceLens.Reporting.pftrace_utils import ensure_trace_json
+from TraceLens.Reporting.pftrace_utils import (
+    derive_pftrace_output_path,
+    ensure_trace_json,
+)
+from TraceLens.Reporting.reporting_utils import write_report_outputs
 from TraceLens.Reporting.pftrace_hip_activity_analysis import (
     PftraceHipActivityAnalyzer,
     ns_to_ms,
@@ -154,33 +157,15 @@ def generate_perf_report_pftrace_hip_activity(
         dict_name2df["hip_summary"] = analyzer.get_df_hip_summary()
         logger.info("  - hip_summary (%d rows)", len(dict_name2df["hip_summary"]))
 
-    if output_csvs_dir:
-        logger.info("Writing CSV files to: %s", output_csvs_dir)
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in dict_name2df.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            logger.info("  - %s.csv (%d rows)", sheet_name, len(df))
-    else:
-        if output_xlsx_path is None:
-            base = Path(trace_path).resolve()
-            if base.suffix.lower() == ".pftrace":
-                base = base.with_suffix("")
-            elif base.suffix.lower() == ".gz" and base.name.endswith(".json.gz"):
-                base = base.parent / base.name.replace(".json.gz", "")
-            else:
-                base = base.with_suffix("")
-            output_xlsx_path = str(base) + "_pftrace_activity_report.xlsx"
-        logger.info("Writing Excel to: %s", output_xlsx_path)
-        if importlib.util.find_spec("openpyxl") is None:
-            logger.error("openpyxl required for Excel output")
-            raise ImportError("openpyxl is required for Excel output")
-        with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
-            for sheet_name, df in dict_name2df.items():
-                sn = sheet_name[:31]
-                df.to_excel(writer, sheet_name=sn, index=False)
-                logger.info("  - Sheet '%s' (%d rows)", sn, len(df))
-        logger.info("Successfully written to %s", output_xlsx_path)
+    if not output_csvs_dir and output_xlsx_path is None:
+        output_xlsx_path = derive_pftrace_output_path(
+            trace_path, "_pftrace_activity_report.xlsx"
+        )
+    write_report_outputs(
+        dict_name2df,
+        xlsx_path=output_xlsx_path if not output_csvs_dir else None,
+        csvs_dir=output_csvs_dir,
+    )
 
     if output_md_path:
         logger.info("Writing Markdown to: %s", output_md_path)

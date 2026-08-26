@@ -4,7 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import importlib.util
 import os
 import argparse
 import sys
@@ -22,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 from TraceLens.util import RocprofParser
 from TraceLens.Reporting.rocprof_analysis import RocprofAnalyzer
+from TraceLens.Reporting.reporting_utils import write_report_outputs
 
 
 def generate_perf_report_rocprof(
@@ -132,37 +132,19 @@ def generate_perf_report_rocprof(
         )
 
     # 5. Write output
-    if output_csvs_dir:
-        logger.info(f"Writing CSV files to: {output_csvs_dir}")
-        os.makedirs(output_csvs_dir, exist_ok=True)
-        for sheet_name, df in dict_name2df.items():
-            csv_path = os.path.join(output_csvs_dir, f"{sheet_name}.csv")
-            df.to_csv(csv_path, index=False)
-            logger.info(f"  - {sheet_name}.csv ({len(df)} rows)")
-    else:
-        if output_xlsx_path is None:
-            # Auto-generate output filename
-            if profile_json_path.endswith("_results.json"):
-                output_xlsx_path = profile_json_path.replace(
-                    "_results.json", "_perf_report.xlsx"
-                )
-            else:
-                base_path = profile_json_path.rsplit(".json", 1)[0]
-                output_xlsx_path = base_path + "_perf_report.xlsx"
-
-        logger.info(f"Writing Excel file to: {output_xlsx_path}")
-        if importlib.util.find_spec("openpyxl") is None:
-            logger.error(
-                "Error importing openpyxl. Please install it with: pip install openpyxl"
+    if not output_csvs_dir and output_xlsx_path is None:
+        if profile_json_path.endswith("_results.json"):
+            output_xlsx_path = profile_json_path.replace(
+                "_results.json", "_perf_report.xlsx"
             )
-            raise ImportError("openpyxl is required for Excel output")
-
-        with pd.ExcelWriter(output_xlsx_path, engine="openpyxl") as writer:
-            for sheet_name, df in dict_name2df.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-                logger.info(f"  - Sheet '{sheet_name}' ({len(df)} rows)")
-
-        logger.info(f"Successfully written to {output_xlsx_path}")
+        else:
+            base_path = profile_json_path.rsplit(".json", 1)[0]
+            output_xlsx_path = base_path + "_perf_report.xlsx"
+    write_report_outputs(
+        dict_name2df,
+        xlsx_path=output_xlsx_path if not output_csvs_dir else None,
+        csvs_dir=output_csvs_dir,
+    )
 
     return dict_name2df
 
