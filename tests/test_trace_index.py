@@ -6,6 +6,11 @@
 
 import csv
 import json
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -21,6 +26,7 @@ from TraceLens.TraceIndex.importer import (
     import_report_dir as import_report_dir_with_store,
 )
 from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
+from TraceLens.TraceIndex.server import make_handler
 from TraceLens.TraceIndex.utils import (
     collect_trace_paths,
     parse_repr,
@@ -41,6 +47,56 @@ def write_csv(path, rows):
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def seed_mini_catalog(tmp_path):
+    db_path = tmp_path / "trace_index.sqlite"
+    trace_path = tmp_path / "rank0_trace.json"
+    trace_path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
+    report_dir = tmp_path / "report"
+    write_csv(
+        report_dir / "unified_perf_summary.csv",
+        [
+            {
+                "name": "aten::mm",
+                "op category": "GEMM",
+                "operation_count": "1",
+                "Kernel Time (us)_sum": "10.0",
+            },
+            {
+                "name": "aten::add",
+                "op category": "elementwise",
+                "operation_count": "1",
+                "Kernel Time (us)_sum": "1.0",
+            },
+        ],
+    )
+    append_trace(db_path, trace_path, report_dir=report_dir)
+    return db_path
+
+
+def request_json(url, method="GET", payload=None):
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        return exc.code, json.loads(body)
+
+
+def start_query_server(db_path):
+    handler = make_handler(db_path, default_limit=500, max_limit=5000)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    return server, thread, "http://%s:%s" % (host, port)
 
 
 def test_parse_repr_strips_numpy_scalars_and_to_json():
@@ -385,3 +441,78 @@ def test_build_traces_continues_after_failure(tmp_path):
     assert result["imported"] == []
     assert len(result["failed"]) == 2
     assert "missing_a.json" in result["failed"][0]["trace_path"]
+
+
+def test_query_server_health_tables_and_read_sql(tmp_path):
+    """The read-only HTTP server reports health/tables and runs a SELECT."""
+    db_path = seed_mini_catalog(tmp_path)
+    server, thread, base = start_query_server(db_path)
+    try:
+        status, root = request_json(base + "/")
+        assert status == 200
+        assert "POST /query" in root["endpoints"]
+
+        status, health = request_json(base + "/health")
+        assert status == 200
+        assert health["ok"] is True
+
+        status, tables = request_json(base + "/tables")
+        assert status == 200
+        assert tables["tables"]["unified_perf_rows"] == 2
+
+        status, queried = request_json(
+            base + "/query",
+            method="POST",
+            payload={
+                "sql": "SELECT name FROM unified_perf_rows ORDER BY source_row",
+                "limit": 10,
+            },
+        )
+        assert status == 200
+        assert queried["truncated"] is False
+        assert [row["name"] for row in queried["rows"]] == ["aten::mm", "aten::add"]
+
+        encoded = urllib.parse.urlencode(
+            {"sql": "SELECT COUNT(*) AS n FROM unified_perf_rows", "limit": "1"}
+        )
+        status, get_query = request_json(base + "/query?" + encoded)
+        assert status == 200
+        assert get_query["rows"][0]["n"] == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_query_server_rejects_write_sql_and_unknown_paths(tmp_path):
+    """Write SQL and unknown routes are rejected; SELECT limit truncation is reported."""
+    db_path = seed_mini_catalog(tmp_path)
+    server, thread, base = start_query_server(db_path)
+    try:
+        status, payload = request_json(
+            base + "/query",
+            method="POST",
+            payload={"sql": "DELETE FROM traces"},
+        )
+        assert status == 400
+        assert "read-only" in payload["error"]
+
+        status, missing = request_json(base + "/nope")
+        assert status == 404
+        assert missing["error"] == "not found"
+
+        status, post_missing = request_json(base + "/tables", method="POST", payload={})
+        assert status == 404
+
+        status, truncated = request_json(
+            base + "/query",
+            method="POST",
+            payload={"sql": "SELECT name FROM unified_perf_rows", "limit": 1},
+        )
+        assert status == 200
+        assert truncated["truncated"] is True
+        assert len(truncated["rows"]) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

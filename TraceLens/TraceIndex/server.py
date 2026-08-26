@@ -115,7 +115,8 @@ def make_handler(
             )
 
         def handle_tables(self) -> None:
-            with self.connect() as conn:
+            conn = self.connect()
+            try:
                 tables = [row["name"] for row in conn.execute("""
                         SELECT name
                         FROM sqlite_master
@@ -136,6 +137,8 @@ def make_handler(
                     except sqlite3.DatabaseError as exc:
                         counts[table] = repr(exc)
                 self.send_json({"tables": counts})
+            finally:
+                conn.close()
 
         def handle_query(self, sql: str, params: List[Any], limit: int) -> None:
             if not is_read_only_sql(sql):
@@ -148,7 +151,8 @@ def make_handler(
                 return
             limit = max(1, min(limit, max_limit))
             start = time.perf_counter()
-            with self.connect() as conn:
+            conn = self.connect()
+            try:
                 # The server is a read-only SQL endpoint. sql is gated by
                 # is_read_only_sql and the connection is opened with mode=ro.
                 # codeql[py/sql-injection]
@@ -163,6 +167,8 @@ def make_handler(
                         "rows": [dict(row) for row in returned],
                     }
                 )
+            finally:
+                conn.close()
 
     return Handler
 
