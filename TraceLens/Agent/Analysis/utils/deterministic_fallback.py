@@ -81,11 +81,11 @@ _TABLE_DIVIDER = "|" + "---|" * 10
 # {pct}/{max_pct} are pre-formatted percents; {drop_note} is the conditional
 # drop-count sentence (empty when nothing was dropped).
 _DEGRADED_BANNER = """> **⚠ Degraded (deterministic fallback) report.** This trace was
-> graph-under-recorded (graph-replay fraction {pct} > {max_pct});
-> per-op decomposition failed, so the LLM analysis path could not run.
+> graph-under-recorded (graph-replay fraction {pct};
+> per-op decomposition failed, so the agentic analysis path did not execute.
 > Only **kernel name, time, and %E2E** are recoverable from a graph-collapsed
-> trace. Shapes, launcher path, quant operands, category, and efficiency were
-> **never captured** in this trace. Impact ranges are heuristic.{drop_note}"""
+> trace. Shapes, launcher path, quant operands, category, and efficiency are
+> not available in this trace. Impact estimates are heuristic.{drop_note}"""
 
 
 @dataclass
