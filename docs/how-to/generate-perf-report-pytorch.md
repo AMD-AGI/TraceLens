@@ -18,12 +18,12 @@ performance report, then read the sheets to find what dominates GPU time.
 
 Before generating a report, confirm you have the following:
 
-- TraceLens installed (see [Install TraceLens](../install/install.md)).
+- [TraceLens installed](../install/install.md).
 - A `torch.profiler` Chrome trace (`.json` or `.json.gz`).
 
 ```{note}
 If you don't have a trace yet, see the
-[PyTorch profiling walkthrough](../tutorials/torch-profiling.ipynb)
+[PyTorch profiling walkthrough](https://github.com/AMD-AGI/TraceLens/blob/main/notebooks/torch-profiling.ipynb)
 for instructions on capturing one with `torch.profiler`.
 ```
 
@@ -74,7 +74,7 @@ The generated workbook contains the following sheets:
 | `short_kernels_summary`, `short_kernel_histogram` | Short-kernel table and duration histogram — added with `--short_kernel_study`. |
 
 For the GPU timeline, a low computation percentage with significant idle time
-indicates poor compute/communication overlap; use `--micro_idle_thresh_us` to
+indicates poor compute and communication overlap; use `--micro_idle_thresh_us` to
 split very short idle gaps into their own category.
 
 See [Performance report column reference](../reference/perf-report-columns.md)

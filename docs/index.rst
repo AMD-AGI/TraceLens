@@ -48,18 +48,12 @@ The TraceLens source code is hosted at `github.com/AMD-AGI/TraceLens <https://gi
 
    .. grid-item-card:: Concepts
 
-      * :doc:`The Trace2Tree data model <conceptual/trace2tree>`
-      * :doc:`Understanding PyTorch traces <conceptual/torch-profiling-analysis>`
+      * :doc:`Trace2Tree data model <conceptual/trace2tree>`
+      * :doc:`PyTorch traces <conceptual/torch-profiling-analysis>`
       * :doc:`Tensor shape metadata <conceptual/shape-metadata>`
       * :doc:`GEMM analysis <conceptual/gemm-analysis>`
       * :doc:`Inference performance analysis <conceptual/inference-analysis>`
       * :doc:`Triton kernel performance model <conceptual/triton-perf-model-walkthrough>`
-
-   .. grid-item-card:: Tutorials
-
-      * :doc:`PyTorch profiling walkthrough <tutorials/torch-profiling>`
-      * :doc:`Distributed profiling walkthrough <tutorials/distributed-profiling>`
-      * :doc:`Anomaly detection walkthrough <tutorials/anomaly-detection>`
 
    .. grid-item-card:: Reference
 
