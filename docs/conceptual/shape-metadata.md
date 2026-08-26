@@ -4,7 +4,7 @@ Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
-# Tensor shape metadata in PyTorch profiler traces
+# Tensor shape metadata in PyTorch profiler traces in TraceLens
 ```{meta}
 :description: A conceptual explanation of when tensor shapes appear in PyTorch profiler traces, why some operations lack them, and how to register operations so shapes are recorded.
 :keywords: tensor shapes, PyTorch profiler, cpu_op, dispatcher, torch.library, custom op, Triton, FlashInfer, vLLM, SGLang, Input Dims, backward events, TraceLens
@@ -53,7 +53,7 @@ cuda_runtime    → No shapes (API-level event)
 
 If an operation lacks shapes, the fix is to register it with the dispatcher through `torch.library`. There are two approaches.
 
-### Option 1: register as a custom op
+### Option 1: Register as a custom op
 
 Wrap the operation with `torch.library.custom_op`:
 
@@ -74,7 +74,7 @@ The `mutates_args` argument tells PyTorch which input arguments the function mod
 - `mutates_args=("output",)` — the `output` argument is modified in-place.
 - Required for correctness with `torch.compile` and autograd.
 
-### Option 2: lighter-weight registration (vLLM approach)
+### Option 2: Lighter-weight registration (vLLM approach)
 
 Use the lower-level `Library` API directly. For reference, see [`vllm/utils/torch_utils.py:742` — `direct_register_custom_op`](https://github.com/vllm-project/vllm/blob/0b225fb7b22f8ae1f5fc8ee618640ae0983c76de/vllm/utils/torch_utils.py#L742-L780).
 

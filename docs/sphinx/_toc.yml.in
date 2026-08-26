@@ -67,9 +67,9 @@ subtrees:
 - caption: Concepts
   entries:
   - file: conceptual/trace2tree
-    title: The Trace2Tree data model
+    title: Trace2Tree data model
   - file: conceptual/torch-profiling-analysis
-    title: Understanding PyTorch traces
+    title: PyTorch traces
   - file: conceptual/shape-metadata
     title: Tensor shape metadata
   - file: conceptual/gemm-analysis

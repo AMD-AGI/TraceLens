@@ -11,7 +11,7 @@ See LICENSE for license information.
 :keywords: TraceLens, PyTorch distributed, DDP, torchrun, distributed profiling, GPU trace, ROCm, AMD Instinct, multi-GPU, NCCL, performance profiling, CUDA
 ```
 
-Learn the core concepts behind profiling a distributed workload. It directly builds on the [Configure and run the PyTorch profiler](./torch-profiling.md) that covered profiling a single-GPU run.
+Learn the core concepts behind profiling a distributed workload. It directly builds on [Configure and run the PyTorch profiler](./torch-profiling.md) that covered profiling a single-GPU run.
 
 This tutorial focuses on what changes when a workload runs under PyTorch Distributed (DDP or otherwise) — not on the mechanics of DDP itself, but on how profiling behaves when multiple processes participate.
 

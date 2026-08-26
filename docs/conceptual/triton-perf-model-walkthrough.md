@@ -4,7 +4,7 @@ Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
-# Triton kernel performance model
+# Triton kernel performance model in TraceLens
 
 ```{meta}
 :description: How TraceLens computes GFLOPS, TB/s, and other performance metrics for torch.compile-generated Triton kernels, including the metric formulas and worked examples.
@@ -183,9 +183,9 @@ Chrome Trace (.json.gz)
 
 TraceLens needs three pieces of information to compute metrics:
 
-1. Element counts — `xnumel` and `rnumel`
-2. Data types and shapes — to calculate bytes moved
-3. Fused ATen ops — to calculate FLOPs
+- Element counts — `xnumel` and `rnumel`
+- Data types and shapes — to calculate bytes moved
+- Fused ATen ops — to calculate FLOPs
 
 These are obtained through a two-tier approach. V2 is tried first; V1 is
 the fallback:
@@ -367,35 +367,35 @@ Pointwise kernel → last integer scalar is `xnumel`:
 
 ### Bytes calculation
 
-Step 1: Calculate bytes for each tensor input:
+1. Calculate bytes for each tensor input:
 
-| Input | Dims | Type | Bytes per elem | Elements | Bytes |
-|-------|------|------|---------------|----------|-------|
-| `in_out_ptr0` | [8, 4096, 8192] | bf16 | 2 | 268,435,456 | 536,870,912 |
-| `in_ptr0` | [32768, 8192] | bf16 | 2 | 268,435,456 | 536,870,912 |
-| `xnumel` | [] | Scalar | — | — | skipped |
+   | Input | Dims | Type | Bytes per elem | Elements | Bytes |
+   |-------|------|------|---------------|----------|-------|
+   | `in_out_ptr0` | [8, 4096, 8192] | bf16 | 2 | 268,435,456 | 536,870,912 |
+   | `in_ptr0` | [32768, 8192] | bf16 | 2 | 268,435,456 | 536,870,912 |
+   | `xnumel` | [] | Scalar | — | — | skipped |
 
-```
-input_bytes = (268,435,456 * 2) + (268,435,456 * 2) = 1,073,741,824
-```
+   ```
+   input_bytes = (268,435,456 * 2) + (268,435,456 * 2) = 1,073,741,824
+   ```
 
-Step 2: Add output write for pointwise kernels.
+2. Add the output write for pointwise kernels.
 
-In pointwise kernels, `in_out_ptr0` is both read and written — the output
-overwrites the input buffer. The input bytes above already count the read.
-V2 adds one extra write of `ptr_bytes[0] * xnumel`:
+   In pointwise kernels, `in_out_ptr0` is both read and written — the output
+   overwrites the input buffer. The input bytes above already count the read.
+   V2 adds one extra write of `ptr_bytes[0] * xnumel`:
 
-```
-output_write = 2 * 268,435,456 = 536,870,912
-```
+   ```
+   output_write = 2 * 268,435,456 = 536,870,912
+   ```
 
-Total:
+   Total:
 
-```
-bytes_moved = 1,073,741,824 + 536,870,912
-            = 1,610,612,736 bytes
-            = 1,536 MB
-```
+   ```
+   bytes_moved = 1,073,741,824 + 536,870,912
+               = 1,610,612,736 bytes
+               = 1,536 MB
+   ```
 
 ### FLOPs calculation
 
@@ -551,10 +551,3 @@ seq_len=4096, dtype=bf16. Traced with PyTorch 2.11+rocm7.2 on AMD Instinct™ MI
 - [PyTorch Inductor codegen/triton.py](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/codegen/triton.py)
 - [PyTorch Inductor wrapper_benchmark.py](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/wrapper_benchmark.py)
 
-## Related topics
-
-- [GEMM analysis](../conceptual/gemm-analysis.md)
-- [Trace2Tree](../conceptual/trace2tree.md)
-- [Generate a performance report from a PyTorch trace](../how-to/generate-perf-report-pytorch.md)
-- [Performance report columns](../reference/perf-report-columns.md)
-- [API reference](../reference/api-reference.md)

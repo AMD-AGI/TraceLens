@@ -15,7 +15,7 @@ Some workloads have anomalous steps — most steps are fine, but every so often 
 
 Trace every step continuously with CUDA-only activities, flush the buffer every step, and only write to disk when the step exceeds a threshold. Saved traces are tight — one anomaly equals one small trace, with no surrounding context.
 
-This tutorial walks through the pattern with a ResNet18 example, a synthetic anomaly injector, and the TraceLens perf-report generator. It builds on the [Configure and run the PyTorch profiler](./torch-profiling.md).
+This tutorial walks through the pattern with a ResNet18 example, a synthetic anomaly injector, and the TraceLens perf-report generator. It builds on [Configure and run the PyTorch profiler](./torch-profiling.md).
 
 ## Set up your environment
 
@@ -240,8 +240,8 @@ df_timeline["percent"] = df_timeline["percent"].round(2)
 df_timeline
 ```
 
-| type | time ms | percent |
-|------|---------|---------|
+| Type | Time (ms) | Percent |
+|------|-----------|---------|
 | computation_time | 22.479 | 96.92 |
 | exposed_comm_time | 0.000 | 0.00 |
 | exposed_memcpy_time | 0.000 | 0.00 |
