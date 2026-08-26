@@ -112,7 +112,7 @@ In a chat with a capable model, invoke one of:
   ```
 
 If prompted, provide the trace file path, the platform of the first trace, the
-analysis mode (`default` for training and non-vLLM, SGLang, or ATOM eager inference,
+analysis mode (`default` for training and eager inference outside vLLM, SGLang, and ATOM,
 or `inference` for vLLM, SGLang, or ATOM), the execution mode and capture-folder path for
 inference, environment details (node, container, or virtual environment), and an
 optional output directory.

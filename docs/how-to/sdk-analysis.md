@@ -103,8 +103,8 @@ analyzer.get_df_gpu_timeline()
 
 Example output:
 
-| Type | Time (ms) | Percent |
-|------|-----------|---------|
+| type | time ms | percent |
+|------|---------|---------|
 | `busy_time` | 6521.46 | 99.93 |
 | `computation_time` | 6318.26 | 96.81 |
 | `exposed_communication_time` | 203.06 | 3.11 |

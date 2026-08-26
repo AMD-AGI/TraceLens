@@ -552,6 +552,13 @@ seq_len=4096, dtype=bf16. Traced with PyTorch 2.11+rocm7.2 on AMD Instinct™ MI
 | `triton_poi_fused__unsafe_view_mul_silu_2` (SwiGLU) | 1.342 | 1,536 | 0.83 | 3.19 | 2.66 |
 | `triton_poi_fused__unsafe_view_add_3` (residual add) | 0.067 | 512 | 0.12 | 3.81 | 0.48 |
 
+## Related topics
+
+- [GEMM analysis in TraceLens](./gemm-analysis.md)
+- [Generate a PyTorch performance report](../how-to/generate-perf-report-pytorch.md)
+- [Analyze traces with the TraceLens SDK](../how-to/sdk-analysis.md)
+- [Performance report columns](../reference/perf-report-columns.md)
+
 ## References
 
 The following resources provide additional background on the PyTorch compiler, Triton kernels, and the performance concepts discussed in this topic.
