@@ -19,7 +19,7 @@ SDK.
 
 Confirm you have the following before continuing.
 
-- TraceLens installed (see [Install TraceLens](../install/install.md)).
+- [TraceLens installed](../install/install.md).
 - Per-rank PyTorch profiler traces (one trace per rank).
 
 ## Why fuse traces

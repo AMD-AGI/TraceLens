@@ -37,6 +37,8 @@ Directly inspecting GPU kernel names has two fundamental limitations:
 
 ## How this solves the problem
 
+The tree structure addresses the kernel-name limitations described above in three ways.
+
 * Disambiguates semantics: Argument metadata at the backend op layer lets you group identical computations, attribute time, and deterministically reproduce slow cases.
 * Enables fair comparison: Operations such as `aten::mm` and HLO are stable across platforms. By anchoring analysis there, you can compare the same operation and arguments regardless of how the kernels are named underneath.
 * Flexible attribution: GPU time can be viewed at any level — module (through its backend ops), dispatch op, runtime, or kernel — depending on the question. As an additional benefit, time can be attributed all the way up to the Python `nn.Module` level, making performance insights accessible even to users outside the performance-engineering field. This helps bridge the gap between model developers and low-level hardware execution.

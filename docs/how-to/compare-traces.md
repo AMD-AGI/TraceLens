@@ -32,7 +32,7 @@ the matching to be:
 
 Confirm you have the following before continuing.
 
-- TraceLens installed (see [Install TraceLens](../install/install.md)).
+- [TraceLens installed](../install/install.md).
 - For perf-report comparison: two generated reports (`.xlsx`), one
   per configuration. Generate them with [TraceLens_generate_perf_report_pytorch](./generate-perf-report-pytorch.md).
 

@@ -43,6 +43,8 @@ Two loop dimensions: `xnumel` (outer) and `rnumel` (reduction axis).
 
 ## Requirements and PyTorch version compatibility
 
+This section covers the trace capture settings and PyTorch versions required for V2 metadata extraction to work correctly.
+
 ### Trace capture requirements
 
 TraceLens uses a two-tier approach (V2 primary, V1 fallback) to extract
@@ -134,7 +136,11 @@ Verified on PyTorch 2.4 and 2.11 (with `record_shapes=True`):
 
 ## How it works
 
+This section describes the data flow from a Chrome trace event to a computed TB/s and TFLOPS/s metric, and the two-tier metadata extraction strategy used to handle different PyTorch versions.
+
 ### Data flow
+
+The following diagram shows how a trace event flows through the model to produce throughput metrics.
 
 ```
 Chrome Trace (.json.gz)
@@ -249,6 +255,8 @@ size_hints=[268435456]                # older list format
 
 ### V1 compared with V2
 
+The following table summarizes the key differences between the two metadata extraction strategies.
+
 |  | V2 (trace-intrinsic) | V1 (cache-based) |
 |--|----------------------|-------------------|
 | Data source | Chrome trace `event["args"]` | Inductor cache `.py` files on disk |
@@ -298,7 +306,11 @@ the entire name collapses to `triton_{index}`.
 
 ## Metric formulas
 
+The following formulas define how FLOPs, bytes moved, and throughput are computed for each supported Triton kernel type.
+
 ### FLOPs
+
+FLOPs are computed by summing per-element operation costs across all fused ATen ops, then multiplying by the element count.
 
 ```
 flops = sum(flops_per_elem[op] for op in fused_aten_ops) * xnumel * rnumel
@@ -541,6 +553,8 @@ seq_len=4096, dtype=bf16. Traced with PyTorch 2.11+rocm7.2 on AMD Instinct™ MI
 | `triton_poi_fused__unsafe_view_add_3` (residual add) | 0.067 | 512 | 0.12 | 3.81 | 0.48 |
 
 ## References
+
+The following resources provide additional background on the PyTorch compiler, Triton kernels, and the performance concepts discussed in this topic.
 
 - [PyTorch Blog: Why Is PyTorch Compile So Fast — Kernel Fusion](https://pytorch.org/blog/why-is-pytorch-compile-so-fast-kernel-fusion/)
 - [TorchInductor GPU Profiling — PyTorch docs](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_inductor_profiling.html)

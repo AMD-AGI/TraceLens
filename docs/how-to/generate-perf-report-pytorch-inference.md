@@ -45,7 +45,7 @@ supported for vLLM, SGLang, ATOM, and xDiT (proposed patches required).
 
 Confirm you have the following before continuing.
 
-- TraceLens installed (see [Install TraceLens](../install/install.md)).
+- [TraceLens installed](../install/install.md).
 - An LLM inference setup to profile (this guide uses vLLM, SGLang, or ATOM on AMD Instinct™ MI300X).
 
 ## Collect inference traces

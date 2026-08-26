@@ -23,6 +23,8 @@ In profiler traces, look for events with:
 
 ### Operations that have shapes
 
+The following operation types record tensor shapes in the trace.
+
 | Operation type | Example | Why it works |
 |---|---|---|
 | Native ATen ops | `aten::mm`, `aten::linear` | Built into the PyTorch dispatcher |
@@ -33,6 +35,8 @@ In profiler traces, look for events with:
 
 ### Operations that don't have shapes
 
+The following operation types bypass the dispatcher and do not record shapes.
+
 | Operation type | Example | Why it fails |
 |---|---|---|
 | Plain Python functions | `def my_kernel(x, y): ...` | Bypasses the dispatcher |
@@ -41,6 +45,8 @@ In profiler traces, look for events with:
 | Backward engine events | `autograd::engine::evaluate_function:*Backward` | Empty inputs passed to the profiler |
 
 ### Quick reference: event categories
+
+The following summary shows which event categories carry shape information.
 
 ```
 cpu_op          → Usually has shapes (exception: backward events)
@@ -95,6 +101,8 @@ register_op("triton_matmul", triton_matmul_impl)
 
 ### Choosing between the two options
 
+The following table compares the two registration approaches to help you select the right one for your use case.
+
 | Aspect | Option 1: `custom_op` | Option 2: `Library.define()` |
 |---|---|---|
 | Simplicity | Decorator, minimal code | More boilerplate |
@@ -103,6 +111,8 @@ register_op("triton_matmul", triton_matmul_impl)
 | Use when | Prototyping, one-off ops | Performance-critical paths |
 
 ## Framework-specific status
+
+The following table shows the current shape-recording status for each supported framework.
 
 | Framework | Current state | How to get shapes |
 |---|---|---|
@@ -115,6 +125,8 @@ register_op("triton_matmul", triton_matmul_impl)
 
 ## Key takeaways
 
+The following points summarize when shapes are available and how to recover them when they are missing.
+
 - Shapes are tied to dispatcher registration. If it's a `cpu_op`, it has shapes.
 - The fix is straightforward: register operations through `torch.library`.
 - Start simple with `@torch.library.custom_op`.
@@ -122,6 +134,8 @@ register_op("triton_matmul", triton_matmul_impl)
 - FlashInfer disabled shape recording on purpose — a performance versus observability trade-off that can be re-enabled.
 
 ## Appendix
+
+This section provides supplementary detail on how backward events relate to their forward counterparts via sequence number linking.
 
 ### Backward events and sequence number linking
 

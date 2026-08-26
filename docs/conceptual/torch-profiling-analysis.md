@@ -16,7 +16,12 @@ When you run a PyTorch model on a GPU, there's a hidden interplay between the CP
 
 ## The execution model: host, GPU, and asynchronous launches
 
-![Figure 1: Asynchronous execution example.](../images/profiling_analysis_fig1.png)
+```{figure} ../images/profiling_analysis_fig1.png
+:alt: Asynchronous execution example showing host queuing GPU commands while the CPU continues execution.
+:align: center
+
+Figure 1: Asynchronous execution example.
+```
 
 To understand profiling, you need a mental model of how PyTorch — or any application — runs code across the CPU and GPU.
 
@@ -32,7 +37,12 @@ A kernel itself is just a GPU function that runs across thousands of lightweight
 
 To dig deeper into what a trace shows, consider the snippet below.
 
-![Figure 2: Perfetto trace highlighting idle time between convolution and batch normalization kernels.](../images/profiling_analysis_fig2.png)
+```{figure} ../images/profiling_analysis_fig2.png
+:alt: Perfetto trace showing a red dashed region of GPU idle time between convolution and batch normalization kernels.
+:align: center
+
+Figure 2: Perfetto trace highlighting idle time between convolution and batch normalization kernels.
+```
 
 The red dashed region marks idle time: the GPU is waiting for the host to issue the next command. This happens when the CPU frontend can't keep up with the GPU's execution speed. Reducing such idle gaps is an important optimization goal. To see why these gaps occur, follow the path from a high-level PyTorch call down to the GPU kernels that actually run.
 
@@ -57,13 +67,20 @@ Another important detail is tensor metadata. Python-level operations in the trac
 
 For example, in the figure below the first tensor is the activation (`[5, 64, 56, 56]`) and the second tensor is the convolution filter (`[64, 64, 3, 3]`).
 
-![Figure 3: Shapes recorded on the backend op when record_shapes=True.](../images/profiling_analysis_fig3.png)
+```{figure} ../images/profiling_analysis_fig3.png
+:alt: Perfetto Current Selection panel showing Input Dims and Input type fields on an aten::convolution cpu_op event.
+:align: center
+
+Figure 3: Shapes recorded on the backend op when `record_shapes=True`.
+```
 
 This metadata becomes very useful for deeper analysis and debugging — for example, when matching trace events to model architecture, analyzing kernel efficiency, or spotting unusual stride or dtype patterns.
 
 That's all you need for a clean first pass: know what the host and GPU are doing, read the timeline, and use recorded shapes to ground what you see. Perfetto gives you the raw signals; turning them into insight is a skill you build with practice, and TraceLens helps accelerate that process.
 
 ## Perfetto tips and trace internals
+
+This section covers Perfetto UI navigation shortcuts, how memory copies appear in traces, the raw JSON event format, and how autograd introduces a second thread in the timeline.
 
 ### Perfetto UI tips
 
@@ -76,11 +93,21 @@ Perfetto also links host launches and GPU execution with arrows called *flows*. 
 
 When you select a runtime launch event such as `hipExtModuleLaunchKernel`, the *Following Flow* jumps you forward to the GPU kernel it triggered:
 
-![Figure 4: Following flow from a host launch (hipExtModuleLaunchKernel) to the corresponding GPU kernel event.](../images/profiling_analysis_fig4.png)
+```{figure} ../images/profiling_analysis_fig4.png
+:alt: Perfetto trace with a Following Flow arrow connecting a hipExtModuleLaunchKernel host event to its GPU kernel event.
+:align: center
+
+Figure 4: Following flow from a host launch (`hipExtModuleLaunchKernel`) to the corresponding GPU kernel event.
+```
 
 Conversely, when you select a GPU kernel event, the *Preceding Flow* takes you back to the runtime call on the host that launched it:
 
-![Figure 5: Preceding flow from a GPU kernel (SubTensorOpWithScalar1d) back to its launch on the host.](../images/profiling_analysis_fig5.png)
+```{figure} ../images/profiling_analysis_fig5.png
+:alt: Perfetto trace with a Preceding Flow arrow tracing a SubTensorOpWithScalar1d GPU kernel back to its host launch event.
+:align: center
+
+Figure 5: Preceding flow from a GPU kernel (`SubTensorOpWithScalar1d`) back to its launch on the host.
+```
 
 These flows are the bridge between the Python-level trace and the GPU execution timeline. They let you answer both:
 
@@ -117,7 +144,12 @@ Autograd introduces another dimension to the trace: the forward and backward pas
 
 These are linked at the `aten::convolution` layer of the call stack. Perfetto uses flows to connect the forward convolution op to its corresponding backward node.
 
-![Figure 6: Example of aten::convolution (forward) linked to ConvolutionBackward0 (backward) through flows.](../images/profiling_analysis_fig6.png)
+```{figure} ../images/profiling_analysis_fig6.png
+:alt: Perfetto trace showing flow arrows linking an aten::convolution forward op on the main thread to its ConvolutionBackward0 node on the autograd thread.
+:align: center
+
+Figure 6: `aten::convolution` (forward) linked to `ConvolutionBackward0` (backward) through flows.
+```
 
 Key points:
 

@@ -20,7 +20,7 @@ performance.
 
 Confirm you have the following before continuing.
 
-- TraceLens installed (see [Install TraceLens](../install/install.md)).
+- [TraceLens installed](../install/install.md).
 - A JAX XPlane protobuf trace (`xplane.pb`). JAX parsing uses the `xprof`
   dependency, installed automatically with TraceLens.
 
