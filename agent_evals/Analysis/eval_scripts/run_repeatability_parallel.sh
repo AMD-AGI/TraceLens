@@ -102,6 +102,7 @@ SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 CONTAINER="${CONTAINER:-}"
 TEST_IDS="${TEST_IDS:-}"
 SUITE_NAME="${SUITE_NAME:-eval}"
+SKIP_GENERATE_REF="${SKIP_GENERATE_REF:-}"
 SKIP_POST_PROCESSING="${SKIP_POST_PROCESSING:-}"
 
 AGENT_MODEL="${AGENT_MODEL:-claude-opus-4-8-thinking-medium}"
@@ -611,14 +612,22 @@ echo "  Max parallel: $MAX_PARALLEL"
 if [[ -n "$TEST_IDS" ]]; then
     echo "  Test filter:  $TEST_IDS"
 fi
+if [[ "$SKIP_GENERATE_REF" == "1" ]]; then
+    echo "  Skip reference generation: TRUE"
+fi
 echo "  Report dir:   $REPORT_DIR"
 echo "========================================="
 echo ""
 
 # Stage 1: regenerate golden references from scratch for each scope.
-for scope in "${SCOPES[@]}"; do
-    generate_refs_for_scope "$scope"
-done
+if [[ "$SKIP_GENERATE_REF" == "1" ]]; then
+    echo "  Stage 1 skipped -- SKIP_GENERATE_REF=1."
+    echo ""
+else
+    for scope in "${SCOPES[@]}"; do
+        generate_refs_for_scope "$scope"
+    done
+fi
 
 # Stage 2: run repeatability evals for each scope against the fresh references.
 for scope in "${SCOPES[@]}"; do
