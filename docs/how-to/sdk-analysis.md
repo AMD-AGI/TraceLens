@@ -25,20 +25,14 @@ script packages everything covered here into a ready-made Excel report. Reach fo
 the SDK when you need more than that report offers — custom filtering, ad-hoc
 aggregations, support for a new operation, or programmatic access to the tree.
 
-## On this page
-
-- [Build and navigate the tree](#build-and-navigate-the-tree)
-- [GPU timeline breakdown](#gpu-timeline-breakdown)
-- [Per-operation GPU time](#per-operation-gpu-time)
-- [Roofline metrics](#roofline-metrics)
-- [nn.Module attribution](#nnmodule-attribution)
-
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/install.md)).
+Confirm you have the following before continuing.
+
+- [TraceLens installed](../install/install.md).
 - A PyTorch profiler trace JSON file for the model you want to analyze.
 - A basic understanding of how `Trace2Tree` builds the tree (see
-  [The Trace2Tree data model](../conceptual/trace2tree.md)).
+  [Trace2Tree data model](../conceptual/trace2tree.md)).
 
 ## Build and navigate the tree
 
@@ -61,7 +55,7 @@ Once you have an event of interest, the tree exposes navigation helpers:
   chain up to the Python frame that launched it; `cpu_op_fields` optionally shows
   op details (`'Input Dims'`, `'Input type'`, `'Input Strides'`, `'Concrete Inputs'`).
 - `tree.get_parent_event(event)`, `tree.get_children_events(event)`, and
-  `tree.get_gpu_events(event)` — direct parent/child/kernel access.
+  `tree.get_gpu_events(event)` — direct parent, child, and kernel access.
 
 For example, `traverse_subtree_and_print` on an `aten::convolution` op shows how
 the dispatch op lowers to runtime launches and kernels:
@@ -111,26 +105,26 @@ Example output:
 
 | type | time ms | percent |
 |------|---------|---------|
-| busy_time | 6521.46 | 99.93 |
-| computation_time | 6318.26 | 96.81 |
-| exposed_communication_time | 203.06 | 3.11 |
-| exposed_memcpy_time | 0.14 | 0.00 |
-| idle_time | 4.72 | 0.07 |
-| total_time | 6526.18 | 100.00 |
+| `busy_time` | 6521.46 | 99.93 |
+| `computation_time` | 6318.26 | 96.81 |
+| `exposed_communication_time` | 203.06 | 3.11 |
+| `exposed_memcpy_time` | 0.14 | 0.00 |
+| `idle_time` | 4.72 | 0.07 |
+| `total_time` | 6526.18 | 100.00 |
 
 The metrics are defined as:
 
-- **computation_time**: time in compute kernels (GEMMs, convolutions, and so on).
-- **communication_time**: time in collective/communication kernels (for example, NCCL/RCCL).
-- **memcpy_time**: time in host-device or device-device memory copies.
-- **exposed_communication_time** / **exposed_memcpy_time** — the portion of
+- `computation_time`: Time in compute kernels (GEMMs, convolutions, and so on).
+- `communication_time`: Time in collective/communication kernels (for example, NCCL/RCCL).
+- `memcpy_time`: Time in host-device or device-device memory copies.
+- `exposed_communication_time` / `exposed_memcpy_time`: The portion of
   communication or memcpy that does *not* overlap computation (the part that
   actually costs wall-clock time).
-- **busy_time** / **idle_time** — time the GPU is doing anything vs. nothing.
+- `busy_time` / `idle_time`: Time the GPU is doing anything vs. nothing.
 
 This breakdown is computed by `GPUEventAnalyser`, which works directly from a list
-of GPU events. It operates on **any GPU timeline** (PyTorch, JAX, and others) and
-uses **no host-side call stack**, so you can run it standalone without building
+of GPU events. It operates on any GPU timeline (PyTorch, JAX, and others) and
+uses no host-side call stack, so you can run it standalone without building
 the CPU-side tree:
 
 ```python

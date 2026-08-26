@@ -23,7 +23,9 @@ anything.
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/install.md)).
+Confirm you have the following before continuing.
+
+- [TraceLens installed](../install/install.md).
 - The shapes and dtypes of the ops you want to model (no trace required).
 
 ## Op coverage
