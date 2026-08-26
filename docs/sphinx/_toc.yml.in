@@ -38,15 +38,6 @@ subtrees:
       title: Collective-communication report
     - file: how-to/compare-perf-reports
       title: Compare performance reports
-  - file: how-to/pytorch-profiling/index
-    title: Run the PyTorch profiler
-    entries:
-    - file: how-to/pytorch-profiling/torch-profiling
-      title: Configure and run the PyTorch profiler
-    - file: how-to/pytorch-profiling/distributed-profiling
-      title: Profile distributed PyTorch workloads
-    - file: how-to/pytorch-profiling/anomaly-detection
-      title: Investigate performance anomalies
   - file: how-to/compare-traces
     title: Compare two traces
   - file: how-to/event-replay

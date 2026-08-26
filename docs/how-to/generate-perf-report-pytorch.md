@@ -21,11 +21,6 @@ Before generating a report, confirm you have the following:
 - [TraceLens installed](../install/install.md).
 - A `torch.profiler` Chrome trace (`.json` or `.json.gz`).
 
-```{note}
-If you don't have a trace yet, see the
-[PyTorch profiling walkthrough](./pytorch-profiling/torch-profiling.md)
-for instructions on capturing one with `torch.profiler`.
-```
 
 ## Generate the report
 

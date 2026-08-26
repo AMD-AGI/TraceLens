@@ -37,12 +37,6 @@ The TraceLens source code is hosted at `github.com/AMD-AGI/TraceLens <https://gi
         * :doc:`Collective-communication report <how-to/collective-report>`
         * :doc:`Compare performance reports <how-to/compare-perf-reports>`
 
-      * :doc:`Run the PyTorch profiler <how-to/pytorch-profiling/index>`
-
-        * :doc:`Configure and run the PyTorch profiler <how-to/pytorch-profiling/torch-profiling>`
-        * :doc:`Profile distributed PyTorch workloads <how-to/pytorch-profiling/distributed-profiling>`
-        * :doc:`Investigate performance anomalies <how-to/pytorch-profiling/anomaly-detection>`
-
       * :doc:`Compare two traces <how-to/compare-traces>`
       * :doc:`Replay a single operation <how-to/event-replay>`
       * :doc:`Fuse multi-rank traces <how-to/trace-fusion>`
