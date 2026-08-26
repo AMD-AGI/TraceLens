@@ -259,7 +259,7 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 ## Step 2: Trace-Quality Gate
 
 
-`<csv_dir>` is `<output_dir>/perf_report_csvs` (`standalone`) or `<output_dir>/perf_report_trace1_csvs` (`comparative`, primary trace).
+`<unified_perf_csv>` is `<output_dir>/perf_report_csvs/unified_perf_summary.csv` (`standalone`) or `<output_dir>/perf_report_trace1_csvs/unified_perf_summary.csv` (`comparative`, primary trace).
 
 ```bash
 <prefix> python3 -c \"
@@ -267,16 +267,16 @@ import sys
 from TraceLens.Agent.Analysis.utils import check_graph_replay_coverage
 v = check_graph_replay_coverage(sys.argv[1])
 print('GRAPH_UNDER_RECORDED' if v.graph_under_recorded else 'OK', v.graph_replay_fraction, v.reason)
-\" '<csv_dir>'
+\" '<unified_perf_csv>'
 ```
 
 **`OK`:** Proceed
 **`GRAPH_UNDER_RECORDED`:**
 1. Emit `[DIAG:trace_quality:GRAPH_UNDER_RECORDED]`: Deterministic fallback report
-2. Run the deterministic fallback writer on `<csv_dir>`:
+2. Run the deterministic fallback writer on `<unified_perf_csv>`:
    ```bash
    <prefix> python3 -m TraceLens.Agent.Analysis.utils.deterministic_fallback \
-     --perf-csvs-dir '<csv_dir>' \
+     --unified-perf-csv '<unified_perf_csv>' \
      --output-dir '<output_dir>' \
      --graph-replay-fraction <graph_replay_fraction>
    ```

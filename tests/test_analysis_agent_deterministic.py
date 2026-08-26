@@ -27,6 +27,7 @@ from TraceLens.Agent.Analysis.utils.deterministic_fallback import (
     _PERCENT_COLUMN,
     _WEIGHT_COLUMN,
     check_graph_replay_coverage,
+    main,
     render_fallback_report,
 )
 
@@ -618,10 +619,6 @@ def test_writer_drop_note_parser_inert(tmp_path):
     )
 
 
-# ---------------------------------------------------------------------------
-# field-size crash fix: a field larger than csv's 131072 default must not
-# raise in the detector or the loader/writer.
-# ---------------------------------------------------------------------------
 def test_detector_handles_giant_csv_field(tmp_path):
     giant = "hipGraphLaunch->" + ("k" * 200000) + " (Synthetic Op)"
     rows = [
@@ -636,4 +633,56 @@ def test_detector_handles_giant_csv_field(tmp_path):
     md = render_fallback_report(
         perf_csv, verdict.graph_replay_fraction
     )  # must not raise
+    assert "#### P1:" in md
+
+
+def test_main_writes_analysis_md(tmp_path, monkeypatch):
+    rows = [
+        ("hipGraphLaunch->k (Synthetic Op)", 90.0, 90.0),
+        ("aten::mm", 10.0, 10.0),
+    ]
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    out_dir = tmp_path / "out"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "deterministic_fallback",
+            "--unified-perf-csv",
+            str(perf_csv),
+            "--output-dir",
+            str(out_dir),
+            "--graph-replay-fraction",
+            "0.9",
+        ],
+    )
+
+    main()
+
+    md = (out_dir / "analysis.md").read_text(encoding="utf-8")
+    assert "#### P1:" in md
+
+
+def test_main_derives_fraction_when_omitted(tmp_path, monkeypatch):
+    rows = [
+        ("hipGraphLaunch->k (Synthetic Op)", 90.0, 90.0),
+        ("aten::mm", 10.0, 10.0),
+    ]
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    out_dir = tmp_path / "out"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "deterministic_fallback",
+            "--unified-perf-csv",
+            str(perf_csv),
+            "--output-dir",
+            str(out_dir),
+        ],
+    )
+
+    main()
+
+    # 90% graph-replay fraction is recovered from the gate and rendered in the banner.
+    md = (out_dir / "analysis.md").read_text(encoding="utf-8")
+    assert "90%" in md
     assert "#### P1:" in md
