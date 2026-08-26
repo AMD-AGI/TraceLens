@@ -17,6 +17,8 @@ reproducers with kernel or framework developers.
 
 ## Before you begin
 
+Confirm you have the following before continuing.
+
 - TraceLens installed (see [Install TraceLens](../install/install.md)).
 - A PyTorch profiler trace containing the operation you want to isolate.
 

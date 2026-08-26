@@ -41,6 +41,8 @@ collective-communication report from the command line instead, see
 
 ## Before you begin
 
+Confirm you have the following before continuing.
+
 - TraceLens installed (see [Install TraceLens](../install/install.md)).
 - Per-rank PyTorch profiler traces from a distributed run (one trace per rank).
 

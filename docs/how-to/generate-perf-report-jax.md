@@ -18,6 +18,8 @@ performance.
 
 ## Before you begin
 
+Confirm you have the following before continuing.
+
 - TraceLens installed (see [Install TraceLens](../install/install.md)).
 - A JAX XPlane protobuf trace (`xplane.pb`). JAX parsing uses the `xprof`
   dependency, installed automatically with TraceLens.
@@ -49,7 +51,7 @@ Options:
 
 - `--kernel_metadata_keyword_filters <kw> ...` restricts the analysis to events
   whose metadata contains the given keywords (for example, `remat checkpoint` to
-  focus on rematerialization/checkpointing scopes).
+  focus on rematerialization or checkpointing scopes).
 - `--enable-origami` uses Origami-simulated GEMM/SDPA times when a GPU arch JSON
   is available.
 - `--output_xlsx_path` and `--output_csvs_dir` control output paths. (JAX

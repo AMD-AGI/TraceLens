@@ -17,6 +17,8 @@ synchronization skew.
 
 ## Before you begin
 
+Confirm you have the following before continuing.
+
 - TraceLens installed (see [Install TraceLens](../install/install.md)).
 - Per-rank PyTorch profiler traces from a distributed run (one trace per rank).
 
@@ -101,7 +103,7 @@ time a rank spends waiting for other ranks to arrive. The key metrics:
 High skew points to load imbalance upstream rather than a slow network; high
 `comm_latency` with low skew points to a bandwidth or topology limit.
 
-### Interpret all-to-all-v collectives (MoE / expert parallel)
+### Interpret all-to-all-v collectives (MoE and expert parallel)
 
 All-to-all-v sends a different amount of data per rank, so there's no single
 message size and the ring/tree `algo bw` / `bus bw` formulas don't apply.

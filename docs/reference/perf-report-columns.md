@@ -56,7 +56,7 @@ In this example:
 - 99.30% computation time, so the GPU is very efficiently utilized.
 - 0.42% exposed communication, which is excellent. Most communication (30.34% total - 0.42% exposed = 29.92%) overlaps with computation.
 - 0.25% idle time, so there are minimal gaps and good kernel launch efficiency.
-- This workload demonstrates effective computation/communication overlap.
+- This workload demonstrates effective computation and communication overlap.
 
 ### Event classification
 
@@ -110,7 +110,7 @@ exposed_comm intervals     = COMM - COMP
 exposed_memcpy intervals   = MEMCPY - COMP - COMM
 ```
 
-In simple terms:
+In plain terms:
 
 - Exposed communication is communication time that doesn't overlap with computation.
 - Exposed memcpy is memcpy time that doesn't overlap with computation or communication.
@@ -145,7 +145,7 @@ computation_time + exposed_comm_time + exposed_memcpy_time + idle_time = total_t
 ### Interpreting results
 
 - High `computation_time` (>80%): workload is efficiently using the GPU.
-- High `exposed_comm_time`: communication isn't overlapped with computation, so optimize with computation/communication overlap.
+- High `exposed_comm_time`: communication isn't overlapped with computation, so optimize with computation and communication overlap.
 - High `exposed_memcpy_time`: memory transfers are blocking work, so optimize data movement.
 - High `idle_time`: the GPU is sitting idle, so check for CPU bottlenecks, kernel launch overhead, or synchronization.
 

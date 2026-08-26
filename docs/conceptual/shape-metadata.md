@@ -14,7 +14,7 @@ Tensor shapes are one of the most useful pieces of metadata in a PyTorch profile
 
 ## When are shapes available?
 
-The simple rule is that shapes are available when an operation goes through PyTorch's dispatcher as a `cpu_op`.
+Shapes are available when an operation goes through PyTorch's dispatcher as a `cpu_op`.
 
 In profiler traces, look for events with:
 

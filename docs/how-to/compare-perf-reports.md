@@ -25,6 +25,8 @@ SDK-based `TraceDiff` workflow.
 
 ## Before you begin
 
+Confirm you have the following before continuing.
+
 - TraceLens installed (see [Install TraceLens](../install/install.md)).
 - At least two reports (`.xlsx`) generated with
   [TraceLens_generate_perf_report_pytorch](./generate-perf-report-pytorch.md).

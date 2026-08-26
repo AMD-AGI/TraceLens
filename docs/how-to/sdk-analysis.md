@@ -35,6 +35,8 @@ aggregations, support for a new operation, or programmatic access to the tree.
 
 ## Before you begin
 
+Confirm you have the following before continuing.
+
 - TraceLens installed (see [Install TraceLens](../install/install.md)).
 - A PyTorch profiler trace JSON file for the model you want to analyze.
 - A basic understanding of how `Trace2Tree` builds the tree (see
@@ -61,7 +63,7 @@ Once you have an event of interest, the tree exposes navigation helpers:
   chain up to the Python frame that launched it; `cpu_op_fields` optionally shows
   op details (`'Input Dims'`, `'Input type'`, `'Input Strides'`, `'Concrete Inputs'`).
 - `tree.get_parent_event(event)`, `tree.get_children_events(event)`, and
-  `tree.get_gpu_events(event)` — direct parent/child/kernel access.
+  `tree.get_gpu_events(event)` — direct parent, child, and kernel access.
 
 For example, `traverse_subtree_and_print` on an `aten::convolution` op shows how
 the dispatch op lowers to runtime launches and kernels:

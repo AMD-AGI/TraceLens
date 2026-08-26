@@ -34,7 +34,7 @@ Generate a multi-sheet Excel report from a PyTorch (`torch.profiler`) trace.
 |----------|---------|-------------|
 | `--profile_json_path` | required | Path to the `profile.json` or `.json.gz` trace. |
 | `--output_xlsx_path` | auto | Path to the output Excel file. |
-| `--output_csvs_dir` | None | Directory to write per-sheet CSV files instead of/with Excel. |
+| `--output_csvs_dir` | None | Directory to write per-sheet CSV files instead of or with Excel. |
 | `--enable_kernel_summary` | off | Add a kernel-summary sheet. |
 | `--short_kernel_study` | off | Add a short-kernel study; tune with `--short_kernel_threshold_us`, `--short_kernel_histogram_bins`, `--topk_short_kernels`. |
 | `--disable_coll_analysis` | on | Disable the collective-analysis section (enabled by default). |

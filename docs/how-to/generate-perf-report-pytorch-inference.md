@@ -43,6 +43,8 @@ supported for vLLM, SGLang, ATOM, and xDiT (proposed patches required).
 
 ## Before you begin
 
+Confirm you have the following before continuing.
+
 - TraceLens installed (see [Install TraceLens](../install/install.md)).
 - An LLM inference setup to profile (this guide uses vLLM, SGLang, or ATOM on AMD Instinct™ MI300X).
 
@@ -136,7 +138,7 @@ the SGLang version (`--sglang-version`, default `0.5.9`), and the GPU type
 | `0.5.17`     | MI300       | `lmsysorg/sglang:v0.5.17-rocm720-mi30x` |
 | `0.5.17`     | MI350/MI355 | `lmsysorg/sglang:v0.5.17-rocm720-mi35x` |
 
-On SGLang **0.5.13 / 0.5.14**, kernel-shape wrapping is incompatible with the
+On SGLang **0.5.13 and 0.5.14**, kernel-shape wrapping is incompatible with the
 EAGLE/MTP speculative *overlap* decode, so the speculative patches disable capture
 profiling on the speculative graph runners (and, on 0.5.14, the target-verify
 graph) to keep MTP runs fault-free; non-MTP shape profiling is unaffected. Full MTP
@@ -307,7 +309,7 @@ during the benchmark. Pass both paths to the report generator using
    written unconditionally and this variable does not exist.
 
 ```{note}
-On SGLang 0.5.13 / 0.5.14 the graph-capture shape profiling is intentionally
+On SGLang 0.5.13 and 0.5.14 the graph-capture shape profiling is intentionally
 disabled for the EAGLE/MTP speculative graphs (and, on 0.5.14, the target-verify
 graph) to avoid a GPU fault in the speculative overlap decode, so
 `SGLANG_GRAPH_BATCH_CAPTURE` only yields capture traces for the
