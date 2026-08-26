@@ -72,10 +72,24 @@ def _ac2g(corr, pid, tid, ts, phase):
 def _launcher_and_kernel(corr, kernel_name, rt_ts, k_ts):
     """A cuda_runtime launcher + its GPU kernel, linked via ac2g flow events."""
     return [
-        _ev(f"rt{corr}", rt_ts, 5, "cuda_runtime", "hipLaunchKernel",
-            args={"correlation": corr}),
-        _ev(f"k{corr}", k_ts, 30, "kernel", kernel_name, pid=0, tid=7,
-            args={"correlation": corr, "stream": 7}),
+        _ev(
+            f"rt{corr}",
+            rt_ts,
+            5,
+            "cuda_runtime",
+            "hipLaunchKernel",
+            args={"correlation": corr},
+        ),
+        _ev(
+            f"k{corr}",
+            k_ts,
+            30,
+            "kernel",
+            kernel_name,
+            pid=0,
+            tid=7,
+            args={"correlation": corr, "stream": 7},
+        ),
         _ac2g(corr, 0, 7, k_ts, "s"),
         _ac2g(corr, 0, 7, k_ts + 30, "f"),
     ]
@@ -136,9 +150,9 @@ def _assert_every_kernel_accounted_once(df, analyzer):
     """Core invariant: each GPU kernel is owned by exactly one row (mirrors the
     report's 'Kernels accounted: N/N' sanity check)."""
     row_uids = _row_kernel_uids(df)
-    assert len(row_uids) == len(set(row_uids)), (
-        f"a kernel is attributed to more than one row: {row_uids}"
-    )
+    assert len(row_uids) == len(
+        set(row_uids)
+    ), f"a kernel is attributed to more than one row: {row_uids}"
     assert set(row_uids) == _tree_kernel_uids(analyzer), (
         "kernels are dropped or duplicated: "
         f"rows={sorted(set(row_uids))} tree={sorted(_tree_kernel_uids(analyzer))}"
@@ -148,7 +162,7 @@ def _assert_every_kernel_accounted_once(df, analyzer):
 def _call_stack(row):
     """The per-row call stack: last kernel's frame chain (kd['call_stack'] +
     kernel name). Requires add_python_func=True."""
-    kd = (row.get("kernel_details") or [])
+    kd = row.get("kernel_details") or []
     if not kd:
         return []
     return list(kd[-1].get("call_stack", [])) + [kd[-1].get("name")]
@@ -188,9 +202,9 @@ def test_synthetic_op_row_classification():
 def _build_orphan_tree_rows(add_python_func=True):
     """A tree with NO cpu_op anywhere -- both kernels are orphans::
 
-        py_func_A                     (python_function, root)
-        ├── py_func_B -> hipLaunchKernel -> kernel_B
-        └── hipLaunchKernel -> kernel_A
+    py_func_A                     (python_function, root)
+    ├── py_func_B -> hipLaunchKernel -> kernel_B
+    └── hipLaunchKernel -> kernel_A
     """
     # Frame names contain "/" so they register in the call stack (the running
     # call-stack filter keeps module-like frames and cpu_ops).
@@ -262,12 +276,27 @@ def test_multi_kernel_launcher_synthetic_ops():
     # A graph launch fires MULTIPLE kernels from one runtime event. Exit 4 must
     # emit one synthetic per launched kernel (not only the 1:1 case).
     events = [
-        _ev("g", 1000, 200, "cuda_runtime", "hipGraphLaunch",
-            args={"correlation": 20}),
-        _ev("k1", 1050, 30, "kernel", "kernel_G1", pid=0, tid=7,
-            args={"correlation": 20, "stream": 7}),
-        _ev("k2", 1100, 30, "kernel", "kernel_G2", pid=0, tid=7,
-            args={"correlation": 20, "stream": 7}),
+        _ev("g", 1000, 200, "cuda_runtime", "hipGraphLaunch", args={"correlation": 20}),
+        _ev(
+            "k1",
+            1050,
+            30,
+            "kernel",
+            "kernel_G1",
+            pid=0,
+            tid=7,
+            args={"correlation": 20, "stream": 7},
+        ),
+        _ev(
+            "k2",
+            1100,
+            30,
+            "kernel",
+            "kernel_G2",
+            pid=0,
+            tid=7,
+            args={"correlation": 20, "stream": 7},
+        ),
     ]
     tree = TraceToTree(deepcopy(events), prune_nongpu_paths=False)
     tree.build_tree(add_python_func=True)
@@ -355,4 +384,6 @@ def test_perf_model_op_owns_whole_subtree():
     # The nested perf-modeled op is subsumed -- it does NOT get its own row.
     assert B_NAME not in rows
     # No synthetic op is emitted for A's own kernel (the traversal never recurses).
-    assert not any("(Synthetic Op)" in n for n in rows), f"unexpected synthetic rows: {list(rows)}"
+    assert not any(
+        "(Synthetic Op)" in n for n in rows
+    ), f"unexpected synthetic rows: {list(rows)}"
