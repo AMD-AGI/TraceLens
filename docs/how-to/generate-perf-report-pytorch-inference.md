@@ -381,8 +381,8 @@ uses that to drive window selection instead:
 | Argument   | Type      | Description                                                                                                                                 |
 | ---------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--CONC` | `int`   | Expected peak concurrency (number of concurrent requests). A warning is printed if the observed trace peak differs.                         |
-| `--OSL`  | `float` | Maximum output sequence length (decode tokens per request). Each request's OSL is sampled from`[R * OSL, OSL]`.                           |
-| `--R`    | `float` | OSL sampling range ratio in`[0, 1]`. `R=0` means all requests use exactly `OSL` tokens; `R=1` means OSL is uniform in `[0, OSL]`. |
+| `--OSL`  | `float` | Maximum output sequence length (decode tokens per request). Each request's OSL is sampled from `[R * OSL, OSL]`.                           |
+| `--R`    | `float` | OSL sampling range ratio in `[0, 1]`. `R=0` means all requests use exactly `OSL` tokens; `R=1` means OSL is uniform in `[0, OSL]`. |
 
 When all three are provided, the tool derives:
 
@@ -467,13 +467,13 @@ relevant to serving traces:
 
 | Argument                     | Default   | Description                                                                                                                                         |
 | ---------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--profile_json_path`      | required  | Path to the graph-replay`torch.profiler` trace (`.json` or `.json.gz`).                                                                       |
-| `--capture_folder PATH`    | `None`  | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). Mutually exclusive with`--comparison_json_path`. |
-| `--group_by_parent_module` | `False` | Group kernel-launcher summaries by parent`nn.Module` in addition to operation name.                                                               |
+| `--profile_json_path`      | required  | Path to the graph-replay `torch.profiler` trace (`.json` or `.json.gz`).                                                                       |
+| `--capture_folder PATH`    | `None`  | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). Mutually exclusive with `--comparison_json_path`. |
+| `--group_by_parent_module` | `False` | Group kernel-launcher summaries by parent `nn.Module` in addition to operation name.                                                               |
 | `--group_by_num_kernels`   | `False` | Group summary rows by the number of kernels.                                                                                                        |
 | `--include_call_stack`     | `False` | Add the CPU call stack to the report.                                                                                                               |
 | `--include_overlap_info`   | `False` | Add kernel-overlap sheets (`*_kl_overlap`) when overlap data exists.                                                                              |
-| `--enable_pseudo_ops`      | `False` | Augment the tree with pseudo-ops to isolate kernels (for example,`FusedMoE`).                                                                     |
+| `--enable_pseudo_ops`      | `False` | Augment the tree with pseudo-ops to isolate kernels (for example, `FusedMoE`).                                                                     |
 
 Run the tool with `--help` for the complete, version-specific argument list.
 
