@@ -15,7 +15,7 @@ analytical FLOPs and bytes from an op's shapes and dtypes, and the *trace*
 supplies the measured wall-clock time. Dividing one by the other gives the
 achieved `TFLOPS/s` and `TB/s` in every report.
 
-The perf model is just a Python library — you can call the analytical half on its
+The perf model is a Python library — you can call the analytical half on its
 own, with *no trace and no kernel launch*. Hand it shapes, get back FLOPs and
 bytes; arithmetic intensity and roofline-bounded time follow. This is useful for
 sizing studies, end-to-end ceilings, and regression bounds before you run

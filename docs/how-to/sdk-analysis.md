@@ -19,7 +19,7 @@ and derive metrics at the timeline, operation, roofline, and `nn.Module` levels.
 This topic is the narrated reference for the SDK. Each section links a runnable
 notebook you can execute against your own trace.
 
-If you just need the standard metrics in a spreadsheet, the
+If you need the standard metrics in a spreadsheet, the
 [`generate_perf_report_pytorch.py`](https://github.com/AMD-AGI/TraceLens/blob/main/TraceLens/Reporting/generate_perf_report_pytorch.py)
 script packages everything covered here into a ready-made Excel report. Reach for
 the SDK when you need more than that report offers — custom filtering, ad-hoc
