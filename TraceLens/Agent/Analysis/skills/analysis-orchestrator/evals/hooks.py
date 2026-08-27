@@ -1,6 +1,8 @@
+###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
+###############################################################################
 
 """TraceLens setup and scoring for the `gemm-01-repeatability` behavior case.
 
