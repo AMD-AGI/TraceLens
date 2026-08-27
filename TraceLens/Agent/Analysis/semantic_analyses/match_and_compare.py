@@ -35,7 +35,7 @@ import sys
 from collections import OrderedDict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _helpers import load_labels
+from _helpers import load_labels, load_json
 
 
 
@@ -67,8 +67,7 @@ def load_metadata(path):
     if not path or not os.path.exists(path):
         return None
     try:
-        with open(path) as f:
-            meta = json.load(f)
+        meta = load_json(path)
         return meta.get("gpu_timeline")
     except (json.JSONDecodeError, OSError):
         return None

@@ -35,9 +35,13 @@ _this_dir = os.path.dirname(os.path.abspath(__file__))
 _repo_root = os.path.abspath(os.path.join(_this_dir, "..", "..", "..", ".."))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
+if _this_dir not in sys.path:
+    sys.path.insert(0, _this_dir)
 
 from TraceLens.util import DataLoader
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.Trace2Tree.trace_capture_merge import merge_capture_trace_into_graph
+from _helpers import load_json
 
 
 def load_and_build_tree(trace_path, capture_trace_path=None):
@@ -49,10 +53,6 @@ def load_and_build_tree(trace_path, capture_trace_path=None):
     graph-mode traces.
     """
     if capture_trace_path:
-        from TraceLens.Trace2Tree.trace_capture_merge import (
-            merge_capture_trace_into_graph,
-        )
-
         print(
             f"Merging capture trace {capture_trace_path} into {trace_path}...",
             file=sys.stderr,
@@ -290,8 +290,7 @@ def main():
             f"Wrote tree_context.json to {len(regions)} region subdirs", file=sys.stderr
         )
     else:
-        with open(args.extracted_json) as f:
-            extracted = json.load(f)
+        extracted = load_json(args.extracted_json)
 
         print(
             f"Matching {len(extracted['kernels'])} kernels to tree events...",

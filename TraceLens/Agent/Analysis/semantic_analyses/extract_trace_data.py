@@ -21,7 +21,6 @@ Usage:
 """
 
 import argparse
-import gzip
 import json
 import logging
 import os
@@ -30,11 +29,9 @@ from collections import Counter
 
 from trace_split_adapter import split_vllm_trace, get_steady_state_key
 from annotation_metadata import gather_metadata
+from _helpers import load_json
 
-try:
-    from TraceLens import GPUEventAnalyser
-except ImportError:
-    GPUEventAnalyser = None
+from TraceLens import GPUEventAnalyser
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +41,7 @@ def load_trace(path_or_data):
     if isinstance(path_or_data, dict):
         data = path_or_data
     else:
-        opener = gzip.open if path_or_data.endswith(".gz") else open
-        with opener(path_or_data, "rt") as f:
-            data = json.load(f)
+        data = load_json(path_or_data)
     events = data.get("traceEvents", [])
     by_cat = {}
     for e in events:
@@ -182,10 +177,8 @@ def run_assertions(data, by_cat, kernels, is_graph_mode, strict=True):
 def compute_gpu_timeline_metrics(events):
     """
     Run GPUEventAnalyser on events and return gpu_timeline dict for metadata.
-    Returns None if GPUEventAnalyser unavailable or fails.
+    Returns None on failure.
     """
-    if GPUEventAnalyser is None:
-        return None
     try:
         # Ensure events have UID (required by GPUEventAnalyser for overlap computation)
         for i, e in enumerate(events):
@@ -199,14 +192,14 @@ def compute_gpu_timeline_metrics(events):
         if total <= 0:
             return None
         return {
-            "busy_time_us": round(metrics.get("busy_time", 0), 2),
-            "idle_time_us": round(metrics.get("idle_time", 0), 2),
-            "total_time_us": round(total, 2),
-            "computation_time_us": round(metrics.get("computation_time", 0), 2),
-            "exposed_comm_time_us": round(metrics.get("exposed_comm_time", 0), 2),
-            "exposed_memcpy_time_us": round(metrics.get("exposed_memcpy_time", 0), 2),
-            "idle_pct": round(100 * idle / total, 1),
-            "busy_pct": round(100 * busy / total, 1),
+            "busy_time_us": metrics.get("busy_time", 0),
+            "idle_time_us": metrics.get("idle_time", 0),
+            "total_time_us": total,
+            "computation_time_us": metrics.get("computation_time", 0),
+            "exposed_comm_time_us": metrics.get("exposed_comm_time", 0),
+            "exposed_memcpy_time_us": metrics.get("exposed_memcpy_time", 0),
+            "idle_pct": 100 * idle / total,
+            "busy_pct": 100 * busy / total,
         }
     except Exception as e:
         logger.warning("GPUEventAnalyser failed: %s", e)
@@ -236,22 +229,6 @@ def extract_and_build_result(data, by_cat, source_file, region_metadata=None):
     if region_metadata:
         result["region_metadata"] = region_metadata
     return result, kernels
-
-
-def _resolve_output_dir(output_arg):
-    """Resolve -o to a directory path, handling the .json suffix case.
-
-    When auto-split detects regions, -o is treated as a directory.  If the
-    caller passed something like ``$DIR/extracted.json`` (intending a file),
-    strip the trailing ``.json`` component and use the parent directory so
-    that region subdirs land in ``$DIR/`` rather than inside a rogue
-    ``extracted.json/`` directory.
-    """
-    if not output_arg:
-        return "."
-    if output_arg.endswith(".json") or output_arg.endswith(".json.gz"):
-        return os.path.dirname(output_arg) or "."
-    return output_arg
 
 
 def _write_split_regions(split_result, trace_path, output_dir):
@@ -323,7 +300,7 @@ def main():
     if not args.no_split:
         split_result = split_vllm_trace(args.trace)
         if split_result:
-            output_dir = _resolve_output_dir(args.output)
+            output_dir = args.output or "."
             _write_split_regions(split_result, args.trace, output_dir)
             return
 

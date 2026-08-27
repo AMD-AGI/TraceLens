@@ -19,13 +19,15 @@ Usage:
             key = get_steady_state_key(metadata)
 """
 
-import gzip
 import json
 import os
 import subprocess
 import sys
 import tempfile
 from typing import List, Optional, Tuple
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _helpers import load_json
 
 
 def get_steady_state_key(metadata: dict) -> str:
@@ -47,18 +49,6 @@ def get_steady_state_key(metadata: dict) -> str:
     if ctx > 0 and gen > 0:
         return f"prefill_decode_{ctx_sum}_{gen_sum}"
     return f"prefill_decode_{batch}_{batch}"
-
-
-def _get_tracelens_root() -> str:
-    """Resolve TraceLens package root (tracelens_private/ or repo root)."""
-    # trace_split_adapter.py is at TraceLens/AgenticMode/SemanticComparison/trace_breakdown/
-    this_file = os.path.abspath(__file__)
-    trace_breakdown = os.path.dirname(this_file)
-    semantic = os.path.dirname(trace_breakdown)
-    agentic = os.path.dirname(semantic)
-    tracelens_pkg = os.path.dirname(agentic)
-    root = os.path.dirname(tracelens_pkg)
-    return root
 
 
 def _phase_to_region_meta(phase: dict) -> dict:
@@ -102,11 +92,7 @@ def _phase_to_region_meta(phase: dict) -> dict:
 
 def _load_trace(path: str) -> dict:
     """Load trace JSON from .json or .json.gz file."""
-    if path.endswith(".gz"):
-        with gzip.open(path, "rt") as f:
-            return json.load(f)
-    with open(path, "r") as f:
-        return json.load(f)
+    return load_json(path)
 
 
 def _is_single_iteration(phase: dict) -> bool:
@@ -146,13 +132,6 @@ def split_vllm_trace(trace_path: str) -> Optional[List[Tuple[dict, dict]]]:
     Returns None if no annotation iterations are found (caller should fall back
     to full trace).
     """
-    root = _get_tracelens_root()
-    env = os.environ.copy()
-    if "PYTHONPATH" in env:
-        env["PYTHONPATH"] = root + os.pathsep + env["PYTHONPATH"]
-    else:
-        env["PYTHONPATH"] = root
-
     with tempfile.TemporaryDirectory(prefix="trace_split_") as tmpdir:
         cmd = [
             sys.executable,
@@ -168,8 +147,6 @@ def split_vllm_trace(trace_path: str) -> Optional[List[Tuple[dict, dict]]]:
         ]
         result = subprocess.run(
             cmd,
-            cwd=root,
-            env=env,
             capture_output=True,
             text=True,
         )

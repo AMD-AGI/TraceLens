@@ -60,26 +60,19 @@ Ask the user for:
 `*_graph*` and `*_capture*` files.
 
 **vLLM / annotated traces** are auto-detected by `extract_trace_data.py`.
-No special flag is needed -- the script probes for annotation iterations
-and splits into per-region subdirectories automatically.
+No special flag is needed.
 
 ---
 
 ## Step 1: Semantic Breakdown (Deterministic, PARALLEL)
 
 Breakdown is fully deterministic -- no LLM calls. Run both traces as
-**parallel shell commands** (NOT Task subagents) so the orchestrator
-blocks until both finish.
+parallel shell commands.
 
 ### 1.1 Per-trace Pipeline
 
 Run the full breakdown for **both traces in a single shell call** using
-background jobs + `wait`. The extraction step auto-detects vLLM
-annotation regions; no special flag is needed. For vLLM traces the
-output directory will contain per-region subdirs; the remaining steps
-(`extract_tree_context.py`, `pattern_finder.py`, `classify_kernels.py`,
-`build_semantic_labels.py`) support `--regions-dir` / per-region paths
-and must be run for **every** region.
+background jobs + `wait`.
 
 ```bash
 SCRIPTS=TraceLens/Agent/Analysis/semantic_analyses
@@ -151,12 +144,7 @@ and stop.
 
 ## Step 2: Kernel-Name Unification (Name-First, LLM)
 
-Replaces the old block-alignment harmonization. Instead of aligning blocks
-via CPU-op / nn_module context (absent in graph mode), the LLM unifies raw
-**kernel names** across the two traces. The unified name is written into each
-kernel's `semantic_block` field, which Steps 3-4 use as the matching key.
-Kernel names already identical in both traces unify by default (no map entry
-needed); the LLM only maps names that differ but denote the same operation.
+The LLM unifies raw **kernel names** across the two traces. The unified name is written into each kernel's `semantic_block` field. Kernel names already identical in both traces unify by default (no map entry needed); the LLM only maps names that differ but denote the same operation
 
 Scripts: `TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py`
 
@@ -179,10 +167,7 @@ The context lists each trace's unique kernel names with `perf_categories`,
 
 If Step 2.1 prints `STEM PREPROCESSING NEEDED` (combined unique names exceed
 the threshold, default 5000), the raw name set is too large for the LLM.
-Follow `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/kernel-stem-preprocessing-agent.md`:
-the LLM inspects the emitted `sample`, authors `stem_rules.json` (custom
-regexes that collapse high-cardinality families to stems, preserve families
-whose parameters matter for later analysis, drop noise), then:
+Launch the subagent `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/kernel-stem-preprocessing-agent.md`, then:
 
 ```bash
 python $KU apply-stem-rules \
@@ -194,18 +179,12 @@ python $KU apply-stem-rules \
     -o <output_dir>/_work/kernel_unification_context.json
 ```
 
-Re-run until the printed stem count is within budget. This rewrites
-`kernel_unification_context.json` at the stem level and emits
-`raw_to_stem.json` (needed by 2.4). **Skip this step entirely when not flagged.**
+Re-run until the printed stem count is within budget.
 
-### 2.3 Launch Kernel Unification Agent [LLM]
+### 2.3 Launch Kernel Unification Agent
 
 Read `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/kernel-unification-agent.md` and
-launch it with `kernel_unification_context.json` inline. It writes
-`<output_dir>/_work/kernel_unification_map.json` (`map_a` / `map_b`), mapping
-only names it is certain are equivalent, using the same unified value on both
-sides for a matched pair. For multi-region vLLM: run once per matching region
-pair.
+launch it with `kernel_unification_context.json` inline. For multi-region vLLM: run once per matching region pair.
 
 ### 2.4 Apply the Map [S]
 

@@ -11,6 +11,7 @@ Merged from the former trace_breakdown/_helpers.py (build_rle, detect_period)
 and trace_comparison/_helpers.py (load_labels).
 """
 
+import gzip
 import json
 
 
@@ -67,7 +68,13 @@ def detect_period(rle_groups):
     return n
 
 
+def load_json(path):
+    """Load a JSON file, transparently decompressing .gz input."""
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt") as f:
+        return json.load(f)
+
+
 def load_labels(path):
     """Load a semantic_labels.json file."""
-    with open(path) as f:
-        return json.load(f)
+    return load_json(path)

@@ -65,9 +65,13 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import OrderedDict
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _helpers import load_json
 
 
 DEFAULT_THRESHOLD = 5000
@@ -80,8 +84,7 @@ DEFAULT_SAMPLE_SIZE = 300
 
 
 def _load(path):
-    with open(path) as f:
-        return json.load(f)
+    return load_json(path)
 
 
 def _dims_repr(dims, limit=160):
