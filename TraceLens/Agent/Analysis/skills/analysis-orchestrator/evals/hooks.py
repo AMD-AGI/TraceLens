@@ -41,6 +41,7 @@ TRACELENS_REF = os.environ.get("TRACELENS_REF", "").strip()
 UNIT_TESTS_ARCHIVE = "unit_tests_standalone.tar.gz"
 ANALYSIS_TESTS = "agent_evals/Analysis/analysis_tests"
 COMBINED_TRACES_CSV = f"{ANALYSIS_TESTS}/combined_traces_standalone.csv"
+WORKFLOW_EVAL_SCRIPT = "agent_evals/Analysis/eval_utils/workflow_scripted_evals.py"
 
 # The default repeatability order starts here. Asserted rather than assumed, so
 # an upstream reordering surfaces as a clear failure instead of silently
@@ -108,7 +109,9 @@ def setup_session(cache_dir: Path) -> dict:
     tracelens_dir = _clone_tracelens(cache_dir).resolve()
     _extract_unit_tests(tracelens_dir)
 
-    with (tracelens_dir / COMBINED_TRACES_CSV).open(newline="", encoding="utf-8") as handle:
+    with (tracelens_dir / COMBINED_TRACES_CSV).open(
+        newline="", encoding="utf-8"
+    ) as handle:
         row = next(csv.DictReader(handle))
     if row["id"] != EXPECTED_CASE_ID:
         raise RuntimeError(
@@ -152,10 +155,13 @@ def check(run, case, ctx: dict) -> None:
     _run(
         [
             str(venv_python),
-            str(tracelens_dir / "agent_evals/Analysis/eval_utils/workflow_scripted_evals.py"),
-            "--output-dir", str(output_dir),
-            "--results", str(results_csv),
-            "--comparison-scope", "standalone",
+            str(tracelens_dir / WORKFLOW_EVAL_SCRIPT),
+            "--output-dir",
+            str(output_dir),
+            "--results",
+            str(results_csv),
+            "--comparison-scope",
+            "standalone",
         ],
         cwd=tracelens_dir,
     )
