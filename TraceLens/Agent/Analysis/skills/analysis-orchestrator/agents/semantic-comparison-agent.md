@@ -206,11 +206,14 @@ shared vocabulary.
 ### 2.6 Coherence Pass (second pass, LLM)
 
 The first pass leaves **one-sided** buckets -- kernels whose unified name
-appears in only one trace (e.g. vendor GEMM families that use different
-naming conventions per platform). This pass uses the first-pass **shared**
-buckets as cross-trace positional anchors and re-labels one-sided buckets
-by their shared-neighbor context. Skip it only if `apply-map` already
-reported no meaningful one-sided buckets.
+appears in only one trace (most importantly vendor GEMM families: e.g.
+`(vendor1_gemm_name)_*` on one platform vs `(vendor2_gemm_name)_*` on the
+other, which cannot be paired by name). This pass uses
+the first-pass **shared** buckets as cross-trace positional anchors and
+re-labels one-sided buckets by their shared-neighbor context, which (a)
+pairs GEMMs across vendors by position and (b) splits a name that occurs in
+different contexts. Skip it only if `apply-map` already reported no
+meaningful one-sided buckets.
 
 **2.6a Prepare coherence context [S]**
 ```bash
@@ -241,8 +244,9 @@ python $KC apply \
 
 `apply` rewrites `semantic_block` in place and prints any residual one-sided
 condensed symbols. If meaningful (non-singleton) symbols remain, revise the
-decisions and re-run 2.6b--2.6c, or increase `--neighbor-radius` in 2.6a;
-residual singletons with no counterpart may be accepted.
+decisions and re-run 2.6b--2.6c; residual pre/post-layer singletons (setup /
+copy / prefix-scan kernels with no counterpart) may be accepted. Increase
+`--neighbor-radius` in 2.6a if one-sided buckets share an ambiguous context.
 
 ---
 

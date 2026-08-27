@@ -86,14 +86,20 @@ Write to the output directory. Exact shape:
   "name_b": "B300",
   "map_a": {
     "moe_attn_vllm": "moe_attn",
-    "Cijk_Alik_Bljk_..._MT32x16x512_...": "expert_gemm"
+    "(vendor1_gemm_name)_(shape1)": "expert_gemm"
   },
   "map_b": {
     "sglang_moe_attention": "moe_attn",
-    "nvjet_sm103_tst_128x16_...": "expert_gemm"
+    "(vendor2_gemm_name)_(shape1)": "expert_gemm"
   }
 }
 ```
+
+Using the same `(shape1)` on both sides shows *why* this pairs: two vendors'
+differently-mangled names for the same GEMM tile shape/role -- not license to
+collapse every GEMM in a trace into one bucket; kernels with distinct shapes
+or otherwise clearly serving distinct per-layer roles should stay separate
+keys.
 
 - `map_a` keys are `name_a` names; `map_b` keys are `name_b` names.
 - A pair is unified when a `map_a` value equals a `map_b` value.

@@ -40,7 +40,7 @@ if _this_dir not in sys.path:
 
 from TraceLens.util import DataLoader
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.Trace2Tree.trace_capture_merge import merge_capture_trace_into_graph
+from TraceLens.Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 from _helpers import load_json
 
 
