@@ -63,7 +63,8 @@ in `only_in_<name_b>` when you are **certain** they are the same operation.
    unsure, leave both names unmapped -- they fall back to their raw name / stem
    and simply remain unmatched. This pass builds anchors, not a full
    resolution.
-2. **Skip identical names.** Anything in `in_both` is already unified. No entry.
+2. **Skip identical names.** Anything in `in_both` is already unified. Do NOT
+   add map entries for them.
 3. **Preserve granularity.** Do not merge two functionally distinct kernels
    because their names look similar. Do not collapse a family that a later
    analysis stage may want to keep separate (e.g. distinct attention variants).

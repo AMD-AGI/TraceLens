@@ -148,22 +148,6 @@ def _entry_list(agg, keys):
     return [e for name, e in agg.items() if name in keyset]
 
 
-UNIFICATION_RULES = [
-    "Map ONLY names you are confident are the same operation across traces.",
-    "Names already identical in both traces are unified by default -- do NOT "
-    "add map entries for them.",
-    "Prefer preserving granularity: do not merge two functionally distinct "
-    "kernels just because names look similar.",
-    "This pass establishes clear anchors, not a full resolution of every "
-    "ambiguity; leave uncertain names unmapped (they fall back to their raw "
-    "name / stem).",
-    "Values are short shared unified names; use the SAME value on both sides "
-    "for a matched pair.",
-    "Keys must be exact names (or stems, when stem preprocessing was applied) "
-    "taken verbatim from the context lists.",
-]
-
-
 def _build_context(agg_a, agg_b, name_a, name_b, level, extra=None):
     """Assemble the unification-context dict from two aggregations."""
     set_a = set(agg_a)
@@ -184,7 +168,6 @@ def _build_context(agg_a, agg_b, name_a, name_b, level, extra=None):
         f"only_in_{name_a}": len(only_a),
         f"only_in_{name_b}": len(only_b),
     }
-    ctx["rules"] = UNIFICATION_RULES
     ctx[f"only_in_{name_a}"] = _entry_list(agg_a, only_a)
     ctx[f"only_in_{name_b}"] = _entry_list(agg_b, only_b)
     ctx["in_both"] = in_both
