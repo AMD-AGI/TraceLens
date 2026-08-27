@@ -164,9 +164,9 @@ Do NOT proceed to Step 1 until validation passes.
 
 ## Step 0.5: Comparison Method Detection (comparative only)
 
-For `standalone`, skip this step — `<comparison_method>` is unused.
+For `standalone`, skip this step.
 
-For `comparative`, auto-detect the comparison path (structural **TraceDiff** vs **semantic**). Pass `--capture{1,2}-available` for any trace that had a capture folder collected, so a graph-mode trace with capture is not needlessly routed to semantic:
+For `comparative`, auto-detect the comparison path (structural **TraceDiff** vs **semantic**). Pass `--capture{1,2}-available` for any trace that had a capture folder collected:
 
 ```bash
 <prefix> python3 TraceLens/Agent/Analysis/utils/comparison_routing.py \
@@ -175,7 +175,7 @@ For `comparative`, auto-detect the comparison path (structural **TraceDiff** vs 
   [--capture1-available] [--capture2-available]
 ```
 
-Set `<comparison_method>` to the printed `method` field and echo `reasons`. The script routes to `semantic` only when the frameworks differ or a trace is graph-mode with no capture available; otherwise `tracediff`.
+Set `<comparison_method>` to the printed `method` field and echo `reasons`.
 
 If `method` is `semantic` and a graph-mode trace is involved but capture folders were not collected in Step 0, ask for them now: `<capture_folder_path>` (trace1) and `<capture_folder_path2>` (trace2).
 
@@ -211,8 +211,6 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 | `comparative` trace1 | `--comparison_json_path <trace2_path>` |
 | `comparative` trace1 if `<capture_folder_path2>` provided | `--comparison_json_path <trace2_path> --comparison_capture_folder <capture_folder_path2>` |
 | `comparative` trace2 | none |
-
-> **Semantic comparison method** (`<comparison_method>` = `semantic`, decided in Step 0.5): the `<suffix_2>` values above are the `tracediff` path. For the semantic method, trace1's report instead consumes a precomputed diff via `--precomputed_diff_stats_csv <output_dir>/_semantic/tracediff_output/diff_stats.csv` — see **Step 1.S** for the required ordering.
 
 **`<suffix_3>`** — graph capture flags:
 
@@ -276,13 +274,11 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
   <suffix_ext>
 ```
 
-(For comparative graph mode, the trace2 report uses `--capture_folder <capture_folder_path2>`.)
-
 ---
 
 ## Step 1.S: Semantic Comparative Ordering (`<comparison_method>` = `semantic` only)
 
-When `<comparison_scope>` = `comparative` and `<comparison_method>` = `semantic`, run Step 1 in this order so the trace1 report can consume the semantic diff:
+When `<comparison_scope>` = `comparative` and `<comparison_method>` = `semantic`, run Step 1 in this order:
 
 1. **Trace2 report** — run the analysis-mode CLI above for trace2 using the `comparative` trace2 `<suffix_1>` and empty `<suffix_2>` (identical to the TraceDiff path). For graph mode add `--capture_folder <capture_folder_path2>`.
 
@@ -306,11 +302,9 @@ Run the full semantic comparison through "Generate TraceDiff Output" so that
 
    Verify `<output_dir>/_semantic/tracediff_output/diff_stats.csv` exists before continuing. If it is missing, retry the subagent once; if it still fails, stop and report.
 
-3. **Trace1 report** — run the analysis-mode CLI for trace1 with the `comparative` trace1 `<suffix_1>` and `<suffix_2>` = `--precomputed_diff_stats_csv <output_dir>/_semantic/tracediff_output/diff_stats.csv`. For graph mode also add `--capture_folder <capture_folder_path>`. This produces the enriched `unified_perf_summary` and the `diff_stats` sheet in `perf_report_trace1_csvs` (same enrichment as the tracediff path).
+3. **Trace1 report** — run the analysis-mode CLI for trace1 with the `comparative` trace1 `<suffix_1>` and `<suffix_2>` = `--precomputed_diff_stats_csv <output_dir>/_semantic/tracediff_output/diff_stats.csv`. For graph mode also add `--capture_folder <capture_folder_path>`.
 
 4. **Confirm** `<output_dir>/perf_report_trace1_csvs/diff_stats.csv` exists (written by the report script). If absent, copy `<output_dir>/_semantic/tracediff_output/diff_stats.csv` to that path so the comparative fusion step (Steps 2-5) can read it.
-
-After Step 1.S, proceed to Steps 2-5 unchanged.
 
 ---
 
@@ -707,6 +701,6 @@ If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report
 
 If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses the following features before retrying:
 - **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
-  - **Comparative scope** (`<comparison_scope>` = `comparative`): graph replay is **supported — do not abort**. Step 0.5 routes on capture availability: graph traces **with** capture folders use the direct capture-folder comparison path (tracediff + `--comparison_capture_folder`); graph traces **without** capture use the **semantic** comparison path (follow Step 1.S). Ensure capture folders were collected for both traces when available.
+  - **Comparative scope**: graph replay is **supported**; routing (tracediff+capture vs semantic) was already decided in Step 0.5. Ensure capture folders were collected for both traces when available.
   - **Default mode, standalone** (analysis_mode = `default`): Inform the user with `[DIAG:trace_quality:GPU_GRAPH_REPLAY]` that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
-  - **Inference mode, standalone** (analysis_mode = `inference`): Graph launches are expected and supported if graph capture folder is provided, do not abort. If inference_exec_mode is `eager` (no capture folder was provided), continue.
+  - **Inference mode, standalone**: graph launches are expected and supported; continue whether or not a capture folder was provided (eager mode has none).

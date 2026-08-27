@@ -146,7 +146,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 <!-- === COMPARATIVE Top Operations === -->
 `Trace 2 Time (ms)` = matching `manifest.trace2_ops_summary_by_category[]["total_direct_kernel_time_ms"]` where `"op category"` matches the row Category **case-insensitively**; use — if no match. This field is the semantic-aligned trace2 total (trace2 kernel time rolled up to trace1 categories via the LCA alignment), so it is consistent with the Detailed Analysis cards' per-op Trace 2 times. (`manifest.trace2_ops_summary_by_category_raw` holds the legacy per-framework breakdown for reference only — do NOT use it here.)
 `Difference (ms)` = Trace 2 Time − Trace 1 Time.
-Note: `% of Compute Time` is Trace 1 kernel time / Trace 1 compute-only time; for communication categories (e.g. collectives) this can exceed 100% because the kernel time is not compute-bound — report the value as computed.
+Note: for communication categories (e.g. collectives), `% of Compute Time` can exceed 100% because the kernel time is not compute-bound — report the value as computed.
 <!-- impact-begin kind=top_ops -->
 | Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Difference (ms) |
 |------|----------|-------------------|-------------------|-------------------|-----|-----------------|

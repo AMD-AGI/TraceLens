@@ -201,19 +201,16 @@ python $KU apply-map \
 
 Check that `kernel_unification_context.json` and `kernel_unification_map.json`
 exist in `<output_dir>/_work/`, and that `apply-map` reported a non-empty
-shared vocabulary. Every kernel now carries a `semantic_block` set to its
-unified kernel name.
+shared vocabulary.
 
 ### 2.6 Coherence Pass (second pass, LLM)
 
 The first pass leaves **one-sided** buckets -- kernels whose unified name
-appears in only one trace (most importantly vendor GEMM families: MI300
-`Cijk_*` vs B300 `nvjet_*`, which cannot be paired by name). This pass uses
-the first-pass **shared** buckets as cross-trace positional anchors and
-re-labels one-sided buckets by their shared-neighbor context, which (a) pairs
-GEMMs across vendors by position and (b) splits a name that occurs in different
-contexts. Skip it only if `apply-map` already reported no meaningful one-sided
-buckets.
+appears in only one trace (e.g. vendor GEMM families that use different
+naming conventions per platform). This pass uses the first-pass **shared**
+buckets as cross-trace positional anchors and re-labels one-sided buckets
+by their shared-neighbor context. Skip it only if `apply-map` already
+reported no meaningful one-sided buckets.
 
 **2.6a Prepare coherence context [S]**
 ```bash
@@ -244,9 +241,8 @@ python $KC apply \
 
 `apply` rewrites `semantic_block` in place and prints any residual one-sided
 condensed symbols. If meaningful (non-singleton) symbols remain, revise the
-decisions and re-run 2.6b--2.6c; residual pre/post-layer singletons (setup /
-copy / prefix-scan kernels with no counterpart) may be accepted. Increase
-`--neighbor-radius` in 2.6a if one-sided buckets share an ambiguous context.
+decisions and re-run 2.6b--2.6c, or increase `--neighbor-radius` in 2.6a;
+residual singletons with no counterpart may be accepted.
 
 ---
 
@@ -269,16 +265,12 @@ Produces in `<output_dir>/tracediff_output/`:
 This is a **final deliverable** directory for downstream TraceDiff consumers.
 
 **Perf-report enrichment compatibility:** `diff_stats.csv` carries a
-per-kernel `gpu_op_uid` (the TraceTree UID, identical to the perf report's
-`kernel_details[].gpu_op_uid`) and a per-LCA `busy_time`. This makes it
+per-kernel `gpu_op_uid` (identical to the perf report's
+`kernel_details[].gpu_op_uid`) and a per-LCA `busy_time`, making it
 consumable by `enrich_perf_report_dict_inplace` in
 `TraceLens/Reporting/tracediff_comparison_extension.py`, which matches
 diff rows to `unified_perf_summary` rows via `gpu_op_uid` and adds the
-speedup / delta / LCA columns. The enrichment is invoked at the
-orchestrator layer (passing the semantic `diff_stats` plus the trace-1
-`df_unified_perf`); `generate_perf_report_pytorch.py` is unchanged and
-retains its own in-memory TraceDiff path for the `--comparison_json_path`
-flow.
+speedup / delta / LCA columns.
 
 ---
 
@@ -306,15 +298,9 @@ python TraceLens/Agent/Analysis/semantic_analyses/match_and_compare.py \
 
 ## Key Principles
 
-1. **Seamless flow** -- user provides two trace paths, orchestrator handles
-   everything
-2. **Parallel breakdown** -- both traces processed as parallel shell jobs
-3. **Name-first unification** -- kernel names are unified across traces to
-   establish matching anchors; identical names unify by default
-4. **Conservative anchors** -- map only certain equivalences; preserve
+1. **Conservative anchors** -- map only certain equivalences; preserve
    granularity and leave uncertain names unmapped
-5. **Vendor-agnostic language** -- generic terms for all recommendations
-6. **No script creation** -- subagents use only existing scripts (the stem
+2. **No script creation** -- subagents use only existing scripts (the stem
    preprocessing authors regex *rules*, not new scripts)
 
 ---
@@ -324,16 +310,16 @@ python TraceLens/Agent/Analysis/semantic_analyses/match_and_compare.py \
 ```
 <output_dir>/
   _work/
-    <name_a>/semantic_labels.json     # Per-trace labels (semantic_block = unified kernel name)
+    <name_a>/semantic_labels.json
     <name_b>/semantic_labels.json
-    kernel_unification_context.json    # Pass 1 LLM input: unique kernel names + stats
-    kernel_unification_map.json        # Pass 1 LLM output: cross-trace name map
-    raw_to_stem.json                   # Only when stem preprocessing ran
-    kernel_coherence_context.json      # Pass 2 LLM input: one-sided buckets + neighbor context
-    kernel_coherence_decisions.json    # Pass 2 LLM output: context_renames + fallbacks
-    per_kernel_final_<name>.csv        # Pass 2 audit: first_pass -> final block per kernel
-    comparison.csv                     # Cross-trace comparison
-  tracediff_output/                    # TraceDiff-compatible output
+    kernel_unification_context.json
+    kernel_unification_map.json
+    raw_to_stem.json
+    kernel_coherence_context.json
+    kernel_coherence_decisions.json
+    per_kernel_final_<name>.csv
+    comparison.csv
+  tracediff_output/
     diff_stats.csv
     diff_stats_unique_args_summary.csv
     cpu_op_map.json
