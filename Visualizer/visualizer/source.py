@@ -6,12 +6,24 @@ import importlib.util
 from pathlib import Path
 from typing import Any
 
-from visualizer.github import fetch_github_source, find_modeling_files, is_github_url, parse_github_url
+from visualizer.github import (
+    fetch_github_source,
+    find_modeling_files,
+    is_github_url,
+    parse_github_url,
+    python_source_priority,
+)
 
 MODELING_CANDIDATES = (
     "modeling_{model_type}.py",
     "modeling.py",
 )
+
+# Checkpoints for transformers-native architectures (Qwen3, MiniMax-M3, ...) ship
+# no modeling code of their own, so the implementation is read from upstream.
+TRANSFORMERS_GITHUB_SOURCE = "github:huggingface/transformers@main"
+TRANSFORMERS_MODELING_SUBPATH = "src/transformers/models/{model_type}/modeling_{model_type}.py"
+NESTED_CONFIG_KEYS = ("text_config", "language_config", "llm_config", "decoder_config")
 
 
 def _module_file(module_ref: str) -> str:
@@ -35,6 +47,54 @@ def _collect_auto_map_files(config: dict[str, Any]) -> list[str]:
 
 def _local_modeling_files(root: Path) -> list[Path]:
     return find_modeling_files(root)
+
+
+def _hub_cache_root() -> Path:
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        return Path(HF_HUB_CACHE)
+    except ImportError:
+        return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _hub_snapshot_root(model_id: str) -> Path | None:
+    """Local Hugging Face snapshot directory for a model id, if one is cached."""
+    slug = "models--" + model_id.replace("/", "--")
+    base = _hub_cache_root() / slug
+    snapshots = base / "snapshots"
+    if not snapshots.is_dir():
+        return None
+    for ref_name in ("main", "master"):
+        ref_file = base / "refs" / ref_name
+        if not ref_file.is_file():
+            continue
+        revision = ref_file.read_text(encoding="utf-8").strip()
+        candidate = snapshots / revision
+        if candidate.is_dir():
+            return candidate
+    newest = sorted(
+        (path for path in snapshots.iterdir() if path.is_dir()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return newest[0] if newest else None
+
+
+def _list_repo_python_files(model_id: str) -> list[str]:
+    """Every Python path in a Hugging Face repo, recursively."""
+    try:
+        from huggingface_hub import list_repo_files
+    except ImportError:
+        return []
+    try:
+        return [
+            name
+            for name in list_repo_files(model_id)
+            if name.endswith(".py") and "__pycache__" not in name.split("/")
+        ]
+    except Exception:
+        return []
 
 
 def _download_repo_files(model_id: str, filenames: list[str]) -> list[Path]:
@@ -77,6 +137,44 @@ def _transformers_modeling_path(model_type: str) -> Path | None:
     return origin if origin.is_file() else None
 
 
+def _config_model_types(config: dict[str, Any]) -> list[str]:
+    """Model types to look up upstream, outer wrapper first then its text backbone."""
+    types: list[str] = []
+    candidates = [config.get("model_type")]
+    for key in NESTED_CONFIG_KEYS:
+        nested = config.get(key)
+        if isinstance(nested, dict):
+            candidates.append(nested.get("model_type"))
+    for candidate in candidates:
+        model_type = str(candidate or "").strip().replace("-", "_")
+        if model_type and model_type not in types:
+            types.append(model_type)
+    return types
+
+
+def _transformers_github_modeling_file(model_types: list[str]) -> tuple[Path, str] | None:
+    """Fetch a transformers-native modeling file from GitHub, newest ref first."""
+    for model_type in model_types:
+        subpath = TRANSFORMERS_MODELING_SUBPATH.format(model_type=model_type)
+        try:
+            ref = parse_github_url(f"{TRANSFORMERS_GITHUB_SOURCE}:{subpath}")
+            path = fetch_github_source(ref)
+        except Exception:
+            continue
+        if path.is_file():
+            return path, ref.display
+    return None
+
+
+def _has_modeling_implementation(files: list[Path]) -> bool:
+    """True when a resolved file can hold module definitions, not just config/processing."""
+    for path in files:
+        name = path.name.lower()
+        if name.startswith("modeling") or name in {"model.py", "models.py"}:
+            return True
+    return False
+
+
 def _dedupe_paths(files: list[Path]) -> list[Path]:
     seen: set[Path] = set()
     unique: list[Path] = []
@@ -99,7 +197,7 @@ def resolve_github_files(github: str) -> tuple[list[Path], str]:
     files = _local_modeling_files(root)
     if not files:
         raise FileNotFoundError(
-            f"No modeling*.py files found in GitHub source {label}. "
+            f"No Python source files found in GitHub source {label}. "
             "Pass a deeper --github-path or use --code-path."
         )
     return files, label
@@ -139,14 +237,6 @@ def resolve_source_files(
         gh_files, gh_label = resolve_github_files(str(source))
         return gh_files, [gh_label]
 
-    model_type = str(config.get("model_type") or "")
-    if model_type and not files:
-        tf_path = _transformers_modeling_path(model_type)
-        if tf_path is not None:
-            files.append(tf_path)
-            labels.append(str(tf_path))
-
-    auto_map_files = _collect_auto_map_files(config)
     model_id = None
     if path is not None and not path.exists():
         model_id = str(source)
@@ -156,11 +246,31 @@ def resolve_source_files(
         model_id = str(source)
 
     if model_id and not files:
+        snapshot = _hub_snapshot_root(model_id)
+        if snapshot is not None:
+            snapshot_files = _local_modeling_files(snapshot)
+            files.extend(snapshot_files)
+            if snapshot_files:
+                labels.append(f"hf://{model_id}")
+
+    model_type = str(config.get("model_type") or "")
+    if model_type and not files:
+        tf_path = _transformers_modeling_path(model_type)
+        if tf_path is not None:
+            files.append(tf_path)
+            labels.append(str(tf_path))
+
+    auto_map_files = _collect_auto_map_files(config)
+
+    if model_id and not files:
         hf_files = _download_repo_files(model_id, auto_map_files)
         files.extend(hf_files)
-        if hf_files:
+        repo_python = _list_repo_python_files(model_id)
+        downloaded = _download_repo_files(model_id, repo_python)
+        files.extend(downloaded)
+        if files and f"hf://{model_id}" not in labels:
             labels.append(f"hf://{model_id}")
-        if not auto_map_files and model_type:
+        elif not files and not auto_map_files and model_type:
             fallback = _download_repo_files(
                 model_id,
                 [name.format(model_type=model_type) for name in MODELING_CANDIDATES],
@@ -169,7 +279,16 @@ def resolve_source_files(
             if fallback and f"hf://{model_id}" not in labels:
                 labels.append(f"hf://{model_id}")
 
-    return _dedupe_paths(files), labels
+    if not _has_modeling_implementation(files):
+        upstream = _transformers_github_modeling_file(_config_model_types(config))
+        if upstream is not None:
+            path, label = upstream
+            files.append(path)
+            labels.append(label)
+
+    # Analysis reads the files in order, so modeling code has to precede the
+    # config and processing helpers a checkpoint may also ship.
+    return sorted(_dedupe_paths(files), key=python_source_priority), labels
 
 
 def read_sources(paths: list[Path]) -> dict[Path, str]:

@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from pathlib import Path
 
 from visualizer.ast_analyze import SYNTHETIC_ATTENTION, analyze_source
 from visualizer.basic_ops import BasicOpFilter
 from visualizer.block_tree import BlockNode, build_decoder_block_trees
-from visualizer.computation_graph import SYNTHETIC_INPUT, build_computation_graph
+from visualizer.computation_graph import (
+    SYNTHETIC_INPUT,
+    SYNTHETIC_OUTPUT,
+    build_computation_graph,
+)
 from visualizer.extract import load_architecture
 from visualizer.model_graph import (
     NodeKind,
@@ -82,8 +87,114 @@ def test_classify_operation_kinds():
     )
     assert classify_operation(kernel) == OperationKind.GPU_KERNEL
 
+    kernel_subop = BlockNode(
+        attr_name="tl_dot",
+        class_name="KernelSubOp",
+        role="other",
+        label="tl.dot",
+    )
+    assert classify_operation(kernel_subop) == OperationKind.GPU_KERNEL
+
+    torch_exp = BlockNode(
+        attr_name="fused_sub_0",
+        class_name="KernelSubOp",
+        role="other",
+        label="Exp",
+    )
+    assert classify_operation(torch_exp) == OperationKind.TORCH_FUNCTIONAL
+
+    torch_cumsum = BlockNode(
+        attr_name="gate_sub_1",
+        class_name="KernelSubOp",
+        role="other",
+        label="CumSum",
+    )
+    assert classify_operation(torch_cumsum) == OperationKind.TORCH_FUNCTIONAL
+
+    fused_sigmoid = BlockNode(
+        attr_name="fused_beta_sigmoid",
+        class_name="KernelOp",
+        role="other",
+        label="Fused beta sigmoid",
+    )
+    assert classify_operation(fused_sigmoid) == OperationKind.GPU_KERNEL
+
+    intra_chunk = BlockNode(
+        attr_name="chunk_kda_fwd_intra",
+        class_name="KernelOp",
+        role="other",
+        label="Intra-chunk WY",
+    )
+    assert classify_operation(intra_chunk) == OperationKind.GPU_KERNEL
+
+    nn_attention = BlockNode(
+        attr_name="@attention",
+        class_name="AttentionOp",
+        role="attention",
+        label="Attention",
+        details=["kernel: sdpa_attention_forward"],
+    )
+    assert classify_operation(nn_attention) == OperationKind.TORCH_FUNCTIONAL
+
     assert classify_operation(None, synthetic=SYNTHETIC_INPUT, label="hidden_states") == OperationKind.SYNTHETIC
+    assert classify_operation(None, synthetic=SYNTHETIC_OUTPUT, label="Output") == OperationKind.SYNTHETIC
     assert classify_operation(None, synthetic=None, label="×") == OperationKind.SYNTHETIC
+
+
+def test_library_attention_is_a_kernel_but_torch_attention_is_not():
+    """Flash-attn and friends are fused library kernels; SDPA and eager are torch."""
+
+    def attention(kernel: str) -> BlockNode:
+        return BlockNode(
+            attr_name="@attention",
+            class_name="AttentionOp",
+            role="attention",
+            label="Attention",
+            details=[f"kernel: {kernel}"],
+        )
+
+    for kernel in ("sdpa", "eager", "sdpa_attention_forward", "torch.nn.attention.flex_attention"):
+        assert classify_operation(attention(kernel)) == OperationKind.TORCH_FUNCTIONAL, kernel
+
+    for kernel in ("flash_attention_2", "flash_attn_varlen_func", "xformers", "transformer_engine"):
+        assert classify_operation(attention(kernel)) == OperationKind.GPU_KERNEL, kernel
+
+    unresolved = BlockNode(
+        attr_name="@attention",
+        class_name="AttentionOp",
+        role="attention",
+        label="Attention",
+    )
+    assert classify_operation(unresolved) == OperationKind.GPU_KERNEL, (
+        "attention nobody could resolve to a torch call stays a kernel"
+    )
+
+
+def test_dispatched_attention_resolves_through_the_checkpoint_config():
+    """A forward that calls an attention variable gets its kernel from the config."""
+    from visualizer.ast_analyze import kernel_name_from_step_details
+
+    source = textwrap.dedent(
+        """
+        class Attention(nn.Module):
+            def forward(self, hidden_states):
+                query_states = self.q_proj(hidden_states)
+                attention_interface = eager_attention_forward
+                if self.config._attn_implementation != "eager":
+                    attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+                attn_output, _ = attention_interface(self, query_states, k, v, scaling=self.scaling)
+                return attn_output
+        """
+    )
+
+    def kernel_for(config: dict[str, str]) -> str | None:
+        analysis = analyze_source(source, config=config)
+        details = analysis.class_registry["Attention"].forward_step_details[SYNTHETIC_ATTENTION]
+        return kernel_name_from_step_details(details)
+
+    assert kernel_for({}) == "attention_interface", "no config leaves the variable name"
+    assert kernel_for({"_attn_implementation": "flash_attention_2"}) == "flash_attention_2"
+    assert kernel_for({"_attn_implementation": "sdpa"}) == "sdpa"
 
 
 def test_build_model_graph_matches_computation_graph_topology():
@@ -97,11 +208,43 @@ def test_build_model_graph_matches_computation_graph_topology():
 
     labels = {node.label for node in model_graph.nodes}
     assert "hidden_states" in labels
-    assert "×" in labels
+    assert "Multiply" in labels
     assert "Attention" in labels
 
     operations = {node.label: node.operation for node in model_graph.nodes}
-    assert operations["Attention"] == OperationKind.GPU_KERNEL
+    assert operations["Attention"] == OperationKind.GPU_KERNEL, "the fixture runs a flash-attn kernel"
+
+
+def test_expanded_kernel_pipeline_is_composite_but_its_kernel_stays_low_level():
+    pipeline = BlockNode(
+        attr_name="@attn_pipeline",
+        class_name="KernelPipeline",
+        role="attention",
+        label="sparse_attn pipeline",
+        children=[
+            BlockNode(
+                attr_name="@kernel",
+                class_name="KernelOp",
+                role="other",
+                label="Sparse attn kernel",
+                details=["kernel: sparse_attn_kernel"],
+            )
+        ],
+    )
+
+    assert classify_operation(pipeline) == OperationKind.COMPOSITE
+    assert classify_operation(pipeline.children[0]) == OperationKind.GPU_KERNEL
+
+
+def test_contiguous_kernel_step_is_a_torch_operation():
+    contiguous = BlockNode(
+        attr_name="@pipeline_contiguous",
+        class_name="KernelOp",
+        role="other",
+        label="Contiguous",
+        details=["kernel: contiguous"],
+    )
+    assert classify_operation(contiguous) == OperationKind.TORCH_FUNCTIONAL
 
 
 def test_model_graph_json_roundtrip():
@@ -227,14 +370,10 @@ def test_model_graph_edge_styles():
         (edge.source, edge.target) for edge in model_graph.edges if edge.style == "dashed"
     }
     assert model_dashed == dashed_pairs
-    side_pairs = {
-        (computation.nodes[src].key or f"node:{src}", computation.nodes[tgt].key or f"node:{tgt}")
-        for src, tgt in computation.side_entry_links
-    }
     model_side = {
         (edge.source, edge.target) for edge in model_graph.edges if edge.style == "side"
     }
-    assert model_side == side_pairs
+    assert not model_side
 
 
 def test_model_graph_subgraphs_for_nested_composites():

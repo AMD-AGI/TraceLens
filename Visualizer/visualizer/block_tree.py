@@ -19,6 +19,8 @@ from visualizer.ast_analyze import (
     functional_display_label,
     is_functional_synthetic,
     is_forward_operation,
+    is_positional_synthetic,
+    positional_display_label,
     is_kernel_pipeline_step,
     kernel_kwarg_ports,
     kernel_name_from_step_details,
@@ -259,6 +261,11 @@ def _is_substitutable_single_op_subgraph(
     """True when a composite wrapper should be replaced by its single inner op."""
     if is_method_wrapper(node) or node.is_basic:
         return False
+    # A helper such as MiniMaxM3VLRMSNorm._norm is implementation detail. Replacing
+    # the wrapper with that helper turns the semantically useful "RMSNorm" tile into
+    # a generic "Norm" tile.
+    if node.role == "norm":
+        return False
     if is_inline_expandable_module(node):
         return False
     if not _is_composite_block(node):
@@ -296,6 +303,9 @@ def expand_block_tree_inplace(
         expand_block_tree_inplace(child, basic_ops=basic_ops) for child in node.children
     ]
     node = _clone_block_node(node, children=expanded_children)
+
+    if node.role == "norm" and len(node.children) == 1 and is_method_wrapper(node.children[0]):
+        return _clone_block_node(node, children=[])
 
     if _is_substitutable_single_op_subgraph(node, basic_ops=basic_ops):
         substitute = _substitute_single_op_subgraph(node, basic_ops=basic_ops)
@@ -358,6 +368,41 @@ def is_kernel_pipeline_tree(node: BlockNode) -> bool:
     return node.class_name == "KernelPipeline" and bool(node.children)
 
 
+def _bypass_spans(node: BlockNode) -> list[tuple[int, int]]:
+    """Step ranges that a tensor skips over on its way to a later step."""
+    step_index = {
+        child.attr_name: index
+        for index, child in enumerate(node.children)
+        if child.attr_name
+    }
+    spans: list[tuple[int, int]] = []
+    for child in node.children:
+        target = step_index.get(child.attr_name)
+        if target is None:
+            continue
+        for name in child.operation_predecessors:
+            source = step_index.get(name)
+            if source is not None and target - source > 1:
+                spans.append((source, target))
+    return spans
+
+
+def _has_overlapping_bypass_spans(node: BlockNode) -> bool:
+    """True when bypassed step ranges nest or cross each other.
+
+    Inline expansion draws a bypass by offsetting the steps it skips into a single
+    side column. Consecutive bypasses reuse that column in turn, but nested or
+    crossing ones would need columns of their own, so the block only reads clearly
+    as a diagram of its own.
+    """
+    spans = _bypass_spans(node)
+    return any(
+        first is not second and first[0] < second[1] and second[0] < first[1]
+        for index, first in enumerate(spans)
+        for second in spans[index + 1 :]
+    )
+
+
 def is_straight_line_module(node: BlockNode) -> bool:
     """True when a composite block is a simple straight-line pipeline with no branching."""
     if is_kernel_pipeline_tree(node):
@@ -410,12 +455,12 @@ def inline_block_frame_label(block: BlockNode) -> str:
         return block.label
     if block.class_name == "KernelOp" and block.children:
         return block.label
-    inner = straight_line_steps(block) if is_straight_line_module(block) else []
-    if len(inner) > 1 and (
-        block.role == "router" or re.search(r"(?i)(?:gate|router)", block.class_name)
-    ):
-        return block.class_name
     if is_fused_silu_mul_class(block.class_name):
+        return block.class_name
+    # A frame holding a whole computation is identified by the module class that
+    # implements it; a frame around a single step is better named by the attribute
+    # that step is reached through.
+    if len(collect_function_steps(block)) > 1 and block.class_name != block.attr_name:
         return block.class_name
     return block.attr_name
 
@@ -486,24 +531,6 @@ def collect_method_wrappers(node: BlockNode) -> list[BlockNode]:
     for child in node.children:
         wrappers.extend(collect_method_wrappers(child))
     return wrappers
-
-
-def output_gate_combine_sublabel(node: BlockNode | None) -> str | None:
-    """Sublabel for norm×gate combine nodes from gate AST details."""
-    if node is None or not node.details:
-        return None
-    for line in reversed(node.details):
-        if "×" in line:
-            return line
-    return node.details[-1]
-
-
-def gated_norm_combine_sublabel(
-    consumer: BlockNode | None,
-    gate_producer: BlockNode | None,
-) -> str | None:
-    """Gated-norm combine tiles show the × symbol only (no caption)."""
-    return None
 
 
 def _is_output_gate_node(node: BlockNode) -> bool:
@@ -618,7 +645,6 @@ class SideCombineSegment:
     consumer: BlockNode
     sides: list[SideInputSpec]
     op: str
-    op_sublabel: str | None = None
 
 
 @dataclass
@@ -640,15 +666,14 @@ ComputationSegment = (
 )
 
 
-def _method_combine_op(step: BlockNode) -> tuple[str, str | None]:
-    """Map a method wrapper to an operator symbol and short computation label."""
+def _method_combine_op(step: BlockNode) -> str:
+    """Map a method wrapper to its operation label without operand captions."""
     from visualizer.ast_analyze import combine_op_from_step_details
 
     op = combine_op_from_step_details(step.details)
     if op is not None:
-        return op, None
-    label, _attr = wrapper_bullet_lines(step)
-    return "ƒ", label
+        return op
+    return "Function"
 
 
 def _segment_for_step(node: BlockNode, step: BlockNode) -> ComputationSegment:
@@ -667,24 +692,20 @@ def _segment_for_step(node: BlockNode, step: BlockNode) -> ComputationSegment:
     }
 
     if is_method_wrapper(step) and has_prior_side:
-        op, sublabel = _method_combine_op(step)
         return SideCombineSegment(
             consumer=step,
             sides=list(side_specs),
-            op=op,
-            op_sublabel=sublabel,
+            op=_method_combine_op(step),
         )
 
     if has_residual_side and not has_prior_side:
         return ResidualAddSegment(module=step, sides=list(side_specs))
 
     if is_method_wrapper(step):
-        op, sublabel = _method_combine_op(step)
         return SideCombineSegment(
             consumer=step,
             sides=list(side_specs),
-            op=op,
-            op_sublabel=sublabel,
+            op=_method_combine_op(step),
         )
 
     return SideFeedSegment(
@@ -1648,9 +1669,48 @@ def build_block_node(
             )
             continue
 
+        if is_positional_synthetic(call_attr):
+            child_nodes.append(
+                _leaf_node(
+                    attr_name=call_attr,
+                    class_name="PositionalOp",
+                    forward_order=child_order,
+                    details=list(child_details),
+                    label=positional_display_label(call_attr),
+                    basic=False,
+                )
+            )
+            continue
+
         child_class = cls.init_assignments.get(call_attr)
         if child_class is None or child_class in _SKIP_INIT_CLASS_NAMES:
             if child_class in _SKIP_INIT_CLASS_NAMES:
+                continue
+            method_ops = cls.multi_op_methods.get(call_attr)
+            if method_ops and role != "norm":
+                child_nodes.append(
+                    BlockNode(
+                        attr_name=call_attr,
+                        class_name=call_attr,
+                        role=_classify_role(call_attr, call_attr),
+                        label=call_attr.strip("_").replace("_", " "),
+                        forward_order=child_order,
+                        details=[f"method `{call_attr}()`"],
+                        children=[
+                            _leaf_node(
+                                attr_name=operation.attr_name,
+                                class_name=operation.class_name,
+                                forward_order=operation_index,
+                                details=list(operation.details),
+                                label=operation.label,
+                                basic=True,
+                                operation_predecessors=list(operation.predecessors),
+                                external_inputs=list(operation.external_inputs),
+                            )
+                            for operation_index, operation in enumerate(method_ops)
+                        ],
+                    )
+                )
                 continue
             single_op = cls.single_op_methods.get(call_attr)
             if single_op is not None:
@@ -1754,60 +1814,12 @@ def _input_sources_for_components(
     return upstream_input_sources(components)
 
 
-def fallback_positional_tree(positional_encoding: str) -> BlockNode:
-    """Fallback positional pipeline when AST does not declare a rotary module."""
-    return BlockNode(
-        attr_name="rotary_emb",
-        class_name="RotaryEmbedding",
-        role="positional",
-        label=positional_encoding,
-        children=[
-            BlockNode(
-                attr_name="freqs",
-                class_name="RotaryEmbedding",
-                role="other",
-                label="Freq computation",
-                is_basic=False,
-            ),
-            BlockNode(
-                attr_name="apply_rotary",
-                class_name="ApplyRotary",
-                role="other",
-                label="ApplyRotary",
-                is_basic=False,
-            ),
-        ],
-    )
-
-
-_synthetic_rope_tree = fallback_positional_tree
-
-
-def build_positional_block_tree(
-    component: BlockComponent,
-    registry: dict[str, ClassStructure],
-    basic_ops: BasicOpFilter,
-) -> BlockNode:
-    """Build a positional block tree from AST or config fallback."""
-    if component.class_name in registry:
-        return build_block_node(
-            attr_name=component.attr_name,
-            class_name=component.class_name,
-            registry=registry,
-            basic_ops=basic_ops,
-            details=list(component.details),
-        )
-    return fallback_positional_tree(component.label)
-
-
 def build_stack_component_tree(
     component: BlockComponent,
     registry: dict[str, ClassStructure],
     basic_ops: BasicOpFilter,
 ) -> BlockNode:
     """Build a block tree for one main-diagram stack component."""
-    if component.role == "positional":
-        return build_positional_block_tree(component, registry, basic_ops)
     if component.class_name in registry:
         return build_block_node(
             attr_name=component.attr_name,

@@ -45,8 +45,8 @@ def load_model_spec(
     """Load architecture metadata the same way as the SVG generator.
 
     When ``checkpoint`` is a Hugging Face model id, ``config.json`` and
-    ``modeling_*.py`` are resolved from the hub (via ``auto_map`` or
-    ``modeling_{model_type}.py``) unless ``--code-path`` / ``--github`` override
+    Python sources in the cached snapshot (or listed on the hub) are
+    resolved automatically unless ``--code-path`` / ``--github`` override
     the modeling source.
     """
     if require_code and not analyze_code:
@@ -70,8 +70,8 @@ def load_model_spec(
     if require_code and analyze_code and not spec.class_registry:
         raise FileNotFoundError(
             "No modeling source found for AST inspection. Pass a Hugging Face model "
-            "id or local checkpoint directory (config + modeling_*.py are discovered "
-            "automatically), or set --code-path / --github for the modeling file."
+            "id or local checkpoint directory (config.json and nested .py files are "
+            "discovered automatically), or set --code-path / --github for the modeling file."
         )
 
     if require_code and not spec.export_block_trees and not spec.detailed_block_trees:

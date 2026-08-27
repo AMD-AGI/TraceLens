@@ -86,6 +86,12 @@ The visualizer resolves inputs in this order:
 2. **GitHub** — fetches modeling source from a repo URL or `github:owner/repo@ref:path` shorthand
 3. **Explicit paths** — `--config-path` and `--code-path` override auto-discovery
 
+Checkpoints for transformers-native architectures (Qwen3, MiniMax-M3, …) ship no
+modeling code, so `modeling_<model_type>.py` is read from `huggingface/transformers`
+on GitHub — for a multimodal wrapper, the nested text backbone's `model_type` is tried
+too. The file is cached under `~/.cache/tracelens`, and if the fetch fails the diagram
+falls back to config heuristics. Diagrams name the source in the fact sheet.
+
 Example with GitHub fallback when the HF repo lacks modeling code:
 
 ```bash

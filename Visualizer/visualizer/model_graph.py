@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from visualizer.basic_ops import BasicOpFilter, introspect_is_modeling_operation
-from visualizer.ast_analyze import is_forward_operation, is_functional_synthetic
+from visualizer.ast_analyze import (
+    is_forward_operation,
+    is_functional_synthetic,
+    is_torch_native_attention_kernel,
+    kernel_name_from_step_details,
+)
 from visualizer.extract import architecture_section_trees
 
 if TYPE_CHECKING:
@@ -53,11 +58,14 @@ _REDUCED_OPERATION_KINDS = frozenset(
     }
 )
 
-_SYNTHETIC_KEYS = frozenset({"@input", "@hidden_states", "@tensor", "@combine"})
+_SYNTHETIC_KEYS = frozenset(
+    {"@input", "@output", "@hidden_states", "@tensor", "@combine"}
+)
 _COMBINE_LABELS = frozenset({"×", "+", "Elementwise ×"})
 _KERNEL_CLASS_NAMES = frozenset(
     {
         "KernelOp",
+        "KernelSubOp",
         "KernelOutput",
         "AttentionOp",
         "KernelPipeline",
@@ -70,6 +78,44 @@ _TORCH_FUNCTIONAL_RE = re.compile(
 _NN_MODULE_CLASS_RE = re.compile(
     r"(?i)^(Linear|Embedding|Conv\d*d|Dropout|Identity|RMSNorm|LayerNorm|Parameter)$"
 )
+# Primitive torch.nn / torch.functional ops. Custom fused kernels whose names
+# merely mention these words (e.g. "Fused beta sigmoid", "Gate cumsum") stay kernels.
+_TORCH_PRIMITIVE_LABELS = frozenset(
+    {
+        "exp",
+        "exp2",
+        "softplus",
+        "sigmoid",
+        "hardsigmoid",
+        "cumsum",
+        "cumprod",
+        "softmax",
+        "logsoftmax",
+        "tanh",
+        "relu",
+        "relu6",
+        "gelu",
+        "gelunew",
+        "silu",
+        "swish",
+        "elu",
+        "selu",
+        "mish",
+        "contiguous",
+        "sqrt",
+        "rsqrt",
+        "sum",
+        "mean",
+        "log",
+        "abs",
+        "clamp",
+        "dropout",
+        "identity",
+        "leakyrelu",
+        "hardtanh",
+    }
+)
+_TORCH_PRIMITIVE_SYMBOLS = frozenset({"×", "÷", "+", "−", "^", "× scale"})
 
 
 @dataclass
@@ -158,10 +204,16 @@ def classify_operation(
         return OperationKind.UNKNOWN
 
     details = list(block.details or [])
+    # Expansion is the strongest visual signal: the parent represents a composite
+    # module while each child keeps its own leaf classification.
+    if block.children:
+        return OperationKind.COMPOSITE
+
     if (
         is_functional_synthetic(block.attr_name)
         or is_forward_operation(block.attr_name)
         or any(_TORCH_FUNCTIONAL_RE.search(line) for line in details)
+        or _is_torch_library_operation(block, details)
     ):
         return OperationKind.TORCH_FUNCTIONAL
 
@@ -170,16 +222,6 @@ def classify_operation(
 
     if block.is_basic or _NN_MODULE_CLASS_RE.match(block.class_name or ""):
         return OperationKind.NN_MODULE
-
-    if block.children and introspect_is_modeling_operation(
-        block.class_name,
-        block.attr_name,
-        details,
-    ):
-        return OperationKind.COMPOSITE
-
-    if block.children:
-        return OperationKind.COMPOSITE
 
     if introspect_is_modeling_operation(block.class_name, block.attr_name, details):
         return OperationKind.COMPOSITE
@@ -190,6 +232,32 @@ def classify_operation(
     return OperationKind.UNKNOWN
 
 
+def _normalized_op_label(label: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", label.lower())
+
+
+def is_torch_primitive_label(label: str) -> bool:
+    """True for a standalone torch.nn / torch.functional primitive name."""
+    text = (label or "").strip()
+    if text in _TORCH_PRIMITIVE_SYMBOLS:
+        return True
+    return _normalized_op_label(text) in _TORCH_PRIMITIVE_LABELS
+
+
+def _is_torch_library_operation(block: BlockNode, details: list[str]) -> bool:
+    """True for torch.nn / F.* ops, including torch's own attention, excluding library kernels.
+
+    Attention counts as torch only when the source or the checkpoint says so. An
+    attention step nobody could resolve is far more often a fused library kernel than
+    a torch call, so it stays a kernel rather than being assumed into the torch bucket.
+    """
+    if is_torch_primitive_label(block.label or ""):
+        return True
+    if block.class_name == "AttentionOp":
+        return is_torch_native_attention_kernel(kernel_name_from_step_details(details))
+    return False
+
+
 def _edge_style(
     graph: ComputationGraph,
     source: int,
@@ -198,8 +266,6 @@ def _edge_style(
     pair = (source, target)
     if pair in graph.dashed_links:
         return "dashed"
-    if pair in graph.side_entry_links:
-        return "side"
     return "solid"
 
 

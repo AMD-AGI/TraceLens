@@ -186,14 +186,46 @@ def fetch_github_source(ref: GitHubRef, *, cache_root: Path | None = None) -> Pa
     return extracted
 
 
+_SKIP_PYTHON_DIR_NAMES = {
+    "__pycache__",
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "node_modules",
+}
+
+
+def python_source_priority(path: Path) -> tuple[int, int, int, str]:
+    """Prefer modeling sources so analysis picks the decoder from the right file."""
+    name = path.name.lower()
+    modeling = 0 if name.startswith("modeling") else 1
+    model_py = 0 if name in {"model.py", "models.py"} else 1
+    return (modeling, model_py, len(path.parts), str(path))
+
+
 def find_modeling_files(root: Path) -> list[Path]:
+    """Return every ``.py`` file under ``root``, the same way ``find`` would.
+
+    Hugging Face snapshots often keep modeling code in a nested folder under a
+    name like ``inference/model.py``, so a root-level ``modeling*.py`` glob is
+    not enough. ``__pycache__`` and VCS trees are skipped.
+    """
     if root.is_file() and root.suffix == ".py":
-        return [root.resolve()]
+        return [root.absolute()]
 
     found: list[Path] = []
-    for pattern in ("modeling*.py", "**/modeling*.py"):
-        found.extend(root.glob(pattern))
-    return sorted({path.resolve() for path in found if path.is_file()})
+    for path in root.rglob("*.py"):
+        if not path.is_file():
+            continue
+        if any(part in _SKIP_PYTHON_DIR_NAMES for part in path.parts):
+            continue
+        # Keep the snapshot path. Hugging Face stores files as symlinks into a
+        # content-addressed blob store whose names have no ``.py`` suffix, and
+        # ``resolve()`` would throw those names away.
+        found.append(path.absolute())
+    return sorted(set(found), key=python_source_priority)
 
 
 def github_config_path(root: Path) -> Path | None:

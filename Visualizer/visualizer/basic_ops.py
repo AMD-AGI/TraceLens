@@ -37,8 +37,6 @@ _MODELING_CLASS_PATTERNS: tuple[str, ...] = (
     r"(?i)Multiply",
     r"(?i)FusedRMSNormGated",
     r"(?i)Fused.*Norm.*Gated",
-    r"(?i)^ApplyRotary$",
-    r"(?i)^RotaryEmbedding$",
 )
 
 # Submodule attribute names observed in modeling forwards (conv paths, etc.).
@@ -260,8 +258,6 @@ _DETAIL_OPERATION_CLASSES = frozenset(
         "KernelOp",
         "KernelOutput",
         "ShortConvolution",
-        "RotaryEmbedding",
-        "ApplyRotary",
         "Multiply",
         "SituActivation",
     }

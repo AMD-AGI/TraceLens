@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--code-path",
         type=Path,
-        help="Explicit path to modeling_*.py when auto-discovery is insufficient",
+        help="Explicit path to a modeling .py file when auto-discovery is insufficient",
     )
     parser.add_argument(
         "--config-only",

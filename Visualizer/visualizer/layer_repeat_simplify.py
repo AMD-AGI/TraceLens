@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import operator
 import re
 from typing import Any
 
@@ -35,6 +36,9 @@ def layer_condition_matches(layer_idx: int, condition: str, config: dict[str, An
         expr = expr[5:].strip()
 
     expanded = _substitute_config_attrs(_expand_config_calls(expr, config), config)
+    decided = _decide_condition(expanded, layer_idx)
+    if decided is not None:
+        return decided
     expanded = _simplify_boolean_expr(expanded)
     if not expanded:
         return False
@@ -70,6 +74,90 @@ def layer_condition_matches(layer_idx: int, condition: str, config: dict[str, An
         return layer_idx % int(match.group(1)) == 0
 
     return False
+
+
+_BINARY_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Mod: operator.mod,
+    ast.FloorDiv: operator.floordiv,
+}
+_COMPARE_OPS = {
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+}
+
+
+class _UndecidableCondition(Exception):
+    """The condition needs more than ``layer_idx`` and config literals to decide."""
+
+
+def _decide_condition(expr: str, layer_idx: int) -> bool | None:
+    """Decide a condition whose config references are already literals.
+
+    Returns None when something in the expression stayed symbolic, which leaves the
+    caller's pattern matching to handle the shapes config substitution cannot reach.
+    The expression is walked rather than executed: modeling source is only ever read.
+    """
+    try:
+        tree = ast.parse(expr.strip(), mode="eval")
+    except (SyntaxError, ValueError):
+        return None
+    try:
+        return bool(_condition_value(tree.body, layer_idx))
+    except (_UndecidableCondition, ArithmeticError, TypeError, ValueError):
+        return None
+
+
+def _condition_value(node: ast.AST, layer_idx: int) -> Any:
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id != "layer_idx":
+            raise _UndecidableCondition(node.id)
+        return layer_idx
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return [_condition_value(element, layer_idx) for element in node.elts]
+    if isinstance(node, ast.UnaryOp):
+        if isinstance(node.op, ast.Not):
+            return not _condition_value(node.operand, layer_idx)
+        if isinstance(node.op, ast.USub):
+            return -_condition_value(node.operand, layer_idx)
+        raise _UndecidableCondition(type(node.op).__name__)
+    if isinstance(node, ast.BoolOp):
+        values = (_condition_value(value, layer_idx) for value in node.values)
+        return all(values) if isinstance(node.op, ast.And) else any(values)
+    if isinstance(node, ast.BinOp):
+        apply = _BINARY_OPS.get(type(node.op))
+        if apply is None:
+            raise _UndecidableCondition(type(node.op).__name__)
+        return apply(
+            _condition_value(node.left, layer_idx),
+            _condition_value(node.right, layer_idx),
+        )
+    if isinstance(node, ast.Compare):
+        left = _condition_value(node.left, layer_idx)
+        for op_node, comparator in zip(node.ops, node.comparators):
+            right = _condition_value(comparator, layer_idx)
+            if isinstance(op_node, ast.In):
+                matched = left in right
+            elif isinstance(op_node, ast.NotIn):
+                matched = left not in right
+            else:
+                compare = _COMPARE_OPS.get(type(op_node))
+                if compare is None:
+                    raise _UndecidableCondition(type(op_node).__name__)
+                matched = compare(left, right)
+            if not matched:
+                return False
+            left = right
+        return True
+    raise _UndecidableCondition(type(node).__name__)
 
 
 def _simplify_line(line: str, config: dict[str, Any]) -> str:

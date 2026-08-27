@@ -19,6 +19,221 @@ from visualizer.extract import load_architecture
 from visualizer.render import render_diagram
 
 
+def test_indexer_operation_bypasses_keep_top_entries_without_scalar_sublabels():
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import build_computation_graph
+
+    source = """
+class ColumnParallelLinear:
+    pass
+
+class Indexer:
+    def __init__(self):
+        self.weights_proj = ColumnParallelLinear()
+        self.softmax_scale = unknown
+        self.n_heads = unknown
+        self.index_topk = unknown
+
+    def forward(self, x, score, start_pos, end_pos, ratio, offset):
+        weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads ** -0.5)
+        score = (score * weights).sum(dim=2)
+        topk_idxs = score.topk(min(self.index_topk, end_pos // ratio), dim=-1)[1]
+        if start_pos == 0:
+            topk_idxs = topk_idxs + offset
+        else:
+            topk_idxs += offset
+        return topk_idxs
+"""
+    analysis = analyze_source(source, all_tensor_ops=True)
+    tree = build_block_node(
+        attr_name="indexer",
+        class_name="Indexer",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    graph = build_computation_graph(tree, basic_ops=BasicOpFilter.for_detailed())
+    assert all(node.synthetic != "@combine" for node in graph.nodes)
+    assert all(
+        node.sublabel is None
+        for node in graph.nodes
+        if node.label in {"Add", "Multiply", "Power", "TopK"}
+    )
+
+    power_index = next(index for index, node in enumerate(graph.nodes) if node.label == "Power")
+    assert graph.nodes[power_index].sublabel is None
+    # A step reading only configuration still needs an incoming connector, or it
+    # is drawn as a tile nothing feeds.
+    assert any(target == power_index for _source, target in graph.links)
+
+    projection = next(
+        index for index, node in enumerate(graph.nodes) if node.label == "ColumnParallelLinear"
+    )
+    scaled_weights = next(
+        index
+        for index, node in enumerate(graph.nodes)
+        if node.label == "Multiply"
+        and node.block
+        and "weights_proj" in node.block.operation_predecessors
+    )
+    assert (projection, scaled_weights) in graph.links
+    bypass_inputs = [
+        source_index
+        for source_index, target_index in graph.links
+        if target_index == scaled_weights
+    ]
+    assert bypass_inputs
+    assert any(source_index != projection for source_index in bypass_inputs)
+
+    topk = next(index for index, node in enumerate(graph.nodes) if node.label == "TopK")
+    assert any(
+        target == topk and graph.nodes[source_index].label == "Sum"
+        for source_index, target in graph.links
+    )
+
+    conditional_adds = [
+        index
+        for index, node in enumerate(graph.nodes)
+        if node.label == "Add"
+        and node.block
+        and any(detail.startswith("condition: ") for detail in node.block.details)
+    ]
+    assert len(conditional_adds) == 2
+    assert (conditional_adds[0], conditional_adds[1]) in graph.links
+    assert (topk, conditional_adds[1]) in graph.links
+
+
+def test_discarded_module_call_on_forward_input_is_a_packed_side_branch():
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        build_computation_graph,
+        layout_computation_graph,
+        pack_input_fed_inline_frame_branches,
+    )
+    from visualizer.render import _inline_frame_draw_bounds
+    from visualizer.sizing import min_horizontal_block_gap
+
+    source = """
+class Linear:
+    pass
+
+class Compressor:
+    def __init__(self):
+        self.in_proj = Linear()
+        self.out_proj = Linear()
+
+    def forward(self, x):
+        x = self.in_proj(x)
+        return self.out_proj(x)
+
+class Indexer:
+    def __init__(self):
+        self.query = Linear()
+        self.compressor = Compressor()
+        self.weights = Linear()
+
+    def forward(self, x, qr):
+        q = self.query(qr)
+        self.compressor(x)
+        weights = self.weights(x)
+        score = q * weights
+        score = score * weights
+        return score
+"""
+    analysis = analyze_source(source, all_tensor_ops=True)
+    structure = analysis.class_registry["Indexer"]
+    assert [spec.arg_name for spec in structure.side_inputs["compressor"]] == ["x"]
+    assert "weights" not in structure.side_inputs
+
+    tree = build_block_node(
+        attr_name="indexer",
+        class_name="Indexer",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    graph = build_computation_graph(tree, basic_ops=BasicOpFilter.for_detailed())
+    positions, _ = layout_computation_graph(
+        graph,
+        cx=3.0,
+        top_y=10.0,
+        block_w=6.0,
+        block_h=8.0,
+    )
+
+    frame = next(frame for frame in graph.inline_frames if frame.label == "Compressor")
+    assert frame.frame_id in graph.side_effect_frame_ids
+    bounds = _inline_frame_draw_bounds(frame, positions, graph)
+    members = set(frame.node_indices)
+    main_index = next(
+        index
+        for index, pos in enumerate(positions)
+        if index not in members and pos.spec.synthetic is None
+    )
+    main = positions[main_index]
+    main.top_y = bounds.top
+    main.cx = bounds.right + 2.0 + main.width / 2
+    pack_input_fed_inline_frame_branches(positions, graph)
+
+    packed_bounds = _inline_frame_draw_bounds(frame, positions, graph)
+    assert main.cx - main.width / 2 - packed_bounds.right == pytest.approx(
+        min_horizontal_block_gap()
+    )
+
+
+def _routing_anchor(cx: float, top: float, *, width: float = 1.0, height: float = 0.32):
+    from visualizer.render import _RenderAnchor
+
+    return _RenderAnchor(
+        cx=cx,
+        top=top,
+        bottom=top - height,
+        left=cx - width / 2,
+        right=cx + width / 2,
+    )
+
+
+class _RoutingGraph:
+    """Minimal stand-in for a computation graph during connector routing."""
+
+    def __init__(self, count: int):
+        from visualizer.computation_graph import GraphNodeSpec
+
+        self.nodes = [GraphNodeSpec(key=f"n{index}") for index in range(count)]
+
+
+def test_input_under_foreign_tile_still_uses_top_entry():
+    from visualizer.render import _snap_connector_path_endpoints
+
+    source = _routing_anchor(1.0, 2.0)
+    target = _routing_anchor(3.0, 0.0)
+    graph = _RoutingGraph(3)
+    points = _snap_connector_path_endpoints(
+        [(source.right, 1.8), (target.left, -0.2)],
+        source=source,
+        target=target,
+        link_key=(0, 1),
+        graph=graph,
+    )
+    assert points[0] == (source.cx, source.bottom)
+    assert points[-1][1] == target.top
+
+
+def test_fan_in_spread_port_remains_on_target_top():
+    from visualizer.render import _snap_connector_path_endpoints
+
+    target = _routing_anchor(3.0, 0.0)
+    source = _routing_anchor(6.0, 2.0)
+    graph = _RoutingGraph(2)
+    points = _snap_connector_path_endpoints(
+        [(source.cx, source.bottom), (target.cx, target.top)],
+        source=source,
+        target=target,
+        link_key=(0, 1),
+        graph=graph,
+        merge_entry_x={(0, 1): target.cx - 0.2},
+    )
+    assert points[-1] == (target.cx - 0.2, target.top)
+
+
 FIXTURES = Path(__file__).parent / "fixtures"
 KIMI_ROUTER_CONFIG = {
     "hidden_size": 7168,
@@ -139,6 +354,584 @@ def test_detail_section_title_matches_overview_attention_tile():
     ]
     for variant_title in ("KimiDelta Attn", "KimiMLA Attn"):
         assert _detail_section_title(hybrid, variant_title, attn_tree) == variant_title
+
+    hybrid.layer_variants[0].ffn_class = "MiniMaxM3VLSparseMoeBlock"
+    moe_tree = BlockNode(
+        attr_name="mlp",
+        class_name="MiniMaxM3VLSparseMoeBlock",
+        role="ffn",
+        label="FFN",
+    )
+    assert _detail_section_title(hybrid, "FFN", moe_tree) == "MiniMaxM3VLSparseMoeBlock"
+
+
+def test_moe_layer_frequency_list_is_a_per_layer_mask():
+    from visualizer.extract import _config_moe_layer
+
+    config = {
+        "num_local_experts": 128,
+        "moe_layer_freq": [0, 0, 0, 1, 1],
+    }
+    assert [_config_moe_layer(index, config) for index in range(5)] == [
+        False,
+        False,
+        False,
+        True,
+        True,
+    ]
+
+
+def test_conditional_submodule_binds_concrete_class_and_expands():
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node, is_inline_expandable_module
+
+    source = """
+class Linear:
+    pass
+
+class LightningIndexer:
+    def __init__(self):
+        self.q_proj = Linear()
+        self.k_proj = Linear()
+        self.top_k = 4
+
+    def forward(self, hidden_states):
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        scores = torch.matmul(q, k)
+        block_scores = scores.amax(dim=-1)
+        return block_scores.topk(self.top_k, dim=-1)
+
+class ActualAttention:
+    def __init__(self, config):
+        self.indexer = LightningIndexer() if config.use_sparse else None
+        self.o_proj = Linear()
+
+    def forward(self, hidden_states):
+        if self.indexer is not None:
+            indices = self.indexer(hidden_states)
+        return self.o_proj(hidden_states)
+"""
+    analysis = analyze_source(source, filename="modeling_conditional.py")
+    attention = analysis.class_registry["ActualAttention"]
+
+    assert attention.init_assignments["indexer"] == "LightningIndexer"
+    assert attention.init_assignment_options["indexer"] == ["LightningIndexer"]
+
+    tree = build_block_node(
+        attr_name="self_attn",
+        class_name="ActualAttention",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    indexer = next(child for child in tree.children if child.attr_name == "indexer")
+    assert indexer.class_name == "LightningIndexer"
+    assert [child.attr_name for child in indexer.children[:2]] == ["q_proj", "k_proj"]
+    assert [child.label for child in indexer.children[2:]] == ["MatMul", "Block max", "TopK"]
+    assert is_inline_expandable_module(indexer), "a genuinely straight indexer stays inline"
+
+
+def test_component_sublabel_omits_method_wrapper_metadata():
+    from visualizer.blocks import BlockComponent
+    from visualizer.render import _component_sublabel
+
+    component = BlockComponent(
+        attr_name="mlp",
+        class_name="MiniMaxM3VLSparseMoeBlock",
+        role="ffn",
+        label="SWIGLUOAI",
+        details=["method `mlp()`"],
+    )
+    assert _component_sublabel(component) is None
+
+
+def _straight_line_tree(class_name: str, step_names: list[str]):
+    from visualizer.block_tree import BlockNode
+
+    return BlockNode(
+        attr_name="mlp",
+        class_name=class_name,
+        role="ffn",
+        label=class_name,
+        children=[
+            BlockNode(attr_name=name, class_name="Linear", role="linear", label="Linear")
+            for name in step_names
+        ],
+    )
+
+
+def test_consecutive_bypasses_stay_inline_but_nested_ones_do_not():
+    """One side column serves bypasses in turn; nested ones each need their own."""
+    from visualizer.block_tree import BlockNode, _has_overlapping_bypass_spans
+
+    def tree(spans: dict[str, list[str]]):
+        return BlockNode(
+            attr_name="block",
+            class_name="Block",
+            role="ffn",
+            label="Block",
+            children=[
+                BlockNode(
+                    attr_name=name,
+                    class_name="Linear",
+                    role="linear",
+                    label="Linear",
+                    operation_predecessors=list(preds),
+                )
+                for name, preds in spans.items()
+            ],
+        )
+
+    consecutive = tree(
+        {
+            "a": [],
+            "b": ["a"],
+            "c": ["b"],
+            "d": ["c", "a"],
+            "e": ["d"],
+            "f": ["e"],
+            "g": ["f", "d"],
+        }
+    )
+    assert not _has_overlapping_bypass_spans(consecutive)
+
+    nested = tree(
+        {
+            "a": [],
+            "b": ["a"],
+            "c": ["b"],
+            "d": ["c", "b"],
+            "e": ["d", "a"],
+        }
+    )
+    assert _has_overlapping_bypass_spans(nested)
+
+
+def test_straight_line_component_expands_in_place_instead_of_its_own_section():
+    """Sequential components stay inline even when operations have bypass operands."""
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import BlockNode
+    from visualizer.extract import ArchitectureSpec
+    from visualizer.render import _detail_sections_to_render
+
+    dense = _straight_line_tree("DenseMLP", ["gate_up_proj", "down_proj"])
+    nested = BlockNode(
+        attr_name="mlp",
+        class_name="NestedBypassMLP",
+        role="ffn",
+        label="NestedBypassMLP",
+        children=[
+            BlockNode(
+                attr_name=name,
+                class_name="Linear",
+                role="linear",
+                label="Linear",
+                operation_predecessors=list(preds),
+            )
+            for name, preds in (
+                ("a", []),
+                ("b", ["a"]),
+                ("c", ["b"]),
+                ("d", ["c", "b"]),
+                ("e", ["d", "a"]),
+            )
+        ],
+    )
+    spec = ArchitectureSpec(name="T", model_type="t", architectures=["T"])
+    spec.basic_ops = BasicOpFilter.for_detailed()
+    spec.export_block_trees = [("DenseMLP", dense), ("NestedBypassMLP", nested)]
+
+    titles = [title for title, _tree, _sub in _detail_sections_to_render(spec)]
+    assert "DenseMLP" not in titles, "straight-line components expand inline"
+    assert "NestedBypassMLP" not in titles, "operand bypasses route inside the inline frame"
+
+
+def test_ffn_the_spine_names_beside_another_variant_gets_its_own_section():
+    """A spine tile naming one FFN per layer variant expands each of them."""
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.blocks import LayerVariant
+    from visualizer.extract import ArchitectureSpec
+    from visualizer.render import _detail_sections_to_render, _ffn_label
+
+    dense = _straight_line_tree("DenseMLP", ["gate_up_proj", "down_proj"])
+    moe = _straight_line_tree("SparseMoeBlock", ["gate", "experts"])
+    spec = ArchitectureSpec(name="T", model_type="t", architectures=["T"])
+    spec.basic_ops = BasicOpFilter.for_detailed()
+    spec.export_block_trees = [("DenseMLP", dense), ("FFN", moe)]
+    spec.layer_variants = [
+        LayerVariant(
+            label="dense",
+            count=3,
+            attention_label="Attn",
+            ffn_label="DenseMLP",
+            ffn_class="DenseMLP",
+            ffn_attr="mlp",
+        ),
+        LayerVariant(
+            label="sparse",
+            count=57,
+            attention_label="Attn",
+            ffn_label="MoE block",
+            ffn_class="SparseMoeBlock",
+            ffn_attr="mlp",
+        ),
+    ]
+
+    label, _sublabel = _ffn_label(spec)
+    assert label == "DenseMLP / SparseMoeBlock", "the spine tile names both classes"
+    titles = [title for title, _tree, _sub in _detail_sections_to_render(spec)]
+    assert "DenseMLP" in titles, f"a named variant has to expand somewhere: {titles}"
+
+
+def test_layer_branch_condition_reads_the_config_it_names():
+    """A branch is decided by its config values, not by matching a known phrasing."""
+    from visualizer.layer_repeat_simplify import layer_condition_matches
+
+    condition = (
+        "if layer_idx not in config.mlp_only_layers and "
+        "(config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0)"
+    )
+    every_layer = {"mlp_only_layers": [], "num_experts": 128, "decoder_sparse_step": 1}
+    assert [layer_condition_matches(idx, condition, every_layer) for idx in range(3)] == [
+        True,
+        True,
+        True,
+    ]
+
+    every_other = dict(every_layer, mlp_only_layers=[0], decoder_sparse_step=2)
+    assert [layer_condition_matches(idx, condition, every_other) for idx in range(4)] == [
+        False,
+        True,
+        False,
+        True,
+    ]
+
+
+_CONDITIONAL_FFN_SOURCE = """
+class Linear:
+    pass
+
+class TinyAttention:
+    def __init__(self, config):
+        self.q_proj = Linear()
+
+    def forward(self, hidden_states):
+        return self.q_proj(hidden_states)
+
+class TinyMLP:
+    def __init__(self, config):
+        self.gate_proj = Linear()
+
+    def forward(self, hidden_states):
+        return self.gate_proj(hidden_states)
+
+class TinySparseMoeBlock:
+    def __init__(self, config):
+        self.gate = Linear()
+
+    def forward(self, hidden_states):
+        return self.gate(hidden_states)
+
+class TinyDecoderLayer:
+    def __init__(self, config, layer_idx):
+        self.self_attn = TinyAttention(config)
+        if layer_idx not in config.mlp_only_layers and config.num_experts > 0:
+            self.mlp = TinySparseMoeBlock(config)
+        else:
+            self.mlp = TinyMLP(config)
+
+    def forward(self, hidden_states):
+        return self.mlp(self.self_attn(hidden_states))
+"""
+
+
+def _spec_with_conditional_ffn(config: dict):
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.blocks import BlockComponent
+    from visualizer.extract import ArchitectureSpec, _infer_layer_variants
+
+    analysis = analyze_source(_CONDITIONAL_FFN_SOURCE, filename="modeling_tiny.py")
+    spec = ArchitectureSpec(name="Tiny", model_type="tiny", architectures=["Tiny"])
+    spec.num_hidden_layers = 4
+    spec.raw_config = config
+    spec.block_components = [
+        BlockComponent(
+            attr_name="self_attn",
+            class_name="TinyAttention",
+            role="attention",
+            label="Tiny Attn",
+            forward_order=0,
+        ),
+        # The AST keeps the branch it saw last, which need not be the one this config builds.
+        BlockComponent(
+            attr_name="mlp",
+            class_name="TinyMLP",
+            role="ffn",
+            label="TinyMLP",
+            forward_order=1,
+        ),
+    ]
+    _infer_layer_variants(
+        config,
+        spec,
+        class_registry=analysis.class_registry,
+        decoder_class="TinyDecoderLayer",
+    )
+    return spec
+
+
+def test_spine_ffn_tile_names_the_branch_the_config_builds():
+    """With every layer sparse, the overview tile and its section share one name."""
+    from visualizer.ast_analyze import decoder_type_for_components
+    from visualizer.block_tree import BlockNode
+    from visualizer.render import _detail_section_title, _ffn_label
+
+    spec = _spec_with_conditional_ffn({"mlp_only_layers": [], "num_experts": 128})
+
+    mlp = next(comp for comp in spec.block_components if comp.attr_name == "mlp")
+    assert mlp.class_name == "TinySparseMoeBlock"
+    assert mlp.role == "moe", "a routed block is not a dense FFN just because it is `self.mlp`"
+    assert decoder_type_for_components(spec.block_components) == "Sparse MoE"
+
+    tree = BlockNode(
+        attr_name="mlp",
+        class_name="TinySparseMoeBlock",
+        role="moe",
+        label="TinySparseMoeBlock",
+    )
+    label, _sublabel = _ffn_label(spec)
+    assert label == "TinySparseMoeBlock"
+    assert _detail_section_title(spec, "TinySparseMoeBlock", tree) == label
+
+
+def test_spine_ffn_tile_stays_dense_when_the_config_selects_the_dense_branch():
+    """A config that routes no layer through the experts keeps the dense FFN tile."""
+    from visualizer.render import _ffn_label
+
+    spec = _spec_with_conditional_ffn(
+        {"mlp_only_layers": [0, 1, 2, 3], "num_experts": 128}
+    )
+
+    mlp = next(comp for comp in spec.block_components if comp.attr_name == "mlp")
+    assert (mlp.class_name, mlp.role) == ("TinyMLP", "ffn")
+    assert _ffn_label(spec)[0] == spec.ffn_type
+
+
+def test_section_of_a_module_bypasses_the_step_its_math_skips():
+    """A top-level module keeps the dataflow its operations name, bypass and all."""
+    from visualizer.block_tree import BlockNode
+    from visualizer.computation_graph import build_computation_graph, layout_computation_graph
+
+    def op(attr_name: str, label: str, preds: list[str]) -> BlockNode:
+        return BlockNode(
+            attr_name=attr_name,
+            class_name=label,
+            role="operation",
+            label=label,
+            operation_predecessors=list(preds),
+        )
+
+    root = BlockNode(
+        attr_name="mlp",
+        class_name="DenseMLP",
+        role="ffn",
+        label="DenseMLP",
+        children=[
+            BlockNode(attr_name="gate_up_proj", class_name="Linear", role="linear", label="Linear"),
+            op("glu", "Multiply", []),
+            op("add", "Add", []),
+            # (up + 1) * glu reads the multiply two steps back, skipping the add.
+            op("scale", "Multiply", ["add", "glu"]),
+            BlockNode(attr_name="down_proj", class_name="Linear", role="linear", label="Linear"),
+        ],
+    )
+
+    graph = build_computation_graph(root)
+    labels = [node.label for node in graph.nodes]
+    glu = labels.index("Multiply")
+    scale = len(labels) - 1 - labels[::-1].index("Multiply")
+    add = labels.index("Add")
+    assert (glu, scale) in graph.links, f"the bypass is missing from {graph.links}"
+
+    positions, _edges = layout_computation_graph(graph, cx=2.0, top_y=0.0, block_w=4.0)
+    assert positions[add].cx != pytest.approx(positions[scale].cx), (
+        "the step a bypass skips has to leave the column the bypass runs down"
+    )
+
+
+def test_frame_the_chain_flows_into_takes_the_feeding_column():
+    """A frame fed by one step sits in that step's column, so the spine stays straight."""
+    from visualizer.computation_graph import (
+        ComputationGraph,
+        GraphNodeSpec,
+        InlineFrameSpec,
+        LayoutPosition,
+        _center_align_vertical_chains,
+    )
+
+    specs = [
+        GraphNodeSpec(key="router", label="Router"),
+        GraphNodeSpec(key="head", label="Linear"),
+        GraphNodeSpec(key="tail", label="Linear"),
+    ]
+    positions = [
+        LayoutPosition(spec=specs[0], cx=1.54, top_y=-17.4, width=0.66, height=0.32),
+        LayoutPosition(spec=specs[1], cx=4.25, top_y=-18.2, width=0.63, height=0.32),
+        LayoutPosition(spec=specs[2], cx=4.25, top_y=-18.8, width=0.63, height=0.32),
+    ]
+    graph = ComputationGraph(
+        nodes=specs,
+        links=[(0, 1), (1, 2)],
+        inline_frames=[
+            InlineFrameSpec(frame_id="experts", label="Experts", node_indices=[1, 2]),
+        ],
+    )
+
+    _center_align_vertical_chains(positions, graph)
+
+    assert positions[1].cx == pytest.approx(positions[0].cx), "the frame head left its feeder's column"
+    assert positions[2].cx == pytest.approx(positions[0].cx)
+
+
+def test_input_sits_over_the_single_step_it_feeds():
+    """One consumer means the input tile shares its column instead of centering."""
+    from visualizer.computation_graph import (
+        SYNTHETIC_INPUT,
+        ComputationGraph,
+        GraphNodeSpec,
+        LayoutPosition,
+        _center_align_vertical_chains,
+    )
+
+    def graph_with(targets: list[int]) -> tuple[ComputationGraph, list[LayoutPosition]]:
+        specs = [
+            GraphNodeSpec(key="@input", label="hidden_states", synthetic=SYNTHETIC_INPUT),
+            GraphNodeSpec(key="left", label="Linear"),
+            GraphNodeSpec(key="right", label="Linear"),
+        ]
+        positions = [
+            LayoutPosition(spec=specs[0], cx=2.61, top_y=-13.2, width=1.05, height=0.46),
+            LayoutPosition(spec=specs[1], cx=1.54, top_y=-14.1, width=0.63, height=0.32),
+            LayoutPosition(spec=specs[2], cx=3.90, top_y=-14.1, width=0.63, height=0.32),
+        ]
+        return ComputationGraph(nodes=specs, links=[(0, target) for target in targets]), positions
+
+    single, positions = graph_with([1])
+    _center_align_vertical_chains(positions, single)
+    assert positions[0].cx == pytest.approx(1.54), "a lone consumer leaves nothing to center over"
+
+    fanout, positions = graph_with([1, 2])
+    _center_align_vertical_chains(positions, fanout)
+    assert positions[0].cx == pytest.approx(2.61), "a fan-out keeps the input centered over its branches"
+
+
+def test_stacked_inline_frames_share_one_spine_column():
+    """Frames that follow one another down the spine must not be split into columns."""
+    from visualizer.computation_graph import _group_frame_columns_by_vertical_band
+    from visualizer.computation_graph import GraphNodeSpec, LayoutPosition
+
+    def pos(cx: float, top_y: float) -> LayoutPosition:
+        return LayoutPosition(
+            spec=GraphNodeSpec(key="k", label="Linear"),
+            cx=cx,
+            top_y=top_y,
+            width=1.0,
+            height=0.4,
+        )
+
+    positions = [pos(1.0, 10.0), pos(1.0, 9.0), pos(1.0, 6.0), pos(1.0, 5.0)]
+    stacked = _group_frame_columns_by_vertical_band(positions, [[0, 1], [2, 3]])
+    assert len(stacked) == 2, "stacked frames keep their own band, so neither is shifted"
+
+    positions = [pos(1.0, 10.0), pos(1.0, 9.0), pos(3.0, 10.0), pos(3.0, 9.0)]
+    side_by_side = _group_frame_columns_by_vertical_band(positions, [[0, 1], [2, 3]])
+    assert len(side_by_side) == 1, "frames at the same height compete for one band"
+
+
+def test_multi_op_helper_expands_but_norm_keeps_its_semantic_type():
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node, expand_block_tree_inplace
+
+    source = """
+class MiniMaxM3VLExperts:
+    def forward(self, x):
+        return self._apply_gate(x)
+
+    def _apply_gate(self, x):
+        gate = x * 2
+        activated = torch.sigmoid(gate)
+        return activated * x
+
+class MiniMaxM3VLRMSNorm:
+    def forward(self, x):
+        return self._norm(x)
+
+    def _norm(self, x):
+        variance = x * x
+        return variance + x
+"""
+    analysis = analyze_source(source, all_tensor_ops=True)
+    basic_ops = BasicOpFilter.for_detailed()
+
+    experts = build_block_node(
+        attr_name="experts",
+        class_name="MiniMaxM3VLExperts",
+        registry=analysis.class_registry,
+        basic_ops=basic_ops,
+    )
+    apply_gate = experts.children[0]
+    assert apply_gate.label == "apply gate"
+    assert [child.label for child in apply_gate.children] == [
+        "Multiply",
+        "Sigmoid",
+        "Multiply",
+    ]
+
+    norm = build_block_node(
+        attr_name="q_norm",
+        class_name="MiniMaxM3VLRMSNorm",
+        registry=analysis.class_registry,
+        basic_ops=basic_ops,
+    )
+    prepared_norm = expand_block_tree_inplace(norm, basic_ops=basic_ops)
+    assert prepared_norm.class_name == "MiniMaxM3VLRMSNorm"
+    assert prepared_norm.label == "RMSNorm"
+
+
+def test_repeat_summary_uses_the_diagram_module_names():
+    from visualizer.blocks import LayerVariant
+    from visualizer.extract import ArchitectureSpec
+    from visualizer.render import _repeat_block_label
+
+    spec = ArchitectureSpec(name="M3", model_type="m3", architectures=["M3"])
+    spec.num_hidden_layers = 60
+    spec.layer_variants = [
+        LayerVariant(
+            label="MiniMaxM3VL Attn + MoE block",
+            count=57,
+            attention_label="MiniMaxM3VL Attn",
+            attention_class="MiniMaxM3VLAttention",
+            ffn_label="MoE block",
+            ffn_class="MiniMaxM3VLSparseMoeBlock",
+            ffn_attr="mlp",
+        ),
+        LayerVariant(
+            label="MiniMaxM3VL Attn + MiniMaxM3VLDenseMLP",
+            count=3,
+            attention_label="MiniMaxM3VL Attn",
+            attention_class="MiniMaxM3VLAttention",
+            ffn_label="MiniMaxM3VLDenseMLP",
+            ffn_class="MiniMaxM3VLDenseMLP",
+            ffn_attr="mlp",
+        ),
+    ]
+
+    label = _repeat_block_label(spec)
+    assert "57 MiniMaxM3VLAttention + MiniMaxM3VLSparseMoeBlock" in label
+    assert "3 MiniMaxM3VLAttention + MiniMaxM3VLDenseMLP" in label
+    assert "MoE block" not in label
 
 
 def test_section_content_stays_anchored_when_ports_share_a_consumer():
@@ -437,8 +1230,8 @@ class LinearAttention(nn.Module):
     incoming = [src for src, dst in graph.links if dst == merge_index]
     assert len(incoming) >= 3
     o_norm_index = next(i for i, node in enumerate(graph.nodes) if node.block and node.block.attr_name == "o_norm")
-    side_links = [src for src, dst in graph.links if dst == o_norm_index and (src, dst) in graph.side_entry_links]
-    assert side_links
+    o_norm_inputs = [src for src, dst in graph.links if dst == o_norm_index]
+    assert o_norm_inputs
 
 
 def test_kimi_moe_gate_parses_functional_linear():
@@ -685,7 +1478,7 @@ class MoE(nn.Module):
 def test_build_computation_graph_mla_structure():
     from visualizer.ast_analyze import SYNTHETIC_ATTENTION
     from visualizer.block_tree import BlockNode
-    from visualizer.computation_graph import SYNTHETIC_INPUT, SYNTHETIC_MULTIPLY, build_computation_graph
+    from visualizer.computation_graph import SYNTHETIC_INPUT, build_computation_graph
 
     def leaf(name: str) -> BlockNode:
         return BlockNode(attr_name=name, class_name="Linear", role="other", label="Linear", is_basic=True)
@@ -717,10 +1510,10 @@ def test_build_computation_graph_mla_structure():
     graph = build_computation_graph(root)
     labels = {spec.label for spec in graph.nodes}
     assert "hidden_states" in labels
-    assert "×" in labels
+    assert "Multiply" in labels
     assert len(graph.links) >= 10
     assert any(spec.synthetic == SYNTHETIC_INPUT for spec in graph.nodes)
-    assert any(spec.synthetic == SYNTHETIC_MULTIPLY for spec in graph.nodes)
+    assert not any(spec.synthetic == "@combine" for spec in graph.nodes)
     gate_spec = next(spec for spec in graph.nodes if spec.block and spec.block.attr_name == "g_proj")
     assert gate_spec.port_label == "Linear"
     input_index = next(i for i, spec in enumerate(graph.nodes) if spec.synthetic == SYNTHETIC_INPUT)
@@ -729,10 +1522,10 @@ def test_build_computation_graph_mla_structure():
     assert (input_index, q_head) in graph.links
     assert (input_index, kv_head) in graph.links
     gate_index = next(i for i, spec in enumerate(graph.nodes) if spec.block and spec.block.attr_name == "g_proj")
-    mult_index = next(i for i, spec in enumerate(graph.nodes) if spec.synthetic == SYNTHETIC_MULTIPLY)
+    mult_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "Multiply")
     assert (input_index, gate_index) in graph.links
     assert (input_index, gate_index) not in graph.dashed_links
-    assert (gate_index, mult_index) in graph.side_entry_links
+    assert (gate_index, mult_index) in graph.links
     assert (gate_index, mult_index) not in graph.dashed_links
 
 
@@ -750,28 +1543,21 @@ def test_dashed_path_draws_each_segment():
     assert line_mock.call_args_list[1].args[1:5] == (1.0, 3.0, 4.0, 3.0)
 
 
-def test_side_entry_combine_connector_enters_multiply_side():
-    from visualizer.render import MERGE_RADIUS, _RenderAnchor, _side_entry_combine_connector_points
+def test_combine_connector_is_normalized_to_source_bottom_and_target_top():
+    from visualizer.render import _RenderAnchor, _snap_connector_path_endpoints
 
-    gap = 0.04
     gate = _RenderAnchor(cx=7.8, top=19.4, bottom=19.0, left=7.2, right=8.4)
-    target_cx = 5.2
-    target_cy = 17.3
-    points = _side_entry_combine_connector_points(gate, target_cx, target_cy, gap=gap)
-    assert points[-1] == (target_cx + MERGE_RADIUS, target_cy)
+    target = _RenderAnchor(cx=5.2, top=17.5, bottom=17.1, left=4.7, right=5.7)
+    graph = _RoutingGraph(2)
+    points = _snap_connector_path_endpoints(
+        [(gate.right, 19.2), (target.right, 17.3)],
+        source=gate,
+        target=target,
+        link_key=(0, 1),
+        graph=graph,
+    )
     assert points[0] == (gate.cx, gate.bottom)
-
-
-def test_top_entry_combine_connector_enters_operator_top():
-    from visualizer.render import MERGE_RADIUS, _RenderAnchor, _top_entry_combine_connector_points
-
-    gap = 0.04
-    linear = _RenderAnchor(cx=5.2, top=19.4, bottom=19.0, left=4.6, right=5.8)
-    target_cx = 5.2
-    target_cy = 17.3
-    points = _top_entry_combine_connector_points(linear, target_cx, target_cy, gap=gap)
-    assert points[-1] == (target_cx, target_cy + MERGE_RADIUS)
-    assert points[0] == (linear.cx, linear.bottom)
+    assert points[-1][1] == target.top
 
 
 def test_inline_block_frame_label_uses_attr_name():
@@ -790,6 +1576,335 @@ def test_inline_block_frame_label_uses_attr_name():
     linear = BlockNode(attr_name="q_proj", class_name="Linear", role="other", label="Linear", is_basic=True)
     assert inline_block_frame_label(gate) == "g_proj"
     assert inline_block_frame_label(linear) == "q_proj"
+
+    experts = BlockNode(
+        attr_name="experts",
+        class_name="SparseExperts",
+        role="other",
+        label="Experts",
+        is_basic=False,
+        children=[
+            BlockNode(attr_name="up", class_name="Linear", role="other", label="Linear", is_basic=True),
+            BlockNode(attr_name="down", class_name="Linear", role="other", label="Linear", is_basic=True),
+        ],
+    )
+    assert inline_block_frame_label(experts) == "SparseExperts", (
+        "a frame holding a whole computation is named by the class implementing it"
+    )
+
+
+def test_nested_inline_frame_borders_nest_without_overlapping():
+    """A frame drawn inside another keeps a full pad of clearance from its border."""
+    import matplotlib.pyplot as plt
+
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        _estimate_graph_height,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.render import INLINE_FRAME_PAD, _inline_frame_draw_bounds
+
+    source = """
+class Linear:
+    pass
+
+class Experts:
+    def __init__(self):
+        self.up = Linear()
+        self.down = Linear()
+
+    def forward(self, x):
+        h = self.up(x)
+        g = self._apply_gate(h)
+        return self.down(g)
+
+    def _apply_gate(self, x):
+        gate = x * 2
+        activated = torch.sigmoid(gate)
+        return activated * x
+
+class MoE:
+    def __init__(self):
+        self.router = Linear()
+        self.experts = Experts()
+
+    def forward(self, x):
+        scores = self.router(x)
+        return self.experts(scores)
+"""
+    analysis = analyze_source(source, all_tensor_ops=True)
+    basic_ops = BasicOpFilter.for_detailed()
+    tree = build_block_node(
+        attr_name="mlp",
+        class_name="MoE",
+        registry=analysis.class_registry,
+        basic_ops=basic_ops,
+    )
+    graph = build_computation_graph(tree, basic_ops=basic_ops)
+    outer = next(frame for frame in graph.inline_frames if frame.frame_id == "experts")
+    inner = next(frame for frame in graph.inline_frames if frame.frame_id == "_apply_gate")
+    assert set(inner.node_indices) < set(outer.node_indices)
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    try:
+        measure_graph_node_sizes(ax, graph)
+        positions, _links = layout_computation_graph(
+            graph,
+            cx=5.0,
+            top_y=10.0,
+            block_w=8.0,
+            block_h=_estimate_graph_height(graph),
+        )
+        outer_bounds = _inline_frame_draw_bounds(outer, positions, graph)
+        inner_bounds = _inline_frame_draw_bounds(inner, positions, graph)
+        clearances = (
+            inner_bounds.left - outer_bounds.left,
+            outer_bounds.right - inner_bounds.right,
+            outer_bounds.top - inner_bounds.top,
+            inner_bounds.bottom - outer_bounds.bottom,
+        )
+        assert min(clearances) >= INLINE_FRAME_PAD - 1e-6, (
+            f"nested frame border sits on its parent's: clearances {clearances}"
+        )
+        tiles_top = max(positions[index].top_y for index in outer.node_indices)
+        assert outer_bounds.top <= tiles_top + 2 * INLINE_FRAME_PAD + 1e-6, (
+            "holding a nested frame must not inflate the parent past its own tiles"
+        )
+    finally:
+        plt.close(fig)
+
+
+def _captioned_frame_fixture():
+    """One captioned inline frame of two stacked tiles, plus a feeder above it."""
+    from visualizer.computation_graph import (
+        ComputationGraph,
+        GraphNodeSpec,
+        InlineFrameSpec,
+        LayoutPosition,
+    )
+
+    specs = [
+        GraphNodeSpec(key="router", label="Router"),
+        GraphNodeSpec(key="head", label="Linear"),
+        GraphNodeSpec(key="tail", label="Linear"),
+    ]
+    positions = [
+        LayoutPosition(spec=specs[0], cx=0.6, top_y=6.4, width=0.8, height=0.4),
+        LayoutPosition(spec=specs[1], cx=3.0, top_y=5.4, width=0.8, height=0.4),
+        LayoutPosition(spec=specs[2], cx=3.0, top_y=4.8, width=0.8, height=0.4),
+    ]
+    graph = ComputationGraph(
+        nodes=specs,
+        links=[(0, 1), (1, 2)],
+        inline_frames=[
+            InlineFrameSpec(frame_id="experts", label="Experts", node_indices=[1, 2]),
+        ],
+    )
+    return graph, positions
+
+
+def test_shared_bus_clears_the_band_a_frame_caption_sits_in():
+    """A bus crossing a frame has to clear its caption, not just its border."""
+    from visualizer.render import (
+        CONNECTOR_OBSTACLE_MARGIN,
+        _inline_frame_caption_band_top,
+        _inline_frame_draw_bounds,
+        _lift_bus_y_above_inline_frame_interiors,
+    )
+
+    graph, positions = _captioned_frame_fixture()
+    frame = graph.inline_frames[0]
+    bounds = _inline_frame_draw_bounds(frame, positions, graph)
+    caption_top = _inline_frame_caption_band_top(frame, bounds)
+    assert caption_top > bounds.top, "a labeled frame reserves a band above its border"
+
+    lifted = _lift_bus_y_above_inline_frame_interiors(
+        (bounds.top + caption_top) / 2,
+        graph=graph,
+        positions=positions,
+        x_left=0.0,
+        x_right=4.0,
+    )
+    assert lifted >= caption_top + CONNECTOR_OBSTACLE_MARGIN
+
+
+def test_feed_into_a_frame_head_routes_above_its_caption():
+    """The corridor into a frame's first tile runs above the frame's caption."""
+    from visualizer.render import (
+        CONNECTOR_OBSTACLE_MARGIN,
+        _inline_frame_caption_band_top,
+        _inline_frame_draw_bounds,
+        _inline_frame_top_member_route_y,
+        _RenderAnchor,
+    )
+
+    graph, positions = _captioned_frame_fixture()
+    frame = graph.inline_frames[0]
+    bounds = _inline_frame_draw_bounds(frame, positions, graph)
+    caption_top = _inline_frame_caption_band_top(frame, bounds)
+    # The feeder sits just far enough above the frame that a plain exit stub would
+    # drop the corridor into the caption band.
+    source = _RenderAnchor(cx=0.6, top=6.15, bottom=5.75, left=0.2, right=1.0)
+    target = _RenderAnchor(cx=3.0, top=5.4, bottom=5.0, left=2.6, right=3.4)
+
+    route_y = _inline_frame_top_member_route_y(
+        source,
+        target,
+        frame,
+        positions,
+        graph,
+    )
+    assert route_y >= caption_top + CONNECTOR_OBSTACLE_MARGIN - 1e-9
+    assert route_y <= source.bottom
+
+
+def test_measured_overlap_pass_keeps_the_frame_head_row_gap():
+    """Re-stacking rows after measurement keeps the room a frame caption needs."""
+    from visualizer.computation_graph import (
+        DETAIL_LAYER_GAP,
+        _frame_head_entry_gap,
+        _topological_layers,
+    )
+    from visualizer.render_validate import resolve_measured_overlaps
+
+    graph, positions = _captioned_frame_fixture()
+    resolve_measured_overlaps(positions, graph, top_y=7.0)
+
+    expected = _frame_head_entry_gap(
+        graph,
+        _topological_layers(graph),
+        0,
+        min_gap=DETAIL_LAYER_GAP,
+    )
+    assert expected > DETAIL_LAYER_GAP, "entering a captioned frame asks for extra room"
+    gap = positions[0].bottom - positions[1].top_y
+    assert gap >= expected - 1e-6, f"row gap {gap} lost the caption clearance {expected}"
+
+
+def test_layer_siblings_split_apart_once_measurement_drifts_their_rows():
+    """Same-layer tiles whose rows drift still get pulled apart horizontally."""
+    from visualizer.computation_graph import (
+        ComputationGraph,
+        GraphNodeSpec,
+        LayoutPosition,
+    )
+    from visualizer.render_validate import (
+        MIN_HORIZONTAL_BLOCK_GAP,
+        _node_content_left,
+        _node_content_right,
+        _resolve_same_row_tile_overlaps,
+    )
+
+    specs = [
+        GraphNodeSpec(key="input", label="hidden_states"),
+        GraphNodeSpec(key="experts", label="Experts"),
+        GraphNodeSpec(key="router", label="Router"),
+    ]
+    # The input row grew during measurement, so the two roots no longer share a top_y
+    # even though they still sit side by side in the same layer.
+    positions = [
+        LayoutPosition(spec=specs[0], cx=2.13, top_y=-1.149, width=1.049, height=0.464),
+        LayoutPosition(spec=specs[1], cx=2.97, top_y=-0.939, width=1.389, height=0.322),
+        LayoutPosition(spec=specs[2], cx=1.60, top_y=-1.867, width=0.629, height=0.322),
+    ]
+    graph = ComputationGraph(nodes=specs, links=[(0, 2)], inline_frames=[])
+
+    _resolve_same_row_tile_overlaps(
+        positions,
+        min_gap=MIN_HORIZONTAL_BLOCK_GAP,
+        graph=graph,
+    )
+
+    gap = _node_content_left(positions[1]) - _node_content_right(positions[0])
+    assert gap >= MIN_HORIZONTAL_BLOCK_GAP - 1e-6, (
+        f"drifted layer siblings still overlap: gap {gap}"
+    )
+
+
+def test_module_forward_math_lands_between_its_own_projections():
+    """An MLP-style module shows the math it runs between its projections."""
+    from visualizer.ast_analyze import analyze_source
+
+    source = """
+class Linear:
+    pass
+
+class RMSNorm:
+    pass
+
+class DenseMLP:
+    def __init__(self):
+        self.gate_up_proj = Linear()
+        self.down_proj = Linear()
+
+    def forward(self, hidden_states):
+        gate_up = self.gate_up_proj(hidden_states)
+        gate, up = gate_up.chunk(2, dim=-1)
+        glu = gate * torch.sigmoid(gate)
+        return self.down_proj((up + 1.0) * glu)
+
+class DecoderLayer:
+    def __init__(self):
+        self.input_layernorm = RMSNorm()
+        self.mlp = DenseMLP()
+
+    def forward(self, hidden_states):
+        normed = self.input_layernorm(hidden_states)
+        return hidden_states + self.mlp(normed)
+"""
+    registry = analyze_source(source).class_registry
+
+    mlp_calls = registry["DenseMLP"].forward_calls
+    assert mlp_calls[0] == "gate_up_proj"
+    assert mlp_calls[-1] == "down_proj"
+    assert [call for call in mlp_calls if call.startswith("@op_")], (
+        "the module's own activation math has to reach the diagram"
+    )
+
+    assert registry["DecoderLayer"].forward_calls == ["input_layernorm", "mlp"], (
+        "a container layer leaves the math to its children and its residual to the merge"
+    )
+
+
+def test_frame_column_feeding_past_the_merge_keeps_the_chain_column():
+    """The frame whose exit skips ahead packs first, so its skip stays beside its column."""
+    from visualizer.computation_graph import (
+        ComputationGraph,
+        GraphNodeSpec,
+        InlineFrameSpec,
+        LayoutPosition,
+        _sort_frame_columns_for_packing,
+    )
+
+    def spec(label: str) -> GraphNodeSpec:
+        return GraphNodeSpec(key=label, label=label)
+
+    def pos(cx: float, top_y: float, label: str) -> LayoutPosition:
+        return LayoutPosition(spec=spec(label), cx=cx, top_y=top_y, width=1.0, height=0.4)
+
+    positions = [
+        pos(1.0, 10.0, "a0"),
+        pos(1.0, 9.0, "a1"),
+        pos(3.0, 10.0, "b0"),
+        pos(3.0, 9.0, "b1"),
+        pos(2.0, 8.0, "merge"),
+        pos(2.0, 7.0, "tail"),
+    ]
+    graph = ComputationGraph(
+        nodes=[position.spec for position in positions],
+        links=[(0, 1), (1, 4), (2, 3), (3, 4), (3, 5), (4, 5)],
+        inline_frames=[
+            InlineFrameSpec(frame_id="a", label="A", node_indices=[0, 1]),
+            InlineFrameSpec(frame_id="b", label="B", node_indices=[2, 3]),
+        ],
+    )
+    columns = [[0, 1], [2, 3]]
+    _sort_frame_columns_for_packing(graph, positions, columns, pad=0.1)
+    assert columns[0] == [2, 3], "the frame that also feeds past the merge packs first"
 
 
 def test_tile_display_labels_use_operation_name_for_basic_ops():
@@ -838,14 +1953,431 @@ def test_inline_dashed_port_connector_enters_gate_top():
     assert points[-1] == (target.cx, target.top)
 
 
-def test_combine_op_node_matches_merge_circle_size():
-    from visualizer.computation_graph import COMBINE_OP_SIZE, SYNTHETIC_MULTIPLY, GraphNodeSpec, _diagram_size_for_spec
-    from visualizer.render import COMBINE_OP_SIZE as RENDER_COMBINE_OP_SIZE
+def test_combine_op_node_uses_regular_rectangular_block_size():
+    from visualizer.computation_graph import GraphNodeSpec, _diagram_size_for_spec
 
-    assert COMBINE_OP_SIZE == RENDER_COMBINE_OP_SIZE
-    spec = GraphNodeSpec(key="mul", label="×", synthetic=SYNTHETIC_MULTIPLY)
+    spec = GraphNodeSpec(key="mul", label="Multiply")
     width, height = _diagram_size_for_spec(spec)
-    assert width == height == COMBINE_OP_SIZE
+    assert width > height
+
+
+def test_detail_palette_distinguishes_expanded_kernels_and_regular_ops():
+    from visualizer.block_tree import BlockNode
+    from visualizer.render import COLORS, _detail_block_facecolor, _detail_tile_text_color
+
+    regular = BlockNode(
+        attr_name="proj",
+        class_name="Linear",
+        role="other",
+        label="Linear",
+        is_basic=True,
+    )
+    modeled_leaf = BlockNode(
+        attr_name="apply_rotary",
+        class_name="PositionalOp",
+        role="other",
+        label="Apply rotary",
+    )
+    expanded = BlockNode(
+        attr_name="attn",
+        class_name="Attention",
+        role="attention",
+        label="Attention",
+        children=[regular],
+    )
+    kernel = BlockNode(
+        attr_name="fused",
+        class_name="KernelSubOp",
+        role="other",
+        label="tl.dot",
+    )
+    torch_exp = BlockNode(
+        attr_name="exp",
+        class_name="KernelSubOp",
+        role="other",
+        label="Exp",
+    )
+    torch_cumsum = BlockNode(
+        attr_name="cumsum",
+        class_name="KernelSubOp",
+        role="other",
+        label="CumSum",
+    )
+    torch_softplus = BlockNode(
+        attr_name="softplus",
+        class_name="KernelSubOp",
+        role="other",
+        label="Softplus",
+    )
+    torch_attention = BlockNode(
+        attr_name="@attention",
+        class_name="AttentionOp",
+        role="attention",
+        label="Attention",
+        details=["kernel: sdpa_attention_forward"],
+    )
+    custom_attn = BlockNode(
+        attr_name="@attention",
+        class_name="AttentionOp",
+        role="attention",
+        label="chunk_kda",
+        details=["kernel: chunk_kda"],
+    )
+
+    assert _detail_block_facecolor(regular) == COLORS["basic_op"]
+    assert _detail_block_facecolor(modeled_leaf) == COLORS["basic_op"]
+    assert _detail_block_facecolor(expanded) == COLORS["attention"]
+    assert _detail_block_facecolor(kernel) == COLORS["moe"]
+    assert _detail_block_facecolor(torch_exp) == COLORS["basic_op"]
+    assert _detail_block_facecolor(torch_cumsum) == COLORS["basic_op"]
+    assert _detail_block_facecolor(torch_softplus) == COLORS["basic_op"]
+    assert _detail_block_facecolor(torch_attention) == COLORS["basic_op"]
+    assert _detail_block_facecolor(custom_attn) == COLORS["moe"]
+    assert _detail_tile_text_color(COLORS["basic_op"]) == COLORS["text"]
+    assert _detail_tile_text_color(COLORS["attention"]) == "white"
+    assert _detail_tile_text_color(COLORS["moe"]) == "white"
+
+
+def test_top_level_palette_uses_blue_only_when_component_is_expanded():
+    from visualizer.blocks import BlockComponent
+    from visualizer.block_tree import BlockNode
+    from visualizer.extract import ArchitectureSpec
+    from visualizer.render import COLORS, _top_level_module_style
+
+    attention = BlockComponent(
+        attr_name="self_attn",
+        class_name="Attention",
+        role="attention",
+        label="Attention",
+    )
+    tree = BlockNode(
+        attr_name="self_attn",
+        class_name="Attention",
+        role="attention",
+        label="Attention",
+        children=[
+            BlockNode(
+                attr_name="q_proj",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            )
+        ],
+    )
+    expanded_spec = ArchitectureSpec(
+        name="Expanded",
+        model_type="test",
+        detailed_block_trees=[("Attention", tree)],
+    )
+    config_only_spec = ArchitectureSpec(name="Config only", model_type="test")
+
+    assert _top_level_module_style(attention, expanded_spec) == (
+        COLORS["attention"],
+        "white",
+        {},
+    )
+    fill, text, style = _top_level_module_style(attention, config_only_spec)
+    assert fill == COLORS["basic_op"]
+    assert text == COLORS["text"]
+    assert style["edgecolor"] == "#000000"
+
+
+def test_parallel_head_reference_uses_its_class_name_and_expanded_style():
+    from visualizer.blocks import BlockComponent
+    from visualizer.block_tree import BlockNode
+    from visualizer.extract import ArchitectureSpec
+    from visualizer.render import COLORS, _spine_display_label, _spine_module_style
+
+    head = BlockComponent(
+        attr_name="head",
+        class_name="ParallelHead",
+        role="head",
+        label="ParallelHead",
+    )
+    tree = BlockNode(
+        attr_name="head",
+        class_name="ParallelHead",
+        role="head",
+        label="ParallelHead",
+        children=[
+            BlockNode(
+                attr_name="hc_head",
+                class_name="hc_head",
+                role="other",
+                label="hc head",
+                children=[
+                    BlockNode(
+                        attr_name="@op",
+                        class_name="Multiply",
+                        role="other",
+                        label="Multiply",
+                        is_basic=True,
+                    )
+                ],
+            ),
+            BlockNode(
+                attr_name="get_logits",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            ),
+        ],
+    )
+    spec = ArchitectureSpec(name="D", model_type="d")
+    spec.export_block_trees = [("ParallelHead", tree)]
+
+    assert _spine_display_label(head, spec) == "ParallelHead"
+    assert _spine_module_style(head, spec) == (COLORS["attention"], "white", {})
+
+
+def test_spine_moe_tile_keeps_its_section_when_the_chain_runs_straight():
+    from visualizer.blocks import BlockComponent
+    from visualizer.block_tree import BlockNode
+    from visualizer.extract import ArchitectureSpec
+    from visualizer.render import (
+        COLORS,
+        _detail_sections_to_render,
+        _spine_display_label,
+        _spine_module_style,
+    )
+
+    moe = BlockComponent(
+        attr_name="ffn",
+        class_name="MoE",
+        role="moe",
+        label="MoE",
+    )
+    tree = BlockNode(
+        attr_name="ffn",
+        class_name="MoE",
+        role="moe",
+        label="MoE",
+        children=[
+            BlockNode(
+                attr_name="gate",
+                class_name="Gate",
+                role="router",
+                label="Router",
+            ),
+            BlockNode(
+                attr_name="shared_experts",
+                class_name="Expert",
+                role="expert",
+                label="Expert",
+                children=[
+                    BlockNode(
+                        attr_name="w1",
+                        class_name="Linear",
+                        role="other",
+                        label="Linear",
+                        is_basic=True,
+                    ),
+                    BlockNode(
+                        attr_name="w2",
+                        class_name="Linear",
+                        role="other",
+                        label="Linear",
+                        is_basic=True,
+                    ),
+                ],
+            ),
+        ],
+    )
+    spec = ArchitectureSpec(name="D", model_type="d", block_components=[moe])
+    spec.export_block_trees = [("MoE", tree)]
+
+    assert "MoE" in [title for title, _tree, _sublabel in _detail_sections_to_render(spec)]
+    assert _spine_display_label(moe, spec) == "MoE"
+    assert _spine_module_style(moe, spec) == (COLORS["attention"], "white", {})
+
+
+def test_module_list_expert_loop_keeps_routed_and_shared_moe_branches():
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import (
+        ResidualAddSegment,
+        SideFeedSegment,
+        build_block_node,
+        collect_computation_segments,
+    )
+    from visualizer.computation_graph import build_computation_graph
+
+    source = """
+class Gate:
+    def forward(self, x, input_ids):
+        return x, input_ids
+
+class Expert:
+    def __init__(self):
+        self.w1 = Linear()
+        self.w2 = Linear()
+    def forward(self, x, weights=None):
+        y = self.w1(x)
+        return self.w2(y)
+
+class MoE:
+    def __init__(self):
+        self.gate = Gate()
+        self.experts = ModuleList([Expert()])
+        self.shared_experts = Expert()
+    def forward(self, x, input_ids):
+        weights, indices = self.gate(x, input_ids)
+        y = zeros_like(x)
+        for i in range(1):
+            expert = self.experts[i]
+            idx, top = where(indices == i)
+            y[idx] += expert(x[idx], weights[idx, top, None])
+        y += self.shared_experts(x)
+        return y
+"""
+    analysis = analyze_source(source)
+    cls = analysis.class_registry["MoE"]
+    assert cls.forward_calls == ["gate", "experts", "shared_experts"]
+
+    tree = build_block_node(
+        attr_name="ffn",
+        class_name="MoE",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    segments = collect_computation_segments(tree)
+    routed = next(segment for segment in segments if isinstance(segment, SideFeedSegment))
+    shared = next(segment for segment in segments if isinstance(segment, ResidualAddSegment))
+    assert routed.consumer.attr_name == "experts"
+    assert {side.source_kind for side in routed.sides} == {"forward_input", "prior_step"}
+    assert shared.module.attr_name == "shared_experts"
+
+    graph = build_computation_graph(tree, basic_ops=BasicOpFilter.for_detailed())
+    assert {frame.frame_id for frame in graph.inline_frames} >= {"experts", "shared_experts"}
+    plus = next(
+        index
+        for index, spec in enumerate(graph.nodes)
+        if spec.label == "Add"
+        and len([source for source, target in graph.links if target == index]) == 2
+    )
+    incoming = {source for source, target in graph.links if target == plus}
+    assert len(incoming) == 2
+
+
+def test_expanded_pipeline_is_blue_while_contiguous_is_gray():
+    from visualizer.block_tree import BlockNode
+    from visualizer.render import COLORS, _detail_block_facecolor
+
+    pipeline = BlockNode(
+        attr_name="@attn_pipeline",
+        class_name="KernelPipeline",
+        role="attention",
+        label="sparse_attn pipeline",
+        children=[
+            BlockNode(
+                attr_name="@contiguous",
+                class_name="KernelOp",
+                role="other",
+                label="Contiguous",
+                details=["kernel: contiguous"],
+            )
+        ],
+    )
+
+    assert _detail_block_facecolor(pipeline) == COLORS["attention"]
+    assert _detail_block_facecolor(pipeline.children[0]) == COLORS["basic_op"]
+
+
+def test_rebinding_forward_input_does_not_invent_parallel_head_residual():
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import (
+        ResidualAddSegment,
+        build_block_node,
+        collect_computation_segments,
+    )
+
+    source = """
+class ParallelHead:
+    def forward(self, x, hc_fn, hc_scale, hc_base, norm):
+        x = self.hc_head(x, hc_fn, hc_scale, hc_base)
+        return self.get_logits(norm(x))
+
+    def hc_head(self, x, hc_fn, hc_scale, hc_base):
+        return x * hc_scale + hc_base
+
+    def get_logits(self, x):
+        return x
+"""
+    analysis = analyze_source(source, filename="model.py")
+    structure = analysis.class_registry["ParallelHead"]
+    assert structure.side_inputs == {}
+
+    tree = build_block_node(
+        attr_name="head",
+        class_name="ParallelHead",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    assert not any(
+        isinstance(segment, ResidualAddSegment)
+        for segment in collect_computation_segments(tree)
+    )
+
+
+def test_computation_figure_output_collects_all_terminal_paths():
+    from visualizer.computation_graph import (
+        ComputationGraph,
+        GraphNodeSpec,
+        SYNTHETIC_OUTPUT,
+        add_forward_output,
+    )
+
+    graph = ComputationGraph(
+        nodes=[
+            GraphNodeSpec(key="left", label="Left"),
+            GraphNodeSpec(key="right", label="Right"),
+        ]
+    )
+    output_index = add_forward_output(graph)
+
+    assert output_index is not None
+    assert graph.nodes[output_index].synthetic == SYNTHETIC_OUTPUT
+    assert graph.nodes[output_index].label == "Output"
+    assert {src for src, tgt in graph.links if tgt == output_index} == {0, 1}
+
+
+def test_standalone_detail_figure_draws_output_like_its_input():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from visualizer.block_tree import BlockNode
+    from visualizer.render import COLORS, DiagramLayout, _render_laid_out_computation_graph
+
+    tree = BlockNode(
+        attr_name="proj",
+        class_name="Linear",
+        role="other",
+        label="Linear",
+        is_basic=True,
+    )
+    fig, ax = plt.subplots(figsize=(6, 6))
+    layout = DiagramLayout()
+    _render_laid_out_computation_graph(
+        layout,
+        ax,
+        tree,
+        cx=3.0,
+        top_y=5.0,
+        block_w=3.0,
+        draw_section_frame=True,
+    )
+
+    by_id = {node.node_id: node for node in layout.nodes}
+    # Same fill the top-level figure gives "Tokenized text" and its own "Output".
+    assert by_id["@input"].facecolor == COLORS["embed"]
+    assert by_id["@output"].facecolor == by_id["@input"].facecolor
+    assert by_id["@output"].text_color == by_id["@input"].text_color
+    plt.close(fig)
 
 
 def test_situ_and_mul_matches_parent_mlp_color():
@@ -1190,6 +2722,305 @@ def test_mla_gate_input_uses_solid_residual_connector(tmp_path: Path):
     svg = out.read_text(encoding="utf-8")
     assert COLORS["flow"] in svg
     assert COLORS["residual"] not in svg or "stroke-dasharray" not in svg.split(COLORS["residual"])[-1][:200]
+
+
+def test_moe_router_and_input_enter_first_expert_linear_without_crossing(tmp_path, monkeypatch):
+    """Router and shared-input feeds use distinct ports on the expert's top edge."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    from visualizer import render as render_module
+    from visualizer.computation_graph import SYNTHETIC_INPUT
+    from visualizer.loader import build_detailed_basic_ops
+    from visualizer.render import (
+        CONNECTOR_OBSTACLE_MARGIN,
+        PARALLEL_CONNECTOR_COORD_EPS,
+        _connector_axis_segments,
+        _connector_target_top_entry_y,
+    )
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4-Flash/snapshots"
+        / "60d8d70770c6776ff598c94bb586a859a38244f1/inference/model.py"
+    )
+    if not code_path.exists():
+        pytest.skip("DeepSeek-V4 modeling file not cached locally")
+
+    spec = load_architecture(
+        "deepseek-ai/DeepSeek-V4-Flash",
+        code_path=code_path,
+        detailed=True,
+        basic_ops=build_detailed_basic_ops(),
+    )
+    captured: list[dict] = []
+    original = render_module._collect_detail_link_paths
+
+    def capture(**kwargs):
+        paths = original(**kwargs)
+        captured.append(
+            {
+                "graph": kwargs["graph"],
+                "anchors": dict(kwargs["anchors"]),
+                "link_paths": {key: list(points) for key, points in paths.items()},
+            }
+        )
+        return paths
+
+    monkeypatch.setattr(render_module, "_collect_detail_link_paths", capture)
+    render_diagram(spec, tmp_path / "deepseek_sections.svg", detailed=True)
+    section = next(
+        entry
+        for entry in captured
+        if any(node.label == "Router" for node in entry["graph"].nodes)
+    )
+    graph = section["graph"]
+    anchors = section["anchors"]
+    link_paths = section["link_paths"]
+    input_index = next(
+        index for index, node in enumerate(graph.nodes) if node.synthetic == SYNTHETIC_INPUT
+    )
+    router_link = next(
+        link
+        for link in graph.links
+        if graph.nodes[link[0]].label == "Router"
+        and (input_index, link[1]) in link_paths
+    )
+    router_index, expert_index = router_link
+    chain_link = (input_index, expert_index)
+    target = anchors[expert_index]
+    entry_y = _connector_target_top_entry_y(target)
+    router_points = link_paths[router_link]
+    chain_points = link_paths[chain_link]
+
+    for points in (router_points, chain_points):
+        assert abs(points[-1][1] - entry_y) <= PARALLEL_CONNECTOR_COORD_EPS
+    ports = sorted(points[-1][0] for points in (router_points, chain_points))
+    assert ports[1] - ports[0] >= CONNECTOR_OBSTACLE_MARGIN
+
+    # The router sits right of the drop lane, so its port must too, or the jog
+    # reaches back across that lane and crosses it.
+    assert router_points[-1][0] > chain_points[-1][0]
+
+    router_source = anchors[router_index]
+    for orientation, coord, _lo, _hi, _index in _connector_axis_segments(router_points):
+        if orientation != "h":
+            continue
+        assert abs(router_source.bottom - coord) >= PARALLEL_CONNECTOR_COORD_EPS - 1e-9
+
+    verticals = [
+        segment for segment in _connector_axis_segments(chain_points) if segment[0] == "v"
+    ]
+    horizontals = [
+        segment for segment in _connector_axis_segments(router_points) if segment[0] == "h"
+    ]
+    for _, x, y_lo, y_hi, _index in verticals:
+        for _, y, x_lo, x_hi, _other in horizontals:
+            assert not (x_lo < x < x_hi and y_lo < y < y_hi), (
+                f"router feed crosses the input drop lane at ({x:.3f}, {y:.3f})"
+            )
+
+    # The router may not stand over the lane, or the input has to detour around
+    # the whole expert column to reach the same top edge.
+    assert min(x for x, _y in chain_points) >= target.left - CONNECTOR_OBSTACLE_MARGIN
+
+    departure_levels: set[float] = set()
+    legs_with_extra_levels: list[tuple[int, int]] = []
+    for link, points in link_paths.items():
+        if link[0] != input_index:
+            continue
+        horizontals = [
+            segment for segment in _connector_axis_segments(points) if segment[0] == "h"
+        ]
+        if not horizontals:
+            continue
+        departure_levels.add(round(horizontals[0][1], 6))
+        if len(horizontals) > 1:
+            legs_with_extra_levels.append(link)
+    assert max(departure_levels) - min(departure_levels) <= PARALLEL_CONNECTOR_COORD_EPS + 1e-6
+    assert all(link[0] == input_index for link in legs_with_extra_levels)
+
+
+def test_orthogonal_connector_path_collapses_near_duplicates_without_slanting():
+    """Merging points closer than the coordinate epsilon must keep segments axis-aligned."""
+    from visualizer.render import _ensure_orthogonal_connector_path
+
+    jogged = [
+        (0.841, -16.415),
+        (0.841, -16.515),
+        (0.841, -16.535),
+        (1.540, -16.535),
+        (1.540, -16.600),
+    ]
+    fixed = _ensure_orthogonal_connector_path(jogged)
+
+    assert fixed[0] == jogged[0]
+    assert fixed[-1] == jogged[-1]
+    for (x1, y1), (x2, y2) in zip(fixed, fixed[1:]):
+        assert abs(x1 - x2) <= 1e-9 or abs(y1 - y2) <= 1e-9, (
+            f"slanted segment ({x1:.3f},{y1:.3f})->({x2:.3f},{y2:.3f})"
+        )
+
+
+_SWIGLU_BIAS_SOURCE = """
+class Linear:
+    pass
+
+class SwigluMLP:
+    def __init__(self, config):
+        self.gate_up_proj = Linear()
+        self.down_proj = Linear()
+        self.swiglu_alpha = 1.702
+
+    def forward(self, hidden_states):
+        gate_up = self.gate_up_proj(hidden_states)
+        gate, up = gate_up.chunk(2, dim=-1)
+        glu = gate * torch.sigmoid(gate * self.swiglu_alpha)
+        return self.down_proj((up + 1.0) * glu)
+"""
+
+
+def test_swiglu_bias_add_branch_tees_off_a_single_multiply_stem():
+    """The add beside the gated multiplies hangs off one stem, not a second exit lane."""
+    from collections import defaultdict
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        SYNTHETIC_INPUT,
+        _estimate_graph_height,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.render import (
+        COLORS,
+        CONNECTOR_OBSTACLE_MARGIN,
+        PARALLEL_CONNECTOR_COORD_EPS,
+        _anchors_from_detail_plan,
+        _build_detail_draw_plan,
+        _collect_detail_link_paths,
+        _compute_detail_connector_buses,
+        _connector_axis_segments,
+        _connector_source_bottom_exit_y,
+    )
+    from visualizer.render_validate import finalize_detail_layout
+
+    analysis = analyze_source(_SWIGLU_BIAS_SOURCE, all_tensor_ops=True)
+    basic = BasicOpFilter.for_detailed()
+    tree = build_block_node(
+        attr_name="mlp",
+        class_name="SwigluMLP",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    graph = build_computation_graph(tree, basic_ops=basic)
+    _fig, ax = plt.subplots(figsize=(16, 13))
+    measure_graph_node_sizes(ax, graph)
+    positions, links = layout_computation_graph(
+        graph,
+        cx=2.6,
+        top_y=10.0,
+        block_w=8.0,
+        block_h=_estimate_graph_height(graph),
+        content_left=0.6,
+    )
+    finalize_detail_layout(
+        ax,
+        graph,
+        positions,
+        input_sublabel=None,
+        cx=2.6,
+        top_y=10.0,
+        detail_fill=COLORS["detail_fill"],
+        min_left=0.6,
+    )
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=None)
+    anchors = _anchors_from_detail_plan(positions, plan)
+    incoming: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    outgoing: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for src, tgt in links:
+        incoming[tgt].append((src, tgt))
+        outgoing[src].append((src, tgt))
+    input_index = next(
+        index for index, node in enumerate(graph.nodes) if node.synthetic == SYNTHETIC_INPUT
+    )
+    target_bus, source_bus, merge_entry_x, merge_link_bus = _compute_detail_connector_buses(
+        graph,
+        positions,
+        anchors,
+        incoming,
+        outgoing,
+        plan.label_obstacles,
+    )
+    link_paths = _collect_detail_link_paths(
+        graph=graph,
+        links=links,
+        positions=positions,
+        anchors=anchors,
+        incoming=incoming,
+        label_obstacles=plan.label_obstacles,
+        target_bus=target_bus,
+        source_bus=source_bus,
+        merge_entry_x=merge_entry_x,
+        merge_link_bus=merge_link_bus,
+        input_index=input_index,
+    )
+    try:
+        add_index = next(
+            index for index, node in enumerate(graph.nodes) if node.label == "Add"
+        )
+        gate_index = next(src for src, tgt in links if tgt == add_index)
+        join_index = next(tgt for src, tgt in links if src == add_index)
+        assert (gate_index, join_index) in links, "gate output also feeds the join directly"
+
+        for link_key, points in link_paths.items():
+            for (x1, y1), (x2, y2) in zip(points, points[1:]):
+                assert abs(x1 - x2) <= 1e-9 or abs(y1 - y2) <= 1e-9, (
+                    f"{link_key} has a slanted segment "
+                    f"({x1:.3f},{y1:.3f})->({x2:.3f},{y2:.3f})"
+                )
+
+        gate = anchors[gate_index]
+        branch_points = link_paths[(gate_index, add_index)]
+        stem_points = link_paths[(gate_index, join_index)]
+        exit_y = _connector_source_bottom_exit_y(gate)
+        for points in (branch_points, stem_points):
+            assert abs(points[0][0] - gate.cx) <= PARALLEL_CONNECTOR_COORD_EPS, (
+                "both legs must leave the multiply on its own column"
+            )
+            assert abs(points[0][1] - exit_y) <= PARALLEL_CONNECTOR_COORD_EPS
+
+        # The stem runs on through the add's row instead of stepping aside for it.
+        add = anchors[add_index]
+        join = anchors[join_index]
+        assert add.right + CONNECTOR_OBSTACLE_MARGIN < gate.cx
+        assert add.top < gate.bottom and add.bottom > join.top
+        stem_verticals = [
+            segment for segment in _connector_axis_segments(stem_points) if segment[0] == "v"
+        ]
+        assert len(stem_verticals) == 1, "the stem should reach the join without a jog"
+        assert abs(stem_verticals[0][1] - gate.cx) <= PARALLEL_CONNECTOR_COORD_EPS
+
+        # Two feeds land on the join's top edge, so they need separate ports.
+        rejoin_points = link_paths[(add_index, join_index)]
+        ports = sorted((rejoin_points[-1][0], stem_points[-1][0]))
+        assert ports[1] - ports[0] >= CONNECTOR_OBSTACLE_MARGIN
+        assert rejoin_points[-1][0] < stem_points[-1][0], (
+            "the add approaches from the left, so it takes the left port"
+        )
+        for points in (rejoin_points, stem_points):
+            assert abs(points[-1][1] - join.top) <= PARALLEL_CONNECTOR_COORD_EPS
+            assert join.left <= points[-1][0] <= join.right
+    finally:
+        plt.close(_fig)
 
 
 def test_kimi_mla_attention_feeds_depart_vertically():
@@ -1538,6 +3369,7 @@ def test_kimi_kda_stacked_feeders_enter_gated_delta_rule_without_crossing(
     """CumSum passes beside Intra-chunk WY instead of crossing its merge bus."""
     from visualizer.render import (
         CONNECTOR_OBSTACLE_MARGIN,
+        TOP_ENTRY_PORT_GAP,
         _connector_source_exit_y,
         _connector_turn_before_clearing_source,
     )
@@ -1568,10 +3400,13 @@ def test_kimi_kda_stacked_feeders_enter_gated_delta_rule_without_crossing(
         "the feeder directly above keeps the center port"
     )
     bypass_x = cumsum_leg[-1][0]
-    assert bypass_x >= intra_anchor.right + CONNECTOR_OBSTACLE_MARGIN - 1e-6, (
-        f"bypass port {bypass_x:.4f} must clear Intra-chunk WY at {intra_anchor.right:.4f}"
+    assert gated_anchor.cx < bypass_x <= gated_anchor.cx + TOP_ENTRY_PORT_GAP + 1e-6, (
+        f"bypass port {bypass_x:.4f} must enter beside the center at {gated_anchor.cx:.4f}"
     )
-    assert bypass_x <= gated_anchor.right, "bypass port must stay on the target's top edge"
+    gutter_x = max(x for x, _ in cumsum_leg)
+    assert gutter_x >= intra_anchor.right + CONNECTOR_OBSTACLE_MARGIN - 1e-6, (
+        f"bypass gutter {gutter_x:.4f} must clear Intra-chunk WY at {intra_anchor.right:.4f}"
+    )
 
     intra_bus = section["target_bus"][intra]
     tee_y = cumsum_leg[1][1]
@@ -1592,11 +3427,6 @@ def test_kimi_kda_stacked_feeders_enter_gated_delta_rule_without_crossing(
                     )
 
     for (src, _tgt), points in link_paths.items():
-        if (src, _tgt) in graph.side_entry_links or (
-            src,
-            _tgt,
-        ) in graph.inline_binary_operand_links:
-            continue
         assert (
             _connector_turn_before_clearing_source(
                 points,
@@ -1633,18 +3463,214 @@ def test_same_column_bypass_ports_and_corridor():
         target_bus={1: middle_bus},
     )
     assert list(assignments) == [(0, 2)], "only the feeder above the stack bypasses"
-    port_x, corridor_y = assignments[(0, 2)]
-    assert port_x >= middle.right + CONNECTOR_OBSTACLE_MARGIN - 1e-6
-    assert port_x <= target.right
-    assert middle.top < corridor_y < middle_bus
+    bypass = assignments[(0, 2)]
+    assert bypass.port_x >= middle.right + CONNECTOR_OBSTACLE_MARGIN - 1e-6
+    assert bypass.port_x <= target.right
+    assert middle.top < bypass.corridor_y < middle_bus
+    assert bypass.gutter_x is None, "a port fits beside the passed tile"
 
-    route = _same_column_bypass_top_entry_route(upper, target, port_x, corridor_y)
+    route = _same_column_bypass_top_entry_route(upper, target, bypass)
     assert route == [
         (upper.cx, upper.bottom),
-        (upper.cx, corridor_y),
-        (port_x, corridor_y),
-        (port_x, target.top),
+        (upper.cx, bypass.corridor_y),
+        (bypass.port_x, bypass.corridor_y),
+        (bypass.port_x, target.top),
     ]
+
+
+def test_bypass_past_a_full_width_tile_enters_beside_the_center():
+    """With no port left beyond the passed tile, the bypass returns to the center."""
+    from visualizer.render import (
+        CONNECTOR_OBSTACLE_MARGIN,
+        TOP_ENTRY_PORT_GAP,
+        _RenderAnchor,
+        _same_column_bypass_assignments,
+        _same_column_bypass_top_entry_route,
+    )
+
+    upper = _RenderAnchor(cx=2.0, top=-1.0, bottom=-1.4, left=1.6, right=2.4)
+    middle = _RenderAnchor(cx=2.0, top=-2.0, bottom=-2.4, left=1.35, right=2.65)
+    target = _RenderAnchor(cx=2.0, top=-3.0, bottom=-3.4, left=1.3, right=2.7)
+    anchors = {0: upper, 1: middle, 2: target}
+    positions = [
+        type("Pos", (), {"cx": anchor.cx, "bottom": anchor.bottom})()
+        for anchor in (upper, middle, target)
+    ]
+    bypass = _same_column_bypass_assignments(
+        [(0, 2), (1, 2)],
+        target,
+        positions=positions,
+        anchors=anchors,
+        target_bus={1: middle.top + 0.3},
+    )[(0, 2)]
+
+    assert bypass.port_x == pytest.approx(target.cx + TOP_ENTRY_PORT_GAP)
+    assert bypass.gutter_x >= max(middle.right, target.right) + CONNECTOR_OBSTACLE_MARGIN
+    assert target.top < bypass.jog_y < middle.bottom
+
+    route = _same_column_bypass_top_entry_route(upper, target, bypass)
+    assert route == [
+        (upper.cx, upper.bottom),
+        (upper.cx, bypass.corridor_y),
+        (bypass.gutter_x, bypass.corridor_y),
+        (bypass.gutter_x, bypass.jog_y),
+        (bypass.port_x, bypass.jog_y),
+        (bypass.port_x, target.top),
+    ]
+
+
+def test_merge_legs_from_one_side_get_their_own_corridor():
+    """Two feeds arriving from the same side nest instead of sharing one line."""
+    from visualizer.render import (
+        PARALLEL_CONNECTOR_CHANNEL_GAP,
+        _connector_min_bus_y_above_target,
+        _nest_same_side_merge_bus_levels,
+        _RenderAnchor,
+    )
+
+    target = _RenderAnchor(cx=2.73, top=-5.89, bottom=-6.21, left=2.32, right=3.14)
+    left = _RenderAnchor(cx=2.13, top=-5.16, bottom=-5.48, left=1.9, right=2.36)
+    near = _RenderAnchor(cx=3.26, top=0.65, bottom=0.33, left=3.0, right=3.52)
+    far = _RenderAnchor(cx=4.31, top=0.88, bottom=0.56, left=4.05, right=4.57)
+    anchors = {0: left, 1: near, 2: far, 3: target}
+    positions = [
+        type("Pos", (), {"cx": anchor.cx, "bottom": anchor.bottom})()
+        for anchor in (left, near, far, target)
+    ]
+    links = [(0, 3), (1, 3), (2, 3)]
+    base = _connector_min_bus_y_above_target(target)
+    merge_entry_x = {(0, 3): 2.65, (1, 3): 2.81, (2, 3): 2.89}
+    merge_link_bus = {link: base for link in links}
+
+    _nest_same_side_merge_bus_levels(
+        links,
+        tgt=3,
+        positions=positions,
+        anchors=anchors,
+        merge_entry_x=merge_entry_x,
+        merge_link_bus=merge_link_bus,
+        obstacles=[],
+    )
+
+    assert merge_link_bus[(0, 3)] == pytest.approx(base), "the lone left leg stays put"
+    assert merge_link_bus[(2, 3)] == pytest.approx(base), "the outer right leg stays lowest"
+    assert merge_link_bus[(1, 3)] >= base + PARALLEL_CONNECTOR_CHANNEL_GAP - 1e-9, (
+        "the nearer right leg needs its own level, not the outer leg's line"
+    )
+
+
+def _skip_chain_graph():
+    """A framed chain a -> b -> c -> d with a skip from a to d and a dead-end off b."""
+    from visualizer.computation_graph import ComputationGraph, GraphNodeSpec, InlineFrameSpec
+
+    labels = ["a", "b", "leaf", "c", "d"]
+    return ComputationGraph(
+        nodes=[GraphNodeSpec(key=label, label=label) for label in labels],
+        links=[(0, 1), (1, 2), (1, 3), (3, 4), (0, 4)],
+        inline_frames=[
+            InlineFrameSpec(frame_id="f", label="F", node_indices=[0, 1, 2, 3, 4]),
+        ],
+    )
+
+
+def test_frame_border_needs_a_row_of_its_own_between_members():
+    """A border between two stacked tiles has to fit its padding."""
+    from visualizer.computation_graph import (
+        ComputationGraph,
+        FRAME_BORDER_CLEARANCE,
+        GraphNodeSpec,
+        InlineFrameSpec,
+        _row_gap_rules,
+    )
+    from visualizer.render import INLINE_FRAME_CAPTION_BAND, INLINE_FRAME_PAD
+
+    graph = ComputationGraph(
+        nodes=[GraphNodeSpec(key=name, label=name) for name in ("in", "top", "bottom", "out")],
+        links=[(0, 1), (1, 2), (2, 3)],
+        inline_frames=[InlineFrameSpec(frame_id="f", label="F", node_indices=[1, 2])],
+    )
+    required = _row_gap_rules(graph)
+
+    assert required(1, 2) == pytest.approx(0.0), "two members of one frame pack freely"
+    assert required(0, 1) == pytest.approx(
+        INLINE_FRAME_PAD + INLINE_FRAME_CAPTION_BAND + FRAME_BORDER_CLEARANCE
+    ), "the top border and its caption sit between the feeder and the first member"
+    assert required(2, 3) == pytest.approx(INLINE_FRAME_PAD + FRAME_BORDER_CLEARANCE), (
+        "the bottom border sits between the last member and the step below"
+    )
+
+
+def test_skip_rows_reserve_room_for_the_connector_to_leave_its_column():
+    """The rows a skip jogs through are wide enough to hold its horizontal runs."""
+    from visualizer.computation_graph import (
+        _inline_frame_column_skip_links,
+        _row_gap_rules,
+    )
+    from visualizer.render import CONNECTOR_EXIT_STUB, CONNECTOR_OBSTACLE_MARGIN
+
+    graph = _skip_chain_graph()
+    # A jog needs its exit stub plus the margin of the step it passes.
+    band = CONNECTOR_EXIT_STUB + CONNECTOR_OBSTACLE_MARGIN
+    required = _row_gap_rules(graph)
+
+    assert (0, 4) in _inline_frame_column_skip_links(graph, graph.inline_frames[0]), (
+        "a link that passes steps of its own column is a skip"
+    )
+    assert required(0, 1) >= band, "the skip leaves its column below its source"
+    assert required(3, 4) >= band, "and rejoins it above its target"
+
+
+def test_dead_end_step_steps_out_of_the_column_it_would_block():
+    """A step nothing reads gets its own column instead of sitting under the chain."""
+    from visualizer.computation_graph import (
+        LayoutPosition,
+        _dead_end_branch_nodes_among,
+        _layout_operation_dag_columns,
+        _row_gap_rules,
+    )
+    from visualizer.render import CONNECTOR_EXIT_STUB, CONNECTOR_OBSTACLE_MARGIN
+
+    graph = _skip_chain_graph()
+    members = list(range(len(graph.nodes)))
+    assert _dead_end_branch_nodes_among(graph, members) == {2}, "only the leaf is off the flow"
+
+    positions = [
+        LayoutPosition(spec=spec, cx=2.0, top_y=10.0 - index, width=1.0, height=0.4)
+        for index, spec in enumerate(graph.nodes)
+    ]
+    _layout_operation_dag_columns(positions, graph, members)
+    assert positions[2].cx < positions[1].cx, "the leaf moves aside"
+    assert positions[1].cx == pytest.approx(positions[3].cx), "the chain keeps one column"
+    assert _row_gap_rules(graph)(1, 2) >= CONNECTOR_EXIT_STUB + CONNECTOR_OBSTACLE_MARGIN, (
+        "reaching the column beside the chain needs a run in the row above it"
+    )
+
+
+def test_shift_may_not_close_a_row_reserved_for_a_connector():
+    """Clearing a frame border cannot squeeze a row a connector was promised."""
+    from visualizer.render_validate import _rows_keep_reserved_gap
+    from visualizer.text_measure import box_bounds_at
+
+    box = box_bounds_at(2.0, 10.0, 1.0, 0.4)
+    below = box_bounds_at(2.0, 9.4, 1.0, 0.4)
+    required = lambda upper, lower: 0.17  # noqa: E731 - a fixed reservation under test
+
+    assert _rows_keep_reserved_gap(
+        0,
+        1,
+        box=box,
+        shifted=box_bounds_at(2.0, 9.98, 1.0, 0.4),
+        other=below,
+        required_row_gap=required,
+    ), "a hair of movement leaves the reserved row intact"
+    assert not _rows_keep_reserved_gap(
+        0,
+        1,
+        box=box,
+        shifted=box_bounds_at(2.0, 9.85, 1.0, 0.4),
+        other=below,
+        required_row_gap=required,
+    ), "dropping onto the reserved row strands the connector that needed it"
 
 
 def test_connector_turn_before_clearing_source_flags_short_stubs():
@@ -2194,6 +4220,7 @@ def test_detailed_block_trees_include_pipeline_sections():
 
 
 def test_detailed_expands_rope_at_top_level(tmp_path: Path):
+    """The positional block expands into the tensor math its own forward runs."""
     from visualizer.extract import load_architecture
     from visualizer.basic_ops import BasicOpFilter
     from visualizer.render import render_diagram
@@ -2206,13 +4233,101 @@ def test_detailed_expands_rope_at_top_level(tmp_path: Path):
     )
     out = render_diagram(spec, tmp_path / "detailed_rope.svg", detailed=True)
     svg = out.read_text(encoding="utf-8")
-    assert "Freq computation" in svg
-    assert "ApplyRotary" in svg
+    assert "Positional (RoPE)" in svg
+    assert "rotary_emb" in svg
+    for label in ("MatMul", "Concat", "Cosine", "Sine"):
+        assert label in svg, f"missing rope operation {label}"
+    # Synthetic stand-ins for rope internals must never come back.
+    assert "Freq computation" not in svg
+    assert "ApplyRotary" not in svg
     assert "cos, sin from inv_freq" not in svg
     assert "rotate query/key tensors" not in svg
     assert "Map token IDs to embeddings" not in svg
-    assert "Positional (RoPE)" in svg
-    assert "rotary_emb" in svg
+
+
+def test_expanded_spine_block_stays_on_the_model_axis_and_reports_every_output():
+    """A spine block keeps its chain on the axis and hands back all of its outputs."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node, expand_block_tree_inplace
+    from visualizer.render import DiagramLayout, _render_laid_out_computation_graph
+
+    source = (FIXTURES / "custom_model" / "modeling_custom.py").read_text(encoding="utf-8")
+    analysis = analyze_source(source, filename="modeling_custom.py")
+    basic = BasicOpFilter.for_detailed()
+    tree = expand_block_tree_inplace(
+        build_block_node(
+            attr_name="rotary_emb",
+            class_name="CustomRotaryEmbedding",
+            registry=analysis.class_registry,
+            basic_ops=basic,
+        ),
+        basic_ops=basic,
+    )
+
+    fig, ax = plt.subplots(figsize=(11, 13))
+    fig.canvas.draw()
+    spine_cx = 4.5
+    layout = DiagramLayout()
+    rendered = _render_laid_out_computation_graph(
+        layout,
+        ax,
+        tree,
+        cx=spine_cx,
+        top_y=10.0,
+        block_w=3.4,
+        draw_section_frame=False,
+        root_frame_label="Positional (RoPE) (rotary_emb)",
+        include_input=False,
+        align_chain_to_cx=True,
+        basic_ops=basic,
+    )
+
+    assert rendered.entry is not None
+    assert abs(rendered.entry.cx - spine_cx) <= 0.02
+    for node in layout.nodes:
+        assert abs(node.cx - spine_cx) <= 0.02, f"{node.label} drifted off the spine axis"
+    # cos and sin both leave the module, so both have to reach the flow below it.
+    assert len(rendered.exits) == 2
+    assert all(exit_anchor.bottom > rendered.bottom for exit_anchor in rendered.exits)
+    plt.close(fig)
+
+
+def test_spine_block_side_output_paths_reach_the_downstream_flow():
+    """Outputs stacked above the bottom of a spine block route around it, not through it."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from visualizer.render import _RenderAnchor, _connect_spine_block_side_outputs
+
+    upper = _RenderAnchor(cx=4.5, top=-1.0, bottom=-1.4, left=4.0, right=5.0)
+    lower = _RenderAnchor(cx=4.5, top=-2.0, bottom=-2.4, left=4.0, right=5.0)
+    fig, ax = plt.subplots(figsize=(6, 6))
+    _connect_spine_block_side_outputs(
+        ax,
+        (upper, lower),
+        cx=4.5,
+        join_y=-2.6,
+        corridor_x=5.4,
+    )
+
+    paths = [line.get_xydata().tolist() for line in ax.get_lines()]
+    assert paths, "the side output was not drawn"
+    xs = [x for path in paths for x, _y in path]
+    ys = [y for path in paths for _x, y in path]
+    # The detour leaves sideways and rejoins the flow below the block, never doubling back up.
+    assert max(xs) >= 5.4 - 0.01
+    assert min(ys) <= -2.6 + 0.01
+    assert all(y <= upper.top + 0.01 for y in ys)
+    assert all(x >= lower.right - 0.01 or y <= -2.6 + 0.01 for path in paths for x, y in path)
+    plt.close(fig)
 
 
 def test_partition_detail_trees_skips_spine_and_inlined_modules():
@@ -2231,8 +4346,8 @@ def test_partition_detail_trees_skips_spine_and_inlined_modules():
         role="other",
         label="RoPE",
         children=[
-            BlockNode(attr_name="freqs", class_name="RotaryEmbedding", role="other", label="Freq", is_basic=True),
-            BlockNode(attr_name="apply", class_name="ApplyRotary", role="other", label="Apply", is_basic=True),
+            BlockNode(attr_name="@op_l1_c0_cosine", class_name="Cosine", role="other", label="Cosine", is_basic=True),
+            BlockNode(attr_name="@op_l2_c0_sine", class_name="Sine", role="other", label="Sine", is_basic=True),
         ],
     )
     gate = BlockNode(
@@ -2539,7 +4654,7 @@ def test_moe_infer_graph_dashed_router_side_link():
     from visualizer.ast_analyze import analyze_source
     from visualizer.basic_ops import BasicOpFilter
     from visualizer.block_tree import build_block_node
-    from visualizer.computation_graph import SYNTHETIC_COMBINE, SYNTHETIC_INPUT, build_computation_graph
+    from visualizer.computation_graph import SYNTHETIC_INPUT, build_computation_graph
 
     code_path = (
         Path.home()
@@ -2580,7 +4695,6 @@ def test_moe_infer_graph_dashed_router_side_link():
     )
     assert (route_scaling_index, agg_index) in graph.links
     assert (route_scaling_index, agg_index) not in graph.dashed_links
-    assert (route_scaling_index, agg_index) not in graph.side_entry_links
     assert (route_scaling_index, agg_index) not in graph.link_port_labels
     down_proj_index = next(
         index
@@ -2599,7 +4713,7 @@ def test_shared_experts_graph_residual_side_link_is_solid():
     from visualizer.ast_analyze import _ModelAstVisitor
     from visualizer.basic_ops import BasicOpFilter
     from visualizer.block_tree import build_block_node
-    from visualizer.computation_graph import SYNTHETIC_COMBINE, SYNTHETIC_INPUT, build_computation_graph
+    from visualizer.computation_graph import SYNTHETIC_INPUT, build_computation_graph
 
     code = '''
 class MLP:
@@ -2632,10 +4746,10 @@ class MoE:
     plus_index = next(
         index
         for index, spec in enumerate(graph.nodes)
-        if spec.synthetic == SYNTHETIC_COMBINE and spec.label == "+"
+        if spec.synthetic is None and spec.label == "Add"
     )
     assert (input_index, shared_index) in graph.links
-    assert (shared_index, plus_index) in graph.side_entry_links
+    assert (shared_index, plus_index) in graph.links
     assert (input_index, shared_index) not in graph.dashed_links
     assert (shared_index, plus_index) not in graph.dashed_links
     assert graph.nodes[plus_index].sublabel is None
@@ -2656,6 +4770,7 @@ def test_render_detailed_diagram(tmp_path: Path):
     assert "tokenization" not in svg.lower()
     assert "expert" in svg.lower() or "logits" in svg.lower()
     assert svg.count("fill: #fff5f4; stroke: #c0392b") >= 1
+    assert "<!-- Output -->" in svg
     assert "getattr" not in svg.lower()
     assert "Parameter" not in svg
     assert "<!-- Q -->" in svg or "DejaVuSans-Bold-51" in svg
@@ -2721,7 +4836,7 @@ def test_kimi_ffn_spine_label_uses_class_names():
         basic_ops=BasicOpFilter.for_detailed(),
     )
     label, sublabel = _ffn_label(spec)
-    assert label == "KimiMoE / KimiMLP"
+    assert label == "KimiSparseMoeBlock / KimiMLP"
     assert sublabel is None
 
 
@@ -2923,9 +5038,9 @@ def test_repeat_block_label_bulleted_sublists():
     )
     label = _repeat_block_label(spec)
     assert label.startswith("93 × Transformer block\n")
-    assert "• 68 KimiDelta Attn + KimiSparseMoeBlock" in label
-    assert "• 24 KimiMLA Attn + KimiSparseMoeBlock" in label
-    assert "• 1 KimiDelta Attn + KimiMLP" in label
+    assert "• 68 KimiDeltaAttention + KimiSparseMoeBlock" in label
+    assert "• 24 KimiMLAAttention + KimiSparseMoeBlock" in label
+    assert "• 1 KimiDeltaAttention + KimiMLP" in label
     assert "N =" not in label
 
 
@@ -2946,11 +5061,185 @@ def test_stack_components_from_kimi_ast():
     spec.positional_encoding = "RoPE"
     _rebuild_stack_components(spec, analysis)
 
-    assert [comp.attr_name for comp in spec.stack_pre] == ["embed_tokens", "rotary_emb"]
+    # Kimi's MLA sets `self.rotary_emb = None` and asserts NoPE, so there is no
+    # rotary module to draw and none may be invented from the config.
+    assert [comp.attr_name for comp in spec.stack_pre] == ["embed_tokens"]
     assert spec.stack_pre[0].label == "Token Embedding"
     assert [comp.attr_name for comp in spec.stack_tail] == ["norm", "lm_head"]
     assert spec.stack_tail[0].label == "RMSNorm"
     assert spec.stack_tail[1].label == "Linear"
+
+
+def test_positional_encoding_follows_code_not_config():
+    """A config carrying rope parameters cannot claim rope the code never applies."""
+    from pathlib import Path
+    from visualizer.ast_analyze import analyze_source
+    from visualizer.extract import parse_architecture
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
+    spec = parse_architecture({"rope_theta": 50000, "max_position_embeddings": 4096}, "Kimi", code_analysis=analysis)
+
+    assert spec.positional_encoding == "NoPE"
+    assert not any(note.startswith("RoPE theta=") for note in spec.attention_notes)
+
+
+def test_module_level_rope_calls_are_traced_into_the_calling_block():
+    """Rope applied by a plain function shows up where the forward applies it."""
+    from visualizer.ast_analyze import analyze_source, is_positional_synthetic, positional_display_label
+
+    source = '''
+import torch
+from torch import nn
+
+
+def apply_rotary_emb(x, freqs_cis, inverse=False):
+    return x
+
+
+class Attention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.wq = nn.Linear(8, 8)
+        self.wk = nn.Linear(8, 8)
+        self.wo = nn.Linear(8, 8)
+
+    def forward(self, x, freqs_cis):
+        q = self.wq(x)
+        apply_rotary_emb(q, freqs_cis)
+        k = self.wk(x)
+        apply_rotary_emb(k, freqs_cis)
+        o = q + k
+        apply_rotary_emb(o, freqs_cis, True)
+        return self.wo(o)
+'''
+    analysis = analyze_source(source, filename="modeling_probe.py")
+    attention = analysis.class_registry["Attention"]
+    rope_steps = [call for call in attention.forward_calls if is_positional_synthetic(call)]
+
+    # One step per application site: queries, keys, and the inverse on the output.
+    assert len(rope_steps) == 3
+    assert all(positional_display_label(step) == "Apply rotary emb" for step in rope_steps)
+    assert attention.forward_calls.index(rope_steps[0]) > attention.forward_calls.index("wq")
+    assert attention.forward_step_details[rope_steps[-1]] == ["inverse rotation"]
+    assert analysis.positional_helpers == ["apply_rotary_emb"]
+
+
+def test_stack_owner_found_by_structure_when_name_is_plain():
+    """Inference repos name the stack `Transformer`; its embedding identifies it."""
+    from visualizer.ast_analyze import analyze_source
+
+    source = '''
+from torch import nn
+
+
+class ParallelEmbedding(nn.Module):
+    def __init__(self, vocab, dim):
+        super().__init__()
+        self.weight = nn.Parameter(1)
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.weight = nn.Parameter(1)
+
+
+class ParallelHead(nn.Module):
+    def __init__(self, dim, vocab):
+        super().__init__()
+        self.weight = nn.Parameter(1)
+
+
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.attn_norm = RMSNorm(8)
+        self.attn = nn.Linear(8, 8)
+
+    def forward(self, x):
+        return self.attn(self.attn_norm(x))
+
+
+class Transformer(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.embed = ParallelEmbedding(8, 8)
+        self.norm = RMSNorm(8)
+        self.head = ParallelHead(8, 8)
+
+    def forward(self, tokens):
+        return self.head(self.norm(self.embed(tokens)))
+'''
+    analysis = analyze_source(source, filename="model.py")
+
+    assert analysis.model_class == "Transformer"
+    assert [comp.attr_name for comp in analysis.stack_pre] == ["embed"]
+    assert [comp.attr_name for comp in analysis.stack_tail] == ["norm", "head"]
+
+
+def test_spine_without_modeling_source_comes_from_config_and_says_so():
+    """Config-only diagrams show the spine the config implies, flagged as inferred."""
+    from visualizer.blocks import BlockComponent
+    from visualizer.extract import ArchitectureSpec
+    from visualizer.render import (
+        _spine_box_style,
+        _spine_sublabel,
+        _stack_pre_components,
+        _stack_tail_components,
+    )
+
+    spec = ArchitectureSpec(
+        name="Config only",
+        model_type="llama",
+        vocab_size=151_936,
+        norm_type="RMSNorm",
+    )
+
+    pre = _stack_pre_components(spec)
+    tail = _stack_tail_components(spec)
+    assert [comp.role for comp in pre] == ["embedding"]
+    assert [comp.role for comp in tail] == ["norm", "head"]
+    for comp in pre + tail:
+        assert comp.inferred_from_config
+        assert _spine_sublabel(comp) == "from config"
+        assert _spine_box_style(comp)["linestyle"] == "dashed"
+
+    # Nothing is invented for facts the config never states.
+    bare = ArchitectureSpec(name="Bare", model_type="llama", norm_type="")
+    assert _stack_pre_components(bare) == []
+    assert _stack_tail_components(bare) == []
+
+
+def test_source_declared_spine_is_never_marked_inferred():
+    """A spine read from the modeling source keeps its own tiles and solid styling."""
+    from visualizer.blocks import BlockComponent
+    from visualizer.extract import ArchitectureSpec
+    from visualizer.render import _spine_box_style, _spine_sublabel, _stack_pre_components
+
+    embedding = BlockComponent(
+        attr_name="embed",
+        class_name="ParallelEmbedding",
+        role="embedding",
+        label="ParallelEmbedding",
+        forward_order=0,
+    )
+    spec = ArchitectureSpec(
+        name="From source",
+        model_type="deepseek_v3",
+        vocab_size=129_280,
+        stack_pre=[embedding],
+    )
+
+    assert _stack_pre_components(spec) == [embedding]
+    assert _spine_sublabel(embedding) is None
+    assert _spine_box_style(embedding) == {"edgecolor": "#000000"}
 
 
 def test_is_linear_pipeline_block():
@@ -3015,6 +5304,7 @@ def test_straight_line_module_general_expansion_rule():
     )
     assert not is_straight_line_module(branching)
 
+    # A stack component with no parsed source stays one tile; children are never invented.
     positional = build_stack_component_tree(
         BlockComponent(
             attr_name="rotary_emb",
@@ -3026,7 +5316,8 @@ def test_straight_line_module_general_expansion_rule():
         registry={},
         basic_ops=__import__("visualizer.basic_ops", fromlist=["BasicOpFilter"]).BasicOpFilter.for_detailed(),
     )
-    assert is_straight_line_module(positional)
+    assert positional.children == []
+    assert not is_straight_line_module(positional)
 
 
 def test_moe_graph_records_shared_experts_inline_frame():
@@ -3066,7 +5357,7 @@ class MoE(nn.Module):
     )
     graph = build_computation_graph(tree)
     frame = next(frame for frame in graph.inline_frames if frame.frame_id == "shared_experts")
-    assert "shared_experts" in frame.label
+    assert frame.label == "MLP", "a frame around a whole module is named by its class"
     assert len(frame.node_indices) >= 3
 
 
@@ -3523,23 +5814,6 @@ def test_moe_finalize_keeps_combine_gap_tight():
         min_left=0.6,
     )
     plt.close(fig)
-
-
-def test_side_entry_combine_connector_enters_at_combine_center_y():
-    from visualizer.render import MERGE_RADIUS, _RenderAnchor, _side_entry_combine_connector_points
-
-    gap = 0.04
-    source = _RenderAnchor(cx=0.78, top=7.4, bottom=7.2, left=0.5, right=1.0)
-    target_cx = 1.1
-    target_cy = 6.85
-    points = _side_entry_combine_connector_points(
-        source,
-        target_cx,
-        target_cy,
-        gap=gap,
-    )
-    assert points[-1] == (target_cx - MERGE_RADIUS, target_cy)
-    assert points[0] == (source.cx, source.bottom)
 
 
 def _assert_input_clears_direct_consumers(positions, graph, *, min_gap: float | None = None) -> None:
@@ -4182,14 +6456,10 @@ def test_chunk_kda_pipeline_inline_frames_stay_column_aligned():
                     f"{port_label} should use a vertical feed when docked above its target"
                 )
             else:
-                side_entry = (
-                    abs(points[-1][1] - (anchors[tgt_idx].top + anchors[tgt_idx].bottom) / 2) < 0.15
-                    and (
-                        abs(points[-1][0] - anchors[tgt_idx].left) < 0.15
-                        or abs(points[-1][0] - anchors[tgt_idx].right) < 0.15
-                    )
+                assert abs(points[-1][1] - anchors[tgt_idx].top) < 0.15, (
+                    f"{port_label} connector should enter through the target top"
                 )
-                assert side_entry or len(points) >= 4, f"{port_label} connector should route around obstacles"
+                assert len(points) >= 4, f"{port_label} connector should route around obstacles"
 
         g_frame = next(
             f for f in graph.inline_frames if f.frame_id == "chunk_kda_fwd_kda_gate_chunk_cumsum_g"
@@ -4250,8 +6520,14 @@ def test_chunk_kda_pipeline_inline_frames_stay_column_aligned():
                 for index, anchor in anchors.items()
                 if index in inner_indices and index not in {src, tgt}
             ]
-            if (src, tgt) in graph.inline_binary_operand_links:
-                from visualizer.computation_graph import _ordered_inline_frame_chain
+            from visualizer.computation_graph import (
+                _inline_frame_column_skip_links,
+                _ordered_inline_frame_chain,
+            )
+            if any(
+                (src, tgt) in _inline_frame_column_skip_links(graph, frame)
+                for frame in graph.inline_frames
+            ):
 
                 frame = next(
                     f
@@ -4276,13 +6552,12 @@ def test_chunk_kda_pipeline_inline_frames_stay_column_aligned():
             f for f in graph.inline_frames if f.frame_id == "chunk_kda_fwd_kda_gate_chunk_cumsum_g"
         )
         multiply_idx = next(
-            i for i in g_frame.node_indices if graph.nodes[i].label == "×"
+            i for i in g_frame.node_indices if graph.nodes[i].label == "Multiply"
         )
         exp_idx = next(i for i in g_frame.node_indices if graph.nodes[i].label == "Exp")
         softplus_idx = next(i for i in g_frame.node_indices if graph.nodes[i].label == "Softplus")
         assert (softplus_idx, multiply_idx) in graph.links
         assert (exp_idx, multiply_idx) in graph.links
-        assert (exp_idx, multiply_idx) in graph.side_entry_links
 
         exp_to_mul = _connector_points_for_link(
             graph=graph,
@@ -4300,6 +6575,8 @@ def test_chunk_kda_pipeline_inline_frames_stay_column_aligned():
             input_index=None,
         )
         assert exp_to_mul is not None, "Exp should connect to × as second operand"
+        assert abs(exp_to_mul[0][1] - anchors[exp_idx].bottom) < 1e-6
+        assert abs(exp_to_mul[-1][1] - anchors[multiply_idx].top) < 1e-6
     finally:
         plt.close(fig)
 
@@ -4460,15 +6737,14 @@ def test_mlp_situ_and_mul_steps_are_labeled():
     assert "Split gate | up" not in labels
     assert "Linear" in labels
     assert "Situ" in labels
-    assert "×" in labels
+    assert "Multiply" in labels
     frame = next(frame for frame in graph.inline_frames if frame.frame_id == "act_fn")
     assert frame.sublabel is None
-    mul_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "×")
+    mul_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "Multiply")
     up_index = next(i for i, spec in enumerate(graph.nodes) if spec.block and spec.block.attr_name == "up_proj")
     situ_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "Situ")
     assert (situ_index, mul_index) in graph.links
     assert (up_index, mul_index) in graph.links
-    assert (up_index, mul_index) in graph.side_entry_links
     assert (up_index, mul_index) not in graph.dashed_links
 
 
@@ -4531,7 +6807,7 @@ def test_fork_join_branch_layout_is_horizontal():
     gate = next(i for i, node in enumerate(graph.nodes) if node.block and node.block.attr_name == "gate_proj")
     up = next(i for i, node in enumerate(graph.nodes) if node.block and node.block.attr_name == "up_proj")
     situ = next(i for i, node in enumerate(graph.nodes) if node.label == "Situ")
-    mul = next(i for i, node in enumerate(graph.nodes) if node.label == "×")
+    mul = next(i for i, node in enumerate(graph.nodes) if node.label == "Multiply")
 
     gate_cy = (positions[gate].top_y + positions[gate].bottom) / 2
     up_cy = (positions[up].top_y + positions[up].bottom) / 2
@@ -4607,7 +6883,7 @@ def test_moe_and_situ_expand_in_basic_only_detailed():
     assert gate_frame.label == "KimiMoEGate"
     assert len(gate_frame.node_indices) == 9
     shared_frame = next(frame for frame in moe_graph.inline_frames if frame.frame_id == "shared_experts")
-    assert shared_frame.label == "shared_experts"
+    assert shared_frame.label == "KimiMLP"
     assert any(frame.frame_id == "act_fn" for frame in moe_graph.inline_frames)
     act_fn_frame = next(frame for frame in moe_graph.inline_frames if frame.frame_id == "act_fn")
     assert act_fn_frame.label == "SituAndMul"
@@ -4647,7 +6923,7 @@ def test_kda_output_gate_and_gated_norm_expand_in_graph():
     assert "Linear" in labels
     assert "Reshape" not in labels
     assert "RMSNorm" in labels
-    assert "×" in labels
+    assert "Multiply" in labels
     assert "Sigmoid" not in labels
     assert not any(frame.frame_id == "g_proj" for frame in graph.inline_frames)
     assert not any(spec.label == "Output gate" for spec in graph.nodes)
@@ -4658,16 +6934,15 @@ def test_kda_output_gate_and_gated_norm_expand_in_graph():
         if spec.block and spec.block.attr_name == "g_proj"
     ]
     assert gate_producer_indices
-    combine_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "×")
+    combine_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "Multiply")
     assert graph.nodes[combine_index].sublabel in (None, "")
-    side_into_combine = [
+    gate_inputs_to_combine = [
         src
         for src, dst in graph.links
-        if dst == combine_index and (src, dst) in graph.side_entry_links
+        if dst == combine_index and src in gate_producer_indices
     ]
-    assert side_into_combine
-    assert all(src in gate_producer_indices for src in side_into_combine)
-    assert not any((src, combine_index) in graph.dashed_links for src in side_into_combine)
+    assert gate_inputs_to_combine
+    assert not any((src, combine_index) in graph.dashed_links for src in gate_inputs_to_combine)
 
 
 def test_kda_gated_norm_spine_is_center_aligned():
@@ -4740,14 +7015,14 @@ def test_kda_gated_norm_spine_is_center_aligned():
         if name in by_attr
     ]
     combine_index = next(
-        index for index, pos in enumerate(positions) if pos.spec.label == "×"
+        index for index, pos in enumerate(positions) if pos.spec.label == "Multiply"
     )
     combine = positions[combine_index].cx
     spine.append(combine)
     assert len(spine) == 4
     assert max(spine) - min(spine) < 0.02
-    combine_op_x = next(op_x for op_x, _, _, _ in plan.combine_ops)
-    assert abs(combine_op_x - combine) < 0.02
+    combine_tile = next(node for node, _ in plan.node_draws if node.label == "Multiply")
+    assert abs(combine_tile.cx - combine) < 0.02
     for name in ("@attn_chunk", "o_norm", "o_proj"):
         if name not in by_attr:
             continue
@@ -4984,8 +7259,8 @@ def test_kda_hidden_states_fanout_uses_shared_source_bus_with_vertical_tees():
     from visualizer.render import (
         COLORS,
         DIAGRAM_LEFT_MARGIN,
-        MERGE_RADIUS,
         PARALLEL_CONNECTOR_COORD_EPS,
+        TOP_ENTRY_PORT_GAP,
         _anchors_from_detail_plan,
         _build_detail_draw_plan,
         _collect_detail_link_paths,
@@ -5107,9 +7382,17 @@ def test_kda_hidden_states_fanout_uses_shared_source_bus_with_vertical_tees():
         g_index = next(
             index for index, node in enumerate(graph.nodes) if node.block and node.block.attr_name == "g_proj"
         )
-        combine_index = next(index for index, node in enumerate(graph.nodes) if node.label == "×")
-        side_points = link_paths[(g_index, combine_index)]
-        assert side_points[-1][0] >= positions[combine_index].cx + MERGE_RADIUS - 0.02
+        combine_index = next(
+            index for index, node in enumerate(graph.nodes) if node.label == "Multiply"
+        )
+        # The gate operand enters the combine tile through its own top port,
+        # beside the centered main feed.
+        operand_points = link_paths[(g_index, combine_index)]
+        operand_x, operand_y = operand_points[-1]
+        assert operand_y == pytest.approx(
+            _connector_target_top_entry_y(anchors[combine_index]), abs=0.02
+        )
+        assert operand_x >= positions[combine_index].cx + TOP_ENTRY_PORT_GAP - 0.02
     finally:
         plt.close(fig)
 
@@ -5179,7 +7462,7 @@ def test_moe_plus_is_spine_aligned_with_sigma():
         if spec.block and spec.block.attr_name == "routed_expert_up_proj"
     )
     spine = [positions[index].cx for index in (by_label["MoE aggregation"], up_index, by_label["+"])]
-    draw = {symbol: x for x, _, symbol, _ in plan.combine_ops}
+    draw = {node.label: node.cx for node, _ in plan.node_draws}
     assert max(spine) - min(spine) < 0.02
     assert abs(positions[by_label["MoE aggregation"]].cx - spine[0]) < 0.02
     assert abs(draw["+"] - positions[by_label["+"]].cx) < 0.02
@@ -5560,7 +7843,7 @@ def test_kda_graph_basic_only_shows_linears_and_norms():
     assert not any(frame.label == "chunk_kda pipeline" for frame in graph.inline_frames)
     assert "Attention" not in labels
     assert "KDA" not in labels
-    assert "×" in {spec.label for spec in graph.nodes}
+    assert "Multiply" in {spec.label for spec in graph.nodes}
     pipeline = next(child for child in attn.children if child.class_name == "KernelPipeline")
     pipeline_graph = build_computation_graph(pipeline)
     pipeline_labels = {spec.label for spec in pipeline_graph.nodes if spec.block is not None}
@@ -5794,3 +8077,144 @@ def test_chunk_kda_tensor_ports_include_upstream_hints():
         "g": "← Linear",
         "beta": "← Linear",
     }
+
+
+def test_input_fanout_into_inline_frame_docks_on_the_tile_without_crossing_siblings():
+    """A framed branch tees off the shared input bus rather than crossing it.
+
+    Feeds into the topmost tile of a dotted frame used to be lifted into a
+    corridor above the frame even when they already ran along the input's shared
+    fan-out bus. That detour dropped back down through the bus its sibling
+    branches still followed, and it aimed at the frame envelope rather than the
+    tile, so the wire ended on empty frame background.
+    """
+    from collections import defaultdict
+    from pathlib import Path
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from visualizer.computation_graph import (
+        SYNTHETIC_INPUT,
+        _estimate_graph_height,
+        build_computation_graph,
+        layout_computation_graph,
+        measure_graph_node_sizes,
+    )
+    from visualizer.render import (
+        COLORS,
+        DIAGRAM_LEFT_MARGIN,
+        TOP_ENTRY_PORT_GAP,
+        _anchors_from_detail_plan,
+        _build_detail_draw_plan,
+        _collect_detail_link_paths,
+        _compute_detail_connector_buses,
+        _connector_target_top_entry_y,
+        _detail_sections_to_render,
+        _inline_frame_for_top_member,
+    )
+    from visualizer.render_validate import finalize_detail_layout
+
+    code_path = (
+        Path.home()
+        / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+    )
+    if not code_path.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    spec = load_architecture("moonshotai/Kimi-K3", detailed=True)
+    tree = next(
+        tree
+        for title, tree, _sub in _detail_sections_to_render(spec)
+        if title.startswith("KimiMLAAttention")
+    )
+    graph = build_computation_graph(tree, include_input=True)
+    input_index = next(
+        i for i, node in enumerate(graph.nodes) if node.synthetic == SYNTHETIC_INPUT
+    )
+    framed_targets = [
+        tgt
+        for src, tgt in graph.links
+        if src == input_index and _inline_frame_for_top_member(graph, tgt) is not None
+    ]
+    assert framed_targets, "expected an input feed into a dotted frame's top tile"
+
+    cx, top_y = 3.5, 10.0
+    fig, ax = plt.subplots(figsize=(16, 13))
+    try:
+        measure_graph_node_sizes(ax, graph)
+        min_left = DIAGRAM_LEFT_MARGIN + 0.05
+        positions, links = layout_computation_graph(
+            graph,
+            cx=cx,
+            top_y=top_y,
+            block_w=18.0,
+            block_h=_estimate_graph_height(graph),
+            content_left=min_left,
+        )
+        finalize_detail_layout(
+            ax,
+            graph,
+            positions,
+            input_sublabel=None,
+            cx=cx,
+            top_y=top_y,
+            detail_fill=COLORS["detail_fill"],
+            min_left=min_left,
+        )
+        plan = _build_detail_draw_plan(positions, graph, input_sublabel=None)
+        # The renderer builds frame-aware anchors, so the test has to as well.
+        anchors = _anchors_from_detail_plan(positions, plan, graph)
+        incoming: dict[int, list[tuple[int, int]]] = defaultdict(list)
+        outgoing: dict[int, list[tuple[int, int]]] = defaultdict(list)
+        for src, tgt in links:
+            incoming[tgt].append((src, tgt))
+            outgoing[src].append((src, tgt))
+        target_bus, source_bus, merge_entry_x, merge_link_bus = (
+            _compute_detail_connector_buses(
+                graph, positions, anchors, incoming, outgoing, plan.label_obstacles
+            )
+        )
+        link_paths = _collect_detail_link_paths(
+            graph=graph,
+            links=links,
+            positions=positions,
+            anchors=anchors,
+            incoming=incoming,
+            label_obstacles=plan.label_obstacles,
+            target_bus=target_bus,
+            source_bus=source_bus,
+            merge_entry_x=merge_entry_x,
+            merge_link_bus=merge_link_bus,
+            input_index=input_index,
+        )
+    finally:
+        plt.close(fig)
+
+    for tgt in framed_targets:
+        tile = positions[tgt]
+        end_x, end_y = link_paths[(input_index, tgt)][-1]
+        assert abs(end_x - tile.cx) <= TOP_ENTRY_PORT_GAP, (
+            f"feed into framed tile {tgt} docks at x={end_x:.3f}, "
+            f"away from the tile centre {tile.cx:.3f}"
+        )
+        assert end_x >= tile.cx - tile.width / 2 and end_x <= tile.cx + tile.width / 2
+        assert abs(end_y - _connector_target_top_entry_y(anchors[tgt])) <= 0.02
+
+    def segments(points):
+        return list(zip(points, points[1:]))
+
+    keys = sorted(link_paths)
+    crossings = []
+    for first in range(len(keys)):
+        for second in range(first + 1, len(keys)):
+            for seg_a in segments(link_paths[keys[first]]):
+                for seg_b in segments(link_paths[keys[second]]):
+                    hit = _connector_segment_crossing(seg_a, seg_b)
+                    if hit is not None:
+                        crossings.append((keys[first], keys[second], hit))
+    assert not crossings, "connectors cross: " + ", ".join(
+        f"{a}x{b}@({hit[0]:.3f},{hit[1]:.3f})" for a, b, hit in crossings[:4]
+    )

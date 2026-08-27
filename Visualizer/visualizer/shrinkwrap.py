@@ -434,26 +434,24 @@ def _max_upward_bus_shift(
             _connector_min_bus_y_above_target(target, gap=min_gap),
         )
 
-    upper_bound = bus_y
+    # Every feeder caps how far the bus may rise, so the shared level can only move up
+    # to the lowest cap; honoring just the highest one lifts the bus above feeders that
+    # sit further down and makes their connectors double back upwards.
+    ceilings: list[float] = []
     for link_key, points in link_paths.items():
         if not _path_uses_bus_y(points, bus_y):
             continue
         source = anchors.get(link_key[0])
         if source is not None:
-            upper_bound = max(
-                upper_bound,
-                _connector_source_bottom_exit_y(source, gap=min_gap)
-                - CONNECTOR_EXIT_STUB,
+            ceilings.append(
+                _connector_source_bottom_exit_y(source, gap=min_gap) - CONNECTOR_EXIT_STUB
             )
         for index in range(len(points) - 1):
             x1, y1 = points[index]
             x2, y2 = points[index + 1]
             if abs(x1 - x2) <= PARALLEL_CONNECTOR_COORD_EPS and abs(y2 - bus_y) <= PARALLEL_CONNECTOR_COORD_EPS:
                 if y1 > bus_y + PARALLEL_CONNECTOR_COORD_EPS:
-                    upper_bound = max(
-                        upper_bound,
-                        y1 - CONNECTOR_EXIT_STUB,
-                    )
+                    ceilings.append(y1 - CONNECTOR_EXIT_STUB)
             if abs(y1 - y2) <= PARALLEL_CONNECTOR_COORD_EPS and abs(y1 - bus_y) <= PARALLEL_CONNECTOR_COORD_EPS:
                 if index > 0:
                     prev_x, prev_y = points[index - 1]
@@ -461,11 +459,11 @@ def _max_upward_bus_shift(
                         abs(prev_x - x1) <= PARALLEL_CONNECTOR_COORD_EPS
                         and prev_y > bus_y + PARALLEL_CONNECTOR_COORD_EPS
                     ):
-                        upper_bound = max(
-                            upper_bound,
-                            prev_y - CONNECTOR_EXIT_STUB,
-                        )
+                        ceilings.append(prev_y - CONNECTOR_EXIT_STUB)
 
+    if not ceilings:
+        return None
+    upper_bound = min(ceilings)
     if upper_bound <= bus_y + PARALLEL_CONNECTOR_COORD_EPS:
         return None
     if upper_bound < lower_bound - PARALLEL_CONNECTOR_COORD_EPS:

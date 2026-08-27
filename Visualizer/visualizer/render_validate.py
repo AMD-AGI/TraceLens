@@ -17,7 +17,6 @@ from visualizer.computation_graph import (
     ComputationGraph,
     LayoutPosition,
     MIN_HORIZONTAL_BLOCK_GAP,
-    SYNTHETIC_COMBINE,
     SYNTHETIC_HIDDEN,
     SYNTHETIC_INPUT,
     SYNTHETIC_TENSOR,
@@ -46,6 +45,8 @@ DEFAULT_MIN_GAP = 0.02
 VALIDATE_MIN_GAP = 0.02
 LAYOUT_MIN_TOP_Y = 2.5
 INLINE_FRAME_SEPARATION_EPS = 1e-3
+# Vertical share of two tiles that makes them neighbours competing for one row band.
+ROW_BAND_OVERLAP_EPS = 0.01
 # Vertical reach above a frame border that a top-side caption can occupy.
 CAPTION_CONNECTOR_BAND = 0.5
 CAPTION_CONNECTOR_PENALTY = 5.0
@@ -106,8 +107,6 @@ def apply_measured_node_sizes(
     draw_index = 0
     for pos in positions:
         spec = pos.spec
-        if _is_combine(spec.synthetic):
-            continue
         if spec.synthetic == "@input":
             width, height = input_box_label_size(
                 ax,
@@ -199,25 +198,6 @@ def collect_measured_elements(
     draw_index = 0
     for index, pos in enumerate(positions):
         spec = pos.spec
-        if _is_combine(spec.synthetic):
-            center_y = pos.top_y - pos.height / 2
-            half_w = pos.width / 2
-            half_h = pos.height / 2
-            elements.append(
-                MeasuredElement(
-                    kind="combine",
-                    bounds=ContentBounds(
-                        left=pos.cx - half_w,
-                        right=pos.cx + half_w,
-                        bottom=center_y - half_h,
-                        top=center_y + half_h,
-                    ),
-                    label=spec.label,
-                    node_index=index,
-                )
-            )
-            continue
-
         if draw_index >= len(plan.node_draws):
             continue
         leaf, _ = plan.node_draws[draw_index]
@@ -356,12 +336,6 @@ def collect_measured_elements(
     return elements
 
 
-def _is_combine(synthetic: str | None) -> bool:
-    from visualizer.computation_graph import SYNTHETIC_COMBINE
-
-    return synthetic == SYNTHETIC_COMBINE
-
-
 def _inline_frame_member_sets(elements: list[MeasuredElement]) -> dict[str, set[int]]:
     return {
         element.frame_id: set(element.frame_node_indices)
@@ -470,6 +444,42 @@ def assert_valid_render_layout(
     validate_render_layout(elements, min_gap=min_gap).raise_if_invalid()
 
 
+def _tile_spans_overlap(left: LayoutPosition, right: LayoutPosition) -> bool:
+    """True when two tiles share vertical space, so they compete for one row band."""
+    top = min(left.top_y, right.top_y)
+    bottom = max(left.top_y - left.height, right.top_y - right.height)
+    return top - bottom > ROW_BAND_OVERLAP_EPS
+
+
+def _row_bands(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph | None,
+) -> list[list[int]]:
+    """Tiles that share a row, including layer siblings whose rows drifted apart."""
+    rows: dict[float, list[int]] = {}
+    for index, pos in enumerate(positions):
+        rows.setdefault(round(pos.top_y, 4), []).append(index)
+    bands = [indices for indices in rows.values() if len(indices) > 1]
+    if graph is None:
+        return bands
+
+    from visualizer.computation_graph import _topological_layers
+
+    for layer in _topological_layers(graph):
+        members = [index for index in layer if index < len(positions)]
+        drifted = [
+            index
+            for index in members
+            if any(
+                other != index and _tile_spans_overlap(positions[index], positions[other])
+                for other in members
+            )
+        ]
+        if len(drifted) > 1:
+            bands.append(drifted)
+    return bands
+
+
 def _resolve_same_row_tile_overlaps(
     positions: list[LayoutPosition],
     *,
@@ -490,7 +500,6 @@ def _resolve_same_row_tile_overlaps(
         for branch, indices in branch_groups.items()
         for index in indices
     }
-
     def row_units(indices: list[int]) -> list[list[int]]:
         ordered = sorted(indices, key=lambda index: positions[index].cx)
         units: list[list[int]] = []
@@ -507,10 +516,7 @@ def _resolve_same_row_tile_overlaps(
 
     for _pass in range(max(1, len(positions))):
         changed = False
-        rows: dict[float, list[int]] = {}
-        for index, pos in enumerate(positions):
-            rows.setdefault(round(pos.top_y, 4), []).append(index)
-        for indices in rows.values():
+        for indices in _row_bands(positions, graph):
             if len(indices) < 2:
                 continue
             units = row_units(indices)
@@ -549,7 +555,7 @@ def resolve_measured_overlaps(
 
     if top_y is not None and not _graph_has_tensor_ports(graph):
         layers = _topological_layers(graph)
-        _assign_layered_vertical_positions(positions, layers, top_y=top_y)
+        _assign_layered_vertical_positions(positions, layers, top_y=top_y, graph=graph)
     _resolve_same_row_tile_overlaps(
         positions,
         min_gap=min_gap,
@@ -659,6 +665,31 @@ def _caption_band_heights(
     return bands
 
 
+def _rows_keep_reserved_gap(
+    moved_index: int,
+    other_index: int,
+    *,
+    box: ContentBounds,
+    shifted: ContentBounds,
+    other: ContentBounds,
+    required_row_gap,
+) -> bool:
+    """True when a shift leaves a reserved row gap no tighter than it found it.
+
+    A row reserved for a connector corridor is as good as occupied: closing it
+    strands the connector that was going to run there.
+    """
+    if min(shifted.right, other.right) - max(shifted.left, other.left) <= 0:
+        return True
+    if shifted.top <= other.bottom:
+        needed = required_row_gap(other_index, moved_index)
+        return other.bottom - shifted.top >= min(needed, other.bottom - box.top) - 1e-9
+    if other.top <= shifted.bottom:
+        needed = required_row_gap(moved_index, other_index)
+        return shifted.bottom - other.top >= min(needed, box.bottom - other.top) - 1e-9
+    return True
+
+
 def _clear_inline_frame_vertical_neighbors(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
@@ -677,24 +708,22 @@ def _clear_inline_frame_vertical_neighbors(
         return
 
     from visualizer.computation_graph import (
-        DETAIL_LAYER_GAP,
+        FRAME_BORDER_CLEARANCE,
         _ordered_inline_frame_chain,
+        _row_gap_rules,
         _shift_node_subtree,
     )
     from visualizer.render import (
-        INLINE_FRAME_LABEL_GAP,
-        INLINE_FRAME_LABEL_LINE_H,
-        INLINE_FRAME_PAD,
+        CONNECTOR_OBSTACLE_MARGIN,
+        PARALLEL_CONNECTOR_CHANNEL_GAP,
         _inline_frame_draw_bounds,
     )
+    from visualizer.sizing import INLINE_FRAME_CAPTION_BAND
     from visualizer.text_measure import box_bounds_at
 
-    def _shift_keeps_tiles_apart(root: int, delta: float) -> bool:
-        """True when shifting ``root``'s subtree down does not land it on another tile.
+    required_row_gap = _row_gap_rules(graph)
 
-        Row-mates outside the subtree stay put, so an unchecked shift can collide with a
-        side branch. Better to leave a tight border than to break the layout.
-        """
+    def _subtree_indices(root: int) -> set[int]:
         moved: set[int] = set()
         queue = [root]
         while queue:
@@ -703,8 +732,18 @@ def _clear_inline_frame_vertical_neighbors(
                 continue
             moved.add(index)
             queue.extend(target for source, target in graph.links if source == index)
+        return moved
+
+    def _shift_keeps_tiles_apart(root: int, delta: float) -> bool:
+        """True when shifting ``root``'s subtree down does not land it on another tile.
+
+        Row-mates outside the subtree stay put, so an unchecked shift can collide with a
+        side branch. Better to leave a tight border than to break the layout.
+        """
+        moved = _subtree_indices(root)
         for index in moved:
             pos = positions[index]
+            box = box_bounds_at(pos.cx, pos.top_y, pos.width, pos.height)
             shifted = box_bounds_at(pos.cx, pos.top_y - delta, pos.width, pos.height)
             for other_index, other in enumerate(positions):
                 if other_index in moved:
@@ -712,12 +751,37 @@ def _clear_inline_frame_vertical_neighbors(
                 other_box = box_bounds_at(other.cx, other.top_y, other.width, other.height)
                 if shifted.overlaps(other_box, min_gap=min_gap):
                     return False
+                if not _rows_keep_reserved_gap(
+                    index,
+                    other_index,
+                    box=box,
+                    shifted=shifted,
+                    other=other_box,
+                    required_row_gap=required_row_gap,
+                ):
+                    return False
         return True
 
-    default_band = INLINE_FRAME_LABEL_GAP + INLINE_FRAME_LABEL_LINE_H
-    # Room a standard layer gap leaves outside the border once the member tile's pad is taken;
-    # anything less and the border reads as touching the neighbouring tile.
-    border_clearance = max(DETAIL_LAYER_GAP - INLINE_FRAME_PAD, min_gap + INLINE_FRAME_SEPARATION_EPS)
+    default_band = INLINE_FRAME_CAPTION_BAND
+    # Frame stacking reserves this same clearance, so a neighbour parked here is not
+    # pushed down again on the next pass.
+    border_clearance = max(FRAME_BORDER_CLEARANCE, min_gap + INLINE_FRAME_SEPARATION_EPS)
+    bare_clearance = min_gap + INLINE_FRAME_SEPARATION_EPS
+
+    def _first_shift_that_fits(root: int, deficits: list[float]) -> float | None:
+        """Largest requested shift the layout can take, or None when none fits.
+
+        A crowded column often cannot spare the caption band, but it can nearly
+        always spare the border itself, and a border touching a tile reads as a
+        drawing error where a tight caption only reads as tight.
+        """
+        for deficit in deficits:
+            if deficit <= 1e-6:
+                continue
+            if _shift_keeps_tiles_apart(root, deficit):
+                return deficit
+        return None
+
     caption_bands = (
         _caption_band_heights(ax, graph, positions, min_gap=min_gap)
         if ax is not None
@@ -744,16 +808,47 @@ def _clear_inline_frame_vertical_neighbors(
                     continue
                 above = (box.top + box.bottom) / 2 > frame_center_y
                 if above:
-                    deficit = (
-                        frame_bounds.top + caption_band + border_clearance - box.bottom
+                    if head is None:
+                        continue
+                    # Moving the frame head also moves all of its descendants.
+                    # If this apparent neighbour is one of them, the shift cannot
+                    # change their relative geometry and would repeat every pass.
+                    if index in _subtree_indices(head):
+                        continue
+                    deficit = _first_shift_that_fits(
+                        head,
+                        [
+                            frame_bounds.top + caption_band + border_clearance - box.bottom,
+                            frame_bounds.top + border_clearance - box.bottom,
+                            frame_bounds.top + bare_clearance - box.bottom,
+                        ],
                     )
-                    if deficit > 1e-6 and head is not None and _shift_keeps_tiles_apart(head, deficit):
+                    if deficit is not None:
                         _shift_node_subtree(positions, graph, head, deficit)
                         changed = True
                         break
                 else:
-                    deficit = box.top + border_clearance - frame_bounds.bottom
-                    if deficit > 1e-6 and _shift_keeps_tiles_apart(index, deficit):
+                    # Likewise, shifting a below-frame node cannot separate it
+                    # from a frame that lies in that node's own downstream tree.
+                    if members & _subtree_indices(index):
+                        continue
+                    incoming = [
+                        source for source, target in graph.links if target == index
+                    ]
+                    merge_clearance = border_clearance
+                    if len(incoming) >= 2 and any(source in members for source in incoming):
+                        merge_clearance = max(
+                            merge_clearance,
+                            PARALLEL_CONNECTOR_CHANNEL_GAP + CONNECTOR_OBSTACLE_MARGIN,
+                        )
+                    deficit = _first_shift_that_fits(
+                        index,
+                        [
+                            box.top + merge_clearance - frame_bounds.bottom,
+                            box.top + bare_clearance - frame_bounds.bottom,
+                        ],
+                    )
+                    if deficit is not None:
                         _shift_node_subtree(positions, graph, index, deficit)
                         changed = True
                         break
@@ -1160,6 +1255,8 @@ def _layout_inline_frame_labels(
             tile_bounds.top
             + max(INLINE_FRAME_LABEL_GAP, min_gap)
             + max(0, stacked_lines - 1) * INLINE_FRAME_LABEL_LINE_H
+            + (len(_enclosing_frame_ids(frame.frame_id, frame_members)) if avoid_connectors else 0)
+            * (INLINE_FRAME_LABEL_LINE_H + min_gap)
         )
         # Sliding sideways lets a caption clear a connector column while staying on top,
         # which reads better than banishing it to the side of the frame.
@@ -1241,8 +1338,17 @@ def _layout_inline_frame_labels(
             anchor_x = lines[0].x if lines else top_anchor_x
             anchor_ha = lines[0].ha if lines else "left"
             anchor_y = lines[0].y if lines else top_anchor_y
+            final_caption_obstacles = caption_obstacles + (
+                [placed_bounds for _frame_id, placed_bounds in placed_label_bounds]
+                if avoid_connectors
+                else []
+            )
             for _ in range(8):
-                if not _label_block_overlaps(bounds, caption_obstacles, min_gap=min_gap):
+                if not _label_block_overlaps(
+                    bounds,
+                    final_caption_obstacles,
+                    min_gap=min_gap,
+                ):
                     break
                 anchor_y += 0.04
                 lines, bounds = _stack_inline_frame_label_lines(
@@ -1293,6 +1399,7 @@ def _apply_inline_frame_label_layout(
     min_gap: float,
     min_left: float | None = None,
     avoid_connectors: bool = False,
+    reserve_space: bool = True,
 ) -> list[MeasuredElement]:
     """Resolve inline-frame caption positions and refresh measured elements."""
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=detail_fill)
@@ -1308,14 +1415,15 @@ def _apply_inline_frame_label_layout(
         avoid_connectors=avoid_connectors,
     )
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=detail_fill)
-    _reserve_frame_caption_space(
-        positions,
-        plan,
-        elements,
-        graph,
-        min_gap=min_gap,
-        min_left=min_left,
-    )
+    if reserve_space:
+        _reserve_frame_caption_space(
+            positions,
+            plan,
+            elements,
+            graph,
+            min_gap=min_gap,
+            min_left=min_left,
+        )
     plan.inline_frame_labels = _layout_inline_frame_labels(
         ax,
         graph,
@@ -1349,13 +1457,6 @@ def _classify_layout_zones(
         index
         for index, pos in enumerate(positions)
         if "sidefeed" in pos.spec.key and ":gate_act" in pos.spec.key
-    }
-    side |= {
-        index
-        for index, pos in enumerate(positions)
-        if pos.spec.block is not None
-        and pos.spec.block.attr_name in {"up_proj", "w3"}
-        and any((index, target) in graph.side_entry_links for target in range(len(graph.nodes)))
     }
     from visualizer.computation_graph import _find_fork_join_clusters
 
@@ -1643,6 +1744,13 @@ def _separate_overlapping_inline_frames(
             left_members.issubset(right_members) or right_members.issubset(left_members)
         ):
             continue
+        # Frames stacked down one column share horizontal space by design; only
+        # frames that also sit at the same height are competing for it.
+        if (
+            left.bounds.bottom >= right.bounds.top - min_gap
+            or right.bounds.bottom >= left.bounds.top - min_gap
+        ):
+            continue
         overlap = left.bounds.right + min_gap - right.bounds.left
         if overlap <= 0:
             continue
@@ -1655,6 +1763,43 @@ def _separate_overlapping_inline_frames(
             bottom=right.bounds.bottom,
             top=right.bounds.top,
         )
+
+
+def _separate_external_boxes_from_inline_frames(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+    *,
+    min_gap: float,
+) -> None:
+    """Move non-member tiles horizontally clear of dotted inline frames."""
+    from visualizer.computation_graph import (
+        _node_content_left,
+        _node_content_right,
+    )
+    from visualizer.render import _inline_frame_draw_bounds
+
+    for _ in range(3):
+        changed = False
+        for frame in graph.inline_frames:
+            members = set(frame.node_indices)
+            bounds = _inline_frame_draw_bounds(frame, positions, graph)
+            for index, pos in enumerate(positions):
+                if index in members:
+                    continue
+                if (
+                    pos.bottom >= bounds.top - min_gap
+                    or pos.top_y <= bounds.bottom + min_gap
+                    or _node_content_right(pos) <= bounds.left - min_gap
+                    or _node_content_left(pos) >= bounds.right + min_gap
+                ):
+                    continue
+                if pos.cx <= (bounds.left + bounds.right) / 2:
+                    pos.cx -= _node_content_right(pos) - bounds.left + min_gap
+                else:
+                    pos.cx += bounds.right - _node_content_left(pos) + min_gap
+                changed = True
+        if not changed:
+            break
 
 
 def _shift_clear_forbidden_regions(
@@ -2069,14 +2214,6 @@ def _nudge_apart_remaining_tiles(
                 continue
             if pos.spec.key.startswith("sideproducer") or (
                 "sidefeed" in pos.spec.key and ":gate_act" in pos.spec.key
-            ):
-                shift = frame.bounds.right + min_gap - box.bounds.left
-                if shift > 0:
-                    pos.cx += shift
-                continue
-            if any(
-                box_index == source and target < len(graph.nodes)
-                for source, target in graph.side_entry_links
             ):
                 shift = frame.bounds.right + min_gap - box.bounds.left
                 if shift > 0:
@@ -2946,6 +3083,14 @@ def finalize_detail_layout(
     # Re-docking tensor ports beside a shared consumer vacates the row they were
     # packed into, so the content has to be re-hung from the section anchor.
     _anchor_detail_layout_to_top_y(positions, top_y=top_y)
+    from visualizer.computation_graph import _enforce_top_entry_vertical_order
+
+    _enforce_top_entry_vertical_order(positions, graph)
+    _separate_external_boxes_from_inline_frames(
+        positions,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+    )
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     # Tile positions are settled from here on, so captions can finally be steered clear
@@ -2959,6 +3104,7 @@ def finalize_detail_layout(
         min_gap=VALIDATE_MIN_GAP,
         min_left=min_left,
         avoid_connectors=True,
+        reserve_space=False,
     )
     saved_inline_frame_labels = plan.inline_frame_labels
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)

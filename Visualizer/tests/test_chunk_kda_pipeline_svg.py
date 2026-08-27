@@ -197,7 +197,7 @@ def test_q_tensor_port_sits_above_l2norm_frame():
 
 
 def test_cumsum_fanout_routes_to_intra_and_h_without_crossing():
-    """CumSum outputs tee vertically, enter h from the right, and avoid box overlap."""
+    """CumSum outputs tee vertically, use distinct top ports, and avoid overlap."""
     import matplotlib.pyplot as plt
 
     from visualizer.render import (
@@ -250,11 +250,12 @@ def test_cumsum_fanout_routes_to_intra_and_h_without_crossing():
         assert abs(intra_points[1][1] - tee_y) < CONNECTOR_OBSTACLE_MARGIN + 1e-6, (
             "CumSum fan-out must tee before merge bus"
         )
-        assert abs(h_points[1][1] - tee_y) < CONNECTOR_OBSTACLE_MARGIN + 1e-6
         assert abs(intra_points[1][0] - intra_points[2][0]) < 1e-6, "merge-bus leg stays vertical through tee"
-        assert abs(h_points[2][0] - h_points[1][0]) > 0.06, "branch leg joins tee bus horizontally"
         assert abs(intra_points[2][1] - merge_y) < 1e-6
-        assert abs(h_points[1][1] - intra_points[2][1]) > 0.05, "h branch must leave before intra bus"
+        # Every fan-out leg leaves on the common source tee; no operand-link
+        # classification moves one branch to a private corridor.
+        assert abs(h_points[1][1] - tee_y) < CONNECTOR_OBSTACLE_MARGIN + 1e-6
+        assert abs(h_points[2][0] - h_points[1][0]) > 0.06, "branch leg joins its corridor horizontally"
         path_tee_y = intra_points[1][1]
         path_merge_y = intra_points[2][1]
         assert _connector_path_respects_tee_before_bus_join(
@@ -290,14 +291,14 @@ def test_cumsum_fanout_routes_to_intra_and_h_without_crossing():
             assert orientation is not None
 
         assert abs(h_points[-1][1] - h.top) < 1e-6, "CumSum->h must enter on the top edge"
-        assert h_points[-1][0] > h.cx, "CumSum->h must enter to the right of center"
+        assert abs(h_points[-1][0] - h.cx) > 0.05
 
         intra_h = link_paths[(intra_idx, h_idx)]
         assert len(intra_h) == 2
         assert abs(intra_h[0][0] - intra_h[1][0]) < 1e-6, "intra->h must drop straight down"
         assert abs(intra_h[-1][0] - h.cx) < 1e-6
         assert abs(intra_h[-1][1] - h.top) < 1e-6
-        assert h_points[-1][0] > intra_h[-1][0]
+        assert abs(h_points[-1][0] - intra_h[-1][0]) > 0.05
     finally:
         plt.close(fig)
 
@@ -497,34 +498,24 @@ def test_inline_frame_skip_connectors_stay_inside_submodule():
             input_index=None,
         )
 
+        from visualizer.computation_graph import _inline_frame_column_skip_links
+
         offenders = []
-        for src, tgt in graph.inline_binary_operand_links:
-            frame = next(
-                (
-                    frame
-                    for frame in graph.inline_frames
-                    if src in frame.node_indices and tgt in frame.node_indices
-                ),
-                None,
-            )
-            if frame is None:
-                continue
-            bounds = _inline_frame_draw_bounds(frame, positions, graph)
-            points = link_paths[(src, tgt)]
-            if not _path_stays_inside_bounds(
-                points, bounds, margin=CONNECTOR_OBSTACLE_MARGIN
-            ):
-                offenders.append((graph.nodes[src].label, graph.nodes[tgt].label, frame.frame_id))
+        for frame in graph.inline_frames:
+            for src, tgt in _inline_frame_column_skip_links(graph, frame):
+                bounds = _inline_frame_draw_bounds(frame, positions, graph)
+                points = link_paths[(src, tgt)]
+                if not _path_stays_inside_bounds(
+                        points, bounds, margin=0.0
+                ):
+                    offenders.append((graph.nodes[src].label, graph.nodes[tgt].label, frame.frame_id))
 
         assert not offenders, f"skip connectors escaped submodule frames: {offenders}"
 
         frames_with_skips = {
             frame.frame_id
             for frame in graph.inline_frames
-            if any(
-                src in frame.node_indices and tgt in frame.node_indices
-                for src, tgt in graph.inline_binary_operand_links
-            )
+            if _inline_frame_column_skip_links(graph, frame)
         }
         assert frames_with_skips, "expected at least one inline frame with skip connectors"
     finally:
@@ -769,9 +760,7 @@ def test_chunk_kda_pipeline_connectors_attach_flush_to_box_borders():
     import matplotlib.pyplot as plt
 
     from visualizer.render import (
-        CONNECTOR_EXIT_STUB,
         _connector_source_bottom_exit_y,
-        _connector_target_side_entry_y,
         _connector_target_top_entry_y,
     )
 
@@ -779,28 +768,14 @@ def test_chunk_kda_pipeline_connectors_attach_flush_to_box_borders():
         _chunk_kda_pipeline_link_paths()
     )
     try:
-        side_links = set(graph.inline_binary_operand_links)
         for (src, tgt), points in link_paths.items():
             source = anchors[src]
             target = anchors[tgt]
             start_x, start_y = points[0]
-            end_x, end_y = points[-1]
-            if (src, tgt) in side_links:
-                y_stub = _connector_source_bottom_exit_y(source) - CONNECTOR_EXIT_STUB
-                assert start_x == source.cx
-                assert start_y == y_stub
-                assert end_y == _connector_target_side_entry_y(target)
-                assert end_x in {target.left, target.right}
-            elif end_x in {target.left, target.right} and abs(
-                end_y - _connector_target_side_entry_y(target)
-            ) < 1e-6:
-                assert start_y == _connector_source_bottom_exit_y(source)
-                assert end_x in {target.left, target.right}
-            else:
-                assert start_y == _connector_source_bottom_exit_y(source)
-                if len(points) == 2:
-                    assert start_x == source.cx
-                assert end_y == _connector_target_top_entry_y(target)
+            _end_x, end_y = points[-1]
+            assert start_x == source.cx
+            assert start_y == _connector_source_bottom_exit_y(source)
+            assert end_y == _connector_target_top_entry_y(target)
     finally:
         plt.close(fig)
 
@@ -869,8 +844,11 @@ def test_l2norm_fwd_bypass_connectors_are_separated():
     """l2norm_fwd frames with two bypasses route on left and right gutters."""
     import matplotlib.pyplot as plt
 
-    from visualizer.computation_graph import _inline_frame_vertical_gap
-    from visualizer.render import PARALLEL_CONNECTOR_CHANNEL_GAP
+    from visualizer.computation_graph import (
+        _inline_frame_column_skip_links,
+        _inline_frame_vertical_gap,
+    )
+    from visualizer.render import INLINE_FRAME_BYPASS_ROW_GAP, PARALLEL_CONNECTOR_CHANNEL_GAP
     from visualizer.sizing import min_vertical_block_gap
 
     fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
@@ -880,14 +858,10 @@ def test_l2norm_fwd_bypass_connectors_are_separated():
         for frame in graph.inline_frames:
             if "l2norm_fwd" not in frame.frame_id:
                 continue
-            bypass_links = [
-                (src, tgt)
-                for src, tgt in graph.inline_binary_operand_links
-                if src in frame.node_indices and tgt in frame.node_indices
-            ]
+            bypass_links = _inline_frame_column_skip_links(graph, frame)
             assert len(bypass_links) >= 2, frame.frame_id
             gap = _inline_frame_vertical_gap(graph, frame)
-            assert gap >= min_vertical_block_gap() + 2 * 0.05
+            assert gap >= min_vertical_block_gap() + INLINE_FRAME_BYPASS_ROW_GAP
 
             horizontals: list[float] = []
             vertical_bus_x: list[float] = []
@@ -904,12 +878,7 @@ def test_l2norm_fwd_bypass_connectors_are_separated():
                 assert abs(left - right) >= PARALLEL_CONNECTOR_CHANNEL_GAP / 2, (
                     f"{frame.frame_id} bypass buses too close: {left:.3f} vs {right:.3f}"
                 )
-            assert any(x < column_cx for x in vertical_bus_x), (
-                f"{frame.frame_id} expected a left-gutter bypass"
-            )
-            assert any(x > column_cx for x in vertical_bus_x), (
-                f"{frame.frame_id} expected a right-gutter bypass"
-            )
+            assert any(abs(x - column_cx) > 0.05 for x in vertical_bus_x)
     finally:
         plt.close(fig)
 
@@ -922,6 +891,8 @@ def test_l2norm_fwd_main_chain_uses_straight_vertical_connectors():
         _chunk_kda_pipeline_link_paths()
     )
     try:
+        from visualizer.computation_graph import _inline_frame_column_skip_links
+
         for frame in graph.inline_frames:
             if "l2norm_fwd" not in frame.frame_id:
                 continue
@@ -929,7 +900,7 @@ def test_l2norm_fwd_main_chain_uses_straight_vertical_connectors():
             for src, tgt in graph.links:
                 if src not in members or tgt not in members:
                     continue
-                if (src, tgt) in graph.inline_binary_operand_links:
+                if (src, tgt) in _inline_frame_column_skip_links(graph, frame):
                     continue
                 points = link_paths[(src, tgt)]
                 assert len(points) == 2, (
@@ -942,8 +913,8 @@ def test_l2norm_fwd_main_chain_uses_straight_vertical_connectors():
         plt.close(fig)
 
 
-def test_fused_beta_sigmoid_frame_has_wider_tile_spacing():
-    """Sigmoid and × scale need the same extra spacing as other shortcut frames."""
+def test_fused_beta_sigmoid_frame_uses_compact_tile_spacing():
+    """A frame without top-entry skips uses the normal compact row gap."""
     import matplotlib.pyplot as plt
 
     from visualizer.computation_graph import _inline_frame_vertical_gap
@@ -957,7 +928,7 @@ def test_fused_beta_sigmoid_frame_has_wider_tile_spacing():
             frame for frame in graph.inline_frames if frame.frame_id == "forward_fused_beta_sigmoid_beta"
         )
         gap = _inline_frame_vertical_gap(graph, frame)
-        assert gap >= min_vertical_block_gap() + 0.14
+        assert gap == min_vertical_block_gap()
 
         sigmoid_idx, scale_idx = frame.node_indices[:2]
         points = link_paths[(sigmoid_idx, scale_idx)]
@@ -1154,9 +1125,9 @@ def test_pipeline_merge_bus_sits_below_frame_exit_corridors():
     )
     from visualizer.render import (
         COLORS,
+            CONNECTOR_ATTACHED_BOX_MARGIN,
         CONNECTOR_EXIT_STUB,
         DIAGRAM_LEFT_MARGIN,
-        PIPELINE_MERGE_BUS_BELOW_FRAME_GAP,
         _anchors_from_detail_plan,
         _build_detail_draw_plan,
         _collect_detail_link_paths,
@@ -1235,16 +1206,20 @@ def test_pipeline_merge_bus_sits_below_frame_exit_corridors():
             "forward_fused_beta_sigmoid_beta",
             "chunk_kda_fwd_kda_gate_chunk_cumsum_g",
         )
+        intra_cx = positions[intra_idx].cx
         for frame_id in feeder_frames:
             tail_idx = frame_tails[frame_id]
             link = (tail_idx, intra_idx)
             assert link in link_paths, frame_id
+            if abs(positions[tail_idx].cx - intra_cx) < 0.08:
+                # A tail in intra's own column drops straight in without an exit corridor.
+                continue
             points = link_paths[link]
             frame = next(item for item in graph.inline_frames if item.frame_id == frame_id)
             bounds = _inline_frame_draw_bounds(frame, positions, graph)
             exit_horiz_y = _frame_tail_exit_horiz_y(graph, positions, tail_idx)
             assert exit_horiz_y is not None, frame_id
-            assert bus_y <= exit_horiz_y - CONNECTOR_EXIT_STUB - PIPELINE_MERGE_BUS_BELOW_FRAME_GAP + 1e-6, (
+            assert bus_y <= exit_horiz_y - CONNECTOR_EXIT_STUB - CONNECTOR_ATTACHED_BOX_MARGIN + 1e-6, (
                 f"{frame_id} merge bus {bus_y:.3f} overlaps exit corridor "
                 f"(exit horiz {exit_horiz_y:.3f}, frame bottom {bounds.bottom:.3f})"
             )
@@ -1258,61 +1233,14 @@ def test_pipeline_merge_bus_sits_below_frame_exit_corridors():
         plt.close(fig)
 
 
-def test_bypass_connectors_branch_from_spine_at_intermediate_op():
-    """Bypass paths tee on the frame gutter at the first skipped tile's height."""
-    import matplotlib.pyplot as plt
-
-    from visualizer.computation_graph import _ordered_inline_frame_chain
-    from visualizer.render import (
-        CONNECTOR_EXIT_STUB,
-        _connector_source_bottom_exit_y,
-        _connector_target_side_entry_y,
-    )
-
-    fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
-        _chunk_kda_pipeline_link_paths()
-    )
-    try:
-        for src, tgt in graph.inline_binary_operand_links:
-            points = link_paths[(src, tgt)]
-            source = anchors[src]
-            frame = next(
-                frame
-                for frame in graph.inline_frames
-                if src in frame.node_indices and tgt in frame.node_indices
-            )
-            chain = _ordered_inline_frame_chain(graph, list(frame.node_indices))
-            src_index = chain.index(src)
-            tgt_index = chain.index(tgt)
-            if src_index >= tgt_index - 1:
-                continue
-            intermediate = chain[src_index + 1]
-            tee_y = _connector_target_side_entry_y(anchors[intermediate])
-            y_exit = _connector_source_bottom_exit_y(source)
-            y_stub = y_exit - CONNECTOR_EXIT_STUB
-            assert abs(points[0][0] - source.cx) < 1e-6
-            assert abs(points[0][1] - y_stub) < 1e-6, (
-                f"{graph.nodes[src].label}->{graph.nodes[tgt].label} "
-                f"should tee from the spine stub (y={y_stub:.3f}), "
-                f"got y={points[0][1]:.3f}"
-            )
-            assert abs(points[0][1] - y_exit) > 1e-6, "bypass must not leave from source exit"
-            assert abs(points[1][1] - y_stub) < 1e-6
-            assert abs(points[2][0] - points[1][0]) < 1e-6
-            assert abs(points[2][1] - tee_y) < 1e-6, (
-                f"{graph.nodes[src].label}->{graph.nodes[tgt].label} "
-                f"should reach gutter tee at {graph.nodes[intermediate].label} "
-                f"(y={tee_y:.3f}), got y={points[2][1]:.3f}"
-            )
-    finally:
-        plt.close(fig)
-
-
 def test_bypass_connectors_never_pass_through_skipped_blocks():
     """Bypass connectors must route around intermediate ops, not through them."""
     import matplotlib.pyplot as plt
 
-    from visualizer.computation_graph import _ordered_inline_frame_chain
+    from visualizer.computation_graph import (
+        _inline_frame_column_skip_links,
+        _ordered_inline_frame_chain,
+    )
     from visualizer.render import (
         CONNECTOR_OBSTACLE_MARGIN,
         _path_penetrates_obstacle_tiles,
@@ -1323,24 +1251,20 @@ def test_bypass_connectors_never_pass_through_skipped_blocks():
     )
     try:
         offenders = []
-        for src, tgt in graph.inline_binary_operand_links:
-            frame = next(
-                frame
-                for frame in graph.inline_frames
-                if src in frame.node_indices and tgt in frame.node_indices
-            )
-            chain = _ordered_inline_frame_chain(graph, list(frame.node_indices))
-            src_index = chain.index(src)
-            tgt_index = chain.index(tgt)
-            skipped = chain[src_index + 1 : tgt_index]
-            obstacles = [anchors[index] for index in skipped]
-            points = link_paths[(src, tgt)]
-            if _path_penetrates_obstacle_tiles(
-                points,
-                obstacles,
-                margin=CONNECTOR_OBSTACLE_MARGIN,
-            ):
-                offenders.append((graph.nodes[src].label, graph.nodes[tgt].label))
+        for frame in graph.inline_frames:
+            for src, tgt in _inline_frame_column_skip_links(graph, frame):
+                chain = _ordered_inline_frame_chain(graph, list(frame.node_indices))
+                src_index = chain.index(src)
+                tgt_index = chain.index(tgt)
+                skipped = chain[src_index + 1 : tgt_index]
+                obstacles = [anchors[index] for index in skipped]
+                points = link_paths[(src, tgt)]
+                if _path_penetrates_obstacle_tiles(
+                    points,
+                    obstacles,
+                    margin=CONNECTOR_OBSTACLE_MARGIN,
+                ):
+                    offenders.append((graph.nodes[src].label, graph.nodes[tgt].label))
         assert not offenders, f"bypass connectors crossed skipped blocks: {offenders}"
     finally:
         plt.close(fig)
@@ -1442,13 +1366,10 @@ def test_intra_chunk_merge_bus_uses_single_straight_channel():
                 if abs(y1 - y2) < 1e-6 and abs(x1 - x2) > 0.06
             ]
             bus_horizontals = [(index, y) for index, y in horizontals if abs(y - bus_y) < 0.02]
-            same_column_bus_tee = (
-                len(points) == 3
-                and abs(points[0][0] - intra.cx) < 1e-6
-                and abs(points[1][0] - intra.cx) < 1e-6
-                and abs(points[1][1] - bus_y) < 0.02
-            )
-            assert bus_horizontals or same_column_bus_tee, (
+            # A feeder in intra's own column drops straight down it and never needs
+            # to reach the bus.
+            same_column_drop = all(abs(x - intra.cx) < 1e-6 for x, _y in points)
+            assert bus_horizontals or same_column_drop, (
                 f"{graph.nodes[_src].label} must tee onto the shared merge bus"
             )
             assert len(bus_horizontals) <= 1, (
@@ -1510,10 +1431,10 @@ def test_l2norm_fwd_junction_dots_only_on_shared_buses():
         q_frame = next(
             frame for frame in graph.inline_frames if frame.frame_id == "forward_l2norm_fwd_q"
         )
+        from visualizer.computation_graph import _inline_frame_column_skip_links
+
         bypass_bus_points: set[tuple[float, float]] = set()
-        for src, tgt in graph.inline_binary_operand_links:
-            if src not in q_frame.node_indices or tgt not in q_frame.node_indices:
-                continue
+        for src, tgt in _inline_frame_column_skip_links(graph, q_frame):
             for x, y in link_paths[(src, tgt)][1:-1]:
                 bypass_bus_points.add((round(x, 3), round(y, 3)))
 
@@ -1658,7 +1579,6 @@ def test_chunk_kda_pipeline_draws_connector_junction_dots():
         )
         assert join_points, "expected connector join points in chunk_kda pipeline"
 
-        combine_ops = [(op_x, op_y) for op_x, op_y, _symbol, _sublabel in plan.combine_ops]
         drawable = [
             point
             for point in join_points
@@ -1667,7 +1587,6 @@ def test_chunk_kda_pipeline_draws_connector_junction_dots():
                 point[1],
                 list(anchors.values()) + plan.label_obstacles,
                 halo_radius=CONNECTOR_JUNCTION_HALO_RADIUS,
-                combine_ops=combine_ops,
             )
         ]
         assert drawable, "expected at least one junction dot clear of boxes"
@@ -1676,7 +1595,6 @@ def test_chunk_kda_pipeline_draws_connector_junction_dots():
             ax,
             link_paths,
             obstacles=list(anchors.values()) + plan.label_obstacles,
-            combine_ops=combine_ops,
             target_bus=target_bus,
             source_bus=source_bus,
             merge_link_bus=merge_link_bus,

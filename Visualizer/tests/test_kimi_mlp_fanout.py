@@ -47,7 +47,7 @@ from visualizer.render import (
     _detail_sections_to_render,
     _effective_source_bus_y,
     _fanout_tee_then_entry_column_points,
-    _plan_inline_binary_bus_x,
+    _plan_inline_bypass_bus_x,
     _reroute_connector_path_clearing_blocks,
 )
 from visualizer.render_validate import finalize_detail_layout, measure_detail_tree_content_width
@@ -359,7 +359,7 @@ def test_kimi_mlp_l2_routes_via_tee_not_input_horizontal():
         assert abs(points[1][1] - tee_y) < PARALLEL_CONNECTOR_COORD_EPS
         assert abs(points[2][1] - tee_y) < PARALLEL_CONNECTOR_COORD_EPS
 
-        inline_binary_bus_x = _plan_inline_binary_bus_x(graph, graph.links, anchors, positions)
+        inline_bypass_bus_x = _plan_inline_bypass_bus_x(graph, graph.links, anchors, positions)
         initial = _connector_points_for_link(
             graph=graph,
             positions=positions,
@@ -375,7 +375,7 @@ def test_kimi_mlp_l2_routes_via_tee_not_input_horizontal():
             merge_entry_x=buses[2],
             merge_link_bus=buses[3],
             input_index=input_index,
-            inline_binary_bus_x=inline_binary_bus_x,
+            inline_bypass_bus_x=inline_bypass_bus_x,
         )
         straight = [
             (source.cx, _connector_source_bottom_exit_y(source)),
@@ -392,7 +392,7 @@ def test_kimi_mlp_l2_routes_via_tee_not_input_horizontal():
             positions,
             src=input_index,
             tgt=right_linear,
-        ) is not None
+        ) is None
         rerouted = _reroute_connector_path_clearing_blocks(
             initial,
             source=source,
@@ -428,7 +428,7 @@ def test_runtime_branch_tee_alignment_raises_on_mismatch():
         (0, 1): [(1.0, 9.4), (1.0, 9.31), (1.5, 9.31), (1.5, 9.0)],
         (0, 2): [(1.0, 9.4), (1.0, 9.27), (2.0, 9.27), (2.0, 8.5)],
     }
-    graph = type("G", (), {"inline_binary_operand_links": set()})()
+    graph = type("G", (), {})()
     with pytest.raises(RuntimeError, match="fan-out branch tees misaligned"):
         _assert_shared_fanout_branch_tees_aligned(
             link_paths,
@@ -450,7 +450,7 @@ def test_runtime_branch_tee_alignment_skips_side_routed_legs():
         (0, 1): [(3.0, 9.4), (3.0, 9.3), (2.5, 9.3), (2.5, 9.0)],
         (0, 12): [(3.0, 9.4), (3.5, 9.4), (1.0, 9.4), (1.0, 8.5)],
     }
-    graph = type("G", (), {"inline_binary_operand_links": set()})()
+    graph = type("G", (), {})()
     _assert_shared_fanout_branch_tees_aligned(
         link_paths,
         graph=graph,
@@ -471,7 +471,7 @@ def test_runtime_horizontal_departure_passes_for_pure_tee_fanout():
         (0, 1): [(1.0, y_exit), (1.0, 9.3), (1.5, 9.3), (1.5, 9.0)],
         (0, 2): [(1.0, y_exit), (1.0, 9.3), (2.0, 9.3), (2.0, 8.5)],
     }
-    graph = type("G", (), {"inline_binary_operand_links": set()})()
+    graph = type("G", (), {})()
     _assert_fanout_avoids_input_horizontal_departure(
         link_paths,
         graph=graph,
@@ -492,7 +492,7 @@ def test_runtime_horizontal_departure_skips_mixed_side_routed_fanout():
         (0, 1): [(3.0, y_exit), (3.0, 9.3), (2.5, 9.3), (2.5, 9.0)],
         (0, 12): [(3.0, y_exit), (3.5, y_exit), (1.0, y_exit), (1.0, 8.5)],
     }
-    graph = type("G", (), {"inline_binary_operand_links": set()})()
+    graph = type("G", (), {})()
     _assert_fanout_avoids_input_horizontal_departure(
         link_paths,
         graph=graph,

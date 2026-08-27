@@ -50,6 +50,29 @@ def test_max_upward_bus_shift_finds_vertical_slack():
     assert new_y <= 7.9 + 1e-6
 
 
+def test_max_upward_bus_shift_stays_below_the_lowest_feeder():
+    """A shared merge bus may only rise as far as its deepest feeder allows."""
+    bus_y = 4.0
+    link_paths = {
+        (0, 2): [(1.0, 7.0), (1.0, bus_y), (3.0, bus_y), (3.0, 3.8)],
+        (1, 2): [(5.0, 4.6), (5.0, bus_y), (3.0, bus_y), (3.0, 3.8)],
+    }
+    anchors = {
+        0: _Anchor(cx=1.0, top=7.4, bottom=7.0, left=0.7, right=1.3),
+        1: _Anchor(cx=5.0, top=5.0, bottom=4.6, left=4.7, right=5.3),
+        2: _Anchor(cx=3.0, top=3.8, bottom=3.4, left=2.7, right=3.3),
+    }
+    new_y = _max_upward_bus_shift(
+        bus_y,
+        link_paths,
+        anchors=anchors,
+        targets={2},
+        min_gap=0.02,
+    )
+    assert new_y is not None
+    assert new_y < anchors[1].bottom, "the bus rose above a feeder, forcing it to double back"
+
+
 def test_apply_bus_y_shift_updates_shared_horizontal_legs():
     paths = {(0, 1): [(2.0, 6.0), (2.0, 5.0), (4.0, 5.0), (4.0, 4.0)]}
     _apply_bus_y_shift(paths, 5.0, 5.5)
@@ -72,7 +95,7 @@ def test_validate_shrunk_paths_rejects_block_crossing():
     anchors = {0: source, 1: target, 2: obstacle}
     result = _validate_shrunk_paths(
         {(0, 1): points},
-        graph=type("G", (), {"inline_binary_operand_links": set(), "links": [], "inline_frames": []})(),
+        graph=type("G", (), {"links": [], "inline_frames": []})(),
         anchors=anchors,
         label_obstacles=[],
         positions=[],
@@ -96,8 +119,6 @@ def test_shift_feeder_layout_for_bus_y_moves_frame_column_and_anchors():
                 GraphNodeSpec(key="b", label="b", synthetic=None),
                 GraphNodeSpec(key="merge", label="merge", synthetic=None),
             ],
-            "inline_binary_operand_links": set(),
-            "side_entry_links": set(),
         },
     )()
     positions = [

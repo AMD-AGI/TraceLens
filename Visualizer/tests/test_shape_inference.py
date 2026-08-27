@@ -141,7 +141,7 @@ def test_build_operator_export_custom_model():
     section_titles = [section["title"] for section in payload["sections"]]
     assert "Token Embedding" in section_titles
     assert "Linear" in section_titles
-    assert "RoPE" in section_titles
+    assert "CustomRotaryEmbedding" in section_titles
     assert section_titles.count("RMSNorm") == 1
     assert any(op["name"] == "q_proj" for op in all_ops)
     assert any(op["name"] == "input" and op["operation"] == "input" for op in all_ops)
@@ -218,7 +218,7 @@ def test_build_operator_export_deduplicates_same_shape_subgraphs():
     payload = build_operator_export(spec)
     section_titles = [section["title"] for section in payload["sections"]]
     assert section_titles.count("RMSNorm") == 1
-    assert "RoPE" in section_titles
+    assert "CustomRotaryEmbedding" in section_titles
     assert "Token Embedding" in section_titles
     assert "Linear" in section_titles
     assert "CustomLatent Attn" in section_titles

@@ -8,16 +8,20 @@ from visualizer.ast_analyze import analyze_source, dump_ast
 from visualizer.extract import load_architecture, parse_architecture
 from visualizer.render import (
     COLORS,
-    MERGE_CLEARANCE,
     MERGE_OUTPUT_GAP,
-    MERGE_RADIUS,
+    RESIDUAL_ADD_ENTRY_BAND,
+    RESIDUAL_ADD_HALF_H,
     RESIDUAL_BRANCH_LIFT,
+    TOP_ENTRY_PORT_GAP,
     _collect_sublayer_pairs,
     _make_node,
+    _merge_edge_above,
+    _merge_edge_below,
     _merge_y_for_module,
     _ordered_block_components,
     _residual_branch_y,
     _residual_merge,
+    _residual_merge_ports,
     render_diagram,
 )
 
@@ -28,10 +32,11 @@ FIXTURES = Path(__file__).parent / "fixtures"
 def test_merge_node_sits_below_module_box():
     module_bottom = 4.0
     merge_y = _merge_y_for_module(module_bottom)
-    merge_top = merge_y + MERGE_RADIUS
-    assert merge_top <= module_bottom - MERGE_CLEARANCE
-    merge_connector_top = merge_y + MERGE_RADIUS + MERGE_CLEARANCE
-    assert merge_connector_top <= module_bottom - MERGE_OUTPUT_GAP
+    merge_top = _merge_edge_above(merge_y)
+    assert merge_top < module_bottom
+    # Both inputs approach through lanes stacked in the band above the tile.
+    assert merge_top + RESIDUAL_ADD_ENTRY_BAND <= module_bottom - MERGE_OUTPUT_GAP + 1e-9
+    assert merge_top - _merge_edge_below(merge_y) == pytest.approx(2 * RESIDUAL_ADD_HALF_H)
 
 
 def test_repeat_label_clears_positional_and_routes_around_bbox():
@@ -123,41 +128,113 @@ def test_repeat_label_clears_positional_and_routes_around_bbox():
     assert outside_bb.x1 + BLOCK_FRAME_REPEAT_CONNECTOR_MARGIN <= cx
 
 
-def test_residual_merge_side_entry_uses_merge_center():
+def _record_residual_merge(*, module_cx: float, spine_x: float, branch_x: float, module_bottom: float):
+    """Run _residual_merge with drawing stubbed out; return (segments, add_node)."""
     from unittest.mock import patch
 
-    calls: list[tuple] = []
+    segments: list[tuple[float, float, float, float]] = []
 
     def record_line(ax, x1, y1, x2, y2, **kwargs):
-        calls.append(("line", x1, y1, x2, y2, kwargs.get("linestyle")))
+        segments.append((x1, y1, x2, y2))
 
     def record_arrow(ax, x1, y1, x2, y2, **kwargs):
-        calls.append(("arrow", x1, y1, x2, y2, kwargs.get("linestyle")))
+        segments.append((x1, y1, x2, y2))
 
-    module_bottom = 5.0
-    merge_y = _merge_y_for_module(module_bottom)
-    spine_x = 3.0
-    branch_x = 1.0
+    def record_path(ax, points, **kwargs):
+        for start, end in zip(points, points[1:]):
+            segments.append((*start, *end))
 
     with patch("visualizer.render._line", side_effect=record_line), patch(
         "visualizer.render._arrow", side_effect=record_arrow
-    ), patch("visualizer.render._draw_path"), patch("visualizer.render._draw_merge"):
-        _residual_merge(
+    ), patch("visualizer.render._draw_path", side_effect=record_path), patch(
+        "visualizer.render._draw_box"
+    ):
+        merge_y, add_node = _residual_merge(
             None,
-            module_cx=spine_x,
+            merge_id="ffn_add",
+            module_cx=module_cx,
             module_bottom=module_bottom,
-            skip_from_y=6.0,
+            skip_from_y=module_bottom + 1.0,
             spine_x=spine_x,
             branch_x=branch_x,
+            width=1.35,
         )
 
-    solid_arrows = [call for call in calls if call[0] == "arrow" and call[5] in {None, "solid"}]
-    assert len(solid_arrows) == 1
-    _, x1, y1, x2, y2, _ = solid_arrows[0]
-    assert y1 == merge_y
-    assert y2 == merge_y
-    assert x2 == spine_x - MERGE_RADIUS
-    assert x1 < x2
+    assert merge_y == pytest.approx(_merge_y_for_module(module_bottom))
+    return segments, add_node
+
+
+@pytest.mark.parametrize("module_cx_offset", [0.0, 0.4])
+def test_residual_merge_inputs_enter_distinct_top_ports(module_cx_offset):
+    spine_x = 3.0
+    module_bottom = 5.0
+    segments, add_node = _record_residual_merge(
+        module_cx=spine_x + module_cx_offset,
+        spine_x=spine_x,
+        branch_x=1.0,
+        module_bottom=module_bottom,
+    )
+
+    module_port_x, residual_port_x = _residual_merge_ports(spine_x, add_node.w)
+    assert module_port_x != residual_port_x
+    assert residual_port_x < module_port_x
+    assert module_port_x == pytest.approx(add_node.cx)
+    assert module_port_x - residual_port_x >= TOP_ENTRY_PORT_GAP
+    # Both ports stay on the top edge, clear of the tile's rounded corners.
+    for port_x in (module_port_x, residual_port_x):
+        assert add_node.x + TOP_ENTRY_PORT_GAP <= port_x <= add_node.x + add_node.w - TOP_ENTRY_PORT_GAP
+
+    landings = [(x2, y2) for _, _, x2, y2 in segments if y2 == pytest.approx(add_node.top)]
+    assert sorted(x for x, _ in landings) == [
+        pytest.approx(residual_port_x),
+        pytest.approx(module_port_x),
+    ]
+    # Every approach is vertical, so nothing arrives along the tile's flanks.
+    for x1, y1, x2, y2 in segments:
+        if y2 != pytest.approx(add_node.top):
+            continue
+        assert x1 == pytest.approx(x2)
+        assert y1 > y2
+    assert not any(
+        y1 == pytest.approx(y2)
+        and (
+            x2 == pytest.approx(add_node.x)
+            or x2 == pytest.approx(add_node.x + add_node.w)
+        )
+        for x1, y1, x2, y2 in segments
+    )
+    # Nothing crosses the tile body.
+    assert all(
+        min(y1, y2) >= add_node.top - 1e-9 or max(y1, y2) <= add_node.bottom + 1e-9
+        for x1, y1, x2, y2 in segments
+    )
+
+
+def test_residual_merge_output_leaves_the_bottom_edge():
+    from unittest.mock import patch
+
+    from visualizer.render import _connect_from_merge
+
+    module_bottom = 5.0
+    _, add_node = _record_residual_merge(
+        module_cx=3.0, spine_x=3.0, branch_x=1.0, module_bottom=module_bottom
+    )
+    merge_y = _merge_y_for_module(module_bottom)
+    target = _make_node(
+        "norm2", 3.0, merge_y - 0.4, 1.35, 0.32, "RMSNorm", COLORS["norm"], text_color=COLORS["text"]
+    )
+
+    exits: list[tuple[float, float, float, float]] = []
+    with patch(
+        "visualizer.render._arrow",
+        side_effect=lambda ax, x1, y1, x2, y2, **kwargs: exits.append((x1, y1, x2, y2)),
+    ):
+        _connect_from_merge(None, 3.0, merge_y, target)
+
+    assert len(exits) == 1
+    x1, y1, x2, y2 = exits[0]
+    assert (x1, y1) == (pytest.approx(add_node.cx), pytest.approx(add_node.bottom))
+    assert (x2, y2) == (pytest.approx(target.cx), pytest.approx(target.top))
 
 
 def test_residual_branch_routes_above_norm():
@@ -165,22 +242,6 @@ def test_residual_branch_routes_above_norm():
     branch_y = _residual_branch_y(norm.top)
     assert branch_y > norm.top
     assert branch_y - norm.top >= RESIDUAL_BRANCH_LIFT - 1e-6
-
-
-def test_side_entry_combine_connector_avoids_long_horizontal_bus():
-    from visualizer.render import MERGE_RADIUS, _RenderAnchor, _side_entry_combine_connector_points
-
-    source = _RenderAnchor(cx=0.8, top=9.5, bottom=9.0, left=0.55, right=1.05)
-    target_cx = 3.2
-    target_cy = 7.5
-    points = _side_entry_combine_connector_points(source, target_cx, target_cy)
-    merge_horizontals = [
-        abs(x2 - x1)
-        for (x1, y1), (x2, y2) in zip(points, points[1:])
-        if abs(y1 - y2) < 1e-6 and abs(y1 - target_cy) < 0.02
-    ]
-    assert merge_horizontals, points
-    assert max(merge_horizontals) <= MERGE_RADIUS + 0.12
 
 
 def test_collect_connector_join_points_finds_shared_vertices():
@@ -296,64 +357,12 @@ def test_spread_top_entry_ports_cluster_near_center():
     assert all(abs(x - target.cx) <= TOP_ENTRY_PORT_GAP * 2 for x in xs)
 
 
-def test_combine_circle_connectors_attach_to_gray_circle_edge():
-    from visualizer.computation_graph import SYNTHETIC_COMBINE
-    from visualizer.render import (
-        COMBINE_OP_SIZE,
-        MERGE_CLEARANCE,
-        MERGE_RADIUS,
-        _RenderAnchor,
-        _combine_bottom_exit_y,
-        _combine_top_entry_y,
-        _combine_uses_box_anchor,
-        _snap_connector_path_endpoints,
-    )
-
-    cy = 10.0
-    pad = MERGE_RADIUS + MERGE_CLEARANCE
-    target = _RenderAnchor(
-        cx=5.0,
-        top=cy + pad,
-        bottom=cy - pad,
-        left=5.0 - pad,
-        right=5.0 + pad,
-    )
-    assert target.top - target.bottom == pytest.approx(COMBINE_OP_SIZE)
-    assert not _combine_uses_box_anchor(target)
-    assert _combine_top_entry_y(target) == cy + MERGE_RADIUS
-    assert _combine_bottom_exit_y(target) == cy - MERGE_RADIUS
-    assert _combine_top_entry_y(target) < target.top
-
-    source = _RenderAnchor(cx=5.0, top=12.0, bottom=11.5, left=4.5, right=5.5)
-    graph = type(
-        "Graph",
-        (),
-        {
-            "nodes": (
-                type("Node", (), {"synthetic": None})(),
-                type("Node", (), {"synthetic": SYNTHETIC_COMBINE})(),
-            ),
-            "links": (),
-            "side_entry_links": set(),
-            "inline_binary_operand_links": set(),
-        },
-    )()
-    snapped = _snap_connector_path_endpoints(
-        [(5.0, 11.5), (5.0, target.top)],
-        source=source,
-        target=target,
-        link_key=(0, 1),
-        graph=graph,
-    )
-    assert snapped[-1] == (5.0, cy + MERGE_RADIUS)
-
-
 def test_snap_connector_path_endpoints_keeps_paths_orthogonal():
     from visualizer.render import _RenderAnchor, _snap_connector_path_endpoints
 
     source = _RenderAnchor(cx=1.0, top=2.0, bottom=1.0, left=0.5, right=1.5)
     target = _RenderAnchor(cx=3.0, top=0.5, bottom=0.0, left=2.5, right=3.5)
-    graph = type("Graph", (), {"inline_binary_operand_links": set()})()
+    graph = type("Graph", (), {})()
     snapped = _snap_connector_path_endpoints(
         [(1.0, 1.0), (2.0, 0.8), (3.0, 0.5)],
         source=source,
@@ -468,58 +477,6 @@ def test_fanout_connectors_share_source_bus():
         else:
             assert points[2][1] == bus_y
             assert points[-2][0] == target.cx
-
-
-def test_parallel_connectors_receive_distinct_channels():
-    from collections import defaultdict
-
-    from visualizer.render import (
-        PARALLEL_CONNECTOR_CHANNEL_GAP,
-        _RenderAnchor,
-        _inline_binary_side_entry_connector_points,
-        _plan_inline_binary_bus_x,
-        _separate_parallel_connector_paths,
-    )
-
-    class _Graph:
-        inline_binary_operand_links = {(0, 2), (1, 2)}
-        dashed_links: set[tuple[int, int]] = set()
-        side_entry_links = inline_binary_operand_links
-        link_port_labels: dict[tuple[int, int], str] = {}
-
-    anchors = {
-        0: _RenderAnchor(cx=4.0, top=8.0, bottom=7.5, left=3.7, right=4.3),
-        1: _RenderAnchor(cx=4.0, top=7.0, bottom=6.5, left=3.7, right=4.3),
-        2: _RenderAnchor(cx=4.0, top=5.5, bottom=5.0, left=3.7, right=4.3),
-    }
-    graph = _Graph()
-    links = [(0, 2), (1, 2)]
-    bus_x_map = _plan_inline_binary_bus_x(graph, links, anchors)
-    assert bus_x_map[(0, 2)] - bus_x_map[(1, 2)] == pytest.approx(PARALLEL_CONNECTOR_CHANNEL_GAP)
-
-    path_a = _inline_binary_side_entry_connector_points(
-        anchors[0], anchors[2], bus_x=bus_x_map[(0, 2)]
-    )
-    path_b = _inline_binary_side_entry_connector_points(
-        anchors[1], anchors[2], bus_x=bus_x_map[(1, 2)]
-    )
-    assert path_a[2][0] != path_b[2][0]
-
-    incoming = defaultdict(list)
-    outgoing = defaultdict(list)
-    for link in links:
-        incoming[link[1]].append(link)
-        outgoing[link[0]].append(link)
-    separated = _separate_parallel_connector_paths(
-        {(0, 2): path_a, (1, 2): path_b},
-        incoming=incoming,
-        outgoing=outgoing,
-        target_bus={},
-        source_bus={},
-        merge_link_bus={},
-        anchors=anchors,
-    )
-    assert separated[(0, 2)][2][0] != separated[(1, 2)][2][0]
 
 
 def test_min_vertical_block_gap_matches_top_text_inset():
@@ -767,8 +724,9 @@ def test_block_spine_connectors_span_the_frame_boundary(tmp_path: Path):
         for x1, y1, x2, y2 in segments
         if abs(x1 - x2) < 1e-6 and abs(x1 - spine_cx) < 0.08
     ]
-    # A residual merge glyph legitimately fills a gap of its own diameter.
-    merge_span = 2 * (render_module.MERGE_RADIUS + render_module.MERGE_CLEARANCE)
+    # The lane band above a residual Add tile legitimately breaks the spine: the
+    # module output jogs to its own top port there when it is not tile-centered.
+    merge_span = render_module.RESIDUAL_ADD_ENTRY_BAND + render_module.RESIDUAL_ADD_EXIT_GAP
 
     for upper, lower in zip(column, column[1:]):
         gap_top, gap_bottom = upper[2], lower[3]

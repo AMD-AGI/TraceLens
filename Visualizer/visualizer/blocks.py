@@ -32,6 +32,9 @@ class BlockComponent:
     label: str
     forward_order: int | None = None
     details: list[str] = field(default_factory=list)
+    # Set when the config implies the module but no modeling source declares it, so the
+    # diagram can show it without passing it off as something read from code.
+    inferred_from_config: bool = False
 
 
 def ordered_components(components: list[BlockComponent]) -> list[BlockComponent]:
@@ -150,6 +153,7 @@ class CodeAnalysis:
     source_files: list[str] = field(default_factory=list)
     class_registry: dict[str, ClassStructure] = field(default_factory=dict)
     external_imports: dict[str, str] = field(default_factory=dict)
+    positional_helpers: list[str] = field(default_factory=list)
 
     def has_block_graph(self) -> bool:
         return bool(self.block_components or self.forward_sequence or self.stack_pre or self.stack_tail)

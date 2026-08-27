@@ -414,6 +414,39 @@ def _resolve_ffn_for_layer(
     return "mlp", None
 
 
+def _apply_uniform_ffn_component(
+    spec: ArchitectureSpec,
+    *,
+    ffn_attr: str | None,
+    ffn_class: str | None,
+) -> None:
+    """Name the spine's FFN tile after the branch every layer of this config takes.
+
+    A decoder's ``__init__`` can bind one attribute to either a dense or a sparse
+    class; the AST keeps whichever it saw last, which is not necessarily the one this
+    checkpoint builds.
+    """
+    if not ffn_attr or not ffn_class:
+        return
+    from dataclasses import replace
+
+    from visualizer.ast_analyze import _label_for, ffn_role_for_class
+
+    for index, comp in enumerate(spec.block_components):
+        if comp.attr_name != ffn_attr or comp.role not in {"ffn", "moe"}:
+            continue
+        if comp.class_name == ffn_class:
+            return
+        role = ffn_role_for_class(comp.attr_name, ffn_class)
+        spec.block_components[index] = replace(
+            comp,
+            class_name=ffn_class,
+            role=role,
+            label=_label_for(role, ffn_class, comp.attr_name),
+        )
+        return
+
+
 def _infer_layer_variants(
     config: dict[str, Any],
     spec: ArchitectureSpec,
@@ -442,7 +475,7 @@ def _infer_layer_variants(
         return
 
     from collections import Counter
-    from visualizer.ast_analyze import _classify_role, _label_for
+    from visualizer.ast_analyze import _classify_role, _label_for, ffn_role_for_class
 
     attn_rules = [(cls, cond) for attr, cls, cond in conditionals if attr in _ATTENTION_ATTRS]
     ffn_rules = [
@@ -450,6 +483,21 @@ def _infer_layer_variants(
         for attr, cls, cond in conditionals
         if _classify_role(attr, cls) in {"ffn", "moe"}
     ]
+    decoder_options: list[str] = []
+    if class_registry and decoder_class:
+        decoder = class_registry.get(decoder_class)
+        if isinstance(decoder, ClassStructure):
+            for attr in ("mlp", "block_sparse_moe"):
+                decoder_options.extend(decoder.init_assignment_options.get(attr, []))
+    decoder_options = list(dict.fromkeys(decoder_options))
+    moe_option = next(
+        (class_name for class_name in decoder_options if ffn_role_for_class("", class_name) == "moe"),
+        None,
+    )
+    dense_option = next(
+        (class_name for class_name in decoder_options if ffn_role_for_class("", class_name) == "ffn"),
+        None,
+    )
 
     buckets: Counter[tuple[str, str | None, str, str | None, str | None]] = Counter()
     for layer_idx in range(num_layers):
@@ -467,14 +515,13 @@ def _infer_layer_variants(
             else (None, None)
         )
         if ffn_class is None and ffn_attr is None:
-            ffn_attr, ffn_class = (
-                ("block_sparse_moe", None)
-                if _config_moe_layer(layer_idx, config)
-                else ("mlp", None)
-            )
+            if _config_moe_layer(layer_idx, config):
+                ffn_attr, ffn_class = "mlp", moe_option
+            else:
+                ffn_attr, ffn_class = "mlp", dense_option
 
         attn_label = _label_for("attention", attn_class or "Attention", "self_attn")
-        ffn_role = _classify_role(ffn_attr or "mlp", ffn_class or "MLP")
+        ffn_role = ffn_role_for_class(ffn_attr or "mlp", ffn_class or "MLP")
         ffn_display = _label_for(ffn_role, ffn_class or "", ffn_attr or "")
 
         buckets[(attn_label, attn_class, ffn_display, ffn_class, ffn_attr)] += 1
@@ -482,11 +529,12 @@ def _infer_layer_variants(
     if len(buckets) <= 1:
         only = next(iter(buckets.items()), None)
         if only:
-            (attn_label, attn_class, ffn_display, _ffn_class, _ffn_attr), _count = only
+            (attn_label, attn_class, _ffn_display, ffn_class, ffn_attr), _count = only
             if attn_class:
                 spec.attention_notes.append(f"Attention module: {attn_class}")
             if len({variant.attention_label for variant in spec.layer_variants}) <= 1:
                 spec.attention_type = attn_label
+            _apply_uniform_ffn_component(spec, ffn_attr=ffn_attr, ffn_class=ffn_class)
         return
 
     variants: list[LayerVariant] = []
@@ -535,6 +583,11 @@ def _config_moe_layer(layer_idx: int, config: dict[str, Any]) -> bool:
         )
     )
     if not num_experts or num_experts <= 1:
+        return False
+    moe_pattern = _get(config, "moe_layer_freq")
+    if isinstance(moe_pattern, list):
+        if 0 <= layer_idx < len(moe_pattern):
+            return bool(_as_int(moe_pattern[layer_idx]) or 0)
         return False
     first_k_dense = _as_int(_get(config, "first_k_dense_replace", "num_dense_layers")) or 0
     moe_freq = _as_int(_get(config, "moe_layer_freq", "moe_layer_interval")) or 1
@@ -602,9 +655,11 @@ def _estimate_param_hint(config: dict[str, Any], spec: ArchitectureSpec) -> None
     attn = layers * hidden * hidden * 4
     ffn_multiplier = 3 if spec.ffn_type == "SwiGLU" else 2
     if spec.decoder_type == "Sparse MoE" and spec.num_experts:
-        ffn = layers * spec.num_experts * hidden * (inter or hidden * 4) * ffn_multiplier
+        # Each expert is as wide as one routed FFN, not as wide as the dense one.
+        expert_inter = spec.moe_intermediate_size or inter or hidden * 4
+        ffn = layers * spec.num_experts * hidden * expert_inter * ffn_multiplier
         active = spec.num_experts_per_tok or 1
-        active_ffn = layers * active * hidden * (inter or hidden * 4) * ffn_multiplier
+        active_ffn = layers * active * hidden * expert_inter * ffn_multiplier
         total = embed * 2 + attn + ffn
         active_total = embed * 2 + attn + active_ffn
         spec.total_params_hint = _format_params(total)
@@ -674,7 +729,6 @@ def _rebuild_stack_components(
         causal_lm=causal_lm,
         decoder=decoder,
         registry=registry,
-        positional_encoding=spec.positional_encoding,
     )
 
 
@@ -731,7 +785,13 @@ def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None
             spec.attention_notes.insert(0, f"AST: {analysis.attention_class}")
 
     if analysis.decoder_type:
-        spec.decoder_type = analysis.decoder_type
+        from visualizer.ast_analyze import decoder_type_for_components
+
+        # Read the flavor off the resolved spine, which may name a different FFN class
+        # than the AST alone reported.
+        spec.decoder_type = (
+            decoder_type_for_components(spec.block_components) or analysis.decoder_type
+        )
 
     if analysis.ffn_type:
         spec.ffn_type = analysis.ffn_type
@@ -750,6 +810,41 @@ def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None
     for comp in analysis.block_components:
         if comp.role == "other":
             spec.layer_notes.append(f"Custom block `{comp.attr_name}` ({comp.class_name})")
+
+
+def _code_rotates_positions(analysis: CodeAnalysis) -> bool:
+    """True when the modeling source shows positions being rotated somewhere."""
+    from visualizer.ast_analyze import POSITIONAL_CLASS_RE, is_positional_synthetic
+
+    if analysis.positional_helpers:
+        return True
+    if any(comp.role == "positional" for comp in analysis.stack_pre):
+        return True
+    for name, cls in analysis.class_registry.items():
+        if POSITIONAL_CLASS_RE.search(name):
+            return True
+        if any(is_positional_synthetic(call) for call in cls.forward_calls):
+            return True
+    return False
+
+
+def _refine_positional_from_code(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None:
+    """Correct a config-derived rope claim the modeling source contradicts.
+
+    A config carrying `rope_theta` only means rope parameters exist; a checkpoint can
+    still run without positional encoding, as MLA variants asserting NoPE do.
+    """
+    # Only a rope claim can be checked this way: ALiBi biases scores and learned
+    # absolute encodings add an embedding, neither of which rotates anything.
+    if spec.positional_encoding != "RoPE":
+        return
+    if _code_rotates_positions(analysis):
+        return
+    spec.positional_encoding = "NoPE"
+    spec.attention_notes = [
+        note for note in spec.attention_notes if not note.startswith("RoPE theta=")
+    ]
+    spec.layer_notes.append("No positional encoding applied in modeling code")
 
 
 def _build_detailed_block_trees(spec: ArchitectureSpec, basic_ops: BasicOpFilter) -> None:
@@ -836,6 +931,7 @@ def parse_architecture(
 
     if code_analysis is not None and code_analysis.has_block_graph():
         _merge_code_analysis(spec, code_analysis)
+        _refine_positional_from_code(spec, code_analysis)
 
     _estimate_kv_cache(spec, config)
     _estimate_param_hint(config, spec)
@@ -897,8 +993,11 @@ def load_architecture(
         spec.layer_notes.append(f"Loaded text backbone from {config['_wrapper_model_type']} wrapper")
     if github:
         spec.github_source = parse_github_url(github).display
-    elif code_labels and code_labels[0].startswith("github://"):
-        spec.github_source = code_labels[0]
+    else:
+        spec.github_source = next(
+            (label for label in code_labels if label.startswith("github://")),
+            spec.github_source,
+        )
     spec.code_sources = code_labels or spec.code_sources
     if detailed:
         resolved_basic_ops = basic_ops or BasicOpFilter.for_detailed()
