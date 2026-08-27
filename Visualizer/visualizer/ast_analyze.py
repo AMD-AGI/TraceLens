@@ -894,6 +894,7 @@ class ForwardOperation:
     predecessors: tuple[str, ...] = ()
     external_inputs: tuple[str, ...] = ()
     details: tuple[str, ...] = ()
+    param_inputs: tuple[str, ...] = ()
 
 
 @dataclass
@@ -1107,9 +1108,11 @@ class _ForwardOperationExtractor:
         *,
         self_values: dict[str, Any],
         all_tensor_ops: bool,
+        param_names: set[str] | None = None,
     ) -> None:
         self.self_values = self_values
         self.all_tensor_ops = all_tensor_ops
+        self.param_names = set(param_names or ())
         self.operations: list[ForwardOperation] = []
         self.var_producer: dict[str, str] = {}
         self.var_module_origin: dict[str, str] = {}
@@ -1150,9 +1153,22 @@ class _ForwardOperationExtractor:
                 predecessors=self._dedupe(predecessors),
                 external_inputs=self._dedupe(external_inputs),
                 details=tuple(details or ()),
+                param_inputs=self._param_refs(node),
             )
         )
         return attr_name
+
+    def _param_refs(self, node: ast.AST) -> tuple[str, ...]:
+        """Secondary forward parameters this operation's expression reads."""
+        if not self.param_names:
+            return ()
+        return self._dedupe(
+            [
+                name.id
+                for name in ast.walk(node)
+                if isinstance(name, ast.Name) and name.id in self.param_names
+            ]
+        )
 
     def _self_attr_input(self, node: ast.Attribute) -> tuple[str | None, list[str]]:
         if isinstance(node.value, ast.Name) and node.value.id == "self":
@@ -1434,9 +1450,13 @@ def _forward_operations_from_forward(
     self_values: dict[str, Any],
     all_tensor_ops: bool,
 ) -> list[ForwardOperation]:
+    # The primary parameter is the main path, so only the extra ones can identify
+    # which step consumes a side feed.
+    primary = _primary_forward_input_name(func)
     extractor = _ForwardOperationExtractor(
         self_values=self_values,
         all_tensor_ops=all_tensor_ops,
+        param_names=_forward_input_names(func) - {primary} if primary else set(),
     )
     extractor.statements(func.body)
     return extractor.operations

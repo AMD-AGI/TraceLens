@@ -575,6 +575,7 @@ class BlockNode:
     kernel_predecessors: list[str] = field(default_factory=list)
     operation_predecessors: list[str] = field(default_factory=list)
     external_inputs: list[str] = field(default_factory=list)
+    param_inputs: list[str] = field(default_factory=list)
 
 
 PortStyle = Literal["floating", "inline"]
@@ -740,6 +741,7 @@ def _leaf_node(
     kernel_predecessors: list[str] | None = None,
     operation_predecessors: list[str] | None = None,
     external_inputs: list[str] | None = None,
+    param_inputs: list[str] | None = None,
 ) -> BlockNode:
     role = _classify_role(attr_name, class_name)
     return BlockNode(
@@ -753,6 +755,7 @@ def _leaf_node(
         kernel_predecessors=list(kernel_predecessors or []),
         operation_predecessors=list(operation_predecessors or []),
         external_inputs=list(external_inputs or []),
+        param_inputs=list(param_inputs or []),
     )
 
 
@@ -1654,6 +1657,7 @@ def build_block_node(
                     basic=True,
                     operation_predecessors=list(operation.predecessors),
                     external_inputs=list(operation.external_inputs),
+                    param_inputs=list(operation.param_inputs),
                 )
             )
             continue
@@ -1706,6 +1710,7 @@ def build_block_node(
                                 basic=True,
                                 operation_predecessors=list(operation.predecessors),
                                 external_inputs=list(operation.external_inputs),
+                                param_inputs=list(operation.param_inputs),
                             )
                             for operation_index, operation in enumerate(method_ops)
                         ],
@@ -1725,6 +1730,7 @@ def build_block_node(
                         basic=True,
                         operation_predecessors=list(single_op.predecessors),
                         external_inputs=list(single_op.external_inputs),
+                        param_inputs=list(single_op.param_inputs),
                     )
                 )
                 continue

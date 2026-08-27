@@ -2724,8 +2724,8 @@ def test_mla_gate_input_uses_solid_residual_connector(tmp_path: Path):
     assert COLORS["residual"] not in svg or "stroke-dasharray" not in svg.split(COLORS["residual"])[-1][:200]
 
 
-def test_moe_router_and_input_enter_first_expert_linear_without_crossing(tmp_path, monkeypatch):
-    """Router and shared-input feeds use distinct ports on the expert's top edge."""
+def test_moe_router_weights_dock_on_the_expert_step_that_consumes_them(tmp_path, monkeypatch):
+    """The gate feed enters the multiply that scales the expert, not the frame head."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -2735,6 +2735,7 @@ def test_moe_router_and_input_enter_first_expert_linear_without_crossing(tmp_pat
     from visualizer.loader import build_detailed_basic_ops
     from visualizer.render import (
         CONNECTOR_OBSTACLE_MARGIN,
+        PARALLEL_CONNECTOR_CHANNEL_GAP,
         PARALLEL_CONNECTOR_COORD_EPS,
         _connector_axis_segments,
         _connector_target_top_entry_y,
@@ -2763,7 +2764,10 @@ def test_moe_router_and_input_enter_first_expert_linear_without_crossing(tmp_pat
             {
                 "graph": kwargs["graph"],
                 "anchors": dict(kwargs["anchors"]),
+                "positions": list(kwargs["positions"]),
                 "link_paths": {key: list(points) for key, points in paths.items()},
+                "target_bus": dict(kwargs["target_bus"]),
+                "merge_link_bus": dict(kwargs["merge_link_bus"]),
             }
         )
         return paths
@@ -2777,31 +2781,36 @@ def test_moe_router_and_input_enter_first_expert_linear_without_crossing(tmp_pat
     )
     graph = section["graph"]
     anchors = section["anchors"]
+    positions = section["positions"]
     link_paths = section["link_paths"]
     input_index = next(
         index for index, node in enumerate(graph.nodes) if node.synthetic == SYNTHETIC_INPUT
     )
-    router_link = next(
-        link
-        for link in graph.links
-        if graph.nodes[link[0]].label == "Router"
-        and (input_index, link[1]) in link_paths
+    router_index = next(
+        index for index, node in enumerate(graph.nodes) if node.label == "Router"
     )
-    router_index, expert_index = router_link
-    chain_link = (input_index, expert_index)
-    target = anchors[expert_index]
+    router_link = next(link for link in link_paths if link[0] == router_index)
+    weights_index = router_link[1]
+    # The gate output scales the expert result, so it belongs on that multiply.
+    assert graph.nodes[weights_index].label == "Multiply"
+    experts_frame = next(
+        frame for frame in graph.inline_frames if weights_index in frame.node_indices
+    )
+    frame_head = max(experts_frame.node_indices, key=lambda index: positions[index].top_y)
+    assert weights_index != frame_head
+    # A second feed on the frame head would mean the side input was docked on the
+    # frame instead of on the step that reads it.
+    assert [link for link in link_paths if link[1] == frame_head] == [
+        (input_index, frame_head)
+    ]
+
+    target = anchors[weights_index]
     entry_y = _connector_target_top_entry_y(target)
     router_points = link_paths[router_link]
-    chain_points = link_paths[chain_link]
+    chain_points = link_paths[(input_index, frame_head)]
 
-    for points in (router_points, chain_points):
-        assert abs(points[-1][1] - entry_y) <= PARALLEL_CONNECTOR_COORD_EPS
-    ports = sorted(points[-1][0] for points in (router_points, chain_points))
-    assert ports[1] - ports[0] >= CONNECTOR_OBSTACLE_MARGIN
-
-    # The router sits right of the drop lane, so its port must too, or the jog
-    # reaches back across that lane and crosses it.
-    assert router_points[-1][0] > chain_points[-1][0]
+    assert abs(router_points[-1][1] - entry_y) <= PARALLEL_CONNECTOR_COORD_EPS
+    assert target.left < router_points[-1][0] < target.right
 
     router_source = anchors[router_index]
     for orientation, coord, _lo, _hi, _index in _connector_axis_segments(router_points):
@@ -2822,8 +2831,11 @@ def test_moe_router_and_input_enter_first_expert_linear_without_crossing(tmp_pat
             )
 
     # The router may not stand over the lane, or the input has to detour around
-    # the whole expert column to reach the same top edge.
-    assert min(x for x, _y in chain_points) >= target.left - CONNECTOR_OBSTACLE_MARGIN
+    # the whole expert column to reach the frame head.
+    assert (
+        min(x for x, _y in chain_points)
+        >= anchors[frame_head].left - CONNECTOR_OBSTACLE_MARGIN
+    )
 
     departure_levels: set[float] = set()
     legs_with_extra_levels: list[tuple[int, int]] = []
@@ -2840,6 +2852,92 @@ def test_moe_router_and_input_enter_first_expert_linear_without_crossing(tmp_pat
             legs_with_extra_levels.append(link)
     assert max(departure_levels) - min(departure_levels) <= PARALLEL_CONNECTOR_COORD_EPS + 1e-6
     assert all(link[0] == input_index for link in legs_with_extra_levels)
+
+    input_links = [link for link in link_paths if link[0] == input_index]
+    shared_prefix = link_paths[input_links[0]][:2]
+    assert all(link_paths[link][:2] == shared_prefix for link in input_links)
+    for link in input_links:
+        target_anchor = anchors[link[1]]
+        assert abs(link_paths[link][-1][1] - target_anchor.top) <= PARALLEL_CONNECTOR_COORD_EPS
+    right_expert = max(
+        (link[1] for link in input_links if graph.nodes[link[1]].label == "Linear"),
+        key=lambda index: anchors[index].cx,
+    )
+    assert abs(link_paths[(input_index, right_expert)][-1][0] - anchors[right_expert].cx) <= 1e-9
+
+    add_index = next(index for index, node in enumerate(graph.nodes) if node.label == "Add")
+    add_links = [link for link in link_paths if link[1] == add_index]
+    assert len(add_links) == 2
+    add_bus_segments = []
+    for link in add_links:
+        horizontals = [
+            segment for segment in _connector_axis_segments(link_paths[link])
+            if segment[0] == "h"
+        ]
+        add_bus_segments.append(horizontals[-1])
+    assert abs(add_bus_segments[0][1] - add_bus_segments[1][1]) <= PARALLEL_CONNECTOR_COORD_EPS
+    _, _y1, lo1, hi1, _ = add_bus_segments[0]
+    _, _y2, lo2, hi2, _ = add_bus_segments[1]
+    assert hi1 <= lo2 or hi2 <= lo1
+
+    from visualizer.render import (
+        _find_connector_inline_frame_overlaps,
+        _find_connector_node_clearance_violations,
+    )
+
+    assert not _find_connector_inline_frame_overlaps(
+        link_paths,
+        graph=graph,
+        positions=positions,
+    )
+    assert not _find_connector_node_clearance_violations(
+        link_paths,
+        graph=graph,
+        anchors=anchors,
+        label_obstacles=[],
+        positions=positions,
+    )
+
+    indexer = next(
+        entry
+        for entry in captured
+        if any(node.label == "Floor divide" for node in entry["graph"].nodes)
+        and sum(node.label == "Apply rotary emb" for node in entry["graph"].nodes) >= 2
+    )
+    indexer_graph = indexer["graph"]
+    indexer_anchors = indexer["anchors"]
+    topk = next(
+        index for index, node in enumerate(indexer_graph.nodes) if node.label == "TopK"
+    )
+    topk_links = [link for link in indexer["link_paths"] if link[1] == topk]
+    assert sorted(indexer_graph.nodes[source].label for source, _target in topk_links) == [
+        "Add",
+        "Floor divide",
+    ]
+    # TopK has two independent operands, not a shared connector trunk. Their
+    # topology-assigned approach levels must remain distinct even when their
+    # horizontal spans overlap.
+    assert topk not in indexer["target_bus"]
+    topk_levels = [indexer["merge_link_bus"][link] for link in topk_links]
+    assert abs(topk_levels[0] - topk_levels[1]) >= PARALLEL_CONNECTOR_CHANNEL_GAP
+    main_rotary = next(
+        index
+        for index, node in enumerate(indexer_graph.nodes)
+        if node.label == "Apply rotary emb"
+        and not any(index in frame.node_indices for frame in indexer_graph.inline_frames)
+    )
+    floor_divide = next(
+        index for index, node in enumerate(indexer_graph.nodes) if node.label == "Floor divide"
+    )
+    assert (
+        indexer_anchors[floor_divide].left - indexer_anchors[main_rotary].right
+        >= CONNECTOR_OBSTACLE_MARGIN - 1e-9
+    )
+    assert not _find_connector_inline_frame_overlaps(
+        indexer["link_paths"],
+        graph=indexer_graph,
+        positions=indexer["positions"],
+    )
 
 
 def test_orthogonal_connector_path_collapses_near_duplicates_without_slanting():
@@ -3556,6 +3654,30 @@ def test_merge_legs_from_one_side_get_their_own_corridor():
     assert merge_link_bus[(2, 3)] == pytest.approx(base), "the outer right leg stays lowest"
     assert merge_link_bus[(1, 3)] >= base + PARALLEL_CONNECTOR_CHANNEL_GAP - 1e-9, (
         "the nearer right leg needs its own level, not the outer leg's line"
+    )
+
+
+def test_shared_bus_classification_requires_link_ownership():
+    """An unrelated connector on the same coordinate does not become a bus member."""
+    from visualizer.render import _horizontal_segment_is_shared_bus
+
+    assert _horizontal_segment_is_shared_bus(
+        (1, 4),
+        -2.0,
+        target_bus={4: -2.0},
+        source_bus={},
+    )
+    assert _horizontal_segment_is_shared_bus(
+        (1, 4),
+        -3.0,
+        target_bus={},
+        source_bus={1: -3.0},
+    )
+    assert not _horizontal_segment_is_shared_bus(
+        (2, 5),
+        -2.0,
+        target_bus={4: -2.0},
+        source_bus={1: -2.0},
     )
 
 

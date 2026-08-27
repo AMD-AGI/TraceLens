@@ -400,6 +400,96 @@ def test_moe_aggregation_is_regular_block_with_dual_top_entry_ports():
         plt.close(fig)
 
 
+def test_moe_connectors_do_not_run_along_inline_frame_borders():
+    """No horizontal run may be drawn on a dotted border, which reads as one line."""
+    from visualizer.render import (
+        CONNECTOR_OBSTACLE_MARGIN,
+        _inline_frame_draw_bounds,
+    )
+
+    fig, graph, positions, _anchors, _incoming, _outgoing, _input_index, _buses, link_paths = (
+        _kimi_sparse_moe_layout()
+    )
+    try:
+        assert graph.inline_frames
+        for frame in graph.inline_frames:
+            bounds = _inline_frame_draw_bounds(frame, positions, graph)
+            for link_key, points in link_paths.items():
+                for (x1, y1), (x2, y2) in zip(points, points[1:]):
+                    if abs(y1 - y2) > PARALLEL_CONNECTOR_COORD_EPS or abs(x1 - x2) <= 0.06:
+                        continue
+                    if min(x1, x2) >= bounds.right or max(x1, x2) <= bounds.left:
+                        continue
+                    for edge_name, edge in (("top", bounds.top), ("bottom", bounds.bottom)):
+                        assert abs(y1 - edge) >= CONNECTOR_OBSTACLE_MARGIN - 1e-9, (
+                            f"{link_key} runs along the {frame.frame_id!r} {edge_name} "
+                            f"border (y={y1:.4f}, border={edge:.4f})"
+                        )
+    finally:
+        plt.close(fig)
+
+
+def test_moe_up_projection_bypasses_situ_and_aggregation_feeds_do_not_overlap():
+    from visualizer.render import (
+        CONNECTOR_OBSTACLE_MARGIN,
+        _find_connector_path_overlaps,
+        _path_hits_obstacles,
+    )
+
+    fig, graph, positions, anchors, incoming, outgoing, _input_index, buses, link_paths = (
+        _kimi_sparse_moe_layout()
+    )
+    try:
+        situ = next(index for index, node in enumerate(graph.nodes) if node.label == "Situ")
+        multiply = next(
+            index
+            for index, node in enumerate(graph.nodes)
+            if node.label == "Multiply"
+            and any(
+                graph.nodes[source].block
+                and graph.nodes[source].block.attr_name == "up_proj"
+                for source, target in graph.links
+                if target == index
+            )
+        )
+        up_projection = next(
+            source
+            for source, target in graph.links
+            if target == multiply
+            and graph.nodes[source].block
+            and graph.nodes[source].block.attr_name == "up_proj"
+        )
+        assert not _path_hits_obstacles(
+            link_paths[(up_projection, multiply)],
+            [anchors[situ]],
+            margin=CONNECTOR_OBSTACLE_MARGIN,
+        )
+
+        aggregation = next(
+            index for index, node in enumerate(graph.nodes) if node.label == "MoE aggregation"
+        )
+        aggregation_links = [link for link in link_paths if link[1] == aggregation]
+        assert len(aggregation_links) == 2
+        overlaps = _find_connector_path_overlaps(
+            {link: link_paths[link] for link in aggregation_links},
+            incoming=incoming,
+            outgoing=outgoing,
+            target_bus=buses[0],
+            source_bus=buses[1],
+            merge_link_bus=buses[3],
+            anchors=anchors,
+            graph=graph,
+        )
+        assert not overlaps
+        assert not any(
+            y2 > y1 + PARALLEL_CONNECTOR_COORD_EPS
+            for link in aggregation_links
+            for (_x1, y1), (_x2, y2) in zip(link_paths[link], link_paths[link][1:])
+        )
+    finally:
+        plt.close(fig)
+
+
 def test_moe_collect_detail_link_paths_enforces_runtime_invariants():
     fig, graph, positions, _anchors, _incoming, _outgoing, _input_index, _buses, link_paths = (
         _kimi_sparse_moe_layout()

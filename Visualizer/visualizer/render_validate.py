@@ -538,6 +538,41 @@ def _resolve_same_row_tile_overlaps(
         realign_fanout_branch_columns(positions, graph)
 
 
+def _separate_touching_parallel_row_tiles(
+    positions: list[LayoutPosition],
+    *,
+    min_gap: float,
+) -> None:
+    """Separate side-by-side tiles whose vertical bands overlap.
+
+    Layer grouping only catches tiles with nearly identical ``top_y`` values.
+    Side operations can be offset slightly while still sharing most of a row, so
+    their strokes otherwise collapse a nominal validation gap to a visible touch.
+    """
+    for _pass in range(max(1, len(positions))):
+        changed = False
+        ordered = sorted(range(len(positions)), key=lambda index: positions[index].cx)
+        for left_offset, left_index in enumerate(ordered):
+            left = positions[left_index]
+            for right_index in ordered[left_offset + 1 :]:
+                right = positions[right_index]
+                if right.cx <= left.cx:
+                    continue
+                vertical_overlap = min(left.top_y, right.top_y) - max(
+                    left.bottom,
+                    right.bottom,
+                )
+                if vertical_overlap <= 0:
+                    continue
+                gap = _node_content_left(right) - _node_content_right(left)
+                if gap < -1e-9 or gap >= min_gap:
+                    continue
+                right.cx += min_gap - gap
+                changed = True
+        if not changed:
+            return
+
+
 def resolve_measured_overlaps(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
@@ -714,6 +749,7 @@ def _clear_inline_frame_vertical_neighbors(
         _shift_node_subtree,
     )
     from visualizer.render import (
+        CONNECTOR_EXIT_STUB,
         CONNECTOR_OBSTACLE_MARGIN,
         PARALLEL_CONNECTOR_CHANNEL_GAP,
         _inline_frame_draw_bounds,
@@ -804,9 +840,16 @@ def _clear_inline_frame_vertical_neighbors(
                 if index in members:
                     continue
                 box = box_bounds_at(pos.cx, pos.top_y, pos.width, pos.height)
-                if not _shares_inline_frame_column(box, frame_bounds):
-                    continue
                 above = (box.top + box.bottom) / 2 > frame_center_y
+                incoming = [source for source, target in graph.links if target == index]
+                fed_by_frame = any(source in members for source in incoming)
+                # A tile the frame feeds needs the border checked even when its box
+                # only clips the frame's column: the connector still drops out of the
+                # frame and turns into the tile's top edge right under the border.
+                if not _shares_inline_frame_column(box, frame_bounds) and not (
+                    fed_by_frame and not above
+                ):
+                    continue
                 if above:
                     if head is None:
                         continue
@@ -832,14 +875,14 @@ def _clear_inline_frame_vertical_neighbors(
                     # from a frame that lies in that node's own downstream tree.
                     if members & _subtree_indices(index):
                         continue
-                    incoming = [
-                        source for source, target in graph.links if target == index
-                    ]
                     merge_clearance = border_clearance
-                    if len(incoming) >= 2 and any(source in members for source in incoming):
+                    if len(incoming) >= 2 and fed_by_frame:
+                        # Spread top ports force the feed to jog sideways just above
+                        # the tile, so the exit stub needs to clear the border too.
                         merge_clearance = max(
                             merge_clearance,
                             PARALLEL_CONNECTOR_CHANNEL_GAP + CONNECTOR_OBSTACLE_MARGIN,
+                            CONNECTOR_EXIT_STUB + CONNECTOR_OBSTACLE_MARGIN,
                         )
                     deficit = _first_shift_that_fits(
                         index,
@@ -3083,9 +3126,30 @@ def finalize_detail_layout(
     # Re-docking tensor ports beside a shared consumer vacates the row they were
     # packed into, so the content has to be re-hung from the section anchor.
     _anchor_detail_layout_to_top_y(positions, top_y=top_y)
-    from visualizer.computation_graph import _enforce_top_entry_vertical_order
+    from visualizer.computation_graph import (
+        _enforce_top_entry_vertical_order,
+        _ensure_independent_merge_leg_corridors,
+    )
 
     _enforce_top_entry_vertical_order(positions, graph)
+    _ensure_independent_merge_leg_corridors(positions, graph)
+    # Ordering only measures tile to tile, so a target parked one layer gap below a
+    # framed source still lands under the dotted border. Re-open the corridor now
+    # that vertical order is settled.
+    _ensure_top_entry_clearance_below_inline_frames(positions, graph)
+    from visualizer.render import CONNECTOR_OBSTACLE_MARGIN
+
+    # A validation-only 0.02 gap is visually erased by tile and connector strokes.
+    # Keep parallel row tiles at least one connector obstacle margin apart.
+    _resolve_same_row_tile_overlaps(
+        positions,
+        min_gap=max(VALIDATE_MIN_GAP, CONNECTOR_OBSTACLE_MARGIN),
+        graph=graph,
+    )
+    _separate_touching_parallel_row_tiles(
+        positions,
+        min_gap=max(VALIDATE_MIN_GAP, CONNECTOR_OBSTACLE_MARGIN),
+    )
     _separate_external_boxes_from_inline_frames(
         positions,
         graph,

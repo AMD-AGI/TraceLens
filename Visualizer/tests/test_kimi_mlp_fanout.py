@@ -47,6 +47,8 @@ from visualizer.render import (
     _detail_sections_to_render,
     _effective_source_bus_y,
     _fanout_tee_then_entry_column_points,
+    _inline_frame_draw_bounds,
+    _path_hits_obstacles,
     _plan_inline_bypass_bus_x,
     _reroute_connector_path_clearing_blocks,
 )
@@ -501,6 +503,51 @@ def test_runtime_horizontal_departure_skips_mixed_side_routed_fanout():
         source_bus={0: 9.3},
         stage="test",
     )
+
+
+def test_kimi_mlp_connectors_do_not_run_along_inline_frame_borders():
+    """No horizontal run may be drawn on a dotted border, which reads as one line."""
+    fig, graph, positions, _anchors, _plan, _incoming, _outgoing, _input_index, _buses, link_paths = (
+        _kimi_mlp_layout()
+    )
+    try:
+        assert graph.inline_frames
+        for frame in graph.inline_frames:
+            bounds = _inline_frame_draw_bounds(frame, positions, graph)
+            for link_key, points in link_paths.items():
+                for (x1, y1), (x2, y2) in zip(points, points[1:]):
+                    if abs(y1 - y2) > PARALLEL_CONNECTOR_COORD_EPS or abs(x1 - x2) <= 0.06:
+                        continue
+                    if min(x1, x2) >= bounds.right or max(x1, x2) <= bounds.left:
+                        continue
+                    for edge_name, edge in (("top", bounds.top), ("bottom", bounds.bottom)):
+                        assert abs(y1 - edge) >= CONNECTOR_OBSTACLE_MARGIN - 1e-9, (
+                            f"{link_key} runs along the {frame.frame_id!r} {edge_name} "
+                            f"border (y={y1:.4f}, border={edge:.4f})"
+                        )
+    finally:
+        plt.close(fig)
+
+
+def test_kimi_mlp_up_projection_bypasses_situ_tile():
+    fig, graph, _positions, anchors, _plan, _incoming, _outgoing, _input_index, _buses, link_paths = (
+        _kimi_mlp_layout()
+    )
+    try:
+        situ = next(index for index, node in enumerate(graph.nodes) if node.label == "Situ")
+        multiply = next(index for index, node in enumerate(graph.nodes) if node.label == "Multiply")
+        up_projection = next(
+            source
+            for source, target in graph.links
+            if target == multiply and graph.nodes[source].label == "Linear"
+        )
+        assert not _path_hits_obstacles(
+            link_paths[(up_projection, multiply)],
+            [anchors[situ]],
+            margin=CONNECTOR_OBSTACLE_MARGIN,
+        )
+    finally:
+        plt.close(fig)
 
 
 def test_runtime_detail_fanout_invariants_hold_for_kimi_mlp_paths():

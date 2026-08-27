@@ -202,6 +202,26 @@ def _operation_source_indices(
     return sources
 
 
+def _side_feed_param_indices(
+    graph: ComputationGraph,
+    chain_indices: list[int],
+) -> dict[str, int]:
+    """Map an expanded consumer's forward parameter names to the step that reads them.
+
+    A side-fed module that expands into visible steps has a real docking point for
+    each extra argument, so the feed can land on the step that consumes it instead
+    of on the chain head.
+    """
+    targets: dict[str, int] = {}
+    for index in chain_indices:
+        block = graph.nodes[index].block
+        if block is None:
+            continue
+        for param in block.param_inputs:
+            targets.setdefault(param, index)
+    return targets
+
+
 def _is_local_operation_port(spec: GraphNodeSpec) -> bool:
     """True for an external scalar/config operand docked beside one operation."""
     return spec.synthetic == SYNTHETIC_TENSOR and ":external:" in spec.key
@@ -1305,6 +1325,7 @@ def build_computation_graph(
                 continue
 
             entry_index: int | None = None
+            param_entry_indices: dict[str, int] = {}
             if is_method_wrapper(consumer):
                 consumer_index = _add_method_wrapper_node(
                     graph,
@@ -1338,6 +1359,7 @@ def build_computation_graph(
                     )
                     entry_index = chain_indices[0] if chain_indices else None
                     consumer_index = chain_tail
+                    param_entry_indices = _side_feed_param_indices(graph, chain_indices)
                 else:
                     consumer_index = _add_node(
                         graph,
@@ -1385,7 +1407,11 @@ def build_computation_graph(
                 # link; do not duplicate that operand edge.
                 if source_index == last_index and not forward_input_is_main:
                     continue
-                _append_side_producer_link(graph, source_index=source_index, target_index=entry_index)
+                _append_side_producer_link(
+                    graph,
+                    source_index=source_index,
+                    target_index=param_entry_indices.get(side.arg_name, entry_index),
+                )
             last_index = consumer_index
             _track_attr_index(attr_last_index, consumer.attr_name, consumer_index)
             continue
@@ -4034,6 +4060,63 @@ def _top_entry_incoming_sources(
     return list(incoming.get(target, []))
 
 
+def _ensure_independent_merge_leg_corridors(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
+) -> None:
+    """Reserve one deterministic horizontal channel per same-side merge leg.
+
+    Independent operands may share a target but must not acquire a visual bus
+    merely because their computed approach levels coincide. The outermost leg
+    stays in the lowest corridor; each nearer leg gets one channel above it.
+    """
+    from visualizer.render import (
+        CONNECTOR_ATTACHED_BOX_MARGIN,
+        CONNECTOR_EXIT_STUB,
+        CONNECTOR_OBSTACLE_MARGIN,
+        PARALLEL_CONNECTOR_CHANNEL_GAP,
+        TOP_ENTRY_PORT_GAP,
+    )
+
+    incoming = _build_incoming_links(graph, node_count=len(positions))
+    target_clearance = CONNECTOR_OBSTACLE_MARGIN + CONNECTOR_ATTACHED_BOX_MARGIN
+    for target, sources in incoming.items():
+        if len(sources) < 2:
+            continue
+        target_pos = positions[target]
+        max_top_y = target_pos.top_y
+        constrained = False
+        for side in (-1.0, 1.0):
+            side_sources = [
+                source
+                for source in sources
+                if side * (positions[source].cx - target_pos.cx) > TOP_ENTRY_PORT_GAP
+            ]
+            if len(side_sources) < 2:
+                continue
+            side_sources.sort(
+                key=lambda source: -abs(positions[source].cx - target_pos.cx)
+            )
+            for channel, source in enumerate(side_sources):
+                allowed_top_y = (
+                    positions[source].bottom
+                    - CONNECTOR_EXIT_STUB
+                    - target_clearance
+                    # Keep one channel in reserve for the route planner's base
+                    # approach, then one more for each nested same-side leg.
+                    - (channel + 1) * PARALLEL_CONNECTOR_CHANNEL_GAP
+                )
+                max_top_y = min(max_top_y, allowed_top_y)
+                constrained = True
+        if constrained and target_pos.top_y > max_top_y + 1e-6:
+            _shift_node_subtree(
+                positions,
+                graph,
+                target,
+                target_pos.top_y - max_top_y,
+            )
+
+
 def _ensure_top_entry_clearance_below_inline_frames(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
@@ -4071,14 +4154,16 @@ def _ensure_top_entry_clearance_below_inline_frames(
         ]
         if not tail_sources:
             continue
-        frame_bottom = float("-inf")
+        # A shared target must sit below the lowest of all feeder frames; using
+        # the highest bottom leaves no corridor for a taller sibling frame.
+        frame_bottom = float("inf")
         for source in tail_sources:
             frame = _inline_frame_for_tail_node(graph, source)
             if frame is None:
                 continue
             bounds = _inline_frame_draw_bounds(frame, positions, graph)
-            frame_bottom = max(frame_bottom, bounds.bottom)
-        if frame_bottom == float("-inf"):
+            frame_bottom = min(frame_bottom, bounds.bottom)
+        if frame_bottom == float("inf"):
             continue
         max_top_y = frame_bottom - clearance
         if positions[target].top_y <= max_top_y + 1e-6:
