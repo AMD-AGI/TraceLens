@@ -120,6 +120,32 @@ _GATE_ACTIVATION_NAMES = {
     "softmax": "Softmax",
     "tanh": "Tanh",
 }
+# Modeling code binds its activation from a registry keyed by config
+# (`self.act_fn = ACT2FN[config.hidden_act]`) instead of constructing it, so the
+# activation the checkpoint actually runs is only knowable from the config.
+_ACTIVATION_REGISTRY_NAMES = frozenset({"ACT2FN", "ACT2CLS", "ACT_FN", "ACTIVATION_REGISTRY"})
+_ACTIVATION_DISPLAY_NAMES = {
+    "silu": "SiLU",
+    "swish": "SiLU",
+    "gelu": "GELU",
+    "gelu_new": "GELU",
+    "gelu_pytorch_tanh": "GELU",
+    "quick_gelu": "GELU",
+    "relu": "ReLU",
+    "relu6": "ReLU6",
+    "sigmoid": "Sigmoid",
+    "tanh": "Tanh",
+    "mish": "Mish",
+    "elu": "ELU",
+    "selu": "SELU",
+    "leaky_relu": "LeakyReLU",
+    "prelu": "PReLU",
+    "hardswish": "Hardswish",
+    "hardsigmoid": "Hardsigmoid",
+    "identity": "Identity",
+    "linear": "Identity",
+}
+_ACTIVATION_LEAF_CLASS_NAMES = frozenset(_ACTIVATION_DISPLAY_NAMES.values())
 FORWARD_OPERATION_PREFIX = "@op_"
 _SYNTHETIC_ATTENTION_NAMES = {
     "eager_attention_forward",
@@ -765,22 +791,32 @@ def displays_as_linear(attr_name: str, class_name: str | None) -> bool:
     return bool(class_name and re.match(r"(?i)^Linear$", class_name))
 
 
+def displays_as_pointwise_leaf(attr_name: str, class_name: str | None) -> bool:
+    """True when a submodule is a leaf the parent's own tensor math flows through."""
+    if displays_as_linear(attr_name, class_name):
+        return True
+    return bool(class_name) and class_name in _ACTIVATION_LEAF_CLASS_NAMES
+
+
 def _forward_owns_tensor_math(
     forward_calls: list[str],
     init_assignments: dict[str, str],
 ) -> bool:
     """True when a module's forward does its own tensor math over plain projections.
 
-    An MLP-style module computes its activation and gating inline, so it has no
-    submodule to carry that math: dropping the operations would leave the diagram
-    showing its projections with nothing between them. Modules that call composite
-    children (norms, attention, another MLP) leave the math to those children, and
-    their own statements are residual plumbing represented elsewhere.
+    An MLP-style module computes its gating inline, so it has no submodule to carry
+    that math: dropping the operations would leave the diagram showing its
+    projections with nothing between them. A registered activation is pointwise and
+    carries no gating either, so it counts as a projection here. Modules that call
+    composite children (norms, attention, another MLP) leave the math to those
+    children, and their own statements are residual plumbing represented elsewhere.
     """
     module_calls = [call for call in forward_calls if call in init_assignments]
     if not module_calls:
         return False
-    return all(displays_as_linear(call, init_assignments[call]) for call in module_calls)
+    return all(
+        displays_as_pointwise_leaf(call, init_assignments[call]) for call in module_calls
+    )
 
 
 def _forward_delegates_to_nothing(class_name: str, forward_calls: list[str]) -> bool:
@@ -1446,7 +1482,10 @@ class _ModelAstVisitor(ast.NodeVisitor):
         )
 
         if init_func is not None:
-            init_assignments, init_details, init_assignment_options = _parse_init(init_func)
+            init_assignments, init_details, init_assignment_options = _parse_init(
+                init_func,
+                config=self.config,
+            )
         if forward_func is not None:
             forward_input_name = _primary_forward_input_name(forward_func)
             resolved_forward_func = _resolve_local_module_alias_calls(forward_func)
@@ -1547,14 +1586,23 @@ class _ModelAstVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def _parse_init(func: ast.FunctionDef) -> tuple[dict[str, str], dict[str, list[str]], dict[str, list[str]]]:
+def _parse_init(
+    func: ast.FunctionDef,
+    *,
+    config: dict[str, Any] | None = None,
+) -> tuple[dict[str, str], dict[str, list[str]], dict[str, list[str]]]:
     assignments: dict[str, str] = {}
     details: dict[str, list[str]] = {}
     options: dict[str, list[str]] = {}
 
     def record_assignment(attr: str, value: ast.AST) -> None:
-        class_names = _assignment_class_names(value)
+        class_names = _assignment_class_names(value, config=config)
         if not class_names:
+            return
+        # A registry lookup is the fallback arm of a config switch whose other arm
+        # constructs a real module (`SituAndMul` vs `ACT2FN[...]`), so it must not
+        # displace that module regardless of which arm the walk reaches last.
+        if attr in assignments and _activation_registry_class_name(value, config):
             return
         attr_options = options.setdefault(attr, [])
         for class_name in class_names:
@@ -1580,13 +1628,46 @@ def _parse_init(func: ast.FunctionDef) -> tuple[dict[str, str], dict[str, list[s
     return assignments, details, options
 
 
-def _assignment_class_names(node: ast.AST) -> list[str]:
+def _activation_registry_class_name(
+    node: ast.AST,
+    config: dict[str, Any] | None,
+) -> str | None:
+    """Resolve an activation-registry lookup to the activation the config selects."""
+    if not isinstance(node, ast.Subscript):
+        return None
+    registry = (_expr_name(node.value) or "").rsplit(".", 1)[-1]
+    if registry not in _ACTIVATION_REGISTRY_NAMES:
+        return None
+    key = node.slice
+    name: object = None
+    if isinstance(key, ast.Constant):
+        name = key.value
+    elif isinstance(key, ast.Attribute):
+        name = (config or {}).get(key.attr)
+    if not isinstance(name, str) or not name.strip():
+        return None
+    lowered = name.strip().lower()
+    if lowered in _ACTIVATION_DISPLAY_NAMES:
+        return _ACTIVATION_DISPLAY_NAMES[lowered]
+    return lowered.replace("_", " ").title().replace(" ", "")
+
+
+def _assignment_class_names(
+    node: ast.AST,
+    *,
+    config: dict[str, Any] | None = None,
+) -> list[str]:
     """Return every constructible module class represented by an assignment."""
     if isinstance(node, ast.IfExp):
-        names = _assignment_class_names(node.body) + _assignment_class_names(node.orelse)
+        names = _assignment_class_names(node.body, config=config) + _assignment_class_names(
+            node.orelse, config=config
+        )
         return list(dict.fromkeys(names))
     if isinstance(node, ast.ListComp):
-        return _assignment_class_names(node.elt)
+        return _assignment_class_names(node.elt, config=config)
+    if isinstance(node, ast.Subscript):
+        activation = _activation_registry_class_name(node, config)
+        return [activation] if activation else []
     if isinstance(node, ast.Call):
         if isinstance(node.func, ast.Name) and node.func.id == "getattr":
             return []
@@ -1598,7 +1679,7 @@ def _assignment_class_names(node: ast.AST) -> list[str]:
             "torch.nn.ModuleList",
         }:
             if node.args:
-                return _assignment_class_names(node.args[0])
+                return _assignment_class_names(node.args[0], config=config)
             return []
         class_name = _call_class_name(node)
         if class_name in _SKIP_INIT_CLASS_NAMES:
@@ -1607,14 +1688,18 @@ def _assignment_class_names(node: ast.AST) -> list[str]:
     if isinstance(node, (ast.List, ast.Tuple)):
         names: list[str] = []
         for item in node.elts:
-            names.extend(_assignment_class_names(item))
+            names.extend(_assignment_class_names(item, config=config))
         return list(dict.fromkeys(names))
     return []
 
 
-def _assignment_class_name(node: ast.AST) -> str | None:
+def _assignment_class_name(
+    node: ast.AST,
+    *,
+    config: dict[str, Any] | None = None,
+) -> str | None:
     """Return the preferred module class for backwards-compatible callers."""
-    names = _assignment_class_names(node)
+    names = _assignment_class_names(node, config=config)
     if names:
         return names[0]
     return None
