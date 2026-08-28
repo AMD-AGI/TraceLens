@@ -43,7 +43,9 @@ supported for vLLM, SGLang, ATOM, and xDiT (proposed patches required).
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/install.md)).
+Confirm you have the following before continuing.
+
+- [TraceLens installed](../install/install.md).
 - An LLM inference setup to profile (this guide uses vLLM, SGLang, or ATOM on AMD Instinct™ MI300X).
 
 ## Collect inference traces
@@ -136,7 +138,7 @@ the SGLang version (`--sglang-version`, default `0.5.9`), and the GPU type
 | `0.5.17`     | MI300       | `lmsysorg/sglang:v0.5.17-rocm720-mi30x` |
 | `0.5.17`     | MI350/MI355 | `lmsysorg/sglang:v0.5.17-rocm720-mi35x` |
 
-On SGLang **0.5.13 / 0.5.14**, kernel-shape wrapping is incompatible with the
+On SGLang **0.5.13 and 0.5.14**, kernel-shape wrapping is incompatible with the
 EAGLE/MTP speculative *overlap* decode, so the speculative patches disable capture
 profiling on the speculative graph runners (and, on 0.5.14, the target-verify
 graph) to keep MTP runs fault-free; non-MTP shape profiling is unaffected. Full MTP
@@ -307,7 +309,7 @@ during the benchmark. Pass both paths to the report generator using
    written unconditionally and this variable does not exist.
 
 ```{note}
-On SGLang 0.5.13 / 0.5.14 the graph-capture shape profiling is intentionally
+On SGLang 0.5.13 and 0.5.14 the graph-capture shape profiling is intentionally
 disabled for the EAGLE/MTP speculative graphs (and, on 0.5.14, the target-verify
 graph) to avoid a GPU fault in the speculative overlap decode, so
 `SGLANG_GRAPH_BATCH_CAPTURE` only yields capture traces for the
@@ -381,8 +383,8 @@ uses that to drive window selection instead:
 | Argument   | Type      | Description                                                                                                                                 |
 | ---------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--CONC` | `int`   | Expected peak concurrency (number of concurrent requests). A warning is printed if the observed trace peak differs.                         |
-| `--OSL`  | `float` | Maximum output sequence length (decode tokens per request). Each request's OSL is sampled from`[R * OSL, OSL]`.                           |
-| `--R`    | `float` | OSL sampling range ratio in`[0, 1]`. `R=0` means all requests use exactly `OSL` tokens; `R=1` means OSL is uniform in `[0, OSL]`. |
+| `--OSL`  | `float` | Maximum output sequence length (decode tokens per request). Each request's OSL is sampled from `[R * OSL, OSL]`.                           |
+| `--R`    | `float` | OSL sampling range ratio in `[0, 1]`. `R=0` means all requests use exactly `OSL` tokens; `R=1` means OSL is uniform in `[0, OSL]`. |
 
 When all three are provided, the tool derives:
 
@@ -467,13 +469,13 @@ relevant to serving traces:
 
 | Argument                     | Default   | Description                                                                                                                                         |
 | ---------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--profile_json_path`      | required  | Path to the graph-replay`torch.profiler` trace (`.json` or `.json.gz`).                                                                       |
-| `--capture_folder PATH`    | `None`  | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). Mutually exclusive with`--comparison_json_path`. |
-| `--group_by_parent_module` | `False` | Group kernel-launcher summaries by parent`nn.Module` in addition to operation name.                                                               |
+| `--profile_json_path`      | required  | Path to the graph-replay `torch.profiler` trace (`.json` or `.json.gz`).                                                                       |
+| `--capture_folder PATH`    | `None`  | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). Mutually exclusive with `--comparison_json_path`. |
+| `--group_by_parent_module` | `False` | Group kernel-launcher summaries by parent `nn.Module` in addition to operation name.                                                               |
 | `--group_by_num_kernels`   | `False` | Group summary rows by the number of kernels.                                                                                                        |
 | `--include_call_stack`     | `False` | Add the CPU call stack to the report.                                                                                                               |
 | `--include_overlap_info`   | `False` | Add kernel-overlap sheets (`*_kl_overlap`) when overlap data exists.                                                                              |
-| `--enable_pseudo_ops`      | `False` | Augment the tree with pseudo-ops to isolate kernels (for example,`FusedMoE`).                                                                     |
+| `--enable_pseudo_ops`      | `False` | Augment the tree with pseudo-ops to isolate kernels (for example, `FusedMoE`).                                                                     |
 
 Run the tool with `--help` for the complete, version-specific argument list.
 

@@ -142,13 +142,13 @@ If this fails, the cause is either a bad prefix or a missing package:
 - If the environment is reachable but TraceLens is not installed, ask the user where to install it and if they require a new venv <venv_path>.
   ```bash
   # Install into the container / bare metal directly (no prefix rebuild needed):
-  <prefix> pip install TraceLens
+  <prefix> pip install git+https://github.com/AMD-AGI/TraceLens
 
   # Create a new Python venv (if requested)
   <prefix> python3 -m venv <venv_path>
 
   # Install into the python venv:
-  <prefix> <venv_path>/bin/pip install TraceLens
+  <prefix> <venv_path>/bin/pip install git+https://github.com/AMD-AGI/TraceLens
   ```
 Rebuild the prefix and re-validate after installing.
 
