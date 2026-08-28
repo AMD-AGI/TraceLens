@@ -56,7 +56,7 @@ TraceLens requires the following software:
 |-----------|-------------|-------|
 | Python | 3.6 or later (3.10 recommended) | `python_requires>=3.6`; the 3.10 toolchain is used for documentation and CI builds. |
 | Operating system | N/A | TraceLens analysis and report generation are pure Python and run on any OS. Capturing ROCm-based traces requires a Linux ROCm environment; TraceLens only reads those traces afterward. |
-| TraceLens package | 0.1.0 | Installed from [github.com/AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens). |
+| TraceLens package | 1.0.0 | Installed from [github.com/AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens). |
 
 ### Python dependencies
 
@@ -83,7 +83,7 @@ TraceLens supports the following trace formats:
 | Format | Producing tool |
 |--------|----------------|
 | PyTorch Chrome trace (`.json`, `.json.gz`, `.zip`) | `torch.profiler` |
-| JAX XPlane protobuf (`.pb`) | JAX profiler / `xprof` | 
+| JAX XPlane protobuf (`.pb`) | JAX profiler or `xprof` | 
 | rocprofv3 JSON (`*_results.json`) | AMD ROCm ROCprofiler-SDK | 
 | rocprofv3 pftrace / Perfetto-style | `rocprofv3 --output-format pftrace` | 
 

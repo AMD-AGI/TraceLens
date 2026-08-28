@@ -82,6 +82,7 @@ Environment variables:
 | `REPORT_DIR` | `<RESULTS_ROOT>/../reports` | Where reports and reproducers are written |
 | `SUITE_NAME` | `eval` | Suite label used in reports (e.g. `unit`, `e2e`) |
 | `TEST_IDS` | (empty = all) | Space-separated trace IDs to run (filter) |
+| `SKIP_GENERATE_REF` | (empty) | Set to `1` to skip golden reference generation |
 | `SKIP_POST_PROCESSING` | (empty) | Set to `1` to skip report generation after the eval loop |
 
 Example (subset of traces, 3 repeats, 5 parallel):
@@ -115,6 +116,23 @@ Or with more parallelism:
 ```bash
 MAX_PARALLEL=5 CONTAINER=my_container bash agent_evals/Analysis/eval_scripts/generate_ref.sh
 ```
+
+### Stopping Eval Jobs
+
+Kills every process `generate_ref.sh` or `run_repeatability_parallel.sh` may have spawned. Processes are identified by the `TRACELENS_EVAL_JOB=1` environment variable marker.
+
+```bash
+bash agent_evals/Analysis/eval_scripts/kill_eval_jobs.sh
+```
+
+| Invocation | Behavior |
+|---|---|
+| (no args) | SIGTERM, then SIGKILL if processes are still alive |
+| `--list` | List eval processes without killing anything |
+| `-9` | SIGKILL from the first pass |
+| `-h` / `--help` | Show usage |
+
+Exit code is 0 if all jobs are cleared (or none were found), 1 if any remain after the maximum passes (e.g., stuck in uninterruptible I/O).
 
 ### Individual Manual Runs
 

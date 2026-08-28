@@ -18,7 +18,7 @@ hardware and software versions validated for a release, see the
 ## TraceLens 1.0.0
 
 The release expands performance-model coverage; extends profiling support to
-newer vLLM/SGLang versions along with xDiT diffusion and Genesis
+newer vLLM and SGLang versions along with xDiT diffusion and Genesis
 physics-simulation workloads; strengthens the TraceLens Analysis Agent with a
 portable skill layout and comparative graph-capture support; and overhauls
 TraceDiff's name disambiguation. It also adds production-grade unit-test coverage.
@@ -43,7 +43,7 @@ This release extends framework and profiling support:
 - **vLLM and SGLang:** Profiling support through recent vLLM and SGLang releases,
   using stock upstream images where a patched image is no longer required.
 - **xDiT diffusion:** Diffusion-model profiling using the same capture-merge
-  infrastructure as vLLM/SGLang.
+  infrastructure as vLLM and SGLang.
 - **Genesis physics simulation:** A `TraceLens_generate_perf_report_genesis`
   report generator for Genesis/Taichi workloads that isolates the steady-state
   simulation window from JIT and build overhead.

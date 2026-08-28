@@ -29,6 +29,7 @@ Options:
                            - 0.5.15 / v0515 : sglang_roofline_patches/sglang_0_5_15/
                            - 0.5.16 / v0516 : sglang_roofline_patches/sglang_0_5_16/
                            - 0.5.17 / v0517 : sglang_roofline_patches/sglang_0_5_17/
+                           - 0.5.18 / v0518 : sglang_roofline_patches/sglang_0_5_18/
   --gpu-type <type>        mi300 | mi350 | mi355 (default: mi350)
   --base-image <image>     Override the default base image
   --patch-dir <name>       Patch directory under sglang_roofline_patches/
@@ -58,6 +59,21 @@ Base images:
   0.5.16 MI355X : lmsysorg/sglang:v0.5.16-rocm720-mi35x
   0.5.17 MI300X : lmsysorg/sglang:v0.5.17-rocm720-mi30x
   0.5.17 MI355X : lmsysorg/sglang:v0.5.17-rocm720-mi35x
+  0.5.18 MI300X : lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260824
+  0.5.18 MI355X : lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260824
+
+Note:
+  On a ROCm 7.2.4 base the build also overwrites the HIP and roctracer copies
+  that the torch wheel vendors under torch/lib with the image's own 7.2.4 build.
+  Those vendored copies are 7.2.0, libtorch_hip.so carries DT_RPATH \$ORIGIN so
+  LD_LIBRARY_PATH cannot redirect them, and on 7.2.0 every kernel launched inside
+  a HIP graph replay is missing from the trace -- decode steps record only the
+  hipGraphLaunch. This is skipped on 7.2.0 and 7.0 bases.
+
+Note:
+  SGLang 0.5.18 carries the detailed-annotation and per-batch-size graph-capture
+  work upstream, so its patch set only adds the kernel shape profiler and the
+  shape_discovery plumbing that reaches it.
 
 Note:
   On SGLang 0.5.13 and 0.5.14 the kernel-shape wrapping is incompatible with the
@@ -168,6 +184,9 @@ normalize_version() {
         0.5.17|v0517|0517|5.17)
             echo "0.5.17"
             ;;
+        0.5.18|v0518|0518|5.18)
+            echo "0.5.18"
+            ;;
         *)
             echo ""
             ;;
@@ -176,7 +195,7 @@ normalize_version() {
 
 SGLANG_VERSION="$(normalize_version "${SGLANG_VERSION}")"
 if [ -z "${SGLANG_VERSION}" ]; then
-    echo "Error: unsupported --sglang-version. Use 0.5.9, 0.5.11, 0.5.12, 0.5.13, 0.5.14, 0.5.15, 0.5.16, or 0.5.17."
+    echo "Error: unsupported --sglang-version. Use 0.5.9, 0.5.11, 0.5.12, 0.5.13, 0.5.14, 0.5.15, 0.5.16, 0.5.17, or 0.5.18."
     exit 1
 fi
 
@@ -231,6 +250,12 @@ resolve_base_image() {
             ;;
         0.5.17:mi350|0.5.17:mi355)
             echo "lmsysorg/sglang:v0.5.17-rocm720-mi35x"
+            ;;
+        0.5.18:mi300)
+            echo "lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260824"
+            ;;
+        0.5.18:mi350|0.5.18:mi355)
+            echo "lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260824"
             ;;
         *)
             echo ""
@@ -287,6 +312,31 @@ RUN SGLANG_DIR=\$(pip show sglang | grep "Editable project location" | cut -d' '
     done && \\
     pip install --upgrade /tmp/TraceLens && \\
     rm -rf /tmp/TraceLens
+
+# On a ROCm 7.2.4 base, make torch load the image's own HIP and roctracer instead
+# of the 7.2.0 copies its wheel vendors. libtorch_hip.so carries DT_RPATH \$ORIGIN,
+# so overwriting these two files is the only way to change which runtime profiles;
+# left as shipped, kernels inside a HIP graph replay never reach the trace.
+# Keyed on the ROCm version in the image rather than the tag so --base-image works.
+RUN set -eu; \\
+    ROCM_VERSION="\$(cat /opt/rocm/.info/version 2>/dev/null || echo unknown)"; \\
+    case "\${ROCM_VERSION}" in \\
+        7.2.4*) \\
+            TORCH_LIB="\$(python3 -c 'import torch, pathlib; print(pathlib.Path(torch.__file__).resolve().parent / "lib")')"; \\
+            HIP_SRC="\$(find /opt/rocm/lib -maxdepth 1 -type f -name 'libamdhip64.so.*.*' | head -1)"; \\
+            RT_SRC="\$(find /opt/rocm/lib -maxdepth 1 -type f -name 'libroctracer64.so.*.*' | head -1)"; \\
+            if [ -z "\${HIP_SRC}" ] || [ -z "\${RT_SRC}" ]; then \\
+                echo "ROCm \${ROCM_VERSION} base but no HIP/roctracer found under /opt/rocm/lib"; \\
+                exit 1; \\
+            fi; \\
+            cp -a "\${HIP_SRC}" "\${TORCH_LIB}/libamdhip64.so"; \\
+            cp -a "\${RT_SRC}" "\${TORCH_LIB}/libroctracer64.so"; \\
+            echo "torch/lib now carries \$(basename "\${HIP_SRC}") and \$(basename "\${RT_SRC}")"; \\
+            ;; \\
+        *) \\
+            echo "Base ROCm \${ROCM_VERSION} is not 7.2.4; leaving torch/lib as shipped"; \\
+            ;; \\
+    esac
 
 WORKDIR /workspace
 DOCKERFILE
