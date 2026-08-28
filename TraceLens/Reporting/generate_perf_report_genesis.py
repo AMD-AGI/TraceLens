@@ -36,6 +36,7 @@ from TraceLens.Reporting.genesis_rocprof_util import (
     pftrace_to_json,
     resolve_profile_json,
 )
+from TraceLens.Reporting.reporting_utils import write_report_outputs
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -46,8 +47,6 @@ logger = logging.getLogger(__name__)
 
 
 def write_excel(path: Path, sections: Dict[str, Dict[str, pd.DataFrame]]) -> None:
-    from TraceLens.Reporting.reporting_utils import write_report_outputs
-
     flat: Dict[str, pd.DataFrame] = {}
     for prefix, dfs in sections.items():
         for sheet, df in dfs.items():

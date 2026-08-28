@@ -6,6 +6,7 @@
 
 import argparse
 import ast
+import importlib.util
 import json
 import logging
 import os
@@ -176,8 +177,6 @@ def write_report_outputs(
             logger.info("Wrote %s (%d rows)", csv_path, len(df))
 
     if xlsx_path:
-        import importlib.util
-
         if importlib.util.find_spec("openpyxl") is None:
             raise ImportError(
                 "openpyxl is required for Excel output. Install with: "
