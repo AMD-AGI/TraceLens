@@ -51,11 +51,9 @@ def write_excel(path: Path, sections: Dict[str, Dict[str, pd.DataFrame]]) -> Non
     flat: Dict[str, pd.DataFrame] = {}
     for prefix, dfs in sections.items():
         for sheet, df in dfs.items():
-            if df is None or df.empty:
-                continue
             label = sheet if prefix == "rocprof" else f"{prefix}_{sheet}"
             flat[label] = df
-    write_report_outputs(flat, xlsx_path=str(path))
+    write_report_outputs(flat, xlsx_path=str(path), skip_empty=True)
 
 
 def _rocprof_sheets_for_excel(

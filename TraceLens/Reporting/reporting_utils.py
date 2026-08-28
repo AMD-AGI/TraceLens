@@ -148,13 +148,12 @@ def write_report_outputs(
     xlsx_path: Optional[str] = None,
     csvs_dir: Optional[str] = None,
     hide_columns: Optional[Dict[str, List[str]]] = None,
+    skip_empty: bool = False,
 ) -> None:
     """Write report DataFrames to CSV files and/or an Excel workbook.
 
-    When both *xlsx_path* and *csvs_dir* are provided, both outputs are
-    written.  When neither is provided, nothing happens.  Sheet names
-    are truncated to 31 characters (Excel limit) with collision-safe
-    suffixes.
+    Sheet names are truncated to 31 characters (Excel limit) with
+    collision-safe suffixes.
 
     Args:
         dfs: Mapping of sheet name -> DataFrame.
@@ -163,7 +162,12 @@ def write_report_outputs(
         hide_columns: Optional mapping of sheet name -> column names to
             hide in the Excel output. Hidden columns stay in the file;
             names absent from a DataFrame are ignored.
+        skip_empty: If True, ``None`` or empty DataFrames are omitted from
+            all outputs.
     """
+    if skip_empty:
+        dfs = {name: df for name, df in dfs.items() if df is not None and not df.empty}
+
     if csvs_dir:
         os.makedirs(csvs_dir, exist_ok=True)
         for sheet_name, df in dfs.items():
