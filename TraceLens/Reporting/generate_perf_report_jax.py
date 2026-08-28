@@ -169,7 +169,7 @@ def generate_perf_report_jax(
         output_xlsx_path = base_path + "_perf_report.xlsx"
     write_report_outputs(
         dict_name2df,
-        xlsx_path=output_xlsx_path if not output_csvs_dir else None,
+        xlsx_path=output_xlsx_path,
         csvs_dir=output_csvs_dir,
     )
 

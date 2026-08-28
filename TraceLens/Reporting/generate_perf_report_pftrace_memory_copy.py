@@ -155,7 +155,7 @@ def generate_perf_report_pftrace_memory_copy(
         )
     write_report_outputs(
         dfs,
-        xlsx_path=output_xlsx_path if not output_csvs_dir else None,
+        xlsx_path=output_xlsx_path,
         csvs_dir=output_csvs_dir,
     )
 

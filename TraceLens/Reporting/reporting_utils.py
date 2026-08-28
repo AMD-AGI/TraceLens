@@ -6,7 +6,6 @@
 
 import argparse
 import ast
-import importlib.util
 import json
 import logging
 import os
@@ -17,6 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 import pandas as pd
+from openpyxl.utils import get_column_letter
 
 logger = logging.getLogger(__name__)
 
@@ -177,22 +177,20 @@ def write_report_outputs(
             logger.info("Wrote %s (%d rows)", csv_path, len(df))
 
     if xlsx_path:
-        if importlib.util.find_spec("openpyxl") is None:
-            raise ImportError(
-                "openpyxl is required for Excel output. Install with: "
-                "pip install openpyxl"
-            )
-
-        from openpyxl.utils import get_column_letter
-
         hide_columns = hide_columns or {}
         used: set = set()
         with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
             for sheet_name, df in dfs.items():
                 safe = _safe_sheet_name(sheet_name, used)
                 df.to_excel(writer, sheet_name=safe, index=False)
-                worksheet = writer.sheets[safe]
-                for col in hide_columns.get(sheet_name, []):
+                cols_to_hide = hide_columns.get(sheet_name, [])
+                if not cols_to_hide:
+                    continue
+                # openpyxl may adjust the sheet title (e.g. a case-insensitive
+                # collision with the default "Sheet"), so grab the worksheet we
+                # just wrote directly rather than looking it up by name.
+                worksheet = writer.book.worksheets[-1]
+                for col in cols_to_hide:
                     if col not in df.columns:
                         continue
                     col_letter = get_column_letter(df.columns.get_loc(col) + 1)

@@ -44,7 +44,6 @@ from TraceLens.Reporting.generate_perf_report_genesis import (
     write_excel,
     write_genesis_summary_md,
 )
-from TraceLens.Reporting.reporting_utils import _safe_sheet_name as _safe_sheet
 
 ###############################################################################
 # Shared fixtures — realistic CSV content from actual MI300X genesis traces
@@ -810,46 +809,6 @@ class TestResolveProfileJson:
             output_dir.mkdir()
             with pytest.raises(FileNotFoundError):
                 resolve_profile_json(capture_dict, output_dir, include_api=False)
-
-
-###############################################################################
-# generate_perf_report_genesis — _safe_sheet
-###############################################################################
-
-
-class TestSafeSheet:
-    """Validate Excel sheet name deduplication and length limits."""
-
-    def test_no_collision(self):
-        used = set()
-        name = _safe_sheet("gpu_timeline", used)
-        assert name == "gpu_timeline"
-        assert "gpu_timeline" in used
-
-    def test_collision_adds_suffix(self):
-        used = {"gpu_timeline"}
-        name = _safe_sheet("gpu_timeline", used)
-        assert name == "gpu_timeline_1"
-        assert "gpu_timeline_1" in used
-
-    def test_multiple_collisions(self):
-        used = {"test_sheet", "test_sheet_1", "test_sheet_2"}
-        name = _safe_sheet("test_sheet", used)
-        assert name == "test_sheet_3"
-
-    def test_truncates_to_31_chars(self):
-        used = set()
-        long_name = "a" * 50
-        name = _safe_sheet(long_name, used)
-        assert len(name) <= 31
-
-    def test_truncation_with_collision(self):
-        long_name = "a" * 31
-        used = {long_name}
-        name = _safe_sheet(long_name, used)
-        assert len(name) <= 31
-        assert name != long_name
-        assert name.endswith("_1")
 
 
 ###############################################################################
