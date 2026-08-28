@@ -11,7 +11,6 @@ import re
 from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
-from openpyxl.utils import get_column_letter
 
 from TraceLens.Reporting.reporting_utils import write_report_outputs
 
@@ -590,19 +589,12 @@ def generate_compare_perf_reports_pytorch(
                 cols_to_hide_xl[sheet_name] = cols_to_hide
 
     # ── Write workbook ────────────────────────────────────────────────────────
-    if output_csvs_dir:
-        write_report_outputs(results, csvs_dir=output_csvs_dir)
-
-    if output is not None:
-        with pd.ExcelWriter(output, engine="openpyxl") as xls:
-            for sheet_name, df in results.items():
-                safe = sheet_name[:31]
-                df.to_excel(xls, sheet_name=safe, index=False)
-                for col in cols_to_hide_xl.get(sheet_name, []):
-                    col_idx = df.columns.get_loc(col) + 1
-                    col_letter = get_column_letter(col_idx)
-                    worksheet = xls.sheets[safe]
-                    worksheet.column_dimensions[col_letter].hidden = True
+    write_report_outputs(
+        results,
+        xlsx_path=output,
+        csvs_dir=output_csvs_dir,
+        hide_columns=cols_to_hide_xl,
+    )
 
     return results
 

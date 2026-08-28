@@ -147,6 +147,7 @@ def write_report_outputs(
     *,
     xlsx_path: Optional[str] = None,
     csvs_dir: Optional[str] = None,
+    hide_columns: Optional[Dict[str, List[str]]] = None,
 ) -> None:
     """Write report DataFrames to CSV files and/or an Excel workbook.
 
@@ -154,6 +155,14 @@ def write_report_outputs(
     written.  When neither is provided, nothing happens.  Sheet names
     are truncated to 31 characters (Excel limit) with collision-safe
     suffixes.
+
+    Args:
+        dfs: Mapping of sheet name -> DataFrame.
+        xlsx_path: If set, write an ``.xlsx`` workbook here.
+        csvs_dir: If set, write one CSV per DataFrame into this directory.
+        hide_columns: Optional mapping of sheet name -> column names to
+            hide in the Excel output. Hidden columns stay in the file;
+            names absent from a DataFrame are ignored.
     """
     if csvs_dir:
         os.makedirs(csvs_dir, exist_ok=True)
@@ -171,11 +180,20 @@ def write_report_outputs(
                 "pip install openpyxl"
             )
 
+        from openpyxl.utils import get_column_letter
+
+        hide_columns = hide_columns or {}
         used: set = set()
         with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
             for sheet_name, df in dfs.items():
                 safe = _safe_sheet_name(sheet_name, used)
                 df.to_excel(writer, sheet_name=safe, index=False)
+                worksheet = writer.sheets[safe]
+                for col in hide_columns.get(sheet_name, []):
+                    if col not in df.columns:
+                        continue
+                    col_letter = get_column_letter(df.columns.get_loc(col) + 1)
+                    worksheet.column_dimensions[col_letter].hidden = True
         logger.info("Wrote %s", xlsx_path)
 
 
