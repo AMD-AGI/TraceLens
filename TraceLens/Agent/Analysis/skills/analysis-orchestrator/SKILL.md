@@ -29,7 +29,7 @@ Follow **[reference.md](reference.md)** for every step (user prompts, `<prefix>`
 ```
 0. Query User Inputs (Platform, Trace Path(s), Analysis Mode, Environment Setup)
 1. Generate Performance Report (branches on analysis mode: training vs inference then, comparison scope)
-2. Trace-Quality Gate — deterministic fallback analysis if the gate fails
+2. Trace-Quality Gate → Deterministic fallback analysis
 3-6. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
 7. System-Level Analysis (PARALLEL) → system_findings/
 8. Compute Kernel Subagents (PARALLEL) → category_findings/

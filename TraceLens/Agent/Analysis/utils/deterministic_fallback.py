@@ -34,6 +34,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_HIGH,
     HEURISTIC_FRACTION_LOW,
     HEURISTIC_FRACTION_MID,
+    _KERNEL_NAME_TRUNC_LEN,
 )
 
 # Real traces have CSV cells far larger than csv's 131072-char default, which
@@ -43,15 +44,8 @@ csv.field_size_limit(sys.maxsize)
 # Constants
 
 GRAPH_REPLAY_FRACTION_MAX = 0.10
-MAX_KERNEL_NAME_LEN = 75  # display truncation length (75 + marker = 78-char cell)
 MIN_PITEM_PERCENT_E2E = 0.5  # drop P-items below this %E2E share
 MAX_PITEM_COUNT = 40  # defensive hard cap on emitted P-items
-
-_TRUNCATION_MARKER = "..."  # ASCII marker appended to a truncated display name
-_WEIGHT_COLUMN = "Kernel Time (µs)_sum"
-_PERCENT_COLUMN = "Percentage (%)"
-_SYNTHETIC_OP_SUFFIX = " (Synthetic Op)"
-_EM_DASH = "—"
 
 # Wrapper prefixes (matched on the left of the first `->`) that hide the whole
 # workload behind one replay launch: only these count as the pathology.
@@ -94,7 +88,7 @@ def check_graph_replay_coverage(unified_perf_csv: Path) -> GraphReplayCoverage:
     graph_replay_time = 0.0
     with open(unified_perf_csv, newline="", encoding="utf-8") as csv_file:
         for row in csv.DictReader(csv_file):
-            weight = float(row[_WEIGHT_COLUMN])
+            weight = float(row["Kernel Time (µs)_sum"])
             total_time += weight
             if _is_graph_replay_wrapper(row["name"]):
                 graph_replay_time += weight
@@ -167,9 +161,9 @@ def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float)
         lines.append(_TABLE_DIVIDER)
         time_ms = row["weight"] / 1000.0
         lines.append(
-            f"| {_EM_DASH} | {_EM_DASH} | {_EM_DASH} | {kernel} | {time_ms:.3f} | "
-            f"{row['percent']:.2f} | {_EM_DASH} | {_EM_DASH} | {_EM_DASH} | "
-            f"{_EM_DASH} |"
+            f"| — | — | — | {kernel} | {time_ms:.3f} | "
+            f"{row['percent']:.2f} | — | — | — | "
+            f"— |"
         )
         lines.append("")
 
@@ -201,8 +195,8 @@ def _surviving_rows(csv_rows):
         rows.append(
             {
                 "kernel": kernel,
-                "weight": float(row[_WEIGHT_COLUMN]),
-                "percent": float(row[_PERCENT_COLUMN]),
+                "weight": float(row["Kernel Time (µs)_sum"]),
+                "percent": float(row["Percentage (%)"]),
             }
         )
     return rows
@@ -215,8 +209,9 @@ def _is_plumbing_wrapper(prefix: str) -> bool:
 
 
 def _strip_synthetic_suffix(name: str) -> str:
-    if name.endswith(_SYNTHETIC_OP_SUFFIX):
-        name = name[: -len(_SYNTHETIC_OP_SUFFIX)]
+    suffix = " (Synthetic Op)"
+    if name.endswith(suffix):
+        name = name[: -len(suffix)]
     return name.strip()
 
 
@@ -225,8 +220,8 @@ def _normalize_kernel_name(raw: str) -> str:
     # but never demangle (the matched symbol stays raw) and never return empty (an
     # empty heading title fails the downstream heading match and drops the block).
     s = raw.strip()
-    if len(s) > MAX_KERNEL_NAME_LEN:
-        s = s[:MAX_KERNEL_NAME_LEN] + _TRUNCATION_MARKER
+    if len(s) > _KERNEL_NAME_TRUNC_LEN:
+        s = s[:_KERNEL_NAME_TRUNC_LEN] + "..."
     if not s:
         return raw
     return s

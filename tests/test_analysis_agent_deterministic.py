@@ -20,12 +20,10 @@ import pytest
 
 from TraceLens.Agent.Analysis.utils.deterministic_fallback import (
     GRAPH_REPLAY_FRACTION_MAX,
-    MAX_KERNEL_NAME_LEN,
     MAX_PITEM_COUNT,
     MIN_PITEM_PERCENT_E2E,
+    _KERNEL_NAME_TRUNC_LEN,
     _normalize_kernel_name,
-    _PERCENT_COLUMN,
-    _WEIGHT_COLUMN,
     check_graph_replay_coverage,
     main,
     render_fallback_report,
@@ -77,7 +75,7 @@ def _make_perf_csv(tmp_path, rows):
     csv_path = tmp_path / "unified_perf_summary.csv"
     with open(csv_path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["name", _WEIGHT_COLUMN, _PERCENT_COLUMN])
+        writer.writerow(["name", "Kernel Time (µs)_sum", "Percentage (%)"])
         for row in rows:
             name, weight = row[0], row[1]
             percent = row[2] if len(row) > 2 else 0.0
@@ -416,7 +414,7 @@ def test_normalizer_bare_triton_identity():
 def test_normalizer_clean_aiter_identity():
     # A real ~50-char aiter config passes through untouched (< the 75 cap).
     name = "aiter::f4gemm_bf16_per1x32Fp4_BpreShuffle_192x128"
-    assert len(name) < MAX_KERNEL_NAME_LEN
+    assert len(name) < _KERNEL_NAME_TRUNC_LEN
     assert _normalize_kernel_name(name) == name
 
 
@@ -426,30 +424,30 @@ def test_normalizer_void_template_truncated_void_kept():
         "void at::native::elementwise_kernel<128, 2, "
         "at::native::gpu_kernel_impl<at::native::BinaryFunctor>>(int, char*)"
     )
-    assert len(raw) > MAX_KERNEL_NAME_LEN
+    assert len(raw) > _KERNEL_NAME_TRUNC_LEN
     out = _normalize_kernel_name(raw)
     assert out.startswith("void ")
-    assert out == raw[:MAX_KERNEL_NAME_LEN] + "..."
-    assert len(out) == MAX_KERNEL_NAME_LEN + 3
+    assert out == raw[:_KERNEL_NAME_TRUNC_LEN] + "..."
+    assert len(out) == _KERNEL_NAME_TRUNC_LEN + 3
 
 
 def test_normalizer_tensile_truncated():
     raw = "Cijk_Ailk_Bljk_HHS_BH_Bias_AS_MT128x160x16_MI16x16x16x1_SN_WG32_8_1_ABCD"
     raw = raw + "_extra_tokens_pushing_well_past_the_cap"
-    assert len(raw) > MAX_KERNEL_NAME_LEN
+    assert len(raw) > _KERNEL_NAME_TRUNC_LEN
     out = _normalize_kernel_name(raw)
-    assert out == raw[:MAX_KERNEL_NAME_LEN] + "..."
+    assert out == raw[:_KERNEL_NAME_TRUNC_LEN] + "..."
 
 
 def test_normalizer_mangled_zn_truncated_not_demangled():
     # Locks in the no-demangle decision: the symbol stays mangled, just shorter.
     raw = "_ZN5aiter24add_rmsnorm_quant_kernelIN3std10bfloat16_tES2_Li256ELb1EEEvPT_"
     raw = raw + "PKS1_iiffb"
-    assert len(raw) > MAX_KERNEL_NAME_LEN
+    assert len(raw) > _KERNEL_NAME_TRUNC_LEN
     out = _normalize_kernel_name(raw)
     assert out.startswith("_ZN")
     assert out.endswith("...")
-    assert out == raw[:MAX_KERNEL_NAME_LEN] + "..."
+    assert out == raw[:_KERNEL_NAME_TRUNC_LEN] + "..."
 
 
 def test_normalizer_never_returns_empty():
@@ -459,8 +457,8 @@ def test_normalizer_never_returns_empty():
 
 
 def test_normalizer_length_boundary():
-    at_cap = "a" * MAX_KERNEL_NAME_LEN
-    over_cap = "a" * (MAX_KERNEL_NAME_LEN + 1)
+    at_cap = "a" * _KERNEL_NAME_TRUNC_LEN
+    over_cap = "a" * (_KERNEL_NAME_TRUNC_LEN + 1)
     assert _normalize_kernel_name(at_cap) == at_cap  # len 75 -> identity
     assert _normalize_kernel_name(over_cap) == at_cap + "..."  # len 76 -> truncates
 
