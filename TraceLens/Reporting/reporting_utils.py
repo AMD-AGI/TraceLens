@@ -186,9 +186,6 @@ def write_report_outputs(
                 cols_to_hide = hide_columns.get(sheet_name, [])
                 if not cols_to_hide:
                     continue
-                # openpyxl may adjust the sheet title (e.g. a case-insensitive
-                # collision with the default "Sheet"), so grab the worksheet we
-                # just wrote directly rather than looking it up by name.
                 worksheet = writer.book.worksheets[-1]
                 for col in cols_to_hide:
                     if col not in df.columns:
