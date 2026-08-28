@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# Tags this process and all descendants with TRACELENS_EVAL_JOB=1.
+if [[ "${TRACELENS_EVAL_JOB:-}" != 1 ]]; then
+    export TRACELENS_EVAL_JOB=1
+    exec bash "$0" "$@"
+fi
+
 # ---------------------------------------------------------------------------
 # Usage: bash generate_ref.sh [standalone|comparative]
 #

@@ -58,9 +58,9 @@ subtrees:
 - caption: Concepts
   entries:
   - file: conceptual/trace2tree
-    title: The Trace2Tree data model
+    title: Trace2Tree data model
   - file: conceptual/torch-profiling-analysis
-    title: Understanding PyTorch traces
+    title: PyTorch traces
   - file: conceptual/shape-metadata
     title: Tensor shape metadata
   - file: conceptual/gemm-analysis
@@ -69,15 +69,6 @@ subtrees:
     title: Inference performance analysis
   - file: conceptual/triton-perf-model-walkthrough
     title: Triton kernel performance model
-
-- caption: Tutorials
-  entries:
-  - file: tutorials/torch-profiling
-    title: PyTorch profiling walkthrough
-  - file: tutorials/distributed-profiling
-    title: Distributed profiling walkthrough
-  - file: tutorials/anomaly-detection
-    title: Anomaly detection walkthrough
 
 - caption: Reference
   entries:
