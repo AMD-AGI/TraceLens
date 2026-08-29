@@ -1,0 +1,61 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+# Grades this repo's skills with https://github.com/danielholanda/skillscope:
+# structure (free), then routing (which skill fires) and behavior (what the
+# agent did once it fired).
+
+name: skill-evals
+
+on:
+  pull_request:
+    paths:
+      - "TraceLens/Agent/Analysis/skills/**"
+      - ".github/workflows/skill-evals.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  structural:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: danielholanda/skillscope@main
+        with:
+          command: structural
+          skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
+
+  routing:
+    needs: structural
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: danielholanda/skillscope@main
+        with:
+          command: run
+          args: --mode routing --routing-skills analysis-orchestrator
+          skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
+          install-claude: "true"
+
+  behavior:
+    needs: structural
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: danielholanda/skillscope@main
+        with:
+          command: run
+          args: --mode behavior
+          skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
+          install-claude: "true"
