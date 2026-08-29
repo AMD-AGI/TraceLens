@@ -5,7 +5,7 @@
 ###############################################################################
 
 # Grades this repo's skills with https://github.com/danielholanda/skillscope:
-# structure (free), then routing (which skill fires) and behavior (what the
+# structure (free), then routing (which skill fires) and behavioral (what the
 # agent did once it fired).
 
 name: skill-evals
@@ -40,12 +40,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: danielholanda/skillscope@main
         with:
-          command: run
-          args: --mode routing --routing-skills analysis-orchestrator
+          command: routing
           skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
           install-claude: "true"
 
-  behavior:
+  behavioral:
     needs: structural
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -55,7 +54,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: danielholanda/skillscope@main
         with:
-          command: run
-          args: --mode behavior
+          command: behavioral
           skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
           install-claude: "true"
