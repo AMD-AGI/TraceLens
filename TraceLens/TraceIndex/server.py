@@ -119,7 +119,8 @@ def make_handler(
                 try:
                     # Intentional dynamic SQL: sql is validated by is_read_only_sql()
                     # and the connection is opened read-only with PRAGMA query_only=ON.
-                    rows = conn.execute(sql, params).fetchmany(limit + 1)  # codeql[py/sql-injection]
+                    # codeql[py/sql-injection]
+                    rows = conn.execute(sql, params).fetchmany(limit + 1)
                     elapsed_ms = (time.perf_counter() - start) * 1000
                     returned = rows[:limit]
                     self.send_json(

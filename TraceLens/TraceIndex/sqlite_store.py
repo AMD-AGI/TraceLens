@@ -365,7 +365,8 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             )
         self.conn.execute("PRAGMA query_only=ON")
         # Intentional dynamic SQL: rejected above unless read-only; query_only is set.
-        rows = self.conn.execute(sql, params or ()).fetchmany(limit)  # codeql[py/sql-injection]
+        # codeql[py/sql-injection]
+        rows = self.conn.execute(sql, params or ()).fetchmany(limit)
         return [dict(row) for row in rows]
 
     def close(self) -> None:
