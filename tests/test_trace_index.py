@@ -10,6 +10,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -23,7 +24,6 @@ from TraceLens.TraceIndex.core import (
 from TraceLens.TraceIndex.cli import main as trace_index_main
 from TraceLens.TraceIndex.importer import (
     build_traces as build_traces_with_store,
-    import_report_dir as import_report_dir_with_store,
 )
 from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
 from TraceLens.TraceIndex.server import make_handler
@@ -49,11 +49,13 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
-def seed_mini_catalog(tmp_path):
-    db_path = tmp_path / "trace_index.sqlite"
-    trace_path = tmp_path / "rank0_trace.json"
-    trace_path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
-    report_dir = tmp_path / "report"
+def write_stub_trace(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
+    return path
+
+
+def write_mini_report(report_dir):
     write_csv(
         report_dir / "unified_perf_summary.csv",
         [
@@ -71,7 +73,13 @@ def seed_mini_catalog(tmp_path):
             },
         ],
     )
-    append_trace(db_path, trace_path, report_dir=report_dir)
+    return report_dir
+
+
+def seed_mini_catalog(tmp_path):
+    db_path = tmp_path / "trace_index.sqlite"
+    trace_path = write_stub_trace(tmp_path / "rank0_trace.json")
+    append_trace(db_path, trace_path, report_dir=write_mini_report(tmp_path / "report"))
     return db_path
 
 
@@ -90,13 +98,19 @@ def request_json(url, method="GET", payload=None):
         return exc.code, json.loads(body)
 
 
-def start_query_server(db_path):
+@contextmanager
+def query_server(db_path):
     handler = make_handler(db_path, default_limit=500, max_limit=5000)
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address
-    return server, thread, "http://%s:%s" % (host, port)
+    try:
+        yield "http://%s:%s" % (host, port)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_parse_repr_strips_numpy_scalars_and_to_json():
@@ -116,9 +130,7 @@ def test_trace_index_append_from_report_and_search(tmp_path):
     json_extract and FTS."""
     db_path = tmp_path / "trace_index.sqlite"
     trace_root = tmp_path / "traces"
-    trace_path = trace_root / "model_a" / "rank0_trace.json"
-    trace_path.parent.mkdir(parents=True)
-    trace_path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
+    trace_path = write_stub_trace(trace_root / "model_a" / "rank0_trace.json")
 
     report_dir = tmp_path / "reports" / "trace_1"
     write_csv(
@@ -243,43 +255,6 @@ def test_trace_index_rejects_write_sql(tmp_path):
         execute_read_query(db_path, "DELETE FROM traces")
 
 
-def test_trace_index_store_boundary_supports_append_and_search(tmp_path):
-    """Driving SQLiteTraceIndexStore directly (the storage boundary) imports a
-    report and returns an op-kind FTS hit."""
-    db_path = tmp_path / "trace_index.sqlite"
-    trace_root = tmp_path / "traces"
-    trace_path = trace_root / "rank0_trace.json"
-    trace_path.parent.mkdir(parents=True)
-    trace_path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
-
-    report_dir = tmp_path / "reports" / "trace_1"
-    write_csv(
-        report_dir / "unified_perf_summary.csv",
-        [
-            {
-                "name": "aten::scaled_dot_product_attention",
-                "op category": "SDPA_fwd",
-                "operation_count": "1",
-                "Kernel Time (us)_sum": "10.0",
-            }
-        ],
-    )
-
-    store = SQLiteTraceIndexStore(db_path)
-    try:
-        trace_id = import_report_dir_with_store(
-            store,
-            report_dir,
-            trace_path=trace_path,
-            root=trace_root,
-        )
-        assert trace_id == 1
-        hits = store.search("scaled", limit=10)
-        assert hits[0].kind == "op"
-    finally:
-        store.close()
-
-
 @pytest.mark.skipif(
     not TRAINING_REPORT_DIR.exists(),
     reason="checked-in Qwen training report CSVs are missing",
@@ -288,8 +263,7 @@ def test_import_real_training_report_maps_kernel_stream_and_times(tmp_path):
     """On the checked-in Qwen training report, op_kernels/gemm/sdpa are populated
     from real perf_params and kernel_details with correct shapes and stream."""
     db_path = tmp_path / "trace_index.sqlite"
-    trace_path = tmp_path / "qwen_trace.json"
-    trace_path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
+    trace_path = write_stub_trace(tmp_path / "qwen_trace.json")
     trace_id = append_trace(db_path, trace_path, report_dir=TRAINING_REPORT_DIR)
 
     unified = execute_read_query(
@@ -355,8 +329,7 @@ def test_import_real_inference_report_converts_category_kernel_time_ms(tmp_path)
     """On the checked-in inference report, category kernel time in ms is converted
     to microseconds during import."""
     db_path = tmp_path / "trace_index.sqlite"
-    trace_path = tmp_path / "decode_trace.json"
-    trace_path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
+    trace_path = write_stub_trace(tmp_path / "decode_trace.json")
     append_trace(db_path, trace_path, report_dir=INFERENCE_REPORT_DIR)
     rows = execute_read_query(
         db_path,
@@ -391,20 +364,8 @@ def test_cli_append_from_existing_report(tmp_path, capsys):
     """The CLI append command imports an existing report dir without regenerating
     it and reports the new trace_id."""
     db_path = tmp_path / "trace_index.sqlite"
-    trace_path = tmp_path / "rank0_trace.json"
-    trace_path.write_text(json.dumps({"traceEvents": []}), encoding="utf-8")
-    report_dir = tmp_path / "report"
-    write_csv(
-        report_dir / "unified_perf_summary.csv",
-        [
-            {
-                "name": "aten::mm",
-                "op category": "GEMM",
-                "operation_count": "1",
-                "Kernel Time (us)_sum": "10.0",
-            }
-        ],
-    )
+    trace_path = write_stub_trace(tmp_path / "rank0_trace.json")
+    report_dir = write_mini_report(tmp_path / "report")
 
     rc = trace_index_main(
         [
@@ -421,8 +382,10 @@ def test_cli_append_from_existing_report(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["trace_id"] == 1
     assert payload["generated_report"] is False
-    rows = execute_read_query(db_path, "SELECT name FROM unified_perf_rows")
-    assert rows[0]["name"] == "aten::mm"
+    rows = execute_read_query(
+        db_path, "SELECT name FROM unified_perf_rows ORDER BY source_row"
+    )
+    assert [row["name"] for row in rows] == ["aten::mm", "aten::add"]
 
 
 def test_build_traces_continues_after_failure(tmp_path):
@@ -443,11 +406,10 @@ def test_build_traces_continues_after_failure(tmp_path):
     assert "missing_a.json" in result["failed"][0]["trace_path"]
 
 
-def test_query_server_health_tables_and_read_sql(tmp_path):
-    """The read-only HTTP server reports health/tables and runs a SELECT."""
+def test_query_server_health_query_and_guards(tmp_path):
+    """The read-only HTTP server serves health/tables/SQL and rejects writes."""
     db_path = seed_mini_catalog(tmp_path)
-    server, thread, base = start_query_server(db_path)
-    try:
+    with query_server(db_path) as base:
         status, root = request_json(base + "/")
         assert status == 200
         assert "POST /query" in root["endpoints"]
@@ -478,17 +440,16 @@ def test_query_server_health_tables_and_read_sql(tmp_path):
         status, get_query = request_json(base + "/query?" + encoded)
         assert status == 200
         assert get_query["rows"][0]["n"] == 2
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
 
+        status, truncated = request_json(
+            base + "/query",
+            method="POST",
+            payload={"sql": "SELECT name FROM unified_perf_rows", "limit": 1},
+        )
+        assert status == 200
+        assert truncated["truncated"] is True
+        assert len(truncated["rows"]) == 1
 
-def test_query_server_rejects_write_sql_and_unknown_paths(tmp_path):
-    """Write SQL and unknown routes are rejected; SELECT limit truncation is reported."""
-    db_path = seed_mini_catalog(tmp_path)
-    server, thread, base = start_query_server(db_path)
-    try:
         status, payload = request_json(
             base + "/query",
             method="POST",
@@ -503,16 +464,3 @@ def test_query_server_rejects_write_sql_and_unknown_paths(tmp_path):
 
         status, post_missing = request_json(base + "/tables", method="POST", payload={})
         assert status == 404
-
-        status, truncated = request_json(
-            base + "/query",
-            method="POST",
-            payload={"sql": "SELECT name FROM unified_perf_rows", "limit": 1},
-        )
-        assert status == 200
-        assert truncated["truncated"] is True
-        assert len(truncated["rows"]) == 1
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
