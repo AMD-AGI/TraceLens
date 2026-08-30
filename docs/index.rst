@@ -66,6 +66,7 @@ The TraceLens source code is hosted at `github.com/AMD-AGI/TraceLens <https://gi
 
       * :doc:`API reference <reference/api-reference>`
       * :doc:`Performance report columns <reference/perf-report-columns>`
+      * :doc:`TraceIndex catalog schema <reference/trace-index-catalog-schema>`
       * :doc:`Compatibility matrix <reference/compatibility>`
 
 For information on contributing to TraceLens, see the

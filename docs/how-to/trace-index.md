@@ -62,6 +62,14 @@ TraceLens_trace_index --db trace_index.sqlite build \
   --report-root ./trace_index_reports
 ```
 
+`--report-root` is only used when TraceIndex **generates** CSV reports (the
+default for `build`, or for `append` without `--report-dir`). TraceIndex writes
+one subdirectory per trace under that root, named from the trace filename (for
+example `rank0_trace.json.gz` becomes
+`./trace_index_reports/rank0_trace.json.gz/`). Re-running `build` or `append`
+reuses an existing report directory unless you pass `--force`. If you already
+have CSV reports elsewhere, skip generation and use `append --report-dir` instead.
+
 A failed trace is recorded and the rest of the list still runs. For inference,
 rocprof, or pftrace, generate the CSV reports first, then `append` each trace
 with `--report-dir`.
@@ -89,6 +97,11 @@ The following tables are the catalog schema. There are ten relational tables
 plus a full-text search (FTS) virtual table. SQLite holds this comfortably for
 typical TraceLens corpora (hundreds of traces, hundreds of thousands of kernel
 rows). The practical limit is one writer at a time, not row count.
+
+For column-level detail (every SQL column, units, and which CSV sheet it came
+from), see [TraceIndex catalog schema](../reference/trace-index-catalog-schema.md).
+For columns inside the TraceLens CSV reports themselves, see
+[Performance report columns](../reference/perf-report-columns.md).
 
 The following diagram shows how those tables relate. Every fact table points at
 `traces`. Kernel rows and GEMM / SDPA / convolution satellites also point at
@@ -226,4 +239,5 @@ rows = search_index(db, "Cijk", limit=20)
 - [Generate a PyTorch inference performance report](./generate-perf-report-pytorch-inference.md)
 - [Analyze traces with the TraceLens SDK](./sdk-analysis.md)
 - [Performance report columns](../reference/perf-report-columns.md)
+- [TraceIndex catalog schema](../reference/trace-index-catalog-schema.md)
 - [API reference](../reference/api-reference.md)

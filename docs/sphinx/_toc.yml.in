@@ -87,6 +87,8 @@ subtrees:
     title: API reference
   - file: reference/perf-report-columns
     title: Performance report columns
+  - file: reference/trace-index-catalog-schema
+    title: TraceIndex catalog schema
   - url: https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html
     title: Hyperloom
 
