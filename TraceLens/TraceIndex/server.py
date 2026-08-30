@@ -81,7 +81,7 @@ def make_handler(
             if parsed.path == "/query":
                 params = parse_qs(parsed.query)
                 sql = params.get("sql", [""])[0]
-                limit = int(params.get("limit", [str(default_limit)])[0])
+                limit = params.get("limit", [default_limit])[0]
                 self.handle_query(sql, [], limit)
                 return
             self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
@@ -93,11 +93,45 @@ def make_handler(
                 return
             try:
                 payload = self.read_json()
-                self.handle_query(
-                    str(payload.get("sql", "")),
-                    payload.get("params", []),
-                    int(payload.get("limit", default_limit)),
-                )
+            except Exception as exc:
+                self.send_json({"error": repr(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            self.handle_query(
+                str(payload.get("sql", "")),
+                payload.get("params", []),
+                payload.get("limit", default_limit),
+            )
+
+        def handle_query(self, sql: str, params: List[Any], limit: Any) -> None:
+            try:
+                if not is_read_only_sql(sql):
+                    self.send_json(
+                        {
+                            "error": "only single read-only SELECT/WITH/PRAGMA statements are allowed"
+                        },
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                limit = max(1, min(int(limit), max_limit))
+                start = time.perf_counter()
+                conn = self.connect()
+                try:
+                    # The server is a read-only SQL endpoint. sql is gated by
+                    # is_read_only_sql and the connection is opened with mode=ro.
+                    # codeql[py/sql-injection]
+                    rows = conn.execute(sql, params).fetchmany(limit + 1)
+                    elapsed_ms = (time.perf_counter() - start) * 1000
+                    returned = rows[:limit]
+                    self.send_json(
+                        {
+                            "elapsed_ms": round(elapsed_ms, 3),
+                            "limit": limit,
+                            "truncated": len(rows) > limit,
+                            "rows": [dict(row) for row in returned],
+                        }
+                    )
+                finally:
+                    conn.close()
             except Exception as exc:
                 self.send_json({"error": repr(exc)}, HTTPStatus.BAD_REQUEST)
 
@@ -137,36 +171,6 @@ def make_handler(
                     except sqlite3.DatabaseError as exc:
                         counts[table] = repr(exc)
                 self.send_json({"tables": counts})
-            finally:
-                conn.close()
-
-        def handle_query(self, sql: str, params: List[Any], limit: int) -> None:
-            if not is_read_only_sql(sql):
-                self.send_json(
-                    {
-                        "error": "only single read-only SELECT/WITH/PRAGMA statements are allowed"
-                    },
-                    HTTPStatus.BAD_REQUEST,
-                )
-                return
-            limit = max(1, min(limit, max_limit))
-            start = time.perf_counter()
-            conn = self.connect()
-            try:
-                # The server is a read-only SQL endpoint. sql is gated by
-                # is_read_only_sql and the connection is opened with mode=ro.
-                # codeql[py/sql-injection]
-                rows = conn.execute(sql, params).fetchmany(limit + 1)
-                elapsed_ms = (time.perf_counter() - start) * 1000
-                returned = rows[:limit]
-                self.send_json(
-                    {
-                        "elapsed_ms": round(elapsed_ms, 3),
-                        "limit": limit,
-                        "truncated": len(rows) > limit,
-                        "rows": [dict(row) for row in returned],
-                    }
-                )
             finally:
                 conn.close()
 
