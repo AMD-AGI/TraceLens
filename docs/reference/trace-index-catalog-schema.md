@@ -6,26 +6,35 @@ See LICENSE for license information.
 
 # TraceIndex catalog schema
 ```{meta}
-:description: Column reference for TraceIndex SQLite catalog tables — the SQL query surface for searching traces, ops, kernels, and parsed shapes.
-:keywords: TraceIndex, TraceDB, SQLite, catalog schema, unified_perf_rows, gemm_perf, sdpa_perf, conv_perf, op_kernels, full-text search
+:description: SQL table and column names for TraceIndex catalogs, with CSV source mapping. Column semantics live in the performance report column reference.
+:keywords: TraceIndex, TraceDB, SQLite, catalog schema, unified_perf_rows, gemm_perf, sdpa_perf, conv_perf, op_kernels
 ```
 
-This topic lists every column in the TraceIndex SQLite catalog. Use it when
-writing `sqlite-sql` or HTTP `/query` statements against a catalog built with
+This topic is the **SQL naming and mapping index** for TraceIndex catalogs built with
 [Index a corpus of traces](../how-to/trace-index.md).
 
-TraceIndex imports three CSV sheets from each TraceLens report directory:
-`unified_perf_summary.csv`, `ops_summary_by_category.csv`, and `gpu_timeline.csv`.
-It also derives satellite shape tables and kernel rows during import. For the
-meaning of fields inside the CSV reports, see
-[Performance report columns](./perf-report-columns.md).
+**Column meanings** (units, roofline fields, shape params, kernel details) are documented
+in [Performance report columns](./perf-report-columns.md). That topic covers the CSV/Excel
+sheets; this topic lists where those fields land in SQLite and which columns are
+catalog-only.
 
-## Unit conventions
+## Imported CSV sheets → SQL tables
 
-- **Time in catalog tables**: microseconds (`*_us`) unless the column name ends
-  in `_ms` (for example `gpu_timeline_rows.time_ms`).
-- **JSON columns**: parsed Python structures stored as JSON text (`*_json`).
-  Query with `json_extract(column, '$.key')` when no typed satellite column exists.
+| CSV file (report dir) | SQL table(s) | Semantics |
+|---|---|---|
+| `unified_perf_summary.csv` | `unified_perf_rows` | [unified / ops sheets](./perf-report-columns.md) |
+| `ops_summary_by_category.csv` | `op_category_rows` | [ops_summary_by_category](./perf-report-columns.md) |
+| `gpu_timeline.csv` | `gpu_timeline_rows` | [gpu_timeline](./perf-report-columns.md) |
+
+Derived during import (not separate CSV files): `op_kernels` (from `kernel_details_summary`),
+`gemm_perf` / `sdpa_perf` / `conv_perf` (typed shapes from `perf_params`),
+`trace_summary`, `trace_search` (FTS).
+
+## Unit conventions in SQL
+
+- Kernel/op times in relational tables: **microseconds** (`*_us`) unless the column ends in `_ms`.
+- `gpu_timeline_rows.time_ms` stays in **milliseconds** (matches the CSV).
+- `*_json` columns hold parsed structures; use `json_extract` when no typed satellite column exists.
 
 ## traces
 
@@ -66,8 +75,8 @@ Import audit trail for each CSV report directory loaded into a trace.
 Rows from `unified_perf_summary.csv`, normalized for SQL. Kernel time columns are
 always stored in **microseconds** even when the CSV used milliseconds.
 
-| Column | Type | CSV source (typical) | Description |
-|--------|------|----------------------|-------------|
+| Column | Type | CSV source (typical) | SQL name |
+|--------|------|----------------------|----------|
 | `id` | INTEGER | — | Primary key |
 | `trace_id` | INTEGER | — | FK → `traces.id` |
 | `source_row` | INTEGER | — | 1-based row index in the CSV |

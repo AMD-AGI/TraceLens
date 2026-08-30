@@ -12,6 +12,21 @@ See LICENSE for license information.
 
 This topic explains the columns in each sheet of the TraceLens performance report. The report is an Excel file with multiple sheets, and each sheet analyzes a different aspect of GPU performance. Use it as a lookup while you read a report generated with one of the how-to topics listed under [Related topics](#related-topics).
 
+## TraceIndex catalog
+
+[TraceIndex](../how-to/trace-index.md) imports the same CSV reports into SQLite so you can
+search a corpus with SQL. **Column semantics are defined in this topic** — the
+catalog is another representation of the same perf metrics, not a different schema.
+
+TraceIndex currently imports `unified_perf_summary.csv`, `ops_summary_by_category.csv`,
+and `gpu_timeline.csv`. It normalizes header spelling (for example `op category` →
+`op_category`) and stores kernel times in microseconds in SQL even when the CSV used
+milliseconds. It also derives typed shape tables (`gemm_perf`, `sdpa_perf`, `conv_perf`)
+and exploded kernel rows (`op_kernels`).
+
+For the SQL table/column names and CSV → SQL mapping, see
+[TraceIndex catalog schema](./trace-index-catalog-schema.md).
+
 ## Overview
 
 The performance report Excel file contains multiple sheets analyzing different aspects of GPU performance. The core sheets are:
