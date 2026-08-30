@@ -55,10 +55,10 @@ To try out TraceLens without collecting your own trace, use the [demo traces](te
 
 | Format | Tool | Documentation |
 |--------|------|---------------|
-| **PyTorch** | `torch.profiler` | [docs/generate_perf_report.md](docs/generate_perf_report.md) |
-| **JAX** | XPlane protobuf | [docs/jax_analyses.md](docs/jax_analyses.md) |
-| **rocprofv3 JSON** | AMD ROCm rocprofiler-sdk | [docs/generate_perf_report_rocprof.md](docs/generate_perf_report_rocprof.md) |
-| **rocprofv3 pftrace** | Perfetto-style | [docs/generate_perf_report_rocprof_pftrace.md](docs/generate_perf_report_rocprof_pftrace.md) |
+| **PyTorch** | `torch.profiler` | [docs/how-to/generate-perf-report-pytorch.md](docs/how-to/generate-perf-report-pytorch.md) |
+| **JAX** | XPlane protobuf | [docs/how-to/generate-perf-report-jax.md](docs/how-to/generate-perf-report-jax.md) |
+| **rocprofv3 JSON** | AMD ROCm rocprofiler-sdk | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md) |
+| **rocprofv3 pftrace** | Perfetto-style | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md) |
 | **Genesis / Taichi** | rocprofv3 + pftrace | [docs/generate_perf_report_genesis.md](docs/generate_perf_report_genesis.md) |
 
 Generate a performance analysis report from an eager execution PyTorch trace with a single command:
