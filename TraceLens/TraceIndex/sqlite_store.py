@@ -358,14 +358,14 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         params: Optional[Sequence[Any]] = None,
         limit: int = 500,
     ) -> List[Dict[str, Any]]:
+        """Run one caller-supplied read-only SELECT/WITH/PRAGMA against the catalog."""
         if not is_read_only_sql(sql):
             raise ValueError(
                 "only a single read-only SELECT/WITH/PRAGMA statement is allowed"
             )
         self.conn.execute("PRAGMA query_only=ON")
-        # Callers pass a single SELECT/WITH/PRAGMA; writes are rejected above.
-        # codeql[py/sql-injection]
-        rows = self.conn.execute(sql, params or ()).fetchmany(limit)
+        # Intentional dynamic SQL: rejected above unless read-only; query_only is set.
+        rows = self.conn.execute(sql, params or ()).fetchmany(limit)  # codeql[py/sql-injection]
         return [dict(row) for row in rows]
 
     def close(self) -> None:

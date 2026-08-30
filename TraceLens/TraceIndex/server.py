@@ -103,6 +103,7 @@ def make_handler(
             )
 
         def handle_query(self, sql: str, params: List[Any], limit: Any) -> None:
+            """Run one caller-supplied read-only SQL statement against the catalog."""
             try:
                 if not is_read_only_sql(sql):
                     self.send_json(
@@ -116,10 +117,9 @@ def make_handler(
                 start = time.perf_counter()
                 conn = self.connect()
                 try:
-                    # The server is a read-only SQL endpoint. sql is gated by
-                    # is_read_only_sql and the connection is opened with mode=ro.
-                    # codeql[py/sql-injection]
-                    rows = conn.execute(sql, params).fetchmany(limit + 1)
+                    # Intentional dynamic SQL: sql is validated by is_read_only_sql()
+                    # and the connection is opened read-only with PRAGMA query_only=ON.
+                    rows = conn.execute(sql, params).fetchmany(limit + 1)  # codeql[py/sql-injection]
                     elapsed_ms = (time.perf_counter() - start) * 1000
                     returned = rows[:limit]
                     self.send_json(
