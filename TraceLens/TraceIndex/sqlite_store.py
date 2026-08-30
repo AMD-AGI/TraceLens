@@ -573,7 +573,9 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             kernel_name = as_text(detail.get("name") or detail.get("Kernel name"))
             if not kernel_name:
                 continue
-            library, is_tensile, is_transpose, is_layout = kernel_flags(kernel_name)
+            library, is_tensile, is_transpose, is_layout = kernel_flags(
+                kernel_name, parent_op_name or ""
+            )
             self.conn.execute(
                 """
                 INSERT INTO op_kernels(

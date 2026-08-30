@@ -16,6 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from TraceLens.PerfModel import kernel_name_parser as knp
+from TraceLens.PerfModel.kernel_library import classify_kernel_library
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -165,10 +168,21 @@ def to_json(value: Any) -> Optional[str]:
     return json.dumps(json_safe(value), sort_keys=True)
 
 
-def kernel_flags(name: str) -> Tuple[Optional[str], int, int, int]:
+def kernel_flags(name: str, op_name: str = "") -> Tuple[Optional[str], int, int, int]:
+    """Derive catalog flags for a GPU kernel using shared library classification."""
     low = name.lower()
-    is_tensile = int("cijk" in low or "tensile" in low)
+    library = classify_kernel_library(op_name, name)
+
+    is_tensile = int(
+        knp.is_rocm_gemm(name) or library == "Tensile" or "tensile" in low
+    )
     is_transpose = int("transpose" in low or "permute" in low)
+    parsed = knp.gemm_name_parser(name)
+    if parsed:
+        transpose = parsed.get("transpose")
+        if transpose and any(transpose):
+            is_transpose = 1
+
     is_layout = int(
         is_transpose
         or "contiguous" in low
@@ -176,15 +190,6 @@ def kernel_flags(name: str) -> Tuple[Optional[str], int, int, int]:
         or "cast" in low
         or "convert" in low
     )
-    library = None
-    if is_tensile:
-        library = "Tensile"
-    elif "triton" in low:
-        library = "Triton"
-    elif "ck" in low or "composable" in low:
-        library = "CK"
-    elif "nccl" in low or "rccl" in low:
-        library = "RCCL/NCCL"
     return library, is_tensile, is_transpose, is_layout
 
 

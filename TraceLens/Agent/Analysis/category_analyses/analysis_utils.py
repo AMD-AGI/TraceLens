@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from TraceLens.PerfModel.kernel_library import classify_kernel_library
 from TraceLens.PerfModel.utils import torch_dtype_map
 
 TARGET_HIGH = 100.0
@@ -44,26 +45,6 @@ HEURISTIC_FRACTION_HIGH = 0.45
 # Efficiency Boundary for grouping
 _EFF_BUCKET_BOUNDARIES = (30, 60)
 
-_OP_NAME_LIBRARY_RULES = [
-    ("aiter::", "AITER"),
-    ("rocm_aiter", "AITER"),
-    ("fbgemm", "FBGEMM"),
-    ("miopen", "MIOpen"),
-    ("triton", "Triton"),
-]
-_KERNEL_NAME_LIBRARY_RULES = [
-    ("aiter", "AITER"),
-    ("ck_tile::", "CK"),
-    ("ck_tile6kentry", "CK"),
-    ("FmhaFwd", "CK"),
-    ("FmhaBwd", "CK"),
-    ("Cijk_", "Tensile"),
-    ("wvSplitK", "rocBLAS"),
-    ("splitKreduce", "rocBLAS"),
-    ("rocprim::", "rocPRIM"),
-    ("triton_", "Triton"),
-    ("void at::native::", "PyTorch Native"),
-]
 _COMPARATIVE_SPEEDUP_COL = "speedup (trace2/trace1)"
 _COMPARATIVE_DELTA_COL = "delta_us (trace2 - trace1)"
 _COMPARATIVE_T2_TIME_COL = "lca_total_kernel_time_trace2_us"
@@ -1093,15 +1074,5 @@ def run_category_analysis(
     print(f"Metrics written to: {output_path}")
 
 
-# Category-specific helper functions
-def classify_kernel_library(op_name: str, kernel_details: str = "") -> Optional[str]:
-    """Identify the GPU library backing an operation from its name or kernel strings."""
-    op_lower = op_name.lower()
-    for marker, lib in _OP_NAME_LIBRARY_RULES:
-        if marker in op_lower:
-            return lib
-    kd = str(kernel_details) if kernel_details and not pd.isna(kernel_details) else ""
-    for marker, lib in _KERNEL_NAME_LIBRARY_RULES:
-        if marker in kd:
-            return lib
-    return None
+# Category-specific helper functions — classify_kernel_library lives in
+# TraceLens.PerfModel.kernel_library and is imported above.
