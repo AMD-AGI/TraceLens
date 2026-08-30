@@ -99,9 +99,8 @@ typical TraceLens corpora (hundreds of traces, hundreds of thousands of kernel
 rows). The practical limit is one writer at a time, not row count.
 
 For column-level detail (every SQL column, units, and which CSV sheet it came
-from), see [TraceIndex catalog schema](../reference/trace-index-catalog-schema.md).
-For columns inside the TraceLens CSV reports themselves, see
-[Performance report columns](../reference/perf-report-columns.md).
+from), see [TraceLens metrics](../reference/tracelens-metrics.md) — report sheets
+in the CSV section, catalog tables in the SQLite section.
 
 The following diagram shows how those tables relate. Every fact table points at
 `traces`. Kernel rows and GEMM / SDPA / convolution satellites also point at
@@ -238,6 +237,5 @@ rows = search_index(db, "Cijk", limit=20)
 - [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 - [Generate a PyTorch inference performance report](./generate-perf-report-pytorch-inference.md)
 - [Analyze traces with the TraceLens SDK](./sdk-analysis.md)
-- [Performance report columns](../reference/perf-report-columns.md)
-- [TraceIndex catalog schema](../reference/trace-index-catalog-schema.md)
+- [TraceLens metrics](../reference/tracelens-metrics.md)
 - [API reference](../reference/api-reference.md)

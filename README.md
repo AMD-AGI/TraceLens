@@ -69,7 +69,7 @@ Generate a performance analysis report from an eager execution PyTorch trace wit
 TraceLens_generate_perf_report_pytorch --profile_json_path path/to/your/trace.json
 ```
 
-This produces an Excel workbook with GPU timeline breakdown, ops summary, roofline metrics and more. For additional details, see [Generate a PyTorch performance report](docs/how-to/generate-perf-report-pytorch.md) and [Performance report column reference](docs/reference/perf-report-columns.md). For other input formats, see [Supported Profile Formats](#supported-profile-formats).
+This produces an Excel workbook with GPU timeline breakdown, ops summary, roofline metrics and more. For additional details, see [Generate a PyTorch performance report](docs/how-to/generate-perf-report-pytorch.md) and [TraceLens metrics reference](docs/reference/tracelens-metrics.md). For other input formats, see [Supported Profile Formats](#supported-profile-formats).
 
 Compare two reports to quantify the impact of a change (see [Compare performance reports](docs/how-to/compare-perf-reports.md)):
 
@@ -149,7 +149,7 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 | pftrace Reports              | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md)                                       |
 | Compare PyTorch Reports      | [docs/how-to/compare-perf-reports.md](docs/how-to/compare-perf-reports.md)                                                       |
 | Multi-Rank Collective Report | [docs/how-to/collective-report.md](docs/how-to/collective-report.md)                                                             |
-| Performance Report Columns   | [docs/reference/perf-report-columns.md](docs/reference/perf-report-columns.md)                                                   |
+| TraceLens metrics            | [docs/reference/tracelens-metrics.md](docs/reference/tracelens-metrics.md)                                                       |
 | TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
 | TraceIndex                   | [docs/how-to/trace-index.md](docs/how-to/trace-index.md)                                                                         |
 

@@ -147,5 +147,5 @@ def get_backward_shapes(trace_events, backward_event):
 - [Trace2Tree](../conceptual/trace2tree.md)
 - [Understanding PyTorch traces](../conceptual/torch-profiling-analysis.md)
 - [Generate a performance report from PyTorch traces](../how-to/generate-perf-report-pytorch.md)
-- [Performance report columns](../reference/perf-report-columns.md)
+- [TraceLens metrics](../reference/tracelens-metrics.md)
 - [API reference](../reference/api-reference.md)

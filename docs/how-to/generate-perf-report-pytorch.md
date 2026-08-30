@@ -77,7 +77,7 @@ For the GPU timeline, a low computation percentage with significant idle time
 indicates poor compute/communication overlap; use `--micro_idle_thresh_us` to
 split very short idle gaps into their own category.
 
-See [Performance report column reference](../reference/perf-report-columns.md)
+See [TraceLens metrics reference](../reference/tracelens-metrics.md)
 for what each column means.
 
 ## Roofline classification
