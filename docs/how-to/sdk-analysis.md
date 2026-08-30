@@ -203,7 +203,7 @@ or memory-bound.
 
 For how these metrics are defined and modeled, see
 [GEMM analysis](../conceptual/gemm-analysis.md) and the
-[performance report columns](../reference/perf-report-columns.md) reference. To
+[TraceLens metrics](../reference/tracelens-metrics.md) reference. To
 compute the same metrics from shapes alone, without a trace, see
 [Model op performance without a trace](./perf-model-without-trace.md). The
 [`tree_perf_example.ipynb`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/tree_perf_example.ipynb)

@@ -214,7 +214,7 @@ example notebook under `examples/`.
 | `TraceUtils` | Trace utilities, including inference-trace splitting. | — |
 
 For report-column definitions across all sheets, see the
-[Performance report column reference](./perf-report-columns.md).
+[TraceLens metrics reference](./tracelens-metrics.md).
 
 ```{note}
 For a class- and function-level SDK reference generated directly from

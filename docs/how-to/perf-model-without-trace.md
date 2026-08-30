@@ -101,5 +101,5 @@ decode, bf16, AMD Instinct™ MI300X) — all without a single trace.
 
 - [Analyze traces with the TraceLens SDK](./sdk-analysis.md)
 - [GEMM analysis in TraceLens](../conceptual/gemm-analysis.md)
-- [Performance report columns](../reference/perf-report-columns.md)
+- [TraceLens metrics](../reference/tracelens-metrics.md)
 - [API reference](../reference/api-reference.md)

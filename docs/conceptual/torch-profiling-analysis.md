@@ -147,5 +147,5 @@ Together with the flows discussed earlier, this lets you connect a forward convo
 - [Trace2Tree](../conceptual/trace2tree.md)
 - [GEMM analysis](../conceptual/gemm-analysis.md)
 - [Generate a performance report from PyTorch traces](../how-to/generate-perf-report-pytorch.md)
-- [Performance report columns](../reference/perf-report-columns.md)
+- [TraceLens metrics](../reference/tracelens-metrics.md)
 - [What is TraceLens?](../what-is-tracelens.md)

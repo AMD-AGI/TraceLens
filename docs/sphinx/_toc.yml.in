@@ -85,8 +85,8 @@ subtrees:
   entries:
   - file: reference/api-reference
     title: API reference
-  - file: reference/perf-report-columns
-    title: Performance report columns
+  - file: reference/tracelens-metrics
+    title: TraceLens metrics
   - url: https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html
     title: Hyperloom
 

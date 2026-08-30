@@ -556,5 +556,5 @@ seq_len=4096, dtype=bf16. Traced with PyTorch 2.11+rocm7.2 on AMD Instinct™ MI
 - [GEMM analysis](../conceptual/gemm-analysis.md)
 - [Trace2Tree](../conceptual/trace2tree.md)
 - [Generate a performance report from a PyTorch trace](../how-to/generate-perf-report-pytorch.md)
-- [Performance report columns](../reference/perf-report-columns.md)
+- [TraceLens metrics](../reference/tracelens-metrics.md)
 - [API reference](../reference/api-reference.md)
