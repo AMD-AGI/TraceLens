@@ -52,6 +52,13 @@ function mountFactSheet(factSheet) {
 }
 
 function mountVisualizer(graphCollections) {
+  if (!localStorage.getItem("model_explorer_show_on_edge_item_v3")) {
+    localStorage.setItem(
+      "model_explorer_show_on_edge_item_v3",
+      JSON.stringify({ type: "Input metadata", filterText: "port_label" }),
+    );
+  }
+
   const visualizer = document.createElement("model-explorer-visualizer");
   visualizer.graphCollections = graphCollections;
   visualizer.config = {

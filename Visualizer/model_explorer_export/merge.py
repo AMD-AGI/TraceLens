@@ -18,7 +18,11 @@ from model_explorer_export.adapter import (
     _node_style,
     _sanitize_namespace_segment,
 )
-from model_explorer_export.labels import apply_kernel_frame_labels
+from model_explorer_export.labels import (
+    apply_kernel_frame_labels,
+    skip_merged_tensor_port_parent,
+    tensor_port_input_label,
+)
 from model_explorer_export.overview import (
     _DECODER_NORM_ATTRS,
     _decoder_namespace,
@@ -47,12 +51,156 @@ def _merge_node_id(prefix: str, local_id: str) -> str:
 
 def _is_synthetic_input(node: dict[str, Any]) -> bool:
     node_id = node.get("id", "")
-    if node_id == "@input" or node_id.endswith("/@input"):
+    if node_id == "@input" or re.search(r"/@input(?::|$)", node_id):
         return True
     for attr in node.get("attrs", []):
         if attr.get("key") == "synthetic" and attr.get("value") == "@input":
             return True
     return False
+
+
+def _node_attr(node: dict[str, Any], key: str) -> str | None:
+    for attr in node.get("attrs", []):
+        if attr.get("key") == key:
+            value = attr.get("value")
+            if isinstance(value, str):
+                return value
+    return None
+
+
+def _group_input_id(prefix: str, port_label: str | None = None) -> str:
+    if port_label:
+        return f"{prefix}/@input:{port_label}"
+    return f"{prefix}/@input"
+
+
+def _edge_port_label(edge: dict[str, Any]) -> str | None:
+    metadata = edge.get("metadata") or {}
+    value = metadata.get("port_label")
+    return str(value) if value else None
+
+
+def _label_input_edge(edge: dict[str, Any], label: str) -> dict[str, Any]:
+    labeled = dict(edge)
+    labeled.setdefault("metadata", {})["port_label"] = label
+    return labeled
+
+
+def _set_input_port_metadata(node: dict[str, Any], input_id: str, label: str) -> None:
+    items = list(node.get("inputsMetadata") or [])
+    for item in items:
+        if item.get("id") != input_id:
+            continue
+        attrs = [attr for attr in item.get("attrs", []) if attr.get("key") != "port_label"]
+        attrs.append({"key": "port_label", "value": label})
+        item["attrs"] = attrs
+        node["inputsMetadata"] = items
+        return
+    items.append({"id": input_id, "attrs": [{"key": "port_label", "value": label}]})
+    node["inputsMetadata"] = items
+
+
+def _apply_labeled_external_entry_ports(
+    entry_ports: list[tuple[str | None, dict[str, Any], dict[str, Any]]],
+    internal_ids: set[str],
+) -> bool:
+    """Keep real upstream nodes and label their entry edges instead of adding @input ports."""
+    if not entry_ports:
+        return False
+
+    labels = [label for label, _, _ in entry_ports if label]
+    multi_labeled = (
+        len(entry_ports) >= 2
+        and len(labels) == len(entry_ports)
+        and len(set(labels)) == len(labels)
+    )
+    single_labeled = len(entry_ports) == 1 and entry_ports[0][0] is not None
+    if not multi_labeled and not single_labeled:
+        return False
+
+    for label, edge, target in entry_ports:
+        if not label:
+            continue
+        input_id = str(edge.get("targetNodeInputId", "0"))
+        incoming = list(target.get("incomingEdges", []))
+        relabeled: list[dict[str, Any]] = []
+        for item in incoming:
+            if item["sourceNodeId"] in internal_ids:
+                relabeled.append(item)
+                continue
+            if (
+                item["sourceNodeId"] == edge["sourceNodeId"]
+                and str(item.get("targetNodeInputId", "0")) == input_id
+            ):
+                relabeled.append(_label_input_edge(item, label))
+            else:
+                relabeled.append(item)
+        target["incomingEdges"] = relabeled
+        _set_input_port_metadata(target, input_id, label)
+    return True
+
+
+def _labeled_tensor_port_label(node: dict[str, Any] | None) -> str | None:
+    if node is None or _node_attr(node, "synthetic") != "@tensor":
+        return None
+    label = node.get("label")
+    return label if isinstance(label, str) and label else None
+
+
+def _infer_entry_port_label(
+    edge: dict[str, Any],
+    target: dict[str, Any],
+    node_by_id: dict[str, dict[str, Any]],
+) -> str | None:
+    return (
+        _edge_port_label(edge)
+        or _labeled_tensor_port_label(target)
+        or _node_attr(target, "port_label")
+        or _labeled_tensor_port_label(node_by_id.get(edge["sourceNodeId"]))
+    )
+
+
+def _collect_group_entry_ports(
+    group_nodes: list[dict[str, Any]],
+    internal_ids: set[str],
+    node_by_id: dict[str, dict[str, Any]],
+) -> list[tuple[str | None, dict[str, Any], dict[str, Any]]]:
+    ports: list[tuple[str | None, dict[str, Any], dict[str, Any]]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for node in group_nodes:
+        for edge in node.get("incomingEdges", []):
+            source_id = edge["sourceNodeId"]
+            if source_id in internal_ids:
+                continue
+            key = (source_id, node["id"], str(edge.get("targetNodeInputId", "0")))
+            if key in seen:
+                continue
+            seen.add(key)
+            ports.append((_infer_entry_port_label(edge, node, node_by_id), edge, node))
+    return ports
+
+
+def _make_group_input_node(
+    *,
+    input_id: str,
+    label: str,
+    namespace: str,
+    incoming_edges: list[dict[str, Any]] | None = None,
+    port_label: str | None = None,
+) -> dict[str, Any]:
+    attrs: list[dict[str, str]] = [{"key": "synthetic", "value": "@input"}]
+    if port_label:
+        attrs.append({"key": "port_label", "value": port_label})
+    node: dict[str, Any] = {
+        "id": input_id,
+        "label": label,
+        "namespace": namespace,
+        "attrs": attrs,
+        "style": _input_style(),
+    }
+    if incoming_edges:
+        node["incomingEdges"] = incoming_edges
+    return node
 
 
 def _input_style() -> dict[str, str]:
@@ -135,6 +283,14 @@ def _boundary_nodes(nodes: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
     return entries or sorted(node_ids)[:1], exits or sorted(node_ids)[-1:]
 
 
+def _is_primary_section_input(node: dict[str, Any]) -> bool:
+    """Section spine @input only — not labeled multi-port feeders like @input:q."""
+    if not _is_synthetic_input(node):
+        return False
+    node_id = node.get("id", "")
+    return node_id == "@input" or node_id.endswith("/@input")
+
+
 def _section_input_nodes(
     section_nodes: list[dict[str, Any]],
     namespace_prefix: str,
@@ -142,7 +298,7 @@ def _section_input_nodes(
     return [
         node["id"]
         for node in section_nodes
-        if _is_synthetic_input(node) and node.get("namespace", "") == namespace_prefix
+        if _is_primary_section_input(node) and node.get("namespace", "") == namespace_prefix
     ]
 
 
@@ -195,30 +351,27 @@ def _group_input_prefix(group_ids: list[str]) -> str:
     return prefix
 
 
-def _infer_group_input_label(group_nodes: list[dict[str, Any]], namespace: str) -> str:
+def _infer_group_input_label(
+    group_nodes: list[dict[str, Any]],
+    namespace: str,
+    *,
+    entry_ports: list[tuple[str | None, dict[str, Any], dict[str, Any]]] | None = None,
+) -> str:
+    if entry_ports:
+        labels = [label for label, _, _ in entry_ports if label]
+        if len(labels) == 1:
+            return labels[0]
     for node in group_nodes:
         for attr in node.get("attrs", []):
             if attr.get("key") == "port_label" and attr.get("value"):
                 return str(attr["value"])
     segment = namespace.rsplit("/", 1)[-1]
-    if segment == "l2norm_fwd_q":
-        return "q"
-    if segment == "l2norm_fwd_k":
-        return "k"
+    port_label = tensor_port_input_label(namespace)
+    if port_label is not None:
+        return port_label
     if segment in {"KimiMLP", "KimiMoEGate"}:
         return "x" if segment == "KimiMLP" else "hidden_states"
     return "hidden_states"
-
-
-def _skip_merged_l2norm_input(namespace: str, group_nodes: list[dict[str, Any]]) -> bool:
-    """Skip the shared l2norm_fwd wrapper when q/k frames export as separate groups."""
-    if namespace.rsplit("/", 1)[-1] != "l2norm_fwd":
-        return False
-    return any(
-        "forward_l2norm_fwd_q" in node.get("id", "")
-        or "forward_l2norm_fwd_k" in node.get("id", "")
-        for node in group_nodes
-    )
 
 
 def _skip_variant_root_input(component: BlockComponent) -> bool:
@@ -273,17 +426,17 @@ def _inject_group_inputs(
             continue
         if _skip_nested_inline_frame_input(section_nodes, namespace):
             continue
-        if _skip_merged_l2norm_input(namespace, group_nodes):
+        if skip_merged_tensor_port_parent(namespace, group_nodes):
             continue
 
         internal_ids = _namespace_internal_ids(section_nodes, namespace)
+        entry_ports = _collect_group_entry_ports(group_nodes, internal_ids, node_by_id)
         entry_nodes: list[dict[str, Any]] = []
         outside_sources: set[str] = set()
 
         for node in group_nodes:
             incoming = list(node.get("incomingEdges", []))
             external = [edge for edge in incoming if edge["sourceNodeId"] not in internal_ids]
-            internal = [edge for edge in incoming if edge["sourceNodeId"] in internal_ids]
             if external or not incoming:
                 entry_nodes.append(node)
                 outside_sources.update(edge["sourceNodeId"] for edge in external)
@@ -291,19 +444,21 @@ def _inject_group_inputs(
         if not entry_nodes:
             continue
 
+        if _apply_labeled_external_entry_ports(entry_ports, internal_ids):
+            continue
+
         group_ids = [node["id"] for node in group_nodes]
         prefix = _group_input_prefix(group_ids) or group_ids[0].rsplit("/", 1)[0]
-        input_id = f"{prefix}/@input"
+
+        input_id = _group_input_id(prefix)
         if input_id in node_by_id:
             continue
 
-        input_node: dict[str, Any] = {
-            "id": input_id,
-            "label": _infer_group_input_label(group_nodes, namespace),
-            "namespace": namespace,
-            "attrs": [{"key": "synthetic", "value": "@input"}],
-            "style": _input_style(),
-        }
+        input_node = _make_group_input_node(
+            input_id=input_id,
+            label=_infer_group_input_label(group_nodes, namespace, entry_ports=entry_ports),
+            namespace=namespace,
+        )
         if outside_sources:
             input_node["incomingEdges"] = [
                 {
@@ -329,15 +484,6 @@ def _inject_group_inputs(
         node_by_id[input_id] = input_node
 
 
-def _node_attr(node: dict[str, Any], key: str) -> str | None:
-    for attr in node.get("attrs", []):
-        if attr.get("key") == key:
-            value = attr.get("value")
-            if isinstance(value, str):
-                return value
-    return None
-
-
 def _nested_namespace_segment(nested_block: BlockNode, nested_label: str) -> str:
     if nested_block.class_name == "KernelPipeline":
         return _sanitize_namespace_segment(nested_label)
@@ -360,6 +506,7 @@ def _integrate_kernel_pipeline_merge(
     pipeline_prefix: str,
     pipeline_label: str,
     group_node_attributes: dict[str, dict[str, str]] | None = None,
+    inject_skip: set[str] | None = None,
 ) -> None:
     """Replace the collapsed KernelPipeline merge tile with an expanded subgraph."""
     merge_nodes = [
@@ -384,39 +531,31 @@ def _integrate_kernel_pipeline_merge(
     if not tensor_by_label:
         return
 
+    if inject_skip is not None:
+        inject_skip.add(pipeline_namespace)
+
     section_nodes.remove(merge)
 
-    input_id = f"{pipeline_prefix}/@input"
-    input_node: dict[str, Any] = {
-        "id": input_id,
-        "label": "pipeline inputs",
-        "namespace": pipeline_namespace,
-        "attrs": [{"key": "synthetic", "value": "@input"}],
-        "style": _input_style(),
-    }
-    if merge_edges:
-        input_node["incomingEdges"] = [dict(edge) for edge in merge_edges]
-    section_nodes.append(input_node)
-
     default_labels = ["q", "k", "v", "g", "beta"]
+    merge_edge_by_port: dict[int, dict[str, Any]] = {}
     for edge in merge_edges:
         try:
             port_index = int(edge.get("targetNodeInputId", "0"))
         except ValueError:
             continue
-        if port_index < 0 or port_index >= len(default_labels):
-            continue
-        label = default_labels[port_index]
+        if 0 <= port_index < len(default_labels):
+            merge_edge_by_port[port_index] = edge
+
+    for port_index, label in enumerate(default_labels):
         tensor = tensor_by_label.get(label)
         if tensor is None:
             continue
-        tensor_edge: dict[str, Any] = {
-            "sourceNodeId": input_id,
-            "sourceNodeOutputId": "0",
-            "targetNodeInputId": str(port_index),
-        }
-        tensor_edge["metadata"] = {"port_label": label}
-        tensor["incomingEdges"] = [tensor_edge]
+        merge_edge = merge_edge_by_port.get(port_index)
+        if merge_edge is not None:
+            tensor["incomingEdges"] = [
+                _label_input_edge({**merge_edge, "targetNodeInputId": "0"}, label)
+            ]
+            _set_input_port_metadata(tensor, "0", label)
 
     pipeline_nodes = [
         node
@@ -671,6 +810,7 @@ def _append_section(
     )
 
     seen_ids = {node["id"] for node in merged_nodes}
+    pipeline_inject_skip: set[str] = set()
     for nested_label, nested_block in collect_nested_diagrams(block_tree, basic_ops=basic_ops):
         nested_prefix = _merge_node_id(id_prefix, nested_block.attr_name)
         if any(node["id"].startswith(f"{nested_prefix}/") for node in section_nodes):
@@ -695,11 +835,14 @@ def _append_section(
                 pipeline_prefix=nested_prefix,
                 pipeline_label=nested_label,
                 group_node_attributes=group_node_attributes,
+                inject_skip=pipeline_inject_skip,
             )
 
     section_nodes = [node for node in section_nodes if node["id"] not in seen_ids]
-    inject_skip = frozenset({namespace_prefix}) if skip_variant_root_input else frozenset()
-    _inject_group_inputs(section_nodes, skip_namespaces=inject_skip)
+    inject_skip = set(pipeline_inject_skip)
+    if skip_variant_root_input:
+        inject_skip.add(namespace_prefix)
+    _inject_group_inputs(section_nodes, skip_namespaces=frozenset(inject_skip))
     _connect_external_inputs(
         section_nodes,
         namespace_prefix=namespace_prefix,

@@ -6132,34 +6132,59 @@ def _boxes_overlap_vertically(
     return below.top_y > above.bottom - min_gap
 
 
-def _consumer_row_pairs(
-    positions: list[LayoutPosition],
-    graph: ComputationGraph | None,
-) -> list[tuple[LayoutPosition, LayoutPosition]]:
-    """Producer/consumer row pairs that a top-entry connector has to span downward."""
-    if graph is None:
-        return []
-    count = len(positions)
+def _top_entry_consumer_links(graph: ComputationGraph, count: int) -> list[tuple[int, int]]:
+    """Links drawn as a downward top-entry connector, so the rows have to be ordered.
+
+    Tensor ports are docked alongside the step that reads them and feed it from the
+    side, so their rows are deliberately level and are left out.
+    """
     return [
-        (positions[source], positions[target])
+        (source, target)
         for source, target in _layout_graph_links(graph)
-        if source < count and target < count
+        if source < count
+        and target < count
+        and SYNTHETIC_TENSOR
+        not in (graph.nodes[source].synthetic, graph.nodes[target].synthetic)
     ]
 
 
 def _seat_consumers_below_producers(
-    pairs: Sequence[tuple[LayoutPosition, LayoutPosition]],
+    positions: list[LayoutPosition],
+    graph: ComputationGraph,
     *,
     min_gap: float,
+    max_passes: int = 200,
 ) -> bool:
-    """Drop any consumer that is not clear of its producer's bottom edge."""
-    moved = False
-    for producer, consumer in pairs:
-        allowed_top = producer.bottom - min_gap
-        if consumer.top_y > allowed_top:
-            consumer.top_y = allowed_top
+    """Drop consumers that overlap or sit above the producer feeding their top edge.
+
+    Overlap resolution can push a producer down past one of its own consumers, and a
+    top-entry connector cannot climb back up to reach it. A consumer inside an inline
+    frame moves with the whole frame, so the frame keeps its shape.
+    """
+    frame_of: dict[int, InlineFrameSpec] = {}
+    for frame in graph.inline_frames:
+        for index in frame.node_indices:
+            frame_of[index] = frame
+    links = _top_entry_consumer_links(graph, len(positions))
+    moved_any = False
+    for _pass in range(max_passes):
+        moved = False
+        for source, target in links:
+            frame = frame_of.get(target)
+            if frame is not None and source in frame.node_indices:
+                continue
+            drop = positions[target].top_y - (positions[source].bottom - min_gap)
+            if drop <= 1e-9:
+                continue
+            if frame is None:
+                positions[target].top_y -= drop
+            else:
+                _shift_inline_frame_column(positions, frame, drop)
             moved = True
-    return moved
+        if not moved:
+            break
+        moved_any = True
+    return moved_any
 
 
 def _resolve_vertical_overlaps(
@@ -6172,11 +6197,10 @@ def _resolve_vertical_overlaps(
 ) -> None:
     """Push lower nodes down when they overlap a higher node horizontally.
 
-    Separating a pair can drop a producer past one of its own consumers, and a
-    top-entry connector cannot climb back up to reach it, so consumers follow
-    their producer down in the same relaxation.
+    Separating a pair can drop a producer past one of its own consumers, so the
+    two constraints are relaxed together. Running them as separate passes lets
+    each undo the other's work.
     """
-    consumer_pairs = _consumer_row_pairs(positions, graph)
     for _pass in range(max_passes):
         changed = False
         ordered = sorted(positions, key=lambda pos: pos.top_y, reverse=True)
@@ -6192,7 +6216,12 @@ def _resolve_vertical_overlaps(
                 if below.top_y > allowed_top:
                     below.top_y = allowed_top
                     changed = True
-        if _seat_consumers_below_producers(consumer_pairs, min_gap=min_gap):
+        if graph is not None and _seat_consumers_below_producers(
+            positions,
+            graph,
+            min_gap=min_gap,
+            max_passes=1,
+        ):
             changed = True
         if not changed:
             return

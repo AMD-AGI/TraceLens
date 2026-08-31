@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -122,6 +123,57 @@ def test_merged_sections_include_input_ports():
         if node["id"].endswith("/block_sparse_moe/@input")
     )
     assert attn_input["incomingEdges"]
+
+
+def test_inject_group_inputs_labels_external_tensor_ports_on_edges():
+    from model_explorer_export.merge import _inject_group_inputs
+
+    namespace = "decoder/KimiDeltaAttention/chunk_kda_pipeline"
+    q_node_id = "decoder/attn/@pipeline:tensor:0"
+    k_node_id = "decoder/attn/@pipeline:tensor:1"
+    section_nodes = [
+        {
+            "id": "decoder/attn/q_act",
+            "label": "q act",
+        },
+        {
+            "id": "decoder/attn/k_act",
+            "label": "k act",
+        },
+        {
+            "id": q_node_id,
+            "label": "q",
+            "namespace": namespace,
+            "attrs": [{"key": "synthetic", "value": "@tensor"}],
+            "incomingEdges": [
+                {
+                    "sourceNodeId": "decoder/attn/q_act",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                }
+            ],
+        },
+        {
+            "id": k_node_id,
+            "label": "k",
+            "namespace": namespace,
+            "attrs": [{"key": "synthetic", "value": "@tensor"}],
+            "incomingEdges": [
+                {
+                    "sourceNodeId": "decoder/attn/k_act",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                }
+            ],
+        },
+    ]
+    _inject_group_inputs(section_nodes)
+    assert not any("/@input:" in node.get("id", "") for node in section_nodes)
+    q_node = next(node for node in section_nodes if node["id"] == q_node_id)
+    k_node = next(node for node in section_nodes if node["id"] == k_node_id)
+    assert q_node["incomingEdges"][0]["metadata"] == {"port_label": "q"}
+    assert k_node["incomingEdges"][0]["metadata"] == {"port_label": "k"}
+    assert q_node["inputsMetadata"] == [{"id": "0", "attrs": [{"key": "port_label", "value": "q"}]}]
 
 
 def test_inject_group_inputs_adds_namespace_input_port():
@@ -353,22 +405,41 @@ def test_kimi_layer_variants_export_three_decoder_splits():
         for node in graph["nodes"]
         if (node.get("namespace") or "").startswith(pipeline_ns)
     )
-    pipeline_input = (
-        f"decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@input"
-    )
-    assert any(node["id"] == pipeline_input for node in graph["nodes"])
     q_tensor = next(
         node
         for node in graph["nodes"]
         if node.get("label") == "q" and node.get("namespace") == pipeline_ns
     )
-    assert q_tensor["incomingEdges"][0]["sourceNodeId"] == pipeline_input
-    assert any(
-        "q_conv1d_activation" in edge["sourceNodeId"]
-        for edge in next(node for node in graph["nodes"] if node["id"] == pipeline_input)[
-            "incomingEdges"
-        ]
+    k_tensor = next(
+        node
+        for node in graph["nodes"]
+        if node.get("label") == "k" and node.get("namespace") == pipeline_ns
     )
+    v_tensor = next(
+        node
+        for node in graph["nodes"]
+        if node.get("label") == "v" and node.get("namespace") == pipeline_ns
+    )
+    g_tensor = next(
+        node
+        for node in graph["nodes"]
+        if node.get("label") == "g" and node.get("namespace") == pipeline_ns
+    )
+    beta_tensor = next(
+        node
+        for node in graph["nodes"]
+        if node.get("label") == "beta" and node.get("namespace") == pipeline_ns
+    )
+    assert not any("/@input:" in node.get("id", "") for node in graph["nodes"])
+    for tensor, label in (
+        (q_tensor, "q"),
+        (k_tensor, "k"),
+        (v_tensor, "v"),
+        (g_tensor, "g"),
+        (beta_tensor, "beta"),
+    ):
+        assert tensor["incomingEdges"][0]["metadata"] == {"port_label": label}
+    assert "q_conv1d_activation" in q_tensor["incomingEdges"][0]["sourceNodeId"]
     l2norm_ns = f"{pipeline_ns}/l2norm_fwd_q"
     l2norm_labels = {
         node["label"]
@@ -376,7 +447,7 @@ def test_kimi_layer_variants_export_three_decoder_splits():
         if node.get("namespace") == l2norm_ns
         and any(a.get("key") == "class_name" and a.get("value") == "KernelSubOp" for a in node.get("attrs", []))
     }
-    assert l2norm_labels == {"Sum sq", "Sqrt", "Inv sqrt", "X"}
+    assert l2norm_labels == {"Sum", "Sqrt", "1/x", "X"}
     assert graph["groupNodeAttributes"][l2norm_ns]["label"] == "L2Norm (q)"
     l2norm_k_ns = f"{pipeline_ns}/l2norm_fwd_k"
     assert not any(
@@ -414,16 +485,29 @@ def test_kimi_layer_variants_export_three_decoder_splits():
         assert not any("sub_1" in source for source in sources)
     gate_ns = f"{pipeline_ns}/kda_gate_chunk_cumsum"
     assert graph["groupNodeAttributes"][gate_ns]["label"] == "Gate cumsum"
+
+    def _labeled_entry(namespace: str, label: str) -> dict[str, Any]:
+        return next(
+            node
+            for node in graph["nodes"]
+            if node.get("namespace") == namespace
+            and any(
+                (edge.get("metadata") or {}).get("port_label") == label
+                for edge in node.get("incomingEdges", [])
+            )
+        )
+
+    gate_entry = _labeled_entry(gate_ns, "g")
+    fused_beta_entry = _labeled_entry(fused_beta_ns, "beta")
+    assert gate_entry["inputsMetadata"][0]["attrs"] == [{"key": "port_label", "value": "g"}]
+    assert fused_beta_entry["inputsMetadata"][0]["attrs"] == [{"key": "port_label", "value": "beta"}]
     gate_labels = {
         node["label"]
         for node in graph["nodes"]
         if node.get("namespace") == gate_ns
         and any(a.get("key") == "class_name" and a.get("value") == "KernelSubOp" for a in node.get("attrs", []))
     }
-    assert gate_labels == {"Exp", "Softplus", "Gate mul", "Gate", "Chunk cumsum"}
-    assert "Sigmoid" not in {
-        node["label"] for node in graph["nodes"] if node.get("namespace") == gate_ns
-    }
+    assert gate_labels == {"Exp", "Softplus", "X", "Sigmoid", "CumSum"}
     mlp_variant_ns = f"{decoder_ns}/1x_KimiDeltaAttention_KimiMLP"
     assert not any(
         node["id"] == f"decoder/1x_KimiDeltaAttention_KimiMLP/{norm_attr}/@input"
@@ -617,7 +701,7 @@ def test_kernel_frame_labels_split_l2norm_q_and_k_and_sanitize_unicode():
     apply_kernel_frame_labels(nodes, group_attrs)
     assert nodes[0]["namespace"].endswith("/l2norm_fwd_q")
     assert nodes[1]["namespace"].endswith("/l2norm_fwd_k")
-    assert nodes[0]["label"] == "Sum sq"
+    assert nodes[0]["label"] == "Sum"
     assert nodes[2]["label"] == "x scale"
     assert group_attrs[nodes[0]["namespace"]]["label"] == "L2Norm (q)"
     assert group_attrs[nodes[1]["namespace"]]["label"] == "L2Norm (k)"

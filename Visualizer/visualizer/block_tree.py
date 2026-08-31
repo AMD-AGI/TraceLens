@@ -452,17 +452,13 @@ def linear_pipeline_steps(node: BlockNode) -> list[BlockNode]:
     return straight_line_steps(node)
 
 
-_L2NORM_QK_FRAME_RE = re.compile(r"forward_l2norm_fwd_([qk])$")
-
-
 def _kernel_inline_frame_label(block: BlockNode) -> str | None:
-    """Give q/k L2Norm expansions distinct frame namespaces."""
+    """Give per-tensor-port kernel expansions distinct frame namespaces."""
     if block.class_name != "KernelOp" or not block.children:
         return None
-    match = _L2NORM_QK_FRAME_RE.match(block.attr_name)
-    if match is not None:
-        return f"l2norm_fwd_{match.group(1)}"
-    return None
+    from visualizer.kernel_pipeline import tensor_port_kernel_frame_label
+
+    return tensor_port_kernel_frame_label(block.attr_name)
 
 
 def inline_block_frame_label(block: BlockNode) -> str:

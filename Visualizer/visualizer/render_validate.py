@@ -3175,6 +3175,12 @@ def finalize_detail_layout(
     from visualizer.computation_graph import _resolve_vertical_overlaps
 
     _resolve_vertical_overlaps(positions, graph=graph, min_gap=VALIDATE_MIN_GAP)
+    _ensure_top_entry_clearance_below_inline_frames(positions, graph)
+    _separate_external_boxes_from_inline_frames(
+        positions,
+        graph,
+        min_gap=VALIDATE_MIN_GAP,
+    )
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     # Tile positions are settled from here on, so captions can finally be steered clear

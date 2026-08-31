@@ -119,6 +119,17 @@ _OP_LABEL_OVERRIDES: dict[str, str] = {
 }
 
 
+TENSOR_PORT_KERNEL_ATTR_RE = re.compile(r"forward_(?P<stem>.+)_fwd_(?P<port>[a-z])$")
+
+
+def tensor_port_kernel_frame_label(attr_name: str) -> str | None:
+    """Namespace segment for a kernel expanded once per tensor port (e.g. q/k)."""
+    match = TENSOR_PORT_KERNEL_ATTR_RE.match(attr_name)
+    if match is None:
+        return None
+    return f"{match.group('stem')}_fwd_{match.group('port')}"
+
+
 @dataclass(frozen=True)
 class KernelPipelineStep:
     call_name: str
