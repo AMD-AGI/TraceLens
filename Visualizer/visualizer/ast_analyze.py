@@ -610,8 +610,8 @@ def _single_op_forward_methods(
             self_values=self_values,
             all_tensor_ops=all_tensor_ops,
         )
-        if len(operations) == 1:
-            single[call_attr] = operations[0]
+        if len(operations.operations) == 1:
+            single[call_attr] = operations.operations[0]
     return single
 
 
@@ -650,8 +650,8 @@ def _multi_op_forward_methods(
             all_tensor_ops=all_tensor_ops,
             name_primary_input=True,
         )
-        if len(operations) > 1:
-            expanded[call_attr] = operations
+        if len(operations.operations) > 1:
+            expanded[call_attr] = operations.operations
     return expanded
 
 
@@ -921,6 +921,17 @@ class ForwardOperation:
 
 
 @dataclass
+class ForwardAnalysis:
+    """Inline tensor ops recovered from one ``forward()`` plus return metadata."""
+
+    operations: list[ForwardOperation]
+    var_producer: dict[str, str]
+    return_slots: dict[str, str]
+    return_order: list[str]
+    primary_return_slot: str | None
+
+
+@dataclass
 class ClassStructure:
     name: str
     node: ast.ClassDef
@@ -939,6 +950,10 @@ class ClassStructure:
     forward_operations: dict[str, ForwardOperation] = field(default_factory=dict)
     single_op_methods: dict[str, ForwardOperation] = field(default_factory=dict)
     multi_op_methods: dict[str, list[ForwardOperation]] = field(default_factory=dict)
+    forward_return_slots: dict[str, str] = field(default_factory=dict)
+    forward_return_order: list[str] = field(default_factory=list)
+    primary_return_slot: str | None = None
+    referenced_return_producers: set[str] = field(default_factory=set)
 
 
 def infer_forward_steps_from_init(cls: ClassStructure) -> list[str]:
@@ -1567,13 +1582,250 @@ def _forward_calls_in_source_order(
     return [name for _where, name in ordered]
 
 
+def _return_value_names(value: ast.AST) -> list[str]:
+    if isinstance(value, ast.Tuple):
+        return [elt.id for elt in value.elts if isinstance(elt, ast.Name)]
+    if isinstance(value, ast.Name):
+        return [value.id]
+    return []
+
+
+def _extract_forward_return_metadata(
+    func: ast.FunctionDef,
+    var_producer: dict[str, str],
+) -> tuple[dict[str, str], list[str], str | None]:
+    """Map ``return (a, b, c)`` names to the inline ops that produce them."""
+    return_order: list[str] = []
+    for stmt in reversed(func.body):
+        if isinstance(stmt, ast.Return) and stmt.value is not None:
+            return_order = _return_value_names(stmt.value)
+            break
+    slots = {
+        name: var_producer[name]
+        for name in return_order
+        if name in var_producer
+    }
+    primary = return_order[-1] if return_order else None
+    return slots, return_order, primary
+
+
+def _live_forward_steps(
+    *,
+    operations: dict[str, ForwardOperation],
+    return_slots: dict[str, str],
+) -> set[str]:
+    """Backward closure of ops and submodule steps that feed returned values."""
+    if not return_slots:
+        return set(operations.keys())
+    live_ops: set[str] = set()
+    pending = [producer for producer in return_slots.values() if producer in operations]
+    while pending:
+        step = pending.pop()
+        if step in live_ops:
+            continue
+        live_ops.add(step)
+        operation = operations.get(step)
+        if operation is None:
+            continue
+        for pred in operation.predecessors:
+            if pred in operations and pred not in live_ops:
+                pending.append(pred)
+    live = set(live_ops)
+    for step in live_ops:
+        operation = operations.get(step)
+        if operation is None:
+            continue
+        for pred in operation.predecessors:
+            if pred not in operations:
+                live.add(pred)
+    return live
+
+
+def _prune_forward_pipeline(
+    *,
+    forward_calls: list[str],
+    operations: dict[str, ForwardOperation],
+    return_slots: dict[str, str],
+) -> tuple[list[str], dict[str, ForwardOperation]]:
+    if len(return_slots) < 2:
+        return forward_calls, operations
+    live = _live_forward_steps(operations=operations, return_slots=return_slots)
+    pruned_operations = {name: op for name, op in operations.items() if name in live}
+    pruned_calls = [step for step in forward_calls if step not in operations or step in live]
+    return pruned_calls, pruned_operations
+
+
+def _self_module_call_attr(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        if _is_self_attr(node.func, node.func.attr):
+            return node.func.attr
+    return None
+
+
+def _module_return_unpacks(
+    forward_func: ast.FunctionDef,
+    init_assignments: dict[str, str],
+    registry: dict[str, ClassStructure],
+) -> dict[str, dict[str, str]]:
+    """Map ``module_attr -> {local_var: producing_step}`` for tuple unpacks."""
+    unpacks: dict[str, dict[str, str]] = {}
+    for stmt in forward_func.body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        target = stmt.targets[0]
+        if not isinstance(target, ast.Tuple) or not isinstance(stmt.value, ast.Call):
+            continue
+        module_attr = _self_module_call_attr(stmt.value)
+        if module_attr is None or module_attr not in init_assignments:
+            continue
+        callee = registry.get(init_assignments[module_attr])
+        if callee is None or not callee.forward_return_order:
+            continue
+        if len(target.elts) != len(callee.forward_return_order):
+            continue
+        mapping: dict[str, str] = {}
+        for elt, slot_name in zip(target.elts, callee.forward_return_order):
+            if not isinstance(elt, ast.Name):
+                mapping = {}
+                break
+            producer = callee.forward_return_slots.get(slot_name)
+            if producer is None:
+                mapping = {}
+                break
+            mapping[elt.id] = producer
+        if mapping:
+            unpacks[module_attr] = mapping
+    return unpacks
+
+
+def _expression_at_operation_line(
+    func: ast.FunctionDef,
+    attr_name: str,
+) -> ast.AST | None:
+    match = _OPERATION_SOURCE_POS_RE.match(attr_name)
+    if match is None:
+        return None
+    target_line = int(match.group(1))
+    for stmt in func.body:
+        if getattr(stmt, "lineno", None) != target_line:
+            continue
+        if isinstance(stmt, ast.Return):
+            return stmt.value
+        if isinstance(stmt, ast.Assign):
+            return stmt.value
+        if isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            return stmt.value
+        if isinstance(stmt, ast.AugAssign):
+            return stmt.value
+    return None
+
+
+def _vars_read_in_expr(node: ast.AST | None) -> set[str]:
+    if node is None:
+        return set()
+    return {item.id for item in ast.walk(node) if isinstance(item, ast.Name)}
+
+
+def _refine_forward_operation_predecessors(
+    forward_func: ast.FunctionDef,
+    forward_operations: dict[str, ForwardOperation],
+    *,
+    module_unpacks: dict[str, dict[str, str]],
+) -> dict[str, ForwardOperation]:
+    if not module_unpacks:
+        return forward_operations
+    refined: dict[str, ForwardOperation] = {}
+    for name, operation in forward_operations.items():
+        expr = _expression_at_operation_line(forward_func, name)
+        vars_read = _vars_read_in_expr(expr)
+        predecessors: list[str] = []
+        for pred in operation.predecessors:
+            var_map = module_unpacks.get(pred)
+            if var_map:
+                mapped = [producer for var, producer in var_map.items() if var in vars_read]
+                if mapped:
+                    predecessors.extend(mapped)
+                    continue
+            predecessors.append(pred)
+        refined[name] = ForwardOperation(
+            attr_name=operation.attr_name,
+            label=operation.label,
+            class_name=operation.class_name,
+            predecessors=tuple(dict.fromkeys(predecessors)),
+            external_inputs=operation.external_inputs,
+            details=operation.details,
+            param_inputs=operation.param_inputs,
+        )
+    return refined
+
+
+def _apply_forward_analysis(
+    forward_func: ast.FunctionDef,
+    analysis: ForwardAnalysis,
+    *,
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+) -> tuple[list[str], dict[str, ForwardOperation], dict[str, str], list[str], str | None]:
+    operations = {op.attr_name: op for op in analysis.operations}
+    pruned_calls, pruned_operations = _prune_forward_pipeline(
+        forward_calls=forward_calls,
+        operations=operations,
+        return_slots=analysis.return_slots,
+    )
+    return (
+        pruned_calls,
+        pruned_operations,
+        analysis.return_slots,
+        analysis.return_order,
+        analysis.primary_return_slot,
+    )
+
+
+def finalize_class_registry(registry: dict[str, ClassStructure]) -> None:
+    """Resolve submodule return unpacks and refine inline op predecessors."""
+    referenced: dict[str, set[str]] = {}
+    for cls in registry.values():
+        forward_func = next(
+            (item for item in cls.node.body if isinstance(item, ast.FunctionDef) and item.name == "forward"),
+            None,
+        )
+        if forward_func is None:
+            continue
+        for module_attr, var_map in _module_return_unpacks(
+            forward_func,
+            cls.init_assignments,
+            registry,
+        ).items():
+            callee_name = cls.init_assignments.get(module_attr)
+            if callee_name is None:
+                continue
+            referenced.setdefault(callee_name, set()).update(var_map.values())
+
+    for cls in registry.values():
+        cls.referenced_return_producers = set(referenced.get(cls.name, set()))
+        if not cls.forward_operations:
+            continue
+        forward_func = next(
+            (item for item in cls.node.body if isinstance(item, ast.FunctionDef) and item.name == "forward"),
+            None,
+        )
+        if forward_func is None:
+            continue
+        module_unpacks = _module_return_unpacks(forward_func, cls.init_assignments, registry)
+        cls.forward_operations = _refine_forward_operation_predecessors(
+            forward_func,
+            cls.forward_operations,
+            module_unpacks=module_unpacks,
+        )
+
+
 def _forward_operations_from_forward(
     func: ast.FunctionDef,
     *,
     self_values: dict[str, Any],
     all_tensor_ops: bool,
     name_primary_input: bool = False,
-) -> list[ForwardOperation]:
+) -> ForwardAnalysis:
     # The primary parameter is the main path, so only the extra ones can identify
     # which step consumes a side feed.
     primary = _primary_forward_input_name(func)
@@ -1588,7 +1840,17 @@ def _forward_operations_from_forward(
     if name_primary_input and primary:
         extractor.var_producer[primary] = FORWARD_METHOD_INPUT
     extractor.statements(func.body)
-    return extractor.operations
+    return_slots, return_order, primary_return_slot = _extract_forward_return_metadata(
+        func,
+        extractor.var_producer,
+    )
+    return ForwardAnalysis(
+        operations=extractor.operations,
+        var_producer=dict(extractor.var_producer),
+        return_slots=return_slots,
+        return_order=return_order,
+        primary_return_slot=primary_return_slot,
+    )
 
 
 # Backwards-compatible alias used internally.
@@ -1620,6 +1882,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
         side_inputs: dict[str, list[SideInputSpec]] = {}
         forward_input_name: str | None = None
         forward_operations: dict[str, ForwardOperation] = {}
+        forward_return_slots: dict[str, str] = {}
+        forward_return_order: list[str] = []
+        primary_return_slot: str | None = None
         single_op_methods: dict[str, ForwardOperation] = {}
         multi_op_methods: dict[str, list[ForwardOperation]] = {}
         init_func = next(
@@ -1658,16 +1923,26 @@ class _ModelAstVisitor(ast.NodeVisitor):
             forward_step_details = dict(parsed_step_details)
             if _is_moe_gate_class(node.name, forward_calls):
                 values = _self_config_values(init_func, self.config)
-                parsed_operations = _forward_operations_from_forward(
+                analysis = _forward_operations_from_forward(
                     forward_func,
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
                 )
-                if parsed_operations:
-                    forward_operations = {op.attr_name: op for op in parsed_operations}
-                    forward_calls = [op.attr_name for op in parsed_operations]
+                if analysis.operations:
+                    (
+                        forward_calls,
+                        forward_operations,
+                        forward_return_slots,
+                        forward_return_order,
+                        primary_return_slot,
+                    ) = _apply_forward_analysis(
+                        forward_func,
+                        analysis,
+                        forward_calls=forward_calls,
+                        init_assignments=init_assignments,
+                    )
                     forward_step_details.update(
-                        {op.attr_name: list(op.details) for op in parsed_operations}
+                        {op.attr_name: list(op.details) for op in forward_operations.values()}
                     )
             forward_step_details.update(
                 _method_forward_step_details(node, forward_calls, init_assignments)
@@ -1689,30 +1964,41 @@ class _ModelAstVisitor(ast.NodeVisitor):
             delegates_inline = _forward_delegates_to_nothing(node.name, forward_calls)
             if _forward_owns_tensor_math(forward_calls, init_assignments) or delegates_inline:
                 values = _self_config_values(init_func, self.config)
-                parsed_operations = _forward_operations_from_forward(
+                analysis = _forward_operations_from_forward(
                     forward_func,
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
                     name_primary_input=delegates_inline,
                 )
-                if parsed_operations:
+                if analysis.operations:
                     module_calls = _module_calls_for_forward_merge(
                         forward_calls,
                         init_assignments,
-                        parsed_operations=parsed_operations,
+                        parsed_operations=analysis.operations,
                     )
-                    forward_operations = {op.attr_name: op for op in parsed_operations}
-                    forward_calls = _forward_calls_in_source_order(
+                    merged_calls = _forward_calls_in_source_order(
                         forward_func,
                         module_calls,
-                        parsed_operations,
+                        analysis.operations,
+                    )
+                    (
+                        forward_calls,
+                        forward_operations,
+                        forward_return_slots,
+                        forward_return_order,
+                        primary_return_slot,
+                    ) = _apply_forward_analysis(
+                        forward_func,
+                        analysis,
+                        forward_calls=merged_calls,
+                        init_assignments=init_assignments,
                     )
                     forward_step_details.update(
-                        {op.attr_name: list(op.details) for op in parsed_operations}
+                        {op.attr_name: list(op.details) for op in forward_operations.values()}
                     )
             elif forward_func is not None:
                 values = _self_config_values(init_func, self.config)
-                probed_operations = _forward_operations_from_forward(
+                probed = _forward_operations_from_forward(
                     forward_func,
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
@@ -1720,21 +2006,32 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 if _forward_mixes_modules_and_inline_ops(
                     forward_calls,
                     init_assignments,
-                    probed_operations,
+                    probed.operations,
                 ):
                     module_calls = _module_calls_for_forward_merge(
                         forward_calls,
                         init_assignments,
-                        parsed_operations=probed_operations,
+                        parsed_operations=probed.operations,
                     )
-                    forward_operations = {op.attr_name: op for op in probed_operations}
-                    forward_calls = _forward_calls_in_source_order(
+                    merged_calls = _forward_calls_in_source_order(
                         forward_func,
                         module_calls,
-                        probed_operations,
+                        probed.operations,
+                    )
+                    (
+                        forward_calls,
+                        forward_operations,
+                        forward_return_slots,
+                        forward_return_order,
+                        primary_return_slot,
+                    ) = _apply_forward_analysis(
+                        forward_func,
+                        probed,
+                        forward_calls=merged_calls,
+                        init_assignments=init_assignments,
                     )
                     forward_step_details.update(
-                        {op.attr_name: list(op.details) for op in probed_operations}
+                        {op.attr_name: list(op.details) for op in forward_operations.values()}
                     )
 
         self.classes[node.name] = ClassStructure(
@@ -1755,6 +2052,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
             forward_operations=forward_operations,
             single_op_methods=single_op_methods,
             multi_op_methods=multi_op_methods,
+            forward_return_slots=forward_return_slots,
+            forward_return_order=forward_return_order,
+            primary_return_slot=primary_return_slot,
         )
         self.generic_visit(node)
 
@@ -3530,6 +3830,7 @@ def analyze_source(
     external_imports = _collect_external_imports(tree)
     visitor = _ModelAstVisitor(config=config, all_tensor_ops=all_tensor_ops)
     visitor.visit(tree)
+    finalize_class_registry(visitor.classes)
     _enrich_kernel_import_details(visitor.classes, external_imports)
     _resolve_dispatched_attention_kernel(visitor.classes, config)
 

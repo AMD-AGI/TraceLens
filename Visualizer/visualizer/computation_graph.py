@@ -84,6 +84,7 @@ class ComputationGraph:
     side_effect_frame_ids: set[str] = field(default_factory=set)
     excluded_output_indices: set[int] = field(default_factory=set)
     primary_output_index: int | None = None
+    dead_node_indices: set[int] = field(default_factory=set)
 
 
 def _operation_tile_label(label: str) -> str:
@@ -931,18 +932,45 @@ def _append_step_link(
         graph.links.append((input_index, step_index))
 
 
-def _filter_graph_basic_only(graph: ComputationGraph) -> ComputationGraph:
-    """Drop modeled-op nodes and bridge links across removed vertices."""
-    remove_indices = {
-        index
-        for index, spec in enumerate(graph.nodes)
-        if not keep_detail_graph_node(
-            block=spec.block,
-            synthetic=spec.synthetic,
-            label=spec.label,
-            basic_only=True,
-        )
-    }
+def _dead_node_indices(graph: ComputationGraph, root: BlockNode) -> set[int]:
+    """Nodes not on any path feeding kept return values."""
+    if graph.primary_output_index is None or not root.primary_output_step:
+        return set()
+    preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    for source, target in graph.links:
+        preds[target].append(source)
+
+    keep: set[int] = set()
+    seeds: list[int] = [graph.primary_output_index]
+    for producer in root.referenced_return_producers:
+        for index, spec in enumerate(graph.nodes):
+            if spec.block is not None and spec.block.attr_name == producer:
+                seeds.append(index)
+                break
+
+    pending = list(dict.fromkeys(seeds))
+    while pending:
+        index = pending.pop()
+        if index in keep:
+            continue
+        keep.add(index)
+        pending.extend(preds[index])
+
+    dead: set[int] = set()
+    for index, spec in enumerate(graph.nodes):
+        if index in keep:
+            continue
+        if spec.synthetic in {SYNTHETIC_INPUT, SYNTHETIC_OUTPUT}:
+            continue
+        dead.add(index)
+    return dead
+
+
+def _prune_computation_nodes(
+    graph: ComputationGraph,
+    remove_indices: set[int],
+) -> ComputationGraph:
+    """Drop selected nodes and bridge links across removed vertices."""
     if not remove_indices:
         return graph
 
@@ -1005,21 +1033,30 @@ def _filter_graph_basic_only(graph: ComputationGraph) -> ComputationGraph:
         old_to_new[index] = len(new_nodes)
         new_nodes.append(spec)
 
-    def _remap(index: int) -> int:
-        return old_to_new[index]
+    def _remap(index: int | None) -> int | None:
+        if index is None:
+            return None
+        return old_to_new.get(index)
 
     filtered = ComputationGraph(
         nodes=new_nodes,
-        links=[(_remap(source), _remap(target)) for source, target in bridged_links],
+        links=[
+            (kept_source, kept_target)
+            for source, target in bridged_links
+            if (kept_source := _remap(source)) is not None and (kept_target := _remap(target)) is not None
+        ],
         link_port_labels={
-            (_remap(source), _remap(target)): label
+            (kept_source, kept_target): label
             for (source, target), label in bridged_port_labels.items()
-            if source not in remove_indices and target not in remove_indices
+            if (kept_source := _remap(source)) is not None and (kept_target := _remap(target)) is not None
         },
+        excluded_output_indices={_remap(index) for index in graph.excluded_output_indices if _remap(index) is not None},
+        primary_output_index=_remap(graph.primary_output_index),
+        dead_node_indices=set(),
     )
 
     for frame in graph.inline_frames:
-        kept_indices = [_remap(index) for index in frame.node_indices if index not in remove_indices]
+        kept_indices = [_remap(index) for index in frame.node_indices if _remap(index) is not None]
         if len(kept_indices) >= 2:
             filtered.inline_frames.append(
                 InlineFrameSpec(
@@ -1029,11 +1066,28 @@ def _filter_graph_basic_only(graph: ComputationGraph) -> ComputationGraph:
                     node_indices=kept_indices,
                 )
             )
-        elif len(kept_indices) == 1:
-            # Unwrap single-step inline frames after filtering modeled steps away.
-            pass
 
     return filtered
+
+
+def _filter_graph_basic_only(graph: ComputationGraph) -> ComputationGraph:
+    """Drop modeled-op nodes and bridge links across removed vertices."""
+    remove_indices = {
+        index
+        for index, spec in enumerate(graph.nodes)
+        if not keep_detail_graph_node(
+            block=spec.block,
+            synthetic=spec.synthetic,
+            label=spec.label,
+            basic_only=True,
+        )
+    }
+    return _prune_computation_nodes(graph, remove_indices)
+
+
+def _strip_dead_nodes(graph: ComputationGraph) -> ComputationGraph:
+    """Remove branch tails that do not feed the primary return value."""
+    return _prune_computation_nodes(graph, set(graph.dead_node_indices))
 
 
 def _producer_label_from_attr(attr_name: str) -> str:
@@ -1670,8 +1724,18 @@ def build_computation_graph(
                 _track_attr_index(attr_last_index, step.attr_name, last_index)
 
     _wire_operation_predecessor_links(graph, root)
-    graph.primary_output_index = last_index
+    if root.primary_output_step:
+        for index, spec in enumerate(graph.nodes):
+            if spec.block is not None and spec.block.attr_name == root.primary_output_step:
+                graph.primary_output_index = index
+                break
+        else:
+            graph.primary_output_index = last_index
+    else:
+        graph.primary_output_index = last_index
+    graph.dead_node_indices = _dead_node_indices(graph, root)
     _add_conditional_alternative_links(graph)
+    graph = _strip_dead_nodes(graph)
     if basic_ops is not None and basic_ops.basic_only:
         return _filter_graph_basic_only(graph)
     return graph

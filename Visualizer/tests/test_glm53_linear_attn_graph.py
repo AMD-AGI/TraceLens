@@ -168,6 +168,52 @@ def test_glm53_ffn_hc_input_norm_precedes_linear():
     assert section_labels.index("RMSNorm") < section_labels.index("Linear")
 
 
+def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    prefix = _linear_attn_variant_prefix(spec)
+    node_by_id = {node["id"]: node for node in graph["nodes"]}
+
+    for target in ("input_layernorm", "post_attention_layernorm"):
+        node = node_by_id[f"{prefix}/{target}"]
+        incoming = node.get("incomingEdges", [])
+        assert len(incoming) == 1, (target, incoming)
+        source = node_by_id[incoming[0]["sourceNodeId"]]
+        assert source.get("label") == "Sum"
+        assert "/seq:24:" in source["id"]
+
+    hc = spec.class_registry["Glm5NextTextHyperConnection"]
+    assert hc.primary_return_slot == "collapsed"
+    assert set(hc.forward_return_order) == {"post", "comb", "collapsed"}
+
+    ffn_nodes = [node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/ffn_hc/")]
+    comb_producer = hc.forward_return_slots["comb"]
+    comb_nodes = [node for node in ffn_nodes if comb_producer in node["id"]]
+    assert comb_nodes, "comb branch kept for decoder residual matmul"
+    post_norm_id = f"{prefix}/post_attention_layernorm"
+    comb_to_norm = [
+        edge
+        for node in comb_nodes
+        for edge in node.get("outgoingEdges", [])
+        if edge.get("targetNodeId") == post_norm_id
+    ]
+    assert not comb_to_norm
+
+
+def test_glm53_decoder_residual_ops_use_return_slot_producers():
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    decoder = spec.class_registry["Glm5NextTextDecoderLayer"]
+    attn_hc = spec.class_registry["Glm5NextTextHyperConnection"]
+    matmul = decoder.forward_operations["@op_l1316_c85_matmul"]
+    multiply = decoder.forward_operations["@op_l1316_c24_multiply"]
+    assert attn_hc.forward_return_slots["comb"] in matmul.predecessors
+    assert attn_hc.forward_return_slots["post"] in multiply.predecessors
+    assert "attn_hc" not in matmul.predecessors
+    assert "attn_hc" not in multiply.predecessors
+
+
 def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
     pytest.importorskip("huggingface_hub")
     from model_explorer_export.merge import _resolve_section_tree_for_component

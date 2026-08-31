@@ -288,6 +288,33 @@ def _boundary_nodes(nodes: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
     return entries or sorted(node_ids)[:1], exits or sorted(node_ids)[-1:]
 
 
+def _section_exits(
+    computation: ComputationGraph,
+    section_nodes: list[dict[str, Any]],
+    *,
+    id_prefix: str,
+) -> list[str]:
+    """Return the section output node(s) that feed the next spine step.
+
+    Branchy inline graphs (for example mHC hyperconnections) can leave several
+    terminal ops (`post`, `comb`, `collapsed`). Only the primary output should
+    continue on the main forward path.
+    """
+    node_ids = {node["id"] for node in section_nodes}
+    if computation.primary_output_index is not None:
+        index_to_local = {
+            index: spec.key or f"node:{index}"
+            for index, spec in enumerate(computation.nodes)
+        }
+        primary_local = index_to_local.get(computation.primary_output_index)
+        if primary_local is not None:
+            primary_id = _merge_node_id(id_prefix, primary_local)
+            if primary_id in node_ids:
+                return [primary_id]
+    _entries, exits = _boundary_nodes(section_nodes)
+    return exits
+
+
 def _is_primary_section_input(node: dict[str, Any]) -> bool:
     """Section spine @input only — not labeled multi-port feeders like @input:q."""
     if not _is_synthetic_input(node):
@@ -867,7 +894,7 @@ def _append_section(
         namespace_prefix=namespace_prefix,
         previous_exits=previous_exits,
     )
-    _entries, exits = _boundary_nodes(section_nodes)
+    exits = _section_exits(computation, section_nodes, id_prefix=id_prefix)
 
     merged_nodes.extend(section_nodes)
     apply_kernel_frame_labels(section_nodes, group_node_attributes)

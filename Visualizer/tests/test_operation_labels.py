@@ -49,8 +49,8 @@ class Block(torch.nn.Module):
         self_values=_self_config_values(init, {}),
         all_tensor_ops=False,
     )
-    assert len(ops) == 1
-    op = ops[0]
+    assert len(ops.operations) == 1
+    op = ops.operations[0]
     assert op.label == "Linear"
     assert "weight" in op.external_inputs
 
@@ -70,8 +70,8 @@ class Block(torch.nn.Module):
     cls = tree.body[-1]
     forward = next(item for item in cls.body if isinstance(item, ast.FunctionDef) and item.name == "forward")
     ops = _forward_operations_from_forward(forward, self_values={}, all_tensor_ops=False)
-    assert len(ops) == 1
-    op = ops[0]
+    assert len(ops.operations) == 1
+    op = ops.operations[0]
     assert op.label == "MatMul"
     assert not op.external_inputs
 

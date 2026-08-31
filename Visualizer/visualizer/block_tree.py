@@ -597,6 +597,8 @@ class BlockNode:
     kernel_second_operand: str | None = None
     external_inputs: list[str] = field(default_factory=list)
     param_inputs: list[str] = field(default_factory=list)
+    primary_output_step: str | None = None
+    referenced_return_producers: set[str] = field(default_factory=set)
 
 
 PortStyle = Literal["floating", "inline"]
@@ -1871,6 +1873,9 @@ def build_block_node(
     )
 
     attention_inputs = dict(cls.attention_inputs)
+    primary_output_step = None
+    if cls.primary_return_slot and cls.forward_return_slots:
+        primary_output_step = cls.forward_return_slots.get(cls.primary_return_slot)
 
     return BlockNode(
         attr_name=attr_name,
@@ -1887,6 +1892,8 @@ def build_block_node(
         input_fed_steps=list(cls.input_fed_calls),
         side_inputs=dict(cls.side_inputs),
         input_label=cls.forward_input_name,
+        primary_output_step=primary_output_step,
+        referenced_return_producers=set(cls.referenced_return_producers),
     )
 
 
