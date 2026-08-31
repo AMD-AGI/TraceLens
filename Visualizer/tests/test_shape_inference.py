@@ -267,10 +267,10 @@ def test_export_block_trees_expand_init_only_modules():
         basic_ops=BasicOpFilter.for_detailed(),
     )
     export_titles = [title for title, _ in spec.export_block_trees]
-    detailed_titles = [title for title, _ in spec.detailed_block_trees]
     assert "Token Embedding" in export_titles
     assert "Linear" in export_titles
-    assert detailed_titles == ["CustomLatent Attn", "CustomSharedExpertMoE"]
+    assert "CustomLatent Attn" in export_titles
+    assert "CustomSharedExpertMoE" in export_titles
 
     attn_tree = next(tree for title, tree in spec.export_block_trees if "CustomLatent" in title)
     assert [child.attr_name for child in attn_tree.children] == ["q_proj", "kv_proj"]

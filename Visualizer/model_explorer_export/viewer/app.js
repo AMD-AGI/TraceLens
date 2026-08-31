@@ -67,13 +67,39 @@ function mountFactSheet(factSheetData) {
   factSheetBody.textContent = factSheetData.body;
 }
 
-function mountVisualizer(graphCollections) {
-  if (!localStorage.getItem("model_explorer_show_on_edge_item_v3")) {
-    localStorage.setItem(
-      "model_explorer_show_on_edge_item_v3",
-      JSON.stringify({ type: "Input metadata", filterText: "port_label" }),
-    );
+const SHOW_ON_NODE_KEY = "model_explorer_show_on_node_item_types_v2";
+const SHOW_ON_EDGE_KEY = "model_explorer_show_on_edge_item_v3";
+const LEGACY_SHOW_ON_NODE_KEYS = ["model_explorer_show_on_node_item_v3"];
+
+// Model Explorer enum string values from ShowOnNodeItemType / ShowOnEdgeItemType.
+const TRACE_LENS_SHOW_ON_NODE = {
+  "Op node id": { selected: false },
+  "Op node attributes": { selected: false, filterRegex: "output_shape" },
+  "Op node inputs": { selected: false },
+  "Op node outputs": { selected: false },
+  "Layer node children count": { selected: false },
+  "Layer node descendants count": { selected: false },
+  "Layer node attributes": { selected: false },
+};
+
+const TRACE_LENS_SHOW_ON_EDGE = {
+  type: "Input metadata",
+  filterText: "port_label",
+};
+
+function configureModelExplorerDisplay() {
+  for (const legacyKey of LEGACY_SHOW_ON_NODE_KEYS) {
+    localStorage.removeItem(legacyKey);
   }
+
+  // Always apply TraceLens defaults so stale ME settings (e.g. "Tensor shape"
+  // on edges, which renders "?" without metadata) do not override us.
+  localStorage.setItem(SHOW_ON_NODE_KEY, JSON.stringify(TRACE_LENS_SHOW_ON_NODE));
+  localStorage.setItem(SHOW_ON_EDGE_KEY, JSON.stringify(TRACE_LENS_SHOW_ON_EDGE));
+}
+
+function mountVisualizer(graphCollections) {
+  configureModelExplorerDisplay();
 
   const visualizer = document.createElement("model-explorer-visualizer");
   visualizer.graphCollections = graphCollections;

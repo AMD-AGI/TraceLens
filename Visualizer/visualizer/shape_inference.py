@@ -922,6 +922,11 @@ def _is_router(class_name: str, node: ModelGraphNode) -> bool:
     return "router" in class_name.lower() or "router" in _operator_name(node).lower()
 
 
+def serialize_dim(value: DimExpr) -> int | str:
+    """Serialize a dimension expression for JSON export."""
+    return _serialize_dim(value)
+
+
 __all__ = [
     "DimExpr",
     "ModuleDimRegistry",
@@ -932,4 +937,5 @@ __all__ = [
     "TensorSpec",
     "build_operator_export",
     "save_operator_export",
+    "serialize_dim",
 ]

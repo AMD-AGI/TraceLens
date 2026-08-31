@@ -1,8 +1,8 @@
 """Neutral model graph IR decoupled from layout and rendering.
 
 The graph contains only structural information: node kind, label, edges, and
-optional metadata. Rendering and Sugiyama layout operate on ``ComputationGraph``;
-this module is the serializable export layer built from ``BlockNode`` trees.
+optional metadata. Model Explorer export builds on ``ComputationGraph``; this
+module is the serializable export layer built from ``BlockNode`` trees.
 """
 
 from __future__ import annotations
@@ -263,9 +263,7 @@ def _edge_style(
     source: int,
     target: int,
 ) -> str:
-    pair = (source, target)
-    if pair in graph.dashed_links:
-        return "dashed"
+    del graph, source, target
     return "solid"
 
 

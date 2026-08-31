@@ -40,7 +40,7 @@ def compose_viewer_html(
     if inline_app:
         replacement_parts.append(f"    <script>\n{app_js}\n    </script>")
     else:
-        replacement_parts.append('    <script src="./app.js?v=5"></script>')
+        replacement_parts.append('    <script src="./app.js?v=7"></script>')
 
     if replacement_parts:
         replacement = "\n".join(replacement_parts)

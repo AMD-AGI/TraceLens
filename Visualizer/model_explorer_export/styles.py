@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 _WHITE_TEXT = "#ffffff"
 _DARK_TEXT = "#1a1a1a"
 
-# SVG COLORS palette used by detailed diagram tiles.
+# Detail-tile color palette for Model Explorer nodes.
 _BASIC_OP = "#bdc3c7"
 _ATTENTION = "#5dade2"
 # Model Explorer WebGL labels use dark text on pale GPU kernel / MoE fills.
@@ -51,7 +51,7 @@ ROLE_COLORS: dict[str, dict[str, str]] = {
     "positional": {"backgroundColor": _INPUT, "textColor": _DARK_TEXT},
 }
 
-# Keep legacy operation map aligned with the SVG detail palette.
+# Operation-kind colors for detail tiles.
 OPERATION_COLORS: dict[str, dict[str, str]] = {
     "gpu_kernel": {"backgroundColor": _GPU_KERNEL, "textColor": _DARK_TEXT},
     "nn_module": {"backgroundColor": _BASIC_OP, "textColor": _DARK_TEXT},
@@ -159,7 +159,7 @@ def build_group_node_configs(
 
 
 def spine_tile_style() -> dict[str, str]:
-    """Neutral gray fill for flat overview spine tiles (matches SVG _spine_fill)."""
+    """Neutral gray fill for flat overview spine tiles."""
     return {"backgroundColor": _BASIC_OP, "textColor": _DARK_TEXT}
 
 
@@ -174,13 +174,13 @@ def detail_tile_style(
     synthetic: str | None = None,
     label: str = "",
 ) -> dict[str, str]:
-    """Match SVG ``_detail_block_facecolor`` / ``_detail_tile_text_color``."""
+    """Pick detail-tile colors from block role and operation kind."""
     from visualizer.model_graph import OperationKind, _COMBINE_LABELS, classify_operation
 
     if synthetic == "@input":
         return input_port_style()
 
-    # Combine tiles (Multiply, Add, …) use the same gray as Linear/RMSNorm in SVG.
+    # Combine tiles (Multiply, Add, …) use the same gray as Linear/RMSNorm.
     if synthetic == "@combine" or label in _COMBINE_LABELS:
         return {"backgroundColor": _BASIC_OP, "textColor": _DARK_TEXT}
 

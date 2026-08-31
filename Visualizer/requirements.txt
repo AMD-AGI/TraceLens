@@ -1,3 +1,1 @@
-matplotlib>=3.7
 huggingface_hub>=0.20
-graph-layout>=0.4.1

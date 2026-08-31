@@ -10,6 +10,7 @@ from visualizer.block_tree import BlockNode, collect_nested_diagrams, subgraph_w
 from visualizer.blocks import BlockComponent, LayerVariant
 from visualizer.computation_graph import ComputationGraph, build_computation_graph
 from visualizer.extract import ArchitectureSpec, architecture_section_trees
+from visualizer.shape_inference import ShapeInferencer
 
 from model_explorer_export.adapter import (
     _incoming_edges,
@@ -19,6 +20,7 @@ from model_explorer_export.adapter import (
     _sanitize_namespace_segment,
 )
 from model_explorer_export.fact_sheet import build_fact_sheet_group_attributes
+from model_explorer_export.shapes import annotate_nodes_with_shapes, infer_block_tree_shapes
 from model_explorer_export.labels import (
     apply_kernel_frame_labels,
     skip_merged_tensor_port_parent,
@@ -745,6 +747,7 @@ def _append_section(
     previous_exits: list[str],
     variant: LayerVariant | None = None,
     group_node_attributes: dict[str, dict[str, str]] | None = None,
+    shape_inferencer: ShapeInferencer | None = None,
 ) -> list[str]:
     if not component_has_detail_section(component, spec):
         summary = _summary_node(
@@ -809,6 +812,12 @@ def _append_section(
         namespace_prefix=namespace_prefix,
         skip_synthetic_input=skip_variant_root_input,
     )
+    if shape_inferencer is not None:
+        annotate_nodes_with_shapes(
+            section_nodes,
+            infer_block_tree_shapes(shape_inferencer, block_tree, title=_title),
+            id_prefix=id_prefix,
+        )
 
     seen_ids = {node["id"] for node in merged_nodes}
     pipeline_inject_skip: set[str] = set()
@@ -828,6 +837,12 @@ def _append_section(
                 namespace_prefix=nested_namespace,
             )
         )
+        if shape_inferencer is not None:
+            annotate_nodes_with_shapes(
+                section_nodes,
+                infer_block_tree_shapes(shape_inferencer, nested_block, title=nested_label),
+                id_prefix=nested_prefix,
+            )
         if nested_block.class_name == "KernelPipeline":
             _integrate_kernel_pipeline_merge(
                 section_nodes,
@@ -875,6 +890,7 @@ def _append_variant_layer(
     basic_ops: BasicOpFilter,
     previous_exits: list[str],
     group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None = None,
 ) -> list[str]:
     chain_exits = list(previous_exits)
     for component in _ordered_decoder_components(spec):
@@ -895,6 +911,7 @@ def _append_variant_layer(
             previous_exits=chain_exits,
             variant=variant,
             group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
         )
     return chain_exits
 
@@ -908,6 +925,7 @@ def _append_decoder_layers(
     previous_exits: list[str],
     group_node_configs: list[dict[str, Any]],
     group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None = None,
 ) -> list[str]:
     if spec.layer_variants:
         variant_exits: list[str] = []
@@ -939,6 +957,7 @@ def _append_decoder_layers(
                 basic_ops=basic_ops,
                 previous_exits=previous_exits,
                 group_node_attributes=group_node_attributes,
+                shape_inferencer=shape_inferencer,
             )
             variant_exits.extend(exits)
         return variant_exits or list(previous_exits)
@@ -964,6 +983,7 @@ def _append_decoder_layers(
             basic_ops=basic_ops,
             previous_exits=chain_exits,
             group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
         )
     return chain_exits
 
@@ -991,6 +1011,7 @@ def build_merged_model_graph(
     *,
     basic_ops: BasicOpFilter | None = None,
     graph_id: str = "model",
+    shape_inferencer: ShapeInferencer | None = None,
 ) -> dict[str, Any]:
     """Build a single graph with overview spine and inlined computation subgraphs."""
     resolved_basic_ops = basic_ops or spec.basic_ops
@@ -1024,6 +1045,7 @@ def build_merged_model_graph(
             namespace_prefix=namespace_prefix,
             basic_ops=resolved_basic_ops,
             previous_exits=previous_exits,
+            shape_inferencer=shape_inferencer,
         )
 
     decoder_namespace = _decoder_namespace(spec)
@@ -1035,6 +1057,7 @@ def build_merged_model_graph(
         previous_exits=previous_exits,
         group_node_configs=group_node_configs,
         group_node_attributes=group_node_attributes,
+        shape_inferencer=shape_inferencer,
     )
 
     for component in _stack_tail_components(spec):
@@ -1054,6 +1077,7 @@ def build_merged_model_graph(
             namespace_prefix=namespace_prefix,
             basic_ops=resolved_basic_ops,
             previous_exits=previous_exits,
+            shape_inferencer=shape_inferencer,
         )
 
     model_attrs: dict[str, str] = {

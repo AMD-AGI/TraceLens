@@ -1,4 +1,4 @@
-"""Shared Hugging Face / local model loading for CLI and operator export."""
+"""Shared Hugging Face / local model loading for Model Explorer export."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ def resolve_checkpoint_arg(
     checkpoint: str | Path | None = None,
     source: str | Path | None = None,
 ) -> str | Path | None:
-    """Resolve the checkpoint positional/flag pair the same way as the SVG CLI."""
+    """Resolve the checkpoint positional/flag pair from the Model Explorer CLI."""
     return checkpoint or source
 
 
@@ -22,7 +22,7 @@ def build_detailed_basic_ops(
     add: list[str] | None = None,
     remove: list[str] | None = None,
 ) -> BasicOpFilter:
-    """Basic-op filter used by ``--detailed`` SVG generation and operator export."""
+    """Basic-op filter used by ``--detailed`` Model Explorer export."""
     extra_add = list(add or [])
     for pattern in COMMON_LEAF_PATTERNS:
         if pattern not in extra_add:
@@ -42,7 +42,7 @@ def load_model_spec(
     basic_ops: BasicOpFilter | None = None,
     require_code: bool = False,
 ) -> ArchitectureSpec:
-    """Load architecture metadata the same way as the SVG generator.
+    """Load architecture metadata for Model Explorer export.
 
     When ``checkpoint`` is a Hugging Face model id, ``config.json`` and
     Python sources in the cached snapshot (or listed on the hub) are
@@ -74,7 +74,7 @@ def load_model_spec(
             "discovered automatically), or set --code-path / --github for the modeling file."
         )
 
-    if require_code and not spec.export_block_trees and not spec.detailed_block_trees:
+    if require_code and not spec.export_block_trees:
         raise ValueError(
             "Model loaded but no computation block trees were built. The modeling "
             "source may lack a parseable decoder stack or forward() methods."

@@ -12,9 +12,14 @@ from visualizer.basic_ops import DEFAULT_BASIC_OP_PATTERNS
 from visualizer.extract import dump_model_ast
 from visualizer.loader import build_detailed_basic_ops, load_model_spec, resolve_checkpoint_arg
 
-from model_explorer_export.build import build_model_explorer_payload, save_model_explorer_payload
+from model_explorer_export.build import (
+    build_model_explorer_payload,
+    build_operator_export_payload,
+    save_model_explorer_payload,
+)
 from model_explorer_export.serve import open_viewer, serve_viewer, viewer_url
 from model_explorer_export.viewer_page import is_html_output, save_viewer_html
+from visualizer.shape_inference import save_operator_export
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -113,6 +118,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Open the viewer in a browser after export (implies --serve)",
     )
+    parser.add_argument(
+        "--shapes",
+        action="store_true",
+        help="Add symbolic output_shape/output_dtype annotations on graph nodes",
+    )
+    parser.add_argument(
+        "--operators-json",
+        type=Path,
+        metavar="PATH",
+        help="Also write flat operator export JSON with inferred tensor shapes",
+    )
     return parser
 
 
@@ -190,12 +206,28 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        payload = build_model_explorer_payload(spec, basic_ops=basic_ops)
+        payload = build_model_explorer_payload(
+            spec,
+            basic_ops=basic_ops,
+            include_shapes=args.shapes,
+            include_operator_export=args.operators_json is not None,
+        )
         if not payload["graphCollections"][0]["graphs"]:
             raise ValueError("No computation graphs were built from the modeling source.")
     except Exception as exc:  # noqa: BLE001
         print(f"Error exporting Model Explorer payload: {exc}", file=sys.stderr)
         return 1
+
+    if args.operators_json is not None:
+        try:
+            operator_payload = payload["tracelensViewer"].get("operatorExport")
+            if operator_payload is None:
+                operator_payload = build_operator_export_payload(spec)
+            saved = save_operator_export(operator_payload, args.operators_json)
+            print(f"Wrote operator export JSON: {saved}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error writing operator export: {exc}", file=sys.stderr)
+            return 1
 
     serve_requested = args.serve or args.open
 

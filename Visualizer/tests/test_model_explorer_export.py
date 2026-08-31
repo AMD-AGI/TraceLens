@@ -117,7 +117,7 @@ def test_merged_sections_include_input_ports():
     payload = build_model_explorer_payload(spec)
     graph = payload["graphCollections"][0]["graphs"][0]
     input_nodes = [node for node in graph["nodes"] if node["id"].endswith("/@input") or node["id"] == "@input"]
-    assert any(node["label"] == "hidden_states" for node in input_nodes)
+    assert any(node["label"].split("\n", 1)[0] == "hidden_states" for node in input_nodes)
     attn_input = next(
         node
         for node in input_nodes
@@ -679,6 +679,9 @@ def test_viewer_shell_reserves_fact_sheet_column():
     assert "factSheet.hidden = false" in app_js
     assert "hideInfoPanel: true" in app_js
     assert "loadEmbeddedPayload" in app_js
+    assert "model_explorer_show_on_node_item_types_v2" in app_js
+    assert "Op node attributes" in app_js
+    assert "output_shape" in app_js
 
 
 def test_compose_viewer_html_embeds_payload_without_external_json():
@@ -779,6 +782,51 @@ def test_kernel_frame_labels_split_l2norm_q_and_k_and_sanitize_unicode():
     assert group_attrs[nodes[1]["namespace"]]["label"] == "L2Norm (k)"
 
 
+def test_merged_graph_includes_output_shape_attrs():
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        name="Custom MLA MoE",
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$"]),
+    )
+    payload = build_model_explorer_payload(spec, include_shapes=True)
+    shaped_nodes = [
+        node
+        for node in payload["graphCollections"][0]["graphs"][0]["nodes"]
+        if any(attr.get("key") == "output_shape" for attr in node.get("attrs", []))
+    ]
+    assert shaped_nodes
+    router = next(
+        node
+        for node in shaped_nodes
+        if node["id"].endswith("router:router:0")
+    )
+    shape_attr = next(attr for attr in router["attrs"] if attr["key"] == "output_shape")
+    assert shape_attr["value"] == "B x T x 64"
+    assert payload["tracelensViewer"]["dimensions"]["H"] == 4096
+    assert payload["tracelensViewer"]["dtype"] == "float16"
+
+    payload_default = build_model_explorer_payload(spec)
+    assert "dimensions" not in payload_default["tracelensViewer"]
+    assert not any(
+        any(attr.get("key") == "output_shape" for attr in node.get("attrs", []))
+        for node in payload_default["graphCollections"][0]["graphs"][0]["nodes"]
+    )
+
+
+def test_build_model_explorer_payload_includes_operator_export():
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        name="Custom MLA MoE",
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$"]),
+    )
+    payload = build_model_explorer_payload(spec, include_operator_export=True)
+    operator_export = payload["tracelensViewer"]["operatorExport"]
+    assert operator_export["model_type"] == spec.model_type
+    assert operator_export["sections"]
+
+
 def test_build_model_explorer_payload_custom_model():
     spec = load_architecture(
         FIXTURES / "custom_model",
@@ -799,5 +847,5 @@ def test_build_model_explorer_payload_custom_model():
         incoming = sum(len(node.get("incomingEdges", [])) for node in graph["nodes"])
         assert incoming >= 1
 
-    labels = {node["label"] for node in graphs[0]["nodes"]}
+    labels = {node["label"].split("\n", 1)[0] for node in graphs[0]["nodes"]}
     assert "Linear" in labels

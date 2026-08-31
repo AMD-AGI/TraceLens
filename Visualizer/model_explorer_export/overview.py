@@ -143,7 +143,7 @@ def _spine_named_ffn_classes(spec: ArchitectureSpec) -> set[str]:
 
 
 def _detail_section_trees(spec: ArchitectureSpec) -> list[BlockNode]:
-    """Block trees rendered as expandable internal subsections in the SVG diagram."""
+    """Block trees exported as expandable internal subsections."""
     basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
     section_trees = prepare_diagram_section_trees(
         architecture_section_trees(spec),
@@ -168,7 +168,7 @@ def _detail_section_trees(spec: ArchitectureSpec) -> list[BlockNode]:
 
 
 def component_has_detail_section(component: BlockComponent, spec: ArchitectureSpec) -> bool:
-    """True when the SVG detailed figure expands this module below the overview spine."""
+    """True when this module expands into a detail subsection below the overview spine."""
     for tree in _detail_section_trees(spec):
         if tree.attr_name == component.attr_name or tree.class_name == component.class_name:
             return True
@@ -214,7 +214,7 @@ def build_overview_graph(
     attr_name_to_graph_id: dict[str, str],
     graph_id: str = "model",
 ) -> dict[str, Any]:
-    """Build the main model spine graph shown in the SVG overview diagram."""
+    """Build the main model spine graph for the overview layer."""
     nodes: list[dict[str, Any]] = []
     incoming: dict[str, list[dict[str, str]]] = {}
     previous_id = "@input"

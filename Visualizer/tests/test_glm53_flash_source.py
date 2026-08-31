@@ -27,7 +27,6 @@ def test_config_model_types_includes_wrapper_after_normalization():
 def test_glm53_flash_resolves_transformers_modeling_source():
     pytest.importorskip("huggingface_hub")
     from visualizer.extract import _resolve_checkpoint
-    from visualizer.render import _ffn_label
 
     config, _ = _resolve_checkpoint(checkpoint="zai-org/GLM-5.3-Flash", github=None)
     files, labels = resolve_source_files("zai-org/GLM-5.3-Flash", config)
@@ -36,4 +35,9 @@ def test_glm53_flash_resolves_transformers_modeling_source():
     assert any(label.startswith("github://huggingface/transformers") for label in labels)
 
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    assert _ffn_label(spec)[0] == "Glm5NextTextMoE / Glm5NextTextMLP"
+    ffn_classes: list[str] = []
+    for variant in spec.layer_variants:
+        cls = variant.ffn_class or variant.ffn_label
+        if cls not in ffn_classes:
+            ffn_classes.append(cls)
+    assert " / ".join(ffn_classes) == "Glm5NextTextMoE / Glm5NextTextMLP"

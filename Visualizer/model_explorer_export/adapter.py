@@ -81,8 +81,6 @@ def _incoming_edges(computation: ComputationGraph, index_to_id: dict[int, str]) 
             continue
 
         metadata: dict[str, str] = {}
-        if (source_index, target_index) in computation.dashed_links:
-            metadata["style"] = "dashed"
         port_label = computation.link_port_labels.get((source_index, target_index))
         if port_label:
             metadata["port_label"] = port_label

@@ -24,7 +24,7 @@ class LayerVariant:
 
 @dataclass
 class BlockComponent:
-    """One submodule inside a decoder layer, ordered for diagram rendering."""
+    """One submodule inside a decoder layer, ordered for export."""
 
     attr_name: str
     class_name: str

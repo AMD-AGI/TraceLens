@@ -1,4 +1,4 @@
-"""Model Explorer fact sheet panel (mirrors ``visualizer.render._fact_lines``)."""
+"""Model Explorer fact sheet panel."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ _FACT_SUBLINE_INDENT = "    "
 
 
 def _fact_lines(spec: ArchitectureSpec) -> list[str]:
-    """Keep in sync with ``visualizer.render._fact_lines``."""
+    """Build fact-sheet bullet lines from architecture metadata."""
     lines = [
         f"Model type: {spec.model_type}",
         f"Decoder: {spec.decoder_type}",

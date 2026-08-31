@@ -20,6 +20,29 @@ from visualizer.kernel_pipeline import (
 )
 
 _FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "kda_kernel"
+_KIMI_CODE_PATH = (
+    Path.home()
+    / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/modeling_kimi_linear.py"
+)
+
+
+def _load_chunk_kda_pipeline():
+    from visualizer.basic_ops import BasicOpFilter
+    from visualizer.block_tree import build_block_node
+
+    if not _KIMI_CODE_PATH.exists():
+        pytest.skip("Kimi-K3 modeling file not cached locally")
+
+    basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
+    analysis = analyze_source(_KIMI_CODE_PATH.read_text(), filename="modeling_kimi_linear.py")
+    attn = build_block_node(
+        attr_name="self_attn",
+        class_name="KimiDeltaAttention",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    pipeline = next(child for child in attn.children if child.class_name == "KernelPipeline")
+    return pipeline, basic
 
 
 @pytest.fixture(autouse=True)
@@ -216,7 +239,6 @@ def test_introspect_l2norm_substeps_use_real_second_operands():
 
 def test_l2norm_inv_sqrt_wires_only_real_operands():
     from visualizer.computation_graph import build_computation_graph
-    from tests.test_chunk_kda_pipeline_svg import _load_chunk_kda_pipeline
 
     pipeline, _ = _load_chunk_kda_pipeline()
     graph = build_computation_graph(pipeline)

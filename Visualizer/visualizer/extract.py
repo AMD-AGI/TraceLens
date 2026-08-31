@@ -11,9 +11,7 @@ from visualizer.ast_analyze import analyze_sources, dump_ast
 from visualizer.basic_ops import BasicOpFilter
 from visualizer.block_tree import (
     BlockNode,
-    build_decoder_block_trees,
     build_full_detailed_block_trees,
-    partition_detail_trees,
 )
 from visualizer.blocks import BlockComponent, CodeAnalysis, LayerVariant
 from visualizer.config_resolve import load_checkpoint_config
@@ -25,7 +23,7 @@ BYTES_PER_BF16 = 2
 
 @dataclass
 class ArchitectureSpec:
-    """Normalized architecture description for diagram rendering."""
+    """Normalized architecture description for Model Explorer export."""
 
     name: str
     model_type: str
@@ -90,7 +88,6 @@ class ArchitectureSpec:
     code_sources: list[str] = field(default_factory=list)
     analysis_notes: list[str] = field(default_factory=list)
     custom_blocks: list[str] = field(default_factory=list)
-    detailed_block_trees: list[tuple[str, BlockNode]] = field(default_factory=list)
     export_block_trees: list[tuple[str, BlockNode]] = field(default_factory=list)
     class_registry: dict = field(default_factory=dict, repr=False)
     basic_ops: BasicOpFilter | None = None
@@ -950,12 +947,11 @@ def _refine_positional_from_code(spec: ArchitectureSpec, analysis: CodeAnalysis)
     spec.layer_notes.append("No positional encoding applied in modeling code")
 
 
-def _build_detailed_block_trees(spec: ArchitectureSpec, basic_ops: BasicOpFilter) -> None:
+def _build_export_block_trees(spec: ArchitectureSpec, basic_ops: BasicOpFilter) -> None:
     if not spec.class_registry:
-        spec.detailed_block_trees = []
         spec.export_block_trees = []
         return
-    common_kwargs = dict(
+    spec.export_block_trees = build_full_detailed_block_trees(
         components=spec.block_components,
         registry=spec.class_registry,
         basic_ops=basic_ops,
@@ -964,18 +960,6 @@ def _build_detailed_block_trees(spec: ArchitectureSpec, basic_ops: BasicOpFilter
         decoder_class=spec.decoder_class,
         stack_pre=spec.stack_pre,
         stack_tail=spec.stack_tail,
-    )
-    decoder_trees = build_decoder_block_trees(
-        spec.block_components,
-        spec.class_registry,
-        basic_ops,
-        decoder_class=spec.decoder_class,
-        include_norms=False,
-        infer_init_steps=False,
-    )
-    spec.detailed_block_trees = partition_detail_trees(decoder_trees)
-    spec.export_block_trees = build_full_detailed_block_trees(
-        **common_kwargs,
         partition=False,
         include_norms=True,
         infer_init_steps=True,
@@ -983,8 +967,8 @@ def _build_detailed_block_trees(spec: ArchitectureSpec, basic_ops: BasicOpFilter
 
 
 def architecture_section_trees(spec: ArchitectureSpec) -> list[tuple[str, BlockNode]]:
-    """Return block trees for detailed SVG sections and operator/graph export."""
-    return spec.export_block_trees or spec.detailed_block_trees
+    """Return block trees for graph export and detailed diagrams."""
+    return spec.export_block_trees
 
 
 def parse_architecture(
@@ -1105,7 +1089,7 @@ def load_architecture(
     if detailed:
         resolved_basic_ops = basic_ops or BasicOpFilter.for_detailed()
         spec.basic_ops = resolved_basic_ops
-        _build_detailed_block_trees(spec, resolved_basic_ops)
+        _build_export_block_trees(spec, resolved_basic_ops)
     return spec
 
 

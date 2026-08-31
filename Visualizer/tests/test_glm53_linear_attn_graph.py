@@ -11,7 +11,7 @@ from visualizer.loader import load_model_spec
 def test_glm53_linear_attention_has_single_output_exit():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    title, tree = next((item for item in spec.detailed_block_trees if "Linear Attn" in item[0]))
+    title, tree = next((item for item in spec.export_block_trees if "Linear Attn" in item[0]))
     graph = build_computation_graph(tree, basic_ops=spec.basic_ops)
     source_indices = {src for src, _target in graph.links}
     exits = [

@@ -360,21 +360,10 @@ def test_model_graph_inline_frames_use_node_ids():
 
 def test_model_graph_edge_styles():
     root = _mla_fixture_root()
-    computation = build_computation_graph(root)
     model_graph = build_model_graph(root, title="MLA")
 
-    dashed_pairs = {
-        (computation.nodes[src].key or f"node:{src}", computation.nodes[tgt].key or f"node:{tgt}")
-        for src, tgt in computation.dashed_links
-    }
-    model_dashed = {
-        (edge.source, edge.target) for edge in model_graph.edges if edge.style == "dashed"
-    }
-    assert model_dashed == dashed_pairs
-    model_side = {
-        (edge.source, edge.target) for edge in model_graph.edges if edge.style == "side"
-    }
-    assert not model_side
+    assert all(edge.style == "solid" for edge in model_graph.edges)
+    assert not any(edge.style == "side" for edge in model_graph.edges)
 
 
 def test_model_graph_subgraphs_for_nested_composites():

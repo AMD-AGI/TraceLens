@@ -1,4 +1,4 @@
-"""TraceLens Visualizer: CPU-only LLM architecture diagram generator."""
+"""TraceLens Visualizer: CPU-only LLM architecture analysis for Model Explorer."""
 
 from visualizer.ast_analyze import analyze_source, analyze_sources, dump_ast, parse_python_ast
 from visualizer.blocks import BlockComponent, CodeAnalysis
@@ -12,15 +12,22 @@ from visualizer.model_graph import (
     save_model_graph,
 )
 from visualizer.loader import build_detailed_basic_ops, load_model_spec, resolve_checkpoint_arg
-from visualizer.render import render_diagram
-from visualizer.shape_inference import ShapeInferencer, build_operator_export, save_operator_export
+from visualizer.shape_inference import (
+    ShapeInferencer,
+    ShapeContext,
+    TensorSpec,
+    build_operator_export,
+    save_operator_export,
+)
 
 __all__ = [
     "ArchitectureSpec",
     "BlockComponent",
     "CodeAnalysis",
     "ModelGraph",
+    "ShapeContext",
     "ShapeInferencer",
+    "TensorSpec",
     "analyze_source",
     "analyze_sources",
     "architecture_section_trees",
@@ -36,7 +43,6 @@ __all__ = [
     "load_model_spec",
     "parse_github_url",
     "parse_python_ast",
-    "render_diagram",
     "resolve_checkpoint_arg",
     "save_architecture_model_graphs",
     "save_model_graph",

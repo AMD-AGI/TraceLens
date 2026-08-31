@@ -332,7 +332,7 @@ def prepare_diagram_section_trees(
     *,
     basic_ops: BasicOpFilter | None = None,
 ) -> list[tuple[str, BlockNode]]:
-    """Prepare parsed section block trees for diagram rendering."""
+    """Prepare parsed section block trees for Model Explorer export."""
     return [
         (title, expand_block_tree_inplace(tree, basic_ops=basic_ops))
         for title, tree in trees
@@ -1498,14 +1498,9 @@ def is_simple_modeled_tile(node: BlockNode) -> bool:
 
 
 def tile_sublabel(block: BlockNode | None, *, in_inline_frame: bool = False) -> str | None:
-    """Secondary label for a diagram tile; modeled ops keep text inside inline frames."""
-    if block is None:
-        return None
-    if in_inline_frame and not is_simple_modeled_tile(block):
-        return None
-    from visualizer.sizing import block_sublabel
-
-    return block_sublabel(block)
+    """Secondary label for a detail tile; in-box sublabels are disabled."""
+    del block, in_inline_frame
+    return None
 
 
 def tile_purpose_annotation(block: BlockNode | None) -> str | None:
@@ -1595,7 +1590,7 @@ def collect_nested_diagrams(
 
 
 def flatten_computation_segments(node: BlockNode) -> list[ComputationSegment]:
-    """Prepare top-level segments for graph layout, keeping composite blocks intact."""
+    """Prepare top-level segments for graph export, keeping composite blocks intact."""
     return collect_computation_segments(node)
 
 
