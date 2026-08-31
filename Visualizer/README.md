@@ -12,6 +12,22 @@ Analyze Hugging Face model configs and modeling source code, then export interac
 
 ## Installation
 
+From the TraceLens repository root:
+
+```bash
+pip install -e ".[Visualizer]"
+```
+
+For local development and tests, also install the dev extra:
+
+```bash
+pip install -e ".[Visualizer,dev]"
+```
+
+Or install only from the `Visualizer/` directory with `PYTHONPATH=.` (see below).
+
+Legacy standalone setup:
+
 ```bash
 cd ~/tracelens/Visualizer
 python3 -m venv .venv
