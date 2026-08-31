@@ -51,16 +51,30 @@ TraceLens_trace_index --db trace_index.sqlite append \
 
 ## Build a catalog from a list of traces
 
-`--db` creates the SQLite file if it doesn't exist. `build` walks a list of
+`--db` creates the SQLite file if it doesn't exist. `build` takes a list of
 trace paths, generates a training PyTorch report for each, and appends it.
-Use a text file (one path per line; `#` starts a comment) and/or repeat
-`--trace-path`:
+Pass a text file (one path per line; `#` starts a comment), repeat
+`--trace-path`, and/or walk a directory with `--trace-dir`. You can combine
+those flags; duplicate paths are dropped.
 
 ```bash
 TraceLens_trace_index --db trace_index.sqlite build \
   --traces-file traces.txt \
   --report-root ./trace_index_reports
 ```
+
+```bash
+TraceLens_trace_index --db trace_index.sqlite build \
+  --trace-dir /path/to/traces
+```
+
+`--trace-dir` walks the directory for trace-like files (`.json.gz`, `.json`,
+`.pftrace`, `.rpd`, `.xplane.pb`). Report CSV directories such as
+`perf_report_csvs` are skipped.
+
+`--report-root` is the directory where TraceIndex writes generated training
+PyTorch CSV reports when `build` or `append` doesn't pass `--report-dir`. The
+default is `trace_index_reports/`.
 
 A failed trace is recorded and the rest of the list still runs. For inference,
 rocprof, or pftrace, generate the CSV reports first, then `append` each trace
@@ -90,21 +104,21 @@ plus a full-text search (FTS) virtual table. SQLite holds this comfortably for
 typical TraceLens corpora (hundreds of traces, hundreds of thousands of kernel
 rows). The practical limit is one writer at a time, not row count.
 
-The following diagram shows how those tables relate. Every fact table points at
-`traces`. Kernel rows and GEMM / SDPA / convolution satellites also point at
-the `unified_perf_rows` row they came from.
+The following diagram shows how those tables relate. Per-trace fact tables
+(`report_imports`, `unified_perf_rows`, `op_category_rows`,
+`gpu_timeline_rows`, `trace_summary`, and `trace_search_FTS5`) point at
+`traces`. Kernel rows and GEMM / SDPA / convolution satellites point at the
+`unified_perf_rows` row they came from; join `traces` through that parent when
+you need the file path. Column lists are in
+[TraceIndex catalog schema](../reference/trace-index-schema.md).
 
 ```mermaid
 erDiagram
     traces ||--o{ report_imports : "trace_id"
     traces ||--o{ unified_perf_rows : "trace_id"
-    traces ||--o{ op_kernels : "trace_id"
     traces ||--o{ op_category_rows : "trace_id"
     traces ||--o{ gpu_timeline_rows : "trace_id"
     traces ||--o| trace_summary : "trace_id"
-    traces ||--o{ gemm_perf : "trace_id"
-    traces ||--o{ sdpa_perf : "trace_id"
-    traces ||--o{ conv_perf : "trace_id"
     traces ||--o{ trace_search_FTS5 : "trace_id"
     unified_perf_rows ||--o{ op_kernels : "unified_row_id"
     unified_perf_rows ||--o| gemm_perf : "unified_row_id"
@@ -143,7 +157,8 @@ with `sqlite-sql` or the HTTP server, and `JOIN traces` to get the file to open.
 SELECT t.name, c.input_channels, c.output_channels, c.groups,
        c.kernel_h, c.kernel_w, COUNT(*) AS rows
 FROM conv_perf c
-JOIN traces t ON t.id = c.trace_id
+JOIN unified_perf_rows u ON u.id = c.unified_row_id
+JOIN traces t ON t.id = u.trace_id
 WHERE c.is_depthwise = 1 AND c.groups > 1
 GROUP BY t.id, c.input_channels, c.output_channels, c.groups, c.kernel_h, c.kernel_w
 ORDER BY rows DESC;
@@ -166,7 +181,8 @@ trace.
 ```sql
 SELECT t.name, p.seq_q, p.seq_kv, p.heads, p.head_dim, p.dtype
 FROM sdpa_perf p
-JOIN traces t ON t.id = p.trace_id
+JOIN unified_perf_rows u ON u.id = p.unified_row_id
+JOIN traces t ON t.id = u.trace_id
 ORDER BY p.seq_q DESC
 LIMIT 8;
 ```
@@ -225,5 +241,6 @@ rows = search_index(db, "Cijk", limit=20)
 - [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 - [Generate a PyTorch inference performance report](./generate-perf-report-pytorch-inference.md)
 - [Analyze traces with the TraceLens SDK](./sdk-analysis.md)
+- [TraceIndex catalog schema](../reference/trace-index-schema.md)
 - [Performance report columns](../reference/perf-report-columns.md)
 - [API reference](../reference/api-reference.md)

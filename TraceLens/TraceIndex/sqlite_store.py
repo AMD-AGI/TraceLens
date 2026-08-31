@@ -121,8 +121,7 @@ class SQLiteTraceIndexStore(TraceIndexStore):
 
             CREATE TABLE IF NOT EXISTS op_kernels (
                 id INTEGER PRIMARY KEY,
-                trace_id INTEGER NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
-                unified_row_id INTEGER REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
+                unified_row_id INTEGER NOT NULL REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
                 kernel_name TEXT NOT NULL,
                 parent_op_name TEXT,
                 op_category TEXT,
@@ -140,14 +139,12 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 details_json TEXT
             );
 
-            CREATE INDEX IF NOT EXISTS idx_trace_index_op_kernels_trace ON op_kernels(trace_id);
             CREATE INDEX IF NOT EXISTS idx_trace_index_op_kernels_unified ON op_kernels(unified_row_id);
             CREATE INDEX IF NOT EXISTS idx_trace_index_op_kernels_name ON op_kernels(kernel_name);
             CREATE INDEX IF NOT EXISTS idx_trace_index_op_kernels_tensile ON op_kernels(is_tensile);
 
             CREATE TABLE IF NOT EXISTS gemm_perf (
                 unified_row_id INTEGER PRIMARY KEY REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
-                trace_id INTEGER NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
                 m INTEGER,
                 n INTEGER,
                 k INTEGER,
@@ -158,12 +155,10 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 tflops_median REAL
             );
 
-            CREATE INDEX IF NOT EXISTS idx_trace_index_gemm_trace ON gemm_perf(trace_id);
             CREATE INDEX IF NOT EXISTS idx_trace_index_gemm_tflops ON gemm_perf(tflops_mean);
 
             CREATE TABLE IF NOT EXISTS sdpa_perf (
                 unified_row_id INTEGER PRIMARY KEY REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
-                trace_id INTEGER NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
                 batch INTEGER,
                 heads INTEGER,
                 seq_q INTEGER,
@@ -175,11 +170,8 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 tflops_median REAL
             );
 
-            CREATE INDEX IF NOT EXISTS idx_trace_index_sdpa_trace ON sdpa_perf(trace_id);
-
             CREATE TABLE IF NOT EXISTS conv_perf (
                 unified_row_id INTEGER PRIMARY KEY REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
-                trace_id INTEGER NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
                 conv_nd TEXT,
                 input_shape_json TEXT,
                 filter_shape_json TEXT,
@@ -192,7 +184,6 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 is_transposed_conv INTEGER
             );
 
-            CREATE INDEX IF NOT EXISTS idx_trace_index_conv_trace ON conv_perf(trace_id);
             CREATE INDEX IF NOT EXISTS idx_trace_index_conv_depthwise ON conv_perf(is_depthwise);
 
             CREATE TABLE IF NOT EXISTS op_category_rows (
@@ -373,12 +364,14 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         self.conn.close()
 
     def _clear_trace_payload(self, trace_id: int) -> None:
+        satellite_sql = (
+            "DELETE FROM %s WHERE unified_row_id IN "
+            "(SELECT id FROM unified_perf_rows WHERE trace_id = ?)"
+        )
+        for table in ("op_kernels", "gemm_perf", "sdpa_perf", "conv_perf"):
+            self.conn.execute(satellite_sql % table, (trace_id,))
         for table in (
             "report_imports",
-            "gemm_perf",
-            "sdpa_perf",
-            "conv_perf",
-            "op_kernels",
             "op_category_rows",
             "gpu_timeline_rows",
             "trace_summary",
@@ -538,13 +531,9 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             self._import_kernels_from_details(
                 trace_id, unified_row_id, name, op_category, kernel_details
             )
-            self._maybe_insert_gemm(
-                trace_id, unified_row_id, params, tflops_mean, tflops_median
-            )
-            self._maybe_insert_sdpa(
-                trace_id, unified_row_id, params, tflops_mean, tflops_median
-            )
-            self._maybe_insert_conv(trace_id, unified_row_id, params)
+            self._maybe_insert_gemm(unified_row_id, params, tflops_mean, tflops_median)
+            self._maybe_insert_sdpa(unified_row_id, params, tflops_mean, tflops_median)
+            self._maybe_insert_conv(unified_row_id, params)
             self._insert_search(
                 trace_id,
                 "op",
@@ -578,15 +567,14 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             self.conn.execute(
                 """
                 INSERT INTO op_kernels(
-                    trace_id, unified_row_id, kernel_name, parent_op_name, op_category,
+                    unified_row_id, kernel_name, parent_op_name, op_category,
                     stream, count, total_duration_us, mean_duration_us,
                     median_duration_us, min_duration_us, max_duration_us, library,
                     is_tensile, is_transpose, is_layout_conversion, details_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    trace_id,
                     unified_row_id,
                     kernel_name,
                     parent_op_name,
@@ -613,7 +601,6 @@ class SQLiteTraceIndexStore(TraceIndexStore):
 
     def _maybe_insert_gemm(
         self,
-        trace_id: int,
         unified_row_id: int,
         params: Any,
         tflops_mean: Optional[float],
@@ -626,14 +613,13 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         self.conn.execute(
             """
             INSERT OR REPLACE INTO gemm_perf(
-                unified_row_id, trace_id, m, n, k, batch, dtype, transpose,
+                unified_row_id, m, n, k, batch, dtype, transpose,
                 tflops_mean, tflops_median
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 unified_row_id,
-                trace_id,
                 as_int(params.get("M")),
                 as_int(params.get("N")),
                 as_int(params.get("K")),
@@ -655,7 +641,6 @@ class SQLiteTraceIndexStore(TraceIndexStore):
 
     def _maybe_insert_sdpa(
         self,
-        trace_id: int,
         unified_row_id: int,
         params: Any,
         tflops_mean: Optional[float],
@@ -668,14 +653,13 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         self.conn.execute(
             """
             INSERT OR REPLACE INTO sdpa_perf(
-                unified_row_id, trace_id, batch, heads, seq_q, seq_kv,
+                unified_row_id, batch, heads, seq_q, seq_kv,
                 head_dim, dtype, causal, tflops_mean, tflops_median
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 unified_row_id,
-                trace_id,
                 as_int(params.get("B")),
                 as_int(params.get("H_Q")),
                 as_int(params.get("N_Q")),
@@ -694,7 +678,6 @@ class SQLiteTraceIndexStore(TraceIndexStore):
 
     def _maybe_insert_conv(
         self,
-        trace_id: int,
         unified_row_id: int,
         params: Any,
     ) -> None:
@@ -728,15 +711,14 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         self.conn.execute(
             """
             INSERT OR REPLACE INTO conv_perf(
-                unified_row_id, trace_id, conv_nd, input_shape_json, filter_shape_json,
+                unified_row_id, conv_nd, input_shape_json, filter_shape_json,
                 input_channels, output_channels, groups, kernel_h, kernel_w,
                 is_depthwise, is_transposed_conv
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 unified_row_id,
-                trace_id,
                 params.get("convNd"),
                 to_json(input_shape),
                 to_json(filter_shape),

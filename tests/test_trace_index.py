@@ -21,7 +21,7 @@ from TraceLens.TraceIndex.core import (
     execute_read_query,
     search_index,
 )
-from TraceLens.TraceIndex.cli import main as trace_index_main
+from TraceLens.TraceIndex.cli import build_parser, main as trace_index_main
 from TraceLens.TraceIndex.importer import (
     build_traces as build_traces_with_store,
 )
@@ -74,6 +74,11 @@ def write_mini_report(report_dir):
         ],
     )
     return report_dir
+
+
+def table_column_names(db_path, table):
+    rows = execute_read_query(db_path, "PRAGMA table_info(%s)" % table)
+    return {row["name"] for row in rows}
 
 
 def seed_mini_catalog(tmp_path):
@@ -243,6 +248,19 @@ def test_trace_index_append_from_report_and_search(tmp_path):
     )
     assert conv == [{"groups": 32, "is_depthwise": 1, "is_transposed_conv": 0}]
 
+    for table in ("op_kernels", "gemm_perf", "sdpa_perf", "conv_perf"):
+        cols = table_column_names(db_path, table)
+        assert "trace_id" not in cols
+        assert "unified_row_id" in cols
+
+    joined = execute_read_query(
+        db_path,
+        "SELECT t.id AS trace_id FROM op_kernels k "
+        "JOIN unified_perf_rows u ON u.id = k.unified_row_id "
+        "JOIN traces t ON t.id = u.trace_id LIMIT 1",
+    )
+    assert joined[0]["trace_id"] == trace_id
+
     search_rows = search_index(db_path, "Cijk", limit=10)
     assert search_rows
     assert search_rows[0]["trace_id"] == trace_id
@@ -358,6 +376,33 @@ def test_read_traces_file_skips_comments_and_blanks(tmp_path):
         Path("C:/traces/b.json"),
         Path("c.json"),
     ]
+
+
+def test_collect_trace_paths_from_dir_skips_report_csvs(tmp_path):
+    """Walking --trace-dir keeps trace-like files and skips report CSV dirs."""
+    stub = write_stub_trace(tmp_path / "rank0_trace.json")
+    report_dir = tmp_path / "perf_report_csvs"
+    report_dir.mkdir()
+    (report_dir / "unified_perf_summary.csv").write_text("name\nx\n", encoding="utf-8")
+    write_stub_trace(report_dir / "nested.json")
+    found = collect_trace_paths(trace_dirs=[tmp_path])
+    assert found == [stub.resolve()]
+    extra = Path("explicit.json")
+    combined = collect_trace_paths(
+        traces_file=None,
+        trace_paths=[extra],
+        trace_dirs=[tmp_path],
+    )
+    assert combined == [extra, stub.resolve()]
+
+
+def test_cli_build_accepts_trace_dir():
+    """build argparse accepts --trace-dir and combines it with --trace-path."""
+    args = build_parser().parse_args(
+        ["build", "--trace-dir", "tests/traces", "--trace-path", "a.json"]
+    )
+    assert args.trace_dirs == [Path("tests/traces")]
+    assert args.trace_path == [Path("a.json")]
 
 
 def test_cli_append_from_existing_report(tmp_path, capsys):

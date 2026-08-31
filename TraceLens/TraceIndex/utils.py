@@ -14,7 +14,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 
 def utc_now() -> str:
@@ -188,6 +188,65 @@ def kernel_flags(name: str) -> Tuple[Optional[str], int, int, int]:
     return library, is_tensile, is_transpose, is_layout
 
 
+SKIP_PARTS_EXACT = {
+    ".git",
+    "__pycache__",
+    "node_modules",
+    "_perf_report_csvs",
+    "perf_report_csvs",
+    "gap_analysis",
+    "capture_traces",
+    "graph_capture",
+}
+SKIP_PARTS_CONTAINS = (
+    "_perf_report_csvs",
+    "perf_report",
+    "gap_analysis",
+    "capture_traces",
+    "graph_capture",
+)
+TRACE_FILE_SUFFIXES = (".json.gz", ".json", ".pftrace", ".rpd", ".xplane.pb")
+
+
+def classify_skip(path: Path, root: Path) -> Optional[str]:
+    try:
+        rel_parts = [part.lower() for part in path.relative_to(root).parts[:-1]]
+    except ValueError:
+        rel_parts = []
+    for part in rel_parts:
+        if part in SKIP_PARTS_EXACT:
+            return part
+        for token in SKIP_PARTS_CONTAINS:
+            if token in part:
+                return token
+    name = path.name.lower()
+    if name.endswith((".xlsx", ".csv", ".log", ".jsonl", ".md", ".txt")):
+        return "derived_or_log"
+    return None
+
+
+def is_trace_filename(path: Path) -> bool:
+    return path.name.lower().endswith(TRACE_FILE_SUFFIXES)
+
+
+def collect_traces_from_dir(trace_dir: Path) -> List[Path]:
+    """Walk ``trace_dir`` for trace-like files, skipping report CSV dirs."""
+    root = trace_dir.expanduser().resolve()
+    if not root.is_dir():
+        raise NotADirectoryError(str(root))
+    found: List[Path] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if not is_trace_filename(path):
+            continue
+        if classify_skip(path, root) is not None:
+            continue
+        found.append(path)
+    found.sort(key=lambda item: normalize_path(item))
+    return found
+
+
 def read_traces_file(path: Path) -> List[Path]:
     """Read one trace path per line. Blank lines and ``#`` comments are ignored."""
     traces: List[Path] = []
@@ -199,15 +258,27 @@ def read_traces_file(path: Path) -> List[Path]:
     return traces
 
 
+def _coerce_paths(
+    value: Optional[Union[Path, Sequence[Path]]],
+) -> List[Path]:
+    if value is None:
+        return []
+    if isinstance(value, (str, Path)):
+        return [Path(value)]
+    return [Path(item) for item in value]
+
+
 def collect_trace_paths(
     traces_file: Optional[Path] = None,
     trace_paths: Optional[Sequence[Path]] = None,
+    trace_dirs: Optional[Sequence[Path]] = None,
 ) -> List[Path]:
     paths: List[Path] = []
     if traces_file is not None:
         paths.extend(read_traces_file(traces_file))
-    if trace_paths:
-        paths.extend(trace_paths)
+    paths.extend(_coerce_paths(trace_paths))
+    for trace_dir in _coerce_paths(trace_dirs):
+        paths.extend(collect_traces_from_dir(trace_dir))
     unique: List[Path] = []
     seen = set()
     for path in paths:

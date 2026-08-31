@@ -13,48 +13,13 @@ from pathlib import Path
 from typing import Optional
 
 from TraceLens.TraceIndex.models import TraceRecord
-from TraceLens.TraceIndex.utils import normalize_path, rel_to
+from TraceLens.TraceIndex.utils import classify_skip, normalize_path, rel_to
 
 RANK_RE = re.compile(r"(?:^|[^A-Za-z])rank[-_]?(\d+)(?:[^0-9]|$)", re.IGNORECASE)
-
-SKIP_PARTS_EXACT = {
-    ".git",
-    "__pycache__",
-    "node_modules",
-    "_perf_report_csvs",
-    "perf_report_csvs",
-    "gap_analysis",
-    "capture_traces",
-    "graph_capture",
-}
-SKIP_PARTS_CONTAINS = (
-    "_perf_report_csvs",
-    "perf_report",
-    "gap_analysis",
-    "capture_traces",
-    "graph_capture",
-)
 
 
 def is_json_gz(path: Path) -> bool:
     return path.name.lower().endswith(".json.gz")
-
-
-def classify_skip(path: Path, root: Path) -> Optional[str]:
-    try:
-        rel_parts = [part.lower() for part in path.relative_to(root).parts[:-1]]
-    except ValueError:
-        rel_parts = []
-    for part in rel_parts:
-        if part in SKIP_PARTS_EXACT:
-            return part
-        for token in SKIP_PARTS_CONTAINS:
-            if token in part:
-                return token
-    name = path.name.lower()
-    if name.endswith((".xlsx", ".csv", ".log", ".jsonl", ".md", ".txt")):
-        return "derived_or_log"
-    return None
 
 
 def read_prefix(path: Path, max_bytes: int) -> str:

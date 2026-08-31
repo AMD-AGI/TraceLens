@@ -64,10 +64,13 @@ def append_cmd(args: argparse.Namespace) -> int:
 
 
 def build_cmd(args: argparse.Namespace) -> int:
-    trace_paths = collect_trace_paths(args.traces_file, args.trace_path)
+    trace_paths = collect_trace_paths(
+        args.traces_file, args.trace_path, args.trace_dirs
+    )
     if not trace_paths:
         raise SystemExit(
-            "build requires --traces-file and/or one or more --trace-path values"
+            "build requires --traces-file, --trace-dir, and/or one or more "
+            "--trace-path values"
         )
     store = create_store(args)
     try:
@@ -188,7 +191,23 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         action="append",
         default=[],
-        help="Trace path to include. Repeatable, can be combined with --traces-file",
+        help=(
+            "Trace path to include. Repeatable; can be combined with "
+            "--traces-file and --trace-dir"
+        ),
+    )
+    build.add_argument(
+        "--trace-dir",
+        dest="trace_dirs",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Directory to walk for trace files "
+            "(.json.gz, .json, .pftrace, .rpd, .xplane.pb). "
+            "Report CSV dirs are skipped. Repeatable; can be combined with "
+            "--traces-file and --trace-path"
+        ),
     )
     add_generate_args(build)
     build.set_defaults(func=build_cmd)
