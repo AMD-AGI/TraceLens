@@ -263,14 +263,12 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 
 ```bash
 <prefix> python3 -c \"
-import sys
 from TraceLens.Agent.Analysis.utils import check_graph_replay_coverage
-v = check_graph_replay_coverage(sys.argv[1])
-status = 'GRAPH_UNDER_RECORDED' if v.graph_under_recorded else 'OK'
+coverage = check_graph_replay_coverage(<unified_perf_csv>)
+status = 'GRAPH_UNDER_RECORDED' if coverage.graph_under_recorded else 'OK'
 print(f'STATUS={status}')
-print(f'GRAPH_REPLAY_FRACTION={v.graph_replay_fraction}')
-print(f'REASON={v.reason}')
-\" '<unified_perf_csv>'
+print(f'GRAPH_REPLAY_FRACTION={coverage.graph_replay_fraction}')
+" 
 ```
 <graph_replay_fraction> refers to the returned GRAPH_REPLAY_FRACTION value.
 
@@ -282,7 +280,7 @@ print(f'REASON={v.reason}')
    <prefix> python3 -m TraceLens.Agent.Analysis.utils.deterministic_fallback \
      --unified-perf-csv '<unified_perf_csv>' \
      --output-dir '<output_dir>' \ 
-     --graph-replay-fraction '<graph_replay_fraction>'
+     --graph-replay-fraction <graph_replay_fraction>
    ```
 3. **Skip Steps 3-12.** The writer already produced `<output_dir>/analysis.md`
 
