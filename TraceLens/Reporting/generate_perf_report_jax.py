@@ -5,7 +5,6 @@
 ###############################################################################
 
 import argparse
-import os
 import sys
 from typing import Optional, Dict
 import pandas as pd

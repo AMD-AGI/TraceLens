@@ -14,7 +14,6 @@ Uses shared pftrace_utils (traceconv) and PftraceParser.
 import os
 import argparse
 import sys
-from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple
 
 import pandas as pd
