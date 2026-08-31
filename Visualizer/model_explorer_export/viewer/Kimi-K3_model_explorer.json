@@ -2,6 +2,12 @@
   "name": "KimiLinearForCausalLM",
   "model_type": "kimi_linear",
   "source": "tracelens-computation-graph",
+  "tracelensViewer": {
+    "factSheet": {
+      "title": "Fact sheet",
+      "body": "- Model type: kimi_linear\n- Decoder: Sparse MoE\n- Attention: Hybrid\n- Positional: NoPE\n- Norm: RMSNorm (Pre-Norm)\n- Decoder class: KimiDecoderLayer\n- Checkpoint: hf://moonshotai/Kimi-K3/config.json\n- Hidden size: 7,168\n- Heads: 96 Q / 96 KV\n- Vocab: 163,840\n- Context: 1,048,576 tokens\n- Params (est.): 3.69T (87.0B active)\n- KV cache / token (bf16 est.): 8.7 MiB\n- Layer repeat: 93 \u00d7 KimiDecoderLayer (layer_idx in range(93))\n  self_attn \u2192 KimiDeltaAttention (if (layer_idx + 1) in kda_layers (69 layers))\n  self_attn \u2192 KimiMLAAttention (else)\n  block_sparse_moe \u2192 KimiSparseMoeBlock (if layer_idx >= 1)\n  mlp \u2192 KimiMLP (else)\n  68 \u00d7 KimiDelta Attn + KimiSparseMoeBlock\n  24 \u00d7 KimiMLA Attn + KimiSparseMoeBlock\n  1 \u00d7 KimiDelta Attn + KimiMLP\n- Forward: input_layernorm -> self_attn -> post_attention_layernorm -> block_sparse_moe\n- MoE: 2 shared expert(s)\n- MoE: 16/896 experts active (~1.8%)\n- Layers: Per-layer module types from AST/config\n- AST: Forward order: input_layernorm \u2192 self_attn \u2192 post_attention_layernorm \u2192 block_sparse_moe\nHighlights: Hybrid; Sparse MoE; 68 KimiDelta Attn + KimiSparseMoeBlock, 24 KimiMLA Attn + KimiSparseMoeBlock, 1 KimiDelta Attn + KimiMLP; NoPE"
+    }
+  },
   "graphCollections": [
     {
       "label": "KimiLinearForCausalLM",
@@ -25,35 +31,9 @@
               }
             },
             {
-              "id": "embed_tokens/@input",
-              "label": "input_ids",
-              "namespace": "embed_tokens",
-              "attrs": [
-                {
-                  "key": "synthetic",
-                  "value": "@input"
-                },
-                {
-                  "key": "operation",
-                  "value": "synthetic"
-                }
-              ],
-              "style": {
-                "backgroundColor": "#d9e8f5",
-                "textColor": "#1a1a1a"
-              },
-              "incomingEdges": [
-                {
-                  "sourceNodeId": "@input",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "0"
-                }
-              ]
-            },
-            {
-              "id": "embed_tokens/embed_tokens",
+              "id": "embed_tokens",
               "label": "Token Embedding",
-              "namespace": "embed_tokens",
+              "namespace": "",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -66,26 +46,22 @@
                 {
                   "key": "role",
                   "value": "embedding"
-                },
-                {
-                  "key": "operation",
-                  "value": "nn_module"
                 }
               ],
               "style": {
-                "backgroundColor": "#d9e8f5",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "embed_tokens/@input",
+                  "sourceNodeId": "@input",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
               ]
             },
             {
-              "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/input_layernorm/input_layernorm",
+              "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/input_layernorm",
               "label": "RMSNorm",
               "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock",
               "attrs": [
@@ -100,19 +76,15 @@
                 {
                   "key": "role",
                   "value": "norm"
-                },
-                {
-                  "key": "operation",
-                  "value": "nn_module"
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "embed_tokens/embed_tokens",
+                  "sourceNodeId": "embed_tokens",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -138,7 +110,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/input_layernorm/input_layernorm",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/input_layernorm",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -209,9 +181,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f4f6f7",
-                "textColor": "#1a1a1a",
-                "borderColor": "#566573"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -244,8 +215,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -320,9 +291,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f4f6f7",
-                "textColor": "#1a1a1a",
-                "borderColor": "#566573"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -355,8 +325,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -431,9 +401,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f4f6f7",
-                "textColor": "#1a1a1a",
-                "borderColor": "#566573"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -466,8 +435,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -618,7 +587,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#5dade2",
+                "backgroundColor": "#8e44ad",
                 "textColor": "#ffffff"
               },
               "incomingEdges": [
@@ -656,7 +625,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -678,7 +647,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -773,7 +742,7 @@
             {
               "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_0:0",
               "label": "Sum sq",
-              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_q",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -793,7 +762,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -807,7 +776,7 @@
             {
               "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_1:1",
               "label": "Sqrt",
-              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_q",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -827,7 +796,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -841,7 +810,7 @@
             {
               "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_2:2",
               "label": "Inv sqrt",
-              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_q",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -861,7 +830,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -880,7 +849,7 @@
             {
               "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_3:3",
               "label": "Normalize",
-              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_q",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -900,7 +869,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -919,7 +888,7 @@
             {
               "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_0:0",
               "label": "Sum sq",
-              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_k",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -939,7 +908,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -953,7 +922,7 @@
             {
               "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_1:1",
               "label": "Sqrt",
-              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_k",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -973,7 +942,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -987,7 +956,7 @@
             {
               "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_2:2",
               "label": "Inv sqrt",
-              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_k",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -1007,7 +976,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -1026,7 +995,7 @@
             {
               "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
               "label": "Normalize",
-              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_k",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -1046,7 +1015,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -1085,8 +1054,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -1098,7 +1067,7 @@
             },
             {
               "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_fused_beta_sigmoid_beta:forward_fused_beta_sigmoid_beta_sub_1:1",
-              "label": "\u00d7 scale",
+              "label": "x scale",
               "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/fused_beta_sigmoid",
               "attrs": [
                 {
@@ -1119,8 +1088,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -1153,8 +1122,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -1187,8 +1156,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -1221,7 +1190,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -1260,8 +1229,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -1294,8 +1263,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -1328,12 +1297,12 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#566573",
+                "backgroundColor": "#8e44ad",
                 "textColor": "#ffffff"
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 },
@@ -1348,7 +1317,7 @@
                   "targetNodeInputId": "2"
                 },
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "3"
                 },
@@ -1382,17 +1351,17 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#566573",
+                "backgroundColor": "#8e44ad",
                 "textColor": "#ffffff"
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_kda_fwd_intra:4",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 },
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_kda_fwd_intra:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "1"
                 }
@@ -1677,7 +1646,7 @@
               ]
             },
             {
-              "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/post_attention_layernorm/post_attention_layernorm",
+              "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/post_attention_layernorm",
               "label": "RMSNorm",
               "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock",
               "attrs": [
@@ -1692,14 +1661,10 @@
                 {
                   "key": "role",
                   "value": "norm"
-                },
-                {
-                  "key": "operation",
-                  "value": "nn_module"
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -1730,7 +1695,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/post_attention_layernorm/post_attention_layernorm",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/post_attention_layernorm",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -1763,8 +1728,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -1797,8 +1762,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -1831,7 +1796,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -1865,8 +1830,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -1903,8 +1868,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -1946,8 +1911,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -1980,7 +1945,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -2014,8 +1979,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -2053,7 +2018,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -2108,6 +2073,10 @@
                   "value": "unknown"
                 }
               ],
+              "style": {
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
+              },
               "incomingEdges": [
                 {
                   "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/block_sparse_moe/seq:1:routed_expert_down_proj:routed_expert_down_proj:0",
@@ -2144,7 +2113,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -2292,9 +2261,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f4f6f7",
-                "textColor": "#1a1a1a",
-                "borderColor": "#566573"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -2315,7 +2283,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -2359,7 +2327,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/block_sparse_moe/residual_branch:5:shared_experts/@input",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/block_sparse_moe/residual_branch:5:shared_experts:mul",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -2376,7 +2344,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -2411,11 +2379,6 @@
                   "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/block_sparse_moe/@input",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
-                },
-                {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/block_sparse_moe/residual_branch:5:shared_experts:mul",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "1"
                 }
               ]
             },
@@ -2442,7 +2405,7 @@
               ]
             },
             {
-              "id": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/input_layernorm/input_layernorm",
+              "id": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/input_layernorm",
               "label": "RMSNorm",
               "namespace": "93x_KimiDecoderLayer/24x_KimiMLAAttention_KimiSparseMoeBlock",
               "attrs": [
@@ -2457,19 +2420,15 @@
                 {
                   "key": "role",
                   "value": "norm"
-                },
-                {
-                  "key": "operation",
-                  "value": "nn_module"
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "embed_tokens/embed_tokens",
+                  "sourceNodeId": "embed_tokens",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -2495,7 +2454,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/input_layernorm/input_layernorm",
+                  "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/input_layernorm",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -2566,7 +2525,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -2676,7 +2635,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -2786,7 +2745,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -2854,8 +2813,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -2888,7 +2847,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#5dade2",
+                "backgroundColor": "#8e44ad",
                 "textColor": "#ffffff"
               },
               "incomingEdges": [
@@ -2978,8 +2937,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -3000,7 +2959,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -3073,7 +3032,7 @@
               ]
             },
             {
-              "id": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/post_attention_layernorm/post_attention_layernorm",
+              "id": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/post_attention_layernorm",
               "label": "RMSNorm",
               "namespace": "93x_KimiDecoderLayer/24x_KimiMLAAttention_KimiSparseMoeBlock",
               "attrs": [
@@ -3088,14 +3047,10 @@
                 {
                   "key": "role",
                   "value": "norm"
-                },
-                {
-                  "key": "operation",
-                  "value": "nn_module"
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -3126,7 +3081,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/post_attention_layernorm/post_attention_layernorm",
+                  "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/post_attention_layernorm",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -3159,8 +3114,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -3193,8 +3148,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -3227,7 +3182,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -3261,8 +3216,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -3299,8 +3254,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -3342,8 +3297,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -3376,7 +3331,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -3410,8 +3365,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -3449,7 +3404,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -3504,6 +3459,10 @@
                   "value": "unknown"
                 }
               ],
+              "style": {
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
+              },
               "incomingEdges": [
                 {
                   "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/block_sparse_moe/seq:1:routed_expert_down_proj:routed_expert_down_proj:0",
@@ -3540,7 +3499,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -3688,9 +3647,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f4f6f7",
-                "textColor": "#1a1a1a",
-                "borderColor": "#566573"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -3711,7 +3669,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -3755,7 +3713,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/block_sparse_moe/residual_branch:5:shared_experts/@input",
+                  "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/block_sparse_moe/residual_branch:5:shared_experts:mul",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -3772,7 +3730,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -3807,11 +3765,6 @@
                   "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/block_sparse_moe/@input",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
-                },
-                {
-                  "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/block_sparse_moe/residual_branch:5:shared_experts:mul",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "1"
                 }
               ]
             },
@@ -3838,7 +3791,7 @@
               ]
             },
             {
-              "id": "decoder/1x_KimiDeltaAttention_KimiMLP/input_layernorm/input_layernorm",
+              "id": "decoder/1x_KimiDeltaAttention_KimiMLP/input_layernorm",
               "label": "RMSNorm",
               "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP",
               "attrs": [
@@ -3853,19 +3806,15 @@
                 {
                   "key": "role",
                   "value": "norm"
-                },
-                {
-                  "key": "operation",
-                  "value": "nn_module"
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "embed_tokens/embed_tokens",
+                  "sourceNodeId": "embed_tokens",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -3891,7 +3840,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/input_layernorm/input_layernorm",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/input_layernorm",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -3962,9 +3911,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f4f6f7",
-                "textColor": "#1a1a1a",
-                "borderColor": "#566573"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -3997,8 +3945,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -4073,9 +4021,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f4f6f7",
-                "textColor": "#1a1a1a",
-                "borderColor": "#566573"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -4108,8 +4055,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -4184,9 +4131,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f4f6f7",
-                "textColor": "#1a1a1a",
-                "borderColor": "#566573"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -4219,8 +4165,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -4371,7 +4317,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#5dade2",
+                "backgroundColor": "#8e44ad",
                 "textColor": "#ffffff"
               },
               "incomingEdges": [
@@ -4409,7 +4355,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -4431,7 +4377,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -4526,7 +4472,7 @@
             {
               "id": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_0:0",
               "label": "Sum sq",
-              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_q",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -4546,7 +4492,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -4560,7 +4506,7 @@
             {
               "id": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_1:1",
               "label": "Sqrt",
-              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_q",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -4580,7 +4526,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -4594,7 +4540,7 @@
             {
               "id": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_2:2",
               "label": "Inv sqrt",
-              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_q",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -4614,7 +4560,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -4633,7 +4579,7 @@
             {
               "id": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_3:3",
               "label": "Normalize",
-              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_q",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -4653,7 +4599,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -4672,7 +4618,7 @@
             {
               "id": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_0:0",
               "label": "Sum sq",
-              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_k",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -4692,7 +4638,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -4706,7 +4652,7 @@
             {
               "id": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_1:1",
               "label": "Sqrt",
-              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_k",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -4726,7 +4672,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -4740,7 +4686,7 @@
             {
               "id": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_2:2",
               "label": "Inv sqrt",
-              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_k",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -4760,7 +4706,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -4779,7 +4725,7 @@
             {
               "id": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
               "label": "Normalize",
-              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd",
+              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_k",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -4799,7 +4745,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -4838,8 +4784,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -4851,7 +4797,7 @@
             },
             {
               "id": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_fused_beta_sigmoid_beta:forward_fused_beta_sigmoid_beta_sub_1:1",
-              "label": "\u00d7 scale",
+              "label": "x scale",
               "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/fused_beta_sigmoid",
               "attrs": [
                 {
@@ -4872,8 +4818,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -4906,8 +4852,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -4940,8 +4886,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -4974,7 +4920,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -5013,8 +4959,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -5047,8 +4993,8 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#85929e",
-                "textColor": "#ffffff"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
@@ -5081,12 +5027,12 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#566573",
+                "backgroundColor": "#8e44ad",
                 "textColor": "#ffffff"
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 },
@@ -5101,7 +5047,7 @@
                   "targetNodeInputId": "2"
                 },
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "3"
                 },
@@ -5135,17 +5081,17 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#566573",
+                "backgroundColor": "#8e44ad",
                 "textColor": "#ffffff"
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_kda_fwd_intra:4",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 },
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_kda_fwd_intra:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "1"
                 }
@@ -5430,7 +5376,7 @@
               ]
             },
             {
-              "id": "decoder/1x_KimiDeltaAttention_KimiMLP/post_attention_layernorm/post_attention_layernorm",
+              "id": "decoder/1x_KimiDeltaAttention_KimiMLP/post_attention_layernorm",
               "label": "RMSNorm",
               "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP",
               "attrs": [
@@ -5445,14 +5391,10 @@
                 {
                   "key": "role",
                   "value": "norm"
-                },
-                {
-                  "key": "operation",
-                  "value": "nn_module"
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -5483,7 +5425,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/post_attention_layernorm/post_attention_layernorm",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/post_attention_layernorm",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -5592,13 +5534,12 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#f4f6f7",
-                "textColor": "#1a1a1a",
-                "borderColor": "#566573"
+                "backgroundColor": "#bdc3c7",
+                "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/block_sparse_moe/mlp/@input",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/block_sparse_moe/mlp:gate_proj",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -5615,7 +5556,7 @@
                 }
               ],
               "style": {
-                "backgroundColor": "#ecf0f1",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
@@ -5625,7 +5566,7 @@
                   "targetNodeInputId": "0"
                 },
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/block_sparse_moe/mlp/@input",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/block_sparse_moe/mlp:up_proj",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "1"
                 }
@@ -5666,72 +5607,9 @@
               ]
             },
             {
-              "id": "decoder/1x_KimiDeltaAttention_KimiMLP/block_sparse_moe/mlp/@input",
-              "label": "hidden_states",
-              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiMLP/SituAndMul",
-              "attrs": [
-                {
-                  "key": "synthetic",
-                  "value": "@input"
-                }
-              ],
-              "style": {
-                "backgroundColor": "#d9e8f5",
-                "textColor": "#1a1a1a"
-              },
-              "incomingEdges": [
-                {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/block_sparse_moe/mlp:gate_proj",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "0"
-                },
-                {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/block_sparse_moe/mlp:up_proj",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "1"
-                }
-              ]
-            },
-            {
-              "id": "norm/@input",
-              "label": "hidden_states",
-              "namespace": "norm",
-              "attrs": [
-                {
-                  "key": "synthetic",
-                  "value": "@input"
-                },
-                {
-                  "key": "operation",
-                  "value": "synthetic"
-                }
-              ],
-              "style": {
-                "backgroundColor": "#d9e8f5",
-                "textColor": "#1a1a1a"
-              },
-              "incomingEdges": [
-                {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/block_sparse_moe/residual_add:5",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "0"
-                },
-                {
-                  "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/block_sparse_moe/residual_add:5",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "1"
-                },
-                {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/block_sparse_moe/mlp:down_proj",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "2"
-                }
-              ]
-            },
-            {
-              "id": "norm/norm",
+              "id": "norm",
               "label": "RMSNorm",
-              "namespace": "norm",
+              "namespace": "",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -5744,54 +5622,34 @@
                 {
                   "key": "role",
                   "value": "norm"
-                },
-                {
-                  "key": "operation",
-                  "value": "nn_module"
                 }
               ],
               "style": {
-                "backgroundColor": "#f5b041",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "norm/@input",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/block_sparse_moe/residual_add:5",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                },
+                {
+                  "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/block_sparse_moe/residual_add:5",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                },
+                {
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/block_sparse_moe/mlp:down_proj",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
               ]
             },
             {
-              "id": "lm_head/@input",
-              "label": "hidden_states",
-              "namespace": "lm_head",
-              "attrs": [
-                {
-                  "key": "synthetic",
-                  "value": "@input"
-                },
-                {
-                  "key": "operation",
-                  "value": "synthetic"
-                }
-              ],
-              "style": {
-                "backgroundColor": "#d9e8f5",
-                "textColor": "#1a1a1a"
-              },
-              "incomingEdges": [
-                {
-                  "sourceNodeId": "norm/norm",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "0"
-                }
-              ]
-            },
-            {
-              "id": "lm_head/lm_head",
-              "label": "Linear",
-              "namespace": "lm_head",
+              "id": "lm_head",
+              "label": "Logits",
+              "namespace": "",
               "attrs": [
                 {
                   "key": "attr_name",
@@ -5804,51 +5662,19 @@
                 {
                   "key": "role",
                   "value": "head"
-                },
-                {
-                  "key": "operation",
-                  "value": "nn_module"
                 }
               ],
               "style": {
-                "backgroundColor": "#d5dbdb",
+                "backgroundColor": "#bdc3c7",
                 "textColor": "#1a1a1a"
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "lm_head/@input",
+                  "sourceNodeId": "norm",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
               ]
-            },
-            {
-              "id": "@fact_sheet",
-              "label": "Fact sheet\n\u2022 Model type: kimi_linear\n\u2022 Decoder: Sparse MoE\n\u2022 Attention: Hybrid\n\u2022 Positional: NoPE\n\u2022 Norm: RMSNorm (Pre-Norm)\n\u2022 Decoder class: KimiDecoderLayer\n\u2022 Checkpoint: hf://moonshotai/Kimi-K3/config.json\n\u2022 Hidden size: 7,168\n\u2022 Heads: 96 Q / 96 KV\n\u2022 Vocab: 163,840\n\u2022 Context: 1,048,576 tokens\n\u2022 Params (est.): 3.69T (87.0B active)\n\u2022 KV cache / token (bf16 est.): 8.7 MiB\n\u2022 Layer repeat: 93 \u00d7 KimiDecoderLayer (layer_idx in range(93))\n  self_attn \u2192 KimiDeltaAttention (if (layer_idx + 1) in kda_layers (69 layers))\n  self_attn \u2192 KimiMLAAttention (else)\n  block_sparse_moe \u2192 KimiSparseMoeBlock (if layer_idx >= 1)\n  mlp \u2192 KimiMLP (else)\n  68 \u00d7 KimiDelta Attn + KimiSparseMoeBlock\n  24 \u00d7 KimiMLA Attn + KimiSparseMoeBlock\n  1 \u00d7 KimiDelta Attn + KimiMLP\n\u2022 Forward: input_layernorm \u2192 self_attn \u2192 post_attention_layernorm \u2192 block_sparse_moe\n\u2022 MoE: 2 shared expert(s)\n\u2022 MoE: 16/896 experts active (~1.8%)\n\u2022 Layers: Per-layer module types from AST/config\n\u2022 AST: Forward order: input_layernorm \u2192 self_attn \u2192 post_attention_layernorm \u2192 block_sparse_moe\nHighlights: Hybrid; Sparse MoE; 68 KimiDelta Attn + KimiSparseMoeBlock, 24 KimiMLA Attn + KimiSparseMoeBlock, 1 KimiDelta Attn + KimiMLP; NoPE",
-              "namespace": "",
-              "attrs": [
-                {
-                  "key": "synthetic",
-                  "value": "fact_sheet"
-                },
-                {
-                  "key": "class_name",
-                  "value": "FactSheet"
-                },
-                {
-                  "key": "title",
-                  "value": "KimiLinearForCausalLM"
-                },
-                {
-                  "key": "model_type",
-                  "value": "kimi_linear"
-                }
-              ],
-              "style": {
-                "backgroundColor": "#ffffff",
-                "textColor": "#1a1a1a",
-                "borderColor": "#d0d0d0"
-              }
             }
           ],
           "groupNodeAttributes": {
@@ -5877,8 +5703,12 @@
               "operation": "kernel pipeline",
               "details": "kernel pipeline \u00b7 chunk_kda"
             },
-            "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd": {
-              "label": "L2Norm",
+            "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_q": {
+              "label": "L2Norm (q)",
+              "operation": "gpu_kernel"
+            },
+            "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_k": {
+              "label": "L2Norm (k)",
               "operation": "gpu_kernel"
             },
             "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/fused_beta_sigmoid": {
@@ -5887,6 +5717,10 @@
             },
             "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/kda_gate_chunk_cumsum": {
               "label": "Gate cumsum",
+              "operation": "gpu_kernel"
+            },
+            "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd": {
+              "label": "L2Norm",
               "operation": "gpu_kernel"
             },
             "93x_KimiDecoderLayer/24x_KimiMLAAttention_KimiSparseMoeBlock": {
@@ -5906,8 +5740,12 @@
               "operation": "kernel pipeline",
               "details": "kernel pipeline \u00b7 chunk_kda"
             },
-            "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd": {
-              "label": "L2Norm",
+            "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_q": {
+              "label": "L2Norm (q)",
+              "operation": "gpu_kernel"
+            },
+            "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_k": {
+              "label": "L2Norm (k)",
               "operation": "gpu_kernel"
             },
             "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/fused_beta_sigmoid": {
@@ -5917,52 +5755,110 @@
             "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/kda_gate_chunk_cumsum": {
               "label": "Gate cumsum",
               "operation": "gpu_kernel"
+            },
+            "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd": {
+              "label": "L2Norm",
+              "operation": "gpu_kernel"
             }
           },
           "groupNodeConfigs": [
             {
-              "namespaceRegex": "93x_KimiDecoderLayer",
+              "namespaceRegex": "^93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/kda_gate_chunk_cumsum$",
+              "backgroundColor": "#8e44ad",
+              "textColor": "#ffffff",
+              "layoutDirection": "TOP_BOTTOM"
+            },
+            {
+              "namespaceRegex": "^93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/fused_beta_sigmoid$",
+              "backgroundColor": "#8e44ad",
+              "textColor": "#ffffff",
+              "layoutDirection": "TOP_BOTTOM"
+            },
+            {
+              "namespaceRegex": "^93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_q$",
+              "backgroundColor": "#8e44ad",
+              "textColor": "#ffffff",
+              "layoutDirection": "TOP_BOTTOM"
+            },
+            {
+              "namespaceRegex": "^93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_k$",
+              "backgroundColor": "#8e44ad",
+              "textColor": "#ffffff",
+              "layoutDirection": "TOP_BOTTOM"
+            },
+            {
+              "namespaceRegex": "^93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd$",
+              "backgroundColor": "#8e44ad",
+              "textColor": "#ffffff",
+              "layoutDirection": "TOP_BOTTOM"
+            },
+            {
+              "namespaceRegex": "^93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/kda_gate_chunk_cumsum$",
+              "backgroundColor": "#8e44ad",
+              "textColor": "#ffffff",
+              "layoutDirection": "TOP_BOTTOM"
+            },
+            {
+              "namespaceRegex": "^93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/fused_beta_sigmoid$",
+              "backgroundColor": "#8e44ad",
+              "textColor": "#ffffff",
+              "layoutDirection": "TOP_BOTTOM"
+            },
+            {
+              "namespaceRegex": "^93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_q$",
+              "backgroundColor": "#8e44ad",
+              "textColor": "#ffffff",
+              "layoutDirection": "TOP_BOTTOM"
+            },
+            {
+              "namespaceRegex": "^93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd_k$",
+              "backgroundColor": "#8e44ad",
+              "textColor": "#ffffff",
+              "layoutDirection": "TOP_BOTTOM"
+            },
+            {
+              "namespaceRegex": "^93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline$",
+              "backgroundColor": "#8e44ad",
+              "textColor": "#ffffff",
+              "layoutDirection": "TOP_BOTTOM"
+            },
+            {
+              "namespaceRegex": "^93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/l2norm_fwd$",
+              "backgroundColor": "#8e44ad",
+              "textColor": "#ffffff",
+              "layoutDirection": "TOP_BOTTOM"
+            },
+            {
+              "namespaceRegex": "^93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline$",
+              "backgroundColor": "#8e44ad",
+              "textColor": "#ffffff",
+              "layoutDirection": "TOP_BOTTOM"
+            },
+            {
+              "namespaceRegex": "^93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock$",
               "backgroundColor": "#fff5f4",
               "borderColor": "#c0392b",
               "textColor": "#1a1a1a",
               "layoutDirection": "TOP_BOTTOM"
             },
             {
-              "namespaceRegex": "embed_tokens",
-              "backgroundColor": "#d9e8f5",
-              "textColor": "#1a1a1a",
-              "layoutDirection": "TOP_BOTTOM"
-            },
-            {
-              "namespaceRegex": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock",
+              "namespaceRegex": "^93x_KimiDecoderLayer/24x_KimiMLAAttention_KimiSparseMoeBlock$",
               "backgroundColor": "#fff5f4",
               "borderColor": "#c0392b",
               "textColor": "#1a1a1a",
               "layoutDirection": "TOP_BOTTOM"
             },
             {
-              "namespaceRegex": "93x_KimiDecoderLayer/24x_KimiMLAAttention_KimiSparseMoeBlock",
+              "namespaceRegex": "^93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP$",
               "backgroundColor": "#fff5f4",
               "borderColor": "#c0392b",
               "textColor": "#1a1a1a",
               "layoutDirection": "TOP_BOTTOM"
             },
             {
-              "namespaceRegex": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP",
+              "namespaceRegex": "^93x_KimiDecoderLayer$",
               "backgroundColor": "#fff5f4",
               "borderColor": "#c0392b",
-              "textColor": "#1a1a1a",
-              "layoutDirection": "TOP_BOTTOM"
-            },
-            {
-              "namespaceRegex": "norm",
-              "backgroundColor": "#f5b041",
-              "textColor": "#1a1a1a",
-              "layoutDirection": "TOP_BOTTOM"
-            },
-            {
-              "namespaceRegex": "lm_head",
-              "backgroundColor": "#d5dbdb",
               "textColor": "#1a1a1a",
               "layoutDirection": "TOP_BOTTOM"
             }

@@ -18,18 +18,19 @@ from model_explorer_export.adapter import (
     _node_style,
     _sanitize_namespace_segment,
 )
-from model_explorer_export.fact_sheet import build_fact_sheet_node
 from model_explorer_export.labels import apply_kernel_frame_labels
 from model_explorer_export.overview import (
     _DECODER_NORM_ATTRS,
     _decoder_namespace,
     _display_label,
+    _flat_spine_namespace,
     _ordered_decoder_components,
     _section_namespace_segment,
     _stack_pre_components,
     _stack_tail_components,
+    component_has_detail_section,
 )
-from model_explorer_export.styles import ROLE_COLORS, ensure_readable_text
+from model_explorer_export.styles import ROLE_COLORS, _GPU_KERNEL_BORDER, build_group_node_configs, ensure_readable_text, finalize_graph_node_styles, input_port_style, spine_tile_style
 
 
 def _join_namespace(prefix: str, suffix: str) -> str:
@@ -55,7 +56,7 @@ def _is_synthetic_input(node: dict[str, Any]) -> bool:
 
 
 def _input_style() -> dict[str, str]:
-    return ensure_readable_text({"backgroundColor": "#d9e8f5", "textColor": "#1a1a1a"})
+    return ensure_readable_text(input_port_style())
 
 
 def _computation_nodes(
@@ -181,20 +182,78 @@ def _common_id_prefix(ids: list[str]) -> str:
     return prefix
 
 
+def _group_input_prefix(group_ids: list[str]) -> str:
+    """Pick a stable group input id prefix, avoiding partial kernel sub-op stems."""
+    prefix = _common_id_prefix(group_ids) or group_ids[0].rsplit("/", 1)[0]
+    if ":" in prefix:
+        head, tail = prefix.rsplit(":", 1)
+        if "_sub_" in tail:
+            tail = tail.split("_sub_", 1)[0]
+            return f"{head}:{tail}"
+    elif "_sub_" in prefix:
+        prefix = prefix.split("_sub_", 1)[0]
+    return prefix
+
+
 def _infer_group_input_label(group_nodes: list[dict[str, Any]], namespace: str) -> str:
     for node in group_nodes:
         for attr in node.get("attrs", []):
             if attr.get("key") == "port_label" and attr.get("value"):
                 return str(attr["value"])
     segment = namespace.rsplit("/", 1)[-1]
+    if segment == "l2norm_fwd_q":
+        return "q"
+    if segment == "l2norm_fwd_k":
+        return "k"
     if segment in {"KimiMLP", "KimiMoEGate"}:
         return "x" if segment == "KimiMLP" else "hidden_states"
     return "hidden_states"
 
 
+def _skip_merged_l2norm_input(namespace: str, group_nodes: list[dict[str, Any]]) -> bool:
+    """Skip the shared l2norm_fwd wrapper when q/k frames export as separate groups."""
+    if namespace.rsplit("/", 1)[-1] != "l2norm_fwd":
+        return False
+    return any(
+        "forward_l2norm_fwd_q" in node.get("id", "")
+        or "forward_l2norm_fwd_k" in node.get("id", "")
+        for node in group_nodes
+    )
+
+
 def _skip_variant_root_input(component: BlockComponent) -> bool:
     """Decoder norms at the variant namespace are single tiles, not expanded input groups."""
     return component.role == "norm" and component.attr_name in _DECODER_NORM_ATTRS
+
+
+def _namespace_is_descendant(node_namespace: str, group_namespace: str) -> bool:
+    if not group_namespace:
+        return node_namespace == ""
+    return node_namespace == group_namespace or node_namespace.startswith(f"{group_namespace}/")
+
+
+def _namespace_internal_ids(section_nodes: list[dict[str, Any]], namespace: str) -> set[str]:
+    """Include nested namespaces so SituAndMul ops stay inside KimiMLP groups."""
+    return {
+        node["id"]
+        for node in section_nodes
+        if _namespace_is_descendant(node.get("namespace", ""), namespace)
+    }
+
+
+_INLINE_FRAME_NAMESPACE_SUFFIXES = frozenset({"SituAndMul", "SiluAndMul"})
+
+
+def _skip_nested_inline_frame_input(section_nodes: list[dict[str, Any]], namespace: str) -> bool:
+    """Inline activation frames inherit the parent KimiMLP input port."""
+    segment = namespace.rsplit("/", 1)[-1]
+    if segment not in _INLINE_FRAME_NAMESPACE_SUFFIXES or "/" not in namespace:
+        return False
+    parent = namespace.rsplit("/", 1)[0]
+    return any(
+        _is_synthetic_input(node) and node.get("namespace", "") == parent
+        for node in section_nodes
+    )
 
 
 def _inject_group_inputs(
@@ -212,8 +271,12 @@ def _inject_group_inputs(
         group_nodes = [node for node in section_nodes if node.get("namespace", "") == namespace]
         if any(_is_synthetic_input(node) for node in group_nodes):
             continue
+        if _skip_nested_inline_frame_input(section_nodes, namespace):
+            continue
+        if _skip_merged_l2norm_input(namespace, group_nodes):
+            continue
 
-        internal_ids = {node["id"] for node in group_nodes}
+        internal_ids = _namespace_internal_ids(section_nodes, namespace)
         entry_nodes: list[dict[str, Any]] = []
         outside_sources: set[str] = set()
 
@@ -229,7 +292,7 @@ def _inject_group_inputs(
             continue
 
         group_ids = [node["id"] for node in group_nodes]
-        prefix = _common_id_prefix(group_ids) or group_ids[0].rsplit("/", 1)[0]
+        prefix = _group_input_prefix(group_ids) or group_ids[0].rsplit("/", 1)[0]
         input_id = f"{prefix}/@input"
         if input_id in node_by_id:
             continue
@@ -515,7 +578,7 @@ def _summary_node(
     namespace: str,
     component: BlockComponent,
 ) -> dict[str, Any]:
-    style = ROLE_COLORS.get(component.role)
+    style = spine_tile_style()
     node: dict[str, Any] = {
         "id": node_id,
         "label": label,
@@ -543,6 +606,31 @@ def _append_section(
     variant: LayerVariant | None = None,
     group_node_attributes: dict[str, dict[str, str]] | None = None,
 ) -> list[str]:
+    if not component_has_detail_section(component, spec):
+        summary = _summary_node(
+            id_prefix,
+            _group_node_label(spec, component)
+            if component.role == "norm"
+            else _display_label(component, spec),
+            namespace=_flat_spine_namespace(
+                component,
+                namespace_prefix,
+                variant=variant,
+            ),
+            component=component,
+        )
+        if previous_exits:
+            summary["incomingEdges"] = [
+                {
+                    "sourceNodeId": source_id,
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                }
+                for source_id in previous_exits
+            ]
+        merged_nodes.append(summary)
+        return [id_prefix]
+
     resolved = _resolve_section_tree_for_component(
         spec,
         component,
@@ -553,7 +641,11 @@ def _append_section(
         summary = _summary_node(
             id_prefix,
             _display_label(component, spec),
-            namespace=namespace_prefix,
+            namespace=_flat_spine_namespace(
+                component,
+                namespace_prefix,
+                variant=variant,
+            ),
             component=component,
         )
         if previous_exits:
@@ -687,7 +779,7 @@ def _append_decoder_layers(
             }
             group_node_configs.append(
                 {
-                    "namespaceRegex": re.escape(variant_namespace),
+                    "namespaceRegex": f"^{re.escape(variant_namespace)}$",
                     "backgroundColor": "#fff5f4",
                     "borderColor": "#c0392b",
                     "textColor": "#1a1a1a",
@@ -738,13 +830,13 @@ def _group_config_for_role(namespace: str, role: str) -> dict[str, Any] | None:
         return None
     style = ensure_readable_text(style)
     config: dict[str, Any] = {
-        "namespaceRegex": re.escape(namespace),
+        "namespaceRegex": f"^{re.escape(namespace)}$",
         "backgroundColor": style["backgroundColor"],
         "textColor": style["textColor"],
         "layoutDirection": "TOP_BOTTOM",
     }
     if role == "moe":
-        config["borderColor"] = "#6c3483"
+        config["borderColor"] = _GPU_KERNEL_BORDER
     elif role == "ffn":
         config["borderColor"] = "#566573"
     return config
@@ -764,7 +856,7 @@ def build_merged_model_graph(
             "label": "Tokenized text",
             "namespace": "",
             "attrs": [{"key": "synthetic", "value": "@input"}],
-            "style": ensure_readable_text({"backgroundColor": "#d9e8f5", "textColor": "#1a1a1a"}),
+            "style": ensure_readable_text(input_port_style()),
         }
     ]
     previous_exits = ["@input"]
@@ -772,10 +864,14 @@ def build_merged_model_graph(
     group_node_attributes: dict[str, dict[str, str]] = {}
 
     for component in _stack_pre_components(spec):
-        namespace_prefix = _sanitize_namespace_segment(component.attr_name)
-        group = _group_config_for_role(namespace_prefix, component.role)
-        if group:
-            group_node_configs.append(group)
+        expands = component_has_detail_section(component, spec)
+        namespace_prefix = (
+            _sanitize_namespace_segment(component.attr_name) if expands else ""
+        )
+        if expands:
+            group = _group_config_for_role(namespace_prefix, component.role)
+            if group:
+                group_node_configs.append(group)
         previous_exits = _append_section(
             nodes,
             spec=spec,
@@ -798,10 +894,14 @@ def build_merged_model_graph(
     )
 
     for component in _stack_tail_components(spec):
-        namespace_prefix = _sanitize_namespace_segment(component.attr_name)
-        group = _group_config_for_role(namespace_prefix, component.role)
-        if group:
-            group_node_configs.append(group)
+        expands = component_has_detail_section(component, spec)
+        namespace_prefix = (
+            _sanitize_namespace_segment(component.attr_name) if expands else ""
+        )
+        if expands:
+            group = _group_config_for_role(namespace_prefix, component.role)
+            if group:
+                group_node_configs.append(group)
         previous_exits = _append_section(
             nodes,
             spec=spec,
@@ -812,9 +912,6 @@ def build_merged_model_graph(
             previous_exits=previous_exits,
         )
 
-    nodes.append(build_fact_sheet_node(spec))
-
-    decoder_namespace_escaped = re.escape(decoder_namespace)
     model_attrs: dict[str, str] = {
         "title": spec.name,
         "model_type": spec.model_type,
@@ -828,6 +925,8 @@ def build_merged_model_graph(
     if spec.layer_mix:
         model_attrs["layer_mix"] = spec.layer_mix
 
+    finalize_graph_node_styles(nodes)
+
     return {
         "id": graph_id,
         "nodes": nodes,
@@ -840,14 +939,15 @@ def build_merged_model_graph(
             },
             **group_node_attributes,
         },
-        "groupNodeConfigs": [
-            {
-                "namespaceRegex": decoder_namespace_escaped,
-                "backgroundColor": "#fff5f4",
-                "borderColor": "#c0392b",
-                "textColor": "#1a1a1a",
-                "layoutDirection": "TOP_BOTTOM",
+        "groupNodeConfigs": build_group_node_configs(
+            decoder_namespace=decoder_namespace,
+            group_node_attributes={
+                "": model_attrs,
+                decoder_namespace: {
+                    "repeat": decoder_namespace,
+                },
+                **group_node_attributes,
             },
-            *group_node_configs,
-        ],
+            role_configs=group_node_configs,
+        ),
     }

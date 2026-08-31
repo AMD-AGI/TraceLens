@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from visualizer.extract import ArchitectureSpec
 
-FACT_SHEET_NODE_ID = "@fact_sheet"
 _FACT_SUBLINE_INDENT = "    "
 
 
@@ -51,7 +48,7 @@ def _fact_lines(spec: ArchitectureSpec) -> list[str]:
     elif spec.layer_mix:
         lines.append(f"Layer mix: {spec.layer_mix}")
     if spec.forward_sequence:
-        lines.append("Forward: " + " → ".join(spec.forward_sequence))
+        lines.append("Forward: " + " -> ".join(spec.forward_sequence))
     for note in spec.moe_notes[:2]:
         lines.append(f"MoE: {note}")
     for note in spec.layer_notes[:1]:
@@ -67,33 +64,16 @@ def _highlight_lines(spec: ArchitectureSpec) -> list[str]:
     return [f"Highlights: {'; '.join(spec.highlights)}"]
 
 
-def _format_fact_sheet_label(spec: ArchitectureSpec) -> str:
+def build_fact_sheet_viewer(spec: ArchitectureSpec) -> dict[str, str]:
+    """Return left-aligned fact sheet text for the HTML viewer panel."""
     body: list[str] = []
     for line in _fact_lines(spec):
         if line.startswith(_FACT_SUBLINE_INDENT):
             body.append(f"  {line[len(_FACT_SUBLINE_INDENT) :].strip()}")
         else:
-            body.append(f"• {line.strip()}")
+            body.append(f"- {line.strip()}")
     body.extend(line.strip() for line in _highlight_lines(spec))
-    return "Fact sheet\n" + "\n".join(body)
-
-
-def build_fact_sheet_node(spec: ArchitectureSpec) -> dict[str, Any]:
-    """Return one always-visible fact sheet block with a multi-line label."""
-    label = _format_fact_sheet_label(spec)
     return {
-        "id": FACT_SHEET_NODE_ID,
-        "label": label,
-        "namespace": "",
-        "attrs": [
-            {"key": "synthetic", "value": "fact_sheet"},
-            {"key": "class_name", "value": "FactSheet"},
-            {"key": "title", "value": spec.name},
-            {"key": "model_type", "value": spec.model_type},
-        ],
-        "style": {
-            "backgroundColor": "#ffffff",
-            "textColor": "#1a1a1a",
-            "borderColor": "#d0d0d0",
-        },
+        "title": "Fact sheet",
+        "body": "\n".join(body),
     }

@@ -23,7 +23,25 @@
         text-align: center;
         color: #1a1a1a;
         background: #e1e1e1;
-        z-index: 2;
+        z-index: 100;
+      }
+
+      #tracelens-app {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 420px;
+        width: 100%;
+        height: 100%;
+      }
+
+      #tracelens-app[hidden] {
+        display: none;
+      }
+
+      #tracelens-graph-pane {
+        min-width: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #e1e1e1;
       }
 
       model-explorer-visualizer {
@@ -31,11 +49,42 @@
         width: 100%;
         height: 100%;
       }
+
+      #tracelens-fact-sheet {
+        box-sizing: border-box;
+        height: 100%;
+        overflow: auto;
+        padding: 14px 16px 20px;
+        background: #ffffff;
+        border-left: 1px solid #d0d0d0;
+        color: #1a1a1a;
+        text-align: left;
+      }
+
+      #tracelens-fact-sheet h2 {
+        margin: 0 0 10px;
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      #tracelens-fact-sheet pre {
+        margin: 0;
+        font: 12px/1.45 system-ui, sans-serif;
+        white-space: pre-wrap;
+        text-align: left;
+      }
     </style>
     <script src="https://unpkg.com/ai-edge-model-explorer-visualizer@0.1.2"></script>
   </head>
   <body>
     <div id="status">Loading TraceLens graph…</div>
+    <div id="tracelens-app" hidden>
+      <div id="tracelens-graph-pane"></div>
+      <aside id="tracelens-fact-sheet">
+        <h2 id="tracelens-fact-sheet-title">Fact sheet</h2>
+        <pre id="tracelens-fact-sheet-body"></pre>
+      </aside>
+    </div>
     <script src="./app.js"></script>
   </body>
 </html>

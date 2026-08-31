@@ -2,45 +2,197 @@
 
 from __future__ import annotations
 
+import re
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from visualizer.block_tree import BlockNode
+
 _WHITE_TEXT = "#ffffff"
 _DARK_TEXT = "#1a1a1a"
+
+# SVG COLORS palette used by detailed diagram tiles.
+_BASIC_OP = "#bdc3c7"
+_ATTENTION = "#5dade2"
+# Model Explorer WebGL labels stay dark on purple fills, so export a lighter
+# purple that remains readable with dark text (SVG detailed diagrams keep #8e44ad).
+_GPU_KERNEL = "#d2b4de"
+_GPU_KERNEL_BORDER = "#a569bd"
+_LEGACY_GPU_KERNEL = "#8e44ad"
+_SYNTHETIC = "#ecf0f1"
+_INPUT = "#d9e8f5"
+
+_GPU_KERNEL_FILLS = frozenset(
+    {
+        _GPU_KERNEL.lower(),
+        _LEGACY_GPU_KERNEL.lower(),
+    }
+)
 
 # Backgrounds that should always use white label text.
 _WHITE_TEXT_BACKGROUNDS = frozenset(
     {
         "#3a4550",  # ffn
-        "#566573",  # gpu_kernel / detail border gray
-        "#85929e",  # torch_functional
-        "#8e44ad",  # moe purple
-        "#5dade2",  # attention blue
+        "#566573",  # detail border gray
+        "#85929e",  # legacy torch_functional
+        "#5dade2",  # expanded composite / attention blue
         "#95a5a6",  # residual gray
     }
 )
 
 ROLE_COLORS: dict[str, dict[str, str]] = {
-    "embedding": {"backgroundColor": "#d9e8f5", "textColor": _DARK_TEXT},
-    "attention": {"backgroundColor": "#5dade2", "textColor": _WHITE_TEXT},
+    "embedding": {"backgroundColor": _INPUT, "textColor": _DARK_TEXT},
+    "attention": {"backgroundColor": _ATTENTION, "textColor": _WHITE_TEXT},
     "ffn": {"backgroundColor": "#3a4550", "textColor": _WHITE_TEXT},
-    "moe": {"backgroundColor": "#8e44ad", "textColor": _WHITE_TEXT},
-    "norm": {"backgroundColor": "#f5b041", "textColor": _DARK_TEXT},
+    "moe": {"backgroundColor": _GPU_KERNEL, "textColor": _DARK_TEXT},
+    "norm": {"backgroundColor": _BASIC_OP, "textColor": _DARK_TEXT},
     "head": {"backgroundColor": "#d5dbdb", "textColor": _DARK_TEXT},
     "residual": {"backgroundColor": "#95a5a6", "textColor": _WHITE_TEXT},
-    "positional": {"backgroundColor": "#d9e8f5", "textColor": _DARK_TEXT},
+    "positional": {"backgroundColor": _INPUT, "textColor": _DARK_TEXT},
 }
 
+# Keep legacy operation map aligned with the SVG detail palette.
 OPERATION_COLORS: dict[str, dict[str, str]] = {
-    "gpu_kernel": {"backgroundColor": "#566573", "textColor": _WHITE_TEXT},
-    "nn_module": {"backgroundColor": "#bdc3c7", "textColor": _DARK_TEXT},
-    "torch_functional": {"backgroundColor": "#85929e", "textColor": _WHITE_TEXT},
-    "composite": {"backgroundColor": "#f4f6f7", "textColor": _DARK_TEXT, "borderColor": "#566573"},
-    "synthetic": {"backgroundColor": "#ecf0f1", "textColor": _DARK_TEXT},
+    "gpu_kernel": {"backgroundColor": _GPU_KERNEL, "textColor": _DARK_TEXT},
+    "nn_module": {"backgroundColor": _BASIC_OP, "textColor": _DARK_TEXT},
+    "torch_functional": {"backgroundColor": _BASIC_OP, "textColor": _DARK_TEXT},
+    "composite": {"backgroundColor": _ATTENTION, "textColor": _WHITE_TEXT, "borderColor": "#566573"},
+    "synthetic": {"backgroundColor": _SYNTHETIC, "textColor": _DARK_TEXT},
 }
 
 
 def ensure_readable_text(style: dict[str, str]) -> dict[str, str]:
-    """Force white text on dark gray and purple node fills."""
+    """Normalize fills and pick label colors Model Explorer can render legibly."""
     resolved = dict(style)
     background = resolved.get("backgroundColor", "").lower()
+    if background in _GPU_KERNEL_FILLS:
+        resolved["backgroundColor"] = _GPU_KERNEL
+        resolved["textColor"] = _DARK_TEXT
+        return resolved
     if background in _WHITE_TEXT_BACKGROUNDS:
         resolved["textColor"] = _WHITE_TEXT
     return resolved
+
+
+def finalize_graph_node_styles(nodes: list[dict[str, Any]]) -> None:
+    """Ensure op nodes on dark fills always export white label text."""
+    for node in nodes:
+        style = node.get("style")
+        if not isinstance(style, dict):
+            continue
+        node["style"] = ensure_readable_text(style)
+
+
+def _exact_namespace_regex(namespace: str) -> str:
+    return f"^{re.escape(namespace)}$"
+
+
+def build_group_node_configs(
+    *,
+    decoder_namespace: str,
+    group_node_attributes: dict[str, dict[str, str]],
+    role_configs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build namespace group styling with most-specific regexes first."""
+    configs: list[dict[str, Any]] = []
+
+    for namespace in sorted(group_node_attributes, key=len, reverse=True):
+        if not namespace:
+            continue
+        attrs = group_node_attributes[namespace]
+        operation = attrs.get("operation")
+        if operation in {"gpu_kernel", "kernel pipeline"}:
+            configs.append(
+                {
+                    "namespaceRegex": _exact_namespace_regex(namespace),
+                    "backgroundColor": _GPU_KERNEL,
+                    "textColor": _DARK_TEXT,
+                    "layoutDirection": "TOP_BOTTOM",
+                }
+            )
+            continue
+        segment = namespace.rsplit("/", 1)[-1]
+        if segment in {"KimiSparseMoeBlock", "KimiMoEGate"} or attrs.get("label", "").endswith(
+            "MoEGate"
+        ):
+            configs.append(
+                {
+                    "namespaceRegex": _exact_namespace_regex(namespace),
+                    "backgroundColor": _GPU_KERNEL,
+                    "textColor": _DARK_TEXT,
+                    "borderColor": _GPU_KERNEL_BORDER,
+                    "layoutDirection": "TOP_BOTTOM",
+                }
+            )
+            continue
+        if segment in {"KimiDeltaAttention", "KimiMLAAttention"}:
+            configs.append(
+                {
+                    "namespaceRegex": _exact_namespace_regex(namespace),
+                    "backgroundColor": _ATTENTION,
+                    "textColor": _WHITE_TEXT,
+                    "layoutDirection": "TOP_BOTTOM",
+                }
+            )
+
+    anchored_role_configs: list[dict[str, Any]] = []
+    for config in role_configs:
+        regex = str(config.get("namespaceRegex", ""))
+        if regex.startswith("^") and regex.endswith("$"):
+            anchored_role_configs.append(config)
+        else:
+            anchored = dict(config)
+            anchored["namespaceRegex"] = f"^{regex}$"
+            anchored_role_configs.append(anchored)
+    configs.extend(anchored_role_configs)
+
+    configs.append(
+        {
+            "namespaceRegex": _exact_namespace_regex(decoder_namespace),
+            "backgroundColor": "#fff5f4",
+            "borderColor": "#c0392b",
+            "textColor": _DARK_TEXT,
+            "layoutDirection": "TOP_BOTTOM",
+        }
+    )
+    return configs
+
+
+def spine_tile_style() -> dict[str, str]:
+    """Neutral gray fill for flat overview spine tiles (matches SVG _spine_fill)."""
+    return {"backgroundColor": _BASIC_OP, "textColor": _DARK_TEXT}
+
+
+def input_port_style() -> dict[str, str]:
+    """Synthetic @input ports on the model spine."""
+    return {"backgroundColor": _INPUT, "textColor": _DARK_TEXT}
+
+
+def detail_tile_style(
+    block: BlockNode | None,
+    *,
+    synthetic: str | None = None,
+    label: str = "",
+) -> dict[str, str]:
+    """Match SVG ``_detail_block_facecolor`` / ``_detail_tile_text_color``."""
+    from visualizer.model_graph import OperationKind, _COMBINE_LABELS, classify_operation
+
+    if synthetic == "@input":
+        return input_port_style()
+
+    # Combine tiles (Multiply, Add, …) use the same gray as Linear/RMSNorm in SVG.
+    if synthetic == "@combine" or label in _COMBINE_LABELS:
+        return {"backgroundColor": _BASIC_OP, "textColor": _DARK_TEXT}
+
+    operation = classify_operation(
+        block,
+        synthetic=synthetic,
+        label=label or (block.label if block is not None else ""),
+    )
+    if operation == OperationKind.SYNTHETIC:
+        return {"backgroundColor": _SYNTHETIC, "textColor": _DARK_TEXT}
+    if operation == OperationKind.GPU_KERNEL:
+        return {"backgroundColor": _GPU_KERNEL, "textColor": _DARK_TEXT}
+    if operation == OperationKind.COMPOSITE and block is not None and block.children:
+        return {"backgroundColor": _ATTENTION, "textColor": _WHITE_TEXT}
+    return {"backgroundColor": _BASIC_OP, "textColor": _DARK_TEXT}

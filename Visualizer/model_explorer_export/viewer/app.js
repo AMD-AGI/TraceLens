@@ -1,7 +1,7 @@
 /**
  * TraceLens Model Explorer viewer.
  *
- * Expects a JSON payload produced by export_model_explorer.py and passed via
+ * Expects a JSON payload produced by visualize_model_in_explorer.py and passed via
  * ?graph=<filename> (copied next to this page by the local server).
  */
 
@@ -12,9 +12,15 @@ if (window.modelExplorer) {
 }
 
 const status = document.getElementById("status");
+const app = document.getElementById("tracelens-app");
+const graphPane = document.getElementById("tracelens-graph-pane");
+const factSheetTitle = document.getElementById("tracelens-fact-sheet-title");
+const factSheetBody = document.getElementById("tracelens-fact-sheet-body");
 
 function showError(message) {
   status.textContent = message;
+  status.hidden = false;
+  app.hidden = true;
 }
 
 function graphParam() {
@@ -34,6 +40,17 @@ async function loadPayload() {
   return response.json();
 }
 
+function mountFactSheet(factSheet) {
+  if (!factSheet?.body) {
+    factSheetTitle.textContent = "Fact sheet";
+    factSheetBody.textContent = "No fact sheet data in this export.";
+    return;
+  }
+
+  factSheetTitle.textContent = factSheet.title || "Fact sheet";
+  factSheetBody.textContent = factSheet.body;
+}
+
 function mountVisualizer(graphCollections) {
   const visualizer = document.createElement("model-explorer-visualizer");
   visualizer.graphCollections = graphCollections;
@@ -41,8 +58,12 @@ function mountVisualizer(graphCollections) {
     showHorizontalScrollButton: true,
     showVerticalScrollButton: true,
   };
-  document.body.appendChild(visualizer);
-  status.remove();
+  graphPane.replaceChildren(visualizer);
+}
+
+function showApp() {
+  status.hidden = true;
+  app.hidden = false;
 }
 
 loadPayload()
@@ -51,7 +72,9 @@ loadPayload()
     if (!Array.isArray(collections) || collections.length === 0) {
       throw new Error("JSON payload is missing graphCollections.");
     }
+    mountFactSheet(payload.tracelensViewer?.factSheet);
     mountVisualizer(collections);
+    showApp();
   })
   .catch((error) => {
     showError(error instanceof Error ? error.message : String(error));

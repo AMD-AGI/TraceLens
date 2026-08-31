@@ -452,10 +452,26 @@ def linear_pipeline_steps(node: BlockNode) -> list[BlockNode]:
     return straight_line_steps(node)
 
 
+_L2NORM_QK_FRAME_RE = re.compile(r"forward_l2norm_fwd_([qk])$")
+
+
+def _kernel_inline_frame_label(block: BlockNode) -> str | None:
+    """Give q/k L2Norm expansions distinct frame namespaces."""
+    if block.class_name != "KernelOp" or not block.children:
+        return None
+    match = _L2NORM_QK_FRAME_RE.match(block.attr_name)
+    if match is not None:
+        return f"l2norm_fwd_{match.group(1)}"
+    return None
+
+
 def inline_block_frame_label(block: BlockNode) -> str:
     """Display label for a dotted inline frame around an expanded sub-block."""
     if block.class_name == "KernelPipeline":
         return block.label
+    kernel_label = _kernel_inline_frame_label(block)
+    if kernel_label is not None:
+        return kernel_label
     if block.class_name == "KernelOp" and block.children:
         return block.label
     if is_fused_silu_mul_class(block.class_name):
@@ -580,6 +596,7 @@ class BlockNode:
     tensor_step_targets: dict[str, str] = field(default_factory=dict)
     kernel_predecessors: list[str] = field(default_factory=list)
     operation_predecessors: list[str] = field(default_factory=list)
+    kernel_second_operand: str | None = None
     external_inputs: list[str] = field(default_factory=list)
     param_inputs: list[str] = field(default_factory=list)
 
@@ -764,6 +781,7 @@ def _leaf_node(
     label: str | None = None,
     kernel_predecessors: list[str] | None = None,
     operation_predecessors: list[str] | None = None,
+    kernel_second_operand: str | None = None,
     external_inputs: list[str] | None = None,
     param_inputs: list[str] | None = None,
 ) -> BlockNode:
@@ -778,6 +796,7 @@ def _leaf_node(
         is_basic=basic,
         kernel_predecessors=list(kernel_predecessors or []),
         operation_predecessors=list(operation_predecessors or []),
+        kernel_second_operand=kernel_second_operand,
         external_inputs=list(external_inputs or []),
         param_inputs=list(param_inputs or []),
     )
@@ -860,6 +879,7 @@ def _kernel_pipeline_block_nodes(
                     label=child.label,
                     details=[],
                     basic=False,
+                    kernel_second_operand=child.second_operand,
                 )
                 for sub_index, child in enumerate(step.children)
             ]

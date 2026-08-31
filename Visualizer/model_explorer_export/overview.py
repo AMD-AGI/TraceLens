@@ -5,10 +5,22 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from visualizer.basic_ops import BasicOpFilter
+from visualizer.block_tree import (
+    BlockNode,
+    _omit_from_detailed_view,
+    _show_single_function_in_diagram,
+    collect_nested_diagrams,
+    expand_block_tree_inplace,
+    is_single_function_tree,
+    is_straight_line_module,
+    prepare_diagram_section_trees,
+    subgraph_warrants_export,
+)
 from visualizer.blocks import BlockComponent, LayerVariant
-from visualizer.extract import ArchitectureSpec
+from visualizer.extract import ArchitectureSpec, architecture_section_trees
 
-from model_explorer_export.styles import ROLE_COLORS, ensure_readable_text
+from model_explorer_export.styles import ROLE_COLORS, ensure_readable_text, spine_tile_style
 
 
 def _stack_pre_components(spec: ArchitectureSpec) -> list[BlockComponent]:
@@ -112,10 +124,75 @@ def _decoder_namespace(spec: ArchitectureSpec) -> str:
     return f"{count}x_{decoder_name}"
 
 
-def _style_for_component(component: BlockComponent) -> dict[str, str] | None:
-    if component.role not in ROLE_COLORS:
+def _spine_moe_class(spec: ArchitectureSpec) -> str | None:
+    """MoE class the spine's FFN tile stands for when every layer builds the same one."""
+    if spec.layer_variants:
         return None
-    return ensure_readable_text(dict(ROLE_COLORS[component.role]))
+    for component in _ordered_decoder_components(spec):
+        if component.role == "moe" and component.class_name:
+            return component.class_name
+    return None
+
+
+def _spine_named_ffn_classes(spec: ArchitectureSpec) -> set[str]:
+    classes = {variant.ffn_class for variant in spec.layer_variants if variant.ffn_class}
+    moe_class = _spine_moe_class(spec)
+    if moe_class:
+        classes.add(moe_class)
+    return classes
+
+
+def _detail_section_trees(spec: ArchitectureSpec) -> list[BlockNode]:
+    """Block trees rendered as expandable internal subsections in the SVG diagram."""
+    basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
+    section_trees = prepare_diagram_section_trees(
+        architecture_section_trees(spec),
+        basic_ops=basic_ops,
+    )
+    spine_ffn = _spine_named_ffn_classes(spec)
+    trees: list[BlockNode] = []
+    for _title, tree in section_trees:
+        if (
+            not is_straight_line_module(tree) or tree.class_name in spine_ffn
+        ) and subgraph_warrants_export(tree, basic_ops=basic_ops):
+            trees.append(tree)
+        for _sub_title, sub_tree in collect_nested_diagrams(tree, basic_ops=basic_ops):
+            prepared = expand_block_tree_inplace(sub_tree, basic_ops=basic_ops)
+            if is_single_function_tree(prepared):
+                if _omit_from_detailed_view(prepared):
+                    continue
+                if not _show_single_function_in_diagram(prepared):
+                    continue
+            trees.append(prepared)
+    return trees
+
+
+def component_has_detail_section(component: BlockComponent, spec: ArchitectureSpec) -> bool:
+    """True when the SVG detailed figure expands this module below the overview spine."""
+    for tree in _detail_section_trees(spec):
+        if tree.attr_name == component.attr_name or tree.class_name == component.class_name:
+            return True
+    return False
+
+
+def _flat_spine_namespace(
+    component: BlockComponent,
+    namespace_prefix: str,
+    *,
+    variant: LayerVariant | None,
+) -> str:
+    """Namespace for a single-tile spine module that does not expand into a subgraph."""
+    if variant is not None:
+        return namespace_prefix
+    if component.role in {"embedding", "head", "norm"}:
+        return ""
+    return namespace_prefix
+
+
+def _style_for_component(component: BlockComponent) -> dict[str, str] | None:
+    if component.role in {"attention", "moe", "ffn"} and component.role in ROLE_COLORS:
+        return ensure_readable_text(dict(ROLE_COLORS[component.role]))
+    return ensure_readable_text(spine_tile_style())
 
 
 def _edge(source_id: str, target_id: str) -> dict[str, str]:

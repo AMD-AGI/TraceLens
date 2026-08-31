@@ -74,7 +74,7 @@ def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="Serve a TraceLens Model Explorer viewer.")
-    parser.add_argument("json", type=Path, help="Model Explorer JSON exported by export_model_explorer.py")
+    parser.add_argument("json", type=Path, help="Model Explorer JSON exported by visualize_model_in_explorer.py")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--open", action="store_true")
     args = parser.parse_args()

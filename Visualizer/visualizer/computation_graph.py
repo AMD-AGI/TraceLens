@@ -583,12 +583,13 @@ def _add_linear_pipeline_chain(
             else:
                 graph.links.append((indices[-1], step_index))
 
-        if _is_binary_kernel_op_label(sub_step.label) and len(indices) >= 2:
-            _append_operand_link(
-                graph,
-                source_index=indices[-2],
-                target_index=step_index,
-            )
+        _append_kernel_second_operand_link(
+            graph,
+            sub_step,
+            step_index=step_index,
+            attr_last_index=attr_last_index,
+            chain_input_index=chain_input_index,
+        )
 
         indices.append(step_index)
 
@@ -697,9 +698,43 @@ def _add_situ_gated_mlp_chain(
     return indices, down_index
 
 
-def _is_binary_kernel_op_label(label: str) -> bool:
-    """True for inline kernel sub-ops that combine two prior chain values."""
-    return label.strip() in {"×", "÷", "+", "−"}
+def _resolve_kernel_second_operand_index(
+    step: BlockNode,
+    attr_last_index: dict[str, int] | None,
+    *,
+    chain_input_index: int | None,
+) -> int | None:
+    """Resolve the optional second operand for an inline kernel sub-op."""
+    second = step.kernel_second_operand
+    if second is None:
+        return None
+    if second == "input":
+        return chain_input_index
+    if attr_last_index is None:
+        return None
+    return attr_last_index.get(second)
+
+
+def _append_kernel_second_operand_link(
+    graph: ComputationGraph,
+    step: BlockNode,
+    *,
+    step_index: int,
+    attr_last_index: dict[str, int] | None,
+    chain_input_index: int | None,
+) -> None:
+    source_index = _resolve_kernel_second_operand_index(
+        step,
+        attr_last_index,
+        chain_input_index=chain_input_index,
+    )
+    if source_index is None:
+        return
+    _append_operand_link(
+        graph,
+        source_index=source_index,
+        target_index=step_index,
+    )
 
 
 def _append_operand_link(
@@ -983,14 +1018,24 @@ def _add_tensor_ports_segment(
 
     step_indices: dict[str, int] = {}
     step_entries: dict[str, int] = {}
+    input_operand_attrs: dict[str, list[str]] = {}
+    step_attr_indices: dict[str, dict[str, int]] = {}
     for step_index, step in enumerate(segment.steps):
         if step.children and len(step.children) >= 2:
+            attr_last_index: dict[str, int] = {}
+            input_operand_attrs[step.attr_name] = [
+                child.attr_name
+                for child in step.children
+                if child.kernel_second_operand == "input"
+            ]
             sub_indices, sub_tail = _add_linear_pipeline_chain(
                 graph,
                 step.children,
                 wrapper=step,
                 key_prefix=f"{key_prefix}:pipeline:{step.attr_name}",
+                attr_last_index=attr_last_index,
             )
+            step_attr_indices[step.attr_name] = attr_last_index
             step_indices[step.attr_name] = sub_tail if sub_tail is not None else sub_indices[-1]
             step_entries[step.attr_name] = sub_indices[0]
             for pred_attr in step.kernel_predecessors:
@@ -1027,6 +1072,10 @@ def _add_tensor_ports_segment(
             synthetic=SYNTHETIC_TENSOR,
         )
         graph.links.append((port_index, target_index))
+        for child_attr in input_operand_attrs.get(target_attr, []):
+            child_index = step_attr_indices.get(target_attr, {}).get(child_attr)
+            if child_index is not None:
+                graph.links.append((port_index, child_index))
 
     return step_indices.get(segment.steps[-1].attr_name)
 
@@ -5695,7 +5744,7 @@ def _enforce_jog_corridor_gaps(
             changed = True
         if not changed:
             return
-        _resolve_vertical_overlaps(positions, min_gap=min_gap)
+        _resolve_vertical_overlaps(positions, graph=graph, min_gap=min_gap)
 
 
 def _deepen_fan_in_approach_rows(
@@ -5781,7 +5830,7 @@ def _resolve_layout_overlaps(
         )
     else:
         _resolve_horizontal_overlaps(positions, layers, min_gap=min_horizontal_gap, graph=graph)
-    _resolve_vertical_overlaps(positions, min_gap=min_vertical_gap)
+    _resolve_vertical_overlaps(positions, graph=graph, min_gap=min_vertical_gap)
     if branch_groups:
         _align_fanout_branch_columns(positions, graph)
         _resolve_branch_column_overlaps(
@@ -6083,15 +6132,52 @@ def _boxes_overlap_vertically(
     return below.top_y > above.bottom - min_gap
 
 
+def _consumer_row_pairs(
+    positions: list[LayoutPosition],
+    graph: ComputationGraph | None,
+) -> list[tuple[LayoutPosition, LayoutPosition]]:
+    """Producer/consumer row pairs that a top-entry connector has to span downward."""
+    if graph is None:
+        return []
+    count = len(positions)
+    return [
+        (positions[source], positions[target])
+        for source, target in _layout_graph_links(graph)
+        if source < count and target < count
+    ]
+
+
+def _seat_consumers_below_producers(
+    pairs: Sequence[tuple[LayoutPosition, LayoutPosition]],
+    *,
+    min_gap: float,
+) -> bool:
+    """Drop any consumer that is not clear of its producer's bottom edge."""
+    moved = False
+    for producer, consumer in pairs:
+        allowed_top = producer.bottom - min_gap
+        if consumer.top_y > allowed_top:
+            consumer.top_y = allowed_top
+            moved = True
+    return moved
+
+
 def _resolve_vertical_overlaps(
     positions: list[LayoutPosition],
     *,
+    graph: ComputationGraph | None = None,
     min_gap: float = DETAIL_LAYER_GAP,
     layer_y_epsilon: float = 1e-6,
+    max_passes: int = 400,
 ) -> None:
-    """Push lower nodes down when they overlap a higher node horizontally."""
-    changed = True
-    while changed:
+    """Push lower nodes down when they overlap a higher node horizontally.
+
+    Separating a pair can drop a producer past one of its own consumers, and a
+    top-entry connector cannot climb back up to reach it, so consumers follow
+    their producer down in the same relaxation.
+    """
+    consumer_pairs = _consumer_row_pairs(positions, graph)
+    for _pass in range(max_passes):
         changed = False
         ordered = sorted(positions, key=lambda pos: pos.top_y, reverse=True)
         for above_index, above in enumerate(ordered):
@@ -6106,3 +6192,7 @@ def _resolve_vertical_overlaps(
                 if below.top_y > allowed_top:
                     below.top_y = allowed_top
                     changed = True
+        if _seat_consumers_below_producers(consumer_pairs, min_gap=min_gap):
+            changed = True
+        if not changed:
+            return

@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from visualizer.ast_analyze import kernel_kwarg_ports, kernel_name_from_step_details
 
@@ -130,6 +131,13 @@ class KernelPipelineStep:
     computation: str = ""
     predecessors: frozenset[str] = frozenset()
     children: tuple[KernelPipelineStep, ...] = ()
+    second_operand: str | None = None
+
+
+@dataclass(frozen=True)
+class ComputationOp:
+    label: str
+    second_operand: int | Literal["input"] | None = None
 
 
 @dataclass(frozen=True)
@@ -1032,56 +1040,84 @@ def _is_scale_reference(node: ast.AST) -> bool:
     return isinstance(node, ast.Name) and node.id == "scale"
 
 
-def _flatten_labels(parts: list[list[str]]) -> list[str]:
-    merged: list[str] = []
+def _flatten_ops(parts: list[list[ComputationOp]]) -> list[ComputationOp]:
+    merged: list[ComputationOp] = []
     for part in parts:
-        for label in part:
-            if label and label not in merged:
-                merged.append(label)
+        for op in part:
+            if op.label and op.label not in {existing.label for existing in merged}:
+                merged.append(op)
     return merged
 
 
-def _decompose_computation_expr(expr: ast.AST) -> list[str]:
+def _tensor_names(expr: ast.AST) -> set[str]:
+    return {node.id for node in ast.walk(expr) if isinstance(node, ast.Name)}
+
+
+def _multiply_second_operand(
+    expr: ast.BinOp,
+    left_ops: list[ComputationOp],
+    right_ops: list[ComputationOp],
+) -> int | Literal["input"] | None:
+    if _is_scale_reference(expr.left) or _is_scale_reference(expr.right):
+        return None
+    if left_ops and right_ops:
+        return len(left_ops) - 1
+    names = _tensor_names(expr.left) | _tensor_names(expr.right)
+    if any("rstd" in name for name in names):
+        return "input"
+    if left_ops:
+        return len(left_ops) - 1
+    if right_ops:
+        return len(right_ops) - 1
+    return None
+
+
+def _decompose_computation_expr(expr: ast.AST) -> list[ComputationOp]:
     """Turn a Triton/Python RHS expression tree into ordered operation labels."""
     if isinstance(expr, ast.Call):
         callee = _call_name(expr)
-        arg_labels = _flatten_labels([_decompose_computation_expr(arg) for arg in expr.args])
+        arg_ops = _flatten_ops([_decompose_computation_expr(arg) for arg in expr.args])
         if callee == "sigmoid":
-            return arg_labels + ["Sigmoid"]
+            return arg_ops + [ComputationOp("Sigmoid")]
         if callee == "sum":
-            return arg_labels + ["Sum"]
+            return arg_ops + [ComputationOp("Sum")]
         if callee == "sqrt":
-            return arg_labels + ["Sqrt"]
+            return arg_ops + [ComputationOp("Sqrt")]
         if callee == "cumsum":
-            return arg_labels + ["CumSum"]
+            return arg_ops + [ComputationOp("CumSum")]
         if callee in {"exp", "exp2"}:
-            return arg_labels + ["Exp"]
+            return arg_ops + [ComputationOp("Exp")]
         if callee == "softplus":
-            return arg_labels + ["Softplus"]
+            return arg_ops + [ComputationOp("Softplus")]
         if callee == "load":
-            return arg_labels
-        return arg_labels
+            return arg_ops
+        return arg_ops
     if isinstance(expr, ast.BinOp):
-        left = _decompose_computation_expr(expr.left)
-        right = _decompose_computation_expr(expr.right)
+        left_ops = _decompose_computation_expr(expr.left)
+        right_ops = _decompose_computation_expr(expr.right)
         if isinstance(expr.op, ast.Mult):
             left_name = _expr_name(expr.left)
             right_name = _expr_name(expr.right)
             if left_name and left_name == right_name:
                 return []
             if _is_scale_reference(expr.left) or _is_scale_reference(expr.right):
-                return left + right + ["× scale"]
-            return left + right + ["×"]
+                return left_ops + right_ops + [ComputationOp("× scale")]
+            second_operand = _multiply_second_operand(expr, left_ops, right_ops)
+            return left_ops + right_ops + [ComputationOp("×", second_operand=second_operand)]
         if isinstance(expr.op, ast.Div):
             if isinstance(expr.left, ast.Constant) and expr.left.value in {1, 1.0}:
-                return right + ["÷"]
-            return left + right + ["÷"]
+                return right_ops + [ComputationOp("÷")]
+            second_operand = len(left_ops) - 1 if left_ops else None
+            return left_ops + right_ops + [ComputationOp("÷", second_operand=second_operand)]
         if isinstance(expr.op, ast.Add):
-            return left + right + ["+"]
+            second_operand = len(left_ops) - 1 if left_ops and right_ops else None
+            return left_ops + right_ops + [ComputationOp("+", second_operand=second_operand)]
         if isinstance(expr.op, ast.Sub):
-            return left + right + ["−"]
+            second_operand = len(left_ops) - 1 if left_ops and right_ops else None
+            return left_ops + right_ops + [ComputationOp("−", second_operand=second_operand)]
         if isinstance(expr.op, ast.Pow):
-            return left + right + ["^"]
+            second_operand = len(left_ops) - 1 if left_ops and right_ops else None
+            return left_ops + right_ops + [ComputationOp("^", second_operand=second_operand)]
     if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.USub):
         return _decompose_computation_expr(expr.operand)
     return []
@@ -1123,22 +1159,26 @@ def _assign_performs_computation(stmt: ast.Assign) -> bool:
     return False
 
 
-def _extract_triton_computation_labels(func: ast.FunctionDef) -> list[str]:
+def _extract_triton_computation_ops(func: ast.FunctionDef) -> list[ComputationOp]:
     """Collect ordered operation labels from a ``@triton.jit`` kernel body."""
-    labels: list[str] = []
+    ops: list[ComputationOp] = []
 
     def walk(stmts: list[ast.stmt]) -> None:
         for stmt in stmts:
             if isinstance(stmt, ast.Assign) and _assign_performs_computation(stmt):
-                for label in _decompose_computation_expr(stmt.value):
-                    if label not in labels:
-                        labels.append(label)
+                for op in _decompose_computation_expr(stmt.value):
+                    if op.label not in {existing.label for existing in ops}:
+                        ops.append(op)
             elif isinstance(stmt, ast.If):
                 walk(stmt.body)
                 walk(stmt.orelse)
 
     walk(func.body)
-    return [label for label in labels if label not in {"+"}]
+    return [op for op in ops if op.label not in {"+"}]
+
+
+def _extract_triton_computation_labels(func: ast.FunctionDef) -> list[str]:
+    return [op.label for op in _extract_triton_computation_ops(func)]
 
 
 def _launched_triton_kernel_name(func: ast.FunctionDef) -> str | None:
@@ -1269,19 +1309,25 @@ def introspect_kernel_op_substeps(
     if triton_func is None:
         return ()
 
-    labels = _extract_triton_computation_labels(triton_func)
-    if len(labels) < 2 or len(labels) > 6:
+    ops = _extract_triton_computation_ops(triton_func)
+    if len(ops) < 2 or len(ops) > 6:
         return ()
 
     substeps: list[KernelPipelineStep] = []
-    for index, label in enumerate(labels):
+    for index, op in enumerate(ops):
+        second_operand: str | None = None
+        if op.second_operand == "input":
+            second_operand = "input"
+        elif isinstance(op.second_operand, int):
+            second_operand = substeps[op.second_operand].attr_name
         substeps.append(
             KernelPipelineStep(
-                call_name=label,
+                call_name=op.label,
                 attr_name=f"{parent_attr}_sub_{index}",
                 class_name="KernelSubOp",
-                label=label,
+                label=op.label,
                 details=[],
+                second_operand=second_operand,
             )
         )
     return tuple(substeps)

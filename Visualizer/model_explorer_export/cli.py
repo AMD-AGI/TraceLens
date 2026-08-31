@@ -19,7 +19,7 @@ from model_explorer_export.serve import open_viewer, serve_viewer
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="export-model-explorer",
+        prog="visualize-model-in-explorer",
         description=(
             "TraceLens Model Explorer export — load a Hugging Face model or local "
             "checkpoint, build computation graphs from parsed modeling code, and write "

@@ -175,6 +175,96 @@ def test_introspect_kernel_op_substeps_expand_fused_beta_sigmoid():
     assert [step.label for step in substeps] == ["Sigmoid", "× scale"]
 
 
+def test_introspect_l2norm_substeps_use_real_second_operands():
+    from visualizer.kernel_pipeline import (
+        _collect_import_map,
+        _discover_pipeline_entrypoints,
+        _find_symbol_definition,
+        _parse_module,
+    )
+
+    details = [
+        "kernel: chunk_kda",
+        "import: fla.ops.kda#chunk_kda",
+    ]
+    import_ref = parse_kernel_import(details)
+    assert import_ref is not None
+    module, symbol = import_ref
+    entrypoints, _ = _discover_pipeline_entrypoints(module, symbol)
+    merged_imports = {}
+    owning_module = module
+    for source, _ in entrypoints:
+        tree = _parse_module(source)
+        resolved = _find_symbol_definition(module, symbol)
+        entry_module = resolved[2] if resolved is not None else module
+        merged_imports.update(_collect_import_map(tree, entry_module))
+        owning_module = entry_module
+
+    substeps = introspect_kernel_op_substeps(
+        "l2norm_fwd",
+        merged_imports,
+        owning_module,
+        parent_attr="forward_l2norm_fwd_q",
+    )
+    assert [(step.label, step.second_operand) for step in substeps] == [
+        ("Sum", None),
+        ("Sqrt", None),
+        ("÷", None),
+        ("×", "input"),
+    ]
+
+
+def test_l2norm_inv_sqrt_wires_only_real_operands():
+    from visualizer.computation_graph import build_computation_graph
+    from tests.test_chunk_kda_pipeline_svg import _load_chunk_kda_pipeline
+
+    pipeline, _ = _load_chunk_kda_pipeline()
+    graph = build_computation_graph(pipeline)
+    for frame in graph.inline_frames:
+        if "l2norm_fwd" not in frame.frame_id:
+            continue
+        members = set(frame.node_indices)
+        inv_sqrt = next(i for i in members if graph.nodes[i].label == "÷")
+        normalize = next(i for i in members if graph.nodes[i].label == "×")
+        inv_sources = [graph.nodes[src].label for src, tgt in graph.links if tgt == inv_sqrt]
+        norm_sources = {graph.nodes[src].label for src, tgt in graph.links if tgt == normalize}
+        assert inv_sources == ["Sqrt"]
+        assert "÷" in norm_sources
+        assert any(label in norm_sources for label in {"q", "k"})
+    from visualizer.kernel_pipeline import (
+        _collect_import_map,
+        _discover_pipeline_entrypoints,
+        _find_symbol_definition,
+        _parse_module,
+    )
+
+    details = [
+        "kernel: chunk_kda",
+        "import: fla.ops.kda#chunk_kda",
+    ]
+    import_ref = parse_kernel_import(details)
+    assert import_ref is not None
+    module, symbol = import_ref
+    entrypoints, _ = _discover_pipeline_entrypoints(module, symbol)
+    merged_imports = {}
+    owning_module = module
+    for source, _ in entrypoints:
+        tree = _parse_module(source)
+        resolved = _find_symbol_definition(module, symbol)
+        entry_module = resolved[2] if resolved is not None else module
+        merged_imports.update(_collect_import_map(tree, entry_module))
+        owning_module = entry_module
+
+    substeps = introspect_kernel_op_substeps(
+        "kda_gate_chunk_cumsum",
+        merged_imports,
+        owning_module,
+        parent_attr="gate_step",
+    )
+    multiply = next(step for step in substeps if step.label == "×")
+    assert multiply.second_operand == "gate_step_sub_0"
+
+
 def test_introspect_kernel_pipeline_expands_helper_kernels():
     details = [
         "kernel: chunk_kda",
