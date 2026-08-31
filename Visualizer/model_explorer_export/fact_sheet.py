@@ -2,9 +2,28 @@
 
 from __future__ import annotations
 
+import re
+
+from visualizer.ast_analyze import _classify_role, _label_for
 from visualizer.extract import ArchitectureSpec
 
+from model_explorer_export.overview import format_forward_sequence
+
 _FACT_SUBLINE_INDENT = "    "
+_LAYER_REPEAT_BRANCH_RE = re.compile(r"^(?P<attr>\w+) → (?P<class>[^ (]+)(?P<rest>.*)$")
+
+
+def _display_layer_repeat_subline(line: str) -> str:
+    """Map conditional layer-repeat class names to graph tile labels."""
+    match = _LAYER_REPEAT_BRANCH_RE.match(line.strip())
+    if match is None:
+        return line
+    attr_name = match.group("attr")
+    class_name = match.group("class")
+    rest = match.group("rest")
+    role = _classify_role(attr_name, class_name)
+    display = _label_for(role, class_name, attr_name)
+    return f"{attr_name} → {display}{rest}"
 
 
 def _fact_lines(spec: ArchitectureSpec) -> list[str]:
@@ -43,12 +62,13 @@ def _fact_lines(spec: ArchitectureSpec) -> list[str]:
     if spec.layer_repeat_lines:
         lines.append(f"Layer repeat: {spec.layer_repeat_lines[0]}")
         lines.extend(
-            f"{_FACT_SUBLINE_INDENT}{subline}" for subline in spec.layer_repeat_lines[1:]
+            f"{_FACT_SUBLINE_INDENT}{_display_layer_repeat_subline(subline)}"
+            for subline in spec.layer_repeat_lines[1:]
         )
     elif spec.layer_mix:
         lines.append(f"Layer mix: {spec.layer_mix}")
     if spec.forward_sequence:
-        lines.append("Forward: " + " -> ".join(spec.forward_sequence))
+        lines.append(f"Forward: {format_forward_sequence(spec, arrow=' -> ')}")
     for note in spec.moe_notes[:2]:
         lines.append(f"MoE: {note}")
     for note in spec.layer_notes[:1]:

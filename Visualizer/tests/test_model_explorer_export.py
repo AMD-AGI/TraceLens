@@ -740,6 +740,24 @@ def test_fact_sheet_group_attributes_in_graph_info():
     assert "Model type:" in attrs["architecture_fact_sheet"]
 
 
+def test_fact_sheet_forward_sequence_uses_graph_display_labels():
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        name="Custom MLA MoE",
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$"]),
+    )
+    payload = build_model_explorer_payload(spec)
+    fact_body = payload["tracelensViewer"]["factSheet"]["body"]
+    graph_attrs = payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"][""]
+
+    forward_line = next(line for line in fact_body.splitlines() if line.startswith("- Forward:"))
+    assert forward_line == (
+        "- Forward: RMSNorm -> CustomLatent Attn -> Add -> RMSNorm -> CustomSharedExpertMoE -> Add"
+    )
+    assert graph_attrs["forward"] == "RMSNorm → CustomLatent Attn → Add → RMSNorm → CustomSharedExpertMoE → Add"
+
+
 def test_kernel_frame_labels_split_l2norm_q_and_k_and_sanitize_unicode():
     from model_explorer_export.labels import apply_kernel_frame_labels
 

@@ -92,6 +92,45 @@ def _display_label(component: BlockComponent, spec: ArchitectureSpec) -> str:
     return component.label or component.attr_name
 
 
+def _forward_step_display_label(
+    attr_name: str,
+    *,
+    spec: ArchitectureSpec,
+    components_by_attr: dict[str, BlockComponent],
+) -> str:
+    """Map one decoder ``forward()`` step to the same label used on graph tiles."""
+    component = components_by_attr.get(attr_name)
+    if component is not None:
+        return _display_label(component, spec)
+
+    from visualizer.ast_analyze import classify_matmul_label, operation_display_label
+
+    decoder = spec.class_registry.get(spec.decoder_class or "")
+    if decoder is not None:
+        operation = decoder.forward_operations.get(attr_name)
+        if operation is not None:
+            if operation.label in {"MatMul", "MatMult"}:
+                return classify_matmul_label(external_inputs=operation.external_inputs)
+            return operation_display_label(operation.label, class_name=operation.class_name)
+    return attr_name.replace("_", " ")
+
+
+def forward_sequence_display_labels(spec: ArchitectureSpec) -> list[str]:
+    """Return decoder forward steps using graph tile labels instead of attr names."""
+    if not spec.forward_sequence:
+        return []
+    components_by_attr = {component.attr_name: component for component in _ordered_decoder_components(spec)}
+    return [
+        _forward_step_display_label(attr_name, spec=spec, components_by_attr=components_by_attr)
+        for attr_name in spec.forward_sequence
+    ]
+
+
+def format_forward_sequence(spec: ArchitectureSpec, *, arrow: str = " → ") -> str:
+    """Format the decoder spine order for metadata and the fact sheet."""
+    return arrow.join(forward_sequence_display_labels(spec))
+
+
 _DECODER_NORM_ATTRS = frozenset({"input_layernorm", "post_attention_layernorm"})
 _VARIANT_ATTENTION_ATTRS = frozenset({"self_attn", "self_attention", "attn", "attention"})
 
@@ -333,7 +372,7 @@ def build_overview_graph(
         "layers": str(spec.num_hidden_layers or "?"),
     }
     if spec.forward_sequence:
-        model_attrs["forward"] = " → ".join(spec.forward_sequence)
+        model_attrs["forward"] = format_forward_sequence(spec)
     if spec.decoder_class:
         model_attrs["decoder_class"] = spec.decoder_class
 
@@ -344,7 +383,7 @@ def build_overview_graph(
             "": model_attrs,
             decoder_namespace: {
                 "repeat": _decoder_namespace(spec),
-                "forward": " → ".join(spec.forward_sequence or []),
+                "forward": format_forward_sequence(spec),
             },
         },
         "groupNodeConfigs": [

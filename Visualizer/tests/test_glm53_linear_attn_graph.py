@@ -188,17 +188,12 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
     assert set(hc.forward_return_order) == {"post", "comb", "collapsed"}
 
     ffn_nodes = [node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/ffn_hc/")]
-    comb_producer = hc.forward_return_slots["comb"]
-    comb_nodes = [node for node in ffn_nodes if comb_producer in node["id"]]
-    assert comb_nodes, "comb branch kept for decoder residual matmul"
-    post_norm_id = f"{prefix}/post_attention_layernorm"
-    comb_to_norm = [
-        edge
-        for node in comb_nodes
-        for edge in node.get("outgoingEdges", [])
-        if edge.get("targetNodeId") == post_norm_id
-    ]
-    assert not comb_to_norm
+    ffn_labels = {node.get("label") for node in ffn_nodes}
+    assert "Softmax" not in ffn_labels
+    assert "Divide" not in ffn_labels
+    for slot in ("post", "comb"):
+        producer = hc.forward_return_slots[slot]
+        assert not any(producer in node["id"] for node in ffn_nodes)
 
 
 def test_glm53_decoder_residual_ops_use_return_slot_producers():

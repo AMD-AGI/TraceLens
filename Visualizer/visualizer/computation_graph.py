@@ -932,7 +932,12 @@ def _append_step_link(
         graph.links.append((input_index, step_index))
 
 
-def _dead_node_indices(graph: ComputationGraph, root: BlockNode) -> set[int]:
+def _dead_node_indices(
+    graph: ComputationGraph,
+    root: BlockNode,
+    *,
+    strip_unused_return_branches: bool,
+) -> set[int]:
     """Nodes not on any path feeding kept return values."""
     if graph.primary_output_index is None or not root.primary_output_step:
         return set()
@@ -942,11 +947,12 @@ def _dead_node_indices(graph: ComputationGraph, root: BlockNode) -> set[int]:
 
     keep: set[int] = set()
     seeds: list[int] = [graph.primary_output_index]
-    for producer in root.referenced_return_producers:
-        for index, spec in enumerate(graph.nodes):
-            if spec.block is not None and spec.block.attr_name == producer:
-                seeds.append(index)
-                break
+    if not strip_unused_return_branches:
+        for producer in root.referenced_return_producers:
+            for index, spec in enumerate(graph.nodes):
+                if spec.block is not None and spec.block.attr_name == producer:
+                    seeds.append(index)
+                    break
 
     pending = list(dict.fromkeys(seeds))
     while pending:
@@ -1195,6 +1201,7 @@ def build_computation_graph(
     prefix_steps: list[BlockNode] | None = None,
     include_input: bool = True,
     basic_ops: BasicOpFilter | None = None,
+    strip_unused_return_branches: bool = False,
 ) -> ComputationGraph:
     """Convert a block tree into a directed acyclic computation graph."""
     graph = ComputationGraph()
@@ -1733,7 +1740,11 @@ def build_computation_graph(
             graph.primary_output_index = last_index
     else:
         graph.primary_output_index = last_index
-    graph.dead_node_indices = _dead_node_indices(graph, root)
+    graph.dead_node_indices = _dead_node_indices(
+        graph,
+        root,
+        strip_unused_return_branches=strip_unused_return_branches,
+    )
     _add_conditional_alternative_links(graph)
     graph = _strip_dead_nodes(graph)
     if basic_ops is not None and basic_ops.basic_only:

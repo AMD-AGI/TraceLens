@@ -38,6 +38,7 @@ from model_explorer_export.overview import (
     _stack_pre_components,
     _stack_tail_components,
     component_has_detail_section,
+    format_forward_sequence,
 )
 from model_explorer_export.styles import ROLE_COLORS, _GPU_KERNEL_BORDER, build_group_node_configs, ensure_readable_text, finalize_graph_node_styles, input_port_style, spine_tile_style
 
@@ -834,7 +835,11 @@ def _append_section(
         return [id_prefix]
 
     _title, block_tree = resolved
-    computation = build_computation_graph(block_tree, basic_ops=basic_ops)
+    computation = build_computation_graph(
+        block_tree,
+        basic_ops=basic_ops,
+        strip_unused_return_branches=True,
+    )
     skip_variant_root_input = _skip_variant_root_input(component)
     section_nodes = _computation_nodes(
         computation,
@@ -859,7 +864,11 @@ def _append_section(
             namespace_prefix,
             _nested_namespace_segment(nested_block, nested_label),
         )
-        nested_computation = build_computation_graph(nested_block, basic_ops=basic_ops)
+        nested_computation = build_computation_graph(
+            nested_block,
+            basic_ops=basic_ops,
+            strip_unused_return_branches=True,
+        )
         section_nodes.extend(
             _computation_nodes(
                 nested_computation,
@@ -1130,7 +1139,7 @@ def build_merged_model_graph(
         "layers": str(spec.num_hidden_layers or "?"),
     }
     if spec.forward_sequence:
-        model_attrs["forward"] = " → ".join(spec.forward_sequence)
+        model_attrs["forward"] = format_forward_sequence(spec)
     if spec.decoder_class:
         model_attrs["decoder_class"] = spec.decoder_class
     if spec.layer_mix:
@@ -1146,7 +1155,7 @@ def build_merged_model_graph(
             "": model_attrs,
             decoder_namespace: {
                 "repeat": decoder_namespace,
-                "forward": " → ".join(spec.forward_sequence or []),
+                "forward": format_forward_sequence(spec),
                 **({"layer_mix": spec.layer_mix} if spec.layer_mix else {}),
             },
             **group_node_attributes,
