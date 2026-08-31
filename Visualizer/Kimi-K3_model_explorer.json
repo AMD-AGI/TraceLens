@@ -1320,22 +1320,22 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 },
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_fused_beta_sigmoid_beta:forward_fused_beta_sigmoid_beta_sub_1:1",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "1"
                 },
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_3:3",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "2"
                 },
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_fused_beta_sigmoid_beta:forward_fused_beta_sigmoid_beta_sub_1:1",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_3:3",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "3"
                 },
@@ -1374,12 +1374,12 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_kda_fwd_intra:4",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 },
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_kda_fwd_intra:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "1"
                 }
@@ -5046,22 +5046,22 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 },
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_fused_beta_sigmoid_beta:forward_fused_beta_sigmoid_beta_sub_1:1",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "1"
                 },
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_3:3",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "2"
                 },
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_fused_beta_sigmoid_beta:forward_fused_beta_sigmoid_beta_sub_1:1",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_3:3",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "3"
                 },
@@ -5100,12 +5100,12 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_kda_fwd_intra:4",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 },
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_kda_fwd_intra:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "1"
                 }

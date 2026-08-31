@@ -6152,20 +6152,25 @@ def _seat_consumers_below_producers(
     positions: list[LayoutPosition],
     graph: ComputationGraph,
     *,
-    min_gap: float,
     max_passes: int = 200,
 ) -> bool:
     """Drop consumers that overlap or sit above the producer feeding their top edge.
 
     Overlap resolution can push a producer down past one of its own consumers, and a
-    top-entry connector cannot climb back up to reach it. A consumer inside an inline
-    frame moves with the whole frame, so the frame keeps its shape.
+    top-entry connector cannot climb back up to reach it. Each pair is only opened to
+    the row gap the layout already asks of it, so settled spacing is left alone, and
+    never to less than one layer gap, which is what the connector needs to leave the
+    producer at all. A consumer inside an inline frame moves with the whole frame,
+    keeping its shape.
     """
     frame_of: dict[int, InlineFrameSpec] = {}
     for frame in graph.inline_frames:
         for index in frame.node_indices:
             frame_of[index] = frame
     links = _top_entry_consumer_links(graph, len(positions))
+    if not links:
+        return False
+    required_gap = _row_gap_rules(graph)
     moved_any = False
     for _pass in range(max_passes):
         moved = False
@@ -6173,7 +6178,8 @@ def _seat_consumers_below_producers(
             frame = frame_of.get(target)
             if frame is not None and source in frame.node_indices:
                 continue
-            drop = positions[target].top_y - (positions[source].bottom - min_gap)
+            gap = max(required_gap(source, target), DETAIL_LAYER_GAP)
+            drop = positions[target].top_y - (positions[source].bottom - gap)
             if drop <= 1e-9:
                 continue
             if frame is None:
@@ -6219,7 +6225,6 @@ def _resolve_vertical_overlaps(
         if graph is not None and _seat_consumers_below_producers(
             positions,
             graph,
-            min_gap=min_gap,
             max_passes=1,
         ):
             changed = True

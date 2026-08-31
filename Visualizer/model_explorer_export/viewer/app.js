@@ -29,10 +29,25 @@ function graphParam() {
   return params.get("graph");
 }
 
+function loadEmbeddedPayload() {
+  const embedded = document.getElementById("tracelens-payload");
+  if (!embedded?.textContent) {
+    return null;
+  }
+  return JSON.parse(embedded.textContent);
+}
+
 async function loadPayload() {
+  const embedded = loadEmbeddedPayload();
+  if (embedded) {
+    return embedded;
+  }
+
   const graphFile = graphParam();
   if (!graphFile) {
-    throw new Error("Missing ?graph=<filename> query parameter.");
+    throw new Error(
+      "Missing graph payload. Serve via visualize_model_in_explorer.py --serve or pass ?graph=<filename>.",
+    );
   }
   const response = await fetch(`./${encodeURIComponent(graphFile)}`);
   if (!response.ok) {
@@ -65,6 +80,7 @@ function mountVisualizer(graphCollections) {
   visualizer.config = {
     showHorizontalScrollButton: true,
     showVerticalScrollButton: true,
+    hideInfoPanel: true,
   };
   graphPane.replaceChildren(visualizer);
 }

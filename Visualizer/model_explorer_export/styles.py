@@ -14,10 +14,10 @@ _DARK_TEXT = "#1a1a1a"
 # SVG COLORS palette used by detailed diagram tiles.
 _BASIC_OP = "#bdc3c7"
 _ATTENTION = "#5dade2"
-# Model Explorer WebGL labels stay dark on purple fills, so export a lighter
-# purple that remains readable with dark text (SVG detailed diagrams keep #8e44ad).
-_GPU_KERNEL = "#d2b4de"
-_GPU_KERNEL_BORDER = "#a569bd"
+# Model Explorer WebGL labels use dark text on pale GPU kernel / MoE fills.
+# Match input-tile lightness (#d9e8f5) so black labels stay readable.
+_GPU_KERNEL = "#f5d9d9"
+_GPU_KERNEL_BORDER = "#d98888"
 _LEGACY_GPU_KERNEL = "#8e44ad"
 _SYNTHETIC = "#ecf0f1"
 _INPUT = "#d9e8f5"

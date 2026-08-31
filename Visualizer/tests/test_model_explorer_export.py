@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +65,7 @@ def test_computation_graph_to_explorer_graph_topology():
     assert edge_count == len(computation.links)
 
     attention = next(node for node in graph["nodes"] if node["label"] == "Attention")
-    assert attention["style"]["backgroundColor"] == "#d2b4de"
+    assert attention["style"]["backgroundColor"] == "#f5d9d9"
     assert attention["style"]["textColor"] == "#1a1a1a"
     assert any(attr["key"] == "operation" and attr["value"] == "gpu_kernel" for attr in attention["attrs"])
 
@@ -396,7 +397,7 @@ def test_kimi_layer_variants_export_three_decoder_splits():
     l2norm_q_cfg = next(
         cfg
         for cfg in graph["groupNodeConfigs"]
-        if cfg.get("backgroundColor") == "#d2b4de"
+        if cfg.get("backgroundColor") == "#f5d9d9"
         and "l2norm_fwd_q" in cfg.get("namespaceRegex", "")
     )
     assert l2norm_q_cfg["textColor"] == "#1a1a1a"
@@ -572,7 +573,7 @@ def test_merged_graph_uses_readable_text_on_colored_blocks():
     purple_nodes = [
         node
         for node in graph["nodes"]
-        if node.get("style", {}).get("backgroundColor") == "#d2b4de"
+        if node.get("style", {}).get("backgroundColor") == "#f5d9d9"
     ]
     assert purple_nodes
     assert all(node["style"]["textColor"] == "#1a1a1a" for node in purple_nodes)
@@ -646,6 +647,18 @@ def test_fact_sheet_panel_in_payload():
     assert not any(node["id"] == "@fact_sheet" for node in graph["nodes"])
 
 
+def test_default_html_output_path_replaces_slashes():
+    from model_explorer_export.cli import default_html_output_path
+
+    assert default_html_output_path("moonshotai/Kimi-K3", None).name == "moonshotai_Kimi-K3.html"
+
+
+def test_viewer_url_uses_root_path():
+    from model_explorer_export.serve import viewer_url
+
+    assert viewer_url(8765) == "http://127.0.0.1:8765/"
+
+
 def test_viewer_shell_reserves_fact_sheet_column():
     index_html = (
         Path(__file__).resolve().parents[1]
@@ -664,6 +677,50 @@ def test_viewer_shell_reserves_fact_sheet_column():
     assert "body {" in index_html and "display: grid" in index_html
     assert "tracelens-fact-sheet-body" in app_js
     assert "factSheet.hidden = false" in app_js
+    assert "hideInfoPanel: true" in app_js
+    assert "loadEmbeddedPayload" in app_js
+
+
+def test_compose_viewer_html_embeds_payload_without_external_json():
+    from model_explorer_export.viewer_page import compose_viewer_html
+
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        name="Custom MLA MoE",
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$"]),
+    )
+    payload = build_model_explorer_payload(spec)
+    html = compose_viewer_html(payload, inline_app=True)
+
+    assert 'id="tracelens-payload"' in html
+    assert "graphCollections" in html
+    assert "tracelensViewer" in html
+    assert "./app.js" not in html
+    assert "loadEmbeddedPayload" in html
+    start_tag = '<script id="tracelens-payload" type="application/json">'
+    start = html.index(start_tag) + len(start_tag)
+    end = html.index("</script>", start)
+    embedded_json = html[start:end]
+    json.loads(embedded_json)
+    assert "\n" not in embedded_json
+
+
+def test_save_viewer_html_writes_worker_js(tmp_path: Path):
+    from model_explorer_export.viewer_page import save_viewer_html
+
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        name="Custom MLA MoE",
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$"]),
+    )
+    payload = build_model_explorer_payload(spec)
+    html_path = save_viewer_html(payload, tmp_path / "custom_model.html")
+
+    assert html_path.exists()
+    assert (tmp_path / "worker.js").exists()
+    assert 'id="tracelens-payload"' in html_path.read_text(encoding="utf-8")
 
 
 def test_fact_sheet_group_attributes_in_graph_info():

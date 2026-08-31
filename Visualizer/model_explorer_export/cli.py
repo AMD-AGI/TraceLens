@@ -7,14 +7,14 @@ import argparse
 import sys
 import threading
 from pathlib import Path
-from urllib.parse import quote
 
 from visualizer.basic_ops import DEFAULT_BASIC_OP_PATTERNS
 from visualizer.extract import dump_model_ast
 from visualizer.loader import build_detailed_basic_ops, load_model_spec, resolve_checkpoint_arg
 
 from model_explorer_export.build import build_model_explorer_payload, save_model_explorer_payload
-from model_explorer_export.serve import open_viewer, serve_viewer
+from model_explorer_export.serve import open_viewer, serve_viewer, viewer_url
+from model_explorer_export.viewer_page import is_html_output, save_viewer_html
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,8 +22,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="visualize-model-in-explorer",
         description=(
             "TraceLens Model Explorer export — load a Hugging Face model or local "
-            "checkpoint, build computation graphs from parsed modeling code, and write "
-            "JSON for the ai-edge-model-explorer-visualizer web component."
+            "checkpoint, build computation graphs from parsed modeling code, and "
+            "serve or write a standalone viewer page."
         ),
     )
     parser.add_argument(
@@ -47,8 +47,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-o",
         "--output",
+        nargs="?",
+        const="__default__",
+        default=None,
         type=Path,
-        help="Output JSON path (default: <model>_model_explorer.json in cwd)",
+        metavar="PATH",
+        help=(
+            "Write a standalone .html viewer page (default: <model_with_slashes_as_underscores>.html) "
+            "or an explicit .html / .json path."
+        ),
     )
     parser.add_argument(
         "--title",
@@ -93,7 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--serve",
         action="store_true",
-        help="Start a local HTTP server for the bundled Model Explorer viewer",
+        help="Start a local HTTP server with the graph embedded in the viewer page",
     )
     parser.add_argument(
         "--port",
@@ -104,24 +111,45 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--open",
         action="store_true",
-        help="Open the viewer in a browser after export (implies --serve unless JSON already exists)",
+        help="Open the viewer in a browser after export (implies --serve)",
     )
     return parser
 
 
+def model_output_stem(checkpoint: str | Path | None, github: str | None) -> str:
+    if checkpoint is not None:
+        return str(checkpoint)
+    if github:
+        return github.rstrip("/").replace(".git", "")
+    return "architecture"
+
+
+def default_html_output_path(checkpoint: str | Path | None, github: str | None) -> Path:
+    filename = model_output_stem(checkpoint, github).replace("/", "_") + ".html"
+    return Path.cwd() / filename
+
+
 def default_output_path(checkpoint: str | Path | None, github: str | None) -> Path:
+    stem = model_output_stem(checkpoint, github)
     if checkpoint is not None:
         path = Path(checkpoint)
         if path.exists():
             stem = path.name if path.is_dir() else path.stem
-        else:
-            stem = str(checkpoint).split("/")[-1]
     elif github:
-        stem = github.rstrip("/").split("/")[-1].replace(".git", "")
-    else:
-        stem = "architecture"
+        stem = stem.rstrip("/").split("/")[-1]
     safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stem)
     return Path.cwd() / f"{safe}_model_explorer.json"
+
+
+def write_optional_output(payload: dict, output: Path) -> Path:
+    if is_html_output(output):
+        saved = save_viewer_html(payload, output)
+        print(f"Wrote standalone viewer: {saved}")
+        print(f"Copied worker.js beside export: {saved.parent / 'worker.js'}")
+        return saved
+    saved = save_model_explorer_payload(payload, output)
+    print(f"Wrote Model Explorer JSON: {saved}")
+    return saved
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -161,31 +189,43 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error loading architecture: {exc}", file=sys.stderr)
         return 1
 
-    output = args.output or default_output_path(checkpoint, args.github)
     try:
         payload = build_model_explorer_payload(spec, basic_ops=basic_ops)
         if not payload["graphCollections"][0]["graphs"]:
             raise ValueError("No computation graphs were built from the modeling source.")
-        saved = save_model_explorer_payload(payload, output)
     except Exception as exc:  # noqa: BLE001
-        print(f"Error exporting Model Explorer JSON: {exc}", file=sys.stderr)
+        print(f"Error exporting Model Explorer payload: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Wrote Model Explorer JSON: {saved}")
+    serve_requested = args.serve or args.open
 
-    if args.serve or args.open:
+    if args.output is not None:
+        output = (
+            default_html_output_path(checkpoint, args.github)
+            if args.output == Path("__default__")
+            else args.output
+        )
         try:
-            if args.serve:
-                url = f"http://127.0.0.1:{args.port}/index.html?graph={quote(saved.name)}"
-                print(f"Serving viewer at {url}")
-                if args.open:
-                    open_viewer(url)
-                serve_viewer(json_path=saved, port=args.port, block=True)
-            else:
-                url = serve_viewer(json_path=saved, port=args.port, block=False)
-                print(f"Serving viewer at {url}")
-                if args.open:
-                    open_viewer(url)
+            write_optional_output(payload, output)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error writing output: {exc}", file=sys.stderr)
+            return 1
+    elif not serve_requested:
+        try:
+            output = default_output_path(checkpoint, args.github)
+            write_optional_output(payload, output)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error writing output: {exc}", file=sys.stderr)
+            return 1
+
+    if serve_requested:
+        url = viewer_url(args.port)
+        print(f"Open viewer: {url}")
+        try:
+            if args.open:
+                open_viewer(url)
+            serve_viewer(payload=payload, port=args.port, block=args.serve)
+            if not args.serve:
                 print("Viewer started in the background. Press Ctrl+C to exit.")
                 try:
                     threading.Event().wait()

@@ -3,14 +3,17 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import threading
 import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote
+from typing import Any
+from urllib.parse import unquote, urlparse
 
-VIEWER_DIR = Path(__file__).resolve().parent / "viewer"
+from model_explorer_export.viewer_page import VIEWER_DIR, compose_viewer_html
+
 PACKAGE_ROOT = Path(__file__).resolve().parent
 VISUALIZER_DIST = PACKAGE_ROOT / "node_modules" / "ai-edge-model-explorer-visualizer" / "dist"
 
@@ -24,25 +27,51 @@ def ensure_viewer_assets() -> None:
         shutil.copy2(worker_src, worker_dst)
 
 
+def _load_payload(
+    *,
+    payload: dict[str, Any] | None,
+    json_path: Path | None,
+) -> dict[str, Any]:
+    if payload is not None:
+        return payload
+    if json_path is None:
+        raise ValueError("Provide payload or json_path.")
+    return json.loads(json_path.expanduser().resolve().read_text(encoding="utf-8"))
+
+
+def viewer_url(port: int = 8765) -> str:
+    """Return the local viewer URL for a given port."""
+    return f"http://127.0.0.1:{port}/"
+
+
 def serve_viewer(
     *,
-    json_path: Path,
+    payload: dict[str, Any] | None = None,
+    json_path: Path | None = None,
     port: int = 8765,
     block: bool = False,
 ) -> str:
-    """Start a local HTTP server rooted at the viewer directory."""
+    """Start a local HTTP server with the graph payload embedded in index.html."""
     ensure_viewer_assets()
-    json_path = json_path.expanduser().resolve()
-    if not json_path.exists():
-        raise FileNotFoundError(json_path)
-
-    payload_name = json_path.name
-    viewer_payload = VIEWER_DIR / payload_name
-    shutil.copy2(json_path, viewer_payload)
+    resolved_payload = _load_payload(payload=payload, json_path=json_path)
+    served_index = compose_viewer_html(resolved_payload, inline_app=False)
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=str(VIEWER_DIR), **kwargs)
+
+        def do_GET(self) -> None:  # noqa: N802
+            path = unquote(urlparse(self.path).path)
+            if path in {"", "/", "/index.html"}:
+                body = served_index.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            super().do_GET()
 
         def end_headers(self) -> None:
             path = self.path.split("?", 1)[0]
@@ -54,14 +83,13 @@ def serve_viewer(
             return
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    url = f"http://127.0.0.1:{port}/index.html?graph={quote(payload_name)}"
+    url = viewer_url(port)
 
     def run() -> None:
         try:
             server.serve_forever()
         finally:
             server.server_close()
-            viewer_payload.unlink(missing_ok=True)
 
     thread = threading.Thread(target=run, daemon=not block)
     thread.start()
@@ -85,10 +113,15 @@ def main() -> int:
     parser.add_argument("--open", action="store_true")
     args = parser.parse_args()
 
-    url = serve_viewer(json_path=args.json, port=args.port, block=True)
-    print(url)
+    json_path = args.json.expanduser().resolve()
+    if not json_path.exists():
+        raise SystemExit(f"File not found: {json_path}")
+
+    url = viewer_url(args.port)
+    print(f"Open viewer: {url}")
     if args.open:
         open_viewer(url)
+    serve_viewer(json_path=json_path, port=args.port, block=True)
     return 0
 
 
