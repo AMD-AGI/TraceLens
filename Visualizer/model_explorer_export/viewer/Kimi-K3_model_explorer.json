@@ -85,32 +85,6 @@
               ]
             },
             {
-              "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/input_layernorm/@input",
-              "label": "hidden_states",
-              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock",
-              "attrs": [
-                {
-                  "key": "synthetic",
-                  "value": "@input"
-                },
-                {
-                  "key": "operation",
-                  "value": "synthetic"
-                }
-              ],
-              "style": {
-                "backgroundColor": "#d9e8f5",
-                "textColor": "#1a1a1a"
-              },
-              "incomingEdges": [
-                {
-                  "sourceNodeId": "embed_tokens/embed_tokens",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "0"
-                }
-              ]
-            },
-            {
               "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/input_layernorm/input_layernorm",
               "label": "RMSNorm",
               "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock",
@@ -138,7 +112,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/input_layernorm/@input",
+                  "sourceNodeId": "embed_tokens/embed_tokens",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -1364,7 +1338,7 @@
                   "targetNodeInputId": "0"
                 },
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "1"
                 },
@@ -1374,7 +1348,7 @@
                   "targetNodeInputId": "2"
                 },
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "3"
                 },
@@ -1413,12 +1387,12 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_kda_fwd_intra:4",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 },
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_kda_fwd_intra:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "1"
                 }
@@ -1703,32 +1677,6 @@
               ]
             },
             {
-              "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/post_attention_layernorm/@input",
-              "label": "hidden_states",
-              "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock",
-              "attrs": [
-                {
-                  "key": "synthetic",
-                  "value": "@input"
-                },
-                {
-                  "key": "operation",
-                  "value": "synthetic"
-                }
-              ],
-              "style": {
-                "backgroundColor": "#d9e8f5",
-                "textColor": "#1a1a1a"
-              },
-              "incomingEdges": [
-                {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/seq:3:o_proj:o_proj:0",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "0"
-                }
-              ]
-            },
-            {
               "id": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/post_attention_layernorm/post_attention_layernorm",
               "label": "RMSNorm",
               "namespace": "93x_KimiDecoderLayer/68x_KimiDeltaAttention_KimiSparseMoeBlock",
@@ -1756,7 +1704,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/post_attention_layernorm/@input",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/seq:3:o_proj:o_proj:0",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -2494,32 +2442,6 @@
               ]
             },
             {
-              "id": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/input_layernorm/@input",
-              "label": "hidden_states",
-              "namespace": "93x_KimiDecoderLayer/24x_KimiMLAAttention_KimiSparseMoeBlock",
-              "attrs": [
-                {
-                  "key": "synthetic",
-                  "value": "@input"
-                },
-                {
-                  "key": "operation",
-                  "value": "synthetic"
-                }
-              ],
-              "style": {
-                "backgroundColor": "#d9e8f5",
-                "textColor": "#1a1a1a"
-              },
-              "incomingEdges": [
-                {
-                  "sourceNodeId": "embed_tokens/embed_tokens",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "0"
-                }
-              ]
-            },
-            {
               "id": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/input_layernorm/input_layernorm",
               "label": "RMSNorm",
               "namespace": "93x_KimiDecoderLayer/24x_KimiMLAAttention_KimiSparseMoeBlock",
@@ -2547,7 +2469,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/input_layernorm/@input",
+                  "sourceNodeId": "embed_tokens/embed_tokens",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -3151,32 +3073,6 @@
               ]
             },
             {
-              "id": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/post_attention_layernorm/@input",
-              "label": "hidden_states",
-              "namespace": "93x_KimiDecoderLayer/24x_KimiMLAAttention_KimiSparseMoeBlock",
-              "attrs": [
-                {
-                  "key": "synthetic",
-                  "value": "@input"
-                },
-                {
-                  "key": "operation",
-                  "value": "synthetic"
-                }
-              ],
-              "style": {
-                "backgroundColor": "#d9e8f5",
-                "textColor": "#1a1a1a"
-              },
-              "incomingEdges": [
-                {
-                  "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/self_attn/post:1:o_proj:o_proj:0",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "0"
-                }
-              ]
-            },
-            {
               "id": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/post_attention_layernorm/post_attention_layernorm",
               "label": "RMSNorm",
               "namespace": "93x_KimiDecoderLayer/24x_KimiMLAAttention_KimiSparseMoeBlock",
@@ -3204,7 +3100,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/post_attention_layernorm/@input",
+                  "sourceNodeId": "decoder/24x_KimiMLAAttention_KimiSparseMoeBlock/self_attn/post:1:o_proj:o_proj:0",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -3942,32 +3838,6 @@
               ]
             },
             {
-              "id": "decoder/1x_KimiDeltaAttention_KimiMLP/input_layernorm/@input",
-              "label": "hidden_states",
-              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP",
-              "attrs": [
-                {
-                  "key": "synthetic",
-                  "value": "@input"
-                },
-                {
-                  "key": "operation",
-                  "value": "synthetic"
-                }
-              ],
-              "style": {
-                "backgroundColor": "#d9e8f5",
-                "textColor": "#1a1a1a"
-              },
-              "incomingEdges": [
-                {
-                  "sourceNodeId": "embed_tokens/embed_tokens",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "0"
-                }
-              ]
-            },
-            {
               "id": "decoder/1x_KimiDeltaAttention_KimiMLP/input_layernorm/input_layernorm",
               "label": "RMSNorm",
               "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP",
@@ -3995,7 +3865,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/input_layernorm/@input",
+                  "sourceNodeId": "embed_tokens/embed_tokens",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -5221,7 +5091,7 @@
                   "targetNodeInputId": "0"
                 },
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "1"
                 },
@@ -5231,7 +5101,7 @@
                   "targetNodeInputId": "2"
                 },
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "3"
                 },
@@ -5270,12 +5140,12 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_kda_fwd_intra:4",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 },
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_kda_fwd_intra:4",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "1"
                 }
@@ -5560,32 +5430,6 @@
               ]
             },
             {
-              "id": "decoder/1x_KimiDeltaAttention_KimiMLP/post_attention_layernorm/@input",
-              "label": "hidden_states",
-              "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP",
-              "attrs": [
-                {
-                  "key": "synthetic",
-                  "value": "@input"
-                },
-                {
-                  "key": "operation",
-                  "value": "synthetic"
-                }
-              ],
-              "style": {
-                "backgroundColor": "#d9e8f5",
-                "textColor": "#1a1a1a"
-              },
-              "incomingEdges": [
-                {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/seq:3:o_proj:o_proj:0",
-                  "sourceNodeOutputId": "0",
-                  "targetNodeInputId": "0"
-                }
-              ]
-            },
-            {
               "id": "decoder/1x_KimiDeltaAttention_KimiMLP/post_attention_layernorm/post_attention_layernorm",
               "label": "RMSNorm",
               "namespace": "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP",
@@ -5613,7 +5457,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/post_attention_layernorm/@input",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/seq:3:o_proj:o_proj:0",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 }
@@ -5977,6 +5821,808 @@
                   "targetNodeInputId": "0"
                 }
               ]
+            },
+            {
+              "id": "@fact_sheet/line:0",
+              "label": "Model type: kimi_linear",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Model type",
+                  "value": "kimi_linear"
+                },
+                {
+                  "key": "detail",
+                  "value": "Model type: kimi_linear"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              }
+            },
+            {
+              "id": "@fact_sheet/line:1",
+              "label": "Decoder: Sparse MoE",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Decoder",
+                  "value": "Sparse MoE"
+                },
+                {
+                  "key": "detail",
+                  "value": "Decoder: Sparse MoE"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:0",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:2",
+              "label": "Attention: Hybrid",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Attention",
+                  "value": "Hybrid"
+                },
+                {
+                  "key": "detail",
+                  "value": "Attention: Hybrid"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:1",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:3",
+              "label": "Positional: NoPE",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Positional",
+                  "value": "NoPE"
+                },
+                {
+                  "key": "detail",
+                  "value": "Positional: NoPE"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:2",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:4",
+              "label": "Norm: RMSNorm (Pre-Norm)",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Norm",
+                  "value": "RMSNorm (Pre-Norm)"
+                },
+                {
+                  "key": "detail",
+                  "value": "Norm: RMSNorm (Pre-Norm)"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:3",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:5",
+              "label": "Decoder class: KimiDecoderLayer",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Decoder class",
+                  "value": "KimiDecoderLayer"
+                },
+                {
+                  "key": "detail",
+                  "value": "Decoder class: KimiDecoderLayer"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:4",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:6",
+              "label": "Checkpoint: hf://moonshotai/Kimi-K3/config.json",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Checkpoint",
+                  "value": "hf://moonshotai/Kimi-K3/config.json"
+                },
+                {
+                  "key": "detail",
+                  "value": "Checkpoint: hf://moonshotai/Kimi-K3/config.json"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:5",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:7",
+              "label": "Hidden size: 7,168",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Hidden size",
+                  "value": "7,168"
+                },
+                {
+                  "key": "detail",
+                  "value": "Hidden size: 7,168"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:6",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:8",
+              "label": "Heads: 96 Q / 96 KV",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Heads",
+                  "value": "96 Q / 96 KV"
+                },
+                {
+                  "key": "detail",
+                  "value": "Heads: 96 Q / 96 KV"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:7",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:9",
+              "label": "Vocab: 163,840",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Vocab",
+                  "value": "163,840"
+                },
+                {
+                  "key": "detail",
+                  "value": "Vocab: 163,840"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:8",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:10",
+              "label": "Context: 1,048,576 tokens",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Context",
+                  "value": "1,048,576 tokens"
+                },
+                {
+                  "key": "detail",
+                  "value": "Context: 1,048,576 tokens"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:9",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:11",
+              "label": "Params (est.): 3.69T (87.0B active)",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Params (est.)",
+                  "value": "3.69T (87.0B active)"
+                },
+                {
+                  "key": "detail",
+                  "value": "Params (est.): 3.69T (87.0B active)"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:10",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:12",
+              "label": "KV cache / token (bf16 est.): 8.7 MiB",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "KV cache / token (bf16 est.)",
+                  "value": "8.7 MiB"
+                },
+                {
+                  "key": "detail",
+                  "value": "KV cache / token (bf16 est.): 8.7 MiB"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:11",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:13",
+              "label": "Layer repeat: 93 \u00d7 KimiDecoderLayer (layer_idx in range(93))",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Layer repeat",
+                  "value": "93 \u00d7 KimiDecoderLayer (layer_idx in range(93))"
+                },
+                {
+                  "key": "detail",
+                  "value": "Layer repeat: 93 \u00d7 KimiDecoderLayer (layer_idx in range(93))"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:12",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:14",
+              "label": "self_attn \u2192 KimiDeltaAttention (if (layer_idx + 1) in kda_layers (69 layers))",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "detail",
+                  "value": "self_attn \u2192 KimiDeltaAttention (if (layer_idx + 1) in kda_layers (69 layers))"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:13",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:15",
+              "label": "self_attn \u2192 KimiMLAAttention (else)",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "detail",
+                  "value": "self_attn \u2192 KimiMLAAttention (else)"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:14",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:16",
+              "label": "block_sparse_moe \u2192 KimiSparseMoeBlock (if layer_idx >= 1)",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "detail",
+                  "value": "block_sparse_moe \u2192 KimiSparseMoeBlock (if layer_idx >= 1)"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:15",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:17",
+              "label": "mlp \u2192 KimiMLP (else)",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "detail",
+                  "value": "mlp \u2192 KimiMLP (else)"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:16",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:18",
+              "label": "68 \u00d7 KimiDelta Attn + KimiSparseMoeBlock",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "detail",
+                  "value": "68 \u00d7 KimiDelta Attn + KimiSparseMoeBlock"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:17",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:19",
+              "label": "24 \u00d7 KimiMLA Attn + KimiSparseMoeBlock",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "detail",
+                  "value": "24 \u00d7 KimiMLA Attn + KimiSparseMoeBlock"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:18",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:20",
+              "label": "1 \u00d7 KimiDelta Attn + KimiMLP",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "detail",
+                  "value": "1 \u00d7 KimiDelta Attn + KimiMLP"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:19",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:21",
+              "label": "Forward: input_layernorm \u2192 self_attn \u2192 post_attention_layernorm \u2192 block_sparse_moe",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Forward",
+                  "value": "input_layernorm \u2192 self_attn \u2192 post_attention_layernorm \u2192 block_sparse_moe"
+                },
+                {
+                  "key": "detail",
+                  "value": "Forward: input_layernorm \u2192 self_attn \u2192 post_attention_layernorm \u2192 block_sparse_moe"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:20",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:22",
+              "label": "MoE: 2 shared expert(s)",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "MoE",
+                  "value": "2 shared expert(s)"
+                },
+                {
+                  "key": "detail",
+                  "value": "MoE: 2 shared expert(s)"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:21",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:23",
+              "label": "MoE: 16/896 experts active (~1.8%)",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "MoE",
+                  "value": "16/896 experts active (~1.8%)"
+                },
+                {
+                  "key": "detail",
+                  "value": "MoE: 16/896 experts active (~1.8%)"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:22",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:24",
+              "label": "Layers: Per-layer module types from AST/config",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Layers",
+                  "value": "Per-layer module types from AST/config"
+                },
+                {
+                  "key": "detail",
+                  "value": "Layers: Per-layer module types from AST/config"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:23",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:25",
+              "label": "AST: Forward order: input_layernorm \u2192 self_attn \u2192 post_attention_layernorm \u2192 block_sparse_moe",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "AST",
+                  "value": "Forward order: input_layernorm \u2192 self_attn \u2192 post_attention_layernorm \u2192 block_sparse_moe"
+                },
+                {
+                  "key": "detail",
+                  "value": "AST: Forward order: input_layernorm \u2192 self_attn \u2192 post_attention_layernorm \u2192 block_sparse_moe"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#1a1a1a",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:24",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
+            },
+            {
+              "id": "@fact_sheet/line:26",
+              "label": "Highlights: Hybrid; Sparse MoE; 68 KimiDelta Attn + KimiSparseMoeBlock, 24 KimiMLA Attn + KimiSparseMoeBlock, 1 KimiDelta Attn + KimiMLP; NoPE",
+              "namespace": "fact_sheet",
+              "attrs": [
+                {
+                  "key": "class_name",
+                  "value": "FactSheetLine"
+                },
+                {
+                  "key": "Highlights",
+                  "value": "Hybrid; Sparse MoE; 68 KimiDelta Attn + KimiSparseMoeBlock, 24 KimiMLA Attn + KimiSparseMoeBlock, 1 KimiDelta Attn + KimiMLP; NoPE"
+                },
+                {
+                  "key": "detail",
+                  "value": "Highlights: Hybrid; Sparse MoE; 68 KimiDelta Attn + KimiSparseMoeBlock, 24 KimiMLA Attn + KimiSparseMoeBlock, 1 KimiDelta Attn + KimiMLP; NoPE"
+                }
+              ],
+              "style": {
+                "backgroundColor": "#ffffff",
+                "textColor": "#566573",
+                "borderColor": "#d0d0d0"
+              },
+              "incomingEdges": [
+                {
+                  "sourceNodeId": "@fact_sheet/line:25",
+                  "sourceNodeOutputId": "0",
+                  "targetNodeInputId": "0"
+                }
+              ]
             }
           ],
           "groupNodeAttributes": {
@@ -6045,9 +6691,22 @@
             "93x_KimiDecoderLayer/1x_KimiDeltaAttention_KimiMLP/KimiDeltaAttention/chunk_kda_pipeline/kda_gate_chunk_cumsum": {
               "label": "Gate cumsum",
               "operation": "gpu_kernel"
+            },
+            "fact_sheet": {
+              "label": "Fact sheet",
+              "title": "KimiLinearForCausalLM",
+              "model_type": "kimi_linear",
+              "forward": "input_layernorm \u2192 self_attn \u2192 post_attention_layernorm \u2192 block_sparse_moe"
             }
           },
           "groupNodeConfigs": [
+            {
+              "namespaceRegex": "fact_sheet",
+              "backgroundColor": "#ffffff",
+              "borderColor": "#d0d0d0",
+              "textColor": "#1a1a1a",
+              "layoutDirection": "TOP_BOTTOM"
+            },
             {
               "namespaceRegex": "93x_KimiDecoderLayer",
               "backgroundColor": "#fff5f4",

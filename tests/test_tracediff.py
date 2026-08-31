@@ -4,8 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-<<<<<<< Updated upstream
-=======
 import os
 from copy import deepcopy
 from types import SimpleNamespace
@@ -14,7 +12,6 @@ import pandas as pd
 import pytest
 
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
->>>>>>> Stashed changes
 from TraceLens.TraceDiff.trace_diff import (
     _disambiguate_same_name_candidates,
 )
@@ -571,8 +568,6 @@ class TestDisambiguateSameNameCandidates:
                 assert 0 <= i < len(children1)
             if j is not None:
                 assert 0 <= j < len(children2)
-<<<<<<< Updated upstream
-=======
 
 
 class TestGpuPathChildNamesAtBfsLevels:
@@ -1753,4 +1748,3 @@ class TestTraceDiffMergeEdgeCases:
         td.diff_stats_unique_args_summary_df = td.diff_stats_df.copy()
         td.get_cpu_op_to_kernels_json()
         assert "Kernel to CPU op mapping" in capsys.readouterr().out
->>>>>>> Stashed changes

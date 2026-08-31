@@ -314,6 +314,28 @@ def test_merged_graph_uses_white_text_on_dark_blocks():
     assert all(node["style"]["textColor"] == "#ffffff" for node in dark_nodes)
 
 
+def test_fact_sheet_box_in_merged_graph():
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        name="Custom MLA MoE",
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$"]),
+    )
+    payload = build_model_explorer_payload(spec)
+    graph = payload["graphCollections"][0]["graphs"][0]
+    fact_node = next(node for node in graph["nodes"] if node["id"] == "@fact_sheet")
+    assert fact_node["namespace"] == ""
+    assert fact_node["label"].startswith("Fact sheet\n")
+    assert "Model type:" in fact_node["label"]
+    assert "\n• " in fact_node["label"]
+    assert not any(
+        edge["sourceNodeId"] == "@fact_sheet"
+        for node in graph["nodes"]
+        for edge in node.get("incomingEdges", [])
+    )
+    assert not fact_node.get("incomingEdges")
+
+
 def test_build_model_explorer_payload_custom_model():
     spec = load_architecture(
         FIXTURES / "custom_model",

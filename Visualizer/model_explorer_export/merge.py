@@ -18,6 +18,7 @@ from model_explorer_export.adapter import (
     _node_style,
     _sanitize_namespace_segment,
 )
+from model_explorer_export.fact_sheet import build_fact_sheet_node
 from model_explorer_export.labels import apply_kernel_frame_labels
 from model_explorer_export.overview import (
     _DECODER_NORM_ATTRS,
@@ -810,6 +811,8 @@ def build_merged_model_graph(
             basic_ops=resolved_basic_ops,
             previous_exits=previous_exits,
         )
+
+    nodes.append(build_fact_sheet_node(spec))
 
     decoder_namespace_escaped = re.escape(decoder_namespace)
     model_attrs: dict[str, str] = {
