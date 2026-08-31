@@ -69,17 +69,20 @@ _EM_DASH = "—"
 def _make_perf_csv(tmp_path, rows):
     """Write a synthetic ``unified_perf_summary.csv`` and return its path.
 
-    ``rows`` is a list of ``(name, weight, percent)`` tuples. Only the three
-    columns the code reads are written; ``percent`` defaults to 0.0 if omitted.
+    ``rows`` is a list of ``(name, weight, percent[, count])`` tuples. ``percent``
+    defaults to 0.0 and ``count`` to 1 when omitted.
     """
     csv_path = tmp_path / "unified_perf_summary.csv"
     with open(csv_path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["name", "Kernel Time (µs)_sum", "Percentage (%)"])
+        writer.writerow(
+            ["name", "Kernel Time (µs)_sum", "Percentage (%)", "operation_count"]
+        )
         for row in rows:
             name, weight = row[0], row[1]
             percent = row[2] if len(row) > 2 else 0.0
-            writer.writerow([name, weight, percent])
+            count = row[3] if len(row) > 3 else 1
+            writer.writerow([name, weight, percent, count])
     return csv_path
 
 
@@ -341,6 +344,7 @@ def test_writer_structure_contract(tmp_path):
         assert row[3] == kernel  # Kernel Name cell == raw symbol
         assert row[4] == time_ms
         assert row[5] == pct
+        assert row[6] == "1"  # Count cell: one row per group, count=1
     assert cells is not None  # a data row exists
 
     # NEGATIVE — downgrading #### P to ### P makes _HEADING_RE find no headings.
@@ -377,6 +381,32 @@ def test_writer_separate_rows_grouped_impact(tmp_path):
     ]
     assert lows.count(foo_low) == 2
     assert lows.count(bar_low) == 1
+
+
+# ---------------------------------------------------------------------------
+# Count column: summed per name group (not em-dashed), from operation_count
+# ---------------------------------------------------------------------------
+def test_writer_count_summed_per_group(tmp_path):
+    rows = [
+        # Two foo rows -> counts 7 + 3 = 10 for the group.
+        ("hipGraphLaunch->foo (Synthetic Op)", 30.0, 30.0, 7),
+        ("hipGraphLaunch->foo (Synthetic Op)", 10.0, 10.0, 3),
+        ("hipGraphLaunch->bar (Synthetic Op)", 20.0, 20.0, 4),
+    ]
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
+
+    # Count is cell index 6 (Operation, Args, Kernel Path, Kernel Name, Time,
+    # %E2E, Count, ...); every foo card shows the group sum, not the per-row count.
+    def _count_cells(kernel):
+        return [
+            [c.strip() for c in line.split("|")[1:-1]][6]
+            for line in md.splitlines()
+            if line.strip().startswith("| —") and f"| {kernel} |" in line
+        ]
+
+    assert _count_cells("foo") == ["10", "10"]  # 7 + 3, same on both foo cards
+    assert _count_cells("bar") == ["4"]
 
 
 # ---------------------------------------------------------------------------

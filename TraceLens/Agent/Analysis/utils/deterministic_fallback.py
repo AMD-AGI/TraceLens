@@ -56,7 +56,14 @@ _TORCH_COMPILED_PREFIX = "Torch-Compiled Region"
 # Excluded from both the graph-replay signal and the
 # fallback candidate list.
 _PLUMBING_WRAPPER_PREFIXES = frozenset(
-    {"hipLaunchKernel", "hipModuleLaunchKernel", "hipMemcpyAsync"}
+    {
+        "hipLaunchKernel",
+        "hipModuleLaunchKernel",
+        "hipMemcpyAsync",
+        "cudaLaunchKernel",
+        "cudaLaunchKernelExC",
+        "cudaMemcpyAsync",
+    }
 )
 _PLUMBING_WRAPPER_STARTSWITH = ("Memcpy", "__amd_rocclr_")
 
@@ -119,8 +126,10 @@ def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float)
     # Denominator is built over all surviving rows; the display filter below must
     # not feed back into it, or dropping the tail would inflate the survivors.
     group_time = defaultdict(float)
+    group_count = defaultdict(int)
     for row in rows:
-        group_time[row["kernel"]] += row["weight"]
+        group_time[row["op"]] += row["weight"]
+        group_count[row["op"]] += row["count"]
     total_time = sum(group_time.values())
 
     filtered = [row for row in rows if row["percent"] >= MIN_PITEM_PERCENT_E2E]
@@ -141,9 +150,9 @@ def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float)
     lines = ["# Deterministic Fallback Analysis", "", banner, ""]
 
     for rank, row in enumerate(filtered, start=1):
-        kernel = row["kernel"]
-        display = _normalize_kernel_name(kernel)
-        group_pct = (group_time[kernel] / total_time * 100.0) if total_time > 0 else 0.0
+        op = row["op"]
+        display = _normalize_kernel_name(op)
+        group_pct = (group_time[op] / total_time * 100.0) if total_time > 0 else 0.0
         low = round(group_pct * HEURISTIC_FRACTION_LOW, 2)
         mid = round(group_pct * HEURISTIC_FRACTION_MID, 2)
         high = round(group_pct * HEURISTIC_FRACTION_HIGH, 2)
@@ -161,8 +170,8 @@ def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float)
         lines.append(_TABLE_DIVIDER)
         time_ms = row["weight"] / 1000.0
         lines.append(
-            f"| — | — | — | {kernel} | {time_ms:.3f} | "
-            f"{row['percent']:.2f} | — | — | — | "
+            f"| — | — | — | {op} | {time_ms:.3f} | "
+            f"{row['percent']:.2f} | {group_count[op]} | — | — | "
             f"— |"
         )
         lines.append("")
@@ -187,16 +196,17 @@ def _surviving_rows(csv_rows):
             prefix, tail = name.split("->", 1)
             if _is_plumbing_wrapper(prefix):
                 continue
-            kernel = _strip_synthetic_suffix(tail)
+            op = _strip_synthetic_suffix(tail)
         else:
-            kernel = _strip_synthetic_suffix(name)
-        if _is_plumbing_wrapper(kernel):
+            op = _strip_synthetic_suffix(name)
+        if _is_plumbing_wrapper(op):
             continue
         rows.append(
             {
-                "kernel": kernel,
+                "op": op,
                 "weight": float(row["Kernel Time (µs)_sum"]),
                 "percent": float(row["Percentage (%)"]),
+                "count": int(float(row.get("operation_count", 0) or 0)),
             }
         )
     return rows
@@ -234,6 +244,7 @@ def main() -> None:
     parser.add_argument("--graph-replay-fraction", type=float, default=None)
     args = parser.parse_args()
 
+    # Fallback handling for displaying fraction when script invoked directly
     frac = args.graph_replay_fraction
     if frac is None:
         frac = check_graph_replay_coverage(args.unified_perf_csv).graph_replay_fraction
