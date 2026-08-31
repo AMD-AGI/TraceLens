@@ -77,3 +77,9 @@ def build_fact_sheet_viewer(spec: ArchitectureSpec) -> dict[str, str]:
         "title": "Fact sheet",
         "body": "\n".join(body),
     }
+
+
+def build_fact_sheet_group_attributes(spec: ArchitectureSpec) -> dict[str, str]:
+    """Mirror the HTML fact sheet in Model Explorer graph info metadata."""
+    viewer = build_fact_sheet_viewer(spec)
+    return {"architecture_fact_sheet": viewer["body"]}

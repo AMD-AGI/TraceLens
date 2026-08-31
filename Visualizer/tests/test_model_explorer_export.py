@@ -659,10 +659,25 @@ def test_viewer_shell_reserves_fact_sheet_column():
         / "viewer"
         / "app.js"
     ).read_text(encoding="utf-8")
-    assert "tracelens-app" in index_html
     assert "tracelens-fact-sheet" in index_html
     assert "grid-template-columns" in index_html
+    assert "body {" in index_html and "display: grid" in index_html
     assert "tracelens-fact-sheet-body" in app_js
+    assert "factSheet.hidden = false" in app_js
+
+
+def test_fact_sheet_group_attributes_in_graph_info():
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        name="Custom MLA MoE",
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$"]),
+    )
+    payload = build_model_explorer_payload(spec)
+    graph = payload["graphCollections"][0]["graphs"][0]
+    attrs = graph["groupNodeAttributes"][""]
+    assert "architecture_fact_sheet" in attrs
+    assert "Model type:" in attrs["architecture_fact_sheet"]
 
 
 def test_kernel_frame_labels_split_l2norm_q_and_k_and_sanitize_unicode():

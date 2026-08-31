@@ -18,6 +18,7 @@ from model_explorer_export.adapter import (
     _node_style,
     _sanitize_namespace_segment,
 )
+from model_explorer_export.fact_sheet import build_fact_sheet_group_attributes
 from model_explorer_export.labels import (
     apply_kernel_frame_labels,
     skip_merged_tensor_port_parent,
@@ -1067,6 +1068,7 @@ def build_merged_model_graph(
         model_attrs["decoder_class"] = spec.decoder_class
     if spec.layer_mix:
         model_attrs["layer_mix"] = spec.layer_mix
+    model_attrs.update(build_fact_sheet_group_attributes(spec))
 
     finalize_graph_node_styles(nodes)
 

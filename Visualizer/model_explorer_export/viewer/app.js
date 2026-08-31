@@ -12,15 +12,16 @@ if (window.modelExplorer) {
 }
 
 const status = document.getElementById("status");
-const app = document.getElementById("tracelens-app");
 const graphPane = document.getElementById("tracelens-graph-pane");
+const factSheet = document.getElementById("tracelens-fact-sheet");
 const factSheetTitle = document.getElementById("tracelens-fact-sheet-title");
 const factSheetBody = document.getElementById("tracelens-fact-sheet-body");
 
 function showError(message) {
   status.textContent = message;
   status.hidden = false;
-  app.hidden = true;
+  graphPane.hidden = true;
+  factSheet.hidden = true;
 }
 
 function graphParam() {
@@ -40,15 +41,15 @@ async function loadPayload() {
   return response.json();
 }
 
-function mountFactSheet(factSheet) {
-  if (!factSheet?.body) {
+function mountFactSheet(factSheetData) {
+  if (!factSheetData?.body) {
     factSheetTitle.textContent = "Fact sheet";
     factSheetBody.textContent = "No fact sheet data in this export.";
     return;
   }
 
-  factSheetTitle.textContent = factSheet.title || "Fact sheet";
-  factSheetBody.textContent = factSheet.body;
+  factSheetTitle.textContent = factSheetData.title || "Fact sheet";
+  factSheetBody.textContent = factSheetData.body;
 }
 
 function mountVisualizer(graphCollections) {
@@ -70,7 +71,8 @@ function mountVisualizer(graphCollections) {
 
 function showApp() {
   status.hidden = true;
-  app.hidden = false;
+  graphPane.hidden = false;
+  factSheet.hidden = false;
 }
 
 loadPayload()

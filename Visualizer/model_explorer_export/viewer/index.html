@@ -14,6 +14,12 @@
         font-family: system-ui, sans-serif;
       }
 
+      body {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 420px;
+        grid-template-rows: 1fr;
+      }
+
       #status {
         position: fixed;
         inset: 0;
@@ -23,42 +29,51 @@
         text-align: center;
         color: #1a1a1a;
         background: #e1e1e1;
-        z-index: 100;
+        z-index: 1000;
       }
 
-      #tracelens-app {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) 420px;
-        width: 100%;
-        height: 100%;
-      }
-
-      #tracelens-app[hidden] {
-        display: none;
+      #status[hidden],
+      #tracelens-graph-pane[hidden],
+      #tracelens-fact-sheet[hidden] {
+        display: none !important;
       }
 
       #tracelens-graph-pane {
+        grid-column: 1;
+        grid-row: 1;
         min-width: 0;
-        height: 100%;
+        min-height: 0;
         overflow: hidden;
         background: #e1e1e1;
+        position: relative;
+        isolation: isolate;
       }
 
       model-explorer-visualizer {
         display: block;
         width: 100%;
         height: 100%;
+        max-width: 100%;
       }
 
       #tracelens-fact-sheet {
+        grid-column: 2;
+        grid-row: 1;
+        position: fixed;
+        top: 0;
+        right: 0;
         box-sizing: border-box;
+        min-width: 420px;
+        width: 420px;
         height: 100%;
         overflow: auto;
         padding: 14px 16px 20px;
         background: #ffffff;
-        border-left: 1px solid #d0d0d0;
+        border-left: 2px solid #b0b0b0;
         color: #1a1a1a;
         text-align: left;
+        z-index: 100;
+        box-shadow: -4px 0 12px rgba(0, 0, 0, 0.08);
       }
 
       #tracelens-fact-sheet h2 {
@@ -78,13 +93,11 @@
   </head>
   <body>
     <div id="status">Loading TraceLens graph…</div>
-    <div id="tracelens-app" hidden>
-      <div id="tracelens-graph-pane"></div>
-      <aside id="tracelens-fact-sheet">
-        <h2 id="tracelens-fact-sheet-title">Fact sheet</h2>
-        <pre id="tracelens-fact-sheet-body"></pre>
-      </aside>
-    </div>
-    <script src="./app.js"></script>
+    <div id="tracelens-graph-pane" hidden></div>
+    <aside id="tracelens-fact-sheet" hidden>
+      <h2 id="tracelens-fact-sheet-title">Fact sheet</h2>
+      <pre id="tracelens-fact-sheet-body"></pre>
+    </aside>
+    <script src="./app.js?v=3"></script>
   </body>
 </html>

@@ -1320,7 +1320,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_3:3",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 },
@@ -1330,7 +1330,7 @@
                   "targetNodeInputId": "1"
                 },
                 {
-                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
+                  "sourceNodeId": "decoder/68x_KimiDeltaAttention_KimiSparseMoeBlock/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_3:3",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "2"
                 },
@@ -5046,7 +5046,7 @@
               },
               "incomingEdges": [
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_3:3",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "0"
                 },
@@ -5056,7 +5056,7 @@
                   "targetNodeInputId": "1"
                 },
                 {
-                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3",
+                  "sourceNodeId": "decoder/1x_KimiDeltaAttention_KimiMLP/self_attn/@attn_pipeline/@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_3:3",
                   "sourceNodeOutputId": "0",
                   "targetNodeInputId": "2"
                 },
@@ -5685,7 +5685,8 @@
               "layers": "93",
               "forward": "input_layernorm \u2192 self_attn \u2192 post_attention_layernorm \u2192 block_sparse_moe",
               "decoder_class": "KimiDecoderLayer",
-              "layer_mix": "68 KimiDelta Attn + KimiSparseMoeBlock, 24 KimiMLA Attn + KimiSparseMoeBlock, 1 KimiDelta Attn + KimiMLP"
+              "layer_mix": "68 KimiDelta Attn + KimiSparseMoeBlock, 24 KimiMLA Attn + KimiSparseMoeBlock, 1 KimiDelta Attn + KimiMLP",
+              "architecture_fact_sheet": "- Model type: kimi_linear\n- Decoder: Sparse MoE\n- Attention: Hybrid\n- Positional: NoPE\n- Norm: RMSNorm (Pre-Norm)\n- Decoder class: KimiDecoderLayer\n- Checkpoint: hf://moonshotai/Kimi-K3/config.json\n- Hidden size: 7,168\n- Heads: 96 Q / 96 KV\n- Vocab: 163,840\n- Context: 1,048,576 tokens\n- Params (est.): 3.69T (87.0B active)\n- KV cache / token (bf16 est.): 8.7 MiB\n- Layer repeat: 93 \u00d7 KimiDecoderLayer (layer_idx in range(93))\n  self_attn \u2192 KimiDeltaAttention (if (layer_idx + 1) in kda_layers (69 layers))\n  self_attn \u2192 KimiMLAAttention (else)\n  block_sparse_moe \u2192 KimiSparseMoeBlock (if layer_idx >= 1)\n  mlp \u2192 KimiMLP (else)\n  68 \u00d7 KimiDelta Attn + KimiSparseMoeBlock\n  24 \u00d7 KimiMLA Attn + KimiSparseMoeBlock\n  1 \u00d7 KimiDelta Attn + KimiMLP\n- Forward: input_layernorm -> self_attn -> post_attention_layernorm -> block_sparse_moe\n- MoE: 2 shared expert(s)\n- MoE: 16/896 experts active (~1.8%)\n- Layers: Per-layer module types from AST/config\n- AST: Forward order: input_layernorm \u2192 self_attn \u2192 post_attention_layernorm \u2192 block_sparse_moe\nHighlights: Hybrid; Sparse MoE; 68 KimiDelta Attn + KimiSparseMoeBlock, 24 KimiMLA Attn + KimiSparseMoeBlock, 1 KimiDelta Attn + KimiMLP; NoPE"
             },
             "93x_KimiDecoderLayer": {
               "repeat": "93x_KimiDecoderLayer",

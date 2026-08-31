@@ -44,6 +44,12 @@ def serve_viewer(
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=str(VIEWER_DIR), **kwargs)
 
+        def end_headers(self) -> None:
+            path = self.path.split("?", 1)[0]
+            if path.endswith((".html", ".js", ".json")):
+                self.send_header("Cache-Control", "no-cache")
+            super().end_headers()
+
         def log_message(self, format: str, *args) -> None:  # noqa: A003
             return
 
