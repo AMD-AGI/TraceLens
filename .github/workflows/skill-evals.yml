@@ -4,9 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-# Grades this repo's skills with https://github.com/danielholanda/skillscope:
-# structure (free), then routing (which skill fires) and behavioral (what the
-# agent did once it fired).
+# Run skillscope on evals.json (same intake criteria as amd/skills)
 
 name: skill-evals
 
@@ -21,39 +19,14 @@ permissions:
   contents: read
 
 jobs:
-  structural:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: danielholanda/skillscope@main
-        with:
-          command: structural
-          skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
-
-  routing:
-    needs: structural
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: danielholanda/skillscope@main
-        with:
-          command: routing
-          skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
-          install-claude: "true"
-
-  behavioral:
-    needs: structural
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: danielholanda/skillscope@main
-        with:
-          command: behavioral
-          skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
-          install-claude: "true"
+  evals:
+    uses: danielholanda/skillscope/.github/workflows/reusable.yml@main
+    secrets:
+      api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+    with:
+      skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
+      # Each step can be set to `required`, `optional`, or `off`.
+      # On amd/skills, all steps are required.
+      structural: required
+      routing: required
+      behavioral: required
