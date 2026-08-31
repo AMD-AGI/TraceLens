@@ -14,6 +14,9 @@ KIMI_CODE_PATH = (
 OUTPUT_SVG = Path(__file__).resolve().parent.parent / "chunk_kda_pipeline.svg"
 # Shrinkwrap lands exit stubs on exactly 0.55, so compare with float tolerance.
 MAX_SHRINKWRAPPED_STUB = 0.55 + 1e-6
+# Feeds of one tile approach on their own rows a channel apart, so the corridor they share
+# is a few channels deep rather than a single line.
+MERGE_CORRIDOR_DEPTH = 4 * 0.08
 
 
 def _load_chunk_kda_pipeline():
@@ -245,16 +248,26 @@ def test_cumsum_fanout_routes_to_intra_and_h_without_crossing():
         y_exit = _connector_source_bottom_exit_y(cumsum)
         expected_tee = y_exit - (y_exit - merge_y) * 0.5
         assert abs(tee_y - expected_tee) < 1e-6, "short fan-out tee should sit midway to merge bus"
-        from visualizer.render import CONNECTOR_OBSTACLE_MARGIN
-
-        assert abs(intra_points[1][1] - tee_y) < CONNECTOR_OBSTACLE_MARGIN + 1e-6, (
-            "CumSum fan-out must tee before merge bus"
+        from visualizer.render import (
+            CONNECTOR_OBSTACLE_MARGIN,
+            PARALLEL_CONNECTOR_COORD_EPS,
         )
-        assert abs(intra_points[1][0] - intra_points[2][0]) < 1e-6, "merge-bus leg stays vertical through tee"
-        assert abs(intra_points[2][1] - merge_y) < 1e-6
-        # Every fan-out leg leaves on the common source tee; no operand-link
-        # classification moves one branch to a private corridor.
-        assert abs(h_points[1][1] - tee_y) < CONNECTOR_OBSTACLE_MARGIN + 1e-6
+
+        # The two legs turn on rows of their own rather than doubling up on the tee row. The
+        # leg joining the merge bus turns in the corridor above it; the branch that bypasses
+        # Intra-chunk WY has to reach below that bus, and is checked against the tile it
+        # passes just below.
+        assert merge_y - CONNECTOR_OBSTACLE_MARGIN <= intra_points[1][1] <= y_exit, (
+            f"merge leg turns at {intra_points[1][1]:.4f}, outside the fan-out corridor"
+        )
+        assert h_points[1][1] <= y_exit
+        assert abs(intra_points[1][1] - h_points[1][1]) > PARALLEL_CONNECTOR_COORD_EPS, (
+            "the two legs need rows of their own"
+        )
+        # The branch may tee lower than the merge bus to get its gutter past the wires
+        # feeding the tile it bypasses.
+        assert cumsum.left <= h_points[1][0] <= cumsum.right, "branch leg leaves by its own port"
+        assert h_points[1][1] > anchors[intra_idx].top, "branch must tee above the tile it passes"
         assert abs(h_points[2][0] - h_points[1][0]) > 0.06, "branch leg joins its corridor horizontally"
         path_tee_y = intra_points[1][1]
         path_merge_y = intra_points[2][1]
@@ -772,9 +785,12 @@ def test_chunk_kda_pipeline_connectors_attach_flush_to_box_borders():
             source = anchors[src]
             target = anchors[tgt]
             start_x, start_y = points[0]
-            _end_x, end_y = points[-1]
-            assert start_x == source.cx
+            end_x, end_y = points[-1]
+            # Each leg of a fan-out leaves by its own port, so a departure is pinned to the
+            # bottom edge rather than to the one column down the middle of the tile.
+            assert source.left <= start_x <= source.right
             assert start_y == _connector_source_bottom_exit_y(source)
+            assert target.left <= end_x <= target.right
             assert end_y == _connector_target_top_entry_y(target)
     finally:
         plt.close(fig)
@@ -990,10 +1006,16 @@ def test_parallel_feeder_frame_exit_stubs_are_shrinkwrapped():
                     f"{frame_id} gutter vertical should shrinkwrap toward the merge bus"
                 )
                 continue
-            assert abs(points[1][1] - bus_y) < 0.03, (
-                f"{frame_id} should drop straight onto the merge bus"
+            # Feeds nest one channel apart rather than doubling up on the bus row itself,
+            # so "straight onto the bus" means into the corridor the feeds share, not onto
+            # one line.
+            row_offset = abs(points[1][1] - bus_y)
+            assert row_offset < MERGE_CORRIDOR_DEPTH, (
+                f"{frame_id} should drop straight onto the merge corridor"
             )
-            assert points[0][1] - points[1][1] <= MAX_SHRINKWRAPPED_STUB, (
+            # Shrinkwrap compacts the column down to the bus, so the only length the stub
+            # may carry beyond that is the row this feed nests on above it.
+            assert points[0][1] - points[1][1] <= MAX_SHRINKWRAPPED_STUB + row_offset, (
                 f"{frame_id} output stub should be short after shrinkwrap"
             )
     finally:
@@ -1333,18 +1355,19 @@ def test_l2norm_fwd_q_output_avoids_v_tensor_port():
         plt.close(fig)
 
 
-def test_intra_chunk_merge_bus_uses_single_straight_channel():
-    """All intra-chunk WY feeders tee onto one horizontal bus and enter at center."""
+def test_intra_chunk_feeders_each_claim_their_own_entry_port():
+    """Each intra-chunk WY feeder carries a different tensor, so each gets its own port."""
     import matplotlib.pyplot as plt
 
     from visualizer.render import (
         CONNECTOR_OBSTACLE_MARGIN,
-        _connector_min_bus_y_above_target,
+        TOP_ENTRY_PORT_GAP,
+        _connector_entry_approach_below_target_corridor,
         _path_hits_obstacles,
         _segment_orientation,
     )
 
-    fig, graph, anchors, _plan, _incoming, _outgoing, target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
+    fig, graph, anchors, _plan, _incoming, _outgoing, _target_bus, _source_bus, _merge_link_bus, link_paths, *_ = (
         _chunk_kda_pipeline_link_paths()
     )
     try:
@@ -1352,43 +1375,23 @@ def test_intra_chunk_merge_bus_uses_single_straight_channel():
             index for index, node in enumerate(graph.nodes) if node.label == "chunk_kda_fwd_intra"
         )
         intra = anchors[intra_idx]
-        bus_y = target_bus[intra_idx]
-        assert bus_y >= _connector_min_bus_y_above_target(intra) - 1e-6
-
         intra_links = [(src, tgt) for src, tgt in link_paths if tgt == intra_idx]
         assert len(intra_links) >= 4
 
-        for _src, tgt in intra_links:
-            points = link_paths[(_src, tgt)]
-            horizontals = [
-                (index, y1)
-                for index, ((x1, y1), (x2, y2)) in enumerate(zip(points, points[1:]))
-                if abs(y1 - y2) < 1e-6 and abs(x1 - x2) > 0.06
-            ]
-            bus_horizontals = [(index, y) for index, y in horizontals if abs(y - bus_y) < 0.02]
-            # A feeder in intra's own column drops straight down it and never needs
-            # to reach the bus.
-            same_column_drop = all(abs(x - intra.cx) < 1e-6 for x, _y in points)
-            assert bus_horizontals or same_column_drop, (
-                f"{graph.nodes[_src].label} must tee onto the shared merge bus"
-            )
-            assert len(bus_horizontals) <= 1, (
-                f"{graph.nodes[_src].label} must not backtrack on the merge bus"
-            )
-            if bus_horizontals:
-                _bus_index, _bus_segment_y = bus_horizontals[0]
-                x1, _ = points[_bus_index]
-                x2, _ = points[_bus_index + 1]
-                assert min(x1, x2) <= intra.cx <= max(x1, x2), (
-                    f"{graph.nodes[_src].label} bus segment must span the intra center"
-                )
-            assert abs(points[-1][0] - intra.cx) < 1e-6
+        ports: list[tuple[float, str]] = []
+        for src, tgt in intra_links:
+            points = link_paths[(src, tgt)]
+            label = graph.nodes[src].label
+            assert intra.left <= points[-1][0] <= intra.right
             assert abs(points[-1][1] - intra.top) < 1e-6
+            assert not _connector_entry_approach_below_target_corridor(points, intra), (
+                f"{label} must reach its port from above, not from under the tile"
+            )
             assert not _path_hits_obstacles(
                 points[:-1],
                 [intra],
                 margin=CONNECTOR_OBSTACLE_MARGIN,
-            ), f"{graph.nodes[_src].label} bus must clear intra before entry"
+            ), f"{label} must clear intra before entry"
             for index in range(len(points) - 1):
                 assert _segment_orientation(
                     points[index][0],
@@ -1396,12 +1399,19 @@ def test_intra_chunk_merge_bus_uses_single_straight_channel():
                     points[index + 1][0],
                     points[index + 1][1],
                 ) is not None
+            ports.append((points[-1][0], label))
+
+        ports.sort()
+        for (first_x, first_label), (second_x, second_label) in zip(ports, ports[1:]):
+            assert second_x - first_x >= TOP_ENTRY_PORT_GAP - 1e-6, (
+                f"{first_label} and {second_label} share an entry port on intra"
+            )
     finally:
         plt.close(fig)
 
 
-def test_l2norm_fwd_junction_dots_only_on_shared_buses():
-    """Junction dots mark shared merge buses, not bypass bend corners."""
+def test_l2norm_fwd_junction_dots_only_where_feeds_join():
+    """A dot marks feeds meeting on one tile's approach, never a fan-out parting company."""
     import matplotlib.pyplot as plt
 
     from visualizer.render import _collect_connector_join_points
@@ -1423,7 +1433,6 @@ def test_l2norm_fwd_junction_dots_only_on_shared_buses():
             incoming=incoming,
             anchors=anchors,
         )
-        assert join_points
         assert all(
             (round(x, 3), round(y, 3)) not in endpoint_keys for x, y in join_points
         ), "junction dots must not mark box attachment points"
@@ -1442,39 +1451,18 @@ def test_l2norm_fwd_junction_dots_only_on_shared_buses():
             (round(x, 3), round(y, 3)) in bypass_bus_points for x, y in join_points
         ), "bypass corners must not get junction dots"
 
-        intra_idx = next(
-            index
-            for index, node in enumerate(graph.nodes)
-            if node.label == "chunk_kda_fwd_intra"
-        )
-        bus_y = target_bus[intra_idx]
-        for (src, tgt), points in link_paths.items():
-            if tgt != intra_idx:
-                continue
-            path = points
-            for index in range(1, len(path) - 1):
-                if not _is_bus_bend(path, index):
-                    continue
-                x, y = path[index]
-                if abs(y - bus_y) > 0.03:
-                    continue
-                others_on_bus = [
-                    lk
-                    for lk, other_pts in link_paths.items()
-                    if lk == (src, tgt)
-                    or not any(abs(py - y) < 0.01 for _, py in other_pts)
-                ]
-                if len(others_on_bus) == 1:
-                    assert not any(
-                        abs(jx - x) < 0.03 and abs(jy - y) < 0.03 for jx, jy in join_points
-                    ), f"single-link L-bend must not get a dot at ({x:.3f}, {y:.3f})"
-
-        bus_junctions = [
-            (x, y)
-            for x, y in join_points
-            if abs(y - bus_y) < 0.03
-        ]
-        assert bus_junctions, "expected a junction dot on the intra-chunk merge bus"
+        for x, y in join_points:
+            meeting = {
+                link_key
+                for link_key, points in link_paths.items()
+                if any(abs(px - x) < 0.03 and abs(py - y) < 0.03 for px, py in points)
+            }
+            assert len({link_key[1] for link_key in meeting}) == 1, (
+                f"dot at ({x:.3f}, {y:.3f}) is not on one tile's approach"
+            )
+            assert len({link_key[0] for link_key in meeting}) > 1, (
+                f"dot at ({x:.3f}, {y:.3f}) marks a fan-out splitting, not a join"
+            )
     finally:
         plt.close(fig)
 
@@ -1577,7 +1565,17 @@ def test_chunk_kda_pipeline_draws_connector_junction_dots():
             incoming=incoming,
             anchors=anchors,
         )
-        assert join_points, "expected connector join points in chunk_kda pipeline"
+        # A dot claims the runs meeting under it are connected, so each one has to sit
+        # where feeds of a single tile join. Nothing joins in this pipeline, so what the
+        # test pins down is that a dot is drawn for exactly the joins that are found.
+        for x, y in join_points:
+            meeting = {
+                link_key
+                for link_key, points in link_paths.items()
+                if any(abs(px - x) < 0.03 and abs(py - y) < 0.03 for px, py in points)
+            }
+            assert len({link_key[1] for link_key in meeting}) == 1
+            assert len({link_key[0] for link_key in meeting}) > 1
 
         drawable = [
             point
@@ -1589,7 +1587,6 @@ def test_chunk_kda_pipeline_draws_connector_junction_dots():
                 halo_radius=CONNECTOR_JUNCTION_HALO_RADIUS,
             )
         ]
-        assert drawable, "expected at least one junction dot clear of boxes"
 
         _draw_connector_junction_dots(
             ax,
@@ -1609,7 +1606,11 @@ def test_chunk_kda_pipeline_draws_connector_junction_dots():
             if isinstance(patch, Circle)
             and abs(patch.get_radius() - CONNECTOR_JUNCTION_DOT_RADIUS) < 1e-6
         ]
-        assert junction_patches, "expected junction dot circles on the axes"
+        assert len(junction_patches) == len(drawable)
+        assert sorted(
+            (round(patch.center[0], 6), round(patch.center[1], 6))
+            for patch in junction_patches
+        ) == sorted((round(x, 6), round(y, 6)) for x, y in drawable)
         assert all(
             patch.get_edgecolor() == (0.0, 0.0, 0.0, 0.0) or patch.get_linewidth() == 0.0
             for patch in junction_patches

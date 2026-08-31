@@ -424,6 +424,9 @@ def is_linear_pipeline_block(node: BlockNode) -> bool:
 
 def is_inline_expandable_module(node: BlockNode) -> bool:
     """True when a composite should render as expanded inline steps rather than a nested diagram."""
+    if re.search(r"Indexer", node.class_name or "", re.I):
+        # Large sparse-attention indexers stay separate sections; straight-line ones expand inline.
+        return len(collect_function_steps(node)) < 12
     return is_linear_pipeline_block(node)
 
 
@@ -484,6 +487,8 @@ def inline_composite_steps(
 ) -> tuple[list[BlockNode], BlockNode | None]:
     """Inline a straight-line composite wrapper into its internal forward steps."""
     if not is_straight_line_module(step):
+        return [step], None
+    if not is_inline_expandable_module(step):
         return [step], None
     inner_steps = straight_line_steps(step)
     if len(inner_steps) > 1:
@@ -566,6 +571,7 @@ class BlockNode:
     norm_before: list[str] = field(default_factory=list)
     attention_inputs: dict[str, list[str]] = field(default_factory=dict)
     parallel_gates: list[str] = field(default_factory=list)
+    input_fed_steps: list[str] = field(default_factory=list)
     side_inputs: dict[str, list[SideInputSpec]] = field(default_factory=dict)
     input_label: str | None = None
     input_source: str | None = None
@@ -637,6 +643,7 @@ class SideFeedSegment:
     consumer: BlockNode
     sides: list[SideInputSpec]
     side_producer_nodes: dict[str, BlockNode] = field(default_factory=dict)
+    side_producer_chains: dict[str, list[BlockNode]] = field(default_factory=dict)
 
 
 @dataclass
@@ -677,6 +684,16 @@ def _method_combine_op(step: BlockNode) -> str:
     return "Function"
 
 
+def _side_feed_chain_attrs(node: BlockNode) -> set[str]:
+    """Attrs that only exist to feed a later side-input consumer."""
+    attrs: set[str] = set()
+    for specs in node.side_inputs.values():
+        for spec in specs:
+            if spec.source_kind == "prior_step" and spec.source_chain:
+                attrs.update(spec.source_chain)
+    return attrs
+
+
 def _segment_for_step(node: BlockNode, step: BlockNode) -> ComputationSegment:
     side_specs = node.side_inputs.get(step.attr_name, [])
     if not side_specs:
@@ -684,12 +701,18 @@ def _segment_for_step(node: BlockNode, step: BlockNode) -> ComputationSegment:
 
     has_prior_side = any(side.source_kind == "prior_step" for side in side_specs)
     has_residual_side = any(side.source_kind == "forward_input" for side in side_specs)
+    by_attr = {child.attr_name: child for child in node.children}
     side_producer_nodes = {
-        side.source_chain[-1]: child
+        side.source_chain[-1]: by_attr[side.source_chain[-1]]
+        for side in side_specs
+        if side.source_kind == "prior_step"
+        and side.source_chain
+        and side.source_chain[-1] in by_attr
+    }
+    side_producer_chains = {
+        side.source_chain[-1]: [by_attr[attr] for attr in side.source_chain if attr in by_attr]
         for side in side_specs
         if side.source_kind == "prior_step" and side.source_chain
-        for child in node.children
-        if child.attr_name == side.source_chain[-1]
     }
 
     if is_method_wrapper(step) and has_prior_side:
@@ -713,6 +736,7 @@ def _segment_for_step(node: BlockNode, step: BlockNode) -> ComputationSegment:
         consumer=step,
         sides=list(side_specs),
         side_producer_nodes=side_producer_nodes,
+        side_producer_chains=side_producer_chains,
     )
 
 
@@ -1020,7 +1044,9 @@ def is_gated_norm_module(node: BlockNode) -> bool:
     class_name = node.class_name or ""
     if class_name == "FusedRMSNormGated":
         return True
-    return node.role == "norm" and bool(re.search(r"Fused.*Gated|Gated.*Norm", class_name, re.I))
+    return node.role == "norm" and bool(
+        re.search(r"Fused.*Gated|Gated.*Norm|NormGated", class_name, re.I)
+    )
 
 
 def gated_norm_activation(node: BlockNode) -> str | None:
@@ -1029,7 +1055,7 @@ def gated_norm_activation(node: BlockNode) -> str | None:
     for detail in node.details:
         if detail in known:
             return detail
-    if node.class_name == "FusedRMSNormGated":
+    if node.class_name == "FusedRMSNormGated" or re.search(r"NormGated", node.class_name or "", re.I):
         return "Sigmoid"
     return None
 
@@ -1258,6 +1284,29 @@ def _side_feed_targets(node: BlockNode) -> dict[str, str]:
     return targets
 
 
+def _forward_side_combine_producers(node: BlockNode) -> set[str]:
+    """Side-chain attrs that still expand as forward segments before a SideCombine consumer."""
+    side_chain_attrs = _side_feed_chain_attrs(node)
+    if not side_chain_attrs:
+        return set()
+    targets = _side_feed_targets(node)
+    by_attr = {child.attr_name: child for child in node.children}
+    producers: set[str] = set()
+    for producer_attr in side_chain_attrs:
+        consumer_name = targets.get(producer_attr)
+        if consumer_name is None:
+            continue
+        producer = by_attr.get(producer_attr)
+        consumer = by_attr.get(consumer_name)
+        if producer is None or consumer is None:
+            continue
+        if not isinstance(_segment_for_step(node, producer), SeqSegment):
+            continue
+        if isinstance(_segment_for_step(node, consumer), SideCombineSegment):
+            producers.add(producer_attr)
+    return producers
+
+
 def _situ_gated_mlp_parts(
     node: BlockNode,
 ) -> tuple[BlockNode, BlockNode, BlockNode, BlockNode, BlockNode] | None:
@@ -1343,7 +1392,14 @@ def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
         situ_segments = _situ_gated_mlp_segments(node)
         if situ_segments is not None:
             return situ_segments
-        return [_segment_for_step(node, child) for child in children]
+        side_chain_attrs = _side_feed_chain_attrs(node)
+        side_combine_producers = _forward_side_combine_producers(node)
+        return [
+            _segment_for_step(node, child)
+            for child in children
+            if child.attr_name not in side_chain_attrs
+            or child.attr_name in side_combine_producers
+        ]
 
     pre_merge = children[:merge_idx]
     merge_node = children[merge_idx]
@@ -1371,7 +1427,9 @@ def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
 
     remaining = list(post_merge)
     side_feed_targets = _side_feed_targets(node)
-    skip_sequential: set[str] = set()
+    side_chain_attrs = _side_feed_chain_attrs(node)
+    side_combine_producers = _forward_side_combine_producers(node)
+    skip_sequential: set[str] = side_chain_attrs - side_combine_producers
     for index, step in enumerate(remaining):
         consumer = remaining[index + 1] if index + 1 < len(remaining) else None
         if consumer and side_feed_targets.get(step.attr_name) == consumer.attr_name:
@@ -1804,6 +1862,7 @@ def build_block_node(
         norm_before=list(cls.norm_before),
         attention_inputs=attention_inputs,
         parallel_gates=list(cls.parallel_gates),
+        input_fed_steps=list(cls.input_fed_calls),
         side_inputs=dict(cls.side_inputs),
         input_label=cls.forward_input_name,
     )

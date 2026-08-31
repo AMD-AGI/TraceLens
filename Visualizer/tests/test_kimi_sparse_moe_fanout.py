@@ -149,7 +149,7 @@ def test_moe_input_fanout_departs_vertically():
         plt.close(fig)
 
 
-def test_sigmoid_uses_one_exit_then_splits_to_top_entries():
+def test_sigmoid_legs_take_their_own_exit_ports_to_top_entries():
     fig, graph, _positions, anchors, _incoming, outgoing, _input_index, buses, link_paths = (
         _kimi_sparse_moe_layout()
     )
@@ -165,9 +165,13 @@ def test_sigmoid_uses_one_exit_then_splits_to_top_entries():
 
         add_points = link_paths[add_link]
         gather_points = link_paths[gather_link]
-        assert add_points[0] == gather_points[0]
-        assert add_points[0] == (anchors[sigmoid].cx, anchors[sigmoid].bottom)
-        assert gather_points[0] == (anchors[sigmoid].cx, anchors[sigmoid].bottom)
+        source = anchors[sigmoid]
+        # The two legs carry to different places, so each leaves by a port of its own on
+        # the Sigmoid's bottom edge rather than stacking on one column.
+        assert add_points[0][0] != gather_points[0][0]
+        for points in (add_points, gather_points):
+            assert source.left <= points[0][0] <= source.right
+            assert points[0][1] == source.bottom
 
         from visualizer.render import _connector_target_top_entry_y
 
@@ -222,7 +226,7 @@ def test_moe_shared_experts_to_plus_enters_target_top():
         plus_index = next(
             tgt
             for src, tgt in graph.links
-            if src in shared_members and graph.nodes[tgt].label == "Add"
+            if src in shared_members and graph.nodes[tgt].label in {"Add", "+"}
         )
         shared_tail = next(
             index
@@ -444,7 +448,7 @@ def test_moe_up_projection_bypasses_situ_and_aggregation_feeds_do_not_overlap():
         multiply = next(
             index
             for index, node in enumerate(graph.nodes)
-            if node.label == "Multiply"
+            if node.label in {"Multiply", "×"}
             and any(
                 graph.nodes[source].block
                 and graph.nodes[source].block.attr_name == "up_proj"

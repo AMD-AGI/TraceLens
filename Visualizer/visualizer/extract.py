@@ -336,6 +336,85 @@ def _infer_ffn_and_moe(config: dict[str, Any], spec: ArchitectureSpec) -> None:
         spec.layer_mix = ", ".join(f"{count} {kind}" for kind, count in counts.items())
 
 
+def _config_has_ffn_layer_variation(config: dict[str, Any]) -> bool:
+    """True when config selects different FFN/MoE modules by layer index."""
+    mlp_layer_types = _get(config, "mlp_layer_types")
+    if isinstance(mlp_layer_types, list) and len({str(item) for item in mlp_layer_types}) > 1:
+        return True
+    first_k_dense = _as_int(_get(config, "first_k_dense_replace", "num_dense_layers")) or 0
+    num_experts = _as_int(
+        _get(
+            config,
+            "num_experts",
+            "n_routed_experts",
+            "moe_num_experts",
+            "num_local_experts",
+            "num_moe_experts",
+        )
+    )
+    if first_k_dense and num_experts and num_experts > 1:
+        return True
+    moe_pattern = _get(config, "moe_layer_freq")
+    if isinstance(moe_pattern, list) and len({bool(_as_int(item)) for item in moe_pattern}) > 1:
+        return True
+    return False
+
+
+def _resolve_attention_from_config_lists(
+    layer_idx: int,
+    config: dict[str, Any],
+    *,
+    class_registry: dict | None,
+    decoder_class: str | None,
+) -> str | None:
+    """Map config.layer_types entries to the attention class a decoder layer builds."""
+    layer_types = _get(config, "layer_types", "block_types")
+    if not isinstance(layer_types, list) or layer_idx >= len(layer_types):
+        return None
+    block_type = str(layer_types[layer_idx] or "").strip().lower()
+    if not block_type or not class_registry or not decoder_class:
+        return None
+    from visualizer.ast_analyze import ATTENTION_CLASS_RE, ClassStructure
+
+    decoder = class_registry.get(decoder_class)
+    if not isinstance(decoder, ClassStructure):
+        return None
+    options = decoder.init_assignment_options.get("self_attn") or []
+    if not options:
+        return None
+    linear_markers = ("linear", "delta", "kda")
+    sparse_markers = ("sparse", "full", "flash", "mla")
+    wants_linear = any(marker in block_type for marker in linear_markers)
+    wants_sparse = any(marker in block_type for marker in sparse_markers)
+    for class_name in options:
+        lowered = class_name.lower()
+        if wants_linear and "linear" in lowered:
+            return class_name
+        if wants_sparse and "linear" not in lowered and ATTENTION_CLASS_RE.search(class_name):
+            return class_name
+    return options[0]
+
+
+def _resolve_ffn_from_config_lists(
+    layer_idx: int,
+    config: dict[str, Any],
+    *,
+    moe_option: str | None,
+    dense_option: str | None,
+) -> tuple[str | None, str | None]:
+    """Map config.mlp_layer_types entries to the FFN class a decoder layer builds."""
+    mlp_layer_types = _get(config, "mlp_layer_types")
+    if isinstance(mlp_layer_types, list) and layer_idx < len(mlp_layer_types):
+        layer_kind = str(mlp_layer_types[layer_idx] or "").strip().lower()
+        if layer_kind in {"sparse", "moe"}:
+            return "mlp", moe_option
+        if layer_kind in {"dense", "mlp"}:
+            return "mlp", dense_option
+    if _config_moe_layer(layer_idx, config):
+        return "mlp", moe_option
+    return "mlp", dense_option
+
+
 def _config_has_per_layer_typing(config: dict[str, Any]) -> bool:
     """True when config encodes per-layer module selection beyond a flat layer_types list."""
     if isinstance(_get(config, "layer_types", "block_types"), list):
@@ -460,8 +539,8 @@ def _infer_layer_variants(
         return
 
     layer_types = _get(config, "layer_types", "block_types")
-    if isinstance(layer_types, list) and layer_types:
-        return
+    has_config_layer_lists = isinstance(layer_types, list) and layer_types
+    has_ffn_layer_variation = _config_has_ffn_layer_variation(config)
 
     conditionals: list[tuple[str, str, str]] = []
     if class_registry and decoder_class:
@@ -471,7 +550,17 @@ def _infer_layer_variants(
         if isinstance(decoder, ClassStructure):
             conditionals = _extract_decoder_layer_conditionals(decoder)
 
-    if not conditionals and not _config_has_per_layer_typing(config):
+    if (
+        has_config_layer_lists
+        and not has_ffn_layer_variation
+        and not conditionals
+        and not _config_has_per_layer_typing(config)
+    ):
+        return
+
+    if not conditionals and not _config_has_per_layer_typing(config) and not (
+        has_config_layer_lists or has_ffn_layer_variation
+    ):
         return
 
     from collections import Counter
@@ -506,6 +595,13 @@ def _infer_layer_variants(
             if attn_rules
             else None
         )
+        if attn_class is None and has_config_layer_lists:
+            attn_class = _resolve_attention_from_config_lists(
+                layer_idx,
+                config,
+                class_registry=class_registry,
+                decoder_class=decoder_class,
+            )
         if attn_class is None:
             attn_class = _default_attention_class(class_registry, decoder_class)
 
@@ -514,6 +610,13 @@ def _infer_layer_variants(
             if ffn_rules
             else (None, None)
         )
+        if ffn_class is None and ffn_attr is None:
+            ffn_attr, ffn_class = _resolve_ffn_from_config_lists(
+                layer_idx,
+                config,
+                moe_option=moe_option,
+                dense_option=dense_option,
+            )
         if ffn_class is None and ffn_attr is None:
             if _config_moe_layer(layer_idx, config):
                 ffn_attr, ffn_class = "mlp", moe_option

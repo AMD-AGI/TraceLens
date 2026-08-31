@@ -277,7 +277,7 @@ class ShapeInferencer:
             if node.operation == OperationKind.SYNTHETIC and not include_synthetic_inputs:
                 if node.metadata.get("synthetic") == "@input":
                     pass
-                elif node.label not in {"×", "+", "Elementwise ×"} and node.metadata.get("synthetic") != "@combine":
+                elif node.label not in {"×", "+", "Elementwise ×", "Multiply", "Add"} and node.metadata.get("synthetic") != "@combine":
                     continue
 
             output = specs.get(node.id)
@@ -306,7 +306,7 @@ class ShapeInferencer:
                 OperatorRecord(
                     name=_operator_name(node),
                     computation=_low_level_computation(node),
-                    operation=(node.operation.value if node.operation else "unknown"),
+                    operation=_export_operation_kind(node),
                     class_name=node.metadata.get("class_name"),
                     inputs=_dedupe_preserve(inputs),
                     output=output,
@@ -437,7 +437,7 @@ class ShapeInferencer:
                 return TensorSpec(shape=(experts,), dtype=dtype)
             return TensorSpec(shape=(), dtype=dtype)
 
-        if node.label in {"×", "+", "Elementwise ×"} or synthetic == "@combine":
+        if node.label in {"×", "+", "Elementwise ×", "Multiply", "Add"} or synthetic == "@combine":
             if inputs:
                 return inputs[0]
             hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
@@ -843,9 +843,22 @@ def _operator_name(node: ModelGraphNode) -> str:
         return attr
     if node.metadata.get("synthetic") == "@input":
         return node.label
-    if node.label in {"×", "+", "Elementwise ×"}:
+    if node.label in {"×", "+", "Elementwise ×", "Multiply", "Add"}:
+        if node.label == "Multiply":
+            return "×"
+        if node.label == "Add":
+            return "+"
         return node.label
     return node.label or node.id
+
+
+def _export_operation_kind(node: ModelGraphNode) -> str:
+    """Map exported operator kinds for shape-export consumers."""
+    if _operator_name(node).startswith("@op_"):
+        return "torch_functional"
+    if node.operation is None:
+        return "unknown"
+    return node.operation.value
 
 
 def _low_level_computation(node: ModelGraphNode) -> str:
@@ -861,8 +874,10 @@ def _low_level_computation(node: ModelGraphNode) -> str:
         return node.label or "torch_functional"
     if node.metadata.get("synthetic") == "@input":
         return "input"
-    if node.label in {"×", "+", "Elementwise ×"}:
-        return "elementwise_mul" if "×" in node.label else "elementwise_add"
+    if node.label in {"×", "+", "Elementwise ×", "Multiply", "Add"}:
+        if node.label in {"×", "Multiply", "Elementwise ×"}:
+            return "elementwise_mul"
+        return "elementwise_add"
     return node.label or "unknown"
 
 

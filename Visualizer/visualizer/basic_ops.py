@@ -243,11 +243,12 @@ _DETAIL_OPERATION_LABELS = _BASIC_DETAIL_LABELS | frozenset(
         "Token Embedding",
         "Embedding",
         "×",
+        "Multiply",
         "MoE aggregation",
     }
 )
 
-_DETAIL_COMBINE_LABELS = frozenset({"×", "+", "Elementwise ×"})
+_DETAIL_COMBINE_LABELS = frozenset({"×", "+", "Elementwise ×", "Multiply", "Add"})
 
 _DETAIL_OPERATION_CLASSES = frozenset(
     {
@@ -279,7 +280,7 @@ def keep_detail_graph_node(
     if synthetic is not None:
         return label in _DETAIL_COMBINE_LABELS
     display = label or (block.label if block else "")
-    if display in _DETAIL_OPERATION_LABELS:
+    if display in _DETAIL_COMBINE_LABELS or display in _DETAIL_OPERATION_LABELS:
         return True
     if block is not None and block.class_name in _DETAIL_OPERATION_CLASSES:
         return True

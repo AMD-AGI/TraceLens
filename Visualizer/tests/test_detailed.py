@@ -2254,7 +2254,7 @@ class MoE:
     plus = next(
         index
         for index, spec in enumerate(graph.nodes)
-        if spec.label == "Add"
+        if spec.label in {"Add", "+"}
         and len([source for source, target in graph.links if target == index]) == 2
     )
     incoming = {source for source, target in graph.links if target == plus}
@@ -2737,6 +2737,7 @@ def test_moe_router_weights_dock_on_the_expert_step_that_consumes_them(tmp_path,
         CONNECTOR_OBSTACLE_MARGIN,
         PARALLEL_CONNECTOR_CHANNEL_GAP,
         PARALLEL_CONNECTOR_COORD_EPS,
+        TOP_ENTRY_PORT_GAP,
         _connector_axis_segments,
         _connector_target_top_entry_y,
     )
@@ -2837,25 +2838,42 @@ def test_moe_router_weights_dock_on_the_expert_step_that_consumes_them(tmp_path,
         >= anchors[frame_head].left - CONNECTOR_OBSTACLE_MARGIN
     )
 
-    departure_levels: set[float] = set()
-    legs_with_extra_levels: list[tuple[int, int]] = []
-    for link, points in link_paths.items():
-        if link[0] != input_index:
-            continue
-        horizontals = [
-            segment for segment in _connector_axis_segments(points) if segment[0] == "h"
-        ]
-        if not horizontals:
-            continue
-        departure_levels.add(round(horizontals[0][1], 6))
-        if len(horizontals) > 1:
-            legs_with_extra_levels.append(link)
-    assert max(departure_levels) - min(departure_levels) <= PARALLEL_CONNECTOR_COORD_EPS + 1e-6
-    assert all(link[0] == input_index for link in legs_with_extra_levels)
-
     input_links = [link for link in link_paths if link[0] == input_index]
-    shared_prefix = link_paths[input_links[0]][:2]
-    assert all(link_paths[link][:2] == shared_prefix for link in input_links)
+    source_anchor = anchors[input_index]
+    # Each leg leaves on a port of its own: legs stacked on one column draw as a single
+    # line that appears to stop where they part.
+    ports = {link: link_paths[link][0][0] for link in input_links}
+    assert all(
+        source_anchor.left <= port <= source_anchor.right for port in ports.values()
+    )
+    assert len({round(port, 6) for port in ports.values()}) == len(input_links)
+    # Ports run in the same order as the columns the legs head for, which is what keeps
+    # them from crossing each other on the way out.
+    def _departure_x(link):
+        points = link_paths[link]
+        return next(
+            (x for x, _y in points[1:] if abs(x - points[0][0]) > PARALLEL_CONNECTOR_COORD_EPS),
+            points[0][0],
+        )
+
+    by_departure = sorted(input_links, key=_departure_x)
+    assert [ports[link] for link in by_departure] == sorted(
+        ports[link] for link in by_departure
+    )
+    departure_rows = sorted(
+        (
+            segment[1]
+            for link in input_links
+            for segment in _connector_axis_segments(link_paths[link])
+            if segment[0] == "h"
+        ),
+    )
+    if len(departure_rows) > 1:
+        assert all(
+            abs(first - second) <= PARALLEL_CONNECTOR_COORD_EPS
+            or abs(first - second) >= PARALLEL_CONNECTOR_CHANNEL_GAP - 1e-6
+            for first, second in zip(departure_rows, departure_rows[1:])
+        ), "departure rows must either be the same row or a clear channel apart"
     for link in input_links:
         target_anchor = anchors[link[1]]
         assert abs(link_paths[link][-1][1] - target_anchor.top) <= PARALLEL_CONNECTOR_COORD_EPS
@@ -2865,20 +2883,24 @@ def test_moe_router_weights_dock_on_the_expert_step_that_consumes_them(tmp_path,
     )
     assert abs(link_paths[(input_index, right_expert)][-1][0] - anchors[right_expert].cx) <= 1e-9
 
-    add_index = next(index for index, node in enumerate(graph.nodes) if node.label == "Add")
+    add_index = next(index for index, node in enumerate(graph.nodes) if node.label in {"Add", "+"})
     add_links = [link for link in link_paths if link[1] == add_index]
     assert len(add_links) == 2
-    add_bus_segments = []
+    entry_xs = sorted(link_paths[link][-1][0] for link in add_links)
+    assert entry_xs[1] - entry_xs[0] >= TOP_ENTRY_PORT_GAP - PARALLEL_CONNECTOR_COORD_EPS
+    # A feed standing over its own port drops straight in and needs no approach run at all.
+    # The one that has to come across turns above the tile, on a run the other keeps clear of.
+    approach_runs = []
     for link in add_links:
         horizontals = [
             segment for segment in _connector_axis_segments(link_paths[link])
             if segment[0] == "h"
         ]
-        add_bus_segments.append(horizontals[-1])
-    assert abs(add_bus_segments[0][1] - add_bus_segments[1][1]) <= PARALLEL_CONNECTOR_COORD_EPS
-    _, _y1, lo1, hi1, _ = add_bus_segments[0]
-    _, _y2, lo2, hi2, _ = add_bus_segments[1]
-    assert hi1 <= lo2 or hi2 <= lo1
+        if horizontals:
+            approach_runs.append(horizontals[-1])
+    for index, (_, _y, lo, hi, _link) in enumerate(approach_runs):
+        for _, _other_y, other_lo, other_hi, _other_link in approach_runs[index + 1 :]:
+            assert hi <= other_lo or other_hi <= lo
 
     from visualizer.render import (
         _find_connector_inline_frame_overlaps,
@@ -2979,8 +3001,8 @@ class SwigluMLP:
 """
 
 
-def test_swiglu_bias_add_branch_tees_off_a_single_multiply_stem():
-    """The add beside the gated multiplies hangs off one stem, not a second exit lane."""
+def test_swiglu_bias_add_branch_takes_its_own_leg_off_the_projection():
+    """`(up + 1.0) * glu` draws the add on its own branch and the join with two feeds."""
     from collections import defaultdict
 
     import matplotlib
@@ -3075,9 +3097,21 @@ def test_swiglu_bias_add_branch_tees_off_a_single_multiply_stem():
         add_index = next(
             index for index, node in enumerate(graph.nodes) if node.label == "Add"
         )
-        gate_index = next(src for src, tgt in links if tgt == add_index)
+        proj_index = next(src for src, tgt in links if tgt == add_index)
         join_index = next(tgt for src, tgt in links if src == add_index)
-        assert (gate_index, join_index) in links, "gate output also feeds the join directly"
+
+        # `(up + 1.0) * glu` reads two values, so the join has two feeds: the add that
+        # raised `up`, and the gated multiply that produced `glu`. The projection reaches
+        # the join through the add, never beside it.
+        join_feeds = sorted(src for src, tgt in links if tgt == join_index)
+        glu_index = next(index for index in join_feeds if index != add_index)
+        assert join_feeds == sorted((add_index, glu_index)), (
+            f"the join reads {len(join_feeds)} values, but the multiply combines two"
+        )
+        assert graph.nodes[glu_index].label == "Multiply"
+        assert [src for src, tgt in links if tgt == add_index] == [proj_index], (
+            "the add raises the projection's own output"
+        )
 
         for link_key, points in link_paths.items():
             for (x1, y1), (x2, y2) in zip(points, points[1:]):
@@ -3086,37 +3120,69 @@ def test_swiglu_bias_add_branch_tees_off_a_single_multiply_stem():
                     f"({x1:.3f},{y1:.3f})->({x2:.3f},{y2:.3f})"
                 )
 
-        gate = anchors[gate_index]
-        branch_points = link_paths[(gate_index, add_index)]
-        stem_points = link_paths[(gate_index, join_index)]
-        exit_y = _connector_source_bottom_exit_y(gate)
-        for points in (branch_points, stem_points):
-            assert abs(points[0][0] - gate.cx) <= PARALLEL_CONNECTOR_COORD_EPS, (
-                "both legs must leave the multiply on its own column"
+        # The projection feeds the gate chain, the gated multiply and the add, so each leg
+        # leaves by a port of its own.
+        proj = anchors[proj_index]
+        exit_y = _connector_source_bottom_exit_y(proj)
+        proj_legs = [tgt for src, tgt in links if src == proj_index]
+        assert len(proj_legs) >= 3
+        exits = []
+        for target in proj_legs:
+            points = link_paths[(proj_index, target)]
+            assert proj.left <= points[0][0] <= proj.right, (
+                "every leg must leave by a port on the projection's own bottom edge"
             )
             assert abs(points[0][1] - exit_y) <= PARALLEL_CONNECTOR_COORD_EPS
+            exits.append(points[0][0])
+        for first, second in zip(sorted(exits), sorted(exits)[1:]):
+            assert second - first > PARALLEL_CONNECTOR_COORD_EPS, (
+                "legs carrying to different places need ports of their own"
+            )
 
-        # The stem runs on through the add's row instead of stepping aside for it.
-        add = anchors[add_index]
-        join = anchors[join_index]
-        assert add.right + CONNECTOR_OBSTACLE_MARGIN < gate.cx
-        assert add.top < gate.bottom and add.bottom > join.top
-        stem_verticals = [
-            segment for segment in _connector_axis_segments(stem_points) if segment[0] == "v"
-        ]
-        assert len(stem_verticals) == 1, "the stem should reach the join without a jog"
-        assert abs(stem_verticals[0][1] - gate.cx) <= PARALLEL_CONNECTOR_COORD_EPS
+        from visualizer.render import _find_connector_node_clearance_violations
+
+        assert not _find_connector_node_clearance_violations(
+            link_paths,
+            graph=graph,
+            anchors=anchors,
+            label_obstacles=plan.label_obstacles,
+            positions=positions,
+        ), "no leg may reach its target by cutting through a tile"
+
+        # Where one step of the gate chain sits directly under the last with nothing in
+        # between, it should drop straight into it rather than step around anything.
+        stacked = []
+        for src, tgt in links:
+            above, below = anchors[src], anchors[tgt]
+            if abs(above.cx - below.cx) > PARALLEL_CONNECTOR_COORD_EPS:
+                continue
+            if any(
+                index not in (src, tgt)
+                and min(above.bottom, other.top) - max(below.top, other.bottom) > 0
+                and min(above.right, other.right) - max(above.left, other.left) > 0
+                for index, other in anchors.items()
+            ):
+                continue
+            stacked.append((src, tgt))
+        assert stacked, "the gate chain should be stacked in one column"
+        for link_key in stacked:
+            assert len(link_paths[link_key]) == 2, (
+                f"{link_key} is stacked directly with a clear gap, so it should drop "
+                f"straight down"
+            )
 
         # Two feeds land on the join's top edge, so they need separate ports.
-        rejoin_points = link_paths[(add_index, join_index)]
-        ports = sorted((rejoin_points[-1][0], stem_points[-1][0]))
+        join = anchors[join_index]
+        add_points = link_paths[(add_index, join_index)]
+        glu_points = link_paths[(glu_index, join_index)]
+        ports = sorted((add_points[-1][0], glu_points[-1][0]))
         assert ports[1] - ports[0] >= CONNECTOR_OBSTACLE_MARGIN
-        assert rejoin_points[-1][0] < stem_points[-1][0], (
-            "the add approaches from the left, so it takes the left port"
-        )
-        for points in (rejoin_points, stem_points):
+        for points in (add_points, glu_points):
             assert abs(points[-1][1] - join.top) <= PARALLEL_CONNECTOR_COORD_EPS
             assert join.left <= points[-1][0] <= join.right
+            assert abs(points[-1][0] - points[-2][0]) <= PARALLEL_CONNECTOR_COORD_EPS, (
+                "a top entry approaches straight down onto its port"
+            )
     finally:
         plt.close(_fig)
 
@@ -3498,13 +3564,30 @@ def test_kimi_kda_stacked_feeders_enter_gated_delta_rule_without_crossing(
         "the feeder directly above keeps the center port"
     )
     bypass_x = cumsum_leg[-1][0]
-    assert gated_anchor.cx < bypass_x <= gated_anchor.cx + TOP_ENTRY_PORT_GAP + 1e-6, (
-        f"bypass port {bypass_x:.4f} must enter beside the center at {gated_anchor.cx:.4f}"
+    assert abs(bypass_x - gated_anchor.cx) >= TOP_ENTRY_PORT_GAP - 1e-6, (
+        f"bypass port {bypass_x:.4f} must stand off the center port at {gated_anchor.cx:.4f}"
     )
-    gutter_x = max(x for x, _ in cumsum_leg)
-    assert gutter_x >= intra_anchor.right + CONNECTOR_OBSTACLE_MARGIN - 1e-6, (
-        f"bypass gutter {gutter_x:.4f} must clear Intra-chunk WY at {intra_anchor.right:.4f}"
+    assert gated_anchor.left <= bypass_x <= gated_anchor.right, (
+        f"bypass port {bypass_x:.4f} must sit on the top edge it feeds"
     )
+    # The bypass takes whichever side its source approaches from, so the side is not the
+    # point; what matters is that the run carrying it past Intra-chunk WY stays outside it.
+    passed_runs = [
+        x1
+        for (x1, y1), (x2, y2) in zip(cumsum_leg, cumsum_leg[1:])
+        if abs(x1 - x2) < 1e-9
+        and min(y1, y2) < intra_anchor.top
+        and max(y1, y2) > intra_anchor.bottom
+    ]
+    assert passed_runs, "the bypass must run past Intra-chunk WY"
+    for gutter_x in passed_runs:
+        assert (
+            gutter_x <= intra_anchor.left - CONNECTOR_OBSTACLE_MARGIN + 1e-6
+            or gutter_x >= intra_anchor.right + CONNECTOR_OBSTACLE_MARGIN - 1e-6
+        ), (
+            f"bypass gutter {gutter_x:.4f} cuts Intra-chunk WY spanning "
+            f"[{intra_anchor.left:.4f}, {intra_anchor.right:.4f}]"
+        )
 
     intra_bus = section["target_bus"][intra]
     tee_y = cumsum_leg[1][1]
@@ -4868,7 +4951,7 @@ class MoE:
     plus_index = next(
         index
         for index, spec in enumerate(graph.nodes)
-        if spec.synthetic is None and spec.label == "Add"
+        if spec.synthetic is None and spec.label in {"Add", "+"}
     )
     assert (input_index, shared_index) in graph.links
     assert (shared_index, plus_index) in graph.links
@@ -6674,7 +6757,9 @@ def test_chunk_kda_pipeline_inline_frames_stay_column_aligned():
             f for f in graph.inline_frames if f.frame_id == "chunk_kda_fwd_kda_gate_chunk_cumsum_g"
         )
         multiply_idx = next(
-            i for i in g_frame.node_indices if graph.nodes[i].label == "Multiply"
+            i
+            for i in g_frame.node_indices
+            if graph.nodes[i].label in {"Multiply", "×"}
         )
         exp_idx = next(i for i in g_frame.node_indices if graph.nodes[i].label == "Exp")
         softplus_idx = next(i for i in g_frame.node_indices if graph.nodes[i].label == "Softplus")
@@ -6859,10 +6944,12 @@ def test_mlp_situ_and_mul_steps_are_labeled():
     assert "Split gate | up" not in labels
     assert "Linear" in labels
     assert "Situ" in labels
-    assert "Multiply" in labels
+    assert "×" in labels or "Multiply" in labels
     frame = next(frame for frame in graph.inline_frames if frame.frame_id == "act_fn")
     assert frame.sublabel is None
-    mul_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "Multiply")
+    mul_index = next(
+        i for i, spec in enumerate(graph.nodes) if spec.label in {"Multiply", "×"}
+    )
     up_index = next(i for i, spec in enumerate(graph.nodes) if spec.block and spec.block.attr_name == "up_proj")
     situ_index = next(i for i, spec in enumerate(graph.nodes) if spec.label == "Situ")
     assert (situ_index, mul_index) in graph.links
@@ -6929,7 +7016,7 @@ def test_fork_join_branch_layout_is_horizontal():
     gate = next(i for i, node in enumerate(graph.nodes) if node.block and node.block.attr_name == "gate_proj")
     up = next(i for i, node in enumerate(graph.nodes) if node.block and node.block.attr_name == "up_proj")
     situ = next(i for i, node in enumerate(graph.nodes) if node.label == "Situ")
-    mul = next(i for i, node in enumerate(graph.nodes) if node.label == "Multiply")
+    mul = next(i for i, node in enumerate(graph.nodes) if node.label in {"Multiply", "×"})
 
     gate_cy = (positions[gate].top_y + positions[gate].bottom) / 2
     up_cy = (positions[up].top_y + positions[up].bottom) / 2
@@ -7359,8 +7446,8 @@ def test_fanout_exit_feeders_pack_to_outside():
     )
 
 
-def test_kda_hidden_states_fanout_uses_shared_source_bus_with_vertical_tees():
-    """Parallel linear feeds from hidden_states share one horizontal bus with vertical tees."""
+def test_kda_hidden_states_fanout_nests_each_leg_on_its_own_row():
+    """Parallel linear feeds from hidden_states each get their own exit port and row."""
     from pathlib import Path
 
     import matplotlib
@@ -7378,9 +7465,13 @@ def test_kda_hidden_states_fanout_uses_shared_source_bus_with_vertical_tees():
         layout_computation_graph,
         measure_graph_node_sizes,
     )
+    import itertools
+
     from visualizer.render import (
         COLORS,
+        CONNECTOR_EXIT_STUB,
         DIAGRAM_LEFT_MARGIN,
+        PARALLEL_CONNECTOR_CHANNEL_GAP,
         PARALLEL_CONNECTOR_COORD_EPS,
         TOP_ENTRY_PORT_GAP,
         _anchors_from_detail_plan,
@@ -7471,20 +7562,30 @@ def test_kda_hidden_states_fanout_uses_shared_source_bus_with_vertical_tees():
             )
         ]
         assert len(fanout_links) >= 4
+        source = anchors[input_index]
+        rows: list[tuple[float, float, float]] = []
         for src, tgt in fanout_links:
             target = anchors[tgt]
             points = link_paths[(src, tgt)]
             end_x, end_y = points[-1]
-            assert abs(end_x - target.cx) < 0.08
+            assert target.left <= end_x <= target.right
             assert abs(end_y - _connector_target_top_entry_y(target)) < 0.02
-            horiz_ys = [
-                y1
+            assert source.left <= points[0][0] <= source.right
+            rows.extend(
+                (y1, min(x1, x2), max(x1, x2))
                 for (x1, y1), (x2, y2) in zip(points, points[1:])
                 if abs(y1 - y2) <= PARALLEL_CONNECTOR_COORD_EPS
                 and abs(x1 - x2) > PARALLEL_CONNECTOR_COORD_EPS
-            ]
-            assert any(abs(y - shared_bus_y) <= PARALLEL_CONNECTOR_COORD_EPS for y in horiz_ys), (
-                f"expected shared source bus at y={shared_bus_y:.3f} for fan-out to {tgt}, got {horiz_ys}"
+            )
+        # Every leg turns below the input, and no two of their runs are drawn along the same
+        # row: doubled up they would read as a single line that appears to stop where the
+        # legs part.
+        assert all(row < source.bottom + 1e-6 for row, _lo, _hi in rows)
+        for (row_a, lo_a, hi_a), (row_b, lo_b, hi_b) in itertools.combinations(rows, 2):
+            if abs(row_a - row_b) > PARALLEL_CONNECTOR_COORD_EPS:
+                continue
+            assert min(hi_a, hi_b) - max(lo_a, lo_b) <= PARALLEL_CONNECTOR_COORD_EPS, (
+                f"runs at {row_a:.4f} and {row_b:.4f} are drawn on top of each other"
             )
         join_points = _collect_connector_join_points(
             link_paths,
@@ -7495,11 +7596,11 @@ def test_kda_hidden_states_fanout_uses_shared_source_bus_with_vertical_tees():
             outgoing=outgoing,
             anchors=anchors,
         )
-        input_x = anchors[input_index].cx
+        # A fan-out parting company is a split, not a join, so the input's own exit carries
+        # no dot however many legs leave it.
         assert not any(
-            abs(x - input_x) < 0.12 and abs(y - shared_bus_y) < PARALLEL_CONNECTOR_COORD_EPS
-            for x, y in join_points
-        )
+            abs(y - source.bottom) < CONNECTOR_EXIT_STUB for _x, y in join_points
+        ), f"fan-out exits must stay undotted, got {sorted(join_points)}"
 
         g_index = next(
             index for index, node in enumerate(graph.nodes) if node.block and node.block.attr_name == "g_proj"
@@ -7578,18 +7679,22 @@ def test_moe_plus_is_spine_aligned_with_sigma():
     )
     anchors = _anchors_from_detail_plan(positions, plan)
     by_label = {spec.label: index for index, spec in enumerate(graph.nodes)}
+    residual_label = "+" if "+" in by_label else "Add"
     up_index = next(
         index
         for index, spec in enumerate(graph.nodes)
         if spec.block and spec.block.attr_name == "routed_expert_up_proj"
     )
-    spine = [positions[index].cx for index in (by_label["MoE aggregation"], up_index, by_label["+"])]
+    spine = [
+        positions[index].cx
+        for index in (by_label["MoE aggregation"], up_index, by_label[residual_label])
+    ]
     draw = {node.label: node.cx for node, _ in plan.node_draws}
     assert max(spine) - min(spine) < 0.02
     assert abs(positions[by_label["MoE aggregation"]].cx - spine[0]) < 0.02
-    assert abs(draw["+"] - positions[by_label["+"]].cx) < 0.02
-    assert abs(anchors[by_label["+"]].cx - positions[by_label["+"]].cx) < 0.02
-    gap = positions[up_index].bottom - positions[by_label["+"]].top_y
+    assert abs(draw[residual_label] - positions[by_label[residual_label]].cx) < 0.02
+    assert abs(anchors[by_label[residual_label]].cx - positions[by_label[residual_label]].cx) < 0.02
+    gap = positions[up_index].bottom - positions[by_label[residual_label]].top_y
     assert abs(gap - DETAIL_LAYER_GAP) < 0.02
     plt.close()
 

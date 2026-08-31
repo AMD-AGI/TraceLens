@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TraceLens Model Explorer</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #e1e1e1;
+        font-family: system-ui, sans-serif;
+      }
+
+      #status {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        text-align: center;
+        color: #1a1a1a;
+        background: #e1e1e1;
+        z-index: 2;
+      }
+
+      model-explorer-visualizer {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+    <script src="https://unpkg.com/ai-edge-model-explorer-visualizer@0.1.2"></script>
+  </head>
+  <body>
+    <div id="status">Loading TraceLens graph…</div>
+    <script src="./app.js"></script>
+  </body>
+</html>

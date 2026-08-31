@@ -199,8 +199,9 @@ def test_dispatched_attention_resolves_through_the_checkpoint_config():
 
 def test_build_model_graph_matches_computation_graph_topology():
     root = _mla_fixture_root()
-    computation = build_computation_graph(root)
-    model_graph = build_model_graph(root, title="MLA")
+    basic = BasicOpFilter.for_detailed()
+    computation = build_computation_graph(root, basic_ops=basic)
+    model_graph = build_model_graph(root, title="MLA", basic_ops=basic)
 
     assert model_graph.title == "MLA"
     assert len(model_graph.nodes) == len(computation.nodes)

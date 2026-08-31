@@ -140,6 +140,11 @@ def _transformers_modeling_path(model_type: str) -> Path | None:
 def _config_model_types(config: dict[str, Any]) -> list[str]:
     """Model types to look up upstream, outer wrapper first then its text backbone."""
     types: list[str] = []
+    wrapper = config.get("_wrapper_model_type")
+    if wrapper:
+        wrapper_type = str(wrapper).strip().replace("-", "_")
+        if wrapper_type:
+            types.append(wrapper_type)
     candidates = [config.get("model_type")]
     for key in NESTED_CONFIG_KEYS:
         nested = config.get(key)

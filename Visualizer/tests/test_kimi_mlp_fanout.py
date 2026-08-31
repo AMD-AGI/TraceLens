@@ -29,6 +29,7 @@ from visualizer.render import (
     CONNECTOR_EXIT_STUB,
     CONNECTOR_OBSTACLE_MARGIN,
     DIAGRAM_LEFT_MARGIN,
+    PARALLEL_CONNECTOR_CHANNEL_GAP,
     PARALLEL_CONNECTOR_COORD_EPS,
     _RenderAnchor,
     _anchors_from_detail_plan,
@@ -252,22 +253,35 @@ def test_connector_fanout_branch_tee_y_detects_shared_branch():
     assert abs(_connector_fanout_branch_tee_y(points, source=source) - tee_y) < 1e-6
 
 
-def test_kimi_mlp_fanout_tee_levels_aligned():
+def test_kimi_mlp_fanout_rows_nest_by_how_far_each_leg_reaches():
+    """Legs turn on rows of their own, the furthest-reaching one nearest the input."""
     fig, graph, _positions, anchors, _plan, _incoming, _outgoing, input_index, buses, link_paths = (
         _kimi_mlp_layout()
     )
     try:
-        source_bus = buses[1]
-        assert input_index in source_bus
-        tee_y = source_bus[input_index]
         source = anchors[input_index]
+        y_exit = _connector_source_bottom_exit_y(source)
+        rows: dict[tuple[int, int], tuple[float, float]] = {}
         for link in _fanout_linear_links(graph, input_index, graph.links):
             points = link_paths[link]
-            branch_tee = _connector_fanout_branch_tee_y(points, source=source)
-            assert branch_tee is not None, f"missing branch tee on {link}: {points}"
-            assert abs(branch_tee - tee_y) < PARALLEL_CONNECTOR_COORD_EPS
-            assert abs(points[1][1] - tee_y) < PARALLEL_CONNECTOR_COORD_EPS
-            assert abs(points[2][1] - tee_y) < PARALLEL_CONNECTOR_COORD_EPS
+            if len(points) < 3:
+                # A leg straight down into its target never turns, so it has no row.
+                continue
+            turn_x, turn_y = points[1]
+            assert turn_y < y_exit, f"{link} must drop before turning: {points}"
+            rows[link] = (turn_y, points[2][0] - turn_x)
+        for left, (row_a, reach_a) in rows.items():
+            for right, (row_b, reach_b) in rows.items():
+                if left >= right or reach_a * reach_b <= 0:
+                    continue
+                assert abs(row_a - row_b) >= PARALLEL_CONNECTOR_CHANNEL_GAP - 1e-6, (
+                    f"{left} and {right} head the same way, so they need rows of their own"
+                )
+                # Whichever leg reaches further has to pass over where the nearer one turns
+                # down, so it takes the row closer to the input.
+                assert (abs(reach_a) > abs(reach_b)) == (row_a > row_b), (
+                    f"{left} and {right} are nested the wrong way round"
+                )
     finally:
         plt.close(fig)
 
@@ -279,12 +293,14 @@ def test_kimi_mlp_fanout_leaves_input_vertically():
     try:
         source = anchors[input_index]
         y_exit = _connector_source_bottom_exit_y(source)
+        ports: list[float] = []
         for link in _fanout_linear_links(graph, input_index, graph.links):
             points = link_paths[link]
-            assert abs(points[0][0] - source.cx) < PARALLEL_CONNECTOR_COORD_EPS
+            assert source.left <= points[0][0] <= source.right
             assert abs(points[0][1] - y_exit) < PARALLEL_CONNECTOR_COORD_EPS
-            assert abs(points[1][0] - source.cx) < PARALLEL_CONNECTOR_COORD_EPS
+            assert abs(points[1][0] - points[0][0]) < PARALLEL_CONNECTOR_COORD_EPS
             assert points[1][1] < y_exit - PARALLEL_CONNECTOR_COORD_EPS
+            ports.append(points[0][0])
             x1, y1 = points[0]
             x2, y2 = points[1]
             if (
@@ -293,6 +309,9 @@ def test_kimi_mlp_fanout_leaves_input_vertically():
                 and abs(y1 - y_exit) <= CONNECTOR_OBSTACLE_MARGIN + PARALLEL_CONNECTOR_COORD_EPS
             ):
                 pytest.fail(f"{link} has horizontal departure at input bottom: {points}")
+        assert len({round(port, 6) for port in ports}) == len(ports), (
+            "legs stacked on one port draw as a single line that appears to stop"
+        )
     finally:
         plt.close(fig)
 
@@ -324,23 +343,25 @@ def test_kimi_mlp_exit_to_tee_stub_is_short():
         plt.close(fig)
 
 
-def test_kimi_mlp_post_split_drops_are_minimal():
+def test_kimi_mlp_fanout_legs_turn_once_and_drop_into_their_target():
+    """Each leg turns off the input's edge once and then drops straight in, without wandering."""
     fig, graph, _positions, anchors, _plan, _incoming, _outgoing, input_index, buses, link_paths = (
         _kimi_mlp_layout()
     )
     try:
-        merge_link_bus = buses[3]
-        max_drop = CONNECTOR_OBSTACLE_MARGIN + CONNECTOR_ATTACHED_BOX_MARGIN + 0.01
         for link in _fanout_linear_links(graph, input_index, graph.links):
             points = link_paths[link]
-            drop = abs(points[-2][1] - points[-1][1])
-            assert drop <= max_drop, f"{link} final drop {drop:.4f} > {max_drop:.4f}"
             target = anchors[link[1]]
             assert abs(points[-1][1] - target.top) < 1e-6
-            if merge_link_bus[link] < buses[1][input_index] - PARALLEL_CONNECTOR_COORD_EPS:
-                assert len(points) == 5
-            else:
-                assert len(points) == 4
+            assert target.left <= points[-1][0] <= target.right
+            horizontals = [
+                (x1, x2)
+                for (x1, y1), (x2, y2) in zip(points, points[1:])
+                if abs(y1 - y2) <= PARALLEL_CONNECTOR_COORD_EPS
+                and abs(x1 - x2) > PARALLEL_CONNECTOR_COORD_EPS
+            ]
+            assert len(horizontals) <= 1, f"{link} changes column twice: {points}"
+            assert len(points) <= 4, f"{link} takes {len(points)} points: {points}"
     finally:
         plt.close(fig)
 
@@ -535,7 +556,9 @@ def test_kimi_mlp_up_projection_bypasses_situ_tile():
     )
     try:
         situ = next(index for index, node in enumerate(graph.nodes) if node.label == "Situ")
-        multiply = next(index for index, node in enumerate(graph.nodes) if node.label == "Multiply")
+        multiply = next(
+            index for index, node in enumerate(graph.nodes) if node.label in {"Multiply", "×"}
+        )
         up_projection = next(
             source
             for source, target in graph.links

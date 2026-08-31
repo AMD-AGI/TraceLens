@@ -147,6 +147,9 @@ _ACTIVATION_DISPLAY_NAMES = {
 }
 _ACTIVATION_LEAF_CLASS_NAMES = frozenset(_ACTIVATION_DISPLAY_NAMES.values())
 FORWARD_OPERATION_PREFIX = "@op_"
+# Stands for the value a helper method receives, so operations reading its parameter
+# resolve to whatever feeds the chain the method is inlined into.
+FORWARD_METHOD_INPUT = "@method_input"
 _SYNTHETIC_ATTENTION_NAMES = {
     "eager_attention_forward",
     "flash_attention_forward",
@@ -472,7 +475,7 @@ def _is_functional_linear_call(func: ast.AST) -> bool:
 def _is_moe_gate_class(class_name: str, forward_calls: list[str]) -> bool:
     if first_functional_synthetic_index(forward_calls) is None:
         return False
-    if re.search(r"Gate$", class_name):
+    if re.search(r"(?:Gate|Router)$", class_name):
         return True
     return bool(MOE_CLASS_RE.search(class_name) and re.search(r"gate|router", class_name, re.I))
 
@@ -645,6 +648,7 @@ def _multi_op_forward_methods(
             func,
             self_values=self_values,
             all_tensor_ops=all_tensor_ops,
+            name_primary_input=True,
         )
         if len(operations) > 1:
             expanded[call_attr] = operations
@@ -907,6 +911,7 @@ class ClassStructure:
     norm_before: list[str]
     attention_inputs: dict[str, list[str]] = field(default_factory=dict)
     parallel_gates: list[str] = field(default_factory=list)
+    input_fed_calls: list[str] = field(default_factory=list)
     gate_activations: dict[str, str] = field(default_factory=dict)
     forward_step_details: dict[str, list[str]] = field(default_factory=dict)
     side_inputs: dict[str, list[SideInputSpec]] = field(default_factory=dict)
@@ -1170,6 +1175,20 @@ class _ForwardOperationExtractor:
             ]
         )
 
+    def _call_step_producer(self, node: ast.Call, method_name: str | None) -> str | None:
+        """Chain step a call *is*, for calls the diagram turns into their own node.
+
+        Mirrors the naming `_extract_self_calls_ordered` uses, so the producer recorded
+        here refers to the same node the forward chain will hold.
+        """
+        func = node.func
+        if method_name is not None and _is_self_attr(func, method_name):
+            return method_name if method_name in self.self_values else None
+        target = _expr_name(func)
+        if target and _is_positional_function_call(func, target):
+            return positional_synthetic_attr(target, node.lineno)
+        return None
+
     def _self_attr_input(self, node: ast.Attribute) -> tuple[str | None, list[str]]:
         if isinstance(node.value, ast.Name) and node.value.id == "self":
             if node.attr in self.self_values:
@@ -1255,6 +1274,12 @@ class _ForwardOperationExtractor:
                     arg_producers.append(producer)
                 external.extend(arg_external)
         if label is None:
+            # A call that becomes its own chain step is what later reads of its result
+            # depend on; without this they resolve to whatever fed the call instead, and
+            # an operation reading the result looks like it has no source at all.
+            own_step = self._call_step_producer(node, method_name)
+            if own_step is not None:
+                return own_step, external
             producers = [value for value in (base_producer, *arg_producers) if value]
             return (producers[-1] if producers else None), external
 
@@ -1449,6 +1474,7 @@ def _forward_operations_from_forward(
     *,
     self_values: dict[str, Any],
     all_tensor_ops: bool,
+    name_primary_input: bool = False,
 ) -> list[ForwardOperation]:
     # The primary parameter is the main path, so only the extra ones can identify
     # which step consumes a side feed.
@@ -1458,6 +1484,11 @@ def _forward_operations_from_forward(
         all_tensor_ops=all_tensor_ops,
         param_names=_forward_input_names(func) - {primary} if primary else set(),
     )
+    # A helper method's operations are inlined into the caller's chain, so an operation
+    # reading the parameter partway through reads the value arriving at that chain.
+    # Naming it lets those reads resolve instead of falling back to the previous step.
+    if name_primary_input and primary:
+        extractor.var_producer[primary] = FORWARD_METHOD_INPUT
     extractor.statements(func.body)
     return extractor.operations
 
@@ -1485,6 +1516,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         norm_before: list[str] = []
         attention_inputs: dict[str, list[str]] = {}
         parallel_gates: list[str] = []
+        input_fed_calls: list[str] = []
         gate_activations: dict[str, str] = {}
         forward_step_details: dict[str, list[str]] = {}
         side_inputs: dict[str, list[SideInputSpec]] = {}
@@ -1519,6 +1551,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             alternate = _alternate_forward_dispatches(forward_func)
             if alternate:
                 forward_calls = [call for call in forward_calls if call not in alternate]
+            input_fed_calls = _input_fed_calls_from_forward(forward_func)
             parallel_gates = _parallel_gates_from_forward(forward_func)
             if forward_calls and parallel_gates:
                 # Routers like MoE `gate` run on hidden_states as the main path, not in parallel.
@@ -1595,6 +1628,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             norm_before=norm_before,
             attention_inputs=attention_inputs,
             parallel_gates=parallel_gates,
+            input_fed_calls=input_fed_calls,
             gate_activations=gate_activations,
             forward_step_details=forward_step_details,
             side_inputs=side_inputs,
@@ -2515,6 +2549,45 @@ def _parallel_gates_from_forward(func: ast.FunctionDef) -> list[str]:
             if re.search(r"gate|g_proj", attr, re.I):
                 gates.append(attr)
     return gates
+
+
+def _input_fed_calls_from_forward(func: ast.FunctionDef) -> list[str]:
+    """Submodule calls whose main argument is still the value the forward received.
+
+    Such a call reads the forward input, not the result of the call before it, so the
+    chain has to branch at the input rather than run the two steps in series. A name
+    stops counting once it has been rebound to something a submodule produced;
+    reshapes and views of the input still are the input.
+    """
+    pristine = set(_forward_input_names(func))
+    if not pristine:
+        return []
+    fed: list[str] = []
+    for stmt in func.body:
+        for call in ast.walk(stmt):
+            if not isinstance(call, ast.Call):
+                continue
+            if not isinstance(call.func, ast.Attribute) or not _is_self_attr(call.func, call.func.attr):
+                continue
+            if not call.args or not isinstance(call.args[0], ast.Name):
+                continue
+            if call.args[0].id in pristine and call.func.attr not in fed:
+                fed.append(call.func.attr)
+        # Read the arguments before the targets rebind, so `x = self.block(x)` still
+        # counts as reading the input rather than the value it is about to hold.
+        value = _stmt_value(stmt) if isinstance(stmt, (ast.Assign, ast.AnnAssign)) else None
+        if value is None:
+            continue
+        produced: list[str] = []
+        _extract_self_calls_ordered(value, produced)
+        if not produced:
+            continue
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        for target in targets:
+            for name in ast.walk(target):
+                if isinstance(name, ast.Name):
+                    pristine.discard(name.id)
+    return fed
 
 
 def _parallel_gate_activation(func: ast.FunctionDef, gate_attr: str) -> str | None:

@@ -1,0 +1,8 @@
+{
+  "name": "tracelens-visualizer",
+  "private": true,
+  "description": "Headless ELK edge routing for TraceLens architecture diagrams",
+  "dependencies": {
+    "elkjs": "^0.9.3"
+  }
+}

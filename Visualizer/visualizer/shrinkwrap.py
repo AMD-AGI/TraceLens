@@ -115,6 +115,7 @@ def shrinkwrap_detail_link_paths(
         return link_paths
 
     shrunk = {key: list(points) for key, points in link_paths.items()}
+    nested_targets = _targets_with_nested_merge_buses(merge_link_bus)
     for bus_y, targets in _shared_bus_y_groups(
         shrunk,
         target_bus,
@@ -122,6 +123,8 @@ def shrinkwrap_detail_link_paths(
         source_bus=source_bus,
         outgoing=outgoing,
     ).items():
+        if nested_targets & targets:
+            continue
         if _is_source_fanout_bus_y(bus_y, source_bus, merge_link_bus):
             continue
         if _is_frame_tail_corridor_bus_y(
@@ -312,6 +315,16 @@ def _shift_path_y_above_bus_for_sources(
         link_paths[link_key] = _ensure_orthogonal_connector_path(updated)
 
 
+def _targets_with_nested_merge_buses(
+    merge_link_bus: dict[tuple[int, int], float],
+) -> set[int]:
+    """Targets whose incoming merge legs intentionally use distinct bus levels."""
+    levels_by_target: dict[int, set[float]] = {}
+    for (_src, tgt), bus_y in merge_link_bus.items():
+        levels_by_target.setdefault(tgt, set()).add(round(bus_y, 4))
+    return {tgt for tgt, levels in levels_by_target.items() if len(levels) >= 2}
+
+
 def _apply_bus_y_to_maps(
     target_bus: dict[int, float],
     merge_link_bus: dict[tuple[int, int], float],
@@ -319,11 +332,16 @@ def _apply_bus_y_to_maps(
     old_y: float,
     new_y: float,
 ) -> None:
+    delta = new_y - old_y
+    nested_targets = _targets_with_nested_merge_buses(merge_link_bus)
     for tgt, bus_y in list(target_bus.items()):
         if abs(bus_y - old_y) <= PARALLEL_CONNECTOR_COORD_EPS:
-            target_bus[tgt] = new_y
+            target_bus[tgt] = bus_y + delta if tgt in nested_targets else new_y
     for link_key, bus_y in list(merge_link_bus.items()):
-        if abs(bus_y - old_y) <= PARALLEL_CONNECTOR_COORD_EPS:
+        tgt = link_key[1]
+        if tgt in nested_targets:
+            merge_link_bus[link_key] = bus_y + delta
+        elif abs(bus_y - old_y) <= PARALLEL_CONNECTOR_COORD_EPS:
             merge_link_bus[link_key] = new_y
     for src, bus_y in list(source_bus.items()):
         if abs(bus_y - old_y) <= PARALLEL_CONNECTOR_COORD_EPS:

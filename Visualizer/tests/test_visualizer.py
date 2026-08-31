@@ -244,7 +244,30 @@ def test_residual_branch_routes_above_norm():
     assert branch_y - norm.top >= RESIDUAL_BRANCH_LIFT - 1e-6
 
 
-def test_collect_connector_join_points_finds_shared_vertices():
+def test_collect_connector_join_points_finds_fanout_splits():
+    """Nothing joins where one source's legs part company, so nothing is dotted."""
+    from visualizer.render import _RenderAnchor, _collect_connector_join_points
+
+    link_paths = {
+        (0, 2): [(0.0, 2.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)],
+        (0, 3): [(0.0, 2.0), (0.0, 1.0), (2.0, 1.0), (2.0, 0.0)],
+    }
+    joins = _collect_connector_join_points(
+        link_paths,
+        source_bus={0: 1.0},
+        incoming={2: [(0, 2)], 3: [(0, 3)]},
+        anchors={
+            2: _RenderAnchor(cx=1.0, top=0.1, bottom=0.0, left=0.5, right=1.5),
+            3: _RenderAnchor(cx=2.0, top=0.1, bottom=0.0, left=1.5, right=2.5),
+        },
+    )
+    # One value carries on in two directions from (1, 1): a dot there would claim the two
+    # legs are connected to each other rather than both connected to their source.
+    assert joins == []
+
+
+def test_collect_connector_join_points_marks_feeds_meeting_on_one_approach():
+    """Two feeds of one tile running together into it are joined, so the meeting is dotted."""
     from visualizer.render import _RenderAnchor, _collect_connector_join_points
 
     link_paths = {
@@ -257,8 +280,27 @@ def test_collect_connector_join_points_finds_shared_vertices():
         incoming={2: [(0, 2), (1, 2)]},
         anchors={2: _RenderAnchor(cx=1.0, top=0.1, bottom=0.0, left=0.5, right=1.5)},
     )
-    assert (1.0, 1.0) in joins
-    assert (1.0, 0.0) not in joins
+    assert joins == [(1.0, 1.0)]
+
+
+def test_collect_connector_join_points_ignores_runs_that_only_cross():
+    """Links that pass through one point on their way elsewhere are not connected there."""
+    from visualizer.render import _RenderAnchor, _collect_connector_join_points
+
+    link_paths = {
+        (0, 2): [(0.0, 2.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)],
+        (1, 3): [(1.0, 2.0), (1.0, 1.0), (2.0, 1.0), (2.0, 0.0)],
+    }
+    joins = _collect_connector_join_points(
+        link_paths,
+        target_bus={2: 1.0, 3: 1.0},
+        incoming={2: [(0, 2)], 3: [(1, 3)]},
+        anchors={
+            2: _RenderAnchor(cx=1.0, top=0.1, bottom=0.0, left=0.5, right=1.5),
+            3: _RenderAnchor(cx=2.0, top=0.1, bottom=0.0, left=1.5, right=2.5),
+        },
+    )
+    assert joins == []
 
 
 def test_collect_connector_join_points_ignores_box_endpoints():
@@ -295,13 +337,14 @@ def test_collect_connector_join_points_ignores_l_bends_on_bus():
 
     link_paths = {
         (0, 2): [(0.0, 2.0), (0.0, 1.0), (1.5, 1.0), (2.0, 1.0), (2.0, 0.0)],
-        (1, 2): [(1.5, 2.0), (1.5, 1.0), (1.5, 0.0)],
+        (0, 3): [(0.0, 2.0), (0.0, 1.0), (1.5, 1.0), (1.5, 0.0)],
     }
     joins = _collect_connector_join_points(
         link_paths,
-        target_bus={2: 1.0},
+        source_bus={0: 1.0},
     )
-    assert (1.5, 1.0) in joins
+    # (1.5, 1.0) is where one source's legs part, which is a split rather than a join.
+    assert joins == []
     single_link = {
         (0, 2): [(0.0, 2.0), (0.0, 1.0), (1.5, 1.0), (1.5, 0.0)],
     }

@@ -21,6 +21,7 @@ from visualizer.computation_graph import (
     SYNTHETIC_INPUT,
     SYNTHETIC_TENSOR,
     _compact_synthetic_input_spacing,
+    _enforce_jog_corridor_gaps,
     _ensure_synthetic_input_clears_consumers,
     _fanout_branch_index,
     _fanout_branch_node_groups,
@@ -2561,11 +2562,18 @@ def _finalize_spine_aligned_plan(
     input_sublabel: str | None,
 ) -> DetailDrawPlan:
     """Center-align spine columns and rebuild the draw plan."""
-    from visualizer.computation_graph import _align_merge_nodes, _center_align_vertical_chains
+    from visualizer.computation_graph import (
+        _align_gated_norm_output_spine,
+        _align_merge_nodes,
+        _align_router_spine_column,
+        _center_align_vertical_chains,
+    )
     from visualizer.render import _build_detail_draw_plan
 
     _align_merge_nodes(positions, graph)
     _center_align_vertical_chains(positions, graph)
+    _align_gated_norm_output_spine(positions, graph)
+    _align_router_spine_column(positions, graph)
     from visualizer.computation_graph import _align_tensor_port_merge_nodes, _graph_has_tensor_ports
 
     if _graph_has_tensor_ports(graph):
@@ -3155,6 +3163,18 @@ def finalize_detail_layout(
         graph,
         min_gap=VALIDATE_MIN_GAP,
     )
+    from visualizer.computation_graph import _align_gated_norm_output_spine, _align_router_spine_column
+
+    _align_gated_norm_output_spine(positions, graph)
+    _align_router_spine_column(positions, graph)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    enforce_text_fit_node_sizes(ax, positions, plan)
+    elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
+    _nudge_apart_remaining_tiles(positions, elements, graph, min_gap=VALIDATE_MIN_GAP)
+    _resolve_same_row_tile_overlaps(positions, min_gap=VALIDATE_MIN_GAP, graph=graph)
+    from visualizer.computation_graph import _resolve_vertical_overlaps
+
+    _resolve_vertical_overlaps(positions, min_gap=VALIDATE_MIN_GAP)
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     enforce_text_fit_node_sizes(ax, positions, plan)
     # Tile positions are settled from here on, so captions can finally be steered clear
@@ -3174,6 +3194,11 @@ def finalize_detail_layout(
     plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
     plan.inline_frame_labels = saved_inline_frame_labels
     enforce_text_fit_node_sizes(ax, positions, plan)
+    # Text fitting grows tiles downward, which can eat the row a side feed needs for its
+    # turn, so those corridors are re-reserved at the final tile sizes.
+    _enforce_jog_corridor_gaps(positions, graph)
+    plan = _build_detail_draw_plan(positions, graph, input_sublabel=input_sublabel)
+    plan.inline_frame_labels = saved_inline_frame_labels
     elements = collect_measured_elements(ax, graph, positions, plan, detail_fill=fill)
     validate_render_layout(elements, min_gap=VALIDATE_MIN_GAP, forbidden_regions=forbidden).raise_if_invalid()
     return plan
