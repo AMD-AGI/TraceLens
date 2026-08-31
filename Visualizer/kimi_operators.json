@@ -1,0 +1,1277 @@
+{
+  "name": "KimiLinearForCausalLM",
+  "model_type": "kimi_linear",
+  "checkpoint_source": "hf://moonshotai/Kimi-K3/config.json",
+  "code_sources": [
+    "/home/gweisz/.cache/huggingface/hub/models--moonshotai--Kimi-K3/blobs/b8c41e8bfce768d74d8da3a37e693f5ee43876a0"
+  ],
+  "dtype": "float16",
+  "dimensions": {
+    "B": "B",
+    "T": "T",
+    "H": 7168,
+    "V": 163840,
+    "N": 96,
+    "K": 96,
+    "D": 74,
+    "I": 33792,
+    "E": 896,
+    "TopK": 16,
+    "bos_token_id": 163584,
+    "eos_token_id": 163586,
+    "ignore_index": -100,
+    "media_placeholder_token_id": 163605,
+    "pad_token_id": 163839,
+    "activation_situ_beta": 4,
+    "activation_situ_linear_beta": 25,
+    "attn_res_block_size": 12,
+    "chunk_size_feed_forward": 0,
+    "diversity_penalty": 0,
+    "encoder_no_repeat_ngram_size": 0,
+    "first_k_dense_replace": 1,
+    "hidden_size": 7168,
+    "intermediate_size": 33792,
+    "kv_lora_rank": 512,
+    "length_penalty": 1,
+    "max_length": 20,
+    "max_position_embeddings": 1048576,
+    "min_length": 0,
+    "moe_intermediate_size": 3072,
+    "moe_layer_freq": 1,
+    "no_repeat_ngram_size": 0,
+    "num_attention_heads": 96,
+    "num_beam_groups": 1,
+    "num_beams": 1,
+    "num_expert_group": 1,
+    "num_experts": 896,
+    "num_experts_per_token": 16,
+    "num_hidden_layers": 93,
+    "num_key_value_heads": 96,
+    "num_nextn_predict_layers": 0,
+    "num_return_sequences": 1,
+    "num_shared_experts": 2,
+    "q_lora_rank": 1536,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "repetition_penalty": 1,
+    "routed_expert_hidden_size": 3584,
+    "routed_scaling_factor": 1,
+    "temperature": 1,
+    "top_k": 50,
+    "top_p": 1,
+    "topk_group": 1,
+    "typical_p": 1,
+    "v_head_dim": 128,
+    "vocab_size": 163840
+  },
+  "sections": [
+    {
+      "title": "Token Embedding",
+      "operators": [
+        {
+          "name": "input",
+          "computation": "input",
+          "operation": "input",
+          "inputs": [],
+          "output": {
+            "shape": [
+              "B",
+              "T"
+            ],
+            "dtype": "int64"
+          },
+          "class_name": "input_ids",
+          "node_id": "@input"
+        },
+        {
+          "name": "embed_tokens",
+          "computation": "Embedding",
+          "operation": "nn_module",
+          "inputs": [
+            "input"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "Embedding",
+          "node_id": "embed_tokens"
+        }
+      ]
+    },
+    {
+      "title": "RoPE",
+      "operators": [
+        {
+          "name": "input",
+          "computation": "input",
+          "operation": "input",
+          "inputs": [],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "hidden_states",
+          "node_id": "@input"
+        },
+        {
+          "name": "rotary_emb",
+          "computation": "RotaryEmbedding",
+          "operation": "composite",
+          "inputs": [
+            "input"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "RotaryEmbedding",
+          "node_id": "rotary_emb"
+        }
+      ]
+    },
+    {
+      "title": "RMSNorm",
+      "operators": [
+        {
+          "name": "input",
+          "computation": "input",
+          "operation": "input",
+          "inputs": [],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "hidden_states",
+          "node_id": "@input"
+        },
+        {
+          "name": "input_layernorm",
+          "computation": "KimiRMSNorm",
+          "operation": "nn_module",
+          "inputs": [
+            "input"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KimiRMSNorm",
+          "node_id": "input_layernorm"
+        }
+      ]
+    },
+    {
+      "title": "KimiDelta Attn",
+      "operators": [
+        {
+          "name": "Sum",
+          "computation": "KernelSubOp",
+          "operation": "composite",
+          "inputs": [
+            "q"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              1
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_0:0"
+        },
+        {
+          "name": "Sum",
+          "computation": "KernelSubOp",
+          "operation": "composite",
+          "inputs": [
+            "k"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              1
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_0:0"
+        },
+        {
+          "name": "Exp",
+          "computation": "KernelSubOp",
+          "operation": "composite",
+          "inputs": [
+            "g"
+          ],
+          "output": {
+            "shape": [],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_0:0"
+        },
+        {
+          "name": "Sigmoid",
+          "computation": "KernelSubOp",
+          "operation": "composite",
+          "inputs": [
+            "beta"
+          ],
+          "output": {
+            "shape": [],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:forward_fused_beta_sigmoid_beta:forward_fused_beta_sigmoid_beta_sub_0:0"
+        },
+        {
+          "name": "Sqrt",
+          "computation": "KernelSubOp",
+          "operation": "composite",
+          "inputs": [
+            "Sum"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              1
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_1:1"
+        },
+        {
+          "name": "Sqrt",
+          "computation": "KernelSubOp",
+          "operation": "composite",
+          "inputs": [
+            "Sum"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              1
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_1:1"
+        },
+        {
+          "name": "Softplus",
+          "computation": "KernelSubOp",
+          "operation": "composite",
+          "inputs": [
+            "Exp"
+          ],
+          "output": {
+            "shape": [],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_1:1"
+        },
+        {
+          "name": "\u00d7 scale",
+          "computation": "KernelSubOp",
+          "operation": "composite",
+          "inputs": [
+            "Sigmoid"
+          ],
+          "output": {
+            "shape": [],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:forward_fused_beta_sigmoid_beta:forward_fused_beta_sigmoid_beta_sub_1:1"
+        },
+        {
+          "name": "\u00f7",
+          "computation": "KernelSubOp",
+          "operation": "composite",
+          "inputs": [
+            "Sqrt",
+            "Sum"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              1
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_2:2"
+        },
+        {
+          "name": "\u00f7",
+          "computation": "KernelSubOp",
+          "operation": "composite",
+          "inputs": [
+            "Sqrt",
+            "Sum"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              1
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_2:2"
+        },
+        {
+          "name": "\u00d7",
+          "computation": "KernelSubOp",
+          "operation": "synthetic",
+          "inputs": [
+            "Softplus",
+            "Exp"
+          ],
+          "output": {
+            "shape": [],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_2:2"
+        },
+        {
+          "name": "\u00d7",
+          "computation": "KernelSubOp",
+          "operation": "synthetic",
+          "inputs": [
+            "\u00f7",
+            "Sqrt"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              1
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_q:forward_l2norm_fwd_q_sub_3:3"
+        },
+        {
+          "name": "\u00d7",
+          "computation": "KernelSubOp",
+          "operation": "synthetic",
+          "inputs": [
+            "\u00f7",
+            "Sqrt"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              1
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:forward_l2norm_fwd_k:forward_l2norm_fwd_k_sub_3:3"
+        },
+        {
+          "name": "Sigmoid",
+          "computation": "KernelSubOp",
+          "operation": "composite",
+          "inputs": [
+            "\u00d7"
+          ],
+          "output": {
+            "shape": [],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_3:3"
+        },
+        {
+          "name": "CumSum",
+          "computation": "KernelSubOp",
+          "operation": "composite",
+          "inputs": [
+            "Sigmoid"
+          ],
+          "output": {
+            "shape": [],
+            "dtype": "float16"
+          },
+          "class_name": "KernelSubOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_kda_gate_chunk_cumsum_g:chunk_kda_fwd_kda_gate_chunk_cumsum_g_sub_4:4"
+        },
+        {
+          "name": "chunk_kda_fwd_intra",
+          "computation": "KernelOp",
+          "operation": "gpu_kernel",
+          "inputs": [
+            "\u00d7 scale",
+            "\u00d7",
+            "CumSum",
+            "v"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KernelOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_kda_fwd_intra:4"
+        },
+        {
+          "name": "chunk_gated_delta_rule_fwd_h",
+          "computation": "KernelOp",
+          "operation": "gpu_kernel",
+          "inputs": [
+            "chunk_kda_fwd_intra",
+            "CumSum"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KernelOp",
+          "node_id": "@attn_pipeline:tensor0:pipeline:chunk_kda_fwd_chunk_gated_delta_rule_fwd_h_g:5"
+        }
+      ]
+    },
+    {
+      "title": "KimiMLA Attn",
+      "operators": [
+        {
+          "name": "input",
+          "computation": "input",
+          "operation": "input",
+          "inputs": [],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "hidden_states",
+          "node_id": "@input"
+        },
+        {
+          "name": "q_a_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "input"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              1536
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "fan0-0:q_a_proj:q_a_proj:0"
+        },
+        {
+          "name": "kv_a_proj_with_mqa",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "input"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "fan0-1:kv_a_proj_with_mqa:kv_a_proj_with_mqa:0"
+        },
+        {
+          "name": "kv_a_proj_with_mqa",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "input"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "fan0-2:kv_a_proj_with_mqa:kv_a_proj_with_mqa:0"
+        },
+        {
+          "name": "g_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "input"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "side:1:g_proj:0"
+        },
+        {
+          "name": "q_a_layernorm",
+          "computation": "KimiRMSNorm",
+          "operation": "nn_module",
+          "inputs": [
+            "query_states"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              1536
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KimiRMSNorm",
+          "node_id": "fan0-0:q_a_layernorm:q_a_layernorm:0"
+        },
+        {
+          "name": "kv_a_layernorm",
+          "computation": "KimiRMSNorm",
+          "operation": "nn_module",
+          "inputs": [
+            "key_states"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KimiRMSNorm",
+          "node_id": "fan0-1:kv_a_layernorm:kv_a_layernorm:0"
+        },
+        {
+          "name": "kv_a_layernorm",
+          "computation": "KimiRMSNorm",
+          "operation": "nn_module",
+          "inputs": [
+            "value_states"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KimiRMSNorm",
+          "node_id": "fan0-2:kv_a_layernorm:kv_a_layernorm:0"
+        },
+        {
+          "name": "@gate_activation",
+          "computation": "ActivationOp",
+          "operation": "composite",
+          "inputs": [
+            "Linear"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "ActivationOp",
+          "node_id": "side:1:@gate_activation:1"
+        },
+        {
+          "name": "q_b_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "q_a_layernorm"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              18432
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "fan0-0:q_b_proj:q_b_proj:0"
+        },
+        {
+          "name": "kv_b_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "kv_a_layernorm"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "fan0-1:kv_b_proj:kv_b_proj:0"
+        },
+        {
+          "name": "kv_b_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "kv_a_layernorm"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "fan0-2:kv_b_proj:kv_b_proj:0"
+        },
+        {
+          "name": "@functional_pad",
+          "computation": "Pad",
+          "operation": "torch_functional",
+          "inputs": [
+            "kv_b_proj"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "fan0-2:@functional_pad:@functional_pad:0"
+        },
+        {
+          "name": "Attention",
+          "computation": "AttentionOp",
+          "operation": "gpu_kernel",
+          "inputs": [
+            "q_b_proj",
+            "kv_b_proj",
+            "@functional_pad"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "AttentionOp",
+          "node_id": "merge:0"
+        },
+        {
+          "name": "\u00d7",
+          "computation": "elementwise_mul",
+          "operation": "synthetic",
+          "inputs": [
+            "Attention",
+            "@gate_activation"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "combine:1"
+        },
+        {
+          "name": "o_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "\u00d7"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "post:1:o_proj:o_proj:0"
+        }
+      ]
+    },
+    {
+      "title": "KimiSparseMoeBlock",
+      "operators": [
+        {
+          "name": "input",
+          "computation": "input",
+          "operation": "input",
+          "inputs": [],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "hidden_states",
+          "node_id": "@input"
+        },
+        {
+          "name": "@op_l707_c17_linear",
+          "computation": "Linear",
+          "operation": "torch_functional",
+          "inputs": [
+            "input",
+            "weight"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              896
+            ],
+            "dtype": "float32"
+          },
+          "node_id": "seq:0:gate:@op_l707_c17_linear:0"
+        },
+        {
+          "name": "routed_expert_down_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "input"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              33792
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "seq:1:routed_expert_down_proj:routed_expert_down_proj:0"
+        },
+        {
+          "name": "gate_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "input"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              33792
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "residual_branch:5:shared_experts:gate_proj"
+        },
+        {
+          "name": "up_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "input"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              33792
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "residual_branch:5:shared_experts:up_proj"
+        },
+        {
+          "name": "@op_l712_c21_sigmoid",
+          "computation": "Sigmoid",
+          "operation": "torch_functional",
+          "inputs": [
+            "@op_l707_c17_linear"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              896
+            ],
+            "dtype": "float32"
+          },
+          "node_id": "seq:0:gate:@op_l712_c21_sigmoid:1"
+        },
+        {
+          "name": "situ",
+          "computation": "SituActivation",
+          "operation": "composite",
+          "inputs": [
+            "gate_proj"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              33792
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "SituActivation",
+          "node_id": "residual_branch:5:shared_experts:situ"
+        },
+        {
+          "name": "@op_l723_c28_add",
+          "computation": "Add",
+          "operation": "torch_functional",
+          "inputs": [
+            "@op_l712_c21_sigmoid",
+            "e_score_correction_bias"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              896
+            ],
+            "dtype": "float32"
+          },
+          "node_id": "seq:0:gate:@op_l723_c28_add:2"
+        },
+        {
+          "name": "mul",
+          "computation": "elementwise_mul",
+          "operation": "synthetic",
+          "inputs": [
+            "situ",
+            "up"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              33792
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "residual_branch:5:shared_experts:mul"
+        },
+        {
+          "name": "@op_l747_c22_topk",
+          "computation": "TopK",
+          "operation": "torch_functional",
+          "inputs": [
+            "@op_l723_c28_add"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              16
+            ],
+            "dtype": "int64"
+          },
+          "node_id": "seq:0:gate:@op_l747_c22_topk:3"
+        },
+        {
+          "name": "down_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "mul"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "residual_branch:5:shared_experts:down_proj"
+        },
+        {
+          "name": "@op_l750_c22_gather",
+          "computation": "Gather",
+          "operation": "torch_functional",
+          "inputs": [
+            "@op_l712_c21_sigmoid",
+            "@op_l747_c22_topk"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              16
+            ],
+            "dtype": "float32"
+          },
+          "node_id": "seq:0:gate:@op_l750_c22_gather:4"
+        },
+        {
+          "name": "@op_l754_c26_sum",
+          "computation": "Sum",
+          "operation": "torch_functional",
+          "inputs": [
+            "@op_l750_c22_gather"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              1
+            ],
+            "dtype": "float32"
+          },
+          "node_id": "seq:0:gate:@op_l754_c26_sum:5"
+        },
+        {
+          "name": "@op_l754_c26_add",
+          "computation": "Add",
+          "operation": "torch_functional",
+          "inputs": [
+            "@op_l754_c26_sum"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              1
+            ],
+            "dtype": "float32"
+          },
+          "node_id": "seq:0:gate:@op_l754_c26_add:6"
+        },
+        {
+          "name": "@op_l755_c26_divide",
+          "computation": "Divide",
+          "operation": "torch_functional",
+          "inputs": [
+            "@op_l750_c22_gather",
+            "@op_l754_c26_add"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              16
+            ],
+            "dtype": "float32"
+          },
+          "node_id": "seq:0:gate:@op_l755_c26_divide:7"
+        },
+        {
+          "name": "@op_l757_c22_multiply",
+          "computation": "Multiply",
+          "operation": "torch_functional",
+          "inputs": [
+            "@op_l755_c26_divide"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              16
+            ],
+            "dtype": "float32"
+          },
+          "node_id": "seq:0:gate:@op_l757_c22_multiply:8"
+        },
+        {
+          "name": "moe_infer",
+          "computation": "MoE aggregation",
+          "operation": "unknown",
+          "inputs": [
+            "routed_expert_down_proj",
+            "@op_l757_c22_multiply"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              33792
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "moe_agg:2:moe_infer"
+        },
+        {
+          "name": "routed_expert_norm",
+          "computation": "KimiRMSNorm",
+          "operation": "nn_module",
+          "inputs": [
+            "moe_infer"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              33792
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "KimiRMSNorm",
+          "node_id": "seq:3:routed_expert_norm:routed_expert_norm:0"
+        },
+        {
+          "name": "routed_expert_up_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "routed_expert_norm"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              33792
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "seq:4:routed_expert_up_proj:routed_expert_up_proj:0"
+        },
+        {
+          "name": "residual_add",
+          "computation": "elementwise_add",
+          "operation": "synthetic",
+          "inputs": [
+            "routed_expert_up_proj",
+            "down_proj"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              33792
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "residual_add:5"
+        }
+      ]
+    },
+    {
+      "title": "KimiMLP",
+      "operators": [
+        {
+          "name": "input",
+          "computation": "input",
+          "operation": "input",
+          "inputs": [],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "x",
+          "node_id": "@input"
+        },
+        {
+          "name": "gate_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "input"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              33792
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "mlp:gate_proj"
+        },
+        {
+          "name": "up_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "input"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              33792
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "mlp:up_proj"
+        },
+        {
+          "name": "situ",
+          "computation": "SituActivation",
+          "operation": "composite",
+          "inputs": [
+            "gate_proj"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              33792
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "SituActivation",
+          "node_id": "mlp:situ"
+        },
+        {
+          "name": "mul",
+          "computation": "elementwise_mul",
+          "operation": "synthetic",
+          "inputs": [
+            "situ",
+            "up"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              33792
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "mlp:mul"
+        },
+        {
+          "name": "down_proj",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "mul"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "mlp:down_proj"
+        }
+      ]
+    },
+    {
+      "title": "Linear",
+      "operators": [
+        {
+          "name": "input",
+          "computation": "input",
+          "operation": "input",
+          "inputs": [],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              7168
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "hidden_states",
+          "node_id": "@input"
+        },
+        {
+          "name": "lm_head",
+          "computation": "Linear",
+          "operation": "nn_module",
+          "inputs": [
+            "input"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              163840
+            ],
+            "dtype": "float16"
+          },
+          "node_id": "lm_head"
+        },
+        {
+          "name": "output",
+          "computation": "output",
+          "operation": "output",
+          "inputs": [
+            "lm_head"
+          ],
+          "output": {
+            "shape": [
+              "B",
+              "T",
+              163840
+            ],
+            "dtype": "float16"
+          },
+          "class_name": "logits"
+        }
+      ]
+    }
+  ]
+}
