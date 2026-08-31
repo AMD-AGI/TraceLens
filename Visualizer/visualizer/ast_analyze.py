@@ -168,7 +168,7 @@ _KERNEL_MERGE_NAME_RE = re.compile(
     r"(attention|attn|recurrent|flash|sdpa|linear_attn|kernel|chunk)",
     re.IGNORECASE,
 )
-_SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "getattr"})
+_SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "Buffer", "getattr"})
 _SKIP_INIT_FORWARD_ATTRS = frozenset(
     {
         "config",
@@ -836,6 +836,25 @@ def _forward_delegates_to_nothing(class_name: str, forward_calls: list[str]) -> 
     return bool(POSITIONAL_CLASS_RE.search(class_name))
 
 
+def _forward_mixes_modules_and_inline_ops(
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+    parsed_operations: list[ForwardOperation],
+) -> bool:
+    """True when forward() calls submodules and also runs inline tensor math."""
+    module_calls = [
+        call
+        for call in forward_calls
+        if call in init_assignments
+        or is_positional_synthetic(call)
+        or is_functional_synthetic(call)
+    ]
+    if not module_calls or not parsed_operations:
+        return False
+    inline_ops = sum(1 for op in parsed_operations if is_forward_operation(op.attr_name))
+    return inline_ops >= 2
+
+
 def _label_for(role: str, class_name: str, attr_name: str) -> str:
     if role == "embedding":
         if attr_name == "embed_tokens":
@@ -941,11 +960,12 @@ def infer_forward_steps_from_init(cls: ClassStructure) -> list[str]:
 
 
 def effective_forward_calls(cls: ClassStructure) -> list[str]:
-    """Return parsed ``forward()`` calls, falling back to inferred init order."""
+    """Return parsed ``forward()`` module steps, falling back to inferred init order."""
     steps = [step for step in cls.forward_calls if step not in _SKIP_INIT_CLASS_NAMES]
-    if steps:
-        return steps
-    return infer_forward_steps_from_init(cls)
+    if not steps:
+        return infer_forward_steps_from_init(cls)
+    modules = [step for step in steps if not is_forward_operation(step)]
+    return modules if modules else steps
 
 
 _UNKNOWN = object()
@@ -1014,6 +1034,23 @@ _BINOP_LABELS = {
 
 def is_forward_operation(attr_name: str) -> bool:
     return attr_name.startswith(FORWARD_OPERATION_PREFIX)
+
+
+def operation_display_label(label: str, *, class_name: str | None = None) -> str:
+    """Human-facing operator name for graph tiles and exports."""
+    text = (label or class_name or "").strip()
+    return text or "Op"
+
+
+def classify_matmul_label(*, external_inputs: list[str] | tuple[str, ...]) -> str:
+    """Name a GEMM-like op from its operands: Linear when a weight is involved, else MatMul."""
+    if external_inputs:
+        return "Linear"
+    return "MatMul"
+
+
+def _inline_forward_step(attr_name: str) -> bool:
+    return is_forward_operation(attr_name) or is_functional_synthetic(attr_name)
 
 
 def _config_value(node: ast.AST, config: dict[str, Any], self_values: dict[str, Any]) -> Any:
@@ -1150,11 +1187,15 @@ class _ForwardOperationExtractor:
         details: list[str] | None = None,
     ) -> str:
         attr_name = self._operation_id(node, label)
+        if label.lower() in {"matmul", "matmull"}:
+            display = classify_matmul_label(external_inputs=external_inputs)
+        else:
+            display = operation_display_label(label)
         self.operations.append(
             ForwardOperation(
                 attr_name=attr_name,
-                label=label,
-                class_name=label,
+                label=display,
+                class_name=display,
                 predecessors=self._dedupe(predecessors),
                 external_inputs=self._dedupe(external_inputs),
                 details=tuple(details or ()),
@@ -1183,7 +1224,7 @@ class _ForwardOperationExtractor:
         """
         func = node.func
         if method_name is not None and _is_self_attr(func, method_name):
-            return method_name if method_name in self.self_values else None
+            return method_name
         target = _expr_name(func)
         if target and _is_positional_function_call(func, target):
             return positional_synthetic_attr(target, node.lineno)
@@ -1233,6 +1274,8 @@ class _ForwardOperationExtractor:
                 and isinstance(operand.func, ast.Attribute)
                 and _is_self_attr(operand.func, operand.func.attr)
             ]
+            if label == "Multiply" and not left and not right and not direct_module_predecessors:
+                return None, [*left_external, *right_external]
             producer = self._emit(
                 node,
                 label,
@@ -1261,12 +1304,25 @@ class _ForwardOperationExtractor:
         functional_name = _functional_call_name(node.func)
         label = _FUNCTION_LABELS.get(functional_name or call_name) or _TENSOR_METHOD_LABELS.get(call_name)
         housekeeping = call_name in _HOUSEKEEPING_METHODS or call_name == "zeros_like"
+
+        def _collect_call_arg_producers(arg: ast.AST) -> tuple[list[str], list[str]]:
+            if isinstance(arg, (ast.List, ast.Tuple)):
+                producers: list[str] = []
+                external: list[str] = []
+                for item in arg.elts:
+                    producer, item_external = self.expression(item)
+                    if producer:
+                        producers.append(producer)
+                    external.extend(item_external)
+                return producers, external
+            producer, arg_external = self.expression(arg)
+            return ([producer] if producer else []), list(arg_external)
+
         arg_producers: list[str] = []
         if not (housekeeping and method_name is not None):
             for arg in node.args:
-                producer, arg_external = self.expression(arg)
-                if producer:
-                    arg_producers.append(producer)
+                producers, arg_external = _collect_call_arg_producers(arg)
+                arg_producers.extend(producers)
                 external.extend(arg_external)
             for keyword in node.keywords:
                 producer, arg_external = self.expression(keyword.value)
@@ -1436,6 +1492,43 @@ def _self_call_source_positions(func: ast.FunctionDef) -> dict[str, tuple[int, i
     return positions
 
 
+def _functional_synthetic_source_positions(func: ast.FunctionDef) -> dict[str, tuple[int, int]]:
+    """First source position each ``F.<op>(...)`` maps to a functional synthetic attr."""
+    positions: dict[str, tuple[int, int]] = {}
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        functional_op = _functional_call_name(node.func)
+        if not functional_op:
+            continue
+        attr = functional_synthetic_attr(functional_op)
+        where = (node.lineno, node.col_offset)
+        if attr not in positions or where < positions[attr]:
+            positions[attr] = where
+    return positions
+
+
+def _module_calls_for_forward_merge(
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+    *,
+    parsed_operations: list[ForwardOperation],
+) -> list[str]:
+    """Submodule/synthetic calls to interleave with parsed tensor ops.
+
+    When inline ops were recovered from ``forward()``, drop redundant functional
+    synthetics (``@functional_linear``) that duplicate the same ``F.linear(...)``.
+    """
+    drop_functional = bool(parsed_operations)
+    return [
+        call
+        for call in forward_calls
+        if call in init_assignments
+        or is_positional_synthetic(call)
+        or (is_functional_synthetic(call) and not drop_functional)
+    ]
+
+
 def _forward_calls_in_source_order(
     func: ast.FunctionDef,
     module_calls: list[str],
@@ -1453,9 +1546,14 @@ def _forward_calls_in_source_order(
 
     ordered: list[tuple[tuple[int, int], str]] = []
     call_positions = _self_call_source_positions(func)
+    functional_positions = _functional_synthetic_source_positions(func)
     fallback = 0
     for call in module_calls:
-        where = call_positions.get(call) or positional_synthetic_source_pos(call)
+        where = (
+            call_positions.get(call)
+            or functional_positions.get(call)
+            or positional_synthetic_source_pos(call)
+        )
         if where is None:
             # A call the walk cannot place keeps its parsed order ahead of the ops.
             where = (0, -fallback)
@@ -1588,26 +1686,21 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 self_values=_self_config_values(init_func, self.config),
                 all_tensor_ops=self.all_tensor_ops,
             )
-            if (
-                _forward_owns_tensor_math(forward_calls, init_assignments)
-                or _forward_delegates_to_nothing(node.name, forward_calls)
-                or re.search(r"Indexer", node.name, re.IGNORECASE)
-            ):
+            delegates_inline = _forward_delegates_to_nothing(node.name, forward_calls)
+            if _forward_owns_tensor_math(forward_calls, init_assignments) or delegates_inline:
                 values = _self_config_values(init_func, self.config)
                 parsed_operations = _forward_operations_from_forward(
                     forward_func,
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
+                    name_primary_input=delegates_inline,
                 )
                 if parsed_operations:
-                    # Preserve concrete projection/norm modules so they can still
-                    # expand recursively, and keep them in step with the algorithmic
-                    # tensor ops in the order the forward runs them.
-                    module_calls = [
-                        call
-                        for call in forward_calls
-                        if call in init_assignments or is_positional_synthetic(call)
-                    ]
+                    module_calls = _module_calls_for_forward_merge(
+                        forward_calls,
+                        init_assignments,
+                        parsed_operations=parsed_operations,
+                    )
                     forward_operations = {op.attr_name: op for op in parsed_operations}
                     forward_calls = _forward_calls_in_source_order(
                         forward_func,
@@ -1616,6 +1709,32 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     )
                     forward_step_details.update(
                         {op.attr_name: list(op.details) for op in parsed_operations}
+                    )
+            elif forward_func is not None:
+                values = _self_config_values(init_func, self.config)
+                probed_operations = _forward_operations_from_forward(
+                    forward_func,
+                    self_values=values,
+                    all_tensor_ops=self.all_tensor_ops,
+                )
+                if _forward_mixes_modules_and_inline_ops(
+                    forward_calls,
+                    init_assignments,
+                    probed_operations,
+                ):
+                    module_calls = _module_calls_for_forward_merge(
+                        forward_calls,
+                        init_assignments,
+                        parsed_operations=probed_operations,
+                    )
+                    forward_operations = {op.attr_name: op for op in probed_operations}
+                    forward_calls = _forward_calls_in_source_order(
+                        forward_func,
+                        module_calls,
+                        probed_operations,
+                    )
+                    forward_step_details.update(
+                        {op.attr_name: list(op.details) for op in probed_operations}
                     )
 
         self.classes[node.name] = ClassStructure(
@@ -3123,6 +3242,8 @@ def _build_components(decoder: ClassStructure) -> list[BlockComponent]:
             )
             continue
         if attr in decoder.init_assignments:
+            continue
+        if _inline_forward_step(attr):
             continue
         role = _classify_role(attr, attr)
         components.append(

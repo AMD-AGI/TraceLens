@@ -82,6 +82,8 @@ class ComputationGraph:
     link_port_labels: dict[tuple[int, int], str] = field(default_factory=dict)
     inline_frames: list[InlineFrameSpec] = field(default_factory=list)
     side_effect_frame_ids: set[str] = field(default_factory=set)
+    excluded_output_indices: set[int] = field(default_factory=set)
+    primary_output_index: int | None = None
 
 
 def _operation_tile_label(label: str) -> str:
@@ -131,6 +133,44 @@ def _add_method_wrapper_node(
 
 def _track_attr_index(attr_last_index: dict[str, int], attr_name: str, index: int) -> None:
     attr_last_index[attr_name] = index
+
+
+def _rebuild_attr_last_index(graph: ComputationGraph) -> dict[str, int]:
+    attr_last_index: dict[str, int] = {}
+    for index, spec in enumerate(graph.nodes):
+        if spec.block is not None:
+            _track_attr_index(attr_last_index, spec.block.attr_name, index)
+    return attr_last_index
+
+
+def _wire_operation_predecessor_links(graph: ComputationGraph, root: BlockNode) -> None:
+    """Attach operand edges for inline ops once every forward step has been materialized."""
+    attr_last_index = _rebuild_attr_last_index(graph)
+    last_forward_order = max((child.forward_order or 0 for child in root.children), default=0)
+    for child in root.children:
+        if not is_forward_operation(child.attr_name):
+            continue
+        if not child.operation_predecessors:
+            continue
+        target_index = attr_last_index.get(child.attr_name)
+        if target_index is None:
+            continue
+        module_preds = [
+            pred
+            for pred in child.operation_predecessors
+            if pred != FORWARD_METHOD_INPUT and not is_forward_operation(pred)
+        ]
+        for pred in child.operation_predecessors:
+            if pred == FORWARD_METHOD_INPUT:
+                continue
+            source_index = attr_last_index.get(pred)
+            if source_index is None:
+                continue
+            link = (source_index, target_index)
+            if link not in graph.links:
+                graph.links.append(link)
+        if len(module_preds) >= 2 and (child.forward_order or 0) < last_forward_order:
+            graph.excluded_output_indices.add(target_index)
 
 
 def _operation_source_indices(
@@ -332,6 +372,12 @@ def add_forward_output(graph: ComputationGraph, *, label: str = "Output") -> int
     unframed_exits = [index for index in exits if index not in framed_indices]
     if unframed_exits:
         exits = unframed_exits
+    if graph.primary_output_index is not None:
+        exits = [graph.primary_output_index]
+    else:
+        exits = [index for index in exits if index not in graph.excluded_output_indices]
+    if not exits:
+        return None
     output_index = _add_node(
         graph,
         key=SYNTHETIC_OUTPUT,
@@ -711,6 +757,7 @@ def _add_side_producer_index(
     input_index: int | None,
     attr_last_index: dict[str, int],
     basic_ops: BasicOpFilter | None = None,
+    link_input: bool = True,
 ) -> int | None:
     """Add a side-path producer, inlining straight-line output gates when possible."""
     expanded_steps, wrapper = inline_composite_steps(producer, basic_ops=basic_ops)
@@ -723,7 +770,7 @@ def _add_side_producer_index(
             attr_last_index=attr_last_index,
             port_label=port_label,
             port_style=port_style or "inline",
-            input_index=input_index,
+            input_index=input_index if link_input else None,
             last_index=None,
             branch_from_input_dashed=True,
         )
@@ -740,10 +787,83 @@ def _add_side_producer_index(
         port_label=port_label,
         port_style=port_style,
     )
-    if input_index is not None:
+    if link_input and input_index is not None:
         _link_forward_input(graph, input_index, source_index)
     _track_attr_index(attr_last_index, source_attr, source_index)
     return source_index
+
+
+def _ensure_side_chain_tail_index(
+    graph: ComputationGraph,
+    segment: SideFeedSegment,
+    side,
+    *,
+    segment_index: int,
+    input_index: int | None,
+    attr_last_index: dict[str, int],
+    root: BlockNode,
+    basic_ops: BasicOpFilter | None = None,
+) -> int | None:
+    """Materialize a prior-step side chain, preserving g_a → g_b style gate pipelines."""
+    source_attr = side.source_chain[-1] if side.source_chain else None
+    if source_attr is None:
+        return None
+
+    cached = attr_last_index.get(source_attr)
+    if cached is not None:
+        return cached
+
+    chain = segment.side_producer_chains.get(source_attr)
+    if not chain:
+        producer = segment.side_producer_nodes.get(source_attr)
+        if producer is None:
+            return None
+        return _add_side_producer_index(
+            graph,
+            producer,
+            segment_index=segment_index,
+            source_attr=source_attr,
+            port_label=side.port_label,
+            port_style="inline",
+            input_index=input_index,
+            attr_last_index=attr_last_index,
+            basic_ops=basic_ops,
+        )
+
+    tail_index: int | None = None
+    for step in chain:
+        attr = step.attr_name
+        existing = attr_last_index.get(attr)
+        if existing is not None:
+            tail_index = existing
+            continue
+
+        if tail_index is None:
+            branch_from_input = attr in root.input_fed_steps or len(chain) == 1
+            tail_index = _add_side_producer_index(
+                graph,
+                step,
+                segment_index=segment_index,
+                source_attr=attr,
+                port_label=side.port_label if attr == source_attr else None,
+                port_style="inline",
+                input_index=input_index,
+                attr_last_index=attr_last_index,
+                basic_ops=basic_ops,
+                link_input=branch_from_input,
+            )
+            continue
+
+        step_index = _add_node(
+            graph,
+            key=f"sideproducer:{segment_index}:{attr}",
+            block=step,
+        )
+        graph.links.append((tail_index, step_index))
+        _track_attr_index(attr_last_index, attr, step_index)
+        tail_index = step_index
+
+    return tail_index
 
 
 def _consumer_port_label(sides: list) -> str | None:
@@ -1275,7 +1395,7 @@ def build_computation_graph(
                     graph,
                     key=f"sidefeed:{segment_index}:{consumer.attr_name}:norm",
                     block=consumer,
-                    label="RMSNorm",
+                    label="Gated RMSNorm",
                     sublabel="",
                 )
                 if last_index is not None:
@@ -1299,22 +1419,16 @@ def build_computation_graph(
                     source_attr = side.source_chain[-1] if side.source_chain else None
                     if source_attr is None:
                         continue
-                    source_index = attr_last_index.get(source_attr)
-                    if source_index is None:
-                        producer = segment.side_producer_nodes.get(source_attr)
-                        if producer is None:
-                            continue
-                        source_index = _add_side_producer_index(
-                            graph,
-                            producer,
-                            segment_index=segment_index,
-                            source_attr=source_attr,
-                            port_label=side.port_label,
-                            port_style="inline",
-                            input_index=input_index,
-                            attr_last_index=attr_last_index,
-                            basic_ops=basic_ops,
-                        )
+                    source_index = _ensure_side_chain_tail_index(
+                        graph,
+                        segment,
+                        side,
+                        segment_index=segment_index,
+                        input_index=input_index,
+                        attr_last_index=attr_last_index,
+                        root=root,
+                        basic_ops=basic_ops,
+                    )
                     if source_index is None:
                         continue
                     gate_index = source_index
@@ -1397,24 +1511,18 @@ def build_computation_graph(
                 source_attr = side.source_chain[-1] if side.source_chain else None
                 if source_attr is None:
                     continue
-                source_index = attr_last_index.get(source_attr)
+                source_index = _ensure_side_chain_tail_index(
+                    graph,
+                    segment,
+                    side,
+                    segment_index=segment_index,
+                    input_index=input_index,
+                    attr_last_index=attr_last_index,
+                    root=root,
+                    basic_ops=basic_ops,
+                )
                 if source_index is None:
-                    producer = segment.side_producer_nodes.get(source_attr)
-                    if producer is None:
-                        continue
-                    source_index = _add_side_producer_index(
-                        graph,
-                        producer,
-                        segment_index=segment_index,
-                        source_attr=source_attr,
-                        port_label=side.port_label,
-                        port_style="inline",
-                        input_index=input_index,
-                        attr_last_index=attr_last_index,
-                        basic_ops=basic_ops,
-                    )
-                    if source_index is None:
-                        continue
+                    continue
                 # A feed from the step right before the consumer is already the spine
                 # link; do not duplicate that operand edge.
                 if source_index == last_index and not forward_input_is_main:
@@ -1561,6 +1669,8 @@ def build_computation_graph(
             if expanded_steps:
                 _track_attr_index(attr_last_index, step.attr_name, last_index)
 
+    _wire_operation_predecessor_links(graph, root)
+    graph.primary_output_index = last_index
     _add_conditional_alternative_links(graph)
     if basic_ops is not None and basic_ops.basic_only:
         return _filter_graph_basic_only(graph)

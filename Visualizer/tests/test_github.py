@@ -7,9 +7,16 @@ import pytest
 from visualizer.extract import load_architecture
 from visualizer.github import parse_github_url
 from visualizer.source import resolve_github_files, resolve_source_files
+from visualizer.source_policy import SourcePolicy, set_source_policy
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def _allow_fixture_github_repos():
+    set_source_policy(SourcePolicy.from_env_and_cli(["acme/custom", "acme/models"]))
+    yield
 
 
 def test_parse_github_web_url_with_subpath():
@@ -28,7 +35,7 @@ def test_parse_github_shorthand():
 def test_resolve_github_files_from_local_fixture(tmp_path: Path, monkeypatch):
     fixture_dir = FIXTURES / "custom_model"
 
-    def fake_fetch(ref, cache_root=None):
+    def fake_fetch(ref, cache_root=None, **kwargs):
         return fixture_dir
 
     monkeypatch.setattr("visualizer.source.fetch_github_source", fake_fetch)
@@ -43,7 +50,7 @@ def test_split_checkpoint_and_github(monkeypatch):
     fixture_dir = FIXTURES / "custom_model"
     config = FIXTURES / "llama_like" / "config.json"
 
-    def fake_fetch(ref, cache_root=None):
+    def fake_fetch(ref, cache_root=None, **kwargs):
         return fixture_dir
 
     monkeypatch.setattr("visualizer.source.fetch_github_source", fake_fetch)
@@ -62,7 +69,7 @@ def test_split_checkpoint_and_github(monkeypatch):
 
 
 def test_resolve_source_files_prefers_github_over_hf(monkeypatch):
-    def fake_fetch(ref, cache_root=None):
+    def fake_fetch(ref, cache_root=None, **kwargs):
         return FIXTURES / "custom_model"
 
     monkeypatch.setattr("visualizer.source.fetch_github_source", fake_fetch)

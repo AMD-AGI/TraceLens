@@ -81,7 +81,8 @@ python visualize_model_in_explorer.py moonshotai/Kimi-K3 --operators-json kimi_o
 | Option | Description |
 |--------|-------------|
 | `SOURCE` / `--checkpoint`, `-c` | Hugging Face model id or local checkpoint directory |
-| `--github`, `-g` | GitHub repo URL or `github:owner/repo@ref:path` for modeling source |
+| `--github`, `-g` | GitHub repo URL or `github:owner/repo@ref:path` for modeling source (repo must be whitelisted) |
+| `--allow-repo OWNER/REPO` | Whitelist an extra GitHub repo for remote source introspection (repeatable) |
 | `-o`, `--output` | Output path: `.html` (standalone viewer), `.json` (Model Explorer payload), or default model name when used alone |
 | `--title` | Architecture display name override |
 | `--serve` | Start local HTTP server with embedded payload |
@@ -102,9 +103,28 @@ Shape inference is **off by default**. When enabled, shapes are attached to node
 
 The visualizer resolves inputs in this order:
 
-1. **Hugging Face checkpoint** — downloads or reads `config.json`, then locates `modeling_*.py` in the same repo
-2. **GitHub** — fetches modeling source from a repo URL or `github:owner/repo@ref:path` shorthand
-3. **Explicit paths** — `--config-path` and `--code-path` override auto-discovery
+1. **Hugging Face checkpoint** — downloads or reads `config.json`, then locates `modeling_*.py` in the same repo (always allowed; no GitHub whitelist)
+2. **Local paths** — `--config-path` and `--code-path` override auto-discovery (always allowed)
+3. **GitHub** — fetches modeling source from a repo URL or `github:owner/repo@ref:path` shorthand (**whitelisted repos only**)
+
+### GitHub whitelist
+
+Generic AST introspection reads Python from:
+
+- the Hugging Face checkpoint tree for the model you are visualizing
+- your local `--code-path`
+- **`huggingface/transformers`** (installed package or GitHub fallback)
+- **`fla-org/flash-linear-attention`** (kernel dependency introspection)
+
+Other GitHub repositories are blocked unless you explicitly allow them:
+
+```bash
+python visualize_model_in_explorer.py acme/custom-model \
+  --github github:acme/custom-model@main \
+  --allow-repo acme/custom-model
+```
+
+Or set `TRACELENS_ALLOWED_GITHUB_REPOS=acme/custom-model,other-org/other-repo`.
 
 Checkpoints for transformers-native architectures (Qwen3, MiniMax-M3, …) ship no
 modeling code, so `modeling_<model_type>.py` is read from `huggingface/transformers`
@@ -139,6 +159,7 @@ Visualizer/
 │   ├── computation_graph.py         # Graph construction from block trees
 │   ├── model_graph.py               # Serializable model graph IR
 │   ├── shape_inference.py           # Symbolic shape and operator export
+│   ├── source_policy.py             # GitHub whitelist for remote introspection
 │   └── loader.py                    # High-level model spec loading
 ├── tests/                           # Pytest suite
 └── requirements.txt

@@ -1038,8 +1038,12 @@ def load_architecture(
     detailed: bool = False,
     basic_ops: BasicOpFilter | None = None,
     all_tensor_ops: bool = False,
+    allow_github_repos: list[str] | None = None,
 ) -> ArchitectureSpec:
     """Load architecture metadata from an HF checkpoint and/or GitHub modeling code."""
+    from visualizer.source_policy import SourcePolicy, set_source_policy
+
+    set_source_policy(SourcePolicy.from_env_and_cli(allow_github_repos))
     resolved_checkpoint = checkpoint or source
     config, config_label = _resolve_checkpoint(
         checkpoint=resolved_checkpoint,
@@ -1100,8 +1104,12 @@ def dump_model_ast(
     github: str | None = None,
     config_path: str | None = None,
     code_path: str | Path | None = None,
+    allow_github_repos: list[str] | None = None,
 ) -> str:
     """Return a pretty-printed AST dump for the primary modeling file."""
+    from visualizer.source_policy import SourcePolicy, set_source_policy
+
+    set_source_policy(SourcePolicy.from_env_and_cli(allow_github_repos))
     resolved_checkpoint = checkpoint or source
     config, _ = _resolve_checkpoint(
         checkpoint=resolved_checkpoint,

@@ -93,6 +93,33 @@ def _display_label(component: BlockComponent, spec: ArchitectureSpec) -> str:
 
 
 _DECODER_NORM_ATTRS = frozenset({"input_layernorm", "post_attention_layernorm"})
+_VARIANT_ATTENTION_ATTRS = frozenset({"self_attn", "self_attention", "attn", "attention"})
+
+
+def _component_uses_variant_attention_class(
+    component: BlockComponent,
+    variant: LayerVariant | None,
+) -> bool:
+    return (
+        variant is not None
+        and bool(variant.attention_class)
+        and component.attr_name in _VARIANT_ATTENTION_ATTRS
+    )
+
+
+def _component_uses_variant_ffn_class(
+    component: BlockComponent,
+    variant: LayerVariant | None,
+) -> bool:
+    if variant is None or not variant.ffn_class:
+        return False
+    if variant.ffn_attr and component.attr_name == variant.ffn_attr:
+        return True
+    return component.attr_name == "mlp" and component.class_name == variant.ffn_class
+
+
+def _shared_decoder_class_attr_names(spec: ArchitectureSpec, class_name: str) -> list[str]:
+    return [component.attr_name for component in spec.block_components if component.class_name == class_name]
 
 
 def _section_namespace_segment(
@@ -106,13 +133,14 @@ def _section_namespace_segment(
     if component.role == "norm":
         return _sanitize_namespace_segment(spec.norm_type or "RMSNorm")
     if variant is not None:
-        if component.role == "attention" and variant.attention_class:
-            return _sanitize_namespace_segment(variant.attention_class)
-        if component.role in {"moe", "ffn"}:
-            if variant.ffn_class:
-                return _sanitize_namespace_segment(variant.ffn_class)
-            if variant.ffn_attr:
-                return _sanitize_namespace_segment(variant.ffn_attr)
+        if _component_uses_variant_attention_class(component, variant):
+            return _sanitize_namespace_segment(variant.attention_class or "")
+        if _component_uses_variant_ffn_class(component, variant):
+            return _sanitize_namespace_segment(variant.ffn_class or "")
+        if variant.ffn_attr and component.attr_name == variant.ffn_attr:
+            return _sanitize_namespace_segment(variant.ffn_attr)
+    if component.class_name and len(_shared_decoder_class_attr_names(spec, component.class_name)) > 1:
+        return _sanitize_namespace_segment(component.attr_name)
     if component.class_name and component.role in {"attention", "moe", "ffn"}:
         return _sanitize_namespace_segment(component.class_name)
     return _sanitize_namespace_segment(component.attr_name)
@@ -170,7 +198,13 @@ def _detail_section_trees(spec: ArchitectureSpec) -> list[BlockNode]:
 def component_has_detail_section(component: BlockComponent, spec: ArchitectureSpec) -> bool:
     """True when this module expands into a detail subsection below the overview spine."""
     for tree in _detail_section_trees(spec):
-        if tree.attr_name == component.attr_name or tree.class_name == component.class_name:
+        if tree.attr_name == component.attr_name:
+            return True
+    basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
+    for _title, tree in architecture_section_trees(spec):
+        if tree.attr_name != component.attr_name:
+            continue
+        if subgraph_warrants_export(tree, basic_ops=basic_ops):
             return True
     return False
 

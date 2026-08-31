@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from visualizer.extract import architecture_section_trees
+from visualizer.ast_analyze import is_forward_operation, operation_display_label
 from visualizer.model_graph import (
     ModelGraph,
     ModelGraphNode,
@@ -839,6 +840,8 @@ def _node_attr_name(node: ModelGraphNode) -> str | None:
 
 def _operator_name(node: ModelGraphNode) -> str:
     attr = _node_attr_name(node)
+    if attr and is_forward_operation(attr):
+        return operation_display_label(node.label or "", class_name=node.metadata.get("class_name"))
     if attr:
         return attr
     if node.metadata.get("synthetic") == "@input":
@@ -854,8 +857,6 @@ def _operator_name(node: ModelGraphNode) -> str:
 
 def _export_operation_kind(node: ModelGraphNode) -> str:
     """Map exported operator kinds for shape-export consumers."""
-    if _operator_name(node).startswith("@op_"):
-        return "torch_functional"
     if node.operation is None:
         return "unknown"
     return node.operation.value

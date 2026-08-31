@@ -166,8 +166,19 @@ def _fetch_single_file(ref: GitHubRef) -> Path:
     return cache_file
 
 
-def fetch_github_source(ref: GitHubRef, *, cache_root: Path | None = None) -> Path:
+def fetch_github_source(
+    ref: GitHubRef,
+    *,
+    cache_root: Path | None = None,
+    source_policy=None,
+) -> Path:
     """Download or reuse cached GitHub repo contents. Returns repo root or file path."""
+    from visualizer.source_policy import SourcePolicy, get_source_policy
+
+    policy = source_policy or get_source_policy()
+    if isinstance(policy, SourcePolicy):
+        policy.require_github_repo_allowed(ref.owner, ref.repo)
+
     root = cache_root or CACHE_ROOT
     if ref.subpath.endswith(".py") and "/modeling" in ref.subpath.lower():
         return _fetch_single_file(ref)

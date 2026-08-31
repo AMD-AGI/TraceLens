@@ -28,6 +28,8 @@ from model_explorer_export.labels import (
 )
 from model_explorer_export.overview import (
     _DECODER_NORM_ATTRS,
+    _component_uses_variant_attention_class,
+    _component_uses_variant_ffn_class,
     _decoder_namespace,
     _display_label,
     _flat_spine_namespace,
@@ -626,7 +628,7 @@ def _resolve_section_tree_for_component(
     basic_ops: BasicOpFilter,
 ) -> tuple[str, BlockNode] | None:
     if variant is not None:
-        if component.role == "attention" and variant.attention_class:
+        if _component_uses_variant_attention_class(component, variant):
             resolved = _resolve_section_tree_by_class(
                 spec,
                 variant.attention_class,
@@ -634,15 +636,14 @@ def _resolve_section_tree_for_component(
             )
             if resolved is not None:
                 return resolved
-        if component.role in {"moe", "ffn"}:
-            if variant.ffn_class:
-                resolved = _resolve_section_tree_by_class(
-                    spec,
-                    variant.ffn_class,
-                    basic_ops=basic_ops,
-                )
-                if resolved is not None:
-                    return resolved
+        if _component_uses_variant_ffn_class(component, variant):
+            resolved = _resolve_section_tree_by_class(
+                spec,
+                variant.ffn_class,
+                basic_ops=basic_ops,
+            )
+            if resolved is not None:
+                return resolved
             if variant.ffn_attr:
                 resolved = _resolve_section_tree(
                     spec,
@@ -746,20 +747,22 @@ def _append_section(
     basic_ops: BasicOpFilter,
     previous_exits: list[str],
     variant: LayerVariant | None = None,
+    spine_namespace_prefix: str | None = None,
     group_node_attributes: dict[str, dict[str, str]] | None = None,
     shape_inferencer: ShapeInferencer | None = None,
 ) -> list[str]:
     if not component_has_detail_section(component, spec):
+        summary_namespace = spine_namespace_prefix or _flat_spine_namespace(
+            component,
+            namespace_prefix,
+            variant=variant,
+        )
         summary = _summary_node(
             id_prefix,
             _group_node_label(spec, component)
             if component.role == "norm"
             else _display_label(component, spec),
-            namespace=_flat_spine_namespace(
-                component,
-                namespace_prefix,
-                variant=variant,
-            ),
+            namespace=summary_namespace,
             component=component,
         )
         if previous_exits:
@@ -868,6 +871,13 @@ def _append_section(
 
     merged_nodes.extend(section_nodes)
     apply_kernel_frame_labels(section_nodes, group_node_attributes)
+    if group_node_attributes is not None:
+        group_node_attributes[namespace_prefix] = {
+            "label": _group_node_label(spec, component)
+            if component.role == "norm"
+            else _display_label(component, spec),
+            "operation": component.class_name or component.label or component.attr_name,
+        }
     if (
         group_node_attributes is not None
         and component.role == "norm"
@@ -889,6 +899,7 @@ def _append_variant_layer(
     namespace_prefix: str,
     basic_ops: BasicOpFilter,
     previous_exits: list[str],
+    group_node_configs: list[dict[str, Any]],
     group_node_attributes: dict[str, dict[str, str]],
     shape_inferencer: ShapeInferencer | None = None,
 ) -> list[str]:
@@ -901,6 +912,9 @@ def _append_variant_layer(
             variant=variant,
             namespace_prefix=namespace_prefix,
         )
+        group = _group_config_for_role(section_namespace, component.role)
+        if group:
+            group_node_configs.append(group)
         chain_exits = _append_section(
             merged_nodes,
             spec=spec,
@@ -910,6 +924,7 @@ def _append_variant_layer(
             basic_ops=basic_ops,
             previous_exits=chain_exits,
             variant=variant,
+            spine_namespace_prefix=namespace_prefix,
             group_node_attributes=group_node_attributes,
             shape_inferencer=shape_inferencer,
         )
@@ -956,6 +971,7 @@ def _append_decoder_layers(
                 namespace_prefix=variant_namespace,
                 basic_ops=basic_ops,
                 previous_exits=previous_exits,
+                group_node_configs=group_node_configs,
                 group_node_attributes=group_node_attributes,
                 shape_inferencer=shape_inferencer,
             )

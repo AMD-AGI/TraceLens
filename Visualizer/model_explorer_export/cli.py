@@ -46,7 +46,17 @@ def build_parser() -> argparse.ArgumentParser:
         "-g",
         help=(
             "Optional GitHub repo URL or github:owner/repo@ref:path for modeling source "
-            "when the HF repo does not ship modeling_*.py"
+            "when the HF repo does not ship modeling_*.py (repo must be whitelisted)"
+        ),
+    )
+    parser.add_argument(
+        "--allow-repo",
+        action="append",
+        default=[],
+        metavar="OWNER/REPO",
+        help=(
+            "Whitelist an extra GitHub repository for remote source introspection "
+            "(repeatable; huggingface/transformers is allowed by default)"
         ),
     )
     parser.add_argument(
@@ -184,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
             github=args.github,
             config_path=args.config_path,
             code_path=args.code_path,
+            allow_github_repos=args.allow_repo,
         )
         args.dump_ast.parent.mkdir(parents=True, exist_ok=True)
         args.dump_ast.write_text(ast_dump + "\n", encoding="utf-8")
@@ -200,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             detailed=True,
             basic_ops=basic_ops,
             require_code=True,
+            allow_github_repos=args.allow_repo,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"Error loading architecture: {exc}", file=sys.stderr)

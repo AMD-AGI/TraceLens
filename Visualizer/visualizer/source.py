@@ -13,6 +13,7 @@ from visualizer.github import (
     parse_github_url,
     python_source_priority,
 )
+from visualizer.source_policy import SourcePolicy, get_source_policy, set_source_policy
 
 MODELING_CANDIDATES = (
     "modeling_{model_type}.py",
@@ -157,13 +158,18 @@ def _config_model_types(config: dict[str, Any]) -> list[str]:
     return types
 
 
-def _transformers_github_modeling_file(model_types: list[str]) -> tuple[Path, str] | None:
+def _transformers_github_modeling_file(
+    model_types: list[str],
+    *,
+    source_policy: SourcePolicy | None = None,
+) -> tuple[Path, str] | None:
     """Fetch a transformers-native modeling file from GitHub, newest ref first."""
+    policy = source_policy or get_source_policy()
     for model_type in model_types:
         subpath = TRANSFORMERS_MODELING_SUBPATH.format(model_type=model_type)
         try:
             ref = parse_github_url(f"{TRANSFORMERS_GITHUB_SOURCE}:{subpath}")
-            path = fetch_github_source(ref)
+            path = fetch_github_source(ref, source_policy=policy)
         except Exception:
             continue
         if path.is_file():
@@ -190,10 +196,15 @@ def _dedupe_paths(files: list[Path]) -> list[Path]:
     return unique
 
 
-def resolve_github_files(github: str) -> tuple[list[Path], str]:
+def resolve_github_files(
+    github: str,
+    *,
+    source_policy: SourcePolicy | None = None,
+) -> tuple[list[Path], str]:
     """Fetch a GitHub repo or file and return modeling paths plus a source label."""
     ref = parse_github_url(github)
-    root = fetch_github_source(ref)
+    policy = source_policy or get_source_policy()
+    root = fetch_github_source(ref, source_policy=policy)
     label = ref.display
 
     if root.is_file():
@@ -214,8 +225,10 @@ def resolve_source_files(
     *,
     code_path: str | Path | None = None,
     github: str | None = None,
+    source_policy: SourcePolicy | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Return modeling Python files to analyze and human-readable source labels."""
+    policy = source_policy or get_source_policy()
     labels: list[str] = []
 
     if code_path is not None:
@@ -225,7 +238,7 @@ def resolve_source_files(
         return [path], [str(path)]
 
     if github:
-        files, label = resolve_github_files(github)
+        files, label = resolve_github_files(github, source_policy=policy)
         return files, [label]
 
     path = Path(source).expanduser() if source is not None else None
@@ -239,7 +252,7 @@ def resolve_source_files(
         labels.append(str(path.resolve()))
 
     if is_github_url(str(source)):
-        gh_files, gh_label = resolve_github_files(str(source))
+        gh_files, gh_label = resolve_github_files(str(source), source_policy=policy)
         return gh_files, [gh_label]
 
     model_id = None
@@ -285,7 +298,7 @@ def resolve_source_files(
                 labels.append(f"hf://{model_id}")
 
     if not _has_modeling_implementation(files):
-        upstream = _transformers_github_modeling_file(_config_model_types(config))
+        upstream = _transformers_github_modeling_file(_config_model_types(config), source_policy=policy)
         if upstream is not None:
             path, label = upstream
             files.append(path)

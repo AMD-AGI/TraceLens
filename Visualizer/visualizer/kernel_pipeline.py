@@ -331,6 +331,10 @@ def _module_file_path(module: str) -> Path | None:
     if repo is None:
         return None
     org_repo, branch = repo
+    owner, repo_name = org_repo.split("/", 1)
+    from visualizer.source_policy import get_source_policy
+
+    get_source_policy().require_github_repo_allowed(owner, repo_name)
     relative = Path(*module.split(".")).with_suffix(".py")
     url = f"https://raw.githubusercontent.com/{org_repo}/{branch}/{relative.as_posix()}"
     try:

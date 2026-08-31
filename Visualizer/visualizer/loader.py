@@ -41,6 +41,7 @@ def load_model_spec(
     detailed: bool = True,
     basic_ops: BasicOpFilter | None = None,
     require_code: bool = False,
+    allow_github_repos: list[str] | None = None,
 ) -> ArchitectureSpec:
     """Load architecture metadata for Model Explorer export.
 
@@ -65,6 +66,7 @@ def load_model_spec(
         analyze_code=analyze_code,
         detailed=detailed,
         basic_ops=resolved_basic_ops,
+        allow_github_repos=allow_github_repos,
     )
 
     if require_code and analyze_code and not spec.class_registry:

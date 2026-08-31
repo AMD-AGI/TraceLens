@@ -19,7 +19,9 @@ from visualizer.ast_analyze import (
     functional_display_label,
     is_functional_synthetic,
     is_forward_operation,
+    is_forward_operation,
     is_positional_synthetic,
+    operation_display_label,
     positional_display_label,
     is_kernel_pipeline_step,
     kernel_kwarg_ports,
@@ -32,7 +34,7 @@ from visualizer.ast_analyze import (
 from visualizer.basic_ops import BasicOpFilter, introspect_is_modeling_operation, is_fused_silu_mul_class, resolve_is_basic
 from visualizer.blocks import BlockComponent, input_sources_from_forward_sequence, upstream_input_sources
 
-_SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "getattr"})
+_SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "Buffer", "getattr"})
 
 
 def is_method_wrapper(node: BlockNode) -> bool:
@@ -1664,7 +1666,16 @@ def build_block_node(
 
     cls = registry[class_name]
     parsed_steps = [step for step in cls.forward_calls if step not in _SKIP_INIT_CLASS_NAMES]
-    forward_steps = effective_forward_calls(cls) if infer_init_steps else parsed_steps
+    if infer_init_steps:
+        if cls.forward_operations:
+            forward_steps = parsed_steps
+        elif not parsed_steps:
+            forward_steps = effective_forward_calls(cls)
+        else:
+            uses_init_modules = any(step in cls.init_assignments for step in parsed_steps)
+            forward_steps = parsed_steps if not uses_init_modules else effective_forward_calls(cls)
+    else:
+        forward_steps = parsed_steps
 
     if not forward_steps:
         return BlockNode(
@@ -1722,7 +1733,7 @@ def build_block_node(
                     class_name=operation.class_name,
                     forward_order=child_order,
                     details=list(operation.details),
-                    label=operation.label,
+                    label=operation_display_label(operation.label, class_name=operation.class_name),
                     basic=True,
                     operation_predecessors=list(operation.predecessors),
                     external_inputs=list(operation.external_inputs),
