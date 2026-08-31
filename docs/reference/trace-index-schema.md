@@ -106,7 +106,8 @@ The following table lists the columns in `unified_perf_rows`.
 ## The op_kernels table
 
 One row per kernel exploded from `kernel_details_summary` on a unified row.
-This table has no `trace_id`; join `unified_perf_rows` to reach `traces`.
+Columns match the keys in that dict. This table has no `trace_id`; join
+`unified_perf_rows` to reach `traces`.
 
 The following table lists the columns in `op_kernels`.
 
@@ -114,9 +115,7 @@ The following table lists the columns in `op_kernels`.
 |---|---|---|
 | `id` | INTEGER | Primary key. |
 | `unified_row_id` | INTEGER | Foreign key to `unified_perf_rows.id`. `NOT NULL`. `ON DELETE CASCADE`. |
-| `kernel_name` | TEXT | Kernel name. `NOT NULL`. |
-| `parent_op_name` | TEXT | Name of the parent unified row. |
-| `op_category` | TEXT | Category of the parent unified row. |
+| `name` | TEXT | Kernel name. `NOT NULL`. |
 | `stream` | INTEGER | GPU stream id from kernel details. |
 | `count` | INTEGER | Kernel launch count. |
 | `total_duration_us` | REAL | Total duration in microseconds. |
@@ -124,72 +123,78 @@ The following table lists the columns in `op_kernels`.
 | `median_duration_us` | REAL | Median duration in microseconds. |
 | `min_duration_us` | REAL | Minimum duration in microseconds. |
 | `max_duration_us` | REAL | Maximum duration in microseconds. |
-| `library` | TEXT | Library inferred from the kernel name (`Tensile`, `Triton`, `CK`, `RCCL/NCCL`), or `NULL`. |
-| `is_tensile` | INTEGER | `1` when the name looks like Tensile; default `0`. |
-| `is_transpose` | INTEGER | `1` when the name looks like a transpose or permute; default `0`. |
-| `is_layout_conversion` | INTEGER | `1` when the name looks like a layout conversion; default `0`. |
-| `details_json` | TEXT | Source kernel-detail dict as JSON. |
 
 ## The gemm_perf table
 
-GEMM shapes parsed from `perf_params` on a unified row. Primary key is
-`unified_row_id` (at most one GEMM satellite per unified row). Join
-`unified_perf_rows` to reach `traces`.
+GEMM `perf_params` on a unified row. Primary key is `unified_row_id` (at most
+one GEMM satellite per unified row). Join `unified_perf_rows` to reach
+`traces`. Identifiers that must keep JSON key case are quoted (`M`, `N`, `K`,
+`B`). Tuple or list values are stored as JSON text. TFLOPS stays on
+`unified_perf_rows`.
 
 The following table lists the columns in `gemm_perf`.
 
 | Column | Type | Description |
 |---|---|---|
 | `unified_row_id` | INTEGER | Primary key and foreign key to `unified_perf_rows.id`. `ON DELETE CASCADE`. |
-| `m` | INTEGER | `M` from `perf_params`. |
-| `n` | INTEGER | `N` from `perf_params`. |
-| `k` | INTEGER | `K` from `perf_params`. |
-| `batch` | INTEGER | `B` from `perf_params`. |
-| `dtype` | TEXT | `dtype_A_B` from `perf_params`, stringified. |
-| `transpose` | TEXT | `transpose` from `perf_params`, stringified. |
-| `tflops_mean` | REAL | Mean TFLOPS/s copied from the unified row. |
-| `tflops_median` | REAL | Median TFLOPS/s copied from the unified row. |
+| `"M"` | INTEGER | `M` from `perf_params`. |
+| `"N"` | INTEGER | `N` from `perf_params`. |
+| `"K"` | INTEGER | `K` from `perf_params`. |
+| `"B"` | INTEGER | `B` from `perf_params`. |
+| `bias` | INTEGER | `1` / `0` from `perf_params.bias`, or `NULL`. |
+| `stride_A` | TEXT | `stride_A` from `perf_params` as JSON. |
+| `stride_B` | TEXT | `stride_B` from `perf_params` as JSON. |
+| `dtype_A_B` | TEXT | `dtype_A_B` from `perf_params` as JSON. |
+| `transpose` | TEXT | `transpose` from `perf_params` as JSON. |
 
 ## The sdpa_perf table
 
-Attention shapes parsed from `perf_params` on a unified row. Primary key is
-`unified_row_id`. Join `unified_perf_rows` to reach `traces`.
+Attention `perf_params` on a unified row. Primary key is `unified_row_id`. Join
+`unified_perf_rows` to reach `traces`.
 
 The following table lists the columns in `sdpa_perf`.
 
 | Column | Type | Description |
 |---|---|---|
 | `unified_row_id` | INTEGER | Primary key and foreign key to `unified_perf_rows.id`. `ON DELETE CASCADE`. |
-| `batch` | INTEGER | `B` from `perf_params`. |
-| `heads` | INTEGER | `H_Q` from `perf_params`. |
-| `seq_q` | INTEGER | `N_Q` from `perf_params`. |
-| `seq_kv` | INTEGER | `N_KV` from `perf_params`. |
-| `head_dim` | INTEGER | `d_h_qk` from `perf_params`, or `d_h_v` if `d_h_qk` is missing. |
-| `dtype` | TEXT | `dtype_A_B` from `perf_params`, stringified. |
+| `"B"` | INTEGER | `B` from `perf_params`. |
+| `N_Q` | INTEGER | `N_Q` from `perf_params`. |
+| `H_Q` | INTEGER | `H_Q` from `perf_params`. |
+| `N_KV` | INTEGER | `N_KV` from `perf_params`. |
+| `H_KV` | INTEGER | `H_KV` from `perf_params`. |
+| `d_h_qk` | INTEGER | `d_h_qk` from `perf_params`. |
+| `d_h_v` | INTEGER | `d_h_v` from `perf_params`. |
+| `q_stride` | TEXT | `q_stride` from `perf_params` as JSON. |
+| `k_stride` | TEXT | `k_stride` from `perf_params` as JSON. |
+| `v_stride` | TEXT | `v_stride` from `perf_params` as JSON. |
+| `dropout` | REAL | `dropout` from `perf_params`. |
 | `causal` | INTEGER | `1` / `0` from `perf_params.causal`, or `NULL`. |
-| `tflops_mean` | REAL | Mean TFLOPS/s copied from the unified row. |
-| `tflops_median` | REAL | Median TFLOPS/s copied from the unified row. |
+| `flash_impl` | INTEGER | `1` / `0` from `perf_params.flash_impl`, or `NULL`. |
+| `dtype_A_B` | TEXT | `dtype_A_B` from `perf_params` as JSON. |
 
 ## The conv_perf table
 
-Convolution shapes parsed from `perf_params` on a unified row. Primary key is
-`unified_row_id`. Join `unified_perf_rows` to reach `traces`.
+Convolution `perf_params` on a unified row. Primary key is `unified_row_id`.
+Join `unified_perf_rows` to reach `traces`.
 
 The following table lists the columns in `conv_perf`.
 
 | Column | Type | Description |
 |---|---|---|
 | `unified_row_id` | INTEGER | Primary key and foreign key to `unified_perf_rows.id`. `ON DELETE CASCADE`. |
-| `conv_nd` | TEXT | `convNd` from `perf_params`. |
-| `input_shape_json` | TEXT | `input_shape` as JSON. |
-| `filter_shape_json` | TEXT | `filter_shape` as JSON. |
-| `input_channels` | INTEGER | Channel count from `input_shape[1]`. |
-| `output_channels` | INTEGER | Output channels from `filter_shape[0]`. |
-| `groups` | INTEGER | `groups` from `perf_params`, or `1` when missing. |
-| `kernel_h` | INTEGER | Kernel height from `filter_shape[-2]`. |
-| `kernel_w` | INTEGER | Kernel width from `filter_shape[-1]`. |
-| `is_depthwise` | INTEGER | `1` when groups equal input channels, the filter is one channel per group, and output channels are a multiple of input channels. |
-| `is_transposed_conv` | INTEGER | `1` / `0` from `perf_params.transposed_conv`, or `NULL`. |
+| `"convNd"` | TEXT | `convNd` from `perf_params`. |
+| `input_shape` | TEXT | `input_shape` from `perf_params` as JSON. |
+| `filter_shape` | TEXT | `filter_shape` from `perf_params` as JSON. |
+| `dtype_input_weight` | TEXT | `dtype_input_weight` from `perf_params` as JSON. |
+| `input_stride` | TEXT | `input_stride` from `perf_params` as JSON. |
+| `weight_stride` | TEXT | `weight_stride` from `perf_params` as JSON. |
+| `bias` | INTEGER | `1` / `0` from `perf_params.bias`, or `NULL`. |
+| `stride` | TEXT | `stride` from `perf_params` as JSON. |
+| `padding` | TEXT | `padding` from `perf_params` as JSON. |
+| `dilation` | TEXT | `dilation` from `perf_params` as JSON. |
+| `transposed_conv` | INTEGER | `1` / `0` from `perf_params.transposed_conv`, or `NULL`. |
+| `output_padding` | TEXT | `output_padding` from `perf_params` as JSON. |
+| `groups` | INTEGER | `groups` from `perf_params`. |
 
 ## The op_category_rows table
 
@@ -247,7 +252,7 @@ The following table lists the columns in `trace_search_FTS5`.
 | Column | Type | Description |
 |---|---|---|
 | `trace_id` | UNINDEXED | Trace id of the indexed document. Join to `traces.id`. |
-| `kind` | UNINDEXED | Document kind: `trace`, `op`, `kernel`, `category`, or `timeline`. |
+| `kind` | UNINDEXED | Document kind: `trace`, `op`, `kernel`, or `category`. |
 | `text` | TEXT | Searchable text for that kind. |
 
 ## Related topics

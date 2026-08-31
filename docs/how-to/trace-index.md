@@ -82,8 +82,7 @@ with `--report-dir`.
 
 ## Search and query
 
-Full-text search (FTS) over indexed ops, kernels, categories, and timeline
-labels:
+Full-text search (FTS) over indexed traces, ops, kernels, and categories:
 
 ```bash
 TraceLens_trace_index --backend sqlite --db trace_index.sqlite search attention
@@ -131,18 +130,18 @@ erDiagram
 | `traces` | One row per indexed trace |
 | `report_imports` | Import history for TraceLens CSV report directories |
 | `unified_perf_rows` | Rows from `unified_perf_summary.csv`. `perf_params_json` and `kernel_details_json` are parsed JSON, not the Python `repr` from the CSV |
-| `op_kernels` | One row per kernel exploded from `kernel_details_summary` on a unified row, with `unified_row_id` and Tensile / layout flags |
-| `gemm_perf` | GEMM shapes (`M` / `N` / `K` / batch / dtype / transpose) parsed from `perf_params` |
-| `sdpa_perf` | Attention shapes (`B`, `H_Q`, `N_Q`, `N_KV`, head dim, causal) parsed from `perf_params` |
-| `conv_perf` | Convolution shapes, groups, and depthwise / transposed flags parsed from `perf_params` |
+| `op_kernels` | One row per kernel exploded from `kernel_details_summary` on a unified row |
+| `gemm_perf` | GEMM `perf_params` (`M` / `N` / `K` / `B`, bias, strides, dtype, transpose) |
+| `sdpa_perf` | Attention `perf_params` (`B`, `N_Q`, `H_Q`, `N_KV`, `d_h_qk`, causal) |
+| `conv_perf` | Convolution `perf_params` (`convNd`, shapes, groups, stride, padding) |
 | `op_category_rows` | Rows from `ops_summary_by_category.csv` |
 | `gpu_timeline_rows` | Rows from `gpu_timeline.csv` |
 | `trace_summary` | Per-trace summary metrics derived during import |
-| `trace_search_FTS5` | Full-text search over traces, ops, kernels, categories, and timeline labels |
+| `trace_search_FTS5` | Full-text search over traces, ops, kernels, and categories |
 
 Query GEMM / SDPA / convolution shapes from the satellite tables, or with
 `json_extract` on the parsed JSON columns. For example
-`SELECT m, n, k FROM gemm_perf` or
+`SELECT "M", "N", "K" FROM gemm_perf` or
 `SELECT json_extract(perf_params_json, '$.M') FROM unified_perf_rows`.
 
 ## Example queries
@@ -154,13 +153,25 @@ with `sqlite-sql` or the HTTP server, and `JOIN traces` to get the file to open.
 ### Do any traces have depthwise convolution?
 
 ```sql
-SELECT t.name, c.input_channels, c.output_channels, c.groups,
-       c.kernel_h, c.kernel_w, COUNT(*) AS rows
+SELECT t.name,
+       json_extract(c.input_shape, '$[1]') AS Cin,
+       json_extract(c.filter_shape, '$[0]') AS Cout,
+       c.groups,
+       json_extract(c.filter_shape, '$[2]') AS Kh,
+       json_extract(c.filter_shape, '$[3]') AS Kw,
+       COUNT(*) AS rows
 FROM conv_perf c
 JOIN unified_perf_rows u ON u.id = c.unified_row_id
 JOIN traces t ON t.id = u.trace_id
-WHERE c.is_depthwise = 1 AND c.groups > 1
-GROUP BY t.id, c.input_channels, c.output_channels, c.groups, c.kernel_h, c.kernel_w
+WHERE c.groups > 1
+  AND json_extract(c.input_shape, '$[1]') = c.groups
+  AND json_extract(c.filter_shape, '$[1]') = 1
+GROUP BY t.id,
+         json_extract(c.input_shape, '$[1]'),
+         json_extract(c.filter_shape, '$[0]'),
+         c.groups,
+         json_extract(c.filter_shape, '$[2]'),
+         json_extract(c.filter_shape, '$[3]')
 ORDER BY rows DESC;
 ```
 
@@ -179,24 +190,24 @@ trace.
 ### What are the longest attention sequences in the catalog?
 
 ```sql
-SELECT t.name, p.seq_q, p.seq_kv, p.heads, p.head_dim, p.dtype
+SELECT t.name, p.N_Q, p.N_KV, p.H_Q, p.d_h_qk
 FROM sdpa_perf p
 JOIN unified_perf_rows u ON u.id = p.unified_row_id
 JOIN traces t ON t.id = u.trace_id
-ORDER BY p.seq_q DESC
+ORDER BY p.N_Q DESC
 LIMIT 8;
 ```
 
-| trace | seq_q | seq_kv | heads | d | dtype |
-|---|---:|---:|---:|---:|---|
-| `video_traces_rank_5_step_3.json` | 118872 | 118809 | 3 | 128 | BF16 |
-| `video_traces_rank_2_step_3.json` | 118872 | 118809 | 3 | 128 | BF16 |
-| `video_traces_rank_7_step_3.json` | 118872 | 118809 | 3 | 128 | BF16 |
-| `video_traces_rank_6_step_3.json` | 118872 | 118809 | 3 | 128 | BF16 |
+| trace | N_Q | N_KV | H_Q | d_h_qk |
+|---|---:|---:|---:|---:|
+| `video_traces_rank_5_step_3.json` | 118872 | 118809 | 3 | 128 |
+| `video_traces_rank_2_step_3.json` | 118872 | 118809 | 3 | 128 |
+| `video_traces_rank_7_step_3.json` | 118872 | 118809 | 3 | 128 |
+| `video_traces_rank_6_step_3.json` | 118872 | 118809 | 3 | 128 |
 
-The longest attention here is a video/DiT-style shape: sequence ≈ 119k, 3 heads,
-head dim 128, BF16 — not LLM decode. Because `seq_q` / `seq_kv` / `heads` /
-`head_dim` are columns, "find long-context attention" is a range query.
+The longest attention here is a video/DiT-style shape: `N_Q` ≈ 119k, 3 heads
+(`H_Q`), `d_h_qk` 128, BF16 — not LLM decode. Because `N_Q` / `N_KV` / `H_Q` /
+`d_h_qk` are columns, finding long-context attention is a range query.
 
 ## Serve read-only SQL
 

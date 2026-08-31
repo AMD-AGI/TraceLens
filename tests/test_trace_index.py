@@ -217,8 +217,10 @@ def test_trace_index_append_from_report_and_search(tmp_path):
         "kernel_time_sum_us": 123.5,
     }
 
-    gemm = execute_read_query(db_path, "SELECT m, n, k, batch FROM gemm_perf")
-    assert gemm == [{"m": 128, "n": 64, "k": 32, "batch": 1}]
+    gemm = execute_read_query(
+        db_path, 'SELECT "M", "N", "K", "B" FROM gemm_perf'
+    )
+    assert gemm == [{"M": 128, "N": 64, "K": 32, "B": 1}]
 
     params = execute_read_query(
         db_path,
@@ -229,24 +231,27 @@ def test_trace_index_append_from_report_and_search(tmp_path):
 
     kernels = execute_read_query(
         db_path,
-        "SELECT kernel_name, unified_row_id, library, stream, parent_op_name "
-        "FROM op_kernels",
+        "SELECT name, unified_row_id, stream FROM op_kernels",
     )
-    assert kernels[0]["kernel_name"] == "Cijk_test_kernel"
+    assert kernels[0]["name"] == "Cijk_test_kernel"
     assert kernels[0]["unified_row_id"] is not None
-    assert kernels[0]["library"] == "Tensile"
     assert kernels[0]["stream"] == 0
-    assert kernels[0]["parent_op_name"] == "aten::mm"
+    kernel_cols = table_column_names(db_path, "op_kernels")
+    assert "library" not in kernel_cols
+    assert "parent_op_name" not in kernel_cols
+    assert "kernel_name" not in kernel_cols
 
     sdpa = execute_read_query(
-        db_path, "SELECT seq_q, seq_kv, head_dim, causal FROM sdpa_perf"
+        db_path, "SELECT N_Q, N_KV, d_h_qk, causal FROM sdpa_perf"
     )
-    assert sdpa == [{"seq_q": 128, "seq_kv": 128, "head_dim": 64, "causal": 1}]
+    assert sdpa == [{"N_Q": 128, "N_KV": 128, "d_h_qk": 64, "causal": 1}]
 
     conv = execute_read_query(
-        db_path, "SELECT groups, is_depthwise, is_transposed_conv FROM conv_perf"
+        db_path, "SELECT groups, transposed_conv, filter_shape FROM conv_perf"
     )
-    assert conv == [{"groups": 32, "is_depthwise": 1, "is_transposed_conv": 0}]
+    assert conv[0]["groups"] == 32
+    assert conv[0]["transposed_conv"] == 0
+    assert json.loads(conv[0]["filter_shape"]) == [32, 1, 3, 3]
 
     for table in ("op_kernels", "gemm_perf", "sdpa_perf", "conv_perf"):
         cols = table_column_names(db_path, table)
@@ -293,27 +298,26 @@ def test_import_real_training_report_maps_kernel_stream_and_times(tmp_path):
 
     kernels = execute_read_query(
         db_path,
-        "SELECT k.kernel_name, k.stream, k.total_duration_us, k.unified_row_id, "
-        "k.library FROM op_kernels k "
+        "SELECT k.name, k.stream, k.total_duration_us, k.unified_row_id "
+        "FROM op_kernels k "
         "JOIN unified_perf_rows u ON u.id = k.unified_row_id "
-        "WHERE k.kernel_name LIKE 'Cijk%' LIMIT 1",
+        "WHERE k.name LIKE 'Cijk%' LIMIT 1",
     )
     assert kernels
     assert kernels[0]["stream"] == 0
     assert kernels[0]["total_duration_us"] > 0
     assert kernels[0]["unified_row_id"] is not None
-    assert kernels[0]["library"] == "Tensile"
 
     gemm = execute_read_query(
         db_path,
-        "SELECT g.m, g.n, g.k FROM gemm_perf g "
+        'SELECT g."M", g."N", g."K" FROM gemm_perf g '
         "JOIN unified_perf_rows u ON u.id = g.unified_row_id "
-        "WHERE u.name = 'aten::mm' AND g.n = 2816 AND g.k = 1024 LIMIT 1",
+        'WHERE u.name = \'aten::mm\' AND g."N" = 2816 AND g."K" = 1024 LIMIT 1',
     )
     assert gemm
-    assert gemm[0]["m"] == 8944
-    assert gemm[0]["n"] == 2816
-    assert gemm[0]["k"] == 1024
+    assert gemm[0]["M"] == 8944
+    assert gemm[0]["N"] == 2816
+    assert gemm[0]["K"] == 1024
 
     params = execute_read_query(
         db_path,
@@ -324,10 +328,10 @@ def test_import_real_training_report_maps_kernel_stream_and_times(tmp_path):
 
     sdpa = execute_read_query(
         db_path,
-        "SELECT seq_q, seq_kv, head_dim FROM sdpa_perf LIMIT 1",
+        "SELECT N_Q, N_KV, d_h_qk FROM sdpa_perf LIMIT 1",
     )
     assert sdpa
-    assert sdpa[0]["seq_q"] is not None
+    assert sdpa[0]["N_Q"] is not None
 
     categories = execute_read_query(
         db_path,

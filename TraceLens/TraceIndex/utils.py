@@ -14,7 +14,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 
 def utc_now() -> str:
@@ -163,29 +163,6 @@ def to_json(value: Any) -> Optional[str]:
     if value is None:
         return None
     return json.dumps(json_safe(value), sort_keys=True)
-
-
-def kernel_flags(name: str) -> Tuple[Optional[str], int, int, int]:
-    low = name.lower()
-    is_tensile = int("cijk" in low or "tensile" in low)
-    is_transpose = int("transpose" in low or "permute" in low)
-    is_layout = int(
-        is_transpose
-        or "contiguous" in low
-        or "copy" in low
-        or "cast" in low
-        or "convert" in low
-    )
-    library = None
-    if is_tensile:
-        library = "Tensile"
-    elif "triton" in low:
-        library = "Triton"
-    elif "ck" in low or "composable" in low:
-        library = "CK"
-    elif "nccl" in low or "rccl" in low:
-        library = "RCCL/NCCL"
-    return library, is_tensile, is_transpose, is_layout
 
 
 SKIP_PARTS_EXACT = {

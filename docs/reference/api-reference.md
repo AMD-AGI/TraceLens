@@ -190,7 +190,7 @@ Global options: `--backend` (default `sqlite`) and `--db` (default
 |---------|-------------|
 | `append --trace-path PATH` | Append one trace. Pass `--report-dir` to load an existing CSV report; otherwise generate a training PyTorch report. |
 | `build --traces-file FILE` | Create or open the catalog and append a batch of traces (one path per line). Repeatable `--trace-path` is also accepted. |
-| `search TERMS` | Full-text search over indexed ops, kernels, categories, and timeline labels. |
+| `search TERMS` | Full-text search over indexed traces, ops, kernels, and categories. |
 | `sqlite-sql SQL` | Run one read-only SQL statement. |
 | `serve` | HTTP SQL endpoint on `127.0.0.1:8765` by default. |
 

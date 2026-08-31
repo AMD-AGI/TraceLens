@@ -21,7 +21,6 @@ from TraceLens.TraceIndex.utils import (
     as_optional_bool_int,
     as_text,
     first_value,
-    kernel_flags,
     parse_repr,
     search_text,
     to_json,
@@ -122,69 +121,66 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             CREATE TABLE IF NOT EXISTS op_kernels (
                 id INTEGER PRIMARY KEY,
                 unified_row_id INTEGER NOT NULL REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
-                kernel_name TEXT NOT NULL,
-                parent_op_name TEXT,
-                op_category TEXT,
+                name TEXT NOT NULL,
                 stream INTEGER,
                 count INTEGER,
                 total_duration_us REAL,
                 mean_duration_us REAL,
                 median_duration_us REAL,
                 min_duration_us REAL,
-                max_duration_us REAL,
-                library TEXT,
-                is_tensile INTEGER NOT NULL DEFAULT 0,
-                is_transpose INTEGER NOT NULL DEFAULT 0,
-                is_layout_conversion INTEGER NOT NULL DEFAULT 0,
-                details_json TEXT
+                max_duration_us REAL
             );
 
             CREATE INDEX IF NOT EXISTS idx_trace_index_op_kernels_unified ON op_kernels(unified_row_id);
-            CREATE INDEX IF NOT EXISTS idx_trace_index_op_kernels_name ON op_kernels(kernel_name);
-            CREATE INDEX IF NOT EXISTS idx_trace_index_op_kernels_tensile ON op_kernels(is_tensile);
+            CREATE INDEX IF NOT EXISTS idx_trace_index_op_kernels_name ON op_kernels(name);
 
             CREATE TABLE IF NOT EXISTS gemm_perf (
                 unified_row_id INTEGER PRIMARY KEY REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
-                m INTEGER,
-                n INTEGER,
-                k INTEGER,
-                batch INTEGER,
-                dtype TEXT,
-                transpose TEXT,
-                tflops_mean REAL,
-                tflops_median REAL
+                "M" INTEGER,
+                "N" INTEGER,
+                "K" INTEGER,
+                "B" INTEGER,
+                bias INTEGER,
+                stride_A TEXT,
+                stride_B TEXT,
+                dtype_A_B TEXT,
+                transpose TEXT
             );
-
-            CREATE INDEX IF NOT EXISTS idx_trace_index_gemm_tflops ON gemm_perf(tflops_mean);
 
             CREATE TABLE IF NOT EXISTS sdpa_perf (
                 unified_row_id INTEGER PRIMARY KEY REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
-                batch INTEGER,
-                heads INTEGER,
-                seq_q INTEGER,
-                seq_kv INTEGER,
-                head_dim INTEGER,
-                dtype TEXT,
+                "B" INTEGER,
+                N_Q INTEGER,
+                H_Q INTEGER,
+                N_KV INTEGER,
+                H_KV INTEGER,
+                d_h_qk INTEGER,
+                d_h_v INTEGER,
+                q_stride TEXT,
+                k_stride TEXT,
+                v_stride TEXT,
+                dropout REAL,
                 causal INTEGER,
-                tflops_mean REAL,
-                tflops_median REAL
+                flash_impl INTEGER,
+                dtype_A_B TEXT
             );
 
             CREATE TABLE IF NOT EXISTS conv_perf (
                 unified_row_id INTEGER PRIMARY KEY REFERENCES unified_perf_rows(id) ON DELETE CASCADE,
-                conv_nd TEXT,
-                input_shape_json TEXT,
-                filter_shape_json TEXT,
-                input_channels INTEGER,
-                output_channels INTEGER,
-                groups INTEGER,
-                kernel_h INTEGER,
-                kernel_w INTEGER,
-                is_depthwise INTEGER,
-                is_transposed_conv INTEGER
+                "convNd" TEXT,
+                input_shape TEXT,
+                filter_shape TEXT,
+                dtype_input_weight TEXT,
+                input_stride TEXT,
+                weight_stride TEXT,
+                bias INTEGER,
+                stride TEXT,
+                padding TEXT,
+                dilation TEXT,
+                transposed_conv INTEGER,
+                output_padding TEXT,
+                groups INTEGER
             );
-
-            CREATE INDEX IF NOT EXISTS idx_trace_index_conv_depthwise ON conv_perf(is_depthwise);
 
             CREATE TABLE IF NOT EXISTS op_category_rows (
                 id INTEGER PRIMARY KEY,
@@ -528,11 +524,9 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 ),
             )
             unified_row_id = int(cursor.lastrowid)
-            self._import_kernels_from_details(
-                trace_id, unified_row_id, name, op_category, kernel_details
-            )
-            self._maybe_insert_gemm(unified_row_id, params, tflops_mean, tflops_median)
-            self._maybe_insert_sdpa(unified_row_id, params, tflops_mean, tflops_median)
+            self._import_kernels_from_details(trace_id, unified_row_id, kernel_details)
+            self._maybe_insert_gemm(unified_row_id, params)
+            self._maybe_insert_sdpa(unified_row_id, params)
             self._maybe_insert_conv(unified_row_id, params)
             self._insert_search(
                 trace_id,
@@ -551,8 +545,6 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         self,
         trace_id: int,
         unified_row_id: int,
-        parent_op_name: Optional[str],
-        op_category: Optional[str],
         kernel_details: Any,
     ) -> None:
         if not isinstance(kernel_details, list):
@@ -560,25 +552,21 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         for detail in kernel_details:
             if not isinstance(detail, dict):
                 continue
-            kernel_name = as_text(detail.get("name") or detail.get("Kernel name"))
-            if not kernel_name:
+            name = as_text(detail.get("name") or detail.get("Kernel name"))
+            if not name:
                 continue
-            library, is_tensile, is_transpose, is_layout = kernel_flags(kernel_name)
             self.conn.execute(
                 """
                 INSERT INTO op_kernels(
-                    unified_row_id, kernel_name, parent_op_name, op_category,
-                    stream, count, total_duration_us, mean_duration_us,
-                    median_duration_us, min_duration_us, max_duration_us, library,
-                    is_tensile, is_transpose, is_layout_conversion, details_json
+                    unified_row_id, name, stream, count,
+                    total_duration_us, mean_duration_us,
+                    median_duration_us, min_duration_us, max_duration_us
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     unified_row_id,
-                    kernel_name,
-                    parent_op_name,
-                    op_category,
+                    name,
                     as_int(detail.get("stream")),
                     as_int(detail.get("count")),
                     as_float(detail.get("total_duration_us")),
@@ -586,25 +574,14 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                     as_float(detail.get("median_duration_us")),
                     as_float(detail.get("min_duration_us")),
                     as_float(detail.get("max_duration_us")),
-                    library,
-                    is_tensile,
-                    is_transpose,
-                    is_layout,
-                    to_json(detail),
                 ),
             )
-            self._insert_search(
-                trace_id,
-                "kernel",
-                [kernel_name, library, parent_op_name, op_category],
-            )
+            self._insert_search(trace_id, "kernel", [name])
 
     def _maybe_insert_gemm(
         self,
         unified_row_id: int,
         params: Any,
-        tflops_mean: Optional[float],
-        tflops_median: Optional[float],
     ) -> None:
         if not isinstance(params, dict):
             return
@@ -613,10 +590,9 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         self.conn.execute(
             """
             INSERT OR REPLACE INTO gemm_perf(
-                unified_row_id, m, n, k, batch, dtype, transpose,
-                tflops_mean, tflops_median
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                unified_row_id, "M", "N", "K", "B", bias,
+                stride_A, stride_B, dtype_A_B, transpose
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 unified_row_id,
@@ -624,18 +600,11 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 as_int(params.get("N")),
                 as_int(params.get("K")),
                 as_int(params.get("B")),
-                (
-                    str(params.get("dtype_A_B"))
-                    if params.get("dtype_A_B") is not None
-                    else None
-                ),
-                (
-                    str(params.get("transpose"))
-                    if params.get("transpose") is not None
-                    else None
-                ),
-                tflops_mean,
-                tflops_median,
+                as_optional_bool_int(params.get("bias")),
+                to_json(params.get("stride_A")),
+                to_json(params.get("stride_B")),
+                to_json(params.get("dtype_A_B")),
+                to_json(params.get("transpose")),
             ),
         )
 
@@ -643,8 +612,6 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         self,
         unified_row_id: int,
         params: Any,
-        tflops_mean: Optional[float],
-        tflops_median: Optional[float],
     ) -> None:
         if not isinstance(params, dict):
             return
@@ -653,26 +620,26 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         self.conn.execute(
             """
             INSERT OR REPLACE INTO sdpa_perf(
-                unified_row_id, batch, heads, seq_q, seq_kv,
-                head_dim, dtype, causal, tflops_mean, tflops_median
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                unified_row_id, "B", N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v,
+                q_stride, k_stride, v_stride, dropout, causal, flash_impl, dtype_A_B
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 unified_row_id,
                 as_int(params.get("B")),
-                as_int(params.get("H_Q")),
                 as_int(params.get("N_Q")),
+                as_int(params.get("H_Q")),
                 as_int(params.get("N_KV")),
-                as_int(params.get("d_h_qk") or params.get("d_h_v")),
-                (
-                    str(params.get("dtype_A_B"))
-                    if params.get("dtype_A_B") is not None
-                    else None
-                ),
+                as_int(params.get("H_KV")),
+                as_int(params.get("d_h_qk")),
+                as_int(params.get("d_h_v")),
+                to_json(params.get("q_stride")),
+                to_json(params.get("k_stride")),
+                to_json(params.get("v_stride")),
+                as_float(params.get("dropout")),
                 as_optional_bool_int(params.get("causal")),
-                tflops_mean,
-                tflops_median,
+                as_optional_bool_int(params.get("flash_impl")),
+                to_json(params.get("dtype_A_B")),
             ),
         )
 
@@ -685,50 +652,29 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             return
         if "convNd" not in params and "filter_shape" not in params:
             return
-        input_shape = params.get("input_shape")
-        filter_shape = params.get("filter_shape")
-        groups = as_int(params.get("groups")) or 1
-        input_channels = None
-        output_channels = None
-        kernel_h = None
-        kernel_w = None
-        if isinstance(input_shape, (list, tuple)) and len(input_shape) >= 2:
-            input_channels = as_int(input_shape[1])
-        if isinstance(filter_shape, (list, tuple)) and len(filter_shape) >= 4:
-            output_channels = as_int(filter_shape[0])
-            kernel_h = as_int(filter_shape[-2])
-            kernel_w = as_int(filter_shape[-1])
-        filter_c_per_group = None
-        if isinstance(filter_shape, (list, tuple)) and len(filter_shape) >= 2:
-            filter_c_per_group = as_int(filter_shape[1])
-        is_depthwise = int(
-            bool(input_channels)
-            and groups == input_channels
-            and filter_c_per_group == 1
-            and bool(output_channels)
-            and output_channels % input_channels == 0
-        )
         self.conn.execute(
             """
             INSERT OR REPLACE INTO conv_perf(
-                unified_row_id, conv_nd, input_shape_json, filter_shape_json,
-                input_channels, output_channels, groups, kernel_h, kernel_w,
-                is_depthwise, is_transposed_conv
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                unified_row_id, "convNd", input_shape, filter_shape,
+                dtype_input_weight, input_stride, weight_stride, bias,
+                stride, padding, dilation, transposed_conv, output_padding, groups
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 unified_row_id,
-                params.get("convNd"),
-                to_json(input_shape),
-                to_json(filter_shape),
-                input_channels,
-                output_channels,
-                groups,
-                kernel_h,
-                kernel_w,
-                is_depthwise,
+                as_text(params.get("convNd")),
+                to_json(params.get("input_shape")),
+                to_json(params.get("filter_shape")),
+                to_json(params.get("dtype_input_weight")),
+                to_json(params.get("input_stride")),
+                to_json(params.get("weight_stride")),
+                as_optional_bool_int(params.get("bias")),
+                to_json(params.get("stride")),
+                to_json(params.get("padding")),
+                to_json(params.get("dilation")),
                 as_optional_bool_int(params.get("transposed_conv")),
+                to_json(params.get("output_padding")),
+                as_int(params.get("groups")),
             ),
         )
 
@@ -811,5 +757,4 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                     json.dumps(row, sort_keys=True),
                 ),
             )
-            self._insert_search(trace_id, "timeline", [metric_type])
         return total_duration_us
