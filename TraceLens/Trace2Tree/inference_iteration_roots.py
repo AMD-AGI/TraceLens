@@ -36,10 +36,6 @@ PYTHON_TIER = "python_function"
 GRAPH_LAUNCH_TIER = "graph_launch"
 GRAPH_LAUNCH_NAMES = {"hipGraphLaunch", "cudaGraphLaunch"}
 
-PERIOD_EXACT = "exact"
-PERIOD_INTEGER_RATIO = "integer_ratio"
-PERIOD_CONFLICT = "conflict"
-
 # Branch-descent tier: walk down the call tree until a frame's own children form
 # a repeating family whose per-iteration windows account for ~all the GPU work.
 BRANCH_DESCENT_TIER = "branch_descent"
@@ -49,14 +45,6 @@ GPU_KERNEL_CATS = ("kernel", "gpu_memcpy", "gpu_memset")
 BRANCH_COVERAGE_GATE = 0.95
 # Bound the descent so a pathological tree cannot walk forever / explode a level.
 BRANCH_MAX_NODES = 200000
-
-# --- temporary path-usage instrumentation (which detection branches fire) -----
-PATH_HITS: Counter = Counter()
-
-
-def _hit(name: str) -> None:
-    """Record that a named detection branch executed (dead-path tracking)."""
-    PATH_HITS[name] += 1
 
 
 @dataclass
@@ -189,22 +177,6 @@ def find_period_candidates(
     return _drop_multiples(sorted(found, key=lambda c: c.rank))
 
 
-def compare_periods(a: Optional[int], b: Optional[int]) -> Tuple[str, Optional[int]]:
-    """Whether two independently detected periods agree.
-
-    Differing by an exact integer factor means the same loop at different
-    granularities -- a confirmation, not a conflict.
-    """
-    if not a or not b:
-        return PERIOD_CONFLICT, None
-    low, high = min(a, b), max(a, b)
-    if low == high:
-        return PERIOD_EXACT, 1
-    if high % low == 0:
-        return PERIOD_INTEGER_RATIO, high // low
-    return PERIOD_CONFLICT, None
-
-
 def _find_repeating_period(
     names: List[str], min_repeats: int = 3
 ) -> Tuple[Optional[int], Optional[List[str]], Optional[int]]:
@@ -241,19 +213,43 @@ def _detect_sibling_roots(
 
     blocks = (len(ordered) - start) // period
     sibling_roots = []
+    blocked: List[dict] = []
     for index in range(blocks):
         block = ordered[start + index * period : start + (index + 1) * period]
         first, last = block[0], block[-1]
         event = dict(first)
         event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
         sibling_roots.append(event)
+        blocked.extend(block)
     if not sibling_roots:
         return None
 
-    print(f"Generic: {len(sibling_roots)} sibling-root iterations (period={period}).")
+    # Grade the same way branch-descent and graph-launch do: the per-iteration
+    # windows must account for ~all the GPU work (tree-descendant, so cross-thread
+    # after reattachment). A spurious sibling period that wraps little GPU work is
+    # rejected here -- no need for the kernel-stream period cross-check, which
+    # graph capture makes impossible to satisfy anyway.
+    total_gpu = sum(
+        e.get("dur", 0)
+        for e in tree.events_by_uid.values()
+        if e.get("cat") in GPU_KERNEL_CATS
+    )
+    cov = _descendant_gpu_time(tree, blocked) / total_gpu if total_gpu else 0.0
+    if cov < BRANCH_COVERAGE_GATE:
+        return None
+
+    print(
+        f"Generic: {len(sibling_roots)} sibling-root iterations "
+        f"(period={period}, coverage={cov:.3f})."
+    )
     if diagnostics is not None:
-        diagnostics.update({"period_label_tier": "sibling_roots", "period": period})
-    _hit("old_tree.sibling_roots")
+        diagnostics.update(
+            {
+                "period_label_tier": "sibling_roots",
+                "period": period,
+                "branch_coverage": round(cov, 4),
+            }
+        )
     return sibling_roots
 
 
@@ -502,7 +498,6 @@ def find_iteration_roots_generic(
         key=lambda e: e["ts"],
     )
     if len(launches) >= MIN_LABEL_CHILDREN:
-        _hit("generic.graph_launch_fastpath")
         iteration_roots = [dict(e) for e in launches]
         print(f"Generic: {len(iteration_roots)} graph-launch iteration roots.")
         if diagnostics is not None:
@@ -519,8 +514,7 @@ def find_iteration_roots_generic(
     # Reunite dispatch threads (e.g. the autograd engine) with the host frames
     # that spawned them, so a training loop's backward work is reachable from the
     # main thread rather than flooding the top level as thousands of stray roots.
-    if _reattach_worker_threads(tree):
-        _hit("generic.reattach_applied")
+    _reattach_worker_threads(tree)
 
     # Preferred path: walk down to the frame whose children repeat and cover the
     # GPU. It reads the semantic loop body (forward_step/backward_step, denoise
@@ -528,9 +522,7 @@ def find_iteration_roots_generic(
     # deep sub-loop the way the tier ladder below can.
     branch_roots = _detect_by_branch_descent(tree, diagnostics)
     if branch_roots is not None:
-        _hit("generic.branch_descent_win")
         return branch_roots
-    _hit("generic.fell_through_to_old_tree")
 
     # Walk every cpu_root_node upward to a parentless node -- those are the true
     # per-thread entry points.
