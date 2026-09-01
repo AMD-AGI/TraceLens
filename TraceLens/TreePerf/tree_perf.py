@@ -1632,14 +1632,20 @@ class TreePerfAnalyzer:
 
     def _is_leaf_cpu_op(self, event):
         """
-        Check if a cpu_op directly launches GPU kernels (is a kernel launcher).
+        Check if a cpu_op is the innermost kernel launcher.
 
-        A leaf cpu_op follows patterns:
+        A leaf cpu_op directly launches GPU kernels...
         - cpu_op -> runtime -> kernel
         - cpu_op -> python_function -> runtime -> kernel
-        This matches the definition used in get_kernel_launchers().
+        ...and has NO nested cpu_op that launches kernels. If a finer cpu_op below
+        it launches kernels, this op is not the innermost owner of its kernels, so
+        it is not a leaf (the traversal recurses instead, giving the nested cpu_op
+        its own row and turning this op's own kernels into synthetic ops).
         """
         if self.event_to_category(event) != "cpu_op":
+            return False
+
+        if self._has_descendant_cpu_op_with_kernels(event):
             return False
 
         # Check if any descendant is a kernel within 3 levels
@@ -1759,14 +1765,15 @@ class TreePerfAnalyzer:
         except Exception:
             return False
 
-    def _has_descendant_cpu_op_with_own_perf_model(self, event):
+    def _has_descendant_cpu_op_with_kernels(self, event):
         """
-        True if some ``cpu_op`` strictly below ``event`` has a perf model and GPU work.
+        True if some ``cpu_op`` strictly below ``event`` launches GPU kernels.
 
         Walks descendants the same way as ``collect_unified_perf_events.traverse``
-        (``python_function`` nodes are transparent). Used so a parent that only
-        qualifies via ``_is_sole_bwd_with_fwd_perf_model`` does not win over a
-        deeper op with its own perf model.
+        (``python_function`` nodes are transparent). Used to decide recursion: a
+        cpu_op that contains a finer kernel-launching cpu_op is not the innermost
+        owner of its kernels, so it must recurse (its own directly-launched
+        kernels become synthetic ops and the nested cpu_op gets its own row).
         """
         stack = list(event.get("children", []))
         while stack:
@@ -1780,7 +1787,7 @@ class TreePerfAnalyzer:
                 continue
             if cat != "cpu_op":
                 continue
-            if self._has_perf_model(node) and self._launches_gpu_kernels(node):
+            if self._launches_gpu_kernels(node):
                 return True
             stack.extend(node.get("children", []))
         return False
@@ -1822,32 +1829,78 @@ class TreePerfAnalyzer:
 
         collected = []
         visited = set()
+        next_uid = max(self.tree.events_by_uid.keys()) + 1
+        _GPU = frozenset(c.value for c in TraceEventUtils.GpuEventCategories)
 
-        def traverse(event_uid, call_stack=None):
+        def _create_synthetic_op(prefix_name, kernel, cpu_op):
+            """Append one '<prefix_name>-><kernel> (Synthetic Op)' row owning
+            `kernel`, inheriting shape args from `cpu_op` (the enclosing cpu_op,
+            or the launcher when there is no cpu_op on the path)."""
+            nonlocal next_uid
+            if not include_nccl and TraceEventUtils.is_communication_string(
+                kernel.get("name", "")
+            ):
+                return
+            synthetic_op = dict(cpu_op)
+            synthetic_op["UID"] = next_uid
+            next_uid += 1
+            synthetic_op["name"] = f"{prefix_name}->{kernel['name']} (Synthetic Op)"
+            synthetic_op["gpu_events"] = [kernel["UID"]]
+            # Seed an empty base; build_df's per-kernel suffix walk reconstructs
+            # the full root->kernel chain (the fresh UID never matches, so it
+            # climbs all the way to the root).
+            if self.add_python_func:
+                synthetic_op["_call_stack"] = []
+            collected.append(synthetic_op)
+
+        def _direct_kernels(event):
+            """GPU kernels launched directly by `event` — i.e. reachable via
+            non-cpu_op descent (runtime/python), stopping at any nested cpu_op.
+            Equivalently: the kernels whose nearest cpu_op ancestor is `event`."""
+            out, stack = [], list(event.get("children", []))
+            while stack:
+                node = self.tree.get_UID2event(stack.pop())
+                if node is None:
+                    continue
+                cat = self.event_to_category(node)
+                if cat == "cpu_op":
+                    continue
+                if cat in _GPU:
+                    out.append(node)
+                else:
+                    stack.extend(node.get("children", []))
+            return out
+
+        def _recurse(event, call_stack, child_nearest_cpu_op, is_cpu_op):
+            """Recurse into children; a recursing cpu_op also emits synthetic op
+            rows for its own directly-launched kernels (those not owned by a finer
+            op)."""
+            for child_uid in event.get("children", []):
+                traverse(child_uid, call_stack, child_nearest_cpu_op)
+            if is_cpu_op:
+                for kernel in _direct_kernels(event):
+                    _create_synthetic_op(event["name"], kernel, event)
+
+        def traverse(event_uid, call_stack=None, nearest_cpu_op=None):
             if event_uid in visited:
                 return
             visited.add(event_uid)
 
             event = self.tree.get_UID2event(event_uid)
+            is_cpu_op = self.event_to_category(event) == "cpu_op"
+            # Nearest cpu_op ancestor of this event's children (self if cpu_op).
+            child_nearest_cpu_op = event if is_cpu_op else nearest_cpu_op
             # Build running call stack: append this event's name if it matches the filter
             if self.add_python_func:
                 name = event.get("name", "")
                 if call_stack is None:
                     call_stack = []
-                if (
-                    any(f in name for f in ["nn.Module", "::", "/"])
-                    or self.event_to_category(event) == "cpu_op"
-                ):
+                if any(f in name for f in ["nn.Module", "::", "/"]) or is_cpu_op:
                     call_stack = call_stack + [re.sub(r"_\d+", "", name)]
 
-            # Skip non-cpu_op events
-            if not self.add_python_func and self.event_to_category(event) != "cpu_op":
-                return
-
-            # First check: Does this subtree have any GPU kernels?
-            # gpu_events contains all GPU events from the entire subtree
+            # Does this subtree have any GPU work? (gpu_events spans the subtree)
             if not self._launches_gpu_kernels(event):
-                return  # No GPU work in this subtree - skip entirely
+                return
 
             # From here, we know there's GPU work in this subtree
 
@@ -1858,131 +1911,53 @@ class TreePerfAnalyzer:
                 collected.append(event)
                 return
 
-            # Exit condition 2: 1:1 backward op with linked forward that has perf model
-            # We can compute backward metrics via forward's perf model — but prefer any
-            # descendant cpu_op with its own perf model (not only direct children).
+            # Exit condition 2: 1:1 backward op linked to a forward with a perf model.
             if self._is_sole_bwd_with_fwd_perf_model(event):
-                if self._has_descendant_cpu_op_with_own_perf_model(event):
-                    for child_uid in event.get("children", []):
-                        traverse(child_uid, call_stack)
+                if self._has_descendant_cpu_op_with_kernels(event):
+                    _recurse(event, call_stack, child_nearest_cpu_op, is_cpu_op)
                     return
                 if self.add_python_func:
                     event["_call_stack"] = call_stack
                 collected.append(event)
                 return
-            if self._has_descendant_cpu_op_with_own_perf_model(event):
-                for child_uid in event.get("children", []):
-                    traverse(child_uid, call_stack)
-                return
-            # Exit condition 3: Leaf cpu_op (direct kernel launcher) with GPU kernels
+            # Exit condition 3: leaf cpu_op — the innermost cpu_op that launches
+            # kernels (directly, with no nested kernel-launching cpu_op). It owns
+            # its whole subtree, so collect it as one op. A cpu_op that has a nested
+            # kernel-launching cpu_op is NOT a leaf, so it falls through to the
+            # generic recurse below (the nested cpu_op gets its own row and this
+            # op's own kernels become synthetic ops).
             if self._is_leaf_cpu_op(event):
-                # Before collecting, check if any cpu_op children have perf models
-                # (e.g., injected pseudo ops from extensions)
-                cpu_op_children_with_perf_model = []
+                if not include_nccl and self._is_nccl_event(event):
+                    return
+                if self.add_python_func:
+                    event["_call_stack"] = call_stack
+                collected.append(event)
+                return
+
+            # Exit condition 4: no cpu_op anywhere on the path (orphan launcher,
+            # e.g. hipModuleLaunchKernel firing a Triton kernel directly). Emit one
+            # "<launcher>-><kernel> (Synthetic Op)" row per directly-launched
+            # kernel, then recurse to reach any deeper launchers.
+            if child_nearest_cpu_op is None:
                 for child_uid in event.get("children", []):
                     child = self.tree.get_UID2event(child_uid)
-                    if (
-                        self.event_to_category(child) == "cpu_op"
-                        and self._has_perf_model(child)
-                        and self._launches_gpu_kernels(child)
-                    ):
-                        cpu_op_children_with_perf_model.append(child_uid)
+                    if child and self.event_to_category(child) in _GPU:
+                        _create_synthetic_op(event["name"], child, event)
 
-                if cpu_op_children_with_perf_model:
-                    # Traverse children with perf models instead of collecting this leaf
-                    for child_uid in cpu_op_children_with_perf_model:
-                        traverse(child_uid, call_stack)
-                else:
-                    # No children with perf models - collect this leaf
-                    if not include_nccl and self._is_nccl_event(event):
-                        return
-                    if self.add_python_func:
-                        event["_call_stack"] = call_stack
-                    collected.append(event)
-                return
+            # Non-leaf with GPU work but no perf model: recurse for finer ops
+            # (and emit own-kernel synthetic ops if this is a cpu_op).
+            _recurse(event, call_stack, child_nearest_cpu_op, is_cpu_op)
 
-            # Non-leaf with GPU kernels in subtree but no perf model
-            # Traverse children to find more granular ops
-            for child_uid in event.get("children", []):
-                traverse(child_uid, call_stack)
-
-        # When python_function events are in the tree, start from
-        # parentless python_function roots that have GPU work
-        if self.add_python_func:
-            for evt in self.tree.events:
-                if (
-                    self.event_to_category(evt) == "python_function"
-                    and evt.get("parent") is None
-                    and evt.get("gpu_events")
-                ):
-                    traverse(evt["UID"])
-
-        # Start from cpu_root_nodes (any not already visited via python roots)
-        for root_uid in self.tree.cpu_root_nodes:
-            traverse(root_uid)
-
-        # Collect GPU kernels that have no cpu_op in their parent hierarchy.
-        # These are missed by the cpu_root_nodes traversal above.
-        collected_gpu_uids = set()
-        for evt in collected:
-            collected_gpu_uids.update(evt.get("gpu_events", []))
-
-        orphan_kernels = []
-        kernels_with_cpu_op = []
+        # Roots: every parentless event that has GPU work — this covers cpu_op
+        # roots, python-function roots, and bare runtime launchers, so every GPU
+        # kernel is reached in this single pass (the `visited` set guards
+        # re-entry). Synthetic ops (kernels under a recursing cpu_op) and orphan
+        # launcher kernels are emitted inline during the traversal above, so no
+        # post-traversal cleanup pass is needed.
         for evt in self.tree.events:
-            if self.event_to_category(evt) not in {
-                "kernel",
-                "gpu_memcpy",
-                "gpu_memset",
-            }:
-                continue
-            if evt["UID"] in collected_gpu_uids:
-                continue
-            if not include_nccl and TraceEventUtils.is_communication_string(
-                evt.get("name", "")
-            ):
-                continue
+            if evt.get("parent") is None and evt.get("gpu_events"):
+                traverse(evt["UID"])
 
-            has_cpu_op = False
-            parent = self.tree.get_parent_event(evt)
-            while parent is not None:
-                if self.event_to_category(parent) == "cpu_op":
-                    has_cpu_op = True
-                    kernels_with_cpu_op.append((evt, parent))
-                    break
-                parent = self.tree.get_parent_event(parent)
-
-            if not has_cpu_op:
-                orphan_kernels.append(evt)
-
-        # Group orphan kernels by their immediate parent (typically a runtime event)
-        parent_to_orphans = defaultdict(list)
-        for kernel in orphan_kernels:
-            parent = self.tree.get_parent_event(kernel)
-            parent_uid = parent["UID"] if parent else None
-            parent_to_orphans[parent_uid].append(kernel)
-
-        next_uid = max(self.tree.events_by_uid.keys()) + 1
-        for parent_uid, kernels in parent_to_orphans.items():
-            if parent_uid is None:
-                continue
-            parent_evt = self.tree.get_UID2event(parent_uid)
-            for kernel in kernels:
-                synthetic = dict(parent_evt)
-                synthetic["UID"] = next_uid
-                next_uid += 1
-                synthetic["name"] = (
-                    f"{parent_evt['name']}->{kernel['name']} (Synthetic Op)"
-                )
-                synthetic["gpu_events"] = [kernel["UID"]]
-                collected.append(synthetic)
-        for evt, parent in kernels_with_cpu_op:
-            synthetic = dict(parent)
-            synthetic["UID"] = next_uid
-            next_uid += 1
-            synthetic["name"] = f"{parent['name']}->{evt['name']} (Synthetic Op)"
-            synthetic["gpu_events"] = [evt["UID"]]
-            collected.append(synthetic)
         return collected
 
     def build_df_unified_perf_table(
