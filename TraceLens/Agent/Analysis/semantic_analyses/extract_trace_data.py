@@ -9,7 +9,7 @@
 Step 1+3: Load a Chrome trace JSON and extract structured data.
 
 Outputs a JSON with:
-  - ordered kernel list (name, duration, timestamp)
+  - ordered kernel list (name, duration, timestamp, gpu_op_uid)
   - python call stack (nested)
   - metadata (categories, graph mode detection, total kernel time)
 
@@ -52,6 +52,22 @@ def load_trace(path_or_data):
     for cat in by_cat:
         by_cat[cat].sort(key=lambda e: e.get("ts", 0))
     return data, by_cat
+
+
+def _stamp_raw_uid(data):
+    """Tag each event with its position in the raw traceEvents array.
+
+    This mirrors the UID scheme TraceToTree/TreePerfAnalyzer assign
+    (enumerate() over the full, unfiltered traceEvents list), so a kernel's
+    ``_gpu_op_uid`` here lines up with the same kernel's UID in a perf report
+    built from the same trace file -- without ever building a tree. Only
+    valid for a single, non-split trace file; do not call this on a
+    per-region slice produced by vLLM trace splitting, since a region's
+    traceEvents subset does not share the original file's indexing.
+    """
+    for i, e in enumerate(data.get("traceEvents", [])):
+        if isinstance(e, dict):
+            e["_gpu_op_uid"] = i
 
 
 def get_stream_id(event):
@@ -115,6 +131,12 @@ def extract_kernel_sequence(by_cat):
             "ts": k["ts"],
             "args": k.get("args", {}),
             "stream_id": get_stream_id(k),
+            # Single-trace path: _stamp_raw_uid() sets "_gpu_op_uid" in-memory.
+            # Split path: split_inference_trace_annotation.py (invoked with
+            # --emit-gpu-op-uid) already persisted "gpu_op_uid" onto the event
+            # before writing the per-region file, so it survives the subprocess
+            # boundary as literal JSON content.
+            "gpu_op_uid": k.get("_gpu_op_uid", k.get("gpu_op_uid")),
         }
         for k in combined
     ]
@@ -306,6 +328,7 @@ def main():
 
     # --- Single-trace extraction -------------------------------------------
     data, by_cat = load_trace(args.trace)
+    _stamp_raw_uid(data)
     kernels = extract_kernel_sequence(by_cat)
     is_graph_mode, graph_launches = detect_graph_mode(by_cat)
     callstack = extract_python_callstack(by_cat)

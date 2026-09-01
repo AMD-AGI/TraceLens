@@ -149,11 +149,16 @@ def build_labels(extracted, classified, pattern, tree_context=None):
         c = cls_by_idx.get(i, {})
         tc = tree_by_idx.get(i, {})
 
+        tree_uid = tc.get("gpu_op_uid")
         entry = {
             "index": i,
             "name": k["name"],
             "dur": k["dur"],
-            "gpu_op_uid": tc.get("gpu_op_uid"),
+            # Prefer the tree-built UID when tree-context ran (e.g.
+            # capture-augmented); fall back to the raw-index UID
+            # extract_trace_data.py already stamps on single-trace kernels
+            # when tree-context was skipped entirely (no-capture graph mode).
+            "gpu_op_uid": tree_uid if tree_uid is not None else k.get("gpu_op_uid"),
             "perf_category": c.get("perf_category", "Others"),
             "nn_module": _deepest_module(tc.get("nn_module_stack", [])),
             "cpu_op": tc.get("cpu_op_name", ""),

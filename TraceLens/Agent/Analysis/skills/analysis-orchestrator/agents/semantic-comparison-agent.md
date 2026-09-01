@@ -89,28 +89,54 @@ run_breakdown() {
 
     # Check whether extraction produced region subdirs or a flat file
     if ls $DIR/*/extracted.json >/dev/null 2>&1; then
-        # Multi-region: tree context once, then per-region steps
-        python $SCRIPTS/extract_tree_context.py $TRACE --regions-dir $DIR/
+        # Multi-region. Skip extract_tree_context.py entirely for no-capture
+        # graph-mode traces, same reasoning as the single-trace branch below:
+        # cpu_op/nn_module ancestry is always empty under cudaGraphLaunch, and
+        # gpu_op_uid is already populated per-region by extract_trace_data.py
+        # (split_inference_trace_annotation.py persists it onto each event via
+        # --emit-gpu-op-uid before writing the per-region file, so it survives
+        # the split subprocess -- no tree build needed to recover it).
+        FIRST_REGION=$(ls -d $DIR/*/ | head -1)
+        IS_GRAPH_MODE=$(python -c "import json; print(json.load(open('${FIRST_REGION}extracted.json'))['metadata']['is_graph_mode'])")
         for REGION in $DIR/*/; do
             python $SCRIPTS/pattern_finder.py $REGION/extracted.json -o $REGION/pattern.json &
             python $CLASSIFY $REGION/extracted.json -o $REGION/classified.json &
         done
+        if [ "$IS_GRAPH_MODE" != "True" ]; then
+            python $SCRIPTS/extract_tree_context.py $TRACE --regions-dir $DIR/
+        fi
         wait
         for REGION in $DIR/*/; do
+            TREE_ARGS=""
+            if [ -f "$REGION/tree_context.json" ]; then
+                TREE_ARGS="--tree-context $REGION/tree_context.json"
+            fi
             python $SCRIPTS/build_semantic_labels.py \
                 $REGION/extracted.json $REGION/classified.json $REGION/pattern.json \
-                --tree-context $REGION/tree_context.json \
+                $TREE_ARGS \
                 -o $REGION/semantic_labels.json
         done
     else
-        # Single-trace
-        python $SCRIPTS/extract_tree_context.py $TRACE $DIR/extracted.json -o $DIR/tree_context.json
+        # Single-trace. Skip extract_tree_context.py entirely for no-capture
+        # graph-mode traces: kernels sit directly under cudaGraphLaunch, so
+        # cpu_op/nn_module ancestry is always empty there anyway, and
+        # gpu_op_uid is already populated by extract_trace_data.py itself
+        # (a plain raw-index lookup, no tree build needed). Only build the
+        # tree when non-graph-mode, or when a companion capture trace is
+        # available to restore ancestry via --capture-trace.
+        IS_GRAPH_MODE=$(python -c "import json; print(json.load(open('$DIR/extracted.json'))['metadata']['is_graph_mode'])")
         python $SCRIPTS/pattern_finder.py $DIR/extracted.json -o $DIR/pattern.json &
         python $CLASSIFY $DIR/extracted.json -o $DIR/classified.json &
+
+        TREE_ARGS=""
+        if [ "$IS_GRAPH_MODE" != "True" ]; then
+            python $SCRIPTS/extract_tree_context.py $TRACE $DIR/extracted.json -o $DIR/tree_context.json
+            TREE_ARGS="--tree-context $DIR/tree_context.json"
+        fi
         wait
         python $SCRIPTS/build_semantic_labels.py \
             $DIR/extracted.json $DIR/classified.json $DIR/pattern.json \
-            --tree-context $DIR/tree_context.json \
+            $TREE_ARGS \
             -o $DIR/semantic_labels.json
     fi
 }
@@ -120,8 +146,10 @@ run_breakdown <trace_b_path> $DIR_B &
 wait
 ```
 
-Add `--capture-trace <capture_path>` to `extract_tree_context.py` when a
-companion capture trace is provided.
+For multi-region traces, and for single graph-mode traces where a
+companion capture trace **is** available, add `--capture-trace
+<capture_path>` to the `extract_tree_context.py` call to restore cpu_op
+ancestry via the capture/graph-replay merge.
 
 **Output directories:**
 - Trace A: `<output_dir>/_work/<name_a>/`

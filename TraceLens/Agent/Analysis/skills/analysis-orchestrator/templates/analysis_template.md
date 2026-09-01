@@ -91,7 +91,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 [1 paragraph comparative overview: summarize which trace is faster overall, by how much, and the dominant gap categories]
 
 <!-- Top Bottleneck Category X% = top category's gpu_kernel_time_ms / manifest.gpu_utilization.total_time_ms
-     Top Bottleneck Category Y% = (aligned trace2 time for that category, i.e. manifest.trace2_ops_summary_by_category[] total_direct_kernel_time_ms matched case-insensitively by op category; — if no match) / manifest.trace2_gpu_utilization.total_time_ms
+     Top Bottleneck Category Y% = top category's matching manifest.trace2_ops_summary_by_category[] total_direct_kernel_time_ms (matched case-insensitively by op category; — if no match) / manifest.trace2_gpu_utilization.total_time_ms
      Use total_time_ms (NOT compute-only time) as the denominator so communication-heavy categories are not reported above 100%.
      Both X% and Y% must reference the SAME category (the trace1 top bottleneck) so the two columns are comparable.
      Difference = Trace 2 value − Trace 1 value -->
@@ -144,7 +144,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 <!-- impact-end -->
 
 <!-- === COMPARATIVE Top Operations === -->
-`Trace 2 Time (ms)` = matching `manifest.trace2_ops_summary_by_category[]["total_direct_kernel_time_ms"]` where `"op category"` matches the row Category **case-insensitively**; use — if no match. This field is the semantic-aligned trace2 total (trace2 kernel time rolled up to trace1 categories via the LCA alignment), so it is consistent with the Detailed Analysis cards' per-op Trace 2 times. (`manifest.trace2_ops_summary_by_category_raw` holds the legacy per-framework breakdown for reference only — do NOT use it here.)
+`Trace 2 Time (ms)` = matching `manifest.trace2_ops_summary_by_category[]["total_direct_kernel_time_ms"]` where `"op category"` matches the row Category **case-insensitively**; use — if no match.
 `Difference (ms)` = Trace 2 Time − Trace 1 Time.
 Note: for communication categories (e.g. collectives), `% of Compute Time` can exceed 100% because the kernel time is not compute-bound — report the value as computed.
 <!-- impact-begin kind=top_ops -->

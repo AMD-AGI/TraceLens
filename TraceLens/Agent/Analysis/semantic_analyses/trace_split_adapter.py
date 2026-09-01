@@ -144,6 +144,7 @@ def split_vllm_trace(trace_path: str) -> Optional[List[Tuple[dict, dict]]]:
             "--store-single-iteration",
             "--iterations",
             "all",
+            "--emit-gpu-op-uid",
         ]
         result = subprocess.run(
             cmd,
