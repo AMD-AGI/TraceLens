@@ -422,11 +422,25 @@ def inject_pseudo_op(
 
 
 # we also need to
-def categorize_extension(row, plugin):
+def categorize_extension(row, _perf_analyzer):
     """
     Categorizer plugin to categorize the kernel launchers.
     """
-    if row["name"] in [
+    name = row["name"]
+    grouped_bwd_prefix = "_GroupedLinearBackward->"
+    synthetic_suffix = " (Synthetic Op)"
+    if name.startswith(grouped_bwd_prefix) and name.endswith(synthetic_suffix):
+        kernel_name = name[len(grouped_bwd_prefix) : -len(synthetic_suffix)]
+        if is_gemm_kernel({"cat": "kernel", "name": kernel_name}):
+            return "GroupedGEMM_bwd"
+    if name.endswith(synthetic_suffix) and name.startswith(
+        (
+            "_OperationFuserAutogradFunctionBackward->ln_tma_bwd_kernel",
+            "_OperationFuserAutogradFunctionBackward->ln_bwd_finalize_kernel",
+        )
+    ):
+        return "NORM_bwd"
+    if name in [
         "_Linear_fwd_mm",
         "_LayerNormLinear_fwd_mm",
         "_LinearBackward_xgrad_mm",
@@ -435,9 +449,9 @@ def categorize_extension(row, plugin):
         "_LayerNormLinearBackward_wgrad_mm",
     ]:
         return "GEMM"
-    if row["name"] == "FusedAttnFunc":
+    if name == "FusedAttnFunc":
         return "SDPA_fwd"
-    if row["name"] == "FusedAttnFuncBackward":
+    if name == "FusedAttnFuncBackward":
         return "SDPA_bwd"
     return None
 
@@ -718,4 +732,6 @@ perf_model_extension = {
 op_category_extension = {
     "FusedAttnFuncBackward": "SDPA_bwd",
     "GroupedGemmBackward": "GroupedGEMM_bwd",
+    "_GroupedLinear": "GroupedGEMM_fwd",
+    "_GroupedLinearBackward": "GroupedGEMM_bwd",
 }

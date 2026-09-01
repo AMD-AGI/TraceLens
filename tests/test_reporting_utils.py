@@ -683,6 +683,30 @@ def test_pytorch_apply_extension_valid_perf_model(tmp_path):
     assert "aten::mm" in analyzer.op_to_perf_model_class_map
 
 
+@pytest.mark.parametrize(
+    "apply_extension", [apply_extension_pytorch, apply_extension_inference]
+)
+def test_apply_extension_categorizer_hook(tmp_path, apply_extension):
+    ext_path = tmp_path / "ext.py"
+    ext_path.write_text(textwrap.dedent("""
+            def categorize_extension(row, plugin):
+                assert plugin is not None
+                if row["name"] == "custom::op":
+                    return "custom"
+                return None
+            """))
+    analyzer = SimpleNamespace(
+        tree=SimpleNamespace(events=[], label_non_gpu_paths=lambda: None),
+        op_to_perf_model_class_map={},
+        op_categorizer=lambda row: "base",
+    )
+
+    apply_extension(analyzer, str(ext_path))
+
+    assert analyzer.op_categorizer({"name": "custom::op"}) == "custom"
+    assert analyzer.op_categorizer({"name": "unknown::op"}) == "base"
+
+
 # ---------------------------------------------------------------------------
 # trunc / wrapper helpers
 # ---------------------------------------------------------------------------
