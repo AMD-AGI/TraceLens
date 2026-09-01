@@ -4,7 +4,7 @@ Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
-# Triton kernel performance model
+# Triton kernel performance model in TraceLens
 
 ```{meta}
 :description: How TraceLens computes GFLOPS, TB/s, and other performance metrics for torch.compile-generated Triton kernels, including the metric formulas and worked examples.
@@ -42,6 +42,8 @@ One loop dimension: `xnumel` (total elements).
 Two loop dimensions: `xnumel` (outer) and `rnumel` (reduction axis).
 
 ## Requirements and PyTorch version compatibility
+
+This section covers the trace capture settings and PyTorch versions required for V2 metadata extraction to work correctly.
 
 ### Trace capture requirements
 
@@ -134,7 +136,11 @@ Verified on PyTorch 2.4 and 2.11 (with `record_shapes=True`):
 
 ## How it works
 
+This section describes the data flow from a Chrome trace event to a computed TB/s and TFLOPS/s metric, and the two-tier metadata extraction strategy used to handle different PyTorch versions.
+
 ### Data flow
+
+The following diagram shows how a trace event flows through the model to produce throughput metrics.
 
 ```
 Chrome Trace (.json.gz)
@@ -183,9 +189,9 @@ Chrome Trace (.json.gz)
 
 TraceLens needs three pieces of information to compute metrics:
 
-1. Element counts — `xnumel` and `rnumel`
-2. Data types and shapes — to calculate bytes moved
-3. Fused ATen ops — to calculate FLOPs
+- Element counts — `xnumel` and `rnumel`
+- Data types and shapes — to calculate bytes moved
+- Fused ATen ops — to calculate FLOPs
 
 These are obtained through a two-tier approach. V2 is tried first; V1 is
 the fallback:
@@ -249,6 +255,8 @@ size_hints=[268435456]                # older list format
 
 ### V1 compared with V2
 
+The following table summarizes the key differences between the two metadata extraction strategies.
+
 |  | V2 (trace-intrinsic) | V1 (cache-based) |
 |--|----------------------|-------------------|
 | Data source | Chrome trace `event["args"]` | Inductor cache `.py` files on disk |
@@ -298,7 +306,11 @@ the entire name collapses to `triton_{index}`.
 
 ## Metric formulas
 
+The following formulas define how FLOPs, bytes moved, and throughput are computed for each supported Triton kernel type.
+
 ### FLOPs
+
+FLOPs are computed by summing per-element operation costs across all fused ATen ops, then multiplying by the element count.
 
 ```
 flops = sum(flops_per_elem[op] for op in fused_aten_ops) * xnumel * rnumel
@@ -367,35 +379,35 @@ Pointwise kernel → last integer scalar is `xnumel`:
 
 ### Bytes calculation
 
-Step 1: Calculate bytes for each tensor input:
+1. Calculate bytes for each tensor input:
 
-| Input | Dims | Type | Bytes per elem | Elements | Bytes |
-|-------|------|------|---------------|----------|-------|
-| `in_out_ptr0` | [8, 4096, 8192] | bf16 | 2 | 268,435,456 | 536,870,912 |
-| `in_ptr0` | [32768, 8192] | bf16 | 2 | 268,435,456 | 536,870,912 |
-| `xnumel` | [] | Scalar | — | — | skipped |
+   | Input | Dims | Type | Bytes per elem | Elements | Bytes |
+   |-------|------|------|---------------|----------|-------|
+   | `in_out_ptr0` | [8, 4096, 8192] | bf16 | 2 | 268,435,456 | 536,870,912 |
+   | `in_ptr0` | [32768, 8192] | bf16 | 2 | 268,435,456 | 536,870,912 |
+   | `xnumel` | [] | Scalar | — | — | skipped |
 
-```
-input_bytes = (268,435,456 * 2) + (268,435,456 * 2) = 1,073,741,824
-```
+   ```
+   input_bytes = (268,435,456 * 2) + (268,435,456 * 2) = 1,073,741,824
+   ```
 
-Step 2: Add output write for pointwise kernels.
+2. Add the output write for pointwise kernels.
 
-In pointwise kernels, `in_out_ptr0` is both read and written — the output
-overwrites the input buffer. The input bytes above already count the read.
-V2 adds one extra write of `ptr_bytes[0] * xnumel`:
+   In pointwise kernels, `in_out_ptr0` is both read and written — the output
+   overwrites the input buffer. The input bytes above already count the read.
+   V2 adds one extra write of `ptr_bytes[0] * xnumel`:
 
-```
-output_write = 2 * 268,435,456 = 536,870,912
-```
+   ```
+   output_write = 2 * 268,435,456 = 536,870,912
+   ```
 
-Total:
+   Total:
 
-```
-bytes_moved = 1,073,741,824 + 536,870,912
-            = 1,610,612,736 bytes
-            = 1,536 MB
-```
+   ```
+   bytes_moved = 1,073,741,824 + 536,870,912
+               = 1,610,612,736 bytes
+               = 1,536 MB
+   ```
 
 ### FLOPs calculation
 
@@ -540,7 +552,16 @@ seq_len=4096, dtype=bf16. Traced with PyTorch 2.11+rocm7.2 on AMD Instinct™ MI
 | `triton_poi_fused__unsafe_view_mul_silu_2` (SwiGLU) | 1.342 | 1,536 | 0.83 | 3.19 | 2.66 |
 | `triton_poi_fused__unsafe_view_add_3` (residual add) | 0.067 | 512 | 0.12 | 3.81 | 0.48 |
 
+## Related topics
+
+- [GEMM analysis in TraceLens](./gemm-analysis.md)
+- [Generate a PyTorch performance report](../how-to/generate-perf-report-pytorch.md)
+- [Analyze traces with the TraceLens SDK](../how-to/sdk-analysis.md)
+- [Performance report columns](../reference/perf-report-columns.md)
+
 ## References
+
+The following resources provide additional background on the PyTorch compiler, Triton kernels, and the performance concepts discussed in this topic.
 
 - [PyTorch Blog: Why Is PyTorch Compile So Fast — Kernel Fusion](https://pytorch.org/blog/why-is-pytorch-compile-so-fast-kernel-fusion/)
 - [TorchInductor GPU Profiling — PyTorch docs](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_inductor_profiling.html)
@@ -551,10 +572,3 @@ seq_len=4096, dtype=bf16. Traced with PyTorch 2.11+rocm7.2 on AMD Instinct™ MI
 - [PyTorch Inductor codegen/triton.py](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/codegen/triton.py)
 - [PyTorch Inductor wrapper_benchmark.py](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/wrapper_benchmark.py)
 
-## Related topics
-
-- [GEMM analysis](../conceptual/gemm-analysis.md)
-- [Trace2Tree](../conceptual/trace2tree.md)
-- [Generate a performance report from a PyTorch trace](../how-to/generate-perf-report-pytorch.md)
-- [Performance report columns](../reference/perf-report-columns.md)
-- [API reference](../reference/api-reference.md)

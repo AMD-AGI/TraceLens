@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Attach symbolic tensor shapes from shape inference to Model Explorer nodes."""
 
 from __future__ import annotations
@@ -37,7 +43,11 @@ def _apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
     if not shape_text:
         return
     tensor_shape = format_shape_tensor(spec)
-    attrs = [item for item in node.get("attrs", []) if item.get("key") not in {"output_shape", "output_dtype"}]
+    attrs = [
+        item
+        for item in node.get("attrs", [])
+        if item.get("key") not in {"output_shape", "output_dtype"}
+    ]
     attrs.append({"key": "output_shape", "value": shape_text})
     attrs.append({"key": "output_dtype", "value": spec.dtype})
     node["attrs"] = attrs
@@ -79,7 +89,9 @@ def annotate_nodes_with_shapes(
 
 def _node_spec(node: dict[str, Any]) -> TensorSpec | None:
     for metadata in node.get("outputsMetadata", []):
-        attrs = {item.get("key"): item.get("value") for item in metadata.get("attrs", [])}
+        attrs = {
+            item.get("key"): item.get("value") for item in metadata.get("attrs", [])
+        }
         shape_text = attrs.get("shape")
         if shape_text:
             return TensorSpec(
@@ -97,7 +109,9 @@ def _incoming_source_ids(node: dict[str, Any]) -> list[str]:
     ]
 
 
-def fill_missing_node_shapes(nodes: list[dict[str, Any]], *, context: ShapeContext) -> None:
+def fill_missing_node_shapes(
+    nodes: list[dict[str, Any]], *, context: ShapeContext
+) -> None:
     """Give every node a shape so the viewer never falls back to rendering ``?``.
 
     Spine summaries, group input ports and nested-diagram nodes have no entry in the
@@ -106,7 +120,9 @@ def fill_missing_node_shapes(nodes: list[dict[str, Any]], *, context: ShapeConte
     """
     hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
     vocab = context.dims.get(Symbol.VOCAB.value, Symbol.VOCAB.value)
-    activation = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value, hidden), context.dtype)
+    activation = TensorSpec(
+        (Symbol.BATCH.value, Symbol.SEQ.value, hidden), context.dtype
+    )
     logits = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value, vocab), context.dtype)
     tokens = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value), "int64")
 
@@ -141,7 +157,11 @@ def fill_missing_node_shapes(nodes: list[dict[str, Any]], *, context: ShapeConte
     while pending:
         progressed = False
         for node in list(pending):
-            sources = [known[source] for source in _incoming_source_ids(node) if source in known]
+            sources = [
+                known[source]
+                for source in _incoming_source_ids(node)
+                if source in known
+            ]
             if not sources:
                 continue
             spec = max(sources, key=lambda item: len(item.shape))

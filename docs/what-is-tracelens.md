@@ -52,6 +52,10 @@ TraceLens provides these capabilities:
   it straightforward to share IP-safe reproducers with kernel developers.
 - **Extensible SDK:** Start with ready-to-use scripts, then build custom
   workflows with a flexible Python API.
+- **Agentic analysis:** Turn a raw trace into a prioritized, human-readable
+  optimization report with the TraceLens Agent. The agent ranks compute-kernel,
+  kernel-fusion, and system-level bottlenecks, each backed by root-cause
+  reasoning and a concrete resolution.
 
 ## Use cases
 
@@ -67,6 +71,9 @@ TraceLens is suited to these scenarios:
   quantify the effect of a code, library, or hardware change.
 - **Reproducer generation:** Extract a single operator into a standalone replay
   script to share with kernel or framework developers.
+- **Autonomous bottleneck triage:** Hand a trace to the TraceLens Agent and get
+  back a ranked action list of the highest-impact optimizations, ready for
+  review or for feeding into automated performance-tuning platforms.
 
 ## Supported profile formats
 
@@ -82,11 +89,8 @@ TraceLens supports the following trace formats:
 
 ```{note}
 TraceLens analyzes trace files and does not execute GPU kernels, so report
-generation runs on any host with a supported Python version — no GPU or ROCm
-installation is required. The PyTorch report is well tested on traces from both
-AMD ROCm and NVIDIA CUDA workloads. GPU hardware is only needed by the
-profiling tools that *capture* the traces. Roofline bound classification
-additionally requires an architecture specification; bundled specs cover AMD
+generation runs on any host with a supported Python version: no GPU or ROCm
+installation is required. The PyTorch report is well tested on traces across platforms. GPU hardware is only needed by the profiling tools that capture the traces. Roofline bound classification additionally requires an architecture specification; bundled specs cover AMD
 Instinct accelerators, and custom JSON specs can be supplied for other
 hardware. See the [compatibility matrix](./reference/compatibility.md) for
 details.

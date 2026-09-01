@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Regex filters for treating modeled blocks as leaf/basic operations."""
 
 from __future__ import annotations
@@ -62,6 +68,7 @@ _OUTPUT_GATE_ATTR_PATTERNS: tuple[str, ...] = (
     r"(?i)_gate$",
 )
 
+
 def _is_functional_synthetic_basic(attr_name: str) -> bool:
     return attr_name.startswith("@functional_")
 
@@ -77,7 +84,9 @@ class BasicOpFilter:
     ) -> None:
         compiled: list[re.Pattern[str]] = []
         for pattern in patterns:
-            compiled.append(pattern if isinstance(pattern, re.Pattern) else re.compile(pattern))
+            compiled.append(
+                pattern if isinstance(pattern, re.Pattern) else re.compile(pattern)
+            )
         self.patterns = compiled
         self.basic_only = basic_only
 

@@ -159,7 +159,7 @@ For **training** workloads:
 2. Pipeline micro-batches to overlap compute of batch N+1 with comm of batch N
 3. Use gradient bucketing to better align communication with available compute
 
-For **inference** workloads (vLLM / SGLang):
+For **inference** workloads (vLLM / SGLang / ATOM):
 1. Overlap tensor-parallel collective communication with decode compute using separate streams
 2. Pipeline prefill and decode phases so collectives from one phase overlap compute of the next
 3. Reduce collective payload size via quantized or compressed allreduce, tuning communication environment variables

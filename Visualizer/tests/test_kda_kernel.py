@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Tests for kernel pipeline introspection."""
 
 from __future__ import annotations
@@ -34,14 +40,18 @@ def _load_chunk_kda_pipeline():
         pytest.skip("Kimi-K3 modeling file not cached locally")
 
     basic = BasicOpFilter.from_cli(add=[r"(?i)^Linear$", r"(?i)^RMSNorm$"])
-    analysis = analyze_source(_KIMI_CODE_PATH.read_text(), filename="modeling_kimi_linear.py")
+    analysis = analyze_source(
+        _KIMI_CODE_PATH.read_text(), filename="modeling_kimi_linear.py"
+    )
     attn = build_block_node(
         attr_name="self_attn",
         class_name="KimiDeltaAttention",
         registry=analysis.class_registry,
         basic_ops=basic,
     )
-    pipeline = next(child for child in attn.children if child.class_name == "KernelPipeline")
+    pipeline = next(
+        child for child in attn.children if child.class_name == "KernelPipeline"
+    )
     return pipeline, basic
 
 
@@ -56,7 +66,9 @@ def test_kernel_search_root_expands_kernel_module_beside_modeling_file(
 ):
     import visualizer.kernel_pipeline as kernel_pipeline
 
-    (tmp_path / "model.py").write_text("from sibling_kernel import sibling_attn\n", encoding="utf-8")
+    (tmp_path / "model.py").write_text(
+        "from sibling_kernel import sibling_attn\n", encoding="utf-8"
+    )
     (tmp_path / "sibling_kernel.py").write_text(
         "import torch\n"
         "\n"
@@ -83,7 +95,9 @@ def test_kernel_search_root_expands_kernel_module_beside_modeling_file(
     pipeline_steps, _output_steps = introspect_kernel_pipeline(details)
     labels = [step.call_name for step in pipeline_steps]
 
-    assert "build_attn_kernel" in labels, "the compiled kernel call takes its builder's name"
+    assert (
+        "build_attn_kernel" in labels
+    ), "the compiled kernel call takes its builder's name"
     assert "contiguous" in labels
     assert "size" not in labels, "shape queries are not pipeline stages"
 
@@ -114,7 +128,9 @@ def test_analyze_source_attaches_kernel_import_for_kda():
 
     analysis = analyze_source(code_path.read_text(), filename="modeling_kimi_linear.py")
     assert analysis.external_imports["chunk_kda"] == "fla.ops.kda#chunk_kda"
-    details = analysis.class_registry["KimiDeltaAttention"].forward_step_details[SYNTHETIC_ATTENTION]
+    details = analysis.class_registry["KimiDeltaAttention"].forward_step_details[
+        SYNTHETIC_ATTENTION
+    ]
     assert parse_kernel_import(details) == ("fla.ops.kda", "chunk_kda")
 
 
@@ -248,8 +264,12 @@ def test_l2norm_inv_sqrt_wires_only_real_operands():
         members = set(frame.node_indices)
         inv_sqrt = next(i for i in members if graph.nodes[i].label == "÷")
         normalize = next(i for i in members if graph.nodes[i].label == "×")
-        inv_sources = [graph.nodes[src].label for src, tgt in graph.links if tgt == inv_sqrt]
-        norm_sources = {graph.nodes[src].label for src, tgt in graph.links if tgt == normalize}
+        inv_sources = [
+            graph.nodes[src].label for src, tgt in graph.links if tgt == inv_sqrt
+        ]
+        norm_sources = {
+            graph.nodes[src].label for src, tgt in graph.links if tgt == normalize
+        }
         assert inv_sources == ["Sqrt"]
         assert "÷" in norm_sources
         assert any(label in norm_sources for label in {"q", "k"})
@@ -296,9 +316,13 @@ def test_introspect_kernel_pipeline_expands_helper_kernels():
         "kwarg: use_gate_in_kernel=True",
     ]
     pipeline_steps, _ = introspect_kernel_pipeline(details)
-    beta = next(step for step in pipeline_steps if step.call_name == "fused_beta_sigmoid")
+    beta = next(
+        step for step in pipeline_steps if step.call_name == "fused_beta_sigmoid"
+    )
     assert [child.label for child in beta.children] == ["Sigmoid", "× scale"]
     l2norm = next(step for step in pipeline_steps if step.call_name == "l2norm_fwd")
     assert "Sum" in [child.label for child in l2norm.children]
-    gate = next(step for step in pipeline_steps if step.call_name == "kda_gate_chunk_cumsum")
+    gate = next(
+        step for step in pipeline_steps if step.call_name == "kda_gate_chunk_cumsum"
+    )
     assert "CumSum" in [child.label for child in gate.children]

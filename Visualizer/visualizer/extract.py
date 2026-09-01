@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Extract architecture metadata from Hugging Face configs (CPU-only, no weights)."""
 
 from __future__ import annotations
@@ -182,7 +188,6 @@ def _infer_attention(config: dict[str, Any], spec: ArchitectureSpec) -> None:
     kv_lora_rank = _as_int(_get(config, "kv_lora_rank"))
     q_lora_rank = _as_int(_get(config, "q_lora_rank"))
     qk_nope_head_dim = _as_int(_get(config, "qk_nope_head_dim"))
-    qk_rope_head_dim = _as_int(_get(config, "qk_rope_head_dim"))
 
     if kv_lora_rank or q_lora_rank or "deepseek" in model_type and qk_nope_head_dim:
         spec.attention_type = "MLA"
@@ -209,7 +214,9 @@ def _infer_attention(config: dict[str, Any], spec: ArchitectureSpec) -> None:
         max_window_layers = _as_int(_get(config, "max_window_layers"))
         if max_window_layers and spec.num_hidden_layers:
             global_layers = spec.num_hidden_layers - max_window_layers
-            spec.layer_mix = f"{max_window_layers} sliding-window + {global_layers} global"
+            spec.layer_mix = (
+                f"{max_window_layers} sliding-window + {global_layers} global"
+            )
             spec.layer_notes.append(f"Sliding window size={window}")
         elif window:
             spec.layer_notes.append(f"Sliding window attention (window={window})")
@@ -251,7 +258,9 @@ def _infer_positional(config: dict[str, Any], spec: ArchitectureSpec) -> None:
 
 
 def _infer_ffn_and_moe(config: dict[str, Any], spec: ArchitectureSpec) -> None:
-    hidden_act = str(_get(config, "hidden_act", "activation_function") or "silu").lower()
+    hidden_act = str(
+        _get(config, "hidden_act", "activation_function") or "silu"
+    ).lower()
     if hidden_act in {"silu", "swish"}:
         spec.ffn_type = "SwiGLU"
     elif hidden_act == "gelu":
@@ -336,9 +345,14 @@ def _infer_ffn_and_moe(config: dict[str, Any], spec: ArchitectureSpec) -> None:
 def _config_has_ffn_layer_variation(config: dict[str, Any]) -> bool:
     """True when config selects different FFN/MoE modules by layer index."""
     mlp_layer_types = _get(config, "mlp_layer_types")
-    if isinstance(mlp_layer_types, list) and len({str(item) for item in mlp_layer_types}) > 1:
+    if (
+        isinstance(mlp_layer_types, list)
+        and len({str(item) for item in mlp_layer_types}) > 1
+    ):
         return True
-    first_k_dense = _as_int(_get(config, "first_k_dense_replace", "num_dense_layers")) or 0
+    first_k_dense = (
+        _as_int(_get(config, "first_k_dense_replace", "num_dense_layers")) or 0
+    )
     num_experts = _as_int(
         _get(
             config,
@@ -352,7 +366,10 @@ def _config_has_ffn_layer_variation(config: dict[str, Any]) -> bool:
     if first_k_dense and num_experts and num_experts > 1:
         return True
     moe_pattern = _get(config, "moe_layer_freq")
-    if isinstance(moe_pattern, list) and len({bool(_as_int(item)) for item in moe_pattern}) > 1:
+    if (
+        isinstance(moe_pattern, list)
+        and len({bool(_as_int(item)) for item in moe_pattern}) > 1
+    ):
         return True
     return False
 
@@ -387,7 +404,11 @@ def _resolve_attention_from_config_lists(
         lowered = class_name.lower()
         if wants_linear and "linear" in lowered:
             return class_name
-        if wants_sparse and "linear" not in lowered and ATTENTION_CLASS_RE.search(class_name):
+        if (
+            wants_sparse
+            and "linear" not in lowered
+            and ATTENTION_CLASS_RE.search(class_name)
+        ):
             return class_name
     return options[0]
 
@@ -416,7 +437,10 @@ def _config_has_per_layer_typing(config: dict[str, Any]) -> bool:
     """True when config encodes per-layer module selection beyond a flat layer_types list."""
     if isinstance(_get(config, "layer_types", "block_types"), list):
         return False
-    for container in [config, *([value for value in config.values() if isinstance(value, dict)])]:
+    for container in [
+        config,
+        *([value for value in config.values() if isinstance(value, dict)]),
+    ]:
         for key, value in container.items():
             if "layer" in key.lower() and isinstance(value, list) and value:
                 if all(_as_int(item) is not None for item in value):
@@ -470,7 +494,9 @@ def _resolve_ffn_for_layer(
     from visualizer.layer_repeat_simplify import layer_condition_matches
 
     for attr, class_name, condition in ffn_rules:
-        if condition != "else" and layer_condition_matches(layer_idx, condition, config):
+        if condition != "else" and layer_condition_matches(
+            layer_idx, condition, config
+        ):
             return attr, class_name
     for attr, class_name, condition in ffn_rules:
         if condition == "else":
@@ -541,7 +567,10 @@ def _infer_layer_variants(
 
     conditionals: list[tuple[str, str, str]] = []
     if class_registry and decoder_class:
-        from visualizer.ast_analyze import ClassStructure, _extract_decoder_layer_conditionals
+        from visualizer.ast_analyze import (
+            ClassStructure,
+            _extract_decoder_layer_conditionals,
+        )
 
         decoder = class_registry.get(decoder_class)
         if isinstance(decoder, ClassStructure):
@@ -555,15 +584,19 @@ def _infer_layer_variants(
     ):
         return
 
-    if not conditionals and not _config_has_per_layer_typing(config) and not (
-        has_config_layer_lists or has_ffn_layer_variation
+    if (
+        not conditionals
+        and not _config_has_per_layer_typing(config)
+        and not (has_config_layer_lists or has_ffn_layer_variation)
     ):
         return
 
     from collections import Counter
     from visualizer.ast_analyze import _classify_role, _label_for, ffn_role_for_class
 
-    attn_rules = [(cls, cond) for attr, cls, cond in conditionals if attr in _ATTENTION_ATTRS]
+    attn_rules = [
+        (cls, cond) for attr, cls, cond in conditionals if attr in _ATTENTION_ATTRS
+    ]
     ffn_rules = [
         (attr, cls, cond)
         for attr, cls, cond in conditionals
@@ -577,11 +610,19 @@ def _infer_layer_variants(
                 decoder_options.extend(decoder.init_assignment_options.get(attr, []))
     decoder_options = list(dict.fromkeys(decoder_options))
     moe_option = next(
-        (class_name for class_name in decoder_options if ffn_role_for_class("", class_name) == "moe"),
+        (
+            class_name
+            for class_name in decoder_options
+            if ffn_role_for_class("", class_name) == "moe"
+        ),
         None,
     )
     dense_option = next(
-        (class_name for class_name in decoder_options if ffn_role_for_class("", class_name) == "ffn"),
+        (
+            class_name
+            for class_name in decoder_options
+            if ffn_role_for_class("", class_name) == "ffn"
+        ),
         None,
     )
 
@@ -662,7 +703,9 @@ def _infer_layer_variants(
     elif len(attn_labels) == 1:
         spec.attention_type = attn_labels[0]
         if variants[0].attention_class:
-            spec.attention_notes.append(f"Attention module: {variants[0].attention_class}")
+            spec.attention_notes.append(
+                f"Attention module: {variants[0].attention_class}"
+            )
 
     mix_parts = [f"{variant.count} {variant.label}" for variant in variants]
     spec.layer_mix = ", ".join(mix_parts)
@@ -689,7 +732,9 @@ def _config_moe_layer(layer_idx: int, config: dict[str, Any]) -> bool:
         if 0 <= layer_idx < len(moe_pattern):
             return bool(_as_int(moe_pattern[layer_idx]) or 0)
         return False
-    first_k_dense = _as_int(_get(config, "first_k_dense_replace", "num_dense_layers")) or 0
+    first_k_dense = (
+        _as_int(_get(config, "first_k_dense_replace", "num_dense_layers")) or 0
+    )
     moe_freq = _as_int(_get(config, "moe_layer_freq", "moe_layer_interval")) or 1
     return layer_idx >= first_k_dense and layer_idx % moe_freq == 0
 
@@ -699,10 +744,18 @@ def _infer_norm(config: dict[str, Any], spec: ArchitectureSpec) -> None:
 
     if _get(config, "rms_norm_eps") is not None:
         spec.norm_type = "RMSNorm"
-    elif _get(config, "layer_norm_eps") is not None or model_type in {"gpt2", "gpt_neox", "opt", "bloom"}:
+    elif _get(config, "layer_norm_eps") is not None or model_type in {
+        "gpt2",
+        "gpt_neox",
+        "opt",
+        "bloom",
+    }:
         spec.norm_type = "LayerNorm"
 
-    if any(token in model_type for token in ("gpt2", "gpt_neox", "bloom", "opt", "llama", "mistral", "qwen")):
+    if any(
+        token in model_type
+        for token in ("gpt2", "gpt_neox", "bloom", "opt", "llama", "mistral", "qwen")
+    ):
         spec.norm_placement = "Pre-Norm"
 
     if "olmo" in model_type:
@@ -813,8 +866,16 @@ def _rebuild_stack_components(
     if not registry:
         return
 
-    decoder = registry.get(analysis.decoder_class) if analysis.decoder_class else _pick_decoder_class(registry)
-    causal_lm = registry.get(analysis.causal_lm_class) if analysis.causal_lm_class else _pick_causal_lm_class(registry)
+    decoder = (
+        registry.get(analysis.decoder_class)
+        if analysis.decoder_class
+        else _pick_decoder_class(registry)
+    )
+    causal_lm = (
+        registry.get(analysis.causal_lm_class)
+        if analysis.causal_lm_class
+        else _pick_causal_lm_class(registry)
+    )
     stack_model = (
         registry.get(analysis.stack_model_class)
         if analysis.stack_model_class
@@ -878,7 +939,10 @@ def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None
     _finalize_layer_repeat_lines(spec)
 
     if analysis.attention_type:
-        mixed_attention = spec.layer_variants and len({variant.attention_label for variant in spec.layer_variants}) > 1
+        mixed_attention = (
+            spec.layer_variants
+            and len({variant.attention_label for variant in spec.layer_variants}) > 1
+        )
         if not mixed_attention:
             spec.attention_type = analysis.attention_type
         if analysis.attention_class:
@@ -909,7 +973,9 @@ def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None
 
     for comp in analysis.block_components:
         if comp.role == "other":
-            spec.layer_notes.append(f"Custom block `{comp.attr_name}` ({comp.class_name})")
+            spec.layer_notes.append(
+                f"Custom block `{comp.attr_name}` ({comp.class_name})"
+            )
 
 
 def _code_rotates_positions(analysis: CodeAnalysis) -> bool:
@@ -928,7 +994,9 @@ def _code_rotates_positions(analysis: CodeAnalysis) -> bool:
     return False
 
 
-def _refine_positional_from_code(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None:
+def _refine_positional_from_code(
+    spec: ArchitectureSpec, analysis: CodeAnalysis
+) -> None:
     """Correct a config-derived rope claim the modeling source contradicts.
 
     A config carrying `rope_theta` only means rope parameters exist; a checkpoint can
@@ -993,14 +1061,20 @@ def parse_architecture(
         model_type=model_type,
         architectures=[str(a) for a in architectures],
         hidden_size=_as_int(_get(config, "hidden_size", "n_embd", "d_model")),
-        num_hidden_layers=_as_int(_get(config, "num_hidden_layers", "n_layer", "num_layers")),
-        intermediate_size=_as_int(_get(config, "intermediate_size", "n_inner", "ffn_dim")),
+        num_hidden_layers=_as_int(
+            _get(config, "num_hidden_layers", "n_layer", "num_layers")
+        ),
+        intermediate_size=_as_int(
+            _get(config, "intermediate_size", "n_inner", "ffn_dim")
+        ),
         vocab_size=_as_int(_get(config, "vocab_size")),
         max_position_embeddings=_as_int(
             _get(config, "max_position_embeddings", "max_seq_len", "seq_length")
         ),
         num_attention_heads=_as_int(_get(config, "num_attention_heads", "n_head")),
-        num_key_value_heads=_as_int(_get(config, "num_key_value_heads", "num_kv_heads")),
+        num_key_value_heads=_as_int(
+            _get(config, "num_key_value_heads", "num_kv_heads")
+        ),
         head_dim=_as_int(_get(config, "head_dim")),
         tie_word_embeddings=_as_bool(_get(config, "tie_word_embeddings")),
         source_path=source,
@@ -1075,13 +1149,17 @@ def load_architecture(
                 all_tensor_ops=all_tensor_ops,
             )
 
-    spec = parse_architecture(config, config_label, name=name, code_analysis=code_analysis)
+    spec = parse_architecture(
+        config, config_label, name=name, code_analysis=code_analysis
+    )
     spec.checkpoint_source = config_label
     spec.source_path = config_label
     if config.get("_has_vision_tower"):
         spec.layer_notes.append("Multimodal wrapper includes a vision tower")
     if config.get("_wrapper_model_type"):
-        spec.layer_notes.append(f"Loaded text backbone from {config['_wrapper_model_type']} wrapper")
+        spec.layer_notes.append(
+            f"Loaded text backbone from {config['_wrapper_model_type']} wrapper"
+        )
     if github:
         spec.github_source = parse_github_url(github).display
     else:

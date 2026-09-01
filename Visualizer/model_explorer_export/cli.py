@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """CLI for exporting TraceLens computation graphs to Model Explorer."""
 
 from __future__ import annotations
@@ -10,7 +16,11 @@ from pathlib import Path
 
 from visualizer.basic_ops import DEFAULT_BASIC_OP_PATTERNS
 from visualizer.extract import dump_model_ast
-from visualizer.loader import build_detailed_basic_ops, load_model_spec, resolve_checkpoint_arg
+from visualizer.loader import (
+    build_detailed_basic_ops,
+    load_model_spec,
+    resolve_checkpoint_arg,
+)
 
 from model_explorer_export.build import (
     build_model_explorer_payload,
@@ -180,9 +190,13 @@ def main(argv: list[str] | None = None) -> int:
 
     checkpoint = resolve_checkpoint_arg(checkpoint=args.checkpoint, source=args.source)
     if checkpoint is None and args.github is None:
-        parser.error("Provide a Hugging Face checkpoint (SOURCE or --checkpoint) and/or --github")
+        parser.error(
+            "Provide a Hugging Face checkpoint (SOURCE or --checkpoint) and/or --github"
+        )
 
-    basic_ops = build_detailed_basic_ops(add=args.basic_op_add, remove=args.basic_op_remove)
+    basic_ops = build_detailed_basic_ops(
+        add=args.basic_op_add, remove=args.basic_op_remove
+    )
 
     if args.dump_ast:
         ast_dump = dump_model_ast(
@@ -221,7 +235,9 @@ def main(argv: list[str] | None = None) -> int:
             include_operator_export=args.operators_json is not None,
         )
         if not payload["graphCollections"][0]["graphs"]:
-            raise ValueError("No computation graphs were built from the modeling source.")
+            raise ValueError(
+                "No computation graphs were built from the modeling source."
+            )
     except Exception as exc:  # noqa: BLE001
         print(f"Error exporting Model Explorer payload: {exc}", file=sys.stderr)
         return 1

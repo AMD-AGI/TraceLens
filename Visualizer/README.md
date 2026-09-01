@@ -1,3 +1,8 @@
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
 # TraceLens Visualizer
 
 This tool analyzes neural network models in Hugging Face and interactively visualizes them using [Google's Model Explorer.](https://github.com/google-ai-edge/model-explorer)

@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Build Model Explorer payloads from TraceLens architecture specs."""
 
 from __future__ import annotations
@@ -8,7 +14,11 @@ from typing import Any
 
 from visualizer.basic_ops import BasicOpFilter
 from visualizer.extract import ArchitectureSpec
-from visualizer.shape_inference import ShapeInferencer, build_operator_export, serialize_dim
+from visualizer.shape_inference import (
+    ShapeInferencer,
+    build_operator_export,
+    serialize_dim,
+)
 
 from model_explorer_export.fact_sheet import build_fact_sheet_viewer
 from model_explorer_export.merge import build_merged_model_graph
@@ -29,7 +39,9 @@ def build_model_explorer_payload(
 ) -> dict[str, Any]:
     """Build a single merged Model Explorer graph with in-place namespace expansion."""
     resolved_basic_ops = basic_ops or spec.basic_ops
-    inferencer = ShapeInferencer(spec) if include_shapes or include_operator_export else None
+    inferencer = (
+        ShapeInferencer(spec) if include_shapes or include_operator_export else None
+    )
     graph = build_merged_model_graph(
         spec,
         basic_ops=_export_basic_ops(resolved_basic_ops),

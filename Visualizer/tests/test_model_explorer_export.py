@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Tests for Model Explorer export from TraceLens computation graphs."""
 
 from __future__ import annotations
@@ -10,11 +16,14 @@ import pytest
 
 from visualizer.ast_analyze import SYNTHETIC_ATTENTION
 from visualizer.basic_ops import BasicOpFilter
-from visualizer.block_tree import BlockNode, build_decoder_block_trees
+from visualizer.block_tree import BlockNode
 from visualizer.computation_graph import build_computation_graph
 from visualizer.extract import load_architecture
 
-from model_explorer_export.adapter import attach_subgraph_links, computation_graph_to_explorer_graph
+from model_explorer_export.adapter import (
+    attach_subgraph_links,
+    computation_graph_to_explorer_graph,
+)
 from model_explorer_export.build import build_model_explorer_payload
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -22,7 +31,13 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 def _mla_fixture_root() -> BlockNode:
     def leaf(name: str) -> BlockNode:
-        return BlockNode(attr_name=name, class_name="Linear", role="other", label="Linear", is_basic=True)
+        return BlockNode(
+            attr_name=name,
+            class_name="Linear",
+            role="other",
+            label="Linear",
+            is_basic=True,
+        )
 
     return BlockNode(
         attr_name="attn",
@@ -53,7 +68,9 @@ def _mla_fixture_root() -> BlockNode:
 def test_computation_graph_to_explorer_graph_topology():
     root = _mla_fixture_root()
     computation = build_computation_graph(root)
-    graph = computation_graph_to_explorer_graph(computation, graph_id="attn", label="MLA")
+    graph = computation_graph_to_explorer_graph(
+        computation, graph_id="attn", label="MLA"
+    )
 
     assert graph["id"] == "attn"
     assert len(graph["nodes"]) == len(computation.nodes)
@@ -67,7 +84,10 @@ def test_computation_graph_to_explorer_graph_topology():
     attention = next(node for node in graph["nodes"] if node["label"] == "Attention")
     assert attention["style"]["backgroundColor"] == "#f5d9d9"
     assert attention["style"]["textColor"] == "#1a1a1a"
-    assert any(attr["key"] == "operation" and attr["value"] == "gpu_kernel" for attr in attention["attrs"])
+    assert any(
+        attr["key"] == "operation" and attr["value"] == "gpu_kernel"
+        for attr in attention["attrs"]
+    )
 
 
 def test_inline_frames_become_namespaces():
@@ -77,9 +97,27 @@ def test_inline_frames_become_namespaces():
         role="ffn",
         label="MLP",
         children=[
-            BlockNode(attr_name="gate_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
-            BlockNode(attr_name="up_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
-            BlockNode(attr_name="down_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
+            BlockNode(
+                attr_name="gate_proj",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            ),
+            BlockNode(
+                attr_name="up_proj",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            ),
+            BlockNode(
+                attr_name="down_proj",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            ),
         ],
     )
     computation = build_computation_graph(root)
@@ -102,8 +140,13 @@ def test_attach_subgraph_links():
             }
         ],
     }
-    nested = {"id": "self_attn", "nodes": [{"id": "q_proj", "label": "Linear", "namespace": ""}]}
-    attach_subgraph_links([main, nested], attr_name_to_graph_id={"self_attn": "self_attn"})
+    nested = {
+        "id": "self_attn",
+        "nodes": [{"id": "q_proj", "label": "Linear", "namespace": ""}],
+    }
+    attach_subgraph_links(
+        [main, nested], attr_name_to_graph_id={"self_attn": "self_attn"}
+    )
     assert main["nodes"][0]["subgraphIds"] == ["self_attn"]
 
 
@@ -116,12 +159,16 @@ def test_merged_sections_include_input_ports():
     )
     payload = build_model_explorer_payload(spec)
     graph = payload["graphCollections"][0]["graphs"][0]
-    input_nodes = [node for node in graph["nodes"] if node["id"].endswith("/@input") or node["id"] == "@input"]
-    assert any(node["label"].split("\n", 1)[0] == "hidden_states" for node in input_nodes)
-    attn_input = next(
+    input_nodes = [
         node
-        for node in input_nodes
-        if node["id"].endswith("/block_sparse_moe/@input")
+        for node in graph["nodes"]
+        if node["id"].endswith("/@input") or node["id"] == "@input"
+    ]
+    assert any(
+        node["label"].split("\n", 1)[0] == "hidden_states" for node in input_nodes
+    )
+    attn_input = next(
+        node for node in input_nodes if node["id"].endswith("/block_sparse_moe/@input")
     )
     assert attn_input["incomingEdges"]
 
@@ -174,7 +221,9 @@ def test_inject_group_inputs_labels_external_tensor_ports_on_edges():
     k_node = next(node for node in section_nodes if node["id"] == k_node_id)
     assert q_node["incomingEdges"][0]["metadata"] == {"port_label": "q"}
     assert k_node["incomingEdges"][0]["metadata"] == {"port_label": "k"}
-    assert q_node["inputsMetadata"] == [{"id": "0", "attrs": [{"key": "port_label", "value": "q"}]}]
+    assert q_node["inputsMetadata"] == [
+        {"id": "0", "attrs": [{"key": "port_label", "value": "q"}]}
+    ]
 
 
 def test_inject_group_inputs_adds_namespace_input_port():
@@ -274,12 +323,18 @@ def test_replace_tile_with_group_puts_nested_diagram_in_the_tile_slot():
         *nested_nodes,
     ]
 
-    _replace_tile_with_group(section_nodes, nested_nodes, tile_id=tile, exit_id=nested_exit)
+    _replace_tile_with_group(
+        section_nodes, nested_nodes, tile_id=tile, exit_id=nested_exit
+    )
 
     by_id = {node["id"]: node for node in section_nodes}
     assert tile not in by_id
-    assert [item["sourceNodeId"] for item in by_id[nested_input]["incomingEdges"]] == [producer]
-    assert [item["sourceNodeId"] for item in by_id[consumer]["incomingEdges"]] == [nested_exit]
+    assert [item["sourceNodeId"] for item in by_id[nested_input]["incomingEdges"]] == [
+        producer
+    ]
+    assert [item["sourceNodeId"] for item in by_id[consumer]["incomingEdges"]] == [
+        nested_exit
+    ]
 
 
 def test_inject_group_inputs_treats_nested_ops_as_internal():
@@ -428,15 +483,24 @@ def test_kimi_layer_variants_export_three_decoder_splits():
     assert "68x_KimiDeltaAttention_KimiSparseMoeBlock" in joined
     assert "24x_KimiMLAAttention_KimiSparseMoeBlock" in joined
     assert "1x_KimiDeltaAttention_KimiMLP" in joined
-    delta_prefix = f"{decoder_ns}/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention"
+    delta_prefix = (
+        f"{decoder_ns}/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention"
+    )
     assert any(node["namespace"].startswith(delta_prefix) for node in graph["nodes"])
-    mla_prefix = f"{decoder_ns}/24x_KimiMLAAttention_KimiSparseMoeBlock/KimiMLAAttention"
+    mla_prefix = (
+        f"{decoder_ns}/24x_KimiMLAAttention_KimiSparseMoeBlock/KimiMLAAttention"
+    )
     assert any(node["namespace"].startswith(mla_prefix) for node in graph["nodes"])
     assert not any(node["label"] == "LayerNorm" for node in graph["nodes"])
     assert any(node["label"] == "RMSNorm" for node in graph["nodes"])
-    assert not any("_attn_pipeline" in (node.get("namespace") or "") for node in graph["nodes"])
+    assert not any(
+        "_attn_pipeline" in (node.get("namespace") or "") for node in graph["nodes"]
+    )
     pipeline_ns = f"{decoder_ns}/68x_KimiDeltaAttention_KimiSparseMoeBlock/KimiDeltaAttention/chunk_kda_pipeline"
-    assert graph["groupNodeAttributes"].get(pipeline_ns, {}).get("label") == "chunk_kda pipeline"
+    assert (
+        graph["groupNodeAttributes"].get(pipeline_ns, {}).get("label")
+        == "chunk_kda pipeline"
+    )
     l2norm_q_ns = f"{pipeline_ns}/l2norm_fwd_q"
     l2norm_k_ns = f"{pipeline_ns}/l2norm_fwd_k"
     assert graph["groupNodeAttributes"][l2norm_q_ns]["label"] == "L2Norm (q)"
@@ -446,7 +510,10 @@ def test_kimi_layer_variants_export_three_decoder_splits():
         node["label"]
         for node in graph["nodes"]
         if node.get("namespace") == fused_beta_ns
-        and any(a.get("key") == "class_name" and a.get("value") == "KernelSubOp" for a in node.get("attrs", []))
+        and any(
+            a.get("key") == "class_name" and a.get("value") == "KernelSubOp"
+            for a in node.get("attrs", [])
+        )
     }
     assert fused_beta_labels == {"Sigmoid", "x scale"}
     assert not any("?" in node.get("label", "") for node in graph["nodes"])
@@ -502,7 +569,10 @@ def test_kimi_layer_variants_export_three_decoder_splits():
         node["label"]
         for node in graph["nodes"]
         if node.get("namespace") == l2norm_ns
-        and any(a.get("key") == "class_name" and a.get("value") == "KernelSubOp" for a in node.get("attrs", []))
+        and any(
+            a.get("key") == "class_name" and a.get("value") == "KernelSubOp"
+            for a in node.get("attrs", [])
+        )
     }
     assert l2norm_labels == {"Sum", "Sqrt", "1/x", "X"}
     assert graph["groupNodeAttributes"][l2norm_ns]["label"] == "L2Norm (q)"
@@ -525,7 +595,10 @@ def test_kimi_layer_variants_export_three_decoder_splits():
             for node in graph["nodes"]
             if node.get("namespace") == namespace
             and node.get("label") == port
-            and any(a.get("key") == "synthetic" and a.get("value") == "@input" for a in node.get("attrs", []))
+            and any(
+                a.get("key") == "synthetic" and a.get("value") == "@input"
+                for a in node.get("attrs", [])
+            )
         )
 
     q_multiply = _l2norm_multiply(l2norm_ns)
@@ -556,16 +629,22 @@ def test_kimi_layer_variants_export_three_decoder_splits():
 
     gate_entry = _labeled_entry(gate_ns, "g")
     fused_beta_entry = _labeled_entry(fused_beta_ns, "beta")
-    assert gate_entry["inputsMetadata"][0]["attrs"] == [{"key": "port_label", "value": "g"}]
-    assert fused_beta_entry["inputsMetadata"][0]["attrs"] == [{"key": "port_label", "value": "beta"}]
+    assert gate_entry["inputsMetadata"][0]["attrs"] == [
+        {"key": "port_label", "value": "g"}
+    ]
+    assert fused_beta_entry["inputsMetadata"][0]["attrs"] == [
+        {"key": "port_label", "value": "beta"}
+    ]
     gate_labels = {
         node["label"]
         for node in graph["nodes"]
         if node.get("namespace") == gate_ns
-        and any(a.get("key") == "class_name" and a.get("value") == "KernelSubOp" for a in node.get("attrs", []))
+        and any(
+            a.get("key") == "class_name" and a.get("value") == "KernelSubOp"
+            for a in node.get("attrs", [])
+        )
     }
     assert gate_labels == {"Exp", "Softplus", "X", "Sigmoid", "CumSum"}
-    mlp_variant_ns = f"{decoder_ns}/1x_KimiDeltaAttention_KimiMLP"
     assert not any(
         node["id"] == f"decoder/1x_KimiDeltaAttention_KimiMLP/{norm_attr}/@input"
         for norm_attr in ("input_layernorm", "post_attention_layernorm")
@@ -602,7 +681,9 @@ def test_build_model_explorer_payload_is_single_merged_graph():
     assert len(graphs) == 1
     assert graphs[0]["id"] == "model"
     assert not any(node.get("subgraphIds") for node in graphs[0]["nodes"])
-    namespaces = {node["namespace"] for node in graphs[0]["nodes"] if node.get("namespace")}
+    namespaces = {
+        node["namespace"] for node in graphs[0]["nodes"] if node.get("namespace")
+    }
     assert namespaces
     overview_labels = [node["label"] for node in graphs[0]["nodes"]]
     assert "Tokenized text" in overview_labels
@@ -625,7 +706,9 @@ def test_merged_graph_uses_readable_text_on_colored_blocks():
             ),
         ],
     )
-    graph = computation_graph_to_explorer_graph(build_computation_graph(root), graph_id="moe")
+    graph = computation_graph_to_explorer_graph(
+        build_computation_graph(root), graph_id="moe"
+    )
     purple_nodes = [
         node
         for node in graph["nodes"]
@@ -636,7 +719,11 @@ def test_merged_graph_uses_readable_text_on_colored_blocks():
 
 
 def test_norm_linear_and_multiply_use_basic_op_gray():
-    from visualizer.computation_graph import ComputationGraph, GraphNodeSpec, build_computation_graph
+    from visualizer.computation_graph import (
+        ComputationGraph,
+        GraphNodeSpec,
+        build_computation_graph,
+    )
 
     norm = BlockNode(
         attr_name="input_layernorm",
@@ -652,19 +739,24 @@ def test_norm_linear_and_multiply_use_basic_op_gray():
         is_basic=True,
     )
     graph = computation_graph_to_explorer_graph(
-        build_computation_graph(BlockNode(
-            attr_name="attn",
-            class_name="Attn",
-            role="attention",
-            label="Attn",
-            children=[norm, linear],
-        )),
+        build_computation_graph(
+            BlockNode(
+                attr_name="attn",
+                class_name="Attn",
+                role="attention",
+                label="Attn",
+                children=[norm, linear],
+            )
+        ),
         graph_id="attn",
     )
     norm_node = next(node for node in graph["nodes"] if node["label"] == "RMSNorm")
     linear_node = next(node for node in graph["nodes"] if node["label"] == "Linear")
     assert norm_node["style"] == {"backgroundColor": "#bdc3c7", "textColor": "#1a1a1a"}
-    assert linear_node["style"] == {"backgroundColor": "#bdc3c7", "textColor": "#1a1a1a"}
+    assert linear_node["style"] == {
+        "backgroundColor": "#bdc3c7",
+        "textColor": "#1a1a1a",
+    }
 
     multiply_graph = computation_graph_to_explorer_graph(
         ComputationGraph(
@@ -684,7 +776,10 @@ def test_norm_linear_and_multiply_use_basic_op_gray():
         graph_id="mul",
     )
     multiply_node = multiply_graph["nodes"][0]
-    assert multiply_node["style"] == {"backgroundColor": "#bdc3c7", "textColor": "#1a1a1a"}
+    assert multiply_node["style"] == {
+        "backgroundColor": "#bdc3c7",
+        "textColor": "#1a1a1a",
+    }
 
 
 def test_fact_sheet_panel_in_payload():
@@ -706,10 +801,15 @@ def test_fact_sheet_panel_in_payload():
 def test_default_html_output_path_replaces_slashes():
     from model_explorer_export.cli import default_html_output_path
 
-    assert default_html_output_path("moonshotai/Kimi-K3", None).name == "moonshotai_Kimi-K3.html"
+    assert (
+        default_html_output_path("moonshotai/Kimi-K3", None).name
+        == "moonshotai_Kimi-K3.html"
+    )
 
 
-def test_implicit_cli_output_uses_html_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_implicit_cli_output_uses_html_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     from model_explorer_export.cli import main
 
     fixture = FIXTURES / "llama_like"
@@ -828,11 +928,16 @@ def test_fact_sheet_forward_sequence_uses_graph_display_labels():
     fact_body = payload["tracelensViewer"]["factSheet"]["body"]
     graph_attrs = payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"][""]
 
-    forward_line = next(line for line in fact_body.splitlines() if line.startswith("- Forward:"))
+    forward_line = next(
+        line for line in fact_body.splitlines() if line.startswith("- Forward:")
+    )
     assert forward_line == (
         "- Forward: RMSNorm -> CustomLatent Attn -> Add -> RMSNorm -> CustomSharedExpertMoE -> Add"
     )
-    assert graph_attrs["forward"] == "RMSNorm → CustomLatent Attn → Add → RMSNorm → CustomSharedExpertMoE → Add"
+    assert (
+        graph_attrs["forward"]
+        == "RMSNorm → CustomLatent Attn → Add → RMSNorm → CustomSharedExpertMoE → Add"
+    )
 
 
 def test_kernel_frame_labels_split_l2norm_q_and_k_and_sanitize_unicode():
@@ -882,7 +987,9 @@ def test_fill_missing_node_shapes_seeds_and_propagates():
 
     from model_explorer_export.shapes import fill_missing_node_shapes
 
-    context = ShapeContext(dims={"B": "B", "S": "S", "H": 4096, "V": 32000}, dtype="float16")
+    context = ShapeContext(
+        dims={"B": "B", "S": "S", "H": 4096, "V": 32000}, dtype="float16"
+    )
     nodes: list[dict[str, Any]] = [
         {"id": "@input", "label": "Tokenized text"},
         {
@@ -893,12 +1000,16 @@ def test_fill_missing_node_shapes_seeds_and_propagates():
         {
             "id": "decoder/norm",
             "label": "RMSNorm",
-            "incomingEdges": [{"sourceNodeId": "embed_tokens", "sourceNodeOutputId": "0"}],
+            "incomingEdges": [
+                {"sourceNodeId": "embed_tokens", "sourceNodeOutputId": "0"}
+            ],
         },
         {
             "id": "mlp",
             "label": "MLP",
-            "incomingEdges": [{"sourceNodeId": "decoder/norm", "sourceNodeOutputId": "0"}],
+            "incomingEdges": [
+                {"sourceNodeId": "decoder/norm", "sourceNodeOutputId": "0"}
+            ],
         },
         {"id": "lm_head", "label": "Logits"},
         {"id": "orphan", "label": "Detached"},
@@ -942,9 +1053,7 @@ def test_merged_graph_includes_output_shape_attrs():
     # Every node needs output metadata or Model Explorer labels its edges "?".
     assert all(node.get("outputsMetadata") for node in nodes)
     router = next(
-        node
-        for node in shaped_nodes
-        if node["id"].endswith("router:router:0")
+        node for node in shaped_nodes if node["id"].endswith("router:router:0")
     )
     shape_attr = next(attr for attr in router["attrs"] if attr["key"] == "output_shape")
     assert shape_attr["value"] == "B x S x 64"
@@ -968,9 +1077,7 @@ def test_expandable_groups_carry_their_boundary_shapes():
     )
     graph = build_model_explorer_payload(spec)["graphCollections"][0]["graphs"][0]
     attrs = graph["groupNodeAttributes"]
-    namespaces = {
-        node["namespace"] for node in graph["nodes"] if node.get("namespace")
-    }
+    namespaces = {node["namespace"] for node in graph["nodes"] if node.get("namespace")}
     assert namespaces
     # Model Explorer leaves edges into collapsed groups unlabeled, so each group states
     # what crosses its boundary.
@@ -983,7 +1090,9 @@ def test_expandable_groups_carry_their_boundary_shapes():
     assert attrs[decoder]["output_shape"] == "B x S x 4096"
 
     without_shapes = build_model_explorer_payload(spec, include_shapes=False)
-    plain_attrs = without_shapes["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+    plain_attrs = without_shapes["graphCollections"][0]["graphs"][0][
+        "groupNodeAttributes"
+    ]
     assert "input_shape" not in plain_attrs.get(decoder, {})
 
 
@@ -994,7 +1103,9 @@ def test_group_boundary_shapes_reads_the_crossing_tensor():
         return {
             "id": node_id,
             "namespace": namespace,
-            "outputsMetadata": [{"id": "0", "attrs": [{"key": "shape", "value": shape}]}],
+            "outputsMetadata": [
+                {"id": "0", "attrs": [{"key": "shape", "value": shape}]}
+            ],
             "incomingEdges": [{"sourceNodeId": source} for source in sources],
         }
 

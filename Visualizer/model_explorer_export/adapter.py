@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Convert TraceLens ``ComputationGraph`` objects to Model Explorer input graphs."""
 
 from __future__ import annotations
@@ -9,7 +15,11 @@ from typing import Any
 from visualizer.computation_graph import ComputationGraph
 from visualizer.model_graph import classify_operation
 
-from model_explorer_export.styles import detail_tile_style, ensure_readable_text, finalize_graph_node_styles
+from model_explorer_export.styles import (
+    detail_tile_style,
+    ensure_readable_text,
+    finalize_graph_node_styles,
+)
 
 _DEFAULT_OUTPUT_ID = "0"
 
@@ -70,7 +80,9 @@ def _node_style(spec) -> dict[str, str] | None:
     )
 
 
-def _incoming_edges(computation: ComputationGraph, index_to_id: dict[int, str]) -> dict[str, list[dict[str, Any]]]:
+def _incoming_edges(
+    computation: ComputationGraph, index_to_id: dict[int, str]
+) -> dict[str, list[dict[str, Any]]]:
     incoming: dict[str, list[dict[str, Any]]] = defaultdict(list)
     target_input_counter: dict[str, int] = defaultdict(int)
 

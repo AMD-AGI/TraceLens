@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Model Explorer fact sheet panel."""
 
 from __future__ import annotations
@@ -62,9 +68,7 @@ def _format_source_line(prefix: str, label: str) -> str:
     url = (
         checkpoint_source_url(label)
         if prefix == "Checkpoint"
-        else github_source_url(label)
-        if prefix == "GitHub code"
-        else None
+        else github_source_url(label) if prefix == "GitHub code" else None
     )
     display = url or label
     return f"{prefix}: {display}"
@@ -74,16 +78,14 @@ def _format_source_line_html(prefix: str, label: str) -> str:
     url = (
         checkpoint_source_url(label)
         if prefix == "Checkpoint"
-        else github_source_url(label)
-        if prefix == "GitHub code"
-        else None
+        else github_source_url(label) if prefix == "GitHub code" else None
     )
     if url is None:
         return f"- {html.escape(prefix)}: {html.escape(label)}"
     safe_url = html.escape(url, quote=True)
     safe_text = html.escape(url)
     return (
-        f'- {html.escape(prefix)}: '
+        f"- {html.escape(prefix)}: "
         f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{safe_text}</a>'
     )
 
@@ -185,10 +187,14 @@ def _render_fact_sheet_html(spec: ArchitectureSpec) -> str:
             continue
         text = line.strip()
         if text.startswith("Checkpoint: "):
-            parts.append(_format_source_line_html("Checkpoint", spec.checkpoint_source or ""))
+            parts.append(
+                _format_source_line_html("Checkpoint", spec.checkpoint_source or "")
+            )
             continue
         if text.startswith("GitHub code: "):
-            parts.append(_format_source_line_html("GitHub code", spec.github_source or ""))
+            parts.append(
+                _format_source_line_html("GitHub code", spec.github_source or "")
+            )
             continue
         parts.append(f"- {html.escape(text)}")
     parts.extend(html.escape(line.strip()) for line in _highlight_lines(spec))

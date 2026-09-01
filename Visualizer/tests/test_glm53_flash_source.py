@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Tests for GLM-5.3-Flash modeling source resolution."""
 
 from __future__ import annotations
@@ -32,7 +38,9 @@ def test_glm53_flash_resolves_transformers_modeling_source():
     files, labels = resolve_source_files("zai-org/GLM-5.3-Flash", config)
     assert files
     assert any("modeling_glm5_next.py" in str(path) for path in files)
-    assert any(label.startswith("github://huggingface/transformers") for label in labels)
+    assert any(
+        label.startswith("github://huggingface/transformers") for label in labels
+    )
 
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     ffn_classes: list[str] = []

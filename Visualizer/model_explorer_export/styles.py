@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Shared node styling helpers for Model Explorer export."""
 
 from __future__ import annotations
@@ -56,7 +62,11 @@ OPERATION_COLORS: dict[str, dict[str, str]] = {
     "gpu_kernel": {"backgroundColor": _GPU_KERNEL, "textColor": _DARK_TEXT},
     "nn_module": {"backgroundColor": _BASIC_OP, "textColor": _DARK_TEXT},
     "torch_functional": {"backgroundColor": _BASIC_OP, "textColor": _DARK_TEXT},
-    "composite": {"backgroundColor": _ATTENTION, "textColor": _WHITE_TEXT, "borderColor": "#566573"},
+    "composite": {
+        "backgroundColor": _ATTENTION,
+        "textColor": _WHITE_TEXT,
+        "borderColor": "#566573",
+    },
     "synthetic": {"backgroundColor": _SYNTHETIC, "textColor": _DARK_TEXT},
 }
 
@@ -112,9 +122,9 @@ def build_group_node_configs(
             )
             continue
         segment = namespace.rsplit("/", 1)[-1]
-        if segment in {"KimiSparseMoeBlock", "KimiMoEGate"} or attrs.get("label", "").endswith(
-            "MoEGate"
-        ):
+        if segment in {"KimiSparseMoeBlock", "KimiMoEGate"} or attrs.get(
+            "label", ""
+        ).endswith("MoEGate"):
             configs.append(
                 {
                     "namespaceRegex": _exact_namespace_regex(namespace),
@@ -175,7 +185,11 @@ def detail_tile_style(
     label: str = "",
 ) -> dict[str, str]:
     """Pick detail-tile colors from block role and operation kind."""
-    from visualizer.model_graph import OperationKind, _COMBINE_LABELS, classify_operation
+    from visualizer.model_graph import (
+        OperationKind,
+        _COMBINE_LABELS,
+        classify_operation,
+    )
 
     if synthetic == "@input":
         return input_port_style()

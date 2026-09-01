@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Tests for fact sheet source URL formatting."""
 
 from __future__ import annotations
@@ -40,7 +46,10 @@ def test_build_fact_sheet_viewer_uses_https_links_in_html():
     assert "github://" not in viewer["body"]
     assert "https://huggingface.co/org/model/blob/main/config.json" in viewer["body"]
     assert "https://github.com/org/repo/blob/v1/model.py" in viewer["body"]
-    assert 'href="https://huggingface.co/org/model/blob/main/config.json"' in viewer["bodyHtml"]
+    assert (
+        'href="https://huggingface.co/org/model/blob/main/config.json"'
+        in viewer["bodyHtml"]
+    )
     assert 'href="https://github.com/org/repo/blob/v1/model.py"' in viewer["bodyHtml"]
 
 
@@ -53,6 +62,8 @@ def test_build_fact_sheet_omits_raw_forward_op_ids():
 
     assert "@op_" not in viewer["body"]
     assert "@op_" not in viewer["bodyHtml"]
-    forward_line = next(line for line in viewer["body"].splitlines() if line.startswith("- Forward:"))
+    forward_line = next(
+        line for line in viewer["body"].splitlines() if line.startswith("- Forward:")
+    )
     assert "MatMul" in forward_line
     assert "Multiply" in forward_line

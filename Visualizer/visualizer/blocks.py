@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Datatypes for code-derived architecture blocks."""
 
 from __future__ import annotations
@@ -115,11 +121,14 @@ def upstream_input_sources(components: list[BlockComponent]) -> dict[str, str]:
         upstream_candidates = [
             candidate
             for candidate in ordered
-            if candidate.forward_order is not None and candidate.forward_order < comp.forward_order
+            if candidate.forward_order is not None
+            and candidate.forward_order < comp.forward_order
         ]
         if not upstream_candidates:
             continue
-        upstream = max(upstream_candidates, key=lambda candidate: candidate.forward_order)
+        upstream = max(
+            upstream_candidates, key=lambda candidate: candidate.forward_order
+        )
         sources[comp.attr_name] = input_source_label(upstream)
     return sources
 
@@ -156,4 +165,9 @@ class CodeAnalysis:
     positional_helpers: list[str] = field(default_factory=list)
 
     def has_block_graph(self) -> bool:
-        return bool(self.block_components or self.forward_sequence or self.stack_pre or self.stack_tail)
+        return bool(
+            self.block_components
+            or self.forward_sequence
+            or self.stack_pre
+            or self.stack_tail
+        )

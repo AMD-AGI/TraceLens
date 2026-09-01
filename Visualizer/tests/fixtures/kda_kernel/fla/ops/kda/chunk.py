@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 # Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
 #
 # This source code is licensed under the MIT license found in the
@@ -71,39 +77,64 @@ class ChunkKDAFunction(torch.autograd.Function):
 
         g_input = g
 
-        (o, final_state, g_cumsum, Aqk, Akk, w, u, qg, kg, v_new, h, initial_state) = chunk_kda_fwd(
-            q=q,
-            k=k,
-            v=v,
-            g=g_input,
-            beta=beta,
-            scale=scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=cu_seqlens_cpu,
-            chunk_indices=chunk_indices,
-            safe_gate=safe_gate,
-            lower_bound=lower_bound,
-            use_gate_in_kernel=use_gate_in_kernel,
-            A_log=A_log,
-            dt_bias=dt_bias,
-            chunk_size=chunk_size,
-            disable_recompute=disable_recompute,
-            return_intermediate_states=return_intermediate_states,
-            cp_context=cp_context,
-            state_v_first=state_v_first,
+        o, final_state, g_cumsum, Aqk, Akk, w, u, qg, kg, v_new, h, initial_state = (
+            chunk_kda_fwd(
+                q=q,
+                k=k,
+                v=v,
+                g=g_input,
+                beta=beta,
+                scale=scale,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+                chunk_indices=chunk_indices,
+                safe_gate=safe_gate,
+                lower_bound=lower_bound,
+                use_gate_in_kernel=use_gate_in_kernel,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                chunk_size=chunk_size,
+                disable_recompute=disable_recompute,
+                return_intermediate_states=return_intermediate_states,
+                cp_context=cp_context,
+                state_v_first=state_v_first,
+            )
         )
 
         if return_intermediate_states:
-            assert torch.is_inference_mode_enabled(), "return_intermediate_states is only allowed in inference mode"
-            assert disable_recompute is False, "return_intermediate_states must be used with disable_recompute=False"
+            assert (
+                torch.is_inference_mode_enabled()
+            ), "return_intermediate_states is only allowed in inference mode"
+            assert (
+                disable_recompute is False
+            ), "return_intermediate_states must be used with disable_recompute=False"
             return o.type_as(q), final_state, h
 
         ctx.save_for_backward(
-            q, q_rstd, k, k_rstd, v, g_cumsum, g_input, beta_raw, beta, A_log, dt_bias, Aqk, Akk,
-            w, u, qg, kg, v_new, h,
-            initial_state, cu_seqlens, chunk_indices
+            q,
+            q_rstd,
+            k,
+            k_rstd,
+            v,
+            g_cumsum,
+            g_input,
+            beta_raw,
+            beta,
+            A_log,
+            dt_bias,
+            Aqk,
+            Akk,
+            w,
+            u,
+            qg,
+            kg,
+            v_new,
+            h,
+            initial_state,
+            cu_seqlens,
+            chunk_indices,
         )
         ctx.chunk_size = chunk_size
         ctx.safe_gate = safe_gate
@@ -126,11 +157,30 @@ class ChunkKDAFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
-        (q, q_rstd, k, k_rstd, v, g_cumsum, g_input, beta_raw, beta, A_log, dt_bias, Aqk, Akk,
-         w, u, qg, kg, v_new, h,
-         initial_state, cu_seqlens, chunk_indices) = (
-            ctx.saved_tensors
-        )
+        (
+            q,
+            q_rstd,
+            k,
+            k_rstd,
+            v,
+            g_cumsum,
+            g_input,
+            beta_raw,
+            beta,
+            A_log,
+            dt_bias,
+            Aqk,
+            Akk,
+            w,
+            u,
+            qg,
+            kg,
+            v_new,
+            h,
+            initial_state,
+            cu_seqlens,
+            chunk_indices,
+        ) = ctx.saved_tensors
 
         dq, dk, dv, db, dg, dh0, dA, dbias = chunk_kda_bwd(
             q=q,
@@ -167,13 +217,38 @@ class ChunkKDAFunction(torch.autograd.Function):
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
         if ctx.use_beta_sigmoid_in_kernel:
-            db = fused_beta_sigmoid_bwd(beta_raw, db, scale=2.0 if ctx.allow_neg_eigval else 1.0)
+            db = fused_beta_sigmoid_bwd(
+                beta_raw, db, scale=2.0 if ctx.allow_neg_eigval else 1.0
+            )
 
-        return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta_raw), dA, dbias, None, dh0,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None)
+        return (
+            dq.to(q),
+            dk.to(k),
+            dv.to(v),
+            dg.to(g_input),
+            db.to(beta_raw),
+            dA,
+            dbias,
+            None,
+            dh0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
-@dispatch('kda')
+@dispatch("kda")
 @torch.compiler.disable
 def chunk_kda(
     q: torch.Tensor,
@@ -349,15 +424,17 @@ def chunk_kda(
             cu_seqlens=cu_seqlens
         )
     """
-    if 'transpose_state_layout' in kwargs:
+    if "transpose_state_layout" in kwargs:
         if state_v_first:
-            raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
+            raise ValueError(
+                "Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`."
+            )
         warnings.warn(
             "`transpose_state_layout` is deprecated and renamed to `state_v_first`.",
             DeprecationWarning,
             stacklevel=2,
         )
-        state_v_first = kwargs.pop('transpose_state_layout')
+        state_v_first = kwargs.pop("transpose_state_layout")
 
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"
@@ -389,30 +466,49 @@ def chunk_kda(
 
     chunk_size = kwargs.pop("chunk_size", 64)
     if chunk_size not in (32, 64):
-        raise ValueError(f"`chunk_size` must be either 32 or 64 for KDA, got {chunk_size}.")
+        raise ValueError(
+            f"`chunk_size` must be either 32 or 64 for KDA, got {chunk_size}."
+        )
 
     if safe_gate and use_gate_in_kernel:
         if lower_bound is None:
-            raise ValueError("`lower_bound` must be specified when `safe_gate=True` and `use_gate_in_kernel=True`.")
+            raise ValueError(
+                "`lower_bound` must be specified when `safe_gate=True` and `use_gate_in_kernel=True`."
+            )
         if not (-5 <= lower_bound < 0):
-            raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
+            raise ValueError(
+                f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}."
+            )
 
     if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
-        raise ValueError("`allow_neg_eigval=True` requires `use_beta_sigmoid_in_kernel=True`.")
+        raise ValueError(
+            "`allow_neg_eigval=True` requires `use_beta_sigmoid_in_kernel=True`."
+        )
 
     # Validate head dimensions for GVA
     B, T, H, K, HV = *q.shape, v.shape[2]
-    assert q.shape == k.shape, f"q and k must have the same shape, got q={q.shape} vs k={k.shape}"
+    assert (
+        q.shape == k.shape
+    ), f"q and k must have the same shape, got q={q.shape} vs k={k.shape}"
     assert K <= 256, f"Currently we only support key headdim <=256 for KDA, got {K}."
     assert HV % H == 0, (
         f"For GVA, num_v_heads (HV={HV}) must be evenly divisible by num_qk_heads (H={H}), "
         f"but got HV % H = {HV % H}"
     )
-    assert g.shape == (B, T, HV, K), f"g must have shape [B, T, HV, K]={[B, T, HV, K]}, got {list(g.shape)}"
-    assert beta.shape == (B, T, HV), f"beta must have shape [B, T, HV]={[B, T, HV]}, got {list(beta.shape)}"
+    assert g.shape == (
+        B,
+        T,
+        HV,
+        K,
+    ), f"g must have shape [B, T, HV, K]={[B, T, HV, K]}, got {list(g.shape)}"
+    assert beta.shape == (
+        B,
+        T,
+        HV,
+    ), f"beta must have shape [B, T, HV]={[B, T, HV]}, got {list(beta.shape)}"
 
     if scale is None:
-        scale = K ** -0.5
+        scale = K**-0.5
     return ChunkKDAFunction.apply(
         q,
         k,

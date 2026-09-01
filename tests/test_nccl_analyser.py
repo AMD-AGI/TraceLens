@@ -6,11 +6,7 @@
 
 """Unit tests for TraceLens.NcclAnalyser helpers and utilities."""
 
-import json
-import re
-
-import pytest
-
+import json, re, pytest, importlib, logging, pandas as pd
 from TraceLens.NcclAnalyser.nccl_analyser import (
     NcclAnalyser,
     _collective_filter,
@@ -170,6 +166,125 @@ class TestXLACollectiveParser:
         assert df.iloc[0]["collective_name"] == "all-reduce"
         assert df.iloc[0]["node"] == "0"
 
+    def test_parse_collectives_missing_and_empty(self, tmp_path, capsys):
+        missing = XLACollectiveParser({"0": str(tmp_path / "missing.txt")})
+        assert missing.parse_collectives_to_dataframe().empty
+        assert "Warning: File not found" in capsys.readouterr().out
+
+        empty_file = tmp_path / "empty.txt"
+        empty_file.write_text("", encoding="utf-8")
+        assert (
+            XLACollectiveParser({"0": str(empty_file)})
+            .parse_collectives_to_dataframe()
+            .empty
+        )
+
+    def test_parse_collectives_read_error(self, tmp_path, monkeypatch, capsys):
+        path = tmp_path / "node.txt"
+        path.write_text("x", encoding="utf-8")
+
+        def boom(*args, **kwargs):
+            raise OSError("read failed")
+
+        monkeypatch.setattr("builtins.open", boom)
+        assert (
+            XLACollectiveParser({"0": str(path)}).parse_collectives_to_dataframe().empty
+        )
+        assert "Error reading file" in capsys.readouterr().out
+
+    def test_extract_replica_groups_source_target_pairs(self):
+        line = (
+            "HLO %x = bf16[4,8]{1,0} collective-permute(bf16[4,8]{1,0} %arg0), "
+            'source_target_pairs={{0,1},{1,0}}, scheduling_name="permute"'
+        )
+        replica_string, groups = self.parser._extract_replica_groups(line)
+        assert replica_string == "{{0,1},{1,0}}"
+        assert groups == [[0, 1], [1, 0]]
+
+    def test_parse_all_gather_and_tuple_output(self, tmp_path):
+        line = (
+            "HLO %x = ((bf16[2,4]{1,0}, bf16[8,4]{1,0})) all-gather-start"
+            "((bf16[2,4]{1,0}), (bf16[8,4]{1,0}) %arg0), "
+            'replica_groups={{0,1}}, scheduling_name="all-gather-start.1", dimensions={0}'
+        )
+        path = tmp_path / "node.txt"
+        path.write_text(line + "\n", encoding="utf-8")
+        df = XLACollectiveParser({"0": str(path)}).parse_collectives_to_dataframe()
+        assert not df.empty
+        assert df.iloc[0]["collective_name"] == "all-gather-start.1"
+
+    def test_device_assignment_with_transpose(self):
+        groups = self.parser._parse_replica_groups("[2,2]<=T(1,0)[2,2]")
+        assert groups == [[0, 2], [1, 3]]
+
+    def test_tensor_spec_and_split_dimension_helpers(self):
+        line = (
+            "HLO %x = bf16[4,8]{1,0} all-reduce(bf16[4,8]{1,0} %arg0), "
+            'dimensions={0,1}, scheduling_name="all-reduce"'
+        )
+        assert self.parser._extract_split_dimension(line) is None
+        assert "bf16[4,8]{1,0}" in self.parser._extract_tensor_specs(line)
+        assert self.parser._extract_output_tensor_from_tuple(
+            "all-to-all", "((bf16[2,4]{1,0}), (bf16[8,4]{1,0}))"
+        ).startswith("bf16[8,4]")
+
+    def test_parse_replica_groups_empty_and_invalid(self):
+        assert self.parser._parse_replica_groups("") == []
+        assert self.parser._parse_replica_groups("none") == []
+        assert self.parser._parse_replica_groups("{{0,1}}") == [[0, 1]]
+        assert self.parser._parse_replica_groups("not-a-group") == []
+
+    def test_parse_device_assignment_invalid(self):
+        assert self.parser._parse_device_assignment("[2,2]<=") == []
+
+    def test_extract_tensor_specs_fallback(self):
+        line = "HLO %x = bf16[2,4]{1,0} all-reduce(bf16[2,4]{1,0} %arg0), channel_id=1"
+        assert self.parser._extract_tensor_specs(line) == "bf16[2,4]{1,0}"
+
+    def test_extract_split_dimension_single(self):
+        line = "HLO %x = bf16[4,8]{1,0} all-reduce(...), dimensions={0}"
+        assert self.parser._extract_split_dimension(line) == 0
+
+    def test_output_tensor_tuple_variants(self):
+        parser = self.parser
+        assert (
+            parser._extract_output_tensor_from_tuple("reduce-scatter", "bf16[2,4]{1,0}")
+            == "bf16[2,4]{1,0}"
+        )
+        nested = "((bf16[2,4]{1,0}), (bf16[8,4]{1,0}))"
+        assert parser._extract_output_tensor_from_tuple(
+            "all-gather-start", nested
+        ).startswith("bf16[8,4]")
+        simple = "(bf16[2,4]{1,0}, bf16[8,4]{1,0})"
+        assert parser._extract_output_tensor_from_tuple(
+            "all-to-all", simple
+        ).startswith("bf16[8,4]")
+
+    def test_calculate_tensor_slice_edge_cases(self):
+        parser = self.parser
+        assert (
+            parser._calculate_tensor_slice(None, 0, [[0, 1]], "all-reduce", 2) is None
+        )
+        assert (
+            parser._calculate_tensor_slice("bf16[4,8]{1,0}", 0, [], "all-reduce", 0)
+            is None
+        )
+        assert (
+            parser._calculate_tensor_slice("invalid", 0, [[0, 1]], "all-reduce", 2)
+            is None
+        )
+        slices = parser._calculate_tensor_slice(
+            "bf16[8,4]{1,0}",
+            0,
+            [[0, 1]],
+            "all-reduce",
+            2,
+        )
+        assert slices and slices[0]["bytes"] > 0
+        assert parser._calculate_data_bytes({"bytes": 16}) == 16
+        assert parser._calculate_data_bytes([{"bytes": 4}, {"bytes": 8}]) == 12
+        assert parser._calculate_data_bytes("bad") == 0
+
 
 def test_extract_node_name_from_path(tmp_path):
     pb_file = tmp_path / "nodeA.xplane.pb"
@@ -239,7 +354,6 @@ def test_get_node_rank_protobuf_mapping_warns_on_unmapped_pb(tmp_path, capsys):
 
 
 def test_parse_log_file_for_node_rank_from_filename(tmp_path, monkeypatch):
-    import importlib
 
     mapping_mod = importlib.import_module(parse_log_file_for_node_rank.__module__)
     log_file = tmp_path / "worker_node_rank_3.log"
@@ -278,7 +392,9 @@ def test_nccl_analyser_load_trace_data_multiprocessing(tmp_path):
         _write_trace(path, [_nccl_kernel(external_id=100 + rank, ts=1000 + rank)])
         filepaths.append(str(path))
 
-    analyser = NcclAnalyser(filepaths, world_size, use_multiprocessing=True, max_workers=2)
+    analyser = NcclAnalyser(
+        filepaths, world_size, use_multiprocessing=True, max_workers=2
+    )
     assert len(analyser.rank2trace_data) == world_size
 
 
@@ -315,7 +431,19 @@ def test_nccl_analyser_build_df_long_with_process_group_metadata(tmp_path):
 
 def test_nccl_analyser_build_df_long_empty_trace(tmp_path):
     path = tmp_path / "rank0.json"
-    _write_trace(path, [{"ph": "X", "cat": "cpu_op", "name": "ignored", "ts": 1, "dur": 1, "args": {}}])
+    _write_trace(
+        path,
+        [
+            {
+                "ph": "X",
+                "cat": "cpu_op",
+                "name": "ignored",
+                "ts": 1,
+                "dur": 1,
+                "args": {},
+            }
+        ],
+    )
     analyser = NcclAnalyser([str(path)], world_size=1)
     df_long = analyser.build_df_long()
     assert df_long.empty
@@ -360,149 +488,238 @@ def test_nccl_analyser_instance_filter_fn():
     assert analyser._nccl_filter_event_fn({**event, "cat": "cpu_op"}) is False
 
 
-class TestXLACollectiveParserExtended:
-    def setup_method(self):
-        self.parser = XLACollectiveParser({})
+def _nccl_kernel(
+    name="ncclKernel_AllReduce", external_id=42, ts=100, dur=10, **extra_args
+):
+    args = {
+        "External id": external_id,
+        "Collective name": "allreduce",
+        "Process Group Name": "default_pg",
+        "Process Group Ranks": [0, 1],
+        "Group size": 2,
+        "dtype": "Float",
+        "In msg nelems": 1024,
+        "Out msg nelems": 1024,
+        "In split size": "[]",
+        "Out split size": "[]",
+        "stream": 3,
+    }
+    args.update(extra_args)
+    return {
+        "ph": "X",
+        "cat": "kernel",
+        "name": name,
+        "ts": ts,
+        "dur": dur,
+        "args": args,
+    }
 
-    def test_parse_collectives_skips_missing_file(self, tmp_path, capsys):
-        parser = XLACollectiveParser({"0": str(tmp_path / "missing.txt")})
-        df = parser.parse_collectives_to_dataframe()
-        assert df.empty
-        assert "Warning: File not found" in capsys.readouterr().out
 
-    def test_parse_collectives_handles_read_error(self, tmp_path, capsys):
-        bad_file = tmp_path / "bad.txt"
-        bad_file.mkdir()
-        parser = XLACollectiveParser({"0": str(bad_file)})
-        df = parser.parse_collectives_to_dataframe()
-        assert df.empty
-        assert "Warning: Error reading file" in capsys.readouterr().out
+def _write_trace(path, events):
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"traceEvents": events}, handle)
 
-    def test_parse_collectives_returns_empty_when_no_collectives(self, tmp_path):
-        xla_file = tmp_path / "empty.txt"
-        xla_file.write_text("HLO %x = add(f32[4], f32[4])\n", encoding="utf-8")
-        parser = XLACollectiveParser({"0": str(xla_file)})
-        assert parser.parse_collectives_to_dataframe().empty
 
-    def test_extract_replica_groups_source_target_pairs(self):
-        line = (
-            'scheduling_name="collective-permute", '
-            "source_target_pairs={{0,1},{2,3}}"
+def _build_analyser(tmp_path, world_size, kernel_builder):
+    filepaths = []
+    for rank in range(world_size):
+        path = tmp_path / f"rank{rank}.json"
+        _write_trace(path, [kernel_builder(rank)])
+        filepaths.append(str(path))
+    return NcclAnalyser(filepaths, world_size)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not-a-list",
+        "{bad",
+        "[]",
+    ],
+)
+def test_parse_split_sizes_unparseable(value):
+    if value == "[]":
+        assert _parse_split_sizes(value) == []
+    else:
+        assert _parse_split_sizes(value) is None
+
+
+def test_parse_split_sizes_syntax_error():
+    assert _parse_split_sizes("[1, 2,") is None
+
+
+def test_build_df_implicit_sync_empty_df(tmp_path):
+    path = tmp_path / "rank0.json"
+    _write_trace(
+        path, [{"ph": "X", "cat": "cpu_op", "name": "x", "ts": 1, "dur": 1, "args": {}}]
+    )
+    analyser = NcclAnalyser([str(path)], world_size=1)
+    df = analyser.build_df_nccl_implicit_sync_cat()
+    assert df.empty
+
+
+def test_build_df_implicit_sync_metadata_mismatch_warning(tmp_path):
+    world_size = 2
+    filepaths = []
+    for rank in range(world_size):
+        path = tmp_path / f"rank{rank}.json"
+        kernel = _nccl_kernel(
+            external_id=100 + rank,
+            ts=1000 + rank * 10,
+            dur=50,
+            dtype="Float" if rank == 0 else "Half",
         )
-        replica_string, groups = self.parser._extract_replica_groups(line)
-        assert replica_string == "{{0,1},{2,3}}"
-        assert groups == [[0, 1], [2, 3]]
+        _write_trace(path, [kernel])
+        filepaths.append(str(path))
 
-    def test_parse_replica_groups_empty_and_invalid(self):
-        assert self.parser._parse_replica_groups("") == []
-        assert self.parser._parse_replica_groups("nan") == []
-        assert self.parser._parse_replica_groups("not-a-group") == []
+    analyser = NcclAnalyser(filepaths, world_size)
+    analyser.build_df_long()
+    df = analyser.build_df_nccl_implicit_sync_cat(strict_metadata_check=False)
+    assert not df.empty
 
-    def test_parse_device_assignment_with_transpose(self):
-        groups = self.parser._parse_replica_groups("[2,2]<=[2,2]T(1,0)")
-        assert groups == [[0, 2], [1, 3]]
 
-    def test_parse_device_assignment_invalid_format(self):
-        assert self.parser._parse_replica_groups("[2,2]<=") == []
-
-    def test_extract_tensor_specs_fallback(self):
-        line = 'HLO %x = bf16[4,8] all-reduce(bf16[4,8] %arg0), scheduling_name="all-reduce"'
-        assert self.parser._extract_tensor_specs(line) == "bf16[4,8]"
-
-    def test_extract_split_dimension_multiple_values(self):
-        line = "all-reduce(...), dimensions={0,1}"
-        assert self.parser._extract_split_dimension(line) is None
-
-    def test_extract_output_tensor_from_tuple_variants(self):
-        assert (
-            self.parser._extract_output_tensor_from_tuple(
-                "reduce-scatter", "((bf16[4,8]), (bf16[2,8]))"
-            )
-            == "((bf16[4,8]), (bf16[2,8]))"
+def test_build_df_implicit_sync_strict_metadata_raises(tmp_path):
+    world_size = 2
+    filepaths = []
+    for rank in range(world_size):
+        path = tmp_path / f"rank{rank}.json"
+        kernel = _nccl_kernel(
+            external_id=200 + rank,
+            ts=2000 + rank,
+            dur=40,
+            dtype="Float" if rank == 0 else "Half",
         )
-        assert (
-            self.parser._extract_output_tensor_from_tuple(
-                "all-gather-start", "((bf16[4,8]), (bf16[8,8]))"
-            )
-            == "bf16[8,8]"
-        )
-        assert (
-            self.parser._extract_output_tensor_from_tuple(
-                "all-to-all", "(bf16[4,8], bf16[4,8])"
-            )
-            == "bf16[4,8]"
-        )
+        _write_trace(path, [kernel])
+        filepaths.append(str(path))
 
-    def test_calculate_tensor_slice_edge_cases(self):
-        assert self.parser._calculate_tensor_slice(None, 0, [[0]], "all-reduce", 1) is None
-        assert (
-            self.parser._calculate_tensor_slice("bf16[4,8]", 0, None, "all-reduce", 1)
-            is None
+    analyser = NcclAnalyser(filepaths, world_size)
+    analyser.build_df_long()
+    with pytest.raises(ValueError, match="Metadata mismatch"):
+        analyser.build_df_nccl_implicit_sync_cat(strict_metadata_check=True)
+
+
+def test_build_df_implicit_sync_zero_comm_latency(tmp_path):
+    world_size = 2
+    filepaths = []
+    for rank in range(world_size):
+        path = tmp_path / f"rank{rank}.json"
+        kernel = _nccl_kernel(external_id=300 + rank, ts=3000, dur=0)
+        _write_trace(path, [kernel])
+        filepaths.append(str(path))
+
+    analyser = NcclAnalyser(filepaths, world_size)
+    analyser.build_df_long()
+    df = analyser.build_df_nccl_implicit_sync_cat(strict_metadata_check=False)
+    assert pd.isna(df.iloc[0]["algo bw (GB/s)"])
+
+
+def test_build_df_straggler_summary(tmp_path):
+    analyser = _build_analyser(
+        tmp_path,
+        2,
+        lambda rank: _nccl_kernel(
+            external_id=400 + rank, ts=4000 + rank * 5, dur=30 + rank
+        ),
+    )
+    analyser.build_df_long()
+    analyser.build_df_nccl_implicit_sync_cat(strict_metadata_check=False)
+    summary = analyser.build_df_straggler_summary(strict_metadata_check=False)
+    assert not summary.empty
+    assert "total_wait_time_us" in summary.columns
+
+
+def test_build_df_straggler_summary_empty_when_no_implicit_sync(tmp_path):
+    path = tmp_path / "rank0.json"
+    _write_trace(
+        path, [{"ph": "X", "cat": "cpu_op", "name": "x", "ts": 1, "dur": 1, "args": {}}]
+    )
+    analyser = NcclAnalyser([str(path)], world_size=1)
+    assert analyser.build_df_straggler_summary().empty
+
+
+def test_infer_collective_name_in_build_df_long(tmp_path):
+    path = tmp_path / "rank0.json"
+    kernel = {
+        "ph": "X",
+        "cat": "kernel",
+        "name": "vllm_cross_device_reduce_kernel",
+        "ts": 100,
+        "dur": 10,
+        "args": {"External id": 1, "Collective name": None, "stream": 1},
+    }
+    _write_trace(path, [kernel])
+    analyser = NcclAnalyser([str(path)], world_size=1)
+    df = analyser.build_df_long()
+    assert df.iloc[0]["Collective name"] == "allreduce"
+
+
+def test_all2allv_heatmap_world_size_warnings(caplog):
+
+    analyser = NcclAnalyser.__new__(NcclAnalyser)
+    analyser.logger = logging.getLogger("TraceLens.NcclAnalyser.nccl_analyser")
+
+    analyser.world_size = 2048
+    with caplog.at_level(logging.WARNING):
+        assert analyser.build_df_all2allv_heatmap() is None
+    assert "Skipping all2allv heatmap" in caplog.text
+
+    analyser.world_size = 512
+    analyser.df_per_rank_coll = pd.DataFrame()
+    with caplog.at_level(logging.WARNING):
+        result = analyser.build_df_all2allv_heatmap()
+    assert result is None
+    assert "all2allv heatmap will produce" in caplog.text
+
+
+def test_all2allv_heatmap_skips_bad_metadata(tmp_path, caplog):
+    world_size = 2
+    filepaths = []
+    for rank in range(world_size):
+        path = tmp_path / f"rank{rank}.json"
+        kernel = _nccl_kernel(
+            name="ncclKernel_AllToAllv",
+            external_id=500 + rank,
+            ts=5000 + rank,
+            dur=20,
+            **{
+                "Collective name": "all_to_allv",
+                "In split size": "bad-split",
+                "Group size": 2,
+            },
         )
-        assert (
-            self.parser._calculate_tensor_slice("bf16[4,8]", 0, [[0]], "all-reduce", 0)
-            is None
+        _write_trace(path, [kernel])
+        filepaths.append(str(path))
+
+    analyser = NcclAnalyser(filepaths, world_size)
+    analyser.build_df_long()
+    heatmap = analyser.build_df_all2allv_heatmap(strict_metadata_check=True)
+    assert heatmap is None
+
+
+def test_all2allv_summary_metadata_mismatch_warns(tmp_path):
+    world_size = 2
+    filepaths = []
+    for rank in range(world_size):
+        path = tmp_path / f"rank{rank}.json"
+        kernel = _nccl_kernel(
+            name="ncclKernel_AllToAllv",
+            external_id=600 + rank,
+            ts=6000 + rank,
+            dur=25,
+            **{
+                "Collective name": "all_to_allv",
+                "In split size": "[512, 512]",
+                "Group size": 2,
+                "dtype": "Float" if rank == 0 else "Half",
+            },
         )
-        assert (
-            self.parser._calculate_tensor_slice("not-a-tensor", 0, [[0, 1]], "all-reduce", 2)
-            is None
+        _write_trace(path, [kernel])
+        filepaths.append(str(path))
+
+    analyser = NcclAnalyser(filepaths, world_size)
+    analyser.build_df_long()
+    with pytest.warns(UserWarning, match="Metadata mismatch"):
+        df = analyser.build_df_nccl_all2allv(
+            detailed=False, strict_metadata_check=False
         )
-
-    def test_calculate_tensor_slice_without_split_dimension(self):
-        tensor_slice = self.parser._calculate_tensor_slice(
-            "bf16[4,8]",
-            None,
-            [[0, 1]],
-            "all-reduce",
-            2,
-        )
-        assert tensor_slice[0]["bytes"] == 4 * 8 * 2
-
-    def test_calculate_tensor_slice_skips_invalid_split(self):
-        tensor_slice = self.parser._calculate_tensor_slice(
-            "bf16[5,8]",
-            0,
-            [[0, 1, 2]],
-            "all-reduce",
-            3,
-        )
-        assert tensor_slice == []
-
-    def test_extract_replica_groups_no_match(self):
-        assert self.parser._extract_replica_groups("scheduling_name=\"all-reduce\"") == (
-            None,
-            None,
-        )
-
-    def test_extract_tensor_specs_equals_fallback(self):
-        line = "HLO %x = bf16[4,8] all-reduce(bf16[4,8] %arg0), channel_id=1"
-        assert self.parser._extract_tensor_specs(line) == "bf16[4,8]"
-
-    def test_extract_split_dimension_single_value(self):
-        assert self.parser._extract_split_dimension("dimensions={2}") == 2
-
-    def test_extract_output_tensor_none_spec(self):
-        assert self.parser._extract_output_tensor_from_tuple("all-gather", None) is None
-
-    def test_extract_output_tensor_nested_all_to_all(self):
-        spec = "((bf16[2,4]), bf16[2,4])"
-        assert (
-            self.parser._extract_output_tensor_from_tuple("all-to-all-start", spec)
-            == "bf16[2,4]"
-        )
-
-    def test_calculate_tensor_slice_unknown_dtype_zero_bytes(self):
-        tensor_slice = self.parser._calculate_tensor_slice(
-            "unknown[4,8]",
-            None,
-            [[0, 1]],
-            "all-reduce",
-            2,
-        )
-        assert tensor_slice[0]["bytes"] == 0
-
-    def test_calculate_data_bytes_variants(self):
-        assert self.parser._calculate_data_bytes(None) == 0
-        assert self.parser._calculate_data_bytes({"bytes": 16}) == 16
-        assert self.parser._calculate_data_bytes([{"bytes": 4}, {"bytes": 6}]) == 10
-        assert self.parser._calculate_data_bytes("invalid") == 0
+    assert df is not None

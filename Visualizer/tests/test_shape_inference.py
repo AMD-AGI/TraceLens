@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Tests for symbolic shape inference and operator export."""
 
 from __future__ import annotations
@@ -180,8 +186,20 @@ def test_subgraph_warrants_export_filters_opaque_single_ops():
         role="attention",
         label="Attn",
         children=[
-            BlockNode(attr_name="q_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
-            BlockNode(attr_name="k_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
+            BlockNode(
+                attr_name="q_proj",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            ),
+            BlockNode(
+                attr_name="k_proj",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            ),
         ],
     )
     inline_mlp = BlockNode(
@@ -190,7 +208,13 @@ def test_subgraph_warrants_export_filters_opaque_single_ops():
         role="ffn",
         label="MLP",
         children=[
-            BlockNode(attr_name="down_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
+            BlockNode(
+                attr_name="down_proj",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            ),
         ],
     )
 
@@ -230,7 +254,9 @@ def test_build_operator_export_deduplicates_same_shape_subgraphs():
         if title != "RMSNorm":
             continue
         operators = inferencer.export_operators(
-            build_model_graph(tree, title=title, basic_ops=BasicOpFilter.for_detailed()),
+            build_model_graph(
+                tree, title=title, basic_ops=BasicOpFilter.for_detailed()
+            ),
             root=tree,
         )
         signature = subgraph_boundary_signature(operators, class_name=tree.class_name)
@@ -241,7 +267,10 @@ def test_build_operator_export_deduplicates_same_shape_subgraphs():
 
 
 def test_infer_forward_steps_from_init():
-    from visualizer.ast_analyze import effective_forward_calls, infer_forward_steps_from_init
+    from visualizer.ast_analyze import (
+        effective_forward_calls,
+        infer_forward_steps_from_init,
+    )
 
     spec = load_architecture(
         FIXTURES / "custom_model",
@@ -272,7 +301,9 @@ def test_export_block_trees_expand_init_only_modules():
     assert "CustomLatent Attn" in export_titles
     assert "CustomSharedExpertMoE" in export_titles
 
-    attn_tree = next(tree for title, tree in spec.export_block_trees if "CustomLatent" in title)
+    attn_tree = next(
+        tree for title, tree in spec.export_block_trees if "CustomLatent" in title
+    )
     assert [child.attr_name for child in attn_tree.children] == ["q_proj", "kv_proj"]
 
 
@@ -474,7 +505,8 @@ def test_forward_parameter_reads_link_back_to_the_block_input():
     collapse = next(
         step
         for step in block.children
-        if step.label == "Multiply" and FORWARD_METHOD_INPUT in step.operation_predecessors
+        if step.label == "Multiply"
+        and FORWARD_METHOD_INPUT in step.operation_predecessors
     )
     graph = build_computation_graph(block, basic_ops=basic)
     input_index = next(

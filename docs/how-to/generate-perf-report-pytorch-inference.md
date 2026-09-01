@@ -4,18 +4,19 @@ Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
-
 # Generate a PyTorch inference performance report
+
 ```{meta}
-:description: Learn how to collect, split, and analyze PyTorch LLM-serving (vLLM/SGLang) traces with TraceLens, including graph-capture merging for graph-mode inference.
-:keywords: TraceLens, PyTorch profiler, inference, vLLM, SGLang, HIP graph, CUDA graph, graph capture, LLM serving, FusedMoE, roofline, trace splitting, steady state, ROCm
+:description: Learn how to collect, split, and analyze PyTorch inference traces (vLLM, SGLang, ATOM, xDiT) with TraceLens, including graph-capture merging for graph-mode inference.
+:keywords: TraceLens, PyTorch profiler, inference, vLLM, SGLang, ATOM, xDiT, diffusion, HIP graph, CUDA graph, graph capture, LLM serving, FusedMoE, roofline, trace splitting, steady state, ROCm
+
 ```
 
 `TraceLens_generate_perf_report_pytorch_inference` is the inference-oriented
-variant of the PyTorch report. It targets LLM-serving traces (for example, from
-vLLM or SGLang) that run in CUDA/HIP graph mode, and can merge the graph-capture
-traces back into the graph-replay trace to recover the call-stack and input-shape
-metadata that graph execution drops.
+variant of the PyTorch report. It targets inference traces from frameworks such
+as vLLM, SGLang, ATOM, and xDiT that run in CUDA/HIP graph mode, and can merge the
+graph-capture traces back into the graph-replay trace to recover the call-stack
+and input-shape metadata that graph execution drops.
 
 This topic covers the end-to-end inference workflow: collecting traces, splitting
 them into steady-state windows, and generating the report. For training or
@@ -27,23 +28,25 @@ steady-state region), see
 
 ## Supported frameworks and execution modes
 
-TraceLens inference features are primarily tested with vLLM and SGLang. Feature
-coverage depends on how the model is executed:
+TraceLens inference analysis supports vLLM, SGLang, ATOM, and xDiT. Feature coverage
+depends on the framework and how the model is executed:
 
 | Mode | Shapes / roofline analysis | Agent analysis | Limitations |
 |------|----------------------------|----------------|-------------|
-| Eager only | Yes | Supported; proposed patches are recommended to include roofline information for attention operations | Eager execution may use different compilation strategies, resulting in different kernels and fusions than graph execution. |
+| Eager only | Yes | Supported; proposed patches are recommended to include roofline information for attention operations | Eager execution might use different compilation strategies, resulting in different kernels and fusions than graph execution. |
 | Graph execution only | Non-graph kernels | Limited | Categorization, call stacks, and shapes are available only for attention kernels if `full_and_piecewise` mode is used. |
-| Graph execution + eager-mode trace | Limited | Limited | Kernel categorization may be less accurate than eager or graph+capture. |
+| Graph execution + eager-mode trace | Limited | Limited | Kernel categorization might be less accurate than eager or graph+capture. |
 | Graph execution + graph capture [^1] | Yes | Yes (patches required) | |
 
 [^1]: Graph-mode analysis using graph-capture and graph-replay traces is
-supported for vLLM and SGLang (proposed patches required).
+supported for vLLM, SGLang, ATOM, and xDiT (proposed patches required).
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/install.md)).
-- An LLM inference setup to profile (this guide uses vLLM or SGLang on AMD Instinct™ MI300X).
+Confirm you have the following before continuing.
+
+- [TraceLens installed](../install/install.md).
+- An LLM inference setup to profile (this guide uses vLLM, SGLang, or ATOM on AMD Instinct™ MI300X).
 
 ## Collect inference traces
 
@@ -66,7 +69,7 @@ configure the profiler yourself, and run the benchmark by hand.
 
 #### Build a Docker image
 
-Build scripts for vLLM and SGLang are provided under
+Build scripts for vLLM, SGLang, and ATOM are provided under
 [`examples/custom_workflows/inference_analysis/`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis).
 
 **vLLM.** A unified build script supports multiple vLLM versions. It takes a
@@ -87,6 +90,12 @@ image and patch file automatically:
 | `v22` | `vllm/vllm-openai-rocm:v0.22.0` | v0.22.0 | `config_vllm_v0.22.0.patch` |
 | `v23` | `vllm/vllm-openai-rocm:v0.23.0` | v0.23.0 | `config_vllm_v0.23.0.patch` |
 | `v24` | `vllm/vllm-openai-rocm:v0.24.0` | v0.24.0 | `config_vllm_v0.24.0.patch` |
+| `v25` | `vllm/vllm-openai-rocm:v0.25.0` | v0.25.0 | `config_vllm_v0.25.0.patch` |
+
+```{note}
+The profiler options these patches add
+([vllm-project/vllm#37524](https://github.com/vllm-project/vllm/pull/37524)) were merged into upstream vLLM and ship in **v0.26.0 and later**, so those versions need no patched image at all.
+```
 
 ```bash
 bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
@@ -110,24 +119,26 @@ bash examples/custom_workflows/inference_analysis/build_docker_vllm.sh \
 the SGLang version (`--sglang-version`, default `0.5.9`), and the GPU type
 (`--gpu-type`, default `mi350`). MI300 and MI350/MI355 are supported:
 
-| SGLang version | GPU type | Base image |
-|----------------|----------|------------|
-| `0.5.9` | MI300 | `lmsysorg/sglang:v0.5.9-rocm700-mi30x` |
-| `0.5.9` | MI350/MI355 | `lmsysorg/sglang:v0.5.9-rocm700-mi35x` |
-| `0.5.11` | MI300 | `lmsysorg/sglang:v0.5.11-rocm720-mi30x` |
-| `0.5.11` | MI350/MI355 | `lmsysorg/sglang:v0.5.11-rocm720-mi35x` |
-| `0.5.12` | MI300 | `lmsysorg/sglang:v0.5.12-rocm720-mi30x` |
-| `0.5.12` | MI350/MI355 | `lmsysorg/sglang:v0.5.12-rocm720-mi35x` |
-| `0.5.13` | MI300 | `lmsysorg/sglang:v0.5.13-rocm720-mi30x` |
-| `0.5.13` | MI350/MI355 | `lmsysorg/sglang:v0.5.13-rocm720-mi35x` |
-| `0.5.14` | MI300 | `lmsysorg/sglang:v0.5.14-rocm720-mi30x` |
-| `0.5.14` | MI350/MI355 | `lmsysorg/sglang:v0.5.14-rocm720-mi35x` |
-| `0.5.15` | MI300 | `lmsysorg/sglang:v0.5.15-rocm720-mi30x` |
-| `0.5.15` | MI350/MI355 | `lmsysorg/sglang:v0.5.15-rocm720-mi35x` |
-| `0.5.16` | MI300 | `lmsysorg/sglang:v0.5.16-rocm720-mi30x` |
-| `0.5.16` | MI350/MI355 | `lmsysorg/sglang:v0.5.16-rocm720-mi35x` |
+| SGLang version | GPU type    | Base image                                |
+| -------------- | ----------- | ----------------------------------------- |
+| `0.5.9`      | MI300       | `lmsysorg/sglang:v0.5.9-rocm700-mi30x`  |
+| `0.5.9`      | MI350/MI355 | `lmsysorg/sglang:v0.5.9-rocm700-mi35x`  |
+| `0.5.11`     | MI300       | `lmsysorg/sglang:v0.5.11-rocm720-mi30x` |
+| `0.5.11`     | MI350/MI355 | `lmsysorg/sglang:v0.5.11-rocm720-mi35x` |
+| `0.5.12`     | MI300       | `lmsysorg/sglang:v0.5.12-rocm720-mi30x` |
+| `0.5.12`     | MI350/MI355 | `lmsysorg/sglang:v0.5.12-rocm720-mi35x` |
+| `0.5.13`     | MI300       | `lmsysorg/sglang:v0.5.13-rocm720-mi30x` |
+| `0.5.13`     | MI350/MI355 | `lmsysorg/sglang:v0.5.13-rocm720-mi35x` |
+| `0.5.14`     | MI300       | `lmsysorg/sglang:v0.5.14-rocm720-mi30x` |
+| `0.5.14`     | MI350/MI355 | `lmsysorg/sglang:v0.5.14-rocm720-mi35x` |
+| `0.5.15`     | MI300       | `lmsysorg/sglang:v0.5.15-rocm720-mi30x` |
+| `0.5.15`     | MI350/MI355 | `lmsysorg/sglang:v0.5.15-rocm720-mi35x` |
+| `0.5.16`     | MI300       | `lmsysorg/sglang:v0.5.16-rocm720-mi30x` |
+| `0.5.16`     | MI350/MI355 | `lmsysorg/sglang:v0.5.16-rocm720-mi35x` |
+| `0.5.17`     | MI300       | `lmsysorg/sglang:v0.5.17-rocm720-mi30x` |
+| `0.5.17`     | MI350/MI355 | `lmsysorg/sglang:v0.5.17-rocm720-mi35x` |
 
-On SGLang **0.5.13 / 0.5.14**, kernel-shape wrapping is incompatible with the
+On SGLang **0.5.13 and 0.5.14**, kernel-shape wrapping is incompatible with the
 EAGLE/MTP speculative *overlap* decode, so the speculative patches disable capture
 profiling on the speculative graph runners (and, on 0.5.14, the target-verify
 graph) to keep MTP runs fault-free; non-MTP shape profiling is unaffected. Full MTP
@@ -139,6 +150,49 @@ bash examples/custom_workflows/inference_analysis/build_docker_sglang.sh \
     --sglang-version 0.5.11 \
     --gpu-type mi350 \
     -t tracelens-sglang
+```
+
+**ATOM.** The ATOM build script takes a version tag as its first argument,
+followed by the path to your local TraceLens clone and any standard
+`docker build` flags. Every supported image runs on both MI300 and MI350, so
+there is no GPU-type argument:
+
+| Version   | Base image                              | ATOM version | Patch directory  |
+| --------- | --------------------------------------- | ------------ | ---------------- |
+| `v13`   | `rocm/atom-dev:nightly_202605301523`  | 0.1.3        | `atom_0_1_3`   |
+| `v14`   | `rocm/atom-dev:atom0.1.4-aiter0.1.15` | 0.1.4        | `atom_0_1_4`   |
+| `v15`   | `rocm/atom-dev:atom0.1.5-aiter0.1.16` | 0.1.5        | `atom_0_1_5`   |
+| `v16rc` | `rocm/atom-dev:nightly_202607091539`  | 0.1.6rc      | `atom_0_1_6rc` |
+
+```{note}
+The annotations these patches add ([ROCm/ATOM#477](https://github.com/ROCm/ATOM/pull/477))
+were merged into ATOM `main` on **2026-07-21**, after `release/v0.1.6` was
+branched. No tagged release contains them, so all four versions above need a
+patched image; conversely, **nightly builds from 2026-07-22 onward** need no
+patched image at all - run a stock `rocm/atom-dev:nightly_*` image.
+```
+
+```bash
+bash examples/custom_workflows/inference_analysis/build_docker_atom.sh \
+    v15 \
+    /path/to/TraceLens \
+    -t tracelens-atom
+```
+
+**xDiT.** The xDiT build script supports diffusion model profiling with xDiT. It takes
+the xDiT version as its first argument, followed by the path to your local
+TraceLens clone and any standard `docker build` flags:
+
+| Version | Base image | Patch file |
+|---------|-----------|------------|
+| `v26.6` | `rocm/pytorch-xdit:v26.6` | `config_xdit_v26.6.patch` |
+| `v26.7` | `rocm/pytorch-xdit:v26.7` | `config_xdit_v26.7.patch` |
+
+```bash
+bash examples/custom_workflows/inference_analysis/build_docker_xdit.sh \
+    v26.7 \
+    /path/to/TraceLens \
+    -t tracelens-xdit:v26.7
 ```
 
 Create a container from the resulting image.
@@ -161,8 +215,9 @@ To apply them:
    python -c "import vllm; import os; print(os.path.dirname(vllm.__file__))"
    # SGLang
    python -c "import sglang; import os; print(os.path.dirname(sglang.__file__))"
+   # ATOM
+   python -c "import atom; import os; print(os.path.dirname(atom.__file__))"
    ```
-
 2. Select the patch for your framework and version and apply it:
 
    ```bash
@@ -172,7 +227,12 @@ To apply them:
    vLLM patches are in
    [`vllm_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/vllm_patches);
    SGLang patches are in
-   [`sglang_roofline_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/sglang_roofline_patches).
+   [`sglang_roofline_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/sglang_roofline_patches);
+   ATOM patches are in
+   [`atom_roofline_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/atom_roofline_patches),
+   one directory per version, each applied in full.
+   xDiT patches are in
+   [`xdit_patches`](https://github.com/AMD-AGI/TraceLens/tree/main/examples/custom_workflows/inference_analysis/xdit_patches).
 
 #### Collection parameters
 
@@ -181,7 +241,7 @@ To apply them:
   `((R+1)/2) * 5 * OSL ± (16 * OSL / CONC)` execution steps to capture peak
   concurrency with a prefill-decode mix. See
   [Steady-state region](../conceptual/inference-analysis.md#steady-state-region)
-  for the derivation. You may need to raise the trace-store timeout in some
+  for the derivation. You might need to raise the trace-store timeout in some
   frameworks to allow writing the trace mid-execution (for example
   `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200` for vLLM).
 - **Graph-capture mode**: The recommended patch traces the graph-capture phase and
@@ -192,20 +252,22 @@ To apply them:
 
 #### Trace collection flags
 
-**vLLM.** The `config_vllm_v*.patch` patches (available for v0.14-v0.24) add two
-`ProfilerConfig` flags. Pass them as server arguments:
+**vLLM.** Two `ProfilerConfig` flags control graph-capture tracing and roofline
+annotations. They are added by the `config_vllm_v*.patch` patches on **v0.14-v0.25**
+and are built into upstream vLLM from **v0.26.0** onwards. Pass them as server
+arguments:
 
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--profiler-config.capture_torch_profiler_dir DIR` | `str` | `""` | Directory where a profiler trace of the HIP/CUDA-graph capture phase is saved (rank 0 only). Requires `--profiler-config.profiler torch`. Leave empty to disable graph-capture profiling. |
-| `--profiler-config.detailed_trace_annotation` | `bool` | `False` | When `True`, execution-step annotations include roofline metrics (`sk`, `sqsq`, `sqsk`) for context and generation requests. When `False`, annotations record only request and token counts. Enable for full roofline analysis. |
+| Flag                                            | Type     | Default   | Description                                                                                                                                                                                                                              |
+| ----------------------------------------------- | -------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--profiler-config.capture_torch_profiler`    | `bool` | `False` | When`True`, a profiler trace of the HIP/CUDA-graph capture phase is written (rank 0 only) to a `capture_traces` subdirectory of `--profiler-config.torch_profiler_dir`. Requires `--profiler-config.profiler torch`.             |
+| `--profiler-config.detailed_trace_annotation` | `bool` | `False` | When`True`, execution-step annotations include roofline metrics (`sk`, `sqsq`, `sqsk`) for context and generation requests. When `False`, annotations record only request and token counts. Enable for full roofline analysis. |
 
 Example - enable both flags alongside a steady-state window profile:
 
 ```bash
 --profiler-config.profiler torch \
 --profiler-config.torch_profiler_dir /workspace/torch_trace \
---profiler-config.capture_torch_profiler_dir /workspace/torch_trace/capture_traces \
+--profiler-config.capture_torch_profiler True \
 --profiler-config.detailed_trace_annotation True \
 --profiler-config.delay_iterations 5402 \
 --profiler-config.max_iterations 256 \
@@ -213,8 +275,16 @@ Example - enable both flags alongside a steady-state window profile:
 ```
 
 ```{note}
-`capture_torch_profiler_dir` is only available when `--profiler-config.profiler torch`
-is set. The capture trace is written once at server startup during HIP/CUDA-graph
+`capture_torch_profiler` is a boolean switch, not a path: the capture directory is
+always `<torch_profiler_dir>/capture_traces`. Earlier TraceLens releases exposed
+this as `capture_torch_profiler_dir DIR`, which took the destination directory
+explicitly; that name no longer exists in any patch or in upstream vLLM, so update
+older command lines to the boolean form. The flag is only available when
+`--profiler-config.profiler torch` is set.
+```
+
+```{note}
+The capture trace is written once at server startup during HIP/CUDA-graph
 construction; the steady-state replay trace is written to `torch_profiler_dir`
 during the benchmark. Pass both paths to the report generator using
 `--capture_folder` and `--profile_json_path` respectively.
@@ -224,14 +294,14 @@ during the benchmark. Pass both paths to the report generator using
 
 1. Pass `shape_discovery=True` to enable shape discovery and registration for
    operations not covered by the default SGLang profile.
-2. Pass `roofline_annotations=True` to annotate the trace with the detailed
+2. Pass `detailed_annotations=True` to annotate the trace with the detailed
    information used for roofline analysis.
 3. To profile the graph-capture phase, pass the `--enable-profile-cuda-graph`
    server argument at startup. This saves one trace file per batch size but misses
    shape information for some operations; add
    `--enable-shape-discovery-for-cuda-graph-profile` for more diverse coverage.
 4. On SGLang **0.5.13 and later**, writing the per-batch-size graph-capture trace
-   files to disk is opt-in via the `SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE=1`
+   files to disk is opt-in using the `SGLANG_GRAPH_BATCH_CAPTURE=1`
    environment variable (default off). Set it *in addition to*
    `--enable-profile-cuda-graph`; without it the capture profiler still runs (for
    the summary tables and memory snapshot) but no per-batch-size trace is written to
@@ -239,20 +309,57 @@ during the benchmark. Pass both paths to the report generator using
    written unconditionally and this variable does not exist.
 
 ```{note}
-On SGLang 0.5.13 / 0.5.14 the graph-capture shape profiling is intentionally
+On SGLang 0.5.13 and 0.5.14 the graph-capture shape profiling is intentionally
 disabled for the EAGLE/MTP speculative graphs (and, on 0.5.14, the target-verify
 graph) to avoid a GPU fault in the speculative overlap decode, so
-`SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE` only yields capture traces for the
+`SGLANG_GRAPH_BATCH_CAPTURE` only yields capture traces for the
 non-speculative graphs there. Full MTP graph-capture profiling works on 0.5.15+.
 ```
+
+**ATOM.** Two environment variables and two server arguments control roofline
+annotations and graph-capture tracing:
+
+| Setting                             | Type       | Description                                                                                                                                                                                                                      |
+| ----------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ATOM_ENABLE_DETAILED_ANNOTATION` | env var    | When`1`, execution-step annotations carry roofline metrics (`sqsq`, `sqsk`, `sk`) alongside the batch and token counts. The aggregates are computed only while the profiler is running, so unprofiled steps pay nothing. |
+| `ATOM_PROFILER_MORE`              | env var    | When`1`, records shapes and CPU call stacks, which the report needs for shape-level analysis.                                                                                                                                  |
+| `--torch-profiler-dir DIR`        | server arg | Destination for the profiler traces. ATOM writes one subdirectory per rank (`rank_N/`).                                                                                                                                        |
+| `--mark-trace`                    | server arg | Enables the graph-capture profiler, writing one trace per captured batch size to`capture_traces/bs_{bs}_rank{N}.json.gz`. Recent nightlies add a query-length field and use `bs_{bs}_q_{q}_rank{N}.json.gz` instead.         |
+
+```bash
+export ATOM_PROFILER_MORE=1
+export ATOM_ENABLE_DETAILED_ANNOTATION=1
+python3 -m atom.entrypoints.openai_server \
+    --model "$MODEL" \
+    --torch-profiler-dir /workspace/torch_trace \
+    --mark-trace
+```
+
+ATOM has no server-side delay/duration equivalent to vLLM's
+`delay_iterations` / `max_iterations`. Bound the profiling window from the
+client instead, by posting to the `start_profile` and `stop_profile` endpoints
+around the region of interest (this is what `benchmark_serving --profile`
+does).
+
+**xDiT.** The `config_xdit_v*.patch` patches add two flags to the `xfuser`
+runner. Pass them using the `EXTRA_XDIT_ARGS` environment variable (or directly to
+the `xdit` CLI):
+
+| Flag                        | Type    | Default  | Description                                                                                                                                                                            |
+| --------------------------- | ------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--profile_capture_phase` | flag    | disabled | Profile the graph-capture phase and write a capture trace to`<output_dir>/capture_traces/capture_rank_0.json.gz`. Required to recover shapes and call stacks in graph-mode analysis. |
+| `--profile_wait`          | `int` | `0`    | Number of profiler warm-up iterations before active collection during the replay phase. Set to`1` to work around a ROCTracer bug that causes empty traces when `wait=0`.           |
+
+In addition, `--profile` must be set to enable xDiT profiling.
+
 
 ## Split inference traces (optional)
 
 Large traces can be split into steady-state windows or per-step files before
 report generation, using `TraceLens.TraceUtils.split_inference_trace_annotation`.
-Splitting assumes vLLM v0.14 or higher (tested through v0.24) or SGLang v0.5.9,
-or use of the provided patches, so that annotations (batch size, request counts,
-and so on) are present in the execution-step metadata.
+Splitting assumes vLLM v0.14 or higher (tested through v0.24), SGLang v0.5.9, or
+ATOM 0.1.3 or higher, or use of the provided patches, so that annotations (batch
+size, request counts, and so on) are present in the execution-step metadata.
 
 **Find the steady-state region** (highest concurrency) and separate
 prefill-decode from decode-only steps. This is the recommended option for large
@@ -273,11 +380,11 @@ prefill-decode-to-total-steps ratio. If the benchmark parameters are known,
 passing `--CONC`, `--OSL`, and `--R` computes the *ideal* ratio analytically and
 uses that to drive window selection instead:
 
-| Argument | Type | Description |
-|----------|------|-------------|
-| `--CONC` | `int` | Expected peak concurrency (number of concurrent requests). A warning is printed if the observed trace peak differs. |
-| `--OSL` | `float` | Maximum output sequence length (decode tokens per request). Each request's OSL is sampled from `[R * OSL, OSL]`. |
-| `--R` | `float` | OSL sampling range ratio in `[0, 1]`. `R=0` means all requests use exactly `OSL` tokens; `R=1` means OSL is uniform in `[0, OSL]`. |
+| Argument   | Type      | Description                                                                                                                                 |
+| ---------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--CONC` | `int`   | Expected peak concurrency (number of concurrent requests). A warning is printed if the observed trace peak differs.                         |
+| `--OSL`  | `float` | Maximum output sequence length (decode tokens per request). Each request's OSL is sampled from `[R * OSL, OSL]`.                           |
+| `--R`    | `float` | OSL sampling range ratio in `[0, 1]`. `R=0` means all requests use exactly `OSL` tokens; `R=1` means OSL is uniform in `[0, OSL]`. |
 
 When all three are provided, the tool derives:
 
@@ -297,7 +404,7 @@ python -m TraceLens.TraceUtils.split_inference_trace_annotation trace.json.gz \
     --CONC 32 --OSL 1024 --R 0.8
 ```
 
-**One trace file per execution step** (vLLM v0.13+, SGLang v0.5.9, Atom 0.1.1) -
+**One trace file per execution step** (vLLM v0.13+, SGLang v0.5.9, ATOM 0.1.3+) -
 use when you want to analyze an isolated execution step:
 
 ```bash
@@ -360,15 +467,15 @@ The inference report shares most options with the PyTorch report (output paths,
 short-kernel study, roofline and Origami, collective analysis). The options most
 relevant to serving traces:
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--profile_json_path` | required | Path to the graph-replay `torch.profiler` trace (`.json` or `.json.gz`). |
-| `--capture_folder PATH` | `None` | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). Mutually exclusive with `--comparison_json_path`. |
-| `--group_by_parent_module` | `False` | Group kernel-launcher summaries by parent `nn.Module` in addition to operation name. |
-| `--group_by_num_kernels` | `False` | Group summary rows by the number of kernels. |
-| `--include_call_stack` | `False` | Add the CPU call stack to the report. |
-| `--include_overlap_info` | `False` | Add kernel-overlap sheets (`*_kl_overlap`) when overlap data exists. |
-| `--enable_pseudo_ops` | `False` | Augment the tree with pseudo-ops to isolate kernels (for example, `FusedMoE`). |
+| Argument                     | Default   | Description                                                                                                                                         |
+| ---------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--profile_json_path`      | required  | Path to the graph-replay `torch.profiler` trace (`.json` or `.json.gz`).                                                                       |
+| `--capture_folder PATH`    | `None`  | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). Mutually exclusive with `--comparison_json_path`. |
+| `--group_by_parent_module` | `False` | Group kernel-launcher summaries by parent `nn.Module` in addition to operation name.                                                               |
+| `--group_by_num_kernels`   | `False` | Group summary rows by the number of kernels.                                                                                                        |
+| `--include_call_stack`     | `False` | Add the CPU call stack to the report.                                                                                                               |
+| `--include_overlap_info`   | `False` | Add kernel-overlap sheets (`*_kl_overlap`) when overlap data exists.                                                                              |
+| `--enable_pseudo_ops`      | `False` | Augment the tree with pseudo-ops to isolate kernels (for example, `FusedMoE`).                                                                     |
 
 Run the tool with `--help` for the complete, version-specific argument list.
 

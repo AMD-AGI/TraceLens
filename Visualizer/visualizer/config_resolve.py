@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Discover and normalize Hugging Face configs in modular checkpoint repos."""
 
 from __future__ import annotations
@@ -61,7 +67,10 @@ def _score_config_content(config: dict[str, Any], path: str) -> int:
         score += 4
 
     architectures = config.get("architectures") or []
-    if any("CausalLM" in str(item) or "ConditionalGeneration" in str(item) for item in architectures):
+    if any(
+        "CausalLM" in str(item) or "ConditionalGeneration" in str(item)
+        for item in architectures
+    ):
         score += 6
 
     class_name = str(config.get("_class_name") or "")
@@ -71,7 +80,9 @@ def _score_config_content(config: dict[str, Any], path: str) -> int:
     return score
 
 
-def normalize_config(config: dict[str, Any], *, source_label: str = "") -> dict[str, Any]:
+def normalize_config(
+    config: dict[str, Any], *, source_label: str = ""
+) -> dict[str, Any]:
     """Flatten nested multimodal / diffusers configs into parser-friendly fields."""
     normalized = dict(config)
 
@@ -83,7 +94,10 @@ def normalize_config(config: dict[str, Any], *, source_label: str = "") -> dict[
         if config.get("vision_config"):
             normalized["_has_vision_tower"] = True
 
-    if normalized.get("num_hidden_layers") is None and normalized.get("num_layers") is not None:
+    if (
+        normalized.get("num_hidden_layers") is None
+        and normalized.get("num_layers") is not None
+    ):
         normalized["num_hidden_layers"] = normalized["num_layers"]
 
     if normalized.get("intermediate_size") is None:
@@ -105,7 +119,9 @@ def _paths_from_model_index(config: dict[str, Any]) -> list[str]:
     paths: list[str] = []
     for key, value in config.items():
         if not key.startswith("_") and isinstance(value, list) and len(value) >= 3:
-            subfolder = value[2].get("subfolder") if isinstance(value[2], dict) else None
+            subfolder = (
+                value[2].get("subfolder") if isinstance(value[2], dict) else None
+            )
             if subfolder:
                 paths.append(f"{subfolder.rstrip('/')}/config.json")
 
@@ -232,7 +248,9 @@ def load_checkpoint_config(
 
         if path.is_file():
             config = _load_json(path)
-            return normalize_config(config, source_label=str(path.resolve())), str(path.resolve())
+            return normalize_config(config, source_label=str(path.resolve())), str(
+                path.resolve()
+            )
 
         if checkpoint_path.is_dir():
             resolved = checkpoint_path / config_path
@@ -242,7 +260,11 @@ def load_checkpoint_config(
         if not resolved.is_file():
             raise FileNotFoundError(f"Config path not found: {config_path}")
         config = _load_json(resolved)
-        label = str(resolved.resolve()) if resolved.exists() else f"hf://{checkpoint}/{config_path}"
+        label = (
+            str(resolved.resolve())
+            if resolved.exists()
+            else f"hf://{checkpoint}/{config_path}"
+        )
         return normalize_config(config, source_label=label), label
 
     path = Path(checkpoint).expanduser()

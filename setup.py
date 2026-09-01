@@ -89,7 +89,7 @@ setup(
         "Visualizer": _read_requirements(_ROOT / "Visualizer" / "requirements.txt"),
         "dev": [
             "pytest",
-            "black==26.1.0",
+            "black==26.3.1",
         ],
     },
     description="A library for automating the analysis of ML model performance traces",

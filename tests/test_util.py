@@ -6,16 +6,8 @@
 
 """Unit tests for TraceLens.util helpers."""
 
-import contextlib
-import gzip
-import json
-import os
-import sys
-import types
+import contextlib, gzip, json, os, sys, types, pytest, pandas as pd
 from unittest.mock import patch
-
-import pytest
-
 from TraceLens.util import (
     DataLoader,
     JaxProfileProcessor,
@@ -23,6 +15,10 @@ from TraceLens.util import (
     RocprofParser,
     TraceEventUtils,
     suppress_native_hlo_logs,
+)
+from TraceLens.Agent.Analysis.category_analyses import (
+    analysis_utils as au,
+    kernel_fusion_analysis as kfa,
 )
 
 TK = TraceEventUtils.TraceKeys
@@ -750,9 +746,7 @@ def test_dataloader_load_pb(mock_suppress, tmp_path):
     trace_path.write_bytes(b"pb")
 
     mock_suppress.return_value = contextlib.nullcontext()
-    modules = _install_mock_xprof_convert(
-        (json.dumps(payload).encode("utf-8"), None)
-    )
+    modules = _install_mock_xprof_convert((json.dumps(payload).encode("utf-8"), None))
 
     with patch.dict(sys.modules, modules):
         result = DataLoader.load_data(str(trace_path))
@@ -1144,3 +1138,117 @@ def test_pftrace_parser_validation_errors(tmp_path):
     not_list_path.write_text(json.dumps({"traceEvents": "nope"}))
     with pytest.raises(ValueError, match="must be a list"):
         PftraceParser.load_pftrace_data(str(not_list_path))
+
+
+class TestAnalysisUtilsPhase13:
+    def test_efficiency_memory_bound_and_fusion_map_empty(self, tmp_path):
+        row = pd.Series(
+            {
+                "FLOPS/Byte": 0.5,
+                "TFLOPS/s_mean": 10.0,
+                "TB/s_mean": 2.0,
+                "Roofline Bound": "MEMORY_BOUND",
+                "Compute Spec": "matrix_fp16",
+            }
+        )
+        eff = au.calculate_efficiency(
+            row, peak_maf_or_maf_dict={"matrix_fp16": 100.0}, peak_hbm_bw=5300
+        )
+        assert eff["bound_type"] == "memory"
+        assert au._load_fusion_map(str(tmp_path)) == {}
+
+
+class TestAnalysisUtilsPhase7:
+    def test_efficiency_and_fusion_branches(self, tmp_path):
+        row = pd.Series(
+            {
+                "FLOPS/Byte": 2.0,
+                "TFLOPS/s_mean": 50.0,
+                "TB/s_mean": 0.1,
+                "Roofline Bound": "COMPUTE_BOUND",
+                "Compute Spec": "matrix_fp16",
+            }
+        )
+        eff = au.calculate_efficiency(
+            row, peak_maf_or_maf_dict={"matrix_fp16": 100.0}, peak_hbm_bw=5300
+        )
+        assert eff["bound_type"] == "compute"
+
+        cat_dir = tmp_path / "category_data"
+        cat_dir.mkdir()
+        (cat_dir / "kernel_fusion_metrics.json").write_text(
+            json.dumps(
+                {
+                    "impact_estimates": [
+                        {
+                            "candidate_id": "c1",
+                            "impact_score": 5.0,
+                            "impact_score_low": 3.0,
+                            "impact_score_high": 8.0,
+                            "confidence": "high",
+                        }
+                    ]
+                }
+            )
+        )
+        loaded = au._load_fusion_map(str(tmp_path))
+        assert isinstance(loaded, dict)
+
+        ops = [
+            {
+                "kernel_names": ["a", "b"],
+                "base_name": "Block",
+                "instance_count": 3,
+                "kernel_type_signature": ["GEMM", "elementwise"],
+            }
+        ]
+        assert len(kfa._filter_and_dedup(ops)) >= 1
+
+
+class TestAnalysisUtilsPhase8:
+    def test_validate_efficiency_branches(self):
+        assert au.validate_efficiency(50, 0, "TFLOPS")["is_anomaly"]
+        assert au.validate_efficiency(None, 100, "TFLOPS")["value"] is None
+        assert au.validate_efficiency(120, 100, "TFLOPS")["is_anomaly"]
+        assert au.validate_efficiency(105, 100, "TFLOPS")["warning"] is not None
+        assert au.validate_efficiency(80, 100, "TFLOPS")["value"] == 80.0
+
+    def test_calculate_time_metrics_no_kernel_time(self):
+        ops = pd.DataFrame({"name": ["aten::mm"], "operation_count": [3]})
+        summary = au.calculate_time_metrics(
+            ops, {"gpu_utilization": {"total_time_ms": 10}}
+        )
+        assert summary["total_time_ms"] == 0
+
+    def test_calculate_efficiency_with_validation(self):
+        out = au.calculate_efficiency_with_validation(50.0, 0.5, 100.0, 5300.0)
+        assert "compute_efficiency_pct" in out
+
+    def test_build_operation_metrics(self, tmp_path):
+        cat_dir = tmp_path / "category_data"
+        cat_dir.mkdir()
+        (cat_dir / "gemm_metrics.json").write_text("{}")
+        ops = pd.DataFrame(
+            {
+                "name": ["aten::mm"],
+                "Kernel Time (µs)_sum": [50000.0],
+                "TFLOPS/s_mean": [10.0],
+                "TB/s_mean": [0.5],
+                "FLOPS/Byte": [1.0],
+                "Roofline Bound": ["COMPUTE_BOUND"],
+                "Compute Spec": ["matrix_fp16"],
+                "kernel_details_summary": ["[{'name': 'Cijk_a'}]"],
+                "call_stack_full": ["['aten::mm']"],
+            }
+        )
+        metrics = au.build_operation_metrics(
+            ops,
+            {
+                "gpu_utilization": {"total_time_ms": 100.0},
+                "peak_hbm_bw_tbs": 5.3,
+                "max_achievable_tflops": {"matrix_fp16": 100.0},
+            },
+            {},
+            comparison_scope="standalone",
+        )
+        assert isinstance(metrics, list)

@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Inspect Hugging Face modeling code via Python AST (CPU-only)."""
 
 from __future__ import annotations
@@ -58,7 +64,9 @@ SYNTHETIC_ATTENTION = "@attention"
 FUNCTIONAL_SYNTHETIC_PREFIX = "@functional_"
 SYNTHETIC_FUNCTIONAL_LINEAR = f"{FUNCTIONAL_SYNTHETIC_PREFIX}linear"
 POSITIONAL_SYNTHETIC_PREFIX = "@positional_"
-_POSITIONAL_SOURCE_POS_RE = re.compile(rf"^{re.escape(POSITIONAL_SYNTHETIC_PREFIX)}l(\d+)_")
+_POSITIONAL_SOURCE_POS_RE = re.compile(
+    rf"^{re.escape(POSITIONAL_SYNTHETIC_PREFIX)}l(\d+)_"
+)
 
 
 def positional_synthetic_attr(func_name: str, lineno: int) -> str:
@@ -113,6 +121,8 @@ def first_functional_synthetic_index(forward_calls: list[str]) -> int | None:
         if is_functional_synthetic(call):
             return index
     return None
+
+
 SYNTHETIC_GATE_ACTIVATION = "@gate_activation"
 SYNTHETIC_GATE_RESHAPE = "@gate_reshape"
 _GATE_ACTIVATION_NAMES = {
@@ -123,7 +133,9 @@ _GATE_ACTIVATION_NAMES = {
 # Modeling code binds its activation from a registry keyed by config
 # (`self.act_fn = ACT2FN[config.hidden_act]`) instead of constructing it, so the
 # activation the checkpoint actually runs is only knowable from the config.
-_ACTIVATION_REGISTRY_NAMES = frozenset({"ACT2FN", "ACT2CLS", "ACT_FN", "ACTIVATION_REGISTRY"})
+_ACTIVATION_REGISTRY_NAMES = frozenset(
+    {"ACT2FN", "ACT2CLS", "ACT_FN", "ACTIVATION_REGISTRY"}
+)
 _ACTIVATION_DISPLAY_NAMES = {
     "silu": "SiLU",
     "swish": "SiLU",
@@ -237,7 +249,9 @@ def _positional_step_details(func: ast.FunctionDef) -> dict[str, list[str]]:
         if not _is_positional_function_call(node.func, node.func.id):
             continue
         if _call_undoes_rotation(node):
-            details[positional_synthetic_attr(node.func.id, node.lineno)] = ["inverse rotation"]
+            details[positional_synthetic_attr(node.func.id, node.lineno)] = [
+                "inverse rotation"
+            ]
     return details
 
 
@@ -477,7 +491,9 @@ def _is_moe_gate_class(class_name: str, forward_calls: list[str]) -> bool:
         return False
     if re.search(r"(?:Gate|Router)$", class_name):
         return True
-    return bool(MOE_CLASS_RE.search(class_name) and re.search(r"gate|router", class_name, re.I))
+    return bool(
+        MOE_CLASS_RE.search(class_name) and re.search(r"gate|router", class_name, re.I)
+    )
 
 
 def _stmt_value(stmt: ast.AST) -> ast.AST | None:
@@ -529,7 +545,9 @@ def _expr_is_weighted_sum(node: ast.AST) -> bool:
     return False
 
 
-def _detect_method_combine_op(func: ast.FunctionDef, *, class_name: str = "") -> str | None:
+def _detect_method_combine_op(
+    func: ast.FunctionDef, *, class_name: str = ""
+) -> str | None:
     """Infer a combine-operator symbol from a helper method body."""
     weighted = False
     for node in ast.walk(func):
@@ -544,7 +562,9 @@ def _detect_method_combine_op(func: ast.FunctionDef, *, class_name: str = "") ->
             weighted = True
             break
     moe_like = bool(re.search(r"(?i)moe", func.name) or MOE_CLASS_RE.search(class_name))
-    if moe_like and (weighted or re.search(r"(?i)(?:infer|combin|aggregat)", func.name)):
+    if moe_like and (
+        weighted or re.search(r"(?i)(?:infer|combin|aggregat)", func.name)
+    ):
         return MOE_AGGREGATION_LABEL
     if weighted:
         return "Σ"
@@ -558,9 +578,7 @@ def _method_forward_step_details(
 ) -> dict[str, list[str]]:
     """Attach AST-derived metadata to forward helper methods."""
     method_funcs = {
-        item.name: item
-        for item in class_node.body
-        if isinstance(item, ast.FunctionDef)
+        item.name: item for item in class_node.body if isinstance(item, ast.FunctionDef)
     }
     details: dict[str, list[str]] = {}
     for call_attr in forward_calls:
@@ -594,10 +612,16 @@ def _single_op_forward_methods(
     Such a method has no internals worth a frame of its own, so callers render the op
     it performs instead of an opaque tile named after the method.
     """
-    method_funcs = {item.name: item for item in class_node.body if isinstance(item, ast.FunctionDef)}
+    method_funcs = {
+        item.name: item for item in class_node.body if isinstance(item, ast.FunctionDef)
+    }
     single: dict[str, ForwardOperation] = {}
     for call_attr in forward_calls:
-        if call_attr in init_assignments or call_attr.startswith("@") or call_attr == SYNTHETIC_ATTENTION:
+        if (
+            call_attr in init_assignments
+            or call_attr.startswith("@")
+            or call_attr == SYNTHETIC_ATTENTION
+        ):
             continue
         func = method_funcs.get(call_attr)
         if func is None:
@@ -625,9 +649,7 @@ def _multi_op_forward_methods(
 ) -> dict[str, list[ForwardOperation]]:
     """Forward helper methods with enough tensor operations to expand as a subgraph."""
     method_funcs = {
-        item.name: item
-        for item in class_node.body
-        if isinstance(item, ast.FunctionDef)
+        item.name: item for item in class_node.body if isinstance(item, ast.FunctionDef)
     }
     expanded: dict[str, list[ForwardOperation]] = {}
     for call_attr in forward_calls:
@@ -771,7 +793,9 @@ def _classify_role(attr_name: str, class_name: str) -> str:
         return "positional"
     if EMBEDDING_CLASS_RE.search(class_name) and "embed" in attr_key:
         return "embedding"
-    if HEAD_CLASS_RE.search(class_name) or (re.match(r"(?i)^Linear$", class_name) and "head" in attr_key):
+    if HEAD_CLASS_RE.search(class_name) or (
+        re.match(r"(?i)^Linear$", class_name) and "head" in attr_key
+    ):
         return "head"
     return "other"
 
@@ -818,7 +842,8 @@ def _forward_owns_tensor_math(
     if not module_calls:
         return False
     return all(
-        displays_as_pointwise_leaf(call, init_assignments[call]) for call in module_calls
+        displays_as_pointwise_leaf(call, init_assignments[call])
+        for call in module_calls
     )
 
 
@@ -850,7 +875,9 @@ def _forward_mixes_modules_and_inline_ops(
     ]
     if not module_calls or not parsed_operations:
         return False
-    inline_ops = sum(1 for op in parsed_operations if is_forward_operation(op.attr_name))
+    inline_ops = sum(
+        1 for op in parsed_operations if is_forward_operation(op.attr_name)
+    )
     return inline_ops >= 2
 
 
@@ -1067,7 +1094,9 @@ def _inline_forward_step(attr_name: str) -> bool:
     return is_forward_operation(attr_name) or is_functional_synthetic(attr_name)
 
 
-def _config_value(node: ast.AST, config: dict[str, Any], self_values: dict[str, Any]) -> Any:
+def _config_value(
+    node: ast.AST, config: dict[str, Any], self_values: dict[str, Any]
+) -> Any:
     """Evaluate the small literal/config expression subset used by model constructors."""
     if isinstance(node, ast.Constant):
         return node.value
@@ -1089,7 +1118,11 @@ def _config_value(node: ast.AST, config: dict[str, Any], self_values: dict[str, 
         if name == "getattr" and len(node.args) >= 2:
             base = _config_value(node.args[0], config, self_values)
             key = _config_value(node.args[1], config, self_values)
-            default = _config_value(node.args[2], config, self_values) if len(node.args) >= 3 else _UNKNOWN
+            default = (
+                _config_value(node.args[2], config, self_values)
+                if len(node.args) >= 3
+                else _UNKNOWN
+            )
             if isinstance(base, dict) and isinstance(key, str):
                 return base.get(key, default)
         return _UNKNOWN
@@ -1101,14 +1134,24 @@ def _config_value(node: ast.AST, config: dict[str, Any], self_values: dict[str, 
         if isinstance(node.op, ast.And):
             if any(value is False for value in values):
                 return False
-            return all(values) if all(value is not _UNKNOWN for value in values) else _UNKNOWN
+            return (
+                all(values)
+                if all(value is not _UNKNOWN for value in values)
+                else _UNKNOWN
+            )
         if isinstance(node.op, ast.Or):
             if any(value is True for value in values):
                 return True
-            return any(values) if all(value is not _UNKNOWN for value in values) else _UNKNOWN
+            return (
+                any(values)
+                if all(value is not _UNKNOWN for value in values)
+                else _UNKNOWN
+            )
     if isinstance(node, ast.Compare):
         left = _config_value(node.left, config, self_values)
-        comparators = [_config_value(item, config, self_values) for item in node.comparators]
+        comparators = [
+            _config_value(item, config, self_values) for item in node.comparators
+        ]
         if left is _UNKNOWN or any(item is _UNKNOWN for item in comparators):
             return _UNKNOWN
         values = [left, *comparators]
@@ -1134,7 +1177,9 @@ def _config_value(node: ast.AST, config: dict[str, Any], self_values: dict[str, 
     return _UNKNOWN
 
 
-def _self_config_values(init_func: ast.FunctionDef | None, config: dict[str, Any]) -> dict[str, Any]:
+def _self_config_values(
+    init_func: ast.FunctionDef | None, config: dict[str, Any]
+) -> dict[str, Any]:
     values: dict[str, Any] = {}
     if init_func is None:
         return values
@@ -1230,7 +1275,9 @@ class _ForwardOperationExtractor:
             ]
         )
 
-    def _call_step_producer(self, node: ast.Call, method_name: str | None) -> str | None:
+    def _call_step_producer(
+        self, node: ast.Call, method_name: str | None
+    ) -> str | None:
         """Chain step a call *is*, for calls the diagram turns into their own node.
 
         Mirrors the naming `_extract_self_calls_ordered` uses, so the producer recorded
@@ -1290,7 +1337,12 @@ class _ForwardOperationExtractor:
                 and isinstance(operand.func, ast.Attribute)
                 and _is_self_attr(operand.func, operand.func.attr)
             ]
-            if label == "Multiply" and not left and not right and not direct_module_predecessors:
+            if (
+                label == "Multiply"
+                and not left
+                and not right
+                and not direct_module_predecessors
+            ):
                 return None, [*left_external, *right_external]
             producer = self._emit(
                 node,
@@ -1311,14 +1363,21 @@ class _ForwardOperationExtractor:
         if isinstance(node.func, ast.Attribute):
             method_name = node.func.attr
             owner_name = _expr_name(node.func.value)
-            is_namespace_call = owner_name in {"torch", "F", "torch.nn.functional", "nn.functional"}
+            is_namespace_call = owner_name in {
+                "torch",
+                "F",
+                "torch.nn.functional",
+                "nn.functional",
+            }
             if not is_namespace_call:
                 base_producer, base_external = self.expression(node.func.value)
                 external.extend(base_external)
 
         call_name = (_expr_name(node.func) or method_name or "").split(".")[-1]
         functional_name = _functional_call_name(node.func)
-        label = _FUNCTION_LABELS.get(functional_name or call_name) or _TENSOR_METHOD_LABELS.get(call_name)
+        label = _FUNCTION_LABELS.get(
+            functional_name or call_name
+        ) or _TENSOR_METHOD_LABELS.get(call_name)
         housekeeping = call_name in _HOUSEKEEPING_METHODS or call_name == "zeros_like"
 
         def _collect_call_arg_producers(arg: ast.AST) -> tuple[list[str], list[str]]:
@@ -1356,7 +1415,10 @@ class _ForwardOperationExtractor:
             return (producers[-1] if producers else None), external
 
         if housekeeping and not self.all_tensor_ops:
-            return base_producer or (arg_producers[0] if arg_producers else None), external
+            return (
+                base_producer or (arg_producers[0] if arg_producers else None),
+                external,
+            )
 
         details: list[str] = []
         if call_name == "linear" and any(
@@ -1376,7 +1438,11 @@ class _ForwardOperationExtractor:
                 if keyword.arg in {"dim", "keepdim"}:
                     details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
         if call_name in {"type", "float", "to"}:
-            dtype = ast.unparse(node.args[0]) if node.args else ("float32" if call_name == "float" else "")
+            dtype = (
+                ast.unparse(node.args[0])
+                if node.args
+                else ("float32" if call_name == "float" else "")
+            )
             details.append(f"dtype: {dtype}" if dtype else "dtype cast")
         producer = self._emit(
             node,
@@ -1395,7 +1461,9 @@ class _ForwardOperationExtractor:
             if isinstance(target, ast.Name):
                 names.append(target.id)
             elif isinstance(target, (ast.Tuple, ast.List)):
-                names.extend(item.id for item in target.elts if isinstance(item, ast.Name))
+                names.extend(
+                    item.id for item in target.elts if isinstance(item, ast.Name)
+                )
         return names
 
     def _bind(self, stmt: ast.Assign | ast.AnnAssign, producer: str | None) -> None:
@@ -1404,12 +1472,16 @@ class _ForwardOperationExtractor:
         for name in self._target_names(stmt):
             self.var_producer[name] = producer
 
-    def statements(self, statements: list[ast.stmt], *, condition: str | None = None) -> None:
+    def statements(
+        self, statements: list[ast.stmt], *, condition: str | None = None
+    ) -> None:
         for stmt in statements:
             if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
                 producer, _ = self.expression(stmt.value)
                 value = stmt.value
-                targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+                targets = (
+                    stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+                )
                 direct_module = (
                     value.func.attr
                     if isinstance(value, ast.Call)
@@ -1427,7 +1499,9 @@ class _ForwardOperationExtractor:
                     and isinstance(value, ast.Call)
                     and isinstance(value.func, ast.Attribute)
                     and isinstance(value.func.value, ast.Name)
-                    and any(isinstance(target, (ast.Tuple, ast.List)) for target in targets)
+                    and any(
+                        isinstance(target, (ast.Tuple, ast.List)) for target in targets
+                    )
                 ):
                     producer = self.var_module_origin.get(value.func.value.id)
                 self._bind(stmt, producer)
@@ -1448,7 +1522,11 @@ class _ForwardOperationExtractor:
                 continue
             if isinstance(stmt, ast.Expr):
                 producer, _ = self.expression(stmt.value)
-                if producer and isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Attribute):
+                if (
+                    producer
+                    and isinstance(stmt.value, ast.Call)
+                    and isinstance(stmt.value.func, ast.Attribute)
+                ):
                     owner = stmt.value.func.value
                     if isinstance(owner, ast.Name):
                         self.var_producer[owner.id] = producer
@@ -1471,7 +1549,10 @@ class _ForwardOperationExtractor:
                     for index in range(before, len(self.operations)):
                         op = self.operations[index]
                         self.operations[index] = ForwardOperation(
-                            **{**op.__dict__, "details": (*op.details, f"condition: {test}")}
+                            **{
+                                **op.__dict__,
+                                "details": (*op.details, f"condition: {test}"),
+                            }
                         )
                     self.var_producer = dict(before_env)
                     before_else = len(self.operations)
@@ -1480,7 +1561,10 @@ class _ForwardOperationExtractor:
                     for index in range(before_else, len(self.operations)):
                         op = self.operations[index]
                         self.operations[index] = ForwardOperation(
-                            **{**op.__dict__, "details": (*op.details, f"condition: not ({test})")}
+                            **{
+                                **op.__dict__,
+                                "details": (*op.details, f"condition: not ({test})"),
+                            }
                         )
                     self.var_producer = else_env if stmt.orelse else body_env
                 continue
@@ -1508,7 +1592,9 @@ def _self_call_source_positions(func: ast.FunctionDef) -> dict[str, tuple[int, i
     return positions
 
 
-def _functional_synthetic_source_positions(func: ast.FunctionDef) -> dict[str, tuple[int, int]]:
+def _functional_synthetic_source_positions(
+    func: ast.FunctionDef,
+) -> dict[str, tuple[int, int]]:
     """First source position each ``F.<op>(...)`` maps to a functional synthetic attr."""
     positions: dict[str, tuple[int, int]] = {}
     for node in ast.walk(func):
@@ -1601,11 +1687,7 @@ def _extract_forward_return_metadata(
         if isinstance(stmt, ast.Return) and stmt.value is not None:
             return_order = _return_value_names(stmt.value)
             break
-    slots = {
-        name: var_producer[name]
-        for name in return_order
-        if name in var_producer
-    }
+    slots = {name: var_producer[name] for name in return_order if name in var_producer}
     primary = return_order[-1] if return_order else None
     return slots, return_order, primary
 
@@ -1652,7 +1734,9 @@ def _prune_forward_pipeline(
         return forward_calls, operations
     live = _live_forward_steps(operations=operations, return_slots=return_slots)
     pruned_operations = {name: op for name, op in operations.items() if name in live}
-    pruned_calls = [step for step in forward_calls if step not in operations or step in live]
+    pruned_calls = [
+        step for step in forward_calls if step not in operations or step in live
+    ]
     return pruned_calls, pruned_operations
 
 
@@ -1743,7 +1827,9 @@ def _refine_forward_operation_predecessors(
         for pred in operation.predecessors:
             var_map = module_unpacks.get(pred)
             if var_map:
-                mapped = [producer for var, producer in var_map.items() if var in vars_read]
+                mapped = [
+                    producer for var, producer in var_map.items() if var in vars_read
+                ]
                 if mapped:
                     predecessors.extend(mapped)
                     continue
@@ -1766,7 +1852,9 @@ def _apply_forward_analysis(
     *,
     forward_calls: list[str],
     init_assignments: dict[str, str],
-) -> tuple[list[str], dict[str, ForwardOperation], dict[str, str], list[str], str | None]:
+) -> tuple[
+    list[str], dict[str, ForwardOperation], dict[str, str], list[str], str | None
+]:
     operations = {op.attr_name: op for op in analysis.operations}
     pruned_calls, pruned_operations = _prune_forward_pipeline(
         forward_calls=forward_calls,
@@ -1787,7 +1875,11 @@ def finalize_class_registry(registry: dict[str, ClassStructure]) -> None:
     referenced: dict[str, set[str]] = {}
     for cls in registry.values():
         forward_func = next(
-            (item for item in cls.node.body if isinstance(item, ast.FunctionDef) and item.name == "forward"),
+            (
+                item
+                for item in cls.node.body
+                if isinstance(item, ast.FunctionDef) and item.name == "forward"
+            ),
             None,
         )
         if forward_func is None:
@@ -1807,12 +1899,18 @@ def finalize_class_registry(registry: dict[str, ClassStructure]) -> None:
         if not cls.forward_operations:
             continue
         forward_func = next(
-            (item for item in cls.node.body if isinstance(item, ast.FunctionDef) and item.name == "forward"),
+            (
+                item
+                for item in cls.node.body
+                if isinstance(item, ast.FunctionDef) and item.name == "forward"
+            ),
             None,
         )
         if forward_func is None:
             continue
-        module_unpacks = _module_return_unpacks(forward_func, cls.init_assignments, registry)
+        module_unpacks = _module_return_unpacks(
+            forward_func, cls.init_assignments, registry
+        )
         cls.forward_operations = _refine_forward_operation_predecessors(
             forward_func,
             cls.forward_operations,
@@ -1888,11 +1986,19 @@ class _ModelAstVisitor(ast.NodeVisitor):
         single_op_methods: dict[str, ForwardOperation] = {}
         multi_op_methods: dict[str, list[ForwardOperation]] = {}
         init_func = next(
-            (item for item in node.body if isinstance(item, ast.FunctionDef) and item.name == "__init__"),
+            (
+                item
+                for item in node.body
+                if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+            ),
             None,
         )
         forward_func = next(
-            (item for item in node.body if isinstance(item, ast.FunctionDef) and item.name == "forward"),
+            (
+                item
+                for item in node.body
+                if isinstance(item, ast.FunctionDef) and item.name == "forward"
+            ),
             None,
         )
 
@@ -1913,13 +2019,19 @@ class _ModelAstVisitor(ast.NodeVisitor):
             ) = _parse_forward(resolved_forward_func)
             alternate = _alternate_forward_dispatches(forward_func)
             if alternate:
-                forward_calls = [call for call in forward_calls if call not in alternate]
+                forward_calls = [
+                    call for call in forward_calls if call not in alternate
+                ]
             input_fed_calls = _input_fed_calls_from_forward(forward_func)
             parallel_gates = _parallel_gates_from_forward(forward_func)
             if forward_calls and parallel_gates:
                 # Routers like MoE `gate` run on hidden_states as the main path, not in parallel.
-                parallel_gates = [gate for gate in parallel_gates if gate != forward_calls[0]]
-            gate_activations = _parallel_gate_activations_from_forward(forward_func, parallel_gates)
+                parallel_gates = [
+                    gate for gate in parallel_gates if gate != forward_calls[0]
+                ]
+            gate_activations = _parallel_gate_activations_from_forward(
+                forward_func, parallel_gates
+            )
             forward_step_details = dict(parsed_step_details)
             if _is_moe_gate_class(node.name, forward_calls):
                 values = _self_config_values(init_func, self.config)
@@ -1942,7 +2054,10 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         init_assignments=init_assignments,
                     )
                     forward_step_details.update(
-                        {op.attr_name: list(op.details) for op in forward_operations.values()}
+                        {
+                            op.attr_name: list(op.details)
+                            for op in forward_operations.values()
+                        }
                     )
             forward_step_details.update(
                 _method_forward_step_details(node, forward_calls, init_assignments)
@@ -1962,7 +2077,10 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 all_tensor_ops=self.all_tensor_ops,
             )
             delegates_inline = _forward_delegates_to_nothing(node.name, forward_calls)
-            if _forward_owns_tensor_math(forward_calls, init_assignments) or delegates_inline:
+            if (
+                _forward_owns_tensor_math(forward_calls, init_assignments)
+                or delegates_inline
+            ):
                 values = _self_config_values(init_func, self.config)
                 analysis = _forward_operations_from_forward(
                     forward_func,
@@ -1993,7 +2111,10 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         init_assignments=init_assignments,
                     )
                     forward_step_details.update(
-                        {op.attr_name: list(op.details) for op in forward_operations.values()}
+                        {
+                            op.attr_name: list(op.details)
+                            for op in forward_operations.values()
+                        }
                     )
             elif forward_func is not None:
                 values = _self_config_values(init_func, self.config)
@@ -2030,7 +2151,10 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         init_assignments=init_assignments,
                     )
                     forward_step_details.update(
-                        {op.attr_name: list(op.details) for op in forward_operations.values()}
+                        {
+                            op.attr_name: list(op.details)
+                            for op in forward_operations.values()
+                        }
                     )
 
         self.classes[node.name] = ClassStructure(
@@ -2086,7 +2210,9 @@ def _parse_init(
     for node in ast.walk(func):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Attribute) and _is_self_attr(target, target.attr):
+                if isinstance(target, ast.Attribute) and _is_self_attr(
+                    target, target.attr
+                ):
                     record_assignment(target.attr, node.value)
         elif isinstance(node, ast.AnnAssign):
             target = node.target
@@ -2131,9 +2257,9 @@ def _assignment_class_names(
 ) -> list[str]:
     """Return every constructible module class represented by an assignment."""
     if isinstance(node, ast.IfExp):
-        names = _assignment_class_names(node.body, config=config) + _assignment_class_names(
-            node.orelse, config=config
-        )
+        names = _assignment_class_names(
+            node.body, config=config
+        ) + _assignment_class_names(node.orelse, config=config)
         return list(dict.fromkeys(names))
     if isinstance(node, ast.ListComp):
         return _assignment_class_names(node.elt, config=config)
@@ -2145,7 +2271,9 @@ def _assignment_class_names(
             return []
         if isinstance(node.func, ast.Attribute) and node.func.attr == "Parameter":
             return []
-        if isinstance(node.func, (ast.Name, ast.Attribute)) and _expr_name(node.func) in {
+        if isinstance(node.func, (ast.Name, ast.Attribute)) and _expr_name(
+            node.func
+        ) in {
             "ModuleList",
             "nn.ModuleList",
             "torch.nn.ModuleList",
@@ -2184,13 +2312,17 @@ def _assignment_details(node: ast.AST, class_name: str) -> list[str]:
 
     for keyword in node.keywords:
         if keyword.arg in {"num_experts", "top_k", "num_experts_per_tok"}:
-            value = ast.literal_eval(keyword.value) if _is_literal(keyword.value) else None
+            value = (
+                ast.literal_eval(keyword.value) if _is_literal(keyword.value) else None
+            )
             if value is not None:
                 details.append(f"{keyword.arg}={value}")
         if keyword.arg == "activation" and _is_literal(keyword.value):
             raw = ast.literal_eval(keyword.value)
             if isinstance(raw, str):
-                details.append(_GATE_ACTIVATION_NAMES.get(raw.lower(), raw.capitalize()))
+                details.append(
+                    _GATE_ACTIVATION_NAMES.get(raw.lower(), raw.capitalize())
+                )
 
     if re.search(r"SharedExpert|shared", class_name, re.I):
         details.append("shared expert path")
@@ -2215,7 +2347,9 @@ def _dedupe_chain(items: list[str]) -> list[str]:
     return out
 
 
-def _chains_from_expr(value: ast.AST, var_chains: dict[str, list[str]]) -> list[list[str]]:
+def _chains_from_expr(
+    value: ast.AST, var_chains: dict[str, list[str]]
+) -> list[list[str]]:
     """Collect provenance chains from variable references inside an expression."""
     chains: list[list[str]] = []
     if isinstance(value, ast.Name):
@@ -2270,7 +2404,11 @@ def _trace_var_chain(
 
 def _tuple_source_names(value: ast.AST) -> list[str] | None:
     """Names of inputs when a tuple assignment maps 1:1 over an input tuple."""
-    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "map":
+    if (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == "map"
+    ):
         if len(value.args) < 2 or not isinstance(value.args[1], (ast.Tuple, ast.List)):
             return None
         names: list[str] = []
@@ -2362,7 +2500,11 @@ def _is_data_movement_call(func: ast.AST) -> bool:
 def _is_kernel_merge_call(func: ast.AST) -> bool:
     if _is_data_movement_call(func):
         return False
-    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "self":
+    if (
+        isinstance(func, ast.Attribute)
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "self"
+    ):
         return False
     if _is_functional_linear_call(func):
         return False
@@ -2475,7 +2617,10 @@ def _enrich_kernel_import_details(
             continue
         import_ref = imports.get(kernel)
         if import_ref:
-            cls.forward_step_details[SYNTHETIC_ATTENTION] = [*details, f"import: {import_ref}"]
+            cls.forward_step_details[SYNTHETIC_ATTENTION] = [
+                *details,
+                f"import: {import_ref}",
+            ]
 
 
 def _resolve_dispatched_attention_kernel(
@@ -2693,7 +2838,13 @@ def _capture_attention_inputs(
         target = _expr_name(call.func)
         if target not in _SYNTHETIC_ATTENTION_NAMES:
             continue
-        start = 1 if call.args and isinstance(call.args[0], ast.Name) and call.args[0].id == "self" else 0
+        start = (
+            1
+            if call.args
+            and isinstance(call.args[0], ast.Name)
+            and call.args[0].id == "self"
+            else 0
+        )
         for index, arg in enumerate(call.args[start:], start=start):
             if not isinstance(arg, ast.Name):
                 continue
@@ -2774,7 +2925,9 @@ def _capture_call_side_inputs(
     for call in ast.walk(node):
         if not isinstance(call, ast.Call):
             continue
-        if not isinstance(call.func, ast.Attribute) or not _is_self_attr(call.func, call.func.attr):
+        if not isinstance(call.func, ast.Attribute) or not _is_self_attr(
+            call.func, call.func.attr
+        ):
             continue
         callee = call.func.attr
         if callee.startswith("@") or callee in _SYNTHETIC_ATTENTION_NAMES:
@@ -2782,15 +2935,13 @@ def _capture_call_side_inputs(
         if not call.args:
             continue
 
-        main_chain, main_kind = _arg_provenance(call.args[0], var_chains, forward_input_names)
+        main_chain, main_kind = _arg_provenance(
+            call.args[0], var_chains, forward_input_names
+        )
         specs: list[SideInputSpec] = []
         seen: set[tuple[str, tuple[str, ...], SideInputSource]] = set()
 
-        if (
-            main_kind == "forward_input"
-            and prior_calls
-            and callee != prior_calls[0]
-        ):
+        if main_kind == "forward_input" and prior_calls and callee != prior_calls[0]:
             arg0_name = _arg_name(call.args[0], 0)
             if arg0_name not in forward_input_names or call is discarded_call:
                 key = (arg0_name, tuple(), "forward_input")
@@ -2955,7 +3106,9 @@ def _parallel_gates_from_forward(func: ast.FunctionDef) -> list[str]:
         for call in ast.walk(node):
             if not isinstance(call, ast.Call):
                 continue
-            if not isinstance(call.func, ast.Attribute) or not _is_self_attr(call.func, call.func.attr):
+            if not isinstance(call.func, ast.Attribute) or not _is_self_attr(
+                call.func, call.func.attr
+            ):
                 continue
             if not call.args or not isinstance(call.args[0], ast.Name):
                 continue
@@ -2985,7 +3138,9 @@ def _input_fed_calls_from_forward(func: ast.FunctionDef) -> list[str]:
         for call in ast.walk(stmt):
             if not isinstance(call, ast.Call):
                 continue
-            if not isinstance(call.func, ast.Attribute) or not _is_self_attr(call.func, call.func.attr):
+            if not isinstance(call.func, ast.Attribute) or not _is_self_attr(
+                call.func, call.func.attr
+            ):
                 continue
             if not call.args or not isinstance(call.args[0], ast.Name):
                 continue
@@ -2993,7 +3148,9 @@ def _input_fed_calls_from_forward(func: ast.FunctionDef) -> list[str]:
                 fed.append(call.func.attr)
         # Read the arguments before the targets rebind, so `x = self.block(x)` still
         # counts as reading the input rather than the value it is about to hold.
-        value = _stmt_value(stmt) if isinstance(stmt, (ast.Assign, ast.AnnAssign)) else None
+        value = (
+            _stmt_value(stmt) if isinstance(stmt, (ast.Assign, ast.AnnAssign)) else None
+        )
         if value is None:
             continue
         produced: list[str] = []
@@ -3012,7 +3169,11 @@ def _parallel_gate_activation(func: ast.FunctionDef, gate_attr: str) -> str | No
     """Detect activation applied to a parallel output gate (e.g. g_proj(...).sigmoid())."""
     gate_vars: set[str] = set()
     for node in ast.walk(func):
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
             target = node.targets[0].id
             value = node.value
             if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
@@ -3022,12 +3183,18 @@ def _parallel_gate_activation(func: ast.FunctionDef, gate_attr: str) -> str | No
             target = node.target
             if isinstance(target, ast.Name):
                 value = node.value
-                if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
+                if isinstance(value, ast.Call) and isinstance(
+                    value.func, ast.Attribute
+                ):
                     if _is_self_attr(value.func, gate_attr):
                         gate_vars.add(target.id)
 
     for node in ast.walk(func):
-        src = _stmt_value(node) if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Return)) else None
+        src = (
+            _stmt_value(node)
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Return))
+            else None
+        )
         if src is None:
             continue
         if isinstance(src, ast.Call) and isinstance(src.func, ast.Attribute):
@@ -3057,7 +3224,13 @@ def _parallel_gate_activations_from_forward(
 
 def _parse_forward(
     func: ast.FunctionDef,
-) -> tuple[list[str], list[str], dict[str, list[str]], dict[str, list[SideInputSpec]], dict[str, list[str]]]:
+) -> tuple[
+    list[str],
+    list[str],
+    dict[str, list[str]],
+    dict[str, list[SideInputSpec]],
+    dict[str, list[str]],
+]:
     calls: list[str] = []
     norm_before: list[str] = []
     pending_norm: str | None = None
@@ -3080,7 +3253,13 @@ def _parse_forward(
             forward_step_details,
         )
     forward_step_details.update(_positional_step_details(func))
-    return _dedupe_kernel_merge_calls(calls), norm_before, attention_inputs, side_inputs, forward_step_details
+    return (
+        _dedupe_kernel_merge_calls(calls),
+        norm_before,
+        attention_inputs,
+        side_inputs,
+        forward_step_details,
+    )
 
 
 def _walk_forward_stmt(
@@ -3105,7 +3284,9 @@ def _walk_forward_stmt(
             forward_step_details,
         )
         _capture_attention_inputs(node, var_chains, attention_inputs)
-        _capture_call_side_inputs(node, var_chains, forward_input_names, side_inputs, calls)
+        _capture_call_side_inputs(
+            node, var_chains, forward_input_names, side_inputs, calls
+        )
         # Read RHS provenance before rebinding assignment targets. In
         # ``x = self.block(x, aux)`` the first ``x`` is still the forward input;
         # treating the newly produced chain as its source invents a residual merge.
@@ -3123,7 +3304,9 @@ def _walk_forward_stmt(
             forward_step_details,
         )
         _capture_attention_inputs(node, var_chains, attention_inputs)
-        _capture_call_side_inputs(node, var_chains, forward_input_names, side_inputs, calls)
+        _capture_call_side_inputs(
+            node, var_chains, forward_input_names, side_inputs, calls
+        )
         if isinstance(node.target, ast.Name):
             chain = _trace_var_chain(node.value, var_chains, stmt_calls)
             if chain:
@@ -3141,7 +3324,9 @@ def _walk_forward_stmt(
             forward_step_details,
         )
         _capture_attention_inputs(node, var_chains, attention_inputs)
-        _capture_call_side_inputs(node, var_chains, forward_input_names, side_inputs, calls)
+        _capture_call_side_inputs(
+            node, var_chains, forward_input_names, side_inputs, calls
+        )
         return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
 
     if isinstance(node, ast.AugAssign):
@@ -3154,7 +3339,9 @@ def _walk_forward_stmt(
             attention_inputs,
             forward_step_details,
         )
-        _capture_call_side_inputs(node, var_chains, forward_input_names, side_inputs, calls)
+        _capture_call_side_inputs(
+            node, var_chains, forward_input_names, side_inputs, calls
+        )
         _capture_augassign_module_input(
             node,
             var_chains,
@@ -3174,11 +3361,15 @@ def _walk_forward_stmt(
             forward_step_details,
         )
         _capture_attention_inputs(node, var_chains, attention_inputs)
-        _capture_call_side_inputs(node, var_chains, forward_input_names, side_inputs, calls)
+        _capture_call_side_inputs(
+            node, var_chains, forward_input_names, side_inputs, calls
+        )
         return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
 
     if isinstance(node, ast.If):
-        branch = node.body if _if_has_competing_assigns(node) else node.body + node.orelse
+        branch = (
+            node.body if _if_has_competing_assigns(node) else node.body + node.orelse
+        )
         for child in branch:
             pending_norm = _walk_forward_stmt(
                 child,
@@ -3233,9 +3424,15 @@ def _pick_decoder_class(classes: dict[str, ClassStructure]) -> ClassStructure | 
         name = info.name
         if DECODER_CLASS_RE.search(name):
             score += 10
-        if any(_classify_role(a, c) == "attention" for a, c in info.init_assignments.items()):
+        if any(
+            _classify_role(a, c) == "attention"
+            for a, c in info.init_assignments.items()
+        ):
             score += 5
-        if any(_classify_role(a, c) in {"ffn", "moe"} for a, c in info.init_assignments.items()):
+        if any(
+            _classify_role(a, c) in {"ffn", "moe"}
+            for a, c in info.init_assignments.items()
+        ):
             score += 3
         if info.forward_calls:
             score += 2
@@ -3255,7 +3452,9 @@ def _pick_model_class(classes: dict[str, ClassStructure]) -> ClassStructure | No
     return _pick_model_class_by_structure(classes)
 
 
-def _pick_model_class_by_structure(classes: dict[str, ClassStructure]) -> ClassStructure | None:
+def _pick_model_class_by_structure(
+    classes: dict[str, ClassStructure],
+) -> ClassStructure | None:
     """Find the class that owns the stack when its name follows no known convention.
 
     Inference repos often name it plainly (`Transformer`), so the token embedding it
@@ -3265,7 +3464,10 @@ def _pick_model_class_by_structure(classes: dict[str, ClassStructure]) -> ClassS
     for info in classes.values():
         if DECODER_CLASS_RE.search(info.name) or not info.init_assignments:
             continue
-        roles = {_classify_role(attr, class_name) for attr, class_name in info.init_assignments.items()}
+        roles = {
+            _classify_role(attr, class_name)
+            for attr, class_name in info.init_assignments.items()
+        }
         if "embedding" not in roles:
             continue
         ranked.append((int("head" in roles) + int("norm" in roles), info.name, info))
@@ -3388,7 +3590,9 @@ def build_stack_components(
                     class_name=class_name,
                     role="positional",
                     forward_order=order.get(attr, 1),
-                    details=registry.get(class_name, stack_model).init_details.get(attr, []),
+                    details=registry.get(class_name, stack_model).init_details.get(
+                        attr, []
+                    ),
                 )
             )
 
@@ -3441,12 +3645,18 @@ def build_stack_components(
     return pre, tail
 
 
-def _infer_attention_type_from_class(info: ClassStructure | None, all_classes: dict[str, ClassStructure]) -> str | None:
+def _infer_attention_type_from_class(
+    info: ClassStructure | None, all_classes: dict[str, ClassStructure]
+) -> str | None:
     if info is None:
         return None
 
     attn_attr = next(
-        (attr for attr, cls in info.init_assignments.items() if _classify_role(attr, cls) == "attention"),
+        (
+            attr
+            for attr, cls in info.init_assignments.items()
+            if _classify_role(attr, cls) == "attention"
+        ),
         None,
     )
     if not attn_attr:
@@ -3492,7 +3702,11 @@ def _infer_norm_from_ast(decoder: ClassStructure) -> tuple[str | None, str | Non
     elif decoder.forward_calls and norm_classes:
         # If norms appear in init but never immediately precede modules in forward,
         # assume post-norm style wiring.
-        norm_attrs = {a for a, c in decoder.init_assignments.items() if _classify_role(a, c) == "norm"}
+        norm_attrs = {
+            a
+            for a, c in decoder.init_assignments.items()
+            if _classify_role(a, c) == "norm"
+        }
         first_module = decoder.forward_calls[0] if decoder.forward_calls else None
         if first_module and first_module not in norm_attrs:
             placement = "Post-Norm (inside residual)"
@@ -3536,7 +3750,9 @@ def _build_components(decoder: ClassStructure) -> list[BlockComponent]:
                     role="attention",
                     label=attention_kernel_label(step_details),
                     forward_order=index,
-                    details=attention_kernel_details(step_details, decoder.attention_inputs),
+                    details=attention_kernel_details(
+                        step_details, decoder.attention_inputs
+                    ),
                 )
             )
             continue
@@ -3591,7 +3807,9 @@ def expand_conditional_block_components(
         ffn_order = order_map.get("mlp")
 
     for comp in components:
-        class_names = decoder.init_assignment_options.get(comp.attr_name) or [comp.class_name]
+        class_names = decoder.init_assignment_options.get(comp.attr_name) or [
+            comp.class_name
+        ]
         for class_name in class_names:
             key = (comp.attr_name, class_name)
             if key in seen:
@@ -3657,18 +3875,19 @@ def _class_init_method(class_node: ast.ClassDef) -> ast.FunctionDef | None:
 
 
 def _is_module_list(node: ast.AST) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and (
-            (isinstance(node.func, ast.Name) and node.func.id == "ModuleList")
-            or (isinstance(node.func, ast.Attribute) and node.func.attr == "ModuleList")
-        )
+    return isinstance(node, ast.Call) and (
+        (isinstance(node.func, ast.Name) and node.func.id == "ModuleList")
+        or (isinstance(node.func, ast.Attribute) and node.func.attr == "ModuleList")
     )
 
 
 def _parse_layer_module_list(value: ast.AST) -> tuple[str, str, str] | None:
     list_comp: ast.ListComp | None = None
-    if _is_module_list(value) and value.args and isinstance(value.args[0], ast.ListComp):
+    if (
+        _is_module_list(value)
+        and value.args
+        and isinstance(value.args[0], ast.ListComp)
+    ):
         list_comp = value.args[0]
     elif isinstance(value, ast.ListComp):
         list_comp = value
@@ -3685,12 +3904,16 @@ def _parse_layer_module_list(value: ast.AST) -> tuple[str, str, str] | None:
     return decoder_class, loop_var, count_expr
 
 
-def _find_layer_loop_in_init(init_func: ast.FunctionDef) -> tuple[str, str, str, str] | None:
+def _find_layer_loop_in_init(
+    init_func: ast.FunctionDef,
+) -> tuple[str, str, str, str] | None:
     for node in init_func.body:
         if not isinstance(node, ast.Assign):
             continue
         for target in node.targets:
-            if not isinstance(target, ast.Attribute) or not _is_self_attr(target, target.attr):
+            if not isinstance(target, ast.Attribute) or not _is_self_attr(
+                target, target.attr
+            ):
                 continue
             parsed = _parse_layer_module_list(node.value)
             if parsed:
@@ -3756,7 +3979,9 @@ def _collect_layer_init_conditionals(
     return results
 
 
-def _extract_decoder_layer_conditionals(decoder: ClassStructure) -> list[tuple[str, str, str]]:
+def _extract_decoder_layer_conditionals(
+    decoder: ClassStructure,
+) -> list[tuple[str, str, str]]:
     init_func = _class_init_method(decoder.node)
     if init_func is None:
         return []
@@ -3810,7 +4035,9 @@ def build_class_registry(
     return visitor.classes
 
 
-def merge_class_registries(*registries: dict[str, ClassStructure]) -> dict[str, ClassStructure]:
+def merge_class_registries(
+    *registries: dict[str, ClassStructure]
+) -> dict[str, ClassStructure]:
     merged: dict[str, ClassStructure] = {}
     for registry in registries:
         merged.update(registry)

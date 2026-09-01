@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Custom modeling file for AST inspection tests."""
 
 import torch
@@ -8,7 +14,9 @@ class CustomRotaryEmbedding(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.attention_scaling = 1.0
-        self.register_buffer("inv_freq", torch.ones(config.hidden_size), persistent=False)
+        self.register_buffer(
+            "inv_freq", torch.ones(config.hidden_size), persistent=False
+        )
 
     def forward(self, x, position_ids):
         inv_freq = self.inv_freq[None, :, None].expand(position_ids.shape[0], -1, 1)
@@ -46,7 +54,9 @@ class CustomDecoderLayer(nn.Module):
         super().__init__()
         self.input_layernorm = CustomRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.self_attn = CustomLatentAttention(config)
-        self.post_attention_layernorm = CustomRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.post_attention_layernorm = CustomRMSNorm(
+            config.hidden_size, config.rms_norm_eps
+        )
         self.block_sparse_moe = CustomSharedExpertMoE(config)
 
     def forward(self, hidden_states):
@@ -67,6 +77,8 @@ class CustomForCausalLM(nn.Module):
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.rotary_emb = CustomRotaryEmbedding(config)
-        self.layers = nn.ModuleList([CustomDecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList(
+            [CustomDecoderLayer(config) for _ in range(config.num_hidden_layers)]
+        )
         self.norm = CustomRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)

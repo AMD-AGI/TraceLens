@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Build one merged Model Explorer graph with in-place namespace expansion."""
 
 from __future__ import annotations
@@ -6,7 +12,11 @@ import re
 from typing import Any
 
 from visualizer.basic_ops import BasicOpFilter
-from visualizer.block_tree import BlockNode, collect_nested_diagrams, subgraph_warrants_json_export
+from visualizer.block_tree import (
+    BlockNode,
+    collect_nested_diagrams,
+    subgraph_warrants_json_export,
+)
 from visualizer.blocks import BlockComponent, LayerVariant
 from visualizer.computation_graph import ComputationGraph, build_computation_graph
 from visualizer.extract import ArchitectureSpec, architecture_section_trees
@@ -45,7 +55,15 @@ from model_explorer_export.overview import (
     component_has_detail_section,
     format_forward_sequence,
 )
-from model_explorer_export.styles import ROLE_COLORS, _GPU_KERNEL_BORDER, build_group_node_configs, ensure_readable_text, finalize_graph_node_styles, input_port_style, spine_tile_style
+from model_explorer_export.styles import (
+    ROLE_COLORS,
+    _GPU_KERNEL_BORDER,
+    build_group_node_configs,
+    ensure_readable_text,
+    finalize_graph_node_styles,
+    input_port_style,
+    spine_tile_style,
+)
 
 
 def _join_namespace(prefix: str, suffix: str) -> str:
@@ -102,7 +120,9 @@ def _set_input_port_metadata(node: dict[str, Any], input_id: str, label: str) ->
     for item in items:
         if item.get("id") != input_id:
             continue
-        attrs = [attr for attr in item.get("attrs", []) if attr.get("key") != "port_label"]
+        attrs = [
+            attr for attr in item.get("attrs", []) if attr.get("key") != "port_label"
+        ]
         attrs.append({"key": "port_label", "value": label})
         item["attrs"] = attrs
         node["inputsMetadata"] = items
@@ -230,7 +250,8 @@ def _computation_nodes(
         for index, spec in enumerate(computation.nodes)
     }
     local_to_prefixed = {
-        local_id: _merge_node_id(id_prefix, local_id) for local_id in index_to_local.values()
+        local_id: _merge_node_id(id_prefix, local_id)
+        for local_id in index_to_local.values()
     }
     relative_namespaces = _node_namespaces(computation)
     index_to_prefixed = {
@@ -242,7 +263,9 @@ def _computation_nodes(
     for index, spec in enumerate(computation.nodes):
         local_id = index_to_local[index]
         prefixed_id = index_to_prefixed[index]
-        if skip_synthetic_input and (local_id == "@input" or spec.synthetic == "@input"):
+        if skip_synthetic_input and (
+            local_id == "@input" or spec.synthetic == "@input"
+        ):
             continue
 
         relative_ns = relative_namespaces.get(index, "")
@@ -280,15 +303,9 @@ def _computation_nodes(
 def _boundary_nodes(nodes: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
     node_ids = {node["id"] for node in nodes}
     sources = {
-        edge["sourceNodeId"]
-        for node in nodes
-        for edge in node.get("incomingEdges", [])
+        edge["sourceNodeId"] for node in nodes for edge in node.get("incomingEdges", [])
     }
-    targets = {
-        node["id"]
-        for node in nodes
-        for edge in node.get("incomingEdges", [])
-    }
+    targets = {node["id"] for node in nodes for edge in node.get("incomingEdges", [])}
     entries = sorted(node_id for node_id in node_ids if node_id not in targets)
     exits = sorted(node_id for node_id in node_ids if node_id not in sources)
     return entries or sorted(node_ids)[:1], exits or sorted(node_ids)[-1:]
@@ -300,7 +317,9 @@ def _block_tile_ids(computation: ComputationGraph, *, id_prefix: str) -> dict[in
     for index, spec in enumerate(computation.nodes):
         if spec.block is None:
             continue
-        tiles.setdefault(id(spec.block), _merge_node_id(id_prefix, spec.key or f"node:{index}"))
+        tiles.setdefault(
+            id(spec.block), _merge_node_id(id_prefix, spec.key or f"node:{index}")
+        )
     return tiles
 
 
@@ -381,7 +400,8 @@ def _section_input_nodes(
     return [
         node["id"]
         for node in section_nodes
-        if _is_primary_section_input(node) and node.get("namespace", "") == namespace_prefix
+        if _is_primary_section_input(node)
+        and node.get("namespace", "") == namespace_prefix
     ]
 
 
@@ -465,10 +485,14 @@ def _skip_variant_root_input(component: BlockComponent) -> bool:
 def _namespace_is_descendant(node_namespace: str, group_namespace: str) -> bool:
     if not group_namespace:
         return node_namespace == ""
-    return node_namespace == group_namespace or node_namespace.startswith(f"{group_namespace}/")
+    return node_namespace == group_namespace or node_namespace.startswith(
+        f"{group_namespace}/"
+    )
 
 
-def _namespace_internal_ids(section_nodes: list[dict[str, Any]], namespace: str) -> set[str]:
+def _namespace_internal_ids(
+    section_nodes: list[dict[str, Any]], namespace: str
+) -> set[str]:
     """Include nested namespaces so SituAndMul ops stay inside KimiMLP groups."""
     return {
         node["id"]
@@ -480,7 +504,9 @@ def _namespace_internal_ids(section_nodes: list[dict[str, Any]], namespace: str)
 _INLINE_FRAME_NAMESPACE_SUFFIXES = frozenset({"SituAndMul", "SiluAndMul"})
 
 
-def _skip_nested_inline_frame_input(section_nodes: list[dict[str, Any]], namespace: str) -> bool:
+def _skip_nested_inline_frame_input(
+    section_nodes: list[dict[str, Any]], namespace: str
+) -> bool:
     """Inline activation frames inherit the parent KimiMLP input port."""
     segment = namespace.rsplit("/", 1)[-1]
     if segment not in _INLINE_FRAME_NAMESPACE_SUFFIXES or "/" not in namespace:
@@ -499,12 +525,16 @@ def _inject_group_inputs(
 ) -> None:
     """Add a visible @input port to expanded namespace groups that lack one."""
     node_by_id = {node["id"]: node for node in section_nodes}
-    namespaces = sorted({node.get("namespace", "") for node in section_nodes if node.get("namespace")})
+    namespaces = sorted(
+        {node.get("namespace", "") for node in section_nodes if node.get("namespace")}
+    )
 
     for namespace in namespaces:
         if namespace in skip_namespaces:
             continue
-        group_nodes = [node for node in section_nodes if node.get("namespace", "") == namespace]
+        group_nodes = [
+            node for node in section_nodes if node.get("namespace", "") == namespace
+        ]
         if any(_is_synthetic_input(node) for node in group_nodes):
             continue
         if _skip_nested_inline_frame_input(section_nodes, namespace):
@@ -519,7 +549,9 @@ def _inject_group_inputs(
 
         for node in group_nodes:
             incoming = list(node.get("incomingEdges", []))
-            external = [edge for edge in incoming if edge["sourceNodeId"] not in internal_ids]
+            external = [
+                edge for edge in incoming if edge["sourceNodeId"] not in internal_ids
+            ]
             if external or not incoming:
                 entry_nodes.append(node)
                 outside_sources.update(edge["sourceNodeId"] for edge in external)
@@ -539,7 +571,9 @@ def _inject_group_inputs(
 
         input_node = _make_group_input_node(
             input_id=input_id,
-            label=_infer_group_input_label(group_nodes, namespace, entry_ports=entry_ports),
+            label=_infer_group_input_label(
+                group_nodes, namespace, entry_ports=entry_ports
+            ),
             namespace=namespace,
         )
         if outside_sources:
@@ -554,7 +588,9 @@ def _inject_group_inputs(
 
         for entry in entry_nodes:
             incoming = list(entry.get("incomingEdges", []))
-            internal = [edge for edge in incoming if edge["sourceNodeId"] in internal_ids]
+            internal = [
+                edge for edge in incoming if edge["sourceNodeId"] in internal_ids
+            ]
             entry["incomingEdges"] = internal + [
                 {
                     "sourceNodeId": input_id,
@@ -584,7 +620,11 @@ def _is_tensor_port(node: dict[str, Any]) -> bool:
 def _kernel_pipeline_step(block_tree: BlockNode) -> BlockNode | None:
     """Return the kernel pipeline child of an attention block tree, if present."""
     return next(
-        (child for child in block_tree.children if child.class_name == "KernelPipeline"),
+        (
+            child
+            for child in block_tree.children
+            if child.class_name == "KernelPipeline"
+        ),
         None,
     )
 
@@ -700,7 +740,8 @@ def _resolve_section_tree_by_class(
     matches = [
         (title, tree)
         for title, tree in architecture_section_trees(spec)
-        if tree.class_name == class_name and subgraph_warrants_json_export(tree, basic_ops=basic_ops)
+        if tree.class_name == class_name
+        and subgraph_warrants_json_export(tree, basic_ops=basic_ops)
     ]
     if not matches:
         return None
@@ -789,7 +830,8 @@ def _resolve_section_tree(
     matches = [
         (title, tree)
         for title, tree in architecture_section_trees(spec)
-        if tree.attr_name == attr_name and subgraph_warrants_json_export(tree, basic_ops=basic_ops)
+        if tree.attr_name == attr_name
+        and subgraph_warrants_json_export(tree, basic_ops=basic_ops)
     ]
     if not matches:
         return None
@@ -846,9 +888,11 @@ def _append_section(
         )
         summary = _summary_node(
             id_prefix,
-            _group_node_label(spec, component)
-            if component.role == "norm"
-            else _display_label(component, spec),
+            (
+                _group_node_label(spec, component)
+                if component.role == "norm"
+                else _display_label(component, spec)
+            ),
             namespace=summary_namespace,
             component=component,
         )
@@ -931,19 +975,24 @@ def _append_section(
         )
     tile_ids = _block_tile_ids(computation, id_prefix=id_prefix)
     tile_replacements: dict[str, str] = {}
-    for nested_label, nested_block in collect_nested_diagrams(block_tree, basic_ops=basic_ops):
+    for nested_label, nested_block in collect_nested_diagrams(
+        block_tree, basic_ops=basic_ops
+    ):
         tile_id = tile_ids.get(id(nested_block))
         nested_prefix = tile_id or _merge_node_id(id_prefix, nested_block.attr_name)
         if any(node["id"].startswith(f"{nested_prefix}/") for node in section_nodes):
             continue
         nested_namespace = _join_namespace(
             namespace_prefix,
-            _sanitize_namespace_segment(nested_label)
-            if tile_id
-            else _nested_namespace_segment(nested_block, nested_label),
+            (
+                _sanitize_namespace_segment(nested_label)
+                if tile_id
+                else _nested_namespace_segment(nested_block, nested_label)
+            ),
         )
         if nested_block.class_name == "KernelPipeline" and any(
-            node.get("namespace", "").startswith(nested_namespace) and _is_tensor_port(node)
+            node.get("namespace", "").startswith(nested_namespace)
+            and _is_tensor_port(node)
             for node in section_nodes
         ):
             continue
@@ -975,7 +1024,9 @@ def _append_section(
         if shape_inferencer is not None:
             annotate_nodes_with_shapes(
                 section_nodes,
-                infer_block_tree_shapes(shape_inferencer, nested_block, title=nested_label),
+                infer_block_tree_shapes(
+                    shape_inferencer, nested_block, title=nested_label
+                ),
                 id_prefix=nested_prefix,
             )
         if nested_block.class_name == "KernelPipeline":
@@ -1010,9 +1061,11 @@ def _append_section(
     apply_kernel_frame_labels(section_nodes, group_node_attributes)
     if group_node_attributes is not None:
         group_node_attributes[namespace_prefix] = {
-            "label": _group_node_label(spec, component)
-            if component.role == "norm"
-            else _display_label(component, spec),
+            "label": (
+                _group_node_label(spec, component)
+                if component.role == "norm"
+                else _display_label(component, spec)
+            ),
             "operation": component.class_name or component.label or component.attr_name,
         }
     if (

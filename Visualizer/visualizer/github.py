@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Fetch modeling source from GitHub repositories (CPU-only, no weights)."""
 
 from __future__ import annotations
@@ -9,7 +15,6 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 GITHUB_HOSTS = {"github.com", "www.github.com"}
 CACHE_ROOT = Path.home() / ".cache" / "tracelens" / "visualizer" / "github"
@@ -95,7 +100,9 @@ def parse_github_url(url: str) -> GitHubRef:
 
 
 def _download_bytes(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "TraceLens-Visualizer/0.3"})
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "TraceLens-Visualizer/0.3"}
+    )
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.read()
 

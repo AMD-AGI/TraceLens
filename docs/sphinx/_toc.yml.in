@@ -32,6 +32,8 @@ subtrees:
       title: JAX performance report
     - file: how-to/generate-perf-report-rocprof
       title: rocprof performance report
+    - file: how-to/generate-perf-report-genesis
+      title: Genesis / Taichi performance report
     - file: how-to/collective-report
       title: Collective-communication report
     - file: how-to/compare-perf-reports
@@ -56,9 +58,9 @@ subtrees:
 - caption: Concepts
   entries:
   - file: conceptual/trace2tree
-    title: The Trace2Tree data model
+    title: Trace2Tree data model
   - file: conceptual/torch-profiling-analysis
-    title: Understanding PyTorch traces
+    title: PyTorch traces
   - file: conceptual/shape-metadata
     title: Tensor shape metadata
   - file: conceptual/gemm-analysis
@@ -68,21 +70,14 @@ subtrees:
   - file: conceptual/triton-perf-model-walkthrough
     title: Triton kernel performance model
 
-- caption: Tutorials
-  entries:
-  - file: tutorials/torch-profiling
-    title: PyTorch profiling walkthrough
-  - file: tutorials/distributed-profiling
-    title: Distributed profiling walkthrough
-  - file: tutorials/anomaly-detection
-    title: Anomaly detection walkthrough
-
 - caption: Reference
   entries:
   - file: reference/api-reference
     title: API reference
   - file: reference/perf-report-columns
     title: Performance report columns
+  - url: https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html
+    title: Hyperloom
 
 - caption: About
   entries:

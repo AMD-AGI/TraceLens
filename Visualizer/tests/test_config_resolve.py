@@ -1,10 +1,16 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Tests for modular Hugging Face config discovery."""
 
-import json
-
-import pytest
-
-from visualizer.config_resolve import discover_remote_config, normalize_config, _score_config_content
+from visualizer.config_resolve import (
+    discover_remote_config,
+    normalize_config,
+    _score_config_content,
+)
 
 
 def test_normalize_qwen3_vl_text_config():
@@ -31,9 +37,9 @@ def test_normalize_qwen3_vl_text_config():
 def test_score_prefers_text_encoder():
     text_cfg = {"model_type": "qwen3_vl", "text_config": {"num_hidden_layers": 64}}
     vae_cfg = {"_class_name": "AutoencoderKLMiniMaxH3Audio"}
-    assert _score_config_content(text_cfg, "FL2VA/text_encoder/config.json") > _score_config_content(
-        vae_cfg, "FL2VA/audio_vae/config.json"
-    )
+    assert _score_config_content(
+        text_cfg, "FL2VA/text_encoder/config.json"
+    ) > _score_config_content(vae_cfg, "FL2VA/audio_vae/config.json")
 
 
 def test_discover_minimax_h3_config():

@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Substitute config values and simplify layer-repeat fact sheet expressions."""
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ _LOOP_LINE_RE = re.compile(
     r"^(?P<head>\d+|N) × (?P<class_name>[^(]+) \((?P<loop_var>\w+) in (?P<range_expr>.+)\)$"
 )
 
+
 def simplify_layer_repeat_lines(
     lines: list[str],
     config: dict[str, Any],
@@ -25,7 +32,9 @@ def simplify_layer_repeat_lines(
     return [_simplify_line(line, config) for line in lines]
 
 
-def layer_condition_matches(layer_idx: int, condition: str, config: dict[str, Any]) -> bool:
+def layer_condition_matches(
+    layer_idx: int, condition: str, config: dict[str, Any]
+) -> bool:
     """Return True when a decoder __init__ branch condition matches ``layer_idx``."""
     expr = condition.strip()
     if expr == "else":
@@ -56,7 +65,9 @@ def layer_condition_matches(layer_idx: int, condition: str, config: dict[str, An
         payload = match.group(1)
         if "_layers" in payload and not payload.startswith("["):
             stem = payload.split("_layers", 1)[0]
-            one_based = {idx + 1 for idx in _layer_index_list(config, stem, zero_based=False)}
+            one_based = {
+                idx + 1 for idx in _layer_index_list(config, stem, zero_based=False)
+            }
             return (layer_idx + 1) in one_based
         indices = _parse_layer_index_set(payload)
         return (layer_idx + 1) in indices

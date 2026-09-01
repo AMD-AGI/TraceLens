@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Resolve Hugging Face / local / GitHub modeling source files (CPU-only, no weights)."""
 
 from __future__ import annotations
@@ -13,7 +19,7 @@ from visualizer.github import (
     parse_github_url,
     python_source_priority,
 )
-from visualizer.source_policy import SourcePolicy, get_source_policy, set_source_policy
+from visualizer.source_policy import SourcePolicy, get_source_policy
 
 MODELING_CANDIDATES = (
     "modeling_{model_type}.py",
@@ -23,7 +29,9 @@ MODELING_CANDIDATES = (
 # Checkpoints for transformers-native architectures (Qwen3, MiniMax-M3, ...) ship
 # no modeling code of their own, so the implementation is read from upstream.
 TRANSFORMERS_GITHUB_SOURCE = "github:huggingface/transformers@main"
-TRANSFORMERS_MODELING_SUBPATH = "src/transformers/models/{model_type}/modeling_{model_type}.py"
+TRANSFORMERS_MODELING_SUBPATH = (
+    "src/transformers/models/{model_type}/modeling_{model_type}.py"
+)
 NESTED_CONFIG_KEYS = ("text_config", "language_config", "llm_config", "decoder_config")
 
 
@@ -298,7 +306,9 @@ def resolve_source_files(
                 labels.append(f"hf://{model_id}")
 
     if not _has_modeling_implementation(files):
-        upstream = _transformers_github_modeling_file(_config_model_types(config), source_policy=policy)
+        upstream = _transformers_github_modeling_file(
+            _config_model_types(config), source_policy=policy
+        )
         if upstream is not None:
             path, label = upstream
             files.append(path)
@@ -310,8 +320,4 @@ def resolve_source_files(
 
 
 def read_sources(paths: list[Path]) -> dict[Path, str]:
-    return {
-        path: path.read_text(encoding="utf-8")
-        for path in paths
-        if path.is_file()
-    }
+    return {path: path.read_text(encoding="utf-8") for path in paths if path.is_file()}

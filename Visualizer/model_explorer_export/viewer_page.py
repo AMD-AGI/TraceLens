@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Compose TraceLens Model Explorer viewer HTML pages."""
 
 from __future__ import annotations
@@ -9,7 +15,9 @@ from typing import Any
 
 VIEWER_DIR = Path(__file__).resolve().parent / "viewer"
 PACKAGE_ROOT = Path(__file__).resolve().parent
-VISUALIZER_DIST = PACKAGE_ROOT / "node_modules" / "ai-edge-model-explorer-visualizer" / "dist"
+VISUALIZER_DIST = (
+    PACKAGE_ROOT / "node_modules" / "ai-edge-model-explorer-visualizer" / "dist"
+)
 APP_JS_PATTERN = re.compile(r'    <script src="\./app\.js\?v=\d+"></script>')
 
 
@@ -52,7 +60,9 @@ def compose_viewer_html(
     if payload is not None:
         replacement_parts.append(render_payload_script(payload))
     if inline_app:
-        replacement_parts.append(render_worker_script(_worker_js_source().read_text(encoding="utf-8")))
+        replacement_parts.append(
+            render_worker_script(_worker_js_source().read_text(encoding="utf-8"))
+        )
         replacement_parts.append(f"    <script>\n{app_js}\n    </script>")
     else:
         replacement_parts.append('    <script src="./app.js?v=10"></script>')

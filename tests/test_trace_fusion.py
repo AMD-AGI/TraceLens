@@ -6,11 +6,8 @@
 
 """Unit tests for TraceLens.TraceFusion."""
 
-import gzip
-import json
-
-import pytest
-
+import gzip, json, pytest
+from pathlib import Path
 from TraceLens.TraceFusion.trace_fuse import (
     TraceFuse,
     _default_filter_fn,
@@ -71,11 +68,6 @@ def _write_trace(path, events):
 )
 def test_default_filter_fn(event, include_pyfunc, expected):
     assert _default_filter_fn(dict(event), include_pyfunc=include_pyfunc) is expected
-
-
-def test_trace_fuse_default_filter_fn():
-    assert TraceFuse.default_filter_fn(TRACE_EVENT) is False
-    assert TraceFuse.default_filter_fn(KERNEL) is True
 
 
 def test_trace_fuse_init_accepts_list_and_dict(tmp_path):
@@ -235,6 +227,65 @@ def test_merge_and_save_writes_gzip_json(tmp_path):
     assert len(payload["traceEvents"]) >= 2
 
 
+def test_merge_multiprocessing_path(tmp_path):
+    rank0 = tmp_path / "rank0.json"
+    rank1 = tmp_path / "rank1.json"
+    _write_trace(rank0, [CUDA_LAUNCH, KERNEL])
+    _write_trace(
+        rank1,
+        [
+            {**CUDA_LAUNCH, "args": {"correlation": 99}, "pid": 20},
+            {**KERNEL, "args": {"correlation": 99}, "pid": 21},
+        ],
+    )
+
+    merged = TraceFuse(
+        [str(rank0), str(rank1)], use_multiprocessing=True, max_workers=2
+    ).merge()
+    non_metadata = [event for event in merged if event.get("ph") != "M"]
+    ranks = [event["args"]["rank"] for event in non_metadata]
+    assert ranks[:2] == [0, 0]
+    assert ranks[2:] == [1, 1]
+
+
+def test_merge_real_two_rank_trace():
+    trace_dir = Path(__file__).parent / "traces/mi300/llama_70b_fsdp"
+    merged = TraceFuse(
+        [
+            str(trace_dir / "rank0_trace_no_pyfn.json.gz"),
+            str(trace_dir / "rank1_trace_no_pyfn.json.gz"),
+        ]
+    ).merge()
+    by_rank = {
+        rank: [event for event in merged if event.get("args", {}).get("rank") == rank]
+        for rank in (0, 1)
+    }
+    assert all(by_rank.values())
+    rank_pids = [
+        {event["pid"] for event in by_rank[rank] if isinstance(event.get("pid"), int)}
+        for rank in (0, 1)
+    ]
+    assert rank_pids[0].isdisjoint(rank_pids[1])
+    rank_correlations = [
+        {
+            event["args"]["correlation"]
+            for event in by_rank[rank]
+            if "correlation" in event.get("args", {})
+        }
+        for rank in (0, 1)
+    ]
+    assert rank_correlations[0].isdisjoint(rank_correlations[1])
+    labels = {
+        event["args"]["name"] for event in merged if event.get("name") == "process_name"
+    }
+    assert labels >= {
+        "RANK 0 - CPU",
+        "RANK 0 - GPU",
+        "RANK 1 - CPU",
+        "RANK 1 - GPU",
+    }
+
+
 def test_process_single_rank_skips_process_metadata_events(tmp_path):
     trace_path = tmp_path / "rank0.json"
     metadata_events = [
@@ -292,24 +343,3 @@ def test_generate_rank_metadata_skips_metadata_and_non_int_pid():
     metadata = fuser._generate_rank_metadata(merged)
     assert len(metadata) == 2
     assert metadata[0]["args"]["name"] == "RANK 0 - GPU"
-
-
-def test_merge_multiprocessing_path(tmp_path):
-    rank0 = tmp_path / "rank0.json"
-    rank1 = tmp_path / "rank1.json"
-    _write_trace(rank0, [CUDA_LAUNCH, KERNEL])
-    _write_trace(
-        rank1,
-        [
-            {**CUDA_LAUNCH, "args": {"correlation": 99}, "pid": 20},
-            {**KERNEL, "args": {"correlation": 99}, "pid": 21},
-        ],
-    )
-
-    merged = TraceFuse(
-        [str(rank0), str(rank1)], use_multiprocessing=True, max_workers=2
-    ).merge()
-    non_metadata = [event for event in merged if event.get("ph") != "M"]
-    ranks = [event["args"]["rank"] for event in non_metadata]
-    assert ranks[:2] == [0, 0]
-    assert ranks[2:] == [1, 1]

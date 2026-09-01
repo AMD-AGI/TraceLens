@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Neutral model graph IR decoupled from layout and rendering.
 
 The graph contains only structural information: node kind, label, edges, and
@@ -25,7 +31,11 @@ from visualizer.extract import architecture_section_trees
 
 if TYPE_CHECKING:
     from visualizer.block_tree import BlockNode
-    from visualizer.computation_graph import ComputationGraph, GraphNodeSpec, InlineFrameSpec
+    from visualizer.computation_graph import (
+        ComputationGraph,
+        GraphNodeSpec,
+        InlineFrameSpec,
+    )
     from visualizer.extract import ArchitectureSpec
 
 
@@ -159,7 +169,11 @@ class ModelGraph:
                     "id": node.id,
                     "kind": node.kind.value,
                     "label": node.label,
-                    **({"operation": node.operation.value} if node.operation is not None else {}),
+                    **(
+                        {"operation": node.operation.value}
+                        if node.operation is not None
+                        else {}
+                    ),
                     **({"metadata": node.metadata} if node.metadata else {}),
                 }
                 for node in self.nodes
@@ -217,7 +231,9 @@ def classify_operation(
     ):
         return OperationKind.TORCH_FUNCTIONAL
 
-    if block.class_name in _KERNEL_CLASS_NAMES or any(line.lower().startswith("kernel:") for line in details):
+    if block.class_name in _KERNEL_CLASS_NAMES or any(
+        line.lower().startswith("kernel:") for line in details
+    ):
         return OperationKind.GPU_KERNEL
 
     if block.is_basic or _NN_MODULE_CLASS_RE.match(block.class_name or ""):
@@ -270,7 +286,11 @@ def _edge_style(
 def _minimal_metadata(spec: GraphNodeSpec) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     block = spec.block
-    if block is not None and block.class_name and block.class_name not in {spec.label, block.label}:
+    if (
+        block is not None
+        and block.class_name
+        and block.class_name not in {spec.label, block.label}
+    ):
         metadata["class_name"] = block.class_name
     if block is not None and is_forward_operation(block.attr_name):
         metadata["attr_name"] = block.attr_name
@@ -322,7 +342,11 @@ def _convert_inline_frames(
                 frame_id=frame.frame_id,
                 label=frame.label,
                 sublabel=frame.sublabel,
-                node_ids=[index_to_id[index] for index in frame.node_indices if index in index_to_id],
+                node_ids=[
+                    index_to_id[index]
+                    for index in frame.node_indices
+                    if index in index_to_id
+                ],
             )
         )
     return converted
@@ -365,7 +389,9 @@ def build_model_graph(
             node_index=index,
             subgraph_keys=set(subgraph_blocks),
         )
-        operation = classify_operation(spec.block, synthetic=spec.synthetic, label=spec.label)
+        operation = classify_operation(
+            spec.block, synthetic=spec.synthetic, label=spec.label
+        )
         metadata = _minimal_metadata(spec)
         if spec.block is not None and spec.block.attr_name in subgraph_blocks:
             metadata["subgraph_key"] = spec.block.attr_name
@@ -373,7 +399,8 @@ def build_model_graph(
             ModelGraphNode(
                 id=node_id,
                 kind=kind,
-                label=spec.label or (spec.block.label if spec.block is not None else node_id),
+                label=spec.label
+                or (spec.block.label if spec.block is not None else node_id),
                 operation=operation,
                 metadata=metadata,
             )
@@ -469,7 +496,9 @@ class OperationValidationIssue:
     reason: str
 
 
-def collect_non_reduced_operations(graph: ModelGraph, *, graph_title: str | None = None) -> list[OperationValidationIssue]:
+def collect_non_reduced_operations(
+    graph: ModelGraph, *, graph_title: str | None = None
+) -> list[OperationValidationIssue]:
     """Return leaf nodes that are not reduced to nn / torch functional / GPU kernel."""
     title = graph_title or graph.title
     issues: list[OperationValidationIssue] = []
@@ -490,7 +519,10 @@ def collect_non_reduced_operations(graph: ModelGraph, *, graph_title: str | None
             continue
         if node.operation in _REDUCED_OPERATION_KINDS:
             continue
-        if node.kind in {NodeKind.BLOCK, NodeKind.TOP_LEVEL} and node.operation == OperationKind.COMPOSITE:
+        if (
+            node.kind in {NodeKind.BLOCK, NodeKind.TOP_LEVEL}
+            and node.operation == OperationKind.COMPOSITE
+        ):
             continue
 
         reason = "composite block not expanded to leaf ops"

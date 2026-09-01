@@ -18,18 +18,16 @@ Covers every module under category_analyses/ plus the shared kernel classifier:
 - The per-module main() drivers, exercised end-to-end over tmp_path fixtures.
 """
 
-import json
-import os
-import sys
-
-import pandas as pd
-import pytest
+import json, os, sys, pandas as pd, pytest
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(ANALYSIS_DIR, "category_analyses"))
-
+from copy import deepcopy
+from pathlib import Path
+from types import ModuleType
+from typing import Dict, List
 from TraceLens.Agent.Analysis.utils.classify_kernels import (
     MIN_CONFIDENCE,
     classify_kernel,
@@ -56,16 +54,13 @@ from TraceLens.Agent.Analysis.category_analyses.multi_kernel_analysis import (
     classify_overlap_severity,
     cross_validate_with_timeline,
 )
-from TraceLens.Agent.Analysis.category_analyses import multi_kernel_analysis
 from TraceLens.Agent.Analysis.category_analyses.sdpa_analysis import (
     classify_sdpa_operation,
     detect_flash_attention,
     detect_paged_attention,
+    extract_category_specific as sdpa_extract,
     parse_kernel_breakdown,
     parse_perf_params,
-)
-from TraceLens.Agent.Analysis.category_analyses.sdpa_analysis import (
-    extract_category_specific as sdpa_extract,
 )
 from TraceLens.Agent.Analysis.category_analyses.convolution_analysis import (
     extract_category_specific as conv_extract,
@@ -104,18 +99,45 @@ from TraceLens.Agent.Analysis.category_analyses.other_analysis import (
     extract_category_specific as other_extract,
 )
 from TraceLens.Agent.Analysis.category_analyses import (
+    analysis_utils as au,
     convolution_analysis,
     cpu_idle_analysis,
     elementwise_analysis,
     gemm_analysis,
     kernel_fusion_analysis,
     moe_analysis,
+    multi_kernel_analysis,
     norm_analysis,
     other_analysis,
     reduce_analysis,
     sdpa_analysis,
     triton_analysis,
 )
+from TraceLens.Agent.Analysis.utils import arch_utils
+from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions import rmsnorm_perf_model_extensions as rms_ext
+from TraceLens.Trace2Tree.extensions.moe_aiter_pseudo_ops import (
+    _create_pseudo_op_moe_fused_aiter,
+    is_aiter_fused_moe_kernel,
+)
+from TraceLens.Trace2Tree.extensions.moe_flydsl_pseudo_ops import (
+    FUSED_MOE_PARENT,
+    create_pseudo_ops_moe_flydsl,
+)
+from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
+    _extract_topk_from_outplace,
+    create_pseudo_ops_moe_gptq_awq,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from tests.test_conv_backward_bytes import (
+    _conv_bias_bwd_event,
+    _conv_bias_fwd_event,
+    _conv_bias_relu_bwd_event,
+    _conv_bias_relu_fwd_event,
+)
+from tests.test_dit_fused_ln_modulate import _fused_ln_fwd_event
+from tests.test_evoformer_attention_ops import _event as _evoformer_event
+from tests.test_trace2tree import _add_gpu_chain, _mk_event
 
 # ----- classify_kernel: representative rule hits -----
 
@@ -1672,3 +1694,410 @@ def test_driver_multi_kernel_main_success(tmp_path, monkeypatch):
     assert metrics["memcpy_assessment"]["flagged"] is True
     assert metrics["overlap_assessment"]["flagged"] is True
     assert len(metrics["patterns_detected"]) >= 1
+
+
+class TestArchUtils:
+    def test_list_and_load_platform(self):
+        platforms = arch_utils.list_platforms()
+        assert platforms
+        for name in platforms[:3]:
+            arch = arch_utils.load_arch(name)
+            assert "name" in arch or "mem_bw_gbps" in arch
+
+    def test_tl_extension_override(self, tmp_path, monkeypatch):
+        ext_pkg = tmp_path / "fake_ext_pkg"
+        arch_dir = ext_pkg / "Agent" / "Analysis" / "utils" / "arch"
+        arch_dir.mkdir(parents=True)
+        custom = {"name": "CUSTOM", "mem_bw_gbps": 1000, "memory_gb": 80}
+        (arch_dir / "CUSTOM.json").write_text(json.dumps(custom))
+
+        init_py = ext_pkg / "__init__.py"
+        init_py.write_text("")
+
+        fake_mod = ModuleType("fake_ext_pkg")
+        fake_mod.__file__ = str(init_py)
+        monkeypatch.setitem(sys.modules, "fake_ext_pkg", fake_mod)
+        monkeypatch.setenv("TL_EXTENSION", "fake_ext_pkg")
+
+        mapping = arch_utils._collect_arch_jsons()
+        assert "CUSTOM" in mapping
+        assert arch_utils.load_arch("CUSTOM")["mem_bw_gbps"] == 1000
+
+
+class TestCategoryAnalysisHelpers:
+    _META = {"peak_hbm_bw_tbs": 5.3, "peak_maf_tflops": {"matrix_fp16": 654}}
+
+    def test_gemm_classifiers(self):
+        assert gemm_analysis.detect_quantized_gemm("aten::w8a8_mm")
+        info = gemm_analysis.classify_gemm_operation("aten::mm", None)
+        assert info["gemm_type"] == "regular"
+        qinfo = gemm_analysis.classify_gemm_operation("aten::fp8_mm", None)
+        assert qinfo["is_quantized"] is True
+        ops = pd.DataFrame(
+            {
+                "name": ["aten::mm", "aten::fp8_mm"],
+                "TFLOPS/s_mean": [100.0, None],
+            }
+        )
+        extra = gemm_analysis.extract_category_specific(ops, self._META)
+        assert extra["quantized_count"] == 1
+        assert extra["missing_perf_model_count"] == 1
+
+    def test_elementwise_extract(self):
+        out = elementwise_analysis.extract_category_specific(
+            pd.DataFrame({"name": ["aten::add"]}), self._META
+        )
+        assert out["peak_hbm_bw_tbs"] == 5.3
+
+    def test_norm_extract(self):
+        out = norm_analysis.extract_category_specific(
+            pd.DataFrame({"name": ["aten::layer_norm"]}), self._META
+        )
+        assert out["peak_hbm_bw_tbs"] == 5.3
+
+    def test_reduce_extract(self):
+        out = reduce_analysis.extract_category_specific(
+            pd.DataFrame({"name": ["aten::sum"]}), self._META
+        )
+        assert "peak_hbm_bw_tbs" in out
+
+    def test_convolution_extract_with_transpose(self):
+        ops = pd.DataFrame(
+            {
+                "name": ["aten::conv2d", "aten::conv_transpose2d"],
+                "Kernel Time (µs)_sum": [1000.0, 500.0],
+            }
+        )
+        out = convolution_analysis.extract_category_specific(ops, self._META)
+        assert out["transpose_count"] == 1
+        assert out["transpose_time_ms"] == pytest.approx(0.5)
+
+    def test_triton_classifiers(self):
+        assert (
+            triton_analysis.classify_triton_operation("triton_poi_add", None)[
+                "kernel_type"
+            ]
+            == "pointwise"
+        )
+        assert (
+            triton_analysis.classify_triton_operation("triton_red_sum", None)[
+                "kernel_type"
+            ]
+            == "reduction"
+        )
+        assert (
+            triton_analysis.classify_triton_operation("triton_per_mm", None)[
+                "kernel_type"
+            ]
+            == "persistent"
+        )
+        assert (
+            triton_analysis.classify_triton_operation("other", None)["kernel_type"]
+            == "other"
+        )
+        out = triton_analysis.extract_category_specific(
+            pd.DataFrame(
+                {
+                    "name": [
+                        "triton_poi_a",
+                        "triton_red_b",
+                        "triton_per_c",
+                        "other",
+                    ]
+                }
+            ),
+            self._META,
+        )
+        assert out["pointwise_count"] == 1
+        assert out["reduction_count"] == 1
+
+    def test_reduce_softmax_detect(self):
+        assert reduce_analysis.detect_softmax("aten::_softmax")
+        out = reduce_analysis.extract_category_specific(
+            pd.DataFrame({"name": ["aten::_softmax", "aten::sum"]}), self._META
+        )
+        assert out["softmax_count"] == 1
+
+    def test_moe_extract_and_no_data_check(self, tmp_path):
+        out = moe_analysis.extract_category_specific(
+            pd.DataFrame({"name": ["moe_dispatch"]}), self._META
+        )
+        assert "peak_hbm_bw_tbs" in out
+        missing = moe_analysis._check_moe_data(str(tmp_path), "moe_fused", "standalone")
+        assert missing["status"] == "NO_DATA"
+
+
+class TestPerfModelNormAndConvDeep:
+    def test_batch_norm_bwd_full(self):
+        event = {
+            "name": "aten::miopen_batch_norm_backward",
+            "args": {
+                "Input Dims": [
+                    (8, 16, 32, 32),
+                    (8, 16, 32, 32),
+                    (16,),
+                    (16,),
+                    (16,),
+                    (16,),
+                    (16,),
+                    (),
+                ],
+                "Input type": ["float"] * 7 + ["Scalar"],
+                "Input Strides": [(16384, 1024, 32, 1)] * 2 + [(1,)] * 5 + [()],
+                "Concrete Inputs": ["", "", "", "", "", "", "", "1e-5"],
+            },
+        }
+        model = perf_model.BatchNormBwd(event)
+        assert model.flops() > 0
+        assert model.bytes() > 0
+
+    def test_group_norm_bwd(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    None,
+                    (4, 8, 32, 32),
+                    (8,),
+                    (8,),
+                    (8,),
+                    (8,),
+                    (4, 8, 32, 32),
+                    (),
+                ],
+                "Input type": ["c10::BFloat16"] * 7 + ["Scalar"],
+                "Input Strides": [(), (8192, 1024, 32, 1), (1,)] * 2
+                + [(8192, 1024, 32, 1)] * 2
+                + [(), ()],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "8",
+                    "8",
+                    "[True, True]",
+                ],
+            }
+        }
+        model = perf_model.GroupNormBwd(event)
+        assert model.flops() > 0
+
+    def test_conv_bias_bwd_with_forward_cache(self):
+        fwd = perf_model.ConvBias_(_conv_bias_fwd_event())
+        assert fwd.flops() > 0
+        bwd = perf_model.ConvBias_Backward(_conv_bias_bwd_event())
+        assert bwd.flops_bwd() > 0
+
+
+def _build_moe_tree(events: List[Dict], add_python_func: bool = False) -> TraceToTree:
+    tree = TraceToTree(deepcopy(events), prune_nongpu_paths=False)
+    tree.build_tree(add_python_func=add_python_func)
+    return tree
+
+
+def _setup_gemm_output_dir(tmp_path):
+    out = tmp_path / "analysis_output"
+    (out / "category_data").mkdir(parents=True)
+    (out / "metadata").mkdir()
+    df = pd.DataFrame(
+        {
+            "name": ["aten::mm", "aten::addmm"],
+            "count": [12, 3],
+            "Kernel Time (µs)_sum": [100_000.0, 50_000.0],
+            "Kernel Time (µs)_mean": [8000.0, 16000.0],
+            "Kernel Time (µs)_std": [500.0, 100.0],
+            "TFLOPS/s_mean": [400.0, 350.0],
+            "TB/s_mean": [0.5, 0.4],
+            "FLOPS/Byte": [2000.0, 1800.0],
+            "Roofline Bound": ["COMPUTE_BOUND", "COMPUTE_BOUND"],
+            "Compute Spec": ["matrix_bf16", "matrix_bf16"],
+            "kernel_details_summary": ["[{'name': 'Cijk_a'}]", "[{'name': 'Cijk_b'}]"],
+            "call_stack_full": ["['aten::mm', 'Linear']", "['aten::addmm']"],
+            "Input Dims": ["[[32, 64], [64, 128]]", "[[32, 64], [64, 128], [32, 128]]"],
+            "Input type": ["['fp16', 'fp16']", "['fp16', 'fp16', 'fp16']"],
+        }
+    )
+    df.to_csv(out / "category_data" / "gemm_ops.csv", index=False)
+    meta = {
+        "platform": "MI300X",
+        "peak_hbm_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 708},
+        "gpu_utilization": {"total_time_ms": 1000.0},
+        "output_dir": str(out),
+    }
+    (out / "metadata" / "gemm_metadata.json").write_text(json.dumps(meta))
+    return str(out)
+
+
+class TestAnalysisUtilsRunCategoryPhase9:
+    def test_run_category_analysis_success(self, tmp_path):
+        out = _setup_gemm_output_dir(tmp_path)
+        au.run_category_analysis("gemm", out, {}, lambda ops_df, _m: {"n": len(ops_df)})
+        metrics = json.loads(
+            Path(out, "category_data", "gemm_metrics.json").read_text()
+        )
+        assert metrics["status"] == "OK"
+
+    def test_run_category_analysis_no_data(self, tmp_path):
+        out = tmp_path / "empty"
+        (out / "category_data").mkdir(parents=True)
+        au.run_category_analysis(
+            "gemm",
+            str(out),
+            {},
+            lambda _o, _m: {},
+            no_data_check_fn=lambda _o, c, _s: {"category": c, "status": "NO_DATA"},
+        )
+        assert (
+            json.loads((out / "category_data" / "gemm_metrics.json").read_text())[
+                "status"
+            ]
+            == "NO_DATA"
+        )
+
+    def test_run_category_analysis_missing_csv_exits(self, tmp_path):
+        out = tmp_path / "missing"
+        (out / "category_data").mkdir(parents=True)
+        with pytest.raises(SystemExit):
+            au.run_category_analysis("gemm", str(out), {}, lambda _o, _m: {})
+
+
+class TestArchAndMoePhase9:
+    def test_arch_utils(self, monkeypatch):
+        assert arch_utils.list_platforms()
+        monkeypatch.setenv("TL_EXTENSION", "not_a_real_package_xyz")
+        assert isinstance(arch_utils._collect_arch_jsons(), dict)
+
+    def test_moe_pseudo_op_edges(self):
+        assert not is_aiter_fused_moe_kernel(
+            {"cat": "kernel", "name": "aiter::quant_fmoe"}
+        )
+        tree = _build_moe_tree([])
+        _create_pseudo_op_moe_fused_aiter(tree, {"name": "wrong", "UID": 0})
+        assert _extract_topk_from_outplace({"UID": 1, "args": {}}) == 8
+
+        events = []
+        moe = _mk_event(
+            "cpu_op",
+            "vllm::outplace_fused_experts",
+            100,
+            200,
+            1,
+            1,
+            {
+                "Input Dims": [
+                    [128, 4096],
+                    [8, 4096, 512],
+                    [8, 4096, 512],
+                    [128, 6],
+                    [128, 6],
+                ],
+                "Sequence number": 2,
+            },
+        )
+        events.append(moe)
+        _add_gpu_chain(events, moe, 20, "fused_moe_kernel_gptq_awq_up", 110, 150)
+        _add_gpu_chain(events, moe, 21, "fused_moe_kernel_gptq_awq_down", 160, 190)
+        tree2 = _build_moe_tree(events)
+        create_pseudo_ops_moe_gptq_awq(tree2)
+        assert any(e.get("args", {}).get("Pseudo op") for e in tree2.events)
+
+        fly_events = [
+            _mk_event("cpu_op", FUSED_MOE_PARENT, 0, 500, 1, 1, {"Sequence number": 9}),
+            _mk_event(
+                "python_function", "flydsl.py(10): flydsl_moe_stage1", 50, 100, 1, 1, {}
+            ),
+        ]
+        create_pseudo_ops_moe_flydsl(_build_moe_tree(fly_events, add_python_func=True))
+
+
+class TestPerfModelConvAndNormBoost:
+    @pytest.mark.parametrize(
+        "cls,fwd_factory,bwd_cls,bwd_factory",
+        [
+            (
+                perf_model.ConvBias_,
+                _conv_bias_fwd_event,
+                perf_model.ConvBias_Backward,
+                _conv_bias_bwd_event,
+            ),
+            (
+                perf_model.ConvBiasReLU_,
+                _conv_bias_relu_fwd_event,
+                perf_model.ConvBiasReLU_Backward,
+                _conv_bias_relu_bwd_event,
+            ),
+        ],
+    )
+    def test_conv_bias_family(self, cls, fwd_factory, bwd_cls, bwd_factory):
+        fwd = cls(fwd_factory())
+        assert fwd.flops() > 0
+        assert fwd.bytes() > 0
+        bwd = bwd_cls(bwd_factory())
+        assert bwd.flops_bwd() > 0
+        assert bwd.bytes_bwd() > 0
+
+    def test_fused_ln_modulate(self):
+        fwd = perf_model.FusedLnModulate(_fused_ln_fwd_event())
+        assert fwd.flops() > 0
+        assert fwd.bytes() > 0
+
+    def test_evoformer_attention(self):
+        evo = perf_model.evoformer_attention(_evoformer_event())
+        assert evo.flops() > 0
+        assert evo.bytes() > 0
+
+    def test_reduce_and_grouped_gemm(self):
+        reduce_evt = {
+            "name": "aten::mean",
+            "args": {
+                "Input Dims": [(4, 256)],
+                "Input type": ["c10::BFloat16"],
+                "Concrete Inputs": ["", "[1]", "True"],
+            },
+        }
+        model = perf_model.aten_reduce(reduce_evt)
+        assert model.flops() > 0
+        gg_event = {
+            "args": {
+                "Input Dims": [
+                    [4, 128],
+                    [8, 256, 128],
+                    [8, 256],
+                    [8],
+                    [8],
+                    [8],
+                    [8],
+                    [8],
+                    [4, 4],
+                ],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float",
+                    "c10::Int",
+                ]
+                + ["c10::Int"] * 5,
+            }
+        }
+        g = perf_model.primus_turbo_grouped_gemm(gg_event)
+        assert g.flops() > 0
+
+
+class TestRmsNormExtensionsBytes:
+    def test_rmsnorm_family_bytes(self):
+        base = {
+            "args": {
+                "Input Dims": [(4, 256), (256,), (256,)],
+                "Input type": ["c10::BFloat16", "c10::BFloat16", "c10::BFloat16"],
+                "Input Strides": [(256, 1), (1,), (1,)],
+            }
+        }
+        for cls in (rms_ext.aiter_rmsnorm,):
+            model = cls(base)
+            b = model.bytes()
+            assert b is None or b > 0
+            assert model.get_compute_precision() in (None, "bf16", "fp8")

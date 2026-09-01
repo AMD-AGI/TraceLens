@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Tests for inline forward-operation display labels and MoE expansion."""
 
 from __future__ import annotations
@@ -20,7 +26,9 @@ def test_decoder_spine_skips_inline_forward_ops():
 def test_mhc_residual_merge_matmul_is_two_activation_matmul():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    op = spec.class_registry["Glm5NextTextDecoderLayer"].forward_operations["@op_l1316_c85_matmul"]
+    op = spec.class_registry["Glm5NextTextDecoderLayer"].forward_operations[
+        "@op_l1316_c85_matmul"
+    ]
     assert op.label == "MatMul"
     assert op.class_name == "MatMul"
     assert not op.external_inputs
@@ -29,9 +37,12 @@ def test_mhc_residual_merge_matmul_is_two_activation_matmul():
 def test_matmul_with_parameter_displays_as_linear():
     import ast
 
-    from visualizer.ast_analyze import _forward_operations_from_forward, _self_config_values
+    from visualizer.ast_analyze import (
+        _forward_operations_from_forward,
+        _self_config_values,
+    )
 
-    source = '''
+    source = """
 import torch
 class Block(torch.nn.Module):
     def __init__(self):
@@ -39,11 +50,19 @@ class Block(torch.nn.Module):
         self.weight = torch.nn.Parameter(torch.empty(4, 8))
     def forward(self, hidden_states):
         return torch.matmul(hidden_states, self.weight)
-'''
+"""
     tree = ast.parse(source)
     cls = tree.body[-1]
-    forward = next(item for item in cls.body if isinstance(item, ast.FunctionDef) and item.name == "forward")
-    init = next(item for item in cls.body if isinstance(item, ast.FunctionDef) and item.name == "__init__")
+    forward = next(
+        item
+        for item in cls.body
+        if isinstance(item, ast.FunctionDef) and item.name == "forward"
+    )
+    init = next(
+        item
+        for item in cls.body
+        if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+    )
     ops = _forward_operations_from_forward(
         forward,
         self_values=_self_config_values(init, {}),
@@ -60,16 +79,22 @@ def test_two_activation_matmul_displays_as_matmul():
 
     from visualizer.ast_analyze import _forward_operations_from_forward
 
-    source = '''
+    source = """
 import torch
 class Block(torch.nn.Module):
     def forward(self, query, key):
         return torch.matmul(query, key.transpose(-1, -2))
-'''
+"""
     tree = ast.parse(source)
     cls = tree.body[-1]
-    forward = next(item for item in cls.body if isinstance(item, ast.FunctionDef) and item.name == "forward")
-    ops = _forward_operations_from_forward(forward, self_values={}, all_tensor_ops=False)
+    forward = next(
+        item
+        for item in cls.body
+        if isinstance(item, ast.FunctionDef) and item.name == "forward"
+    )
+    ops = _forward_operations_from_forward(
+        forward, self_values={}, all_tensor_ops=False
+    )
     assert len(ops.operations) == 1
     op = ops.operations[0]
     assert op.label == "MatMul"
@@ -82,7 +107,9 @@ def test_rotary_pos_emb_shows_multiply_not_buffer():
     rotary = spec.class_registry["Glm5NextVisionRotaryEmbedding"]
     assert any(op.label == "Multiply" for op in rotary.forward_operations.values())
 
-    _, tree = next(item for item in spec.export_block_trees if item[0] == "rotary_pos_emb")
+    _, tree = next(
+        item for item in spec.export_block_trees if item[0] == "rotary_pos_emb"
+    )
     child_labels = [child.label for child in tree.children]
     assert "Multiply" in child_labels
     assert "Buffer" not in child_labels

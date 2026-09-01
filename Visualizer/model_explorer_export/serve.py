@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Serve the bundled Model Explorer viewer for exported TraceLens graphs."""
 
 from __future__ import annotations
@@ -15,7 +21,9 @@ from urllib.parse import unquote, urlparse
 from model_explorer_export.viewer_page import VIEWER_DIR, compose_viewer_html
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
-VISUALIZER_DIST = PACKAGE_ROOT / "node_modules" / "ai-edge-model-explorer-visualizer" / "dist"
+VISUALIZER_DIST = (
+    PACKAGE_ROOT / "node_modules" / "ai-edge-model-explorer-visualizer" / "dist"
+)
 
 
 def ensure_viewer_assets() -> None:
@@ -107,8 +115,14 @@ def open_viewer(url: str) -> None:
 def main() -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Serve a TraceLens Model Explorer viewer.")
-    parser.add_argument("json", type=Path, help="Model Explorer JSON exported by visualize_model_in_explorer.py")
+    parser = argparse.ArgumentParser(
+        description="Serve a TraceLens Model Explorer viewer."
+    )
+    parser.add_argument(
+        "json",
+        type=Path,
+        help="Model Explorer JSON exported by visualize_model_in_explorer.py",
+    )
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--open", action="store_true")
     args = parser.parse_args()

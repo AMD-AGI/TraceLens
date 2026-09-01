@@ -5,20 +5,25 @@
 ###############################################################################
 
 # Codecov configuration for TraceLens.
-# Fail PRs when overall project coverage or patch coverage drops vs the base branch.
+# Unit CI excludes @pytest.mark.gpu tests; GPU-only paths use the gpu flag with
+# carryforward from optional GPU runners.
 coverage:
   status:
     project:
       default:
-        target: auto
-        threshold: 0%
+        target: 95%
+        threshold: 1%
         base: auto
         informational: false
+        flags:
+          - unit
     patch:
       default:
-        target: auto
-        base: auto
+        target: 95%
+        threshold: 1%
         informational: false
+        flags:
+          - unit
 
 comment:
   layout: "reach, diff, flags, files"

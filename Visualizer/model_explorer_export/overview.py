@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Build a top-level model overview graph for Model Explorer."""
 
 from __future__ import annotations
@@ -20,7 +26,11 @@ from visualizer.block_tree import (
 from visualizer.blocks import BlockComponent, LayerVariant
 from visualizer.extract import ArchitectureSpec, architecture_section_trees
 
-from model_explorer_export.styles import ROLE_COLORS, ensure_readable_text, spine_tile_style
+from model_explorer_export.styles import (
+    ROLE_COLORS,
+    ensure_readable_text,
+    spine_tile_style,
+)
 
 
 def _stack_pre_components(spec: ArchitectureSpec) -> list[BlockComponent]:
@@ -111,7 +121,9 @@ def _forward_step_display_label(
         if operation is not None:
             if operation.label in {"MatMul", "MatMult"}:
                 return classify_matmul_label(external_inputs=operation.external_inputs)
-            return operation_display_label(operation.label, class_name=operation.class_name)
+            return operation_display_label(
+                operation.label, class_name=operation.class_name
+            )
     return attr_name.replace("_", " ")
 
 
@@ -119,9 +131,14 @@ def forward_sequence_display_labels(spec: ArchitectureSpec) -> list[str]:
     """Return decoder forward steps using graph tile labels instead of attr names."""
     if not spec.forward_sequence:
         return []
-    components_by_attr = {component.attr_name: component for component in _ordered_decoder_components(spec)}
+    components_by_attr = {
+        component.attr_name: component
+        for component in _ordered_decoder_components(spec)
+    }
     return [
-        _forward_step_display_label(attr_name, spec=spec, components_by_attr=components_by_attr)
+        _forward_step_display_label(
+            attr_name, spec=spec, components_by_attr=components_by_attr
+        )
         for attr_name in spec.forward_sequence
     ]
 
@@ -132,7 +149,9 @@ def format_forward_sequence(spec: ArchitectureSpec, *, arrow: str = " → ") -> 
 
 
 _DECODER_NORM_ATTRS = frozenset({"input_layernorm", "post_attention_layernorm"})
-_VARIANT_ATTENTION_ATTRS = frozenset({"self_attn", "self_attention", "attn", "attention"})
+_VARIANT_ATTENTION_ATTRS = frozenset(
+    {"self_attn", "self_attention", "attn", "attention"}
+)
 
 
 def _component_uses_variant_attention_class(
@@ -157,8 +176,14 @@ def _component_uses_variant_ffn_class(
     return component.attr_name == "mlp" and component.class_name == variant.ffn_class
 
 
-def _shared_decoder_class_attr_names(spec: ArchitectureSpec, class_name: str) -> list[str]:
-    return [component.attr_name for component in spec.block_components if component.class_name == class_name]
+def _shared_decoder_class_attr_names(
+    spec: ArchitectureSpec, class_name: str
+) -> list[str]:
+    return [
+        component.attr_name
+        for component in spec.block_components
+        if component.class_name == class_name
+    ]
 
 
 def _section_namespace_segment(
@@ -178,7 +203,10 @@ def _section_namespace_segment(
             return _sanitize_namespace_segment(variant.ffn_class or "")
         if variant.ffn_attr and component.attr_name == variant.ffn_attr:
             return _sanitize_namespace_segment(variant.ffn_attr)
-    if component.class_name and len(_shared_decoder_class_attr_names(spec, component.class_name)) > 1:
+    if (
+        component.class_name
+        and len(_shared_decoder_class_attr_names(spec, component.class_name)) > 1
+    ):
         return _sanitize_namespace_segment(component.attr_name)
     if component.class_name and component.role in {"attention", "moe", "ffn"}:
         return _sanitize_namespace_segment(component.class_name)
@@ -202,7 +230,9 @@ def _spine_moe_class(spec: ArchitectureSpec) -> str | None:
 
 
 def _spine_named_ffn_classes(spec: ArchitectureSpec) -> set[str]:
-    classes = {variant.ffn_class for variant in spec.layer_variants if variant.ffn_class}
+    classes = {
+        variant.ffn_class for variant in spec.layer_variants if variant.ffn_class
+    }
     moe_class = _spine_moe_class(spec)
     if moe_class:
         classes.add(moe_class)
@@ -234,7 +264,9 @@ def _detail_section_trees(spec: ArchitectureSpec) -> list[BlockNode]:
     return trees
 
 
-def component_has_detail_section(component: BlockComponent, spec: ArchitectureSpec) -> bool:
+def component_has_detail_section(
+    component: BlockComponent, spec: ArchitectureSpec
+) -> bool:
     """True when this module expands into a detail subsection below the overview spine."""
     for tree in _detail_section_trees(spec):
         if tree.attr_name == component.attr_name:
@@ -276,7 +308,9 @@ def _edge(source_id: str, target_id: str) -> dict[str, str]:
     }
 
 
-def _subgraph_ids(attr_name: str, attr_name_to_graph_id: dict[str, str]) -> list[str] | None:
+def _subgraph_ids(
+    attr_name: str, attr_name_to_graph_id: dict[str, str]
+) -> list[str] | None:
     graph_id = attr_name_to_graph_id.get(attr_name)
     return [graph_id] if graph_id else None
 
@@ -333,7 +367,9 @@ def build_overview_graph(
             "label": "Tokenized text",
             "namespace": "",
             "attrs": [{"key": "synthetic", "value": "@input"}],
-            "style": ensure_readable_text({"backgroundColor": "#d9e8f5", "textColor": "#1a1a1a"}),
+            "style": ensure_readable_text(
+                {"backgroundColor": "#d9e8f5", "textColor": "#1a1a1a"}
+            ),
         }
     )
 

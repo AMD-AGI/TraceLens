@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Tests for GitHub URL parsing and split checkpoint/code sources."""
 
 from pathlib import Path
@@ -8,7 +14,6 @@ from visualizer.extract import load_architecture
 from visualizer.github import parse_github_url
 from visualizer.source import resolve_github_files, resolve_source_files
 from visualizer.source_policy import SourcePolicy, set_source_policy
-
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -123,7 +128,9 @@ def test_resolve_source_files_finds_nested_snapshot_python(tmp_path: Path):
     snapshot = tmp_path / "inference"
     snapshot.mkdir()
     (snapshot / "model.py").write_text("class MLA: pass\n", encoding="utf-8")
-    (tmp_path / "config.json").write_text('{"model_type": "deepseek_v4"}', encoding="utf-8")
+    (tmp_path / "config.json").write_text(
+        '{"model_type": "deepseek_v4"}', encoding="utf-8"
+    )
 
     files, labels = resolve_source_files(tmp_path, {"model_type": "deepseek_v4"})
     assert any(path.name == "model.py" for path in files)
@@ -133,7 +140,9 @@ def test_resolve_source_files_finds_nested_snapshot_python(tmp_path: Path):
 def test_resolve_source_files_uses_cached_hub_snapshot(tmp_path: Path, monkeypatch):
     snapshot = tmp_path / "snapshots" / "abc"
     (snapshot / "inference").mkdir(parents=True)
-    (snapshot / "inference" / "model.py").write_text("class MLA: pass\n", encoding="utf-8")
+    (snapshot / "inference" / "model.py").write_text(
+        "class MLA: pass\n", encoding="utf-8"
+    )
     (tmp_path / "refs").mkdir()
     (tmp_path / "refs" / "main").write_text("abc\n", encoding="utf-8")
 
@@ -151,7 +160,9 @@ def test_resolve_source_files_uses_cached_hub_snapshot(tmp_path: Path, monkeypat
     assert labels[0].startswith("hf://")
 
 
-def _stub_upstream_transformers(monkeypatch, tmp_path: Path, available: set[str]) -> list[str]:
+def _stub_upstream_transformers(
+    monkeypatch, tmp_path: Path, available: set[str]
+) -> list[str]:
     """Serve upstream modeling files for `available` model types, recording lookups."""
     requested: list[str] = []
 
@@ -166,7 +177,9 @@ def _stub_upstream_transformers(monkeypatch, tmp_path: Path, available: set[str]
 
     monkeypatch.setattr("visualizer.source.fetch_github_source", fake_fetch)
     monkeypatch.setattr("visualizer.source._hub_snapshot_root", lambda model_id: None)
-    monkeypatch.setattr("visualizer.source._list_repo_python_files", lambda model_id: [])
+    monkeypatch.setattr(
+        "visualizer.source._list_repo_python_files", lambda model_id: []
+    )
     monkeypatch.setattr(
         "visualizer.source._download_repo_files",
         lambda model_id, filenames: [],
@@ -174,11 +187,15 @@ def _stub_upstream_transformers(monkeypatch, tmp_path: Path, available: set[str]
     return requested
 
 
-def test_resolve_source_files_reads_transformers_native_model_from_github(tmp_path, monkeypatch):
+def test_resolve_source_files_reads_transformers_native_model_from_github(
+    tmp_path, monkeypatch
+):
     """Qwen3-style checkpoints ship no modeling code, so upstream source is used."""
     requested = _stub_upstream_transformers(monkeypatch, tmp_path, {"qwen3_moe"})
 
-    files, labels = resolve_source_files("Qwen/Qwen3-235B-A22B", {"model_type": "qwen3_moe"})
+    files, labels = resolve_source_files(
+        "Qwen/Qwen3-235B-A22B", {"model_type": "qwen3_moe"}
+    )
 
     assert [path.name for path in files] == ["modeling_qwen3_moe.py"]
     assert requested == ["src/transformers/models/qwen3_moe/modeling_qwen3_moe.py"]
@@ -188,7 +205,9 @@ def test_resolve_source_files_reads_transformers_native_model_from_github(tmp_pa
     ]
 
 
-def test_resolve_source_files_falls_back_to_nested_text_config_model_type(tmp_path, monkeypatch):
+def test_resolve_source_files_falls_back_to_nested_text_config_model_type(
+    tmp_path, monkeypatch
+):
     """A multimodal wrapper without upstream code still finds its text backbone."""
     requested = _stub_upstream_transformers(monkeypatch, tmp_path, {"minimax_m2"})
 
@@ -205,9 +224,13 @@ def test_resolve_source_files_keeps_checkpoint_modeling_code(tmp_path, monkeypat
     """Source shipped with the checkpoint wins; no upstream lookup is attempted."""
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
-    (snapshot / "modeling_custom.py").write_text("class Block: pass\n", encoding="utf-8")
+    (snapshot / "modeling_custom.py").write_text(
+        "class Block: pass\n", encoding="utf-8"
+    )
     requested = _stub_upstream_transformers(monkeypatch, tmp_path, {"custom"})
-    monkeypatch.setattr("visualizer.source._hub_snapshot_root", lambda model_id: snapshot)
+    monkeypatch.setattr(
+        "visualizer.source._hub_snapshot_root", lambda model_id: snapshot
+    )
 
     files, _labels = resolve_source_files("acme/custom", {"model_type": "custom"})
 
@@ -215,15 +238,25 @@ def test_resolve_source_files_keeps_checkpoint_modeling_code(tmp_path, monkeypat
     assert requested == []
 
 
-def test_resolve_source_files_orders_modeling_before_config_helpers(tmp_path, monkeypatch):
+def test_resolve_source_files_orders_modeling_before_config_helpers(
+    tmp_path, monkeypatch
+):
     """Analysis reads files in order, so modeling code must come first."""
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
-    (snapshot / "configuration_minimax_m3_vl.py").write_text("class Cfg: pass\n", encoding="utf-8")
-    (snapshot / "processing_minimax.py").write_text("class Proc: pass\n", encoding="utf-8")
+    (snapshot / "configuration_minimax_m3_vl.py").write_text(
+        "class Cfg: pass\n", encoding="utf-8"
+    )
+    (snapshot / "processing_minimax.py").write_text(
+        "class Proc: pass\n", encoding="utf-8"
+    )
     _stub_upstream_transformers(monkeypatch, tmp_path, {"minimax_m3_vl"})
-    monkeypatch.setattr("visualizer.source._hub_snapshot_root", lambda model_id: snapshot)
+    monkeypatch.setattr(
+        "visualizer.source._hub_snapshot_root", lambda model_id: snapshot
+    )
 
-    files, _labels = resolve_source_files("MiniMaxAI/MiniMax-M3", {"model_type": "minimax_m3_vl"})
+    files, _labels = resolve_source_files(
+        "MiniMaxAI/MiniMax-M3", {"model_type": "minimax_m3_vl"}
+    )
 
     assert [path.name for path in files][0] == "modeling_minimax_m3_vl.py"

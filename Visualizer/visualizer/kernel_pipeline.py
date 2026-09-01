@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Derive kernel computation pipelines from modeling AST details and kernel source code."""
 
 from __future__ import annotations
@@ -195,7 +201,9 @@ def parse_kernel_import(details: list[str]) -> tuple[str, str] | None:
     return None
 
 
-def _resolve_relative_module(relative_module: str, current_module: str, level: int) -> str:
+def _resolve_relative_module(
+    relative_module: str, current_module: str, level: int
+) -> str:
     if level == 0:
         return relative_module or current_module
 
@@ -251,17 +259,23 @@ def _iter_calls(func: ast.FunctionDef) -> list[ast.Call]:
     return calls
 
 
-def _collect_import_map(module: ast.Module, module_name: str) -> dict[str, _ImportTarget]:
+def _collect_import_map(
+    module: ast.Module, module_name: str
+) -> dict[str, _ImportTarget]:
     imports: dict[str, _ImportTarget] = {}
 
     def walk(stmts: list[ast.stmt]) -> None:
         for stmt in stmts:
             if isinstance(stmt, ast.ImportFrom):
-                resolved = _resolve_relative_module(stmt.module or "", module_name, stmt.level)
+                resolved = _resolve_relative_module(
+                    stmt.module or "", module_name, stmt.level
+                )
                 for alias in stmt.names:
                     if alias.name == "*":
                         continue
-                    imports[alias.asname or alias.name] = _ImportTarget(resolved, alias.name)
+                    imports[alias.asname or alias.name] = _ImportTarget(
+                        resolved, alias.name
+                    )
             elif isinstance(stmt, ast.Try):
                 walk(stmt.body)
                 for handler in stmt.handlers:
@@ -398,7 +412,9 @@ def _find_symbol_definition(
 
     imports = _collect_import_map(tree, resolved_module)
     target = imports.get(symbol)
-    if target is not None and (target.module != resolved_module or target.symbol != symbol):
+    if target is not None and (
+        target.module != resolved_module or target.symbol != symbol
+    ):
         return _find_symbol_definition(target.module, target.symbol)
 
     try:
@@ -488,7 +504,9 @@ def _discover_pipeline_entrypoints(
     for call in _iter_calls(forward_func):
         callee = _call_name(call)
         imported = imports.get(callee)
-        if imported is None or not _should_follow_import(imported.module, owning_module):
+        if imported is None or not _should_follow_import(
+            imported.module, owning_module
+        ):
             continue
         if not _is_pipeline_handoff(callee, imported):
             continue
@@ -592,7 +610,11 @@ def _is_output_pipeline_step(call_name: str) -> bool:
 def _condition_name(test: ast.AST) -> str | None:
     if isinstance(test, ast.Name):
         return test.id
-    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not) and isinstance(test.operand, ast.Name):
+    if (
+        isinstance(test, ast.UnaryOp)
+        and isinstance(test.op, ast.Not)
+        and isinstance(test.operand, ast.Name)
+    ):
         return f"not {test.operand.id}"
     if isinstance(test, ast.Compare) and isinstance(test.left, ast.Name):
         return ast.unparse(test)
@@ -724,7 +746,9 @@ def _assignment_target_names(stmt: ast.stmt) -> list[str]:
     return names
 
 
-def _bind_assignment(stmt: ast.stmt, step_attr: str, var_producer: dict[str, str]) -> None:
+def _bind_assignment(
+    stmt: ast.stmt, step_attr: str, var_producer: dict[str, str]
+) -> None:
     for name in _assignment_target_names(stmt):
         var_producer[name] = step_attr
 
@@ -745,7 +769,9 @@ def _bind_out_parameters(
             var_producer[arg.id] = step_attr
 
 
-def _predecessor_attr_names(call: ast.Call, var_producer: dict[str, str]) -> frozenset[str]:
+def _predecessor_attr_names(
+    call: ast.Call, var_producer: dict[str, str]
+) -> frozenset[str]:
     predecessors: set[str] = set()
     for node in ast.walk(call):
         if isinstance(node, ast.Name) and node.id in var_producer:
@@ -794,7 +820,9 @@ def _filter_step_predecessors(
     ]
 
 
-def _effective_port_refs(call: ast.Call, port_refs: frozenset[str], active_ports: set[str]) -> frozenset[str]:
+def _effective_port_refs(
+    call: ast.Call, port_refs: frozenset[str], active_ports: set[str]
+) -> frozenset[str]:
     """Resolve tensor port names for a call, including direct argument names."""
     if port_refs:
         return port_refs
@@ -822,7 +850,11 @@ def _step_dedupe_key(
     call: ast.Call | None = None,
 ) -> str:
     """Unique key for one kernel call instance (split duplicate ops on different tensor ports)."""
-    port_key = _call_instance_key(call, port_refs) if call is not None else ",".join(sorted(port_refs))
+    port_key = (
+        _call_instance_key(call, port_refs)
+        if call is not None
+        else ",".join(sorted(port_refs))
+    )
     cond = condition or ""
     return f"{call_name}|{cond}|{port_key}"
 
@@ -912,7 +944,9 @@ def _assigns_invoked_name(stmt: ast.stmt, factory_names: dict[str, str]) -> bool
     )
 
 
-def _factory_for_invocation(call: ast.Call, factory_names: dict[str, str]) -> str | None:
+def _factory_for_invocation(
+    call: ast.Call, factory_names: dict[str, str]
+) -> str | None:
     """The builder call name when ``call`` invokes a value built earlier."""
     if isinstance(call.func, ast.Name):
         return factory_names.get(call.func.id)
@@ -996,19 +1030,25 @@ def _extract_pipeline_from_function(
                 continue
             port_refs = _call_references_port_names(call, active_ports)
             effective_ports = _effective_port_refs(call, port_refs, active_ports)
-            dedupe_key = _step_dedupe_key(call_name, condition, effective_ports, call=call)
-            computation = _computation_for_statement(stmt, call, call_name, imports=imports)
-            pred_attrs = (
-                _predecessor_attr_names(call, var_producer)
-                | _port_predecessor_attr_names(call, shared_port_producer, active_ports)
+            dedupe_key = _step_dedupe_key(
+                call_name, condition, effective_ports, call=call
             )
+            computation = _computation_for_statement(
+                stmt, call, call_name, imports=imports
+            )
+            pred_attrs = _predecessor_attr_names(
+                call, var_producer
+            ) | _port_predecessor_attr_names(call, shared_port_producer, active_ports)
             if dedupe_key in seen:
                 for index, existing in enumerate(steps):
-                    if _step_dedupe_key(
-                        existing.call_name,
-                        existing.condition,
-                        existing.tensor_inputs,
-                    ) == dedupe_key:
+                    if (
+                        _step_dedupe_key(
+                            existing.call_name,
+                            existing.condition,
+                            existing.tensor_inputs,
+                        )
+                        == dedupe_key
+                    ):
                         updated = KernelPipelineStep(
                             call_name=existing.call_name,
                             attr_name=existing.attr_name,
@@ -1017,7 +1057,9 @@ def _extract_pipeline_from_function(
                             details=existing.details,
                             condition=existing.condition,
                             tensor_inputs=existing.tensor_inputs | effective_ports,
-                            computation=_merge_computation_text(existing.computation, computation),
+                            computation=_merge_computation_text(
+                                existing.computation, computation
+                            ),
                             predecessors=existing.predecessors | pred_attrs,
                         )
                         steps[index] = updated
@@ -1118,21 +1160,41 @@ def _decompose_computation_expr(expr: ast.AST) -> list[ComputationOp]:
             if _is_scale_reference(expr.left) or _is_scale_reference(expr.right):
                 return left_ops + right_ops + [ComputationOp("× scale")]
             second_operand = _multiply_second_operand(expr, left_ops, right_ops)
-            return left_ops + right_ops + [ComputationOp("×", second_operand=second_operand)]
+            return (
+                left_ops
+                + right_ops
+                + [ComputationOp("×", second_operand=second_operand)]
+            )
         if isinstance(expr.op, ast.Div):
             if isinstance(expr.left, ast.Constant) and expr.left.value in {1, 1.0}:
                 return right_ops + [ComputationOp("÷")]
             second_operand = len(left_ops) - 1 if left_ops else None
-            return left_ops + right_ops + [ComputationOp("÷", second_operand=second_operand)]
+            return (
+                left_ops
+                + right_ops
+                + [ComputationOp("÷", second_operand=second_operand)]
+            )
         if isinstance(expr.op, ast.Add):
             second_operand = len(left_ops) - 1 if left_ops and right_ops else None
-            return left_ops + right_ops + [ComputationOp("+", second_operand=second_operand)]
+            return (
+                left_ops
+                + right_ops
+                + [ComputationOp("+", second_operand=second_operand)]
+            )
         if isinstance(expr.op, ast.Sub):
             second_operand = len(left_ops) - 1 if left_ops and right_ops else None
-            return left_ops + right_ops + [ComputationOp("−", second_operand=second_operand)]
+            return (
+                left_ops
+                + right_ops
+                + [ComputationOp("−", second_operand=second_operand)]
+            )
         if isinstance(expr.op, ast.Pow):
             second_operand = len(left_ops) - 1 if left_ops and right_ops else None
-            return left_ops + right_ops + [ComputationOp("^", second_operand=second_operand)]
+            return (
+                left_ops
+                + right_ops
+                + [ComputationOp("^", second_operand=second_operand)]
+            )
     if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.USub):
         return _decompose_computation_expr(expr.operand)
     return []
@@ -1161,15 +1223,21 @@ def _assign_performs_computation(stmt: ast.Assign) -> bool:
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
             if _is_scale_reference(node.left) or _is_scale_reference(node.right):
                 return True
-    if isinstance(stmt.value, ast.BinOp) and isinstance(stmt.value.op, (ast.Mult, ast.Div)):
+    if isinstance(stmt.value, ast.BinOp) and isinstance(
+        stmt.value.op, (ast.Mult, ast.Div)
+    ):
         left = _expr_name(stmt.value.left)
         right = _expr_name(stmt.value.right)
         if left and right and left.startswith("b_") and right.startswith("b_"):
             return True
         names = {node.id for node in ast.walk(stmt.value) if isinstance(node, ast.Name)}
-        if isinstance(stmt.value.op, ast.Mult) and any("rstd" in name for name in names):
+        if isinstance(stmt.value.op, ast.Mult) and any(
+            "rstd" in name for name in names
+        ):
             return True
-        if isinstance(stmt.value.op, ast.Div) and isinstance(stmt.value.left, ast.Constant):
+        if isinstance(stmt.value.op, ast.Div) and isinstance(
+            stmt.value.left, ast.Constant
+        ):
             return True
     return False
 
@@ -1272,7 +1340,11 @@ def _follow_to_triton_kernel(
         if resolved is None:
             continue
         inner_source, inner_qn, inner_module = resolved
-        if inner_qn.endswith(".forward") or inner_qn.endswith("_fwd") or callee.endswith("_fwd"):
+        if (
+            inner_qn.endswith(".forward")
+            or inner_qn.endswith("_fwd")
+            or callee.endswith("_fwd")
+        ):
             triton_func = _follow_to_triton_kernel(
                 inner_source,
                 inner_qn,
@@ -1422,7 +1494,8 @@ def introspect_kernel_pipeline(
     pipeline_steps = [
         step
         for step in collected
-        if not _is_output_pipeline_step(step.call_name) and _step_matches_flags(step, flags)
+        if not _is_output_pipeline_step(step.call_name)
+        and _step_matches_flags(step, flags)
     ]
     output_steps = [
         step
@@ -1447,7 +1520,9 @@ def introspect_kernel_pipeline(
         if not merged_imports:
             resolved = _find_symbol_definition(module, symbol)
             if resolved is not None:
-                merged_imports = _collect_import_map(_parse_module(resolved[0]), resolved[2])
+                merged_imports = _collect_import_map(
+                    _parse_module(resolved[0]), resolved[2]
+                )
                 owning_module = resolved[2]
         pipeline_steps = _attach_kernel_op_expansions(
             pipeline_steps, merged_imports, owning_module

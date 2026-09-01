@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Human-readable labels for kernel inline frames in Model Explorer exports."""
 
 from __future__ import annotations
@@ -125,7 +131,9 @@ def tensor_port_input_label(namespace: str) -> str | None:
     return None
 
 
-def skip_merged_tensor_port_parent(namespace: str, group_nodes: list[dict[str, Any]]) -> bool:
+def skip_merged_tensor_port_parent(
+    namespace: str, group_nodes: list[dict[str, Any]]
+) -> bool:
     """Skip injecting a shared parent @input when port-specific frames exist."""
     leaf = _namespace_segment(namespace)
     if not leaf.endswith("_fwd") or _TENSOR_PORT_FRAME_KEY_RE.fullmatch(leaf):

@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Regression tests for GLM-5.3-Flash linear-attention graph wiring."""
 
 from __future__ import annotations
@@ -20,7 +26,9 @@ def _graph_key(graph, suffix: str) -> str:
 
 
 def _linear_attn_variant_prefix(spec) -> str:
-    variant = next(v for v in spec.layer_variants if "LinearAttention" in (v.attention_class or ""))
+    variant = next(
+        v for v in spec.layer_variants if "LinearAttention" in (v.attention_class or "")
+    )
     return f"decoder/{variant.count}x_{variant.attention_class}_{variant.ffn_class}"
 
 
@@ -40,9 +48,7 @@ def test_glm53_linear_attention_has_single_output_exit():
 
     add_forward_output(graph)
     output_sources = [
-        src
-        for src, tgt in graph.links
-        if graph.nodes[tgt].label == "Output"
+        src for src, tgt in graph.links if graph.nodes[tgt].label == "Output"
     ]
     assert len(output_sources) == 1
     assert graph.nodes[output_sources[0]].label == "Linear"
@@ -86,24 +92,14 @@ def test_glm53_spine_hyperconnection_stays_on_variant_namespace():
     )
 
     attn_nodes = [
-        node
-        for node in graph["nodes"]
-        if node["id"].startswith(f"{prefix}/attn_hc/")
+        node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/attn_hc/")
     ]
     ffn_nodes = [
-        node
-        for node in graph["nodes"]
-        if node["id"].startswith(f"{prefix}/ffn_hc/")
+        node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/ffn_hc/")
     ]
     assert attn_nodes and ffn_nodes
-    assert all(
-        node.get("namespace", "").endswith("/attn_hc")
-        for node in attn_nodes
-    )
-    assert all(
-        node.get("namespace", "").endswith("/ffn_hc")
-        for node in ffn_nodes
-    )
+    assert all(node.get("namespace", "").endswith("/attn_hc") for node in attn_nodes)
+    assert all(node.get("namespace", "").endswith("/ffn_hc") for node in ffn_nodes)
     assert variant_namespace in attn_nodes[0].get("namespace", "")
 
 
@@ -205,7 +201,9 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     branch_add_key = _graph_key(graph, ":forget_gate:@op_l323_c13_add:2")
 
     assert key_to_index[concat_key] in sources
-    assert (key_to_index[concat_key], key_to_index[forget_entry_key]) in set(graph.links)
+    assert (key_to_index[concat_key], key_to_index[forget_entry_key]) in set(
+        graph.links
+    )
     assert key_to_index[branch_mul_key] in sources
     assert key_to_index[branch_add_key] in sources
 
@@ -272,7 +270,9 @@ def test_glm53_ffn_hc_input_norm_precedes_linear():
     assert labels.index("RMSNorm") < labels.index("Linear")
     assert len(tree.children) >= 20
 
-    variant = next(v for v in spec.layer_variants if "LinearAttention" in (v.attention_class or ""))
+    variant = next(
+        v for v in spec.layer_variants if "LinearAttention" in (v.attention_class or "")
+    )
     ffn_hc = next(c for c in spec.block_components if c.attr_name == "ffn_hc")
     title, section_tree = _resolve_section_tree_for_component(
         spec,
@@ -304,7 +304,9 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
     assert hc.primary_return_slot == "collapsed"
     assert set(hc.forward_return_order) == {"post", "comb", "collapsed"}
 
-    ffn_nodes = [node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/ffn_hc/")]
+    ffn_nodes = [
+        node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/ffn_hc/")
+    ]
     ffn_labels = {node.get("label") for node in ffn_nodes}
     assert "Softmax" not in ffn_labels
     assert "Divide" not in ffn_labels
@@ -333,7 +335,9 @@ def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
     from visualizer.basic_ops import BasicOpFilter
 
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    variant = next(v for v in spec.layer_variants if "LinearAttention" in (v.attention_class or ""))
+    variant = next(
+        v for v in spec.layer_variants if "LinearAttention" in (v.attention_class or "")
+    )
     prefix = _linear_attn_variant_prefix(spec)
     ffn_hc = next(c for c in spec.block_components if c.attr_name == "ffn_hc")
 
@@ -347,7 +351,9 @@ def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
     assert title == "FFN"
 
     graph = build_merged_model_graph(spec)
-    ffn_nodes = [node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/ffn_hc/")]
+    ffn_nodes = [
+        node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/ffn_hc/")
+    ]
     labels = {node.get("label") for node in ffn_nodes}
     assert "RMSNorm" in labels
     assert "Linear" in labels

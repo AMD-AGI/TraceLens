@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Policy for which remote repositories may supply modeling or kernel source."""
 
 from __future__ import annotations
@@ -43,7 +49,9 @@ class SourcePolicy:
     """
 
     allowed_github_repos: frozenset[tuple[str, str]] = DEFAULT_ALLOWED_GITHUB_REPOS
-    extra_allowed_github_repos: frozenset[tuple[str, str]] = field(default_factory=frozenset)
+    extra_allowed_github_repos: frozenset[tuple[str, str]] = field(
+        default_factory=frozenset
+    )
 
     @classmethod
     def from_env_and_cli(cls, allow_repos: list[str] | None = None) -> SourcePolicy:
@@ -59,8 +67,13 @@ class SourcePolicy:
         return cls(extra_allowed_github_repos=frozenset(extra))
 
     def allowed_repo_keys(self) -> frozenset[tuple[str, str]]:
-        base = {(owner.lower(), repo.lower()) for owner, repo in self.allowed_github_repos}
-        extra = {(owner.lower(), repo.lower()) for owner, repo in self.extra_allowed_github_repos}
+        base = {
+            (owner.lower(), repo.lower()) for owner, repo in self.allowed_github_repos
+        }
+        extra = {
+            (owner.lower(), repo.lower())
+            for owner, repo in self.extra_allowed_github_repos
+        }
         return base | extra
 
     def is_github_repo_allowed(self, owner: str, repo: str) -> bool:
@@ -69,7 +82,9 @@ class SourcePolicy:
     def require_github_repo_allowed(self, owner: str, repo: str) -> None:
         if self.is_github_repo_allowed(owner, repo):
             return
-        allowed = ", ".join(f"{owner}/{repo}" for owner, repo in sorted(self.allowed_repo_keys()))
+        allowed = ", ".join(
+            f"{owner}/{repo}" for owner, repo in sorted(self.allowed_repo_keys())
+        )
         raise PermissionError(
             f"GitHub repository {owner}/{repo} is not whitelisted for source introspection. "
             f"Allowed repositories: {allowed}. "

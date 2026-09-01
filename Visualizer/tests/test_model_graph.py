@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Tests for serializable model graph IR and operation classification."""
 
 from __future__ import annotations
@@ -30,7 +36,13 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 def _mla_fixture_root() -> BlockNode:
     def leaf(name: str) -> BlockNode:
-        return BlockNode(attr_name=name, class_name="Linear", role="other", label="Linear", is_basic=True)
+        return BlockNode(
+            attr_name=name,
+            class_name="Linear",
+            role="other",
+            label="Linear",
+            is_basic=True,
+        )
 
     return BlockNode(
         attr_name="attn",
@@ -136,9 +148,17 @@ def test_classify_operation_kinds():
     )
     assert classify_operation(nn_attention) == OperationKind.TORCH_FUNCTIONAL
 
-    assert classify_operation(None, synthetic=SYNTHETIC_INPUT, label="hidden_states") == OperationKind.SYNTHETIC
-    assert classify_operation(None, synthetic=SYNTHETIC_OUTPUT, label="Output") == OperationKind.SYNTHETIC
-    assert classify_operation(None, synthetic=None, label="×") == OperationKind.SYNTHETIC
+    assert (
+        classify_operation(None, synthetic=SYNTHETIC_INPUT, label="hidden_states")
+        == OperationKind.SYNTHETIC
+    )
+    assert (
+        classify_operation(None, synthetic=SYNTHETIC_OUTPUT, label="Output")
+        == OperationKind.SYNTHETIC
+    )
+    assert (
+        classify_operation(None, synthetic=None, label="×") == OperationKind.SYNTHETIC
+    )
 
 
 def test_library_attention_is_a_kernel_but_torch_attention_is_not():
@@ -153,10 +173,22 @@ def test_library_attention_is_a_kernel_but_torch_attention_is_not():
             details=[f"kernel: {kernel}"],
         )
 
-    for kernel in ("sdpa", "eager", "sdpa_attention_forward", "torch.nn.attention.flex_attention"):
-        assert classify_operation(attention(kernel)) == OperationKind.TORCH_FUNCTIONAL, kernel
+    for kernel in (
+        "sdpa",
+        "eager",
+        "sdpa_attention_forward",
+        "torch.nn.attention.flex_attention",
+    ):
+        assert (
+            classify_operation(attention(kernel)) == OperationKind.TORCH_FUNCTIONAL
+        ), kernel
 
-    for kernel in ("flash_attention_2", "flash_attn_varlen_func", "xformers", "transformer_engine"):
+    for kernel in (
+        "flash_attention_2",
+        "flash_attn_varlen_func",
+        "xformers",
+        "transformer_engine",
+    ):
         assert classify_operation(attention(kernel)) == OperationKind.GPU_KERNEL, kernel
 
     unresolved = BlockNode(
@@ -165,17 +197,16 @@ def test_library_attention_is_a_kernel_but_torch_attention_is_not():
         role="attention",
         label="Attention",
     )
-    assert classify_operation(unresolved) == OperationKind.GPU_KERNEL, (
-        "attention nobody could resolve to a torch call stays a kernel"
-    )
+    assert (
+        classify_operation(unresolved) == OperationKind.GPU_KERNEL
+    ), "attention nobody could resolve to a torch call stays a kernel"
 
 
 def test_dispatched_attention_resolves_through_the_checkpoint_config():
     """A forward that calls an attention variable gets its kernel from the config."""
     from visualizer.ast_analyze import kernel_name_from_step_details
 
-    source = textwrap.dedent(
-        """
+    source = textwrap.dedent("""
         class Attention(nn.Module):
             def forward(self, hidden_states):
                 query_states = self.q_proj(hidden_states)
@@ -184,16 +215,19 @@ def test_dispatched_attention_resolves_through_the_checkpoint_config():
                     attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
                 attn_output, _ = attention_interface(self, query_states, k, v, scaling=self.scaling)
                 return attn_output
-        """
-    )
+        """)
 
     def kernel_for(config: dict[str, str]) -> str | None:
         analysis = analyze_source(source, config=config)
-        details = analysis.class_registry["Attention"].forward_step_details[SYNTHETIC_ATTENTION]
+        details = analysis.class_registry["Attention"].forward_step_details[
+            SYNTHETIC_ATTENTION
+        ]
         return kernel_name_from_step_details(details)
 
     assert kernel_for({}) == "attention_interface", "no config leaves the variable name"
-    assert kernel_for({"_attn_implementation": "flash_attention_2"}) == "flash_attention_2"
+    assert (
+        kernel_for({"_attn_implementation": "flash_attention_2"}) == "flash_attention_2"
+    )
     assert kernel_for({"_attn_implementation": "sdpa"}) == "sdpa"
 
 
@@ -213,7 +247,9 @@ def test_build_model_graph_matches_computation_graph_topology():
     assert "Attention" in labels
 
     operations = {node.label: node.operation for node in model_graph.nodes}
-    assert operations["Attention"] == OperationKind.GPU_KERNEL, "the fixture runs a flash-attn kernel"
+    assert (
+        operations["Attention"] == OperationKind.GPU_KERNEL
+    ), "the fixture runs a flash-attn kernel"
 
 
 def test_expanded_kernel_pipeline_is_composite_but_its_kernel_stays_low_level():
@@ -308,7 +344,9 @@ def test_build_architecture_model_graphs_custom_model():
 
 
 def test_decoder_block_tree_graph_has_nn_and_functional_ops():
-    source = (FIXTURES / "custom_model" / "modeling_custom.py").read_text(encoding="utf-8")
+    source = (FIXTURES / "custom_model" / "modeling_custom.py").read_text(
+        encoding="utf-8"
+    )
     analysis = analyze_source(source, filename="modeling_custom.py")
     basic_ops = BasicOpFilter.from_cli(add=[r"(?i)^Linear$"])
     trees = build_decoder_block_trees(
@@ -343,9 +381,27 @@ def test_model_graph_inline_frames_use_node_ids():
         role="ffn",
         label="MLP",
         children=[
-            BlockNode(attr_name="gate_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
-            BlockNode(attr_name="up_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
-            BlockNode(attr_name="down_proj", class_name="Linear", role="other", label="Linear", is_basic=True),
+            BlockNode(
+                attr_name="gate_proj",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            ),
+            BlockNode(
+                attr_name="up_proj",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            ),
+            BlockNode(
+                attr_name="down_proj",
+                class_name="Linear",
+                role="other",
+                label="Linear",
+                is_basic=True,
+            ),
         ],
     )
     computation = build_computation_graph(root)
@@ -396,4 +452,6 @@ def test_model_graph_subgraphs_for_nested_composites():
         children=[pipeline],
     )
     graph = build_model_graph(root, title="Attn", include_subgraphs=True)
-    assert graph.subgraphs or any(node.operation == OperationKind.GPU_KERNEL for node in graph.nodes)
+    assert graph.subgraphs or any(
+        node.operation == OperationKind.GPU_KERNEL for node in graph.nodes
+    )

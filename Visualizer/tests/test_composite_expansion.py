@@ -1,8 +1,18 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Tests for preferring expanded computations over opaque composite tiles."""
 
 from __future__ import annotations
 
-from visualizer.block_tree import BlockNode, inline_composite_steps, is_simple_modeled_tile
+from visualizer.block_tree import (
+    BlockNode,
+    inline_composite_steps,
+    is_simple_modeled_tile,
+)
 
 
 def test_inline_composite_steps_expands_kernel_pipeline_children():
@@ -46,7 +56,10 @@ def test_inline_composite_steps_expands_kernel_pipeline_children():
     steps, wrapper = inline_composite_steps(pipeline)
 
     assert wrapper is pipeline
-    assert [step.label for step in steps] == ["l2norm_fwd", "chunk_gated_delta_rule_fwd_h"]
+    assert [step.label for step in steps] == [
+        "l2norm_fwd",
+        "chunk_gated_delta_rule_fwd_h",
+    ]
 
 
 def test_inline_composite_steps_expands_output_gate_with_activation():

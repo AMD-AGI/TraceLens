@@ -4,9 +4,10 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import unittest
-from unittest.mock import patch
+import unittest, pandas as pd, ast, os, pytest, importlib
+from unittest.mock import MagicMock, patch
 from TraceLens import JaxNcclAnalyser
+from TraceLens.NcclAnalyser.jax_nccl_analyser import JaxNcclAnalyser
 
 
 class TestJaxNcclAnalyserLoadTraceData(unittest.TestCase):
@@ -121,9 +122,6 @@ class TestJaxNcclAnalyserAnalyzeAllCollectivesFromDf(unittest.TestCase):
 
     def create_mock_dataframe(self):
         """Create a comprehensive mock dataframe for testing using real data from CSV."""
-        import pandas as pd
-        import ast
-        import os
 
         # Load the CSV file with all-gather data for a slice across 32 gpus
         # CSV contains made-up data for demonstrating representative calculations
@@ -203,11 +201,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-import pytest
-import pandas as pd
-from unittest.mock import MagicMock, patch
-
-from TraceLens.NcclAnalyser.jax_nccl_analyser import JaxNcclAnalyser
+_jax_nccl_mod = importlib.import_module("TraceLens.NcclAnalyser.jax_nccl_analyser")
 
 
 @pytest.fixture
@@ -262,12 +256,10 @@ def test_jax_nccl_event_filter(jax_analyser):
     assert jax_analyser._nccl_event_filter({"name": "gemm_kernel"}) is False
 
 
-@patch("TraceLens.NcclAnalyser.jax_nccl_analyser.JaxTraceToTree")
-@patch("TraceLens.NcclAnalyser.jax_nccl_analyser.DataLoader")
-@patch(
-    "TraceLens.NcclAnalyser.jax_nccl_analyser.TraceEventUtils.prepare_event_categorizer"
-)
-@patch("TraceLens.NcclAnalyser.jax_nccl_analyser.TraceEventUtils.split_event_list")
+@patch.object(_jax_nccl_mod, "JaxTraceToTree")
+@patch.object(_jax_nccl_mod, "DataLoader")
+@patch.object(_jax_nccl_mod.TraceEventUtils, "prepare_event_categorizer")
+@patch.object(_jax_nccl_mod.TraceEventUtils, "split_event_list")
 def test_jax_load_trace_data_extracts_nccl_events(
     mock_split, mock_categorizer, mock_loader, mock_tree_cls, tmp_path
 ):
@@ -367,7 +359,11 @@ def test_jax_build_df_long_from_node_trace_data(jax_analyser):
                 "pid": 1,
                 "ts": 100,
                 "dur": 50,
-                "args": {"hlo_op": "all-reduce", "hlo_module": "m", "correlation_id": 7},
+                "args": {
+                    "hlo_op": "all-reduce",
+                    "hlo_module": "m",
+                    "correlation_id": 7,
+                },
                 "process": {"process_name": "gpu0"},
             },
             1: None,
@@ -478,7 +474,9 @@ def test_jax_bandwidth_calculation_edge_cases(mock_print, jax_analyser):
             "data(bytes)",
         ]
     )
-    result = jax_analyser._calculate_collective_bandwidth_from_df(empty_df, "all-reduce")
+    result = jax_analyser._calculate_collective_bandwidth_from_df(
+        empty_df, "all-reduce"
+    )
     assert result[0] == []
 
     mismatch_df = pd.DataFrame(
@@ -504,7 +502,9 @@ def test_jax_bandwidth_calculation_edge_cases(mock_print, jax_analyser):
     "collective_name",
     ["reduce-scatter", "all-to-all", "collective-permute", "unknown-op"],
 )
-def test_jax_bandwidth_for_collective_variants(mock_print, jax_analyser, collective_name):
+def test_jax_bandwidth_for_collective_variants(
+    mock_print, jax_analyser, collective_name
+):
     rows = [
         _make_collective_row(
             gpu_rank=0,
@@ -645,9 +645,7 @@ def test_jax_bandwidth_more_edge_cases(mock_print, jax_analyser):
     assert len(bw) == 1
 
     invalid_slice_df = pd.DataFrame(
-        [
-            _make_collective_row(gpu_rank=0, replica_groups=[[]], replica_string="{{}}")
-        ]
+        [_make_collective_row(gpu_rank=0, replica_groups=[[]], replica_string="{{}}")]
     )
     _, _, _, _, slice_info = jax_analyser._calculate_collective_bandwidth_from_df(
         invalid_slice_df, "all-reduce"

@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Recursive block trees for detailed architecture diagrams."""
 
 from __future__ import annotations
@@ -31,8 +37,17 @@ from visualizer.ast_analyze import (
     _classify_role,
     _label_for,
 )
-from visualizer.basic_ops import BasicOpFilter, introspect_is_modeling_operation, is_fused_silu_mul_class, resolve_is_basic
-from visualizer.blocks import BlockComponent, input_sources_from_forward_sequence, upstream_input_sources
+from visualizer.basic_ops import (
+    BasicOpFilter,
+    introspect_is_modeling_operation,
+    is_fused_silu_mul_class,
+    resolve_is_basic,
+)
+from visualizer.blocks import (
+    BlockComponent,
+    input_sources_from_forward_sequence,
+    upstream_input_sources,
+)
 
 _SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "Buffer", "getattr"})
 
@@ -67,7 +82,9 @@ def wrapper_bullet(node: BlockNode) -> str:
 
 _SKIP_WRAPPER_COMMENT_ATTRS = frozenset({"tokenization", "embed_tokens"})
 
-_FUNCTIONAL_CALL_DETAIL_RE = re.compile(r"(?i)^(?:F\.|torch\.nn\.functional\.)[\w.]+\(\.\.\.\)$")
+_FUNCTIONAL_CALL_DETAIL_RE = re.compile(
+    r"(?i)^(?:F\.|torch\.nn\.functional\.)[\w.]+\(\.\.\.\)$"
+)
 
 
 def wrapper_skips_comment(node: BlockNode) -> bool:
@@ -75,7 +92,12 @@ def wrapper_skips_comment(node: BlockNode) -> bool:
     attr = node.attr_name.lower()
     if attr in _SKIP_WRAPPER_COMMENT_ATTRS:
         return True
-    if node.role == "attention" or attr in {"self_attn", "self_attention", "attn", "attention"}:
+    if node.role == "attention" or attr in {
+        "self_attn",
+        "self_attention",
+        "attn",
+        "attention",
+    }:
         return True
     if "residual" in attr:
         return True
@@ -109,7 +131,11 @@ def block_purpose(node: BlockNode) -> str | None:
 
     for detail in node.details:
         cleaned = detail.strip()
-        if cleaned and not cleaned.startswith("method `") and not cleaned.startswith("kernel:"):
+        if (
+            cleaned
+            and not cleaned.startswith("method `")
+            and not cleaned.startswith("kernel:")
+        ):
             if _FUNCTIONAL_CALL_DETAIL_RE.match(cleaned):
                 continue
             return cleaned
@@ -306,7 +332,11 @@ def expand_block_tree_inplace(
     ]
     node = _clone_block_node(node, children=expanded_children)
 
-    if node.role == "norm" and len(node.children) == 1 and is_method_wrapper(node.children[0]):
+    if (
+        node.role == "norm"
+        and len(node.children) == 1
+        and is_method_wrapper(node.children[0])
+    ):
         return _clone_block_node(node, children=[])
 
     if _is_substitutable_single_op_subgraph(node, basic_ops=basic_ops):
@@ -509,7 +539,11 @@ def inline_composite_steps(
         return list(step.children), step
 
     if _is_output_gate_node(step) and step.children:
-        inner_steps = straight_line_steps(step) if is_straight_line_module(step) else list(step.children)
+        inner_steps = (
+            straight_line_steps(step)
+            if is_straight_line_module(step)
+            else list(step.children)
+        )
         if inner_steps:
             return inner_steps, step
 
@@ -570,7 +604,9 @@ def _is_output_gate_node(node: BlockNode) -> bool:
     return node.class_name == "OutputGate" or node.role == "gate"
 
 
-def collect_parallel_gate_wrappers(node: BlockNode, *, inside_output_gate: bool = False) -> list[BlockNode]:
+def collect_parallel_gate_wrappers(
+    node: BlockNode, *, inside_output_gate: bool = False
+) -> list[BlockNode]:
     """Collect parallel gate side branches referenced inline but listed in the panel."""
     wrappers: list[BlockNode] = []
     gate_attrs = set(node.parallel_gates)
@@ -579,7 +615,9 @@ def collect_parallel_gate_wrappers(node: BlockNode, *, inside_output_gate: bool 
         if not in_gate and child.attr_name in gate_attrs:
             if not _is_composite_block(child):
                 wrappers.append(child)
-        wrappers.extend(collect_parallel_gate_wrappers(child, inside_output_gate=in_gate))
+        wrappers.extend(
+            collect_parallel_gate_wrappers(child, inside_output_gate=in_gate)
+        )
     return wrappers
 
 
@@ -741,7 +779,9 @@ def _segment_for_step(node: BlockNode, step: BlockNode) -> ComputationSegment:
         and side.source_chain[-1] in by_attr
     }
     side_producer_chains = {
-        side.source_chain[-1]: [by_attr[attr] for attr in side.source_chain if attr in by_attr]
+        side.source_chain[-1]: [
+            by_attr[attr] for attr in side.source_chain if attr in by_attr
+        ]
         for side in side_specs
         if side.source_kind == "prior_step" and side.source_chain
     }
@@ -841,7 +881,9 @@ def _output_gate_details(
 
     lines: list[str] = ["Linear"]
 
-    if consumer_class == "FusedRMSNormGated" or (consumer and "Gated" in (consumer_class or "")):
+    if consumer_class == "FusedRMSNormGated" or (
+        consumer and "Gated" in (consumer_class or "")
+    ):
         if inline_activation:
             lines.append(f"{inline_activation}(linear out)")
             lines.append(f"norm(attn_out) × gate → {consumer or 'o_norm'}")
@@ -873,7 +915,10 @@ def _kernel_pipeline_block_nodes(
     parent_class_name: str | None = None,
 ) -> tuple[BlockNode, BlockNode | None]:
     """Expand a multi-input kernel attention step into pipeline and output sibling nodes."""
-    from visualizer.kernel_pipeline import compute_tensor_step_targets, introspect_kernel_pipeline
+    from visualizer.kernel_pipeline import (
+        compute_tensor_step_targets,
+        introspect_kernel_pipeline,
+    )
 
     kernel = kernel_name_from_step_details(details) or "kernel"
     pipeline_steps, output_steps = introspect_kernel_pipeline(details)
@@ -936,7 +981,11 @@ def _kernel_pipeline_block_nodes(
             )
         )
 
-    pipeline_label = pipeline_children[0].label if len(pipeline_children) == 1 else f"{kernel} pipeline"
+    pipeline_label = (
+        pipeline_children[0].label
+        if len(pipeline_children) == 1
+        else f"{kernel} pipeline"
+    )
     pipeline_node = BlockNode(
         attr_name="@attn_pipeline",
         class_name="KernelPipeline",
@@ -1057,13 +1106,17 @@ def _wrap_parallel_gate_children(
             wrapped.append(child)
             continue
         consumer, _ = _gate_side_consumer(side_inputs, child.attr_name)
-        consumer_node = next((node for node in child_nodes if node.attr_name == consumer), None)
+        consumer_node = next(
+            (node for node in child_nodes if node.attr_name == consumer), None
+        )
         details = _output_gate_details(
             child.attr_name,
             side_inputs=side_inputs,
             gate_activations=gate_activations,
             consumer_class=consumer_node.class_name if consumer_node else None,
-            norm_gate_activation=gated_norm_activation(consumer_node) if consumer_node else None,
+            norm_gate_activation=(
+                gated_norm_activation(consumer_node) if consumer_node else None
+            ),
         )
         wrapped.append(
             _output_gate_block_node(
@@ -1079,7 +1132,9 @@ def _wrap_parallel_gate_children(
 def side_producer_has_activation(producer: BlockNode) -> bool:
     """True when an output-gate side producer already ends with an activation step."""
     if producer.class_name == "OutputGate":
-        return any(child.attr_name == SYNTHETIC_GATE_ACTIVATION for child in producer.children)
+        return any(
+            child.attr_name == SYNTHETIC_GATE_ACTIVATION for child in producer.children
+        )
     return False
 
 
@@ -1109,7 +1164,9 @@ def gated_norm_activation(node: BlockNode) -> str | None:
     for detail in node.details:
         if detail in known:
             return detail
-    if node.class_name == "FusedRMSNormGated" or re.search(r"NormGated", node.class_name or "", re.I):
+    if node.class_name == "FusedRMSNormGated" or re.search(
+        r"NormGated", node.class_name or "", re.I
+    ):
         return "Sigmoid"
     return None
 
@@ -1120,7 +1177,11 @@ def _short_conv_activation(details: list[str] | None) -> str | None:
         return None
     for detail in details:
         cleaned = detail.strip()
-        if not cleaned or cleaned.startswith("method `") or cleaned.startswith("kernel:"):
+        if (
+            not cleaned
+            or cleaned.startswith("method `")
+            or cleaned.startswith("kernel:")
+        ):
             continue
         if "=" in cleaned:
             continue
@@ -1244,7 +1305,9 @@ def _nested_input_source(parent: BlockNode, child: BlockNode) -> str:
     return f"{parent_cls}"
 
 
-def _append_branch_followups(steps: list[BlockNode], pre_merge: list[BlockNode]) -> list[BlockNode]:
+def _append_branch_followups(
+    steps: list[BlockNode], pre_merge: list[BlockNode]
+) -> list[BlockNode]:
     """Append immediate post-step siblings (e.g. conv → activation) to a provenance branch."""
     if not steps:
         return steps
@@ -1298,9 +1361,15 @@ def _collapse_identical_branches(branches: list[Branch]) -> list[Branch]:
             collapsed.append(group[0])
             continue
         labels = [branch.label for branch in group]
-        merged_label = labels[0] if all(label == labels[0] for label in labels) else "/".join(labels)
+        merged_label = (
+            labels[0]
+            if all(label == labels[0] for label in labels)
+            else "/".join(labels)
+        )
         collapsed.append(
-            Branch(label=merged_label, steps=group[0].steps, port_style=group[0].port_style)
+            Branch(
+                label=merged_label, steps=group[0].steps, port_style=group[0].port_style
+            )
         )
     return collapsed
 
@@ -1309,7 +1378,9 @@ def _partition_named_branches(pre_merge: list[BlockNode]) -> list[Branch]:
     """Partition steps into labeled branches using attribute-name prefix clustering."""
     buckets: dict[str, list[BlockNode]] = {}
     for node in pre_merge:
-        prefix = node.attr_name.split("_", 1)[0] if "_" in node.attr_name else node.attr_name
+        prefix = (
+            node.attr_name.split("_", 1)[0] if "_" in node.attr_name else node.attr_name
+        )
         buckets.setdefault(prefix, []).append(node)
 
     branches: list[Branch] = []
@@ -1377,7 +1448,11 @@ def _situ_gated_mlp_parts(
     if gate is None or up is None or down is None:
         return None
     situ = next(
-        (child for child in act_fn.children if re.search(r"(?i)si[tl]uactivation", child.class_name)),
+        (
+            child
+            for child in act_fn.children
+            if re.search(r"(?i)si[tl]uactivation", child.class_name)
+        ),
         None,
     )
     if situ is None:
@@ -1460,7 +1535,9 @@ def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
     post_merge = children[merge_idx + 1 :]
 
     provenance = node.attention_inputs
-    pipeline_child = next((child for child in node.children if child.class_name == "KernelPipeline"), None)
+    pipeline_child = next(
+        (child for child in node.children if child.class_name == "KernelPipeline"), None
+    )
     if pipeline_child and pipeline_child.attention_inputs:
         provenance = pipeline_child.attention_inputs
 
@@ -1514,7 +1591,12 @@ def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
 
 def _is_composite_block(node: BlockNode | None) -> bool:
     """True when a block has internal structure worth its own diagram."""
-    return node is not None and not node.is_basic and bool(node.children) and not is_method_wrapper(node)
+    return (
+        node is not None
+        and not node.is_basic
+        and bool(node.children)
+        and not is_method_wrapper(node)
+    )
 
 
 def is_basic_op_tile(block: BlockNode | None) -> bool:
@@ -1532,10 +1614,14 @@ def is_simple_modeled_tile(node: BlockNode) -> bool:
         return False
     if _is_composite_block(node):
         return False
-    return introspect_is_modeling_operation(node.class_name, node.attr_name, node.details)
+    return introspect_is_modeling_operation(
+        node.class_name, node.attr_name, node.details
+    )
 
 
-def tile_sublabel(block: BlockNode | None, *, in_inline_frame: bool = False) -> str | None:
+def tile_sublabel(
+    block: BlockNode | None, *, in_inline_frame: bool = False
+) -> str | None:
     """Secondary label for a detail tile; in-box sublabels are disabled."""
     del block, in_inline_frame
     return None
@@ -1701,15 +1787,21 @@ def build_block_node(
         )
 
     cls = registry[class_name]
-    parsed_steps = [step for step in cls.forward_calls if step not in _SKIP_INIT_CLASS_NAMES]
+    parsed_steps = [
+        step for step in cls.forward_calls if step not in _SKIP_INIT_CLASS_NAMES
+    ]
     if infer_init_steps:
         if cls.forward_operations:
             forward_steps = parsed_steps
         elif not parsed_steps:
             forward_steps = effective_forward_calls(cls)
         else:
-            uses_init_modules = any(step in cls.init_assignments for step in parsed_steps)
-            forward_steps = parsed_steps if not uses_init_modules else effective_forward_calls(cls)
+            uses_init_modules = any(
+                step in cls.init_assignments for step in parsed_steps
+            )
+            forward_steps = (
+                parsed_steps if not uses_init_modules else effective_forward_calls(cls)
+            )
     else:
         forward_steps = parsed_steps
 
@@ -1733,7 +1825,9 @@ def build_block_node(
 
     for index, call_attr in enumerate(forward_steps):
         child_order = order_map.get(call_attr, index)
-        child_details = cls.forward_step_details.get(call_attr) or cls.init_details.get(call_attr, [])
+        child_details = cls.forward_step_details.get(call_attr) or cls.init_details.get(
+            call_attr, []
+        )
 
         if call_attr == SYNTHETIC_ATTENTION:
             if is_kernel_pipeline_step(child_details, cls.attention_inputs):
@@ -1753,7 +1847,9 @@ def build_block_node(
                         class_name="AttentionOp",
                         forward_order=child_order,
                         label=attention_kernel_label(child_details),
-                        details=attention_kernel_details(child_details, cls.attention_inputs),
+                        details=attention_kernel_details(
+                            child_details, cls.attention_inputs
+                        ),
                         basic=False,
                     )
                 )
@@ -1769,7 +1865,9 @@ def build_block_node(
                     class_name=operation.class_name,
                     forward_order=child_order,
                     details=list(operation.details),
-                    label=operation_display_label(operation.label, class_name=operation.class_name),
+                    label=operation_display_label(
+                        operation.label, class_name=operation.class_name
+                    ),
                     basic=True,
                     operation_predecessors=list(operation.predecessors),
                     external_inputs=list(operation.external_inputs),
@@ -1975,7 +2073,9 @@ def build_stack_component_tree(
     )
 
 
-def spine_expanded_frame_label(component: BlockComponent, *, positional_encoding: str) -> str:
+def spine_expanded_frame_label(
+    component: BlockComponent, *, positional_encoding: str
+) -> str:
     """Dotted-frame title for a straight-line module expanded on the main spine."""
     if component.role == "positional":
         return f"Positional ({positional_encoding}) ({component.attr_name})"
@@ -2006,7 +2106,12 @@ def _build_component_block_trees(
     for comp in ordered:
         if comp.role == "norm" and not include_norms:
             continue
-        if comp.forward_order is None and comp.role not in {"embedding", "head", "positional", "norm"}:
+        if comp.forward_order is None and comp.role not in {
+            "embedding",
+            "head",
+            "positional",
+            "norm",
+        }:
             continue
         key = (comp.attr_name, comp.class_name)
         if key in seen:
@@ -2126,7 +2231,11 @@ def build_decoder_block_trees(
         if is_method_wrapper(tree):
             continue
         cls_info = registry.get(comp.class_name)
-        tree.input_label = cls_info.forward_input_name if cls_info and cls_info.forward_input_name else "hidden_states"
+        tree.input_label = (
+            cls_info.forward_input_name
+            if cls_info and cls_info.forward_input_name
+            else "hidden_states"
+        )
         tree.input_source = input_sources.get(comp.attr_name)
         trees.append((title, tree))
 
