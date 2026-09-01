@@ -10,6 +10,7 @@ import gzip
 import json
 import os
 import zipfile
+from bisect import bisect_left, bisect_right
 
 from tqdm import tqdm
 
@@ -130,44 +131,51 @@ def extract_iteration(
 
     min_iter_ts = min(start for start, _ in windows)
     max_iter_end = max(end for _, end in windows)
-    # Collect all relevant tid/pid pairs
-    tid_pid_set = {(root.get("tid"), root.get("pid")) for root in iteration_roots}
 
-    # Pre-filter all CPU events in the global window and by tid/pid
+    # Pre-filter every timestamped CPU-side event in the global window, on ANY
+    # thread. Iterations are time windows, so work dispatched to a sibling thread
+    # -- the autograd engine's backward pass, a stream-side worker -- belongs to
+    # the window its launch falls in and is kept, on its own thread, in the
+    # output. Restricting to the root's thread dropped that work entirely.
     cpu_events = []
     for e in events:
         ts = e.get("ts")
-        if ts is None:
-            continue
         dur = e.get("dur")
-        if dur is None:
+        if ts is None or dur is None:
             continue
-        e_tid = e.get("tid")
-        e_pid = e.get("pid")
-        if (e_tid, e_pid) in tid_pid_set and min_iter_ts <= ts <= max_iter_end:
+        # GPU events arrive only via their launch's correlation id below; the
+        # per-thread pre-filter used to exclude them implicitly (they sit on the
+        # GPU streams, not a root thread), so widening to all threads must skip
+        # them explicitly or every kernel is counted twice.
+        if e.get("cat") in GPU_EVENT_CATEGORIES:
+            continue
+        if min_iter_ts <= ts <= max_iter_end:
             cpu_events.append(e)
+    cpu_events.sort(key=lambda e: e["ts"])
+    cpu_starts = [e["ts"] for e in cpu_events]
 
-    # For each iteration root, filter CPU events and collect correlation ids
+    # For each iteration window collect the CPU events whose start falls in it,
+    # regardless of thread, then follow their correlation ids to the GPU work.
     for iteration_root, (win_ts, win_end) in zip(tqdm(iteration_roots), windows):
         start_time = []
         end_time = []
-        iter_tid = iteration_root.get("tid")
-        iter_pid = iteration_root.get("pid")
         win_dur = win_end - win_ts
         is_last = win_end == max_iter_end
 
         correlation_ids: set[int] = set()
 
-        # CPU events: filter from pre-filtered list
-        for e in cpu_events:
-            ts = e.get("ts")
-            dur = e.get("dur")
-            e_tid = e.get("tid")
-            e_pid = e.get("pid")
+        # Bisect to the window's slice so widening to all threads stays cheap.
+        lo = bisect_left(cpu_starts, win_ts)
+        hi = bisect_right(cpu_starts, win_end)
+        for e in cpu_events[lo:hi]:
+            ts = e["ts"]
             # Half-open so neighbouring windows cannot both claim an event; the
             # final window is closed so nothing at the very end is orphaned.
             within = win_ts <= ts < win_end or (is_last and ts == win_end)
-            if e_tid == iter_tid and e_pid == iter_pid and within and dur <= win_dur:
+            # Spans longer than the window are enclosing frames (thread roots,
+            # outer python frames) that belong to no single iteration; they carry
+            # no correlation id, so no kernel is lost by skipping them.
+            if within and e["dur"] <= win_dur:
                 filtered_events.append(e)
                 corr = e.get("args", {}).get("correlation")
                 if corr is not None:

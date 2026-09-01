@@ -573,11 +573,13 @@ class TestDetectionFlow:
         assert result.status is DetectStatus.NOT_SPLITTABLE
         assert len(result) == 0
 
-    def test_uncovered_work_triggers_probes_and_is_recorded(self):
+    def test_uncovered_work_grades_directly_without_probes(self):
+        # Escalation probes were removed: uncovered work no longer triggers a
+        # probe ladder; the roots are graded straight to degraded/not-splittable.
         events = serving_trace(16)
         events.append(kernel(1500, 500_000, 99999, name="unaccounted"))
         result = find_iteration_roots_ex(events)
-        assert result.diagnostics["probes_run"], "escalation must be recorded"
+        assert result.diagnostics["probes_run"] == []
         assert result.coverage.covered_any < COVERAGE_GATE
         assert result.status in (DetectStatus.DEGRADED, DetectStatus.NOT_SPLITTABLE)
 

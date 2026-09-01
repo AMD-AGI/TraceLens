@@ -18,6 +18,8 @@ from statistics import mean, pstdev
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ...Trace2Tree.inference_iteration_roots import (
+    BRANCH_DESCENT_TIER,
+    GRAPH_LAUNCH_TIER,
     PERIOD_CONFLICT,
     compare_periods,
     find_iteration_roots_generic,
@@ -30,6 +32,8 @@ from ..annotation_utils import (
     name_skeleton,
 )
 from .detect_utils import (
+    COVERAGE_FLOOR,
+    COVERAGE_GATE,
     MIN_ROOTS,
     DetectStatus,
     GpuAttribution,
@@ -96,13 +100,22 @@ def _interarrival_cv(instances: Sequence[dict]) -> float:
 
 
 def collect_annotations(events: Sequence[dict]) -> List[dict]:
-    """CPU-side annotation events, in time order."""
+    """CPU-side *marker* annotations, in time order.
+
+    A split point must be a semantic iteration marker, not an operation. Real
+    tensor ops -- collectives especially (``nccl:*`` / ``gloo:*``) -- are emitted
+    as annotations too, but they carry ``Input Dims`` because they act on
+    tensors. Iteration markers (``step[DECODE]``, ``execute_...``, ``DataLoader``)
+    never do. Excluding anything with ``Input Dims`` keeps a collective from being
+    chosen as the iteration root, which is how an all-gather was winning before.
+    """
     annotations = [
         e
         for e in events
         if e.get("cat") == ANNOTATION_CAT
         and e.get("ts") is not None
         and e.get("dur") is not None
+        and "Input Dims" not in (e.get("args") or {})
     ]
     annotations.sort(key=lambda e: e["ts"])
     return annotations
@@ -316,6 +329,48 @@ def detect_generic(
     if not roots:
         return None
 
+    tier = diagnostics.get("period_label_tier")
+    method = f"generic:{tier}" if tier else "generic:python_function"
+
+    # Graph launches are a direct per-iteration marker (one launch per replay).
+    # The name-based kernel period check below cannot confirm them -- graph
+    # capture hides the per-step kernel period -- so instead confirm them the way
+    # the annotated paths do: audit how much GPU work the launch tiles actually
+    # account for, by projection or by launch correlation. span_share is skipped
+    # because a launch is a point event, so it explains ~no time on its own even
+    # when there is exactly one per iteration; kernel coverage is the real signal.
+    if tier == GRAPH_LAUNCH_TIER:
+        coverage = attribution.audit(collect_annotations(events), roots)
+        if coverage.covered_selected >= COVERAGE_GATE:
+            status = DetectStatus.SPLITTABLE
+        elif coverage.covered_selected >= COVERAGE_FLOOR:
+            status = DetectStatus.DEGRADED
+        else:
+            status = DetectStatus.NOT_SPLITTABLE
+        diagnostics.update({"graph_launch_count": len(roots)})
+        return RootSet(
+            roots=roots,
+            method=method,
+            phase_confidence=PhaseConfidence.UNKNOWN,
+            status=status,
+            coverage=coverage,
+            diagnostics=diagnostics,
+        )
+
+    # Branch descent already gated its windows on tree-descendant GPU coverage,
+    # which is cross-thread exact (it credits work on dispatch threads a launch-
+    # correlation audit on the host thread would miss). Trust that gate rather
+    # than re-confirming against the kernel period, which does not repeat cleanly
+    # for training backward passes.
+    if tier == BRANCH_DESCENT_TIER:
+        return RootSet(
+            roots=roots,
+            method=method,
+            phase_confidence=PhaseConfidence.UNKNOWN,
+            status=DetectStatus.SPLITTABLE,
+            diagnostics=diagnostics,
+        )
+
     kernel_names = [k.get("name", "") for k in attribution.kernels]
     kernel_candidates = find_period_candidates(kernel_names)
     kernel_blocks = kernel_candidates[0].repeats if kernel_candidates else None
@@ -331,14 +386,14 @@ def detect_generic(
     if verdict == PERIOD_CONFLICT:
         return RootSet(
             roots=roots,
-            method="generic:python_function",
+            method=method,
             phase_confidence=PhaseConfidence.UNKNOWN,
             status=DetectStatus.NOT_SPLITTABLE,
             diagnostics=diagnostics,
         )
     return RootSet(
         roots=roots,
-        method="generic:python_function",
+        method=method,
         phase_confidence=PhaseConfidence.UNKNOWN,
         status=DetectStatus.SPLITTABLE,
         diagnostics=diagnostics,

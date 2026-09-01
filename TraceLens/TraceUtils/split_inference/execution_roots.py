@@ -34,7 +34,6 @@ from .detect_utils import (
     IntervalIndex,
     PhaseConfidence,
     RootSet,
-    run_probes,
 )
 from .root_detection import (
     NESTING_MAJORITY,
@@ -45,7 +44,6 @@ from .root_detection import (
     detect_generic,
     resolve_nesting,
 )
-from .root_probes import build_probes
 
 __all__ = [
     "COVERAGE_FLOOR",
@@ -221,17 +219,25 @@ def find_iteration_roots_ex(events: Sequence[dict]) -> RootSet:
             diagnostics={"reason": "no annotations and no repeating call pattern"},
         )
 
-    def audit(candidate: RootSet):
-        return attribution.audit(annotations, candidate.roots)
+    coverage = attribution.audit(annotations, root_set.roots)
+    root_set.coverage = coverage
+    root_set.diagnostics["probes_run"] = []  # escalation probes removed
 
-    root_set.coverage = audit(root_set)
-    # Coverage can look fine while only a warmup loop matched, so a suspiciously
-    # small root count also escalates.
-    if root_set.coverage.passes and not root_set.diagnostics.get(
-        "suspiciously_few_roots"
+    # Trust recognized labels. When the split comes from a parsed annotation
+    # (phase_confidence high) and its GPU coverage is good, a small root count is
+    # a genuinely short run, not a warmup loop -- accept it rather than second-
+    # guessing known-per-iteration labels. The warmup guard still applies to
+    # unknown families, whose meaning we cannot vouch for.
+    known_labels = root_set.phase_confidence is PhaseConfidence.HIGH
+    if coverage.passes and (
+        known_labels or not root_set.diagnostics.get("suspiciously_few_roots")
     ):
         root_set.status = DetectStatus.SPLITTABLE
-        root_set.diagnostics["probes_run"] = []
         return root_set
 
-    return run_probes(root_set, build_probes(events, attribution), audit)
+    # No probes: grade directly on how much GPU work the roots explain.
+    if coverage and coverage.covered_selected >= COVERAGE_FLOOR:
+        root_set.status = DetectStatus.DEGRADED
+    else:
+        root_set.status = DetectStatus.NOT_SPLITTABLE
+    return root_set
