@@ -26,7 +26,6 @@ from TraceLens.Agent.Analysis.category_analyses import (
 )
 from TraceLens.Reporting import (
     generate_multi_rank_collective_report_pytorch as coll_mod,
-    generate_perf_report_pytorch_inference as inf_mod,
     reporting_utils as ru,
     tracediff_comparison_extension as tde,
 )
@@ -51,7 +50,7 @@ from tests.fixtures.traces import (
     TRACES_ROOT,
     _discover_inference_cases,
 )
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+from TraceLens.Reporting.generate_perf_report_pytorch import (
     add_truncated_kernel_details as add_truncated_inference,
     add_truncated_kernel_details as add_truncated_kernel_details_inference,
     apply_extension as apply_extension_inference,
@@ -1068,7 +1067,7 @@ def test_inference_report_main_cli(tmp_path):
 
     old_argv = sys.argv
     sys.argv = [
-        "generate_perf_report_pytorch_inference",
+        "generate_perf_report_pytorch",
         "--profile_json_path",
         trace,
         "--output_csvs_dir",
@@ -1080,7 +1079,9 @@ def test_inference_report_main_cli(tmp_path):
         "--group_by_parent_module",
     ]
     try:
-        inf_mod.main()
+        importlib.import_module(
+            "TraceLens.Reporting.generate_perf_report_pytorch"
+        ).main()
     finally:
         sys.argv = old_argv
     assert xlsx.exists()
@@ -1644,12 +1645,12 @@ class TestReportingCliPhase9:
 
     def test_generate_perf_report_inference_main(self, tmp_path):
         mod = importlib.import_module(
-            "TraceLens.Reporting.generate_perf_report_pytorch_inference"
+            "TraceLens.Reporting.generate_perf_report_pytorch"
         )
         trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "inf.json")
         old_argv = sys.argv
         sys.argv = [
-            "generate_perf_report_pytorch_inference",
+            "generate_perf_report_pytorch",
             "--profile_json_path",
             trace,
             "--output_csvs_dir",

@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-# Regression tests for generate_perf_report_pytorch_inference.
+# Regression tests for generate_perf_report_pytorch (inference mode).
 # Each test case is a subdirectory under tests/traces/inference/ containing:
 #   - A .json.gz trace file
 #   - A perf_csvs/ folder with reference CSV files (one per output sheet)
@@ -13,7 +13,7 @@
 
 import os, numpy as np, pandas as pd, pytest, ast, re, gzip, json, glob
 from pandas.api.types import is_float_dtype
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+from TraceLens.Reporting.generate_perf_report_pytorch import (
     classify_graph_capture_trace,
     generate_perf_report_pytorch,
     generate_perf_report_pytorch as gen_inf,

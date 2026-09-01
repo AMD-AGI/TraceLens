@@ -82,7 +82,6 @@ TraceLens supports the following trace formats:
 | Format | Source tool | Report CLI |
 |--------|-------------|------------|
 | PyTorch | `torch.profiler` | `TraceLens_generate_perf_report_pytorch` |
-| PyTorch (inference) | `torch.profiler` | `TraceLens_generate_perf_report_pytorch_inference` |
 | JAX | XPlane protobuf | `TraceLens_generate_perf_report_jax` |
 | rocprofv3 JSON | AMD ROCm ROCprofiler-SDK | `TraceLens_generate_perf_report_rocprof` |
 | rocprofv3 pftrace (Perfetto-style) | `rocprofv3 --output-format pftrace` | `TraceLens_generate_perf_report_pftrace_hip_activity`, `..._pftrace_hip_api`, `..._pftrace_memory_copy` |

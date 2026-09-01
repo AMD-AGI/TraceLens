@@ -381,11 +381,13 @@ class TestPftraceExtendedPhase9:
 def test_inference_report_main(tmp_path):
     trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 80)])
     out_dir = tmp_path / "inf_csvs"
-    import TraceLens.Reporting.generate_perf_report_pytorch_inference as mod
+    import importlib
+
+    mod = importlib.import_module("TraceLens.Reporting.generate_perf_report_pytorch")
 
     old_argv = sys.argv
     sys.argv = [
-        "generate_perf_report_pytorch_inference",
+        "generate_perf_report_pytorch",
         "--profile_json_path",
         trace,
         "--output_csvs_dir",
