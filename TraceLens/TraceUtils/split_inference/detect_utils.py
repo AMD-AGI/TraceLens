@@ -100,11 +100,6 @@ class CoverageReport:
             self.span_share >= MIN_SPAN_SHARE
         )
 
-    @property
-    def better_roots_exist(self) -> bool:
-        """Annotations cover work the roots miss, so escalation should help."""
-        return self.covered_any - self.covered_selected > 1 - COVERAGE_GATE
-
 
 @dataclass
 class RootSet:
@@ -174,24 +169,6 @@ class IntervalIndex:
                 out.append(evs[i])
             i += 1
         return out
-
-
-def gaps_between(roots: Sequence[dict]) -> List[dict]:
-    """Idle spans between consecutive roots, per thread, as span dicts."""
-    gaps = []
-    for (pid, tid), group in group_by_thread(roots).items():
-        for prev, nxt in zip(group, group[1:]):
-            prev_end = prev.get("ts", 0) + prev.get("dur", 0)
-            if nxt.get("ts", 0) > prev_end:
-                gaps.append(
-                    {
-                        "ts": prev_end,
-                        "dur": nxt["ts"] - prev_end,
-                        "pid": pid,
-                        "tid": tid,
-                    }
-                )
-    return gaps
 
 
 def build_root_tiles(roots: Sequence[dict]) -> Tuple[dict, int]:
@@ -302,7 +279,6 @@ class GpuAttribution:
         self.projections: List[dict] = []
         corr_cpu: List[dict] = []
         self._corr_kernels: Dict[int, List[dict]] = {}
-        self._launch_by_corr: Dict[int, dict] = {}
         for e in events:
             ts, dur, cat = e.get("ts"), e.get("dur"), e.get("cat")
             if ts is None or dur is None:
@@ -316,7 +292,6 @@ class GpuAttribution:
                     self._corr_kernels.setdefault(corr, []).append(e)
             elif corr is not None:
                 corr_cpu.append(e)
-                self._launch_by_corr.setdefault(corr, e)
 
         self.kernels.sort(key=lambda x: x["ts"])
         self._kernel_starts = [k["ts"] for k in self.kernels]
@@ -360,17 +335,6 @@ class GpuAttribution:
                     if id(k) not in seen:
                         seen.add(id(k))
                         out.append(k)
-        return out
-
-    def cpu_launches_for(self, kernels: Sequence[dict]) -> List[dict]:
-        """CPU launch sites of ``kernels``, empty under graph capture."""
-        seen, out = set(), []
-        for kernel in kernels:
-            corr = (kernel.get("args") or {}).get("correlation")
-            launch = self._launch_by_corr.get(corr)
-            if launch is not None and id(launch) not in seen:
-                seen.add(id(launch))
-                out.append(launch)
         return out
 
     def gpu_time_by_correlation(self, spans: Sequence[dict]) -> float:
@@ -434,16 +398,6 @@ class GpuAttribution:
             busy,
             window,
         )
-
-    def uncovered_kernels(self, annotations: Sequence[dict]) -> List[dict]:
-        """Kernels in the audit window that no annotation accounts for."""
-        if self.strategy == self.STRATEGY_PROJECTION:
-            spans = self._projection_union(None)
-            window = SpanSet.of_events(self.projections).bounds
-        else:
-            spans = SpanSet.of_events(self.kernels_for(annotations))
-            window = spans.bounds
-        return [k for k in self._kernels_in(window) if not spans.covers(k["ts"])]
 
     def _projection_union(self, names: Optional[set]) -> SpanSet:
         """Union of projection spans, optionally restricted by annotation name.
