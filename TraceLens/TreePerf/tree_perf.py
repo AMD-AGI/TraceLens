@@ -1005,9 +1005,7 @@ class TreePerfAnalyzer:
         total_kernel_runtime = (
             sum(
                 e - s
-                for s, e in merge_intervals(
-                    [(k["ts"], k["t_end"]) for k in kernels]
-                )
+                for s, e in merge_intervals([(k["ts"], k["t_end"]) for k in kernels])
             )
             if kernels
             else 0
