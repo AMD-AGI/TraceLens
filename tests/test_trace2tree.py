@@ -12,7 +12,7 @@ import pytest
 from copy import deepcopy
 from typing import Dict, List
 from TraceLens.Trace2Tree.inference_iteration_roots import (
-    _detect_iteration_roots_from_tree,
+    _detect_by_branch_descent,
     _find_repeating_period,
     find_iteration_roots_generic,
 )
@@ -165,14 +165,14 @@ class TestInferenceIterationRoots:
             "cpu_op",
             "training_loop",
             ts=0,
-            dur=7000,
+            dur=20000,
             pid=1,
             tid=1,
             args={"Sequence number": 0},
         )
         events.append(loop)
         corr = 100
-        for iteration in range(3):
+        for iteration in range(8):
             base_ts = 100 + iteration * 2000
             for step_name, offset in [("step_fwd", 0), ("step_bwd", 400)]:
                 op = _mk_event(
@@ -195,10 +195,9 @@ class TestInferenceIterationRoots:
                 corr += 1
 
         tree = _build_tree(events)
-        loop_evt = next(e for e in tree.events if e["name"] == "training_loop")
-        roots = _detect_iteration_roots_from_tree(tree, loop_evt)
+        roots = _detect_by_branch_descent(tree)
         assert roots is not None
-        assert len(roots) == 3
+        assert len(roots) == 8
         assert all(root["dur"] > 0 for root in roots)
 
     def test_find_iteration_roots_generic_end_to_end(self):
@@ -208,14 +207,14 @@ class TestInferenceIterationRoots:
                 "cpu_op",
                 "training_loop",
                 ts=0,
-                dur=7000,
+                dur=20000,
                 pid=1,
                 tid=1,
                 args={"Sequence number": 0},
             )
         )
         corr = 200
-        for iteration in range(3):
+        for iteration in range(8):
             base_ts = 100 + iteration * 2000
             for step_name, offset in [("iter_fwd", 0), ("iter_bwd", 400)]:
                 op = _mk_event(

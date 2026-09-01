@@ -26,12 +26,9 @@ DIVISOR_COVERAGE_TOLERANCE = 0.05
 # Label sequences shorter than this are utility-function child lists, not loops.
 MIN_LABEL_CHILDREN = 6
 
-# Preferred sources of labels for period detection, best first. Python frames
-# correspond to semantic loop bodies; the rest are fallbacks for traces captured
-# without stack recording.
+# The python_function event category, used when reuniting worker threads and
+# when scanning a thread's frames.
 PYTHON_TIER = "python_function"
-CPU_OP_TIER = "cpu_op"
-ALL_CHILDREN_TIER = "all_children"
 
 # Graph replay: each engine step replays a captured graph with a single launch.
 # That launch survives graph capture (which erases the per-op python/kernel
@@ -52,6 +49,14 @@ GPU_KERNEL_CATS = ("kernel", "gpu_memcpy", "gpu_memset")
 BRANCH_COVERAGE_GATE = 0.95
 # Bound the descent so a pathological tree cannot walk forever / explode a level.
 BRANCH_MAX_NODES = 200000
+
+# --- temporary path-usage instrumentation (which detection branches fire) -----
+PATH_HITS: Counter = Counter()
+
+
+def _hit(name: str) -> None:
+    """Record that a named detection branch executed (dead-path tracking)."""
+    PATH_HITS[name] += 1
 
 
 @dataclass
@@ -211,123 +216,45 @@ def _find_repeating_period(
     return best.period, list(names[best.start : best.start + best.period]), best.start
 
 
-def _nearest_descendants(tree: TraceToTree, node: dict, cat: str) -> List[dict]:
-    """Nearest descendants of ``node`` in category ``cat``, in time order.
-
-    Descent stops at each match, so the result is one abstraction layer. Direct
-    children are not enough: a python frame's children are often ATen ops whose
-    own children are the next python frames, so filtering them returns nothing.
-    """
-    found: List[dict] = []
-    queue = deque(tree.get_children_events(node))
-    while queue:
-        child = queue.popleft()
-        if child.get("cat") == cat:
-            found.append(child)
-        else:
-            queue.extend(tree.get_children_events(child))
-    found.sort(key=lambda e: e.get("ts", 0))
-    return found
-
-
-def _label_events(tree: TraceToTree, node: dict) -> Tuple[List[dict], str]:
-    """Events under ``node`` to run period detection over, and which tier they are.
-
-    Launches recur many times per iteration and swamp the iteration-level
-    signal, so python frames -- the semantic loop bodies -- are preferred. The
-    ladder exists because a capture without stack recording has none at all.
-    (Graph-replay traces are handled earlier, in
-    :func:`find_iteration_roots_generic`, straight off the flat event list -- one
-    graph launch per replay is the per-iteration marker there.)
-    """
-    for cat in (PYTHON_TIER, CPU_OP_TIER):
-        found = _nearest_descendants(tree, node, cat)
-        if len(found) >= MIN_LABEL_CHILDREN:
-            return found, cat
-    return tree.get_children_events(node), ALL_CHILDREN_TIER
-
-
-def _detect_iteration_roots_from_tree(
+def _detect_sibling_roots(
     tree: TraceToTree, roots, diagnostics: Optional[dict] = None
 ) -> Optional[List[dict]]:
-    """BFS down from ``roots`` for a repeating block, returned as synthetic roots.
+    """Periodicity ACROSS the top-level roots themselves.
 
-    Each returned event spans one block, from the first child's start to the last
-    child's end, so CPU-only leading work stays inside the iteration.
+    When each iteration is its own top-level frame -- separate parentless roots on
+    one thread, rather than repeating children of a shared loop -- the repeating
+    unit is the sequence of roots. Reattachment folds cross-thread worker roots
+    away first, so this only fires for genuine same-thread sibling iterations:
+    the one shape :func:`_detect_by_branch_descent`, which inspects a node's
+    children, cannot see. Each returned event spans one block, first child's start
+    to last child's end.
     """
     if isinstance(roots, dict):
         roots = [roots]
+    if len(roots) < MIN_LABEL_CHILDREN:
+        return None
 
-    # --- Periodicity ACROSS the sibling roots themselves: when each iteration is
-    # its own top-level frame, the repeating unit is the sequence of roots, not a
-    # pattern inside any one of them.
-    if len(roots) >= MIN_LABEL_CHILDREN:
-        ordered = sorted(roots, key=lambda e: e.get("ts", 0))
-        period, _, start = _find_repeating_period([e.get("name", "") for e in ordered])
-        if period is not None:
-            blocks = (len(ordered) - start) // period
-            sibling_roots = []
-            for index in range(blocks):
-                block = ordered[start + index * period : start + (index + 1) * period]
-                first, last = block[0], block[-1]
-                event = dict(first)
-                event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
-                sibling_roots.append(event)
-            if sibling_roots:
-                print(
-                    f"Generic: {len(sibling_roots)} sibling-root iterations "
-                    f"(period={period})."
-                )
-                if diagnostics is not None:
-                    diagnostics.update(
-                        {"period_label_tier": "sibling_roots", "period": period}
-                    )
-                return sibling_roots
+    ordered = sorted(roots, key=lambda e: e.get("ts", 0))
+    period, _, start = _find_repeating_period([e.get("name", "") for e in ordered])
+    if period is None:
+        return None
 
-    queue = deque((node, 0) for node in roots)
-    while queue:
-        current, depth = queue.popleft()
-        labelled, tier = _label_events(tree, current)
-        if not labelled:
-            continue
+    blocks = (len(ordered) - start) // period
+    sibling_roots = []
+    for index in range(blocks):
+        block = ordered[start + index * period : start + (index + 1) * period]
+        first, last = block[0], block[-1]
+        event = dict(first)
+        event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
+        sibling_roots.append(event)
+    if not sibling_roots:
+        return None
 
-        # Only recurse into GPU-bearing subtrees, tested on the events actually
-        # being used as labels rather than on the raw child list.
-        if not any(e.get("gpu_events") for e in labelled):
-            continue
-
-        period, _, start = _find_repeating_period([e.get("name", "") for e in labelled])
-        if period is None:
-            for event in labelled:
-                if event.get("gpu_events"):
-                    queue.append((event, depth + 1))
-            continue
-
-        blocks = (len(labelled) - start) // period
-        iteration_roots = []
-        for index in range(blocks):
-            block = labelled[start + index * period : start + (index + 1) * period]
-            first, last = block[0], block[-1]
-            root_event = dict(first)
-            root_event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
-            iteration_roots.append(root_event)
-
-        print(
-            f"Generic fallback: repeating pattern found under "
-            f"'{current.get('name')}' at depth {depth} (tier={tier}, period={period})"
-        )
-        print(f"Generic fallback: identified {len(iteration_roots)} iterations.")
-        if diagnostics is not None:
-            diagnostics.update(
-                {
-                    "period_label_tier": tier,
-                    "period": period,
-                    "period_depth": depth,
-                }
-            )
-        return iteration_roots or None
-
-    return None
+    print(f"Generic: {len(sibling_roots)} sibling-root iterations (period={period}).")
+    if diagnostics is not None:
+        diagnostics.update({"period_label_tier": "sibling_roots", "period": period})
+    _hit("old_tree.sibling_roots")
+    return sibling_roots
 
 
 def _entry_roots(tree: TraceToTree) -> List[dict]:
@@ -575,6 +502,7 @@ def find_iteration_roots_generic(
         key=lambda e: e["ts"],
     )
     if len(launches) >= MIN_LABEL_CHILDREN:
+        _hit("generic.graph_launch_fastpath")
         iteration_roots = [dict(e) for e in launches]
         print(f"Generic: {len(iteration_roots)} graph-launch iteration roots.")
         if diagnostics is not None:
@@ -591,7 +519,8 @@ def find_iteration_roots_generic(
     # Reunite dispatch threads (e.g. the autograd engine) with the host frames
     # that spawned them, so a training loop's backward work is reachable from the
     # main thread rather than flooding the top level as thousands of stray roots.
-    _reattach_worker_threads(tree)
+    if _reattach_worker_threads(tree):
+        _hit("generic.reattach_applied")
 
     # Preferred path: walk down to the frame whose children repeat and cover the
     # GPU. It reads the semantic loop body (forward_step/backward_step, denoise
@@ -599,7 +528,9 @@ def find_iteration_roots_generic(
     # deep sub-loop the way the tier ladder below can.
     branch_roots = _detect_by_branch_descent(tree, diagnostics)
     if branch_roots is not None:
+        _hit("generic.branch_descent_win")
         return branch_roots
+    _hit("generic.fell_through_to_old_tree")
 
     # Walk every cpu_root_node upward to a parentless node -- those are the true
     # per-thread entry points.
@@ -620,7 +551,9 @@ def find_iteration_roots_generic(
         print("Generic fallback: no root nodes found.")
         return None
 
-    roots = _detect_iteration_roots_from_tree(tree, trace_roots, diagnostics)
+    # Last resort: iterations that are top-level sibling frames (branch-descent
+    # only sees repeating *children* of a node, not a run of sibling roots).
+    roots = _detect_sibling_roots(tree, trace_roots, diagnostics)
     if roots is None:
         print("Generic fallback: no repeating child pattern found.")
     return roots
