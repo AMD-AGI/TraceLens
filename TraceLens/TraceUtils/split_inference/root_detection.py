@@ -21,6 +21,7 @@ from ...Trace2Tree.inference_iteration_roots import (
     BRANCH_DESCENT_TIER,
     GRAPH_LAUNCH_TIER,
     PERIOD_CONFLICT,
+    _hit,
     compare_periods,
     find_iteration_roots_generic,
     find_period_candidates,
@@ -340,6 +341,7 @@ def detect_generic(
     # because a launch is a point event, so it explains ~no time on its own even
     # when there is exactly one per iteration; kernel coverage is the real signal.
     if tier == GRAPH_LAUNCH_TIER:
+        _hit("detect_generic.graph_launch_tier")
         coverage = attribution.audit(collect_annotations(events), roots)
         if coverage.covered_selected >= COVERAGE_GATE:
             status = DetectStatus.SPLITTABLE
@@ -363,6 +365,7 @@ def detect_generic(
     # than re-confirming against the kernel period, which does not repeat cleanly
     # for training backward passes.
     if tier == BRANCH_DESCENT_TIER:
+        _hit("detect_generic.branch_descent_tier")
         return RootSet(
             roots=roots,
             method=method,
@@ -371,6 +374,7 @@ def detect_generic(
             diagnostics=diagnostics,
         )
 
+    _hit("detect_generic.kernel_period_crosscheck")
     kernel_names = [k.get("name", "") for k in attribution.kernels]
     kernel_candidates = find_period_candidates(kernel_names)
     kernel_blocks = kernel_candidates[0].repeats if kernel_candidates else None
