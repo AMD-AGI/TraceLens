@@ -11,6 +11,9 @@ from TraceLens.Reporting.generate_perf_report_pftrace_hip_activity import (
     _write_markdown_report,
     generate_perf_report_pftrace_hip_activity,
 )
+from TraceLens.Reporting.generate_perf_report_pytorch import (
+    main as generate_perf_report_pytorch_main,
+)
 from TraceLens.Reporting.pftrace_hip_activity_analysis import (
     Event,
     PftraceHipActivityAnalyzer,
@@ -381,10 +384,6 @@ class TestPftraceExtendedPhase9:
 def test_inference_report_main(tmp_path):
     trace = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 80)])
     out_dir = tmp_path / "inf_csvs"
-    import importlib
-
-    mod = importlib.import_module("TraceLens.Reporting.generate_perf_report_pytorch")
-
     old_argv = sys.argv
     sys.argv = [
         "generate_perf_report_pytorch",
@@ -396,7 +395,7 @@ def test_inference_report_main(tmp_path):
         "--enable_kernel_summary",
     ]
     try:
-        mod.main()
+        generate_perf_report_pytorch_main()
     finally:
         sys.argv = old_argv
     assert (out_dir / "gpu_timeline.csv").exists()
