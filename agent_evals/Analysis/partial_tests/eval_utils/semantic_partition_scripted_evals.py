@@ -43,7 +43,12 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ANALYSIS_EVAL_UTILS = os.path.abspath(os.path.join(_HERE, "..", "..", "eval_utils"))
 sys.path.insert(0, _ANALYSIS_EVAL_UTILS)
-from compare_lca_partitions import LCA_COL, both_purities, both_strict, load  # noqa: E402
+from compare_lca_partitions import (
+    LCA_COL,
+    both_purities,
+    both_strict,
+    load,
+)  # noqa: E402
 
 CSV_COLUMNS = [
     "index",
@@ -92,9 +97,13 @@ def run(output_dir: str, reference_dir: str, results_path: str) -> list[dict]:
     gold = load(gold_path)
     cand = load(candidate_path)
 
-    merged = gold[["key", LCA_COL]].rename(columns={LCA_COL: "lca_gold"}).merge(
-        cand[["key", LCA_COL]].rename(columns={LCA_COL: "lca_cand"}),
-        on="key",
+    merged = (
+        gold[["key", LCA_COL]]
+        .rename(columns={LCA_COL: "lca_gold"})
+        .merge(
+            cand[["key", LCA_COL]].rename(columns={LCA_COL: "lca_cand"}),
+            on="key",
+        )
     )
 
     if merged.empty:
@@ -140,7 +149,9 @@ def run(output_dir: str, reference_dir: str, results_path: str) -> list[dict]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LCA-partition purity vs with-capture gold")
+    parser = argparse.ArgumentParser(
+        description="LCA-partition purity vs with-capture gold"
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--reference-dir", required=True)
     parser.add_argument("--results", required=True)

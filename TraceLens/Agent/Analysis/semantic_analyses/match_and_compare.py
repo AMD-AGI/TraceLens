@@ -38,7 +38,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _helpers import load_labels, load_json
 
 
-
 def aggregate(labeled_kernels):
     """Aggregate labeled kernels by semantic_block.
 

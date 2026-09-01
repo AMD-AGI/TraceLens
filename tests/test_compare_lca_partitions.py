@@ -28,7 +28,13 @@ sys.path.insert(
 )
 from compare_lca_partitions import both_purities, both_strict, load  # noqa: E402
 
-COLUMNS = ["source", "gpu_op_uid", "name", "lowest_common_ancestor_id", "lowest_common_ancestor_name"]
+COLUMNS = [
+    "source",
+    "gpu_op_uid",
+    "name",
+    "lowest_common_ancestor_id",
+    "lowest_common_ancestor_name",
+]
 
 
 def _write_csv(path, rows):
@@ -128,14 +134,18 @@ def test_end_to_end_via_csv_files(tmp_path):
     )
     gold = load(gold_path)
     cand = load(cand_path)
-    merged = gold[["key", "lowest_common_ancestor_id"]].rename(
-        columns={"lowest_common_ancestor_id": "lca_gold"}
-    ).merge(
-        cand[["key", "lowest_common_ancestor_id"]].rename(
-            columns={"lowest_common_ancestor_id": "lca_cand"}
-        ),
-        on="key",
+    merged = (
+        gold[["key", "lowest_common_ancestor_id"]]
+        .rename(columns={"lowest_common_ancestor_id": "lca_gold"})
+        .merge(
+            cand[["key", "lowest_common_ancestor_id"]].rename(
+                columns={"lowest_common_ancestor_id": "lca_cand"}
+            ),
+            on="key",
+        )
     )
     assert len(merged) == 4
-    fwd, rev = both_purities(merged["lca_gold"].to_numpy(), merged["lca_cand"].to_numpy())
+    fwd, rev = both_purities(
+        merged["lca_gold"].to_numpy(), merged["lca_cand"].to_numpy()
+    )
     assert fwd == 1.0 and rev == 1.0

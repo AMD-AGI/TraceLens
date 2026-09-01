@@ -131,9 +131,7 @@ def aggregate_names(labels, key_fn=None):
         if key_fn and len(entry["sample_raw_names"]) < 5 and name != key:
             entry["sample_raw_names"].add(name)
 
-    ordered = sorted(
-        acc.values(), key=lambda e: (-e["total_dur_us"], e["name"])
-    )
+    ordered = sorted(acc.values(), key=lambda e: (-e["total_dur_us"], e["name"]))
     out = OrderedDict()
     for e in ordered:
         e["total_dur_us"] = round(e["total_dur_us"], 3)
@@ -191,6 +189,7 @@ def _sample_names(agg_a, agg_b, name_a, name_b, sample_size):
     and takes evenly-spaced picks so the sample spans high- and low-impact
     kernels rather than only the top-N.
     """
+
     def _spaced(agg, budget):
         items = list(agg.values())
         if len(items) <= budget:
@@ -244,7 +243,11 @@ def cmd_prepare_context(args):
         )
     else:
         ctx = _build_context(
-            agg_a, agg_b, args.name_a, args.name_b, "raw_name",
+            agg_a,
+            agg_b,
+            args.name_a,
+            args.name_b,
+            "raw_name",
             extra={"needs_stem_preprocessing": False},
         )
 
@@ -353,7 +356,11 @@ def cmd_apply_stem_rules(args):
 
     combined_stems = len(set(agg_a) | set(agg_b))
     ctx = _build_context(
-        agg_a, agg_b, args.name_a, args.name_b, "stem",
+        agg_a,
+        agg_b,
+        args.name_a,
+        args.name_b,
+        "stem",
         extra={
             "needs_stem_preprocessing": False,
             "stem_preprocessing_applied": True,
@@ -419,8 +426,11 @@ def _apply_side(labels, unified_map, raw_to_stem):
         if base in unified_map:
             n_mapped += 1
         k["semantic_block"] = unified
-    return {"kernels": len(labels.get("labeled_kernels", [])),
-            "mapped": n_mapped, "stemmed": n_stemmed}
+    return {
+        "kernels": len(labels.get("labeled_kernels", [])),
+        "mapped": n_mapped,
+        "stemmed": n_stemmed,
+    }
 
 
 def cmd_apply_map(args):
@@ -473,18 +483,20 @@ def main():
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_prep = sub.add_parser(
-        "prepare-context", help="Build the LLM unification context"
-    )
+    p_prep = sub.add_parser("prepare-context", help="Build the LLM unification context")
     _add_common(p_prep)
     p_prep.add_argument("-o", "--output", required=True, help="Output context JSON")
     p_prep.add_argument(
-        "--threshold", type=int, default=DEFAULT_THRESHOLD,
+        "--threshold",
+        type=int,
+        default=DEFAULT_THRESHOLD,
         help=f"Combined-unique count above which stem preprocessing is flagged "
         f"(default {DEFAULT_THRESHOLD})",
     )
     p_prep.add_argument(
-        "--sample-size", type=int, default=DEFAULT_SAMPLE_SIZE,
+        "--sample-size",
+        type=int,
+        default=DEFAULT_SAMPLE_SIZE,
         help=f"Names to sample when over threshold (default {DEFAULT_SAMPLE_SIZE})",
     )
     p_prep.set_defaults(func=cmd_prepare_context)
@@ -500,7 +512,9 @@ def main():
     )
     p_stem.add_argument("-o", "--output", required=True, help="Reduced context JSON")
     p_stem.add_argument(
-        "--threshold", type=int, default=DEFAULT_THRESHOLD,
+        "--threshold",
+        type=int,
+        default=DEFAULT_THRESHOLD,
         help=f"Target combined-stem count (default {DEFAULT_THRESHOLD})",
     )
     p_stem.set_defaults(func=cmd_apply_stem_rules)

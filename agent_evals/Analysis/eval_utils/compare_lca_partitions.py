@@ -85,7 +85,9 @@ def load(path: Path) -> pd.DataFrame:
     df["key"] = df["source"].astype(str) + ":" + df["gpu_op_uid"].astype(str)
     if df["key"].duplicated().any():
         n = int(df["key"].duplicated().sum())
-        raise ValueError(f"{path}: {n} duplicate (source, gpu_op_uid) keys; not a unique kernel id")
+        raise ValueError(
+            f"{path}: {n} duplicate (source, gpu_op_uid) keys; not a unique kernel id"
+        )
     return df
 
 
@@ -135,7 +137,9 @@ def both_purities(gold: np.ndarray, nc: np.ndarray):
     return purity_frac(gold, nc), purity_frac(nc, gold)
 
 
-def strict_consistency_frac(group_labels: np.ndarray, other_labels: np.ndarray) -> float:
+def strict_consistency_frac(
+    group_labels: np.ndarray, other_labels: np.ndarray
+) -> float:
     """Fraction of items whose entire group is homogeneous in ``other_labels``.
 
     Group items by ``group_labels``; an item is *consistent* iff every item that
@@ -169,13 +173,25 @@ def agreement_report(gold: pd.DataFrame, ncap: pd.DataFrame) -> None:
     print("=" * 78)
     print("LCA assignment agreement: with-capture (GOLD) vs no-capture")
     print("=" * 78)
-    print(f"with-capture kernels : {len(gold)}  | distinct gold LCAs: {gold[LCA_COL].nunique()}")
-    print(f"no-capture   kernels : {len(ncap)}  | distinct nc   LCAs: {ncap[LCA_COL].nunique()}")
+    print(
+        f"with-capture kernels : {len(gold)}  | distinct gold LCAs: {gold[LCA_COL].nunique()}"
+    )
+    print(
+        f"no-capture   kernels : {len(ncap)}  | distinct nc   LCAs: {ncap[LCA_COL].nunique()}"
+    )
 
-    g = gold[["key", "name", LCA_COL]].rename(columns={LCA_COL: "lca_gold", "name": "name_gold"})
-    n = ncap[["key", "name", LCA_COL]].rename(columns={LCA_COL: "lca_nc", "name": "name_nc"})
+    g = gold[["key", "name", LCA_COL]].rename(
+        columns={LCA_COL: "lca_gold", "name": "name_gold"}
+    )
+    n = ncap[["key", "name", LCA_COL]].rename(
+        columns={LCA_COL: "lca_nc", "name": "name_nc"}
+    )
     merged = g.merge(n, on="key")
-    name_agree = (merged["name_gold"] == merged["name_nc"]).mean() if len(merged) else float("nan")
+    name_agree = (
+        (merged["name_gold"] == merged["name_nc"]).mean()
+        if len(merged)
+        else float("nan")
+    )
 
     gold_only = len(gold) - len(merged)
     nc_only = len(ncap) - len(merged)
@@ -183,7 +199,9 @@ def agreement_report(gold: pd.DataFrame, ncap: pd.DataFrame) -> None:
     print(f"matched kernels (in both)   : {len(merged)}")
     print(f"gold-only (unmatched)       : {gold_only}")
     print(f"no-capture-only (unmatched) : {nc_only}")
-    print(f"kernel-name agreement on matched keys: {name_agree:.4f}  (sanity: should be 1.0)")
+    print(
+        f"kernel-name agreement on matched keys: {name_agree:.4f}  (sanity: should be 1.0)"
+    )
 
     df = merged[["key", "lca_gold", "lca_nc"]]
     print("-" * 78)
@@ -323,8 +341,12 @@ def baseline_report(merged: pd.DataFrame, title: str, n_trials: int) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("with_capture", type=Path, help="path to with-capture (GOLD) diff_stats.csv")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "with_capture", type=Path, help="path to with-capture (GOLD) diff_stats.csv"
+    )
     ap.add_argument("no_capture", type=Path, help="path to no-capture diff_stats.csv")
     ap.add_argument(
         "--trials",
@@ -343,11 +365,15 @@ def main() -> None:
     print()
 
     # Matched set for the baselines: identity present in both. Deterministic by key.
-    merged = gold[["key", LCA_COL]].rename(columns={LCA_COL: "lca_gold"}).merge(
-        ncap[["key", "source", "gpu_op_uid", LCA_COL, LCA_NAME]].rename(
-            columns={LCA_COL: "lca_nc", LCA_NAME: "nc_name"}
-        ),
-        on="key",
+    merged = (
+        gold[["key", LCA_COL]]
+        .rename(columns={LCA_COL: "lca_gold"})
+        .merge(
+            ncap[["key", "source", "gpu_op_uid", LCA_COL, LCA_NAME]].rename(
+                columns={LCA_COL: "lca_nc", LCA_NAME: "nc_name"}
+            ),
+            on="key",
+        )
     )
 
     # Guard: the random baseline is O(trials * kernels); cap trials on large sets.

@@ -160,9 +160,7 @@ def classify_comparison_method(
 
     reasons = []
     if k1["framework"] != k2["framework"]:
-        reasons.append(
-            f"frameworks differ ({k1['framework']} vs {k2['framework']})"
-        )
+        reasons.append(f"frameworks differ ({k1['framework']} vs {k2['framework']})")
     if k1["exec_mode"] == "graph" and not capture1_available:
         reasons.append("trace1 is graph-mode with no capture trace available")
     if k2["exec_mode"] == "graph" and not capture2_available:

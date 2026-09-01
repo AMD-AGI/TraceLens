@@ -48,7 +48,7 @@ def _deepest_module(nn_module_stack):
     parts = last_entry.split(" > ")
     deepest = parts[-1]
     if deepest.startswith("nn.Module: "):
-        deepest = deepest[len("nn.Module: "):]
+        deepest = deepest[len("nn.Module: ") :]
     return deepest
 
 
@@ -127,16 +127,10 @@ def build_labels(extracted, classified, pattern, tree_context=None):
 
     cat_counter = {}
 
-    preamble_blocks = _build_region_block_names(
-        preamble_set, cls_by_idx, cat_counter
-    )
+    preamble_blocks = _build_region_block_names(preamble_set, cls_by_idx, cat_counter)
     cycle_names = _build_cycle_names(body_rle, period, cat_counter)
-    epilogue_blocks = _build_region_block_names(
-        epilogue_set, cls_by_idx, cat_counter
-    )
-    secondary_blocks = _build_region_block_names(
-        secondary_set, cls_by_idx, cat_counter
-    )
+    epilogue_blocks = _build_region_block_names(epilogue_set, cls_by_idx, cat_counter)
+    secondary_blocks = _build_region_block_names(secondary_set, cls_by_idx, cat_counter)
 
     body_index_to_rle_group = {}
     for g_idx, (_cat, _count, indices, _types) in enumerate(body_rle):
@@ -212,7 +206,8 @@ def main():
     parser.add_argument("classified_json", help="Path to classified.json")
     parser.add_argument("pattern_json", help="Path to pattern.json")
     parser.add_argument(
-        "--tree-context", help="Path to tree_context.json (optional, enriches nn_module and cpu_op)"
+        "--tree-context",
+        help="Path to tree_context.json (optional, enriches nn_module and cpu_op)",
     )
     parser.add_argument("-o", "--output", help="Output JSON path (default: stdout)")
     args = parser.parse_args()

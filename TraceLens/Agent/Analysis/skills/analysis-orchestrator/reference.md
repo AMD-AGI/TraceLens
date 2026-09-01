@@ -626,7 +626,6 @@ The report at `<output_dir>/analysis.md` must use these exact `##` headers — d
 5. `## Detailed Analysis`
 6. `## Appendix`
 
-
 ### 11.1 Validate Report Structure (Retry up to 2x)
 
 After writing `analysis.md`, validate that the report contains all required `##` section headers. If validation fails, modify the report with the missing sections.

@@ -122,8 +122,9 @@ def _symbol_evidence(kernels, indices, top_kernels):
     return sorted(cats), sample_dims, top
 
 
-def _collect_contexts(name, kernels, condensed, run_per_kernel, shared, problematic,
-                      radius, top_kernels):
+def _collect_contexts(
+    name, kernels, condensed, run_per_kernel, shared, problematic, radius, top_kernels
+):
     """Per one-sided symbol, the unique (left,right) shared-neighbor contexts."""
     run_to_k = _run_to_kernel_indices(run_per_kernel)
     out = OrderedDict()
@@ -179,12 +180,24 @@ def cmd_prepare_context(args):
     run_b = run_index_per_kernel(seq_b)
 
     detail_a = _collect_contexts(
-        args.name_a, kernels_a, cond_a, run_a, shared, prob_a,
-        args.neighbor_radius, args.top_kernels,
+        args.name_a,
+        kernels_a,
+        cond_a,
+        run_a,
+        shared,
+        prob_a,
+        args.neighbor_radius,
+        args.top_kernels,
     )
     detail_b = _collect_contexts(
-        args.name_b, kernels_b, cond_b, run_b, shared, prob_b,
-        args.neighbor_radius, args.top_kernels,
+        args.name_b,
+        kernels_b,
+        cond_b,
+        run_b,
+        shared,
+        prob_b,
+        args.neighbor_radius,
+        args.top_kernels,
     )
 
     catalog = []
@@ -272,8 +285,9 @@ def _context_lookup(catalog):
     return out
 
 
-def _final_blocks(workload, kernels, shared, problematic, radius,
-                  lookup, context_renames, fallback):
+def _final_blocks(
+    workload, kernels, shared, problematic, radius, lookup, context_renames, fallback
+):
     """Compute the final semantic_block for each kernel; return (finals, audit)."""
     seq = [k.get("semantic_block", "") for k in kernels]
     cond = collapse_consecutive(seq)
@@ -316,8 +330,13 @@ def _write_audit(path, rows):
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(
             f,
-            fieldnames=["kernel_index", "name", "first_pass_block",
-                        "final_block", "context_id"],
+            fieldnames=[
+                "kernel_index",
+                "name",
+                "first_pass_block",
+                "final_block",
+                "context_id",
+            ],
         )
         w.writeheader()
         w.writerows(rows)
@@ -325,8 +344,16 @@ def _write_audit(path, rows):
 
 def _residual_one_sided(labels_a, labels_b):
     """Return one-sided condensed symbols remaining after apply."""
-    ca = set(collapse_consecutive([k.get("semantic_block", "") for k in labels_a["labeled_kernels"]]))
-    cb = set(collapse_consecutive([k.get("semantic_block", "") for k in labels_b["labeled_kernels"]]))
+    ca = set(
+        collapse_consecutive(
+            [k.get("semantic_block", "") for k in labels_a["labeled_kernels"]]
+        )
+    )
+    cb = set(
+        collapse_consecutive(
+            [k.get("semantic_block", "") for k in labels_b["labeled_kernels"]]
+        )
+    )
     return sorted(ca - cb), sorted(cb - ca)
 
 
@@ -339,7 +366,9 @@ def cmd_apply(args):
     labels_a_path = ctx["inputs"]["labels_a"]
     labels_b_path = ctx["inputs"]["labels_b"]
 
-    context_renames = {str(k): str(v) for k, v in (dec.get("context_renames") or {}).items()}
+    context_renames = {
+        str(k): str(v) for k, v in (dec.get("context_renames") or {}).items()
+    }
     fb_a = {str(k): str(v) for k, v in (dec.get("fallback_remap_a") or {}).items()}
     fb_b = {str(k): str(v) for k, v in (dec.get("fallback_remap_b") or {}).items()}
 
@@ -425,18 +454,26 @@ def main():
     p_prep.add_argument("--name-a", default="trace_a")
     p_prep.add_argument("--name-b", default="trace_b")
     p_prep.add_argument(
-        "--neighbor-radius", type=int, default=DEFAULT_RADIUS,
+        "--neighbor-radius",
+        type=int,
+        default=DEFAULT_RADIUS,
         help=f"Shared symbols to collect on each side (default {DEFAULT_RADIUS})",
     )
     p_prep.add_argument(
-        "--top-kernels", type=int, default=DEFAULT_TOP_KERNELS,
+        "--top-kernels",
+        type=int,
+        default=DEFAULT_TOP_KERNELS,
         help=f"Top kernel names by duration per context (default {DEFAULT_TOP_KERNELS})",
     )
     p_prep.add_argument("-o", "--output", required=True)
     p_prep.set_defaults(func=cmd_prepare_context)
 
-    p_apply = sub.add_parser("apply", help="Apply coherence decisions to labels in place")
-    p_apply.add_argument("--context", required=True, help="kernel_coherence_context.json")
+    p_apply = sub.add_parser(
+        "apply", help="Apply coherence decisions to labels in place"
+    )
+    p_apply.add_argument(
+        "--context", required=True, help="kernel_coherence_context.json"
+    )
     p_apply.add_argument("--decisions", required=True, help="LLM decisions JSON")
     p_apply.add_argument("--audit-csv-a", help="Per-kernel audit CSV for trace A")
     p_apply.add_argument("--audit-csv-b", help="Per-kernel audit CSV for trace B")

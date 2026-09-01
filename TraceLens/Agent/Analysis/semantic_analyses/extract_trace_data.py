@@ -265,9 +265,7 @@ def _write_split_regions(split_result, trace_path, output_dir):
             trace_dict.get("traceEvents", []),
             annotation_meta=region_meta,
         )
-        gpu_timeline = compute_gpu_timeline_metrics(
-            trace_dict.get("traceEvents", [])
-        )
+        gpu_timeline = compute_gpu_timeline_metrics(trace_dict.get("traceEvents", []))
         if gpu_timeline:
             merged_meta["gpu_timeline"] = gpu_timeline
             region_meta = {**region_meta, "gpu_timeline": gpu_timeline}
@@ -275,9 +273,7 @@ def _write_split_regions(split_result, trace_path, output_dir):
         filter_to_primary_stream(by_cat)
         kernels_tmp = extract_kernel_sequence(by_cat)
         is_graph_tmp, _ = detect_graph_mode(by_cat)
-        errors = run_assertions(
-            data, by_cat, kernels_tmp, is_graph_tmp, strict=False
-        )
+        errors = run_assertions(data, by_cat, kernels_tmp, is_graph_tmp, strict=False)
         if errors:
             print(f"Skipping {key}: {'; '.join(errors)}", file=sys.stderr)
             continue
@@ -290,9 +286,7 @@ def _write_split_regions(split_result, trace_path, output_dir):
             json.dump(result, f, indent=2)
         with open(meta_path, "w") as f:
             json.dump(merged_meta, f, indent=2)
-        print(
-            f"Wrote {extracted_path} ({len(kernels)} kernels)", file=sys.stderr
-        )
+        print(f"Wrote {extracted_path} ({len(kernels)} kernels)", file=sys.stderr)
 
 
 def main():

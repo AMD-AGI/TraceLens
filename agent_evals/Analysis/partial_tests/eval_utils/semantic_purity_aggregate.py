@@ -76,7 +76,9 @@ FORWARD_RE = re.compile(r"forward_purity=([0-9.]+)")
 
 
 def find_run_csvs(results_root: str, test_id: str) -> list[str]:
-    pattern = os.path.join(results_root, test_id, "run_*", "semantic_purity_results.csv")
+    pattern = os.path.join(
+        results_root, test_id, "run_*", "semantic_purity_results.csv"
+    )
     return sorted(glob.glob(pattern))
 
 
@@ -128,7 +130,11 @@ def aggregate_one(results_root: str, test_id: str) -> dict:
         }
 
     passed = avg >= floor
-    n_note = "" if len(parsed) > 1 else " (single run; a multi-run average is a stronger estimate)"
+    n_note = (
+        ""
+        if len(parsed) > 1
+        else " (single run; a multi-run average is a stronger estimate)"
+    )
     details = (
         f"n_runs={len(parsed)} strict_forward_values={[round(v, 4) for v in values]} "
         f"avg_strict_forward={avg:.4f} floor={floor}{n_note}"
@@ -140,12 +146,18 @@ def aggregate_one(results_root: str, test_id: str) -> dict:
         "result": "PASS" if passed else "FAIL",
         "details": details,
         "root_cause": "" if passed else "quality",
-        "recommended_fix": "" if passed else "Semantic-bucketing quality regressed below the observed-performance floor; investigate the clustering change",
+        "recommended_fix": (
+            ""
+            if passed
+            else "Semantic-bucketing quality regressed below the observed-performance floor; investigate the clustering change"
+        ),
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Aggregate semantic-purity gate across repeats")
+    parser = argparse.ArgumentParser(
+        description="Aggregate semantic-purity gate across repeats"
+    )
     parser.add_argument("--results-root", required=True)
     parser.add_argument(
         "--test-ids",
