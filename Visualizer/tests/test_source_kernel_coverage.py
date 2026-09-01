@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import io
 import json
 import sys
@@ -27,7 +28,7 @@ import visualizer.source as source
 import visualizer.source_policy as source_policy
 from visualizer.block_tree import BlockNode
 from visualizer.computation_graph import GraphNodeSpec, InlineFrameSpec
-from visualizer.kernel_pipeline import KernelPipelineStep
+from visualizer.kernel_pipeline import KernelPipelineStep, _ImportTarget
 from visualizer.model_graph import (
     GraphEdge,
     InlineFrame,
@@ -785,3 +786,674 @@ def test_loader_require_code_errors(monkeypatch):
     )
     with pytest.raises(ValueError, match="no computation block trees"):
         loader.load_model_spec("model", require_code=True)
+
+
+def test_kernel_ast_helpers_and_import_map():
+    module = kernel._parse_module(
+        "class Foo:\n    def bar(self):\n        return 1\n\ndef top():\n    return 2\n"
+    )
+    assert kernel._function_def(module, "top").name == "top"
+    assert kernel._function_def(module, "missing") is None
+    assert kernel._function_def(module, "Foo.bar").name == "bar"
+    assert kernel._function_def(module, "Foo.missing") is None
+    assert kernel._function_def(module, "Bar.bar") is None
+
+    assert kernel._expr_name(None) is None
+    assert kernel._expr_name(ast.parse("value").body[0].value) == "value"
+    assert kernel._expr_name(ast.parse("pkg.ops.run").body[0].value) == "pkg.ops.run"
+    call = ast.parse("items[0]()").body[0].value
+    assert kernel._call_name(call) == "op"
+    assert kernel._iter_calls(_function("def forward():\n    helper()\n"))
+
+    tree = kernel._parse_module(
+        "from .ops import *\n"
+        "from pkg.ops import run as execute\n"
+        "try:\n"
+        "    from pkg.alt import helper\n"
+        "except ImportError:\n"
+        "    from pkg.fallback import helper\n"
+    )
+    imports = kernel._collect_import_map(tree, "pkg.wrapper")
+    assert "execute" in imports and imports["execute"].symbol == "run"
+    assert imports["helper"].module.endswith("fallback")
+    assert "*" not in imports
+    assert kernel._resolve_relative_module("", "pkg.wrapper", 0) == "pkg.wrapper"
+
+
+def test_kernel_module_file_cache_find_spec_and_github(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(kernel, "_KERNEL_SEARCH_ROOTS", [])
+    monkeypatch.setattr(kernel, "_KERNEL_FIXTURE_ROOT", str(tmp_path / "fixtures"))
+    (tmp_path / "fixtures").mkdir()
+    assert kernel._kernel_search_roots()[0] == Path(tmp_path / "fixtures")
+    assert kernel._search_root_module_file("missing.mod") is None
+
+    origin = tmp_path / "installed.py"
+    origin.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        kernel.importlib.util,
+        "find_spec",
+        lambda name: types.SimpleNamespace(origin=str(origin)),
+    )
+    assert kernel._module_file_path("installed.mod") == origin
+
+    monkeypatch.setattr(
+        kernel.importlib.util,
+        "find_spec",
+        lambda name: (_ for _ in ()).throw(ModuleNotFoundError()),
+    )
+    cache = tmp_path / "kcache"
+    monkeypatch.setattr(kernel, "_KERNEL_SOURCE_CACHE", cache)
+    cached = cache / "fla" / "ops.py"
+    cached.parent.mkdir(parents=True)
+    cached.write_text("def run():\n    pass\n", encoding="utf-8")
+    assert kernel._module_file_path("fla.ops") == cached
+
+    cached.unlink()
+    init = cache / "fla" / "nested" / "__init__.py"
+    init.parent.mkdir(parents=True)
+    init.write_text("", encoding="utf-8")
+    assert kernel._module_file_path("fla.nested") == init
+    init.unlink()
+
+    monkeypatch.setattr(
+        kernel.importlib.util,
+        "find_spec",
+        lambda name: types.SimpleNamespace(origin="namespace"),
+    )
+    source_policy.set_source_policy(source_policy.SourcePolicy())
+
+    class Response:
+        def __init__(self, payload: bytes):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self):
+            return self._payload
+
+    monkeypatch.setattr(
+        kernel.urllib.request,
+        "urlopen",
+        lambda url, timeout: Response(b"def run():\n    return 1\n"),
+    )
+    fetched = kernel._module_file_path("fla.ops.chunk")
+    assert fetched is not None and fetched.read_text(encoding="utf-8").startswith(
+        "def run"
+    )
+
+    calls: list[str] = []
+
+    def urlopen(url, timeout):
+        calls.append(str(url))
+        if len(calls) == 1:
+            raise urllib.error.URLError("missing py")
+        return Response(b"# package init\n")
+
+    monkeypatch.setattr(kernel.urllib.request, "urlopen", urlopen)
+    init_path = kernel._module_file_path("fla.ops.missing")
+    assert init_path is not None and init_path.name == "__init__.py"
+    assert len(calls) == 2
+
+    monkeypatch.setattr(
+        kernel.urllib.request,
+        "urlopen",
+        lambda url, timeout: (_ for _ in ()).throw(urllib.error.URLError("offline")),
+    )
+    assert kernel._module_file_path("fla.ops.offline") is None
+    assert kernel._module_file_path("unknownpkg.ops") is None
+
+
+def test_kernel_read_source_import_and_symbol_inspect(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(kernel, "_KERNEL_SEARCH_ROOTS", [])
+    monkeypatch.setattr(kernel, "_KERNEL_FIXTURE_ROOT", None)
+    imported = tmp_path / "imported_mod.py"
+    imported.write_text("VALUE = 7\n", encoding="utf-8")
+    mod = types.ModuleType("imported_mod")
+    mod.__file__ = str(imported)
+    monkeypatch.setitem(sys.modules, "imported_mod", mod)
+    assert kernel._read_module_source("imported_mod") == ("VALUE = 7\n", "imported_mod")
+
+    monkeypatch.setattr(kernel, "_search_root_module_file", lambda module: None)
+    monkeypatch.setattr(
+        kernel.importlib,
+        "import_module",
+        lambda name: (_ for _ in ()).throw(RuntimeError()),
+    )
+    monkeypatch.setattr(kernel, "_module_file_path", lambda module: None)
+    assert kernel._read_module_source("absent.mod") is None
+    assert kernel._find_symbol_definition("absent.mod", "run") is None
+
+    other = tmp_path / "other_mod.py"
+    other.write_text(
+        "class Widget:\n    def forward(self, x):\n        return x\n\ndef helper(x):\n    return x\n",
+        encoding="utf-8",
+    )
+    star = tmp_path / "star_mod.py"
+    star.write_text("from other_mod import *\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    sys.modules.pop("star_mod", None)
+    sys.modules.pop("other_mod", None)
+    monkeypatch.undo()
+    monkeypatch.setattr(kernel, "_KERNEL_SEARCH_ROOTS", [])
+    monkeypatch.setattr(kernel, "_KERNEL_FIXTURE_ROOT", None)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    found = kernel._find_symbol_definition("star_mod", "Widget")
+    assert found is not None and found[1] == "Widget.forward"
+    found_fn = kernel._find_symbol_definition("star_mod", "helper")
+    assert found_fn is not None and found_fn[1] == "helper"
+    missing_class = kernel._parse_module(
+        "class Op:\n    def extra(self):\n        pass\n"
+    )
+    monkeypatch.setattr(
+        kernel,
+        "_read_module_source",
+        lambda module: ("class Op:\n    def extra(self):\n        pass\n", module),
+    )
+    monkeypatch.setattr(
+        kernel.importlib,
+        "import_module",
+        lambda name: (_ for _ in ()).throw(RuntimeError()),
+    )
+    assert kernel._find_symbol_definition("pkg", "Op") is None
+    del missing_class
+
+
+def test_kernel_flags_docstrings_merge_and_recurrence(monkeypatch):
+    unconditional = KernelPipelineStep("a", "a", "KernelOp", "a", [])
+    assert kernel._step_matches_flags(unconditional, {})
+    assert kernel._step_matches_flags(
+        KernelPipelineStep("a", "a", "KernelOp", "a", [], condition="not use_gate"),
+        {"use_gate": False},
+    )
+    assert not kernel._step_matches_flags(
+        KernelPipelineStep(
+            "a", "a", "KernelOp", "a", [], condition="state is not None"
+        ),
+        {},
+    )
+    assert kernel._step_matches_flags(
+        KernelPipelineStep("a", "a", "KernelOp", "a", [], condition="use_gate"),
+        {"use_gate": True},
+    )
+    assert not kernel._step_matches_flags(
+        KernelPipelineStep("a", "a", "KernelOp", "a", [], condition="use_gate"),
+        {"use_gate": False},
+    )
+    assert kernel._step_matches_flags(
+        KernelPipelineStep("a", "a", "KernelOp", "a", [], condition="mode"),
+        {"mode": "fast"},
+    )
+    assert kernel._details_for_call("src", "call") == []
+    assert kernel._merge_computation_text("", "right") == "right"
+    assert kernel._merge_computation_text("left", "left") == "left"
+    assert kernel._merge_computation_text("left", "right") == "left\nright"
+
+    monkeypatch.setattr(
+        kernel.ast, "unparse", lambda stmt: (_ for _ in ()).throw(ValueError())
+    )
+    assert kernel._statement_computation(ast.parse("x = 1").body[0]) == ""
+    monkeypatch.undo()
+
+    monkeypatch.setattr(kernel, "_find_symbol_definition", lambda module, symbol: None)
+    assert kernel._docstring_computes_line("pkg", "run") is None
+    monkeypatch.setattr(
+        kernel,
+        "_find_symbol_definition",
+        lambda module, symbol: ("x = 1\n", "missing", module),
+    )
+    assert kernel._docstring_computes_line("pkg", "run") is None
+    monkeypatch.setattr(
+        kernel,
+        "_find_symbol_definition",
+        lambda module, symbol: (
+            "def run(x):\n    '''Notes only.'''\n    return x\n",
+            "run",
+            module,
+        ),
+    )
+    assert kernel._docstring_computes_line("pkg", "run") is None
+    monkeypatch.setattr(
+        kernel,
+        "_find_symbol_definition",
+        lambda module, symbol: (
+            "def run(x):\n    '''Computes: q @ k\\nOther.'''\n    return x\n",
+            "run",
+            module,
+        ),
+    )
+    assert kernel._docstring_computes_line("pkg", "run") == "q @ k"
+
+    assert kernel._recurrence_for_call("l2norm_fwd", {}) is None
+    assert kernel._recurrence_for_call("gated_delta_fwd", {}) is None
+    imports = {"gated_delta_fwd": _ImportTarget("pkg.ops", "run")}
+    monkeypatch.setattr(kernel, "_find_symbol_definition", lambda module, symbol: None)
+    assert kernel._recurrence_for_call("gated_delta_fwd", imports) is None
+    combined = (
+        "def run(x):\n"
+        "    '''Computes: q @ k'''\n"
+        "    b_v = tl.load(p_v) - b_v\n"
+        "    b_h1 *= tl.exp2(g)\n"
+        "    x = tl.dot(k, b_h1)\n"
+    )
+    monkeypatch.setattr(
+        kernel,
+        "_find_symbol_definition",
+        lambda module, symbol: (combined, "run", module),
+    )
+    assert "v_new" in kernel._recurrence_for_call("gated_delta_fwd", imports)
+
+    stmt = ast.parse("y = gated_delta_fwd(x)").body[0]
+    call = stmt.value
+    text = kernel._computation_for_statement(
+        stmt, call, "gated_delta_fwd", imports=imports
+    )
+    assert "gated_delta_fwd" in text
+    assert "q @ k" in text
+    assert "h = exp2(g) · h" in text
+
+
+def test_kernel_pipeline_skips_dedupe_aliases_and_unnamed_if():
+    text = """
+def forward(q, k, g, beta, enabled=True):
+    n = q.size()
+    m = len(q)
+    warn()
+    apply()
+    w = helper_bwd(q)
+    compress_state(q)
+    y = torch.exp(q)
+    z = math.sqrt(q)
+    triton.language.load(q)
+    skip_me(q)
+    helper(q)
+    helper(q)
+    a = l2norm_fwd(q_raw)
+    b = l2norm_fwd(g_input)
+    c = l2norm_fwd(beta_raw)
+    if obj.flag:
+        extra_fwd(q)
+    if enabled:
+        gated_fwd(q)
+    helper()
+    helper()
+"""
+    func = _function(text)
+    steps = kernel._extract_pipeline_from_function(
+        func,
+        source=text,
+        prefix="forward",
+        skip_calls={"skip_me"},
+        tensor_ports={"q", "g", "beta"},
+        flags={"enabled": False},
+    )
+    names = [step.call_name for step in steps]
+    assert "helper_bwd" not in names
+    assert "compress_state" not in names
+    assert "exp" not in names
+    assert "skip_me" not in names
+    assert "gated_fwd" not in names
+    assert "extra_fwd" in names
+    helper_steps = [step for step in steps if step.call_name == "helper"]
+    assert len(helper_steps) == 2
+    merged = next(step for step in helper_steps if "q" in step.tensor_inputs)
+    assert "helper(q)" in merged.computation
+    l2 = [step for step in steps if step.call_name == "l2norm_fwd"]
+    ports = {frozenset(step.tensor_inputs) for step in l2}
+    assert frozenset({"q"}) in ports
+    assert frozenset({"g"}) in ports
+    assert frozenset({"beta"}) in ports
+
+
+def test_kernel_decompose_assign_triton_and_follow(monkeypatch):
+    assert [
+        op.label
+        for op in kernel._decompose_computation_expr(
+            ast.parse("load(x) + foo(y)", mode="eval").body
+        )
+    ] == ["+"]
+    labels = [
+        op.label
+        for op in kernel._decompose_computation_expr(
+            ast.parse("(a / b) - (c ** d)", mode="eval").body
+        )
+    ]
+    assert "÷" in labels and "−" in labels and "^" in labels
+    assert (
+        kernel._decompose_computation_expr(ast.parse("a | b", mode="eval").body) == []
+    )
+    both = kernel._decompose_computation_expr(
+        ast.parse("sigmoid(x) * exp(y)", mode="eval").body
+    )
+    assert both[-1].label == "×"
+    assert both[-1].second_operand == 0
+
+    undecorated = _function("def fused_kernel(x):\n    return x\n", "fused_kernel")
+    assert not kernel._function_has_triton_jit_decorator(undecorated)
+    decorated = _function(
+        "@triton.jit(debug=True)\ndef fused_kernel(x):\n    return x\n",
+        "fused_kernel",
+    )
+    assert kernel._function_has_triton_jit_decorator(decorated)
+
+    assigns = ast.parse(
+        "b_h = b_k * b_v\n"
+        "x = x * rstd\n"
+        "y = 1 / z\n"
+        "idx = table[0]\n"
+        "plain = a + b\n"
+    ).body
+    assert kernel._assign_performs_computation(assigns[0])
+    assert kernel._assign_performs_computation(assigns[1])
+    assert kernel._assign_performs_computation(assigns[2])
+    assert not kernel._assign_performs_computation(assigns[3])
+    assert not kernel._assign_performs_computation(assigns[4])
+
+    assert (
+        kernel._follow_to_triton_kernel("x = 1", "f", "m", imports={}, depth=7) is None
+    )
+    assert kernel._follow_to_triton_kernel("x = 1", "missing", "m", imports={}) is None
+
+    apply_src = """
+class HelperFn:
+    @staticmethod
+    def forward(ctx, x):
+        fused_kernel[(1,)](x)
+        helper_bwd(x)
+        len(x)
+
+@triton.jit
+def fused_kernel(x, rstd, scale):
+    a = tl.sigmoid(x)
+    b = a * rstd
+    c = b * scale
+
+def helper(x):
+    HelperFn.apply(x)
+"""
+    triton_func = kernel._follow_to_triton_kernel(
+        apply_src, "helper", "pkg.ops", imports={}
+    )
+    assert triton_func is not None and triton_func.name == "fused_kernel"
+
+    nested_src = """
+from pkg.ops import helper_fwd
+def outer(x):
+    helper_fwd(x)
+"""
+    monkeypatch.setattr(
+        kernel,
+        "_find_symbol_definition",
+        lambda module, symbol: (
+            (apply_src, "helper", "pkg.ops")
+            if symbol in {"helper_fwd", "helper"}
+            else None
+        ),
+    )
+    nested = kernel._follow_to_triton_kernel(
+        nested_src,
+        "outer",
+        "pkg.wrapper",
+        imports={"helper_fwd": _ImportTarget("pkg.ops", "helper_fwd")},
+    )
+    assert nested is not None and nested.name == "fused_kernel"
+
+    assert not kernel._should_expand_kernel_op("chunk_gla_fwd_h")
+    assert not kernel._should_expand_kernel_op("chunk_gated_delta_rule")
+    assert not kernel._should_expand_kernel_op("foo_bar_baz_fwd")
+    assert kernel._should_expand_kernel_op("helper")
+
+    monkeypatch.setattr(kernel, "_resolve_implementation", lambda *args, **kwargs: None)
+    assert (
+        kernel.introspect_kernel_op_substeps("helper", {}, "pkg.ops", parent_attr="p")
+        == ()
+    )
+    monkeypatch.setattr(
+        kernel,
+        "_resolve_implementation",
+        lambda *args, **kwargs: ("def helper(x):\n    return x\n", "helper", "pkg.ops"),
+    )
+    assert (
+        kernel.introspect_kernel_op_substeps("helper", {}, "pkg.ops", parent_attr="p")
+        == ()
+    )
+
+    one_op = """
+def helper(x):
+    fused_kernel[(1,)](x)
+@triton.jit
+def fused_kernel(x):
+    a = tl.sigmoid(x)
+"""
+    monkeypatch.setattr(
+        kernel,
+        "_resolve_implementation",
+        lambda *args, **kwargs: (one_op, "helper", "pkg.ops"),
+    )
+    assert (
+        kernel.introspect_kernel_op_substeps("helper", {}, "pkg.ops", parent_attr="p")
+        == ()
+    )
+
+    rstd_src = """
+def helper(x):
+    fused_kernel[(1,)](x)
+@triton.jit
+def fused_kernel(x, rstd):
+    a = tl.sigmoid(x)
+    b = a * rstd
+"""
+    monkeypatch.setattr(
+        kernel,
+        "_resolve_implementation",
+        lambda *args, **kwargs: (rstd_src, "helper", "pkg.ops"),
+    )
+    children = kernel.introspect_kernel_op_substeps(
+        "helper", {}, "pkg.ops", parent_attr="parent"
+    )
+    assert [child.label for child in children] == ["Sigmoid", "×"]
+    assert children[-1].second_operand == "input"
+
+
+def test_source_import_fallbacks_and_resolve_gaps(tmp_path: Path, monkeypatch):
+    real_import = builtins.__import__
+
+    def blocked_import(name, *args, **kwargs):
+        if name == "huggingface_hub" or name.startswith("huggingface_hub."):
+            raise ImportError("blocked")
+        if name == "transformers" or name.startswith("transformers."):
+            raise ImportError("blocked")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
+    assert source._hub_cache_root() == Path.home() / ".cache" / "huggingface" / "hub"
+    assert source._list_repo_python_files("org/model") == []
+    assert source._download_repo_files("org/model", ["a.py"]) == []
+    assert source._transformers_modeling_path("gpt2") is None
+    monkeypatch.setattr(builtins, "__import__", real_import)
+
+    monkeypatch.setitem(sys.modules, "transformers", types.ModuleType("transformers"))
+    monkeypatch.setattr(
+        source.importlib.util,
+        "find_spec",
+        lambda name: types.SimpleNamespace(origin="/definitely/missing/modeling.py"),
+    )
+    assert source._transformers_modeling_path("demo") is None
+
+    model = tmp_path / "modeling_x.py"
+    model.write_text("class X: pass\n", encoding="utf-8")
+    policy = source_policy.SourcePolicy.from_env_and_cli(["amd/repo"])
+    monkeypatch.setattr(source, "fetch_github_source", lambda ref, **kwargs: model)
+    files, label = source.resolve_github_files(
+        "github:amd/repo@main:modeling_x.py", source_policy=policy
+    )
+    assert files == [model]
+    assert "github://" in label
+
+    local = tmp_path / "ckpt"
+    local.mkdir()
+    (local / "model.py").write_text("class Decoder: pass\n", encoding="utf-8")
+    (local / "config.json").write_text('{"model_type": "demo"}', encoding="utf-8")
+    resolved, labels = source.resolve_source_files(local, {"model_type": "demo"})
+    assert any(path.name == "model.py" for path in resolved)
+    assert labels
+
+    monkeypatch.setattr(source, "fetch_github_source", lambda ref, **kwargs: tmp_path)
+    assert source._transformers_github_modeling_file(["demo"]) is None
+
+    auto = tmp_path / "modeling_auto.py"
+    auto.write_text("", encoding="utf-8")
+    monkeypatch.setattr(source, "_hub_snapshot_root", lambda model_id: None)
+    monkeypatch.setattr(source, "_transformers_modeling_path", lambda model_type: None)
+    monkeypatch.setattr(source, "_list_repo_python_files", lambda model_id: [])
+    monkeypatch.setattr(
+        source, "_transformers_github_modeling_file", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        source,
+        "_download_repo_files",
+        lambda model_id, names: [auto] if names == ["modeling_auto.py"] else [],
+    )
+    files, labels = source.resolve_source_files(
+        "org/auto",
+        {"model_type": "auto", "auto_map": {"AutoModel": "modeling_auto.Model"}},
+    )
+    assert files == [auto]
+    assert labels == ["hf://org/auto"]
+
+
+def test_model_graph_node_kinds_classify_and_reduced_issues():
+    assert model_graph._edge_style(None, 0, 1) == "solid"
+    root = _block(attr_name="attn", label="Attn")
+    top = GraphNodeSpec(key="attn", block=root)
+    assert (
+        model_graph._node_kind_for_spec(
+            top,
+            root=root,
+            inline_member_indices=set(),
+            node_index=0,
+            subgraph_keys=set(),
+        )
+        == NodeKind.TOP_LEVEL
+    )
+    inner = GraphNodeSpec(key="inner", block=_block(attr_name="inner"))
+    assert (
+        model_graph._node_kind_for_spec(
+            inner,
+            root=root,
+            inline_member_indices=set(),
+            node_index=1,
+            subgraph_keys={"inner"},
+        )
+        == NodeKind.SUBGRAPH
+    )
+    assert (
+        model_graph._node_kind_for_spec(
+            inner,
+            root=root,
+            inline_member_indices={1},
+            node_index=1,
+            subgraph_keys=set(),
+        )
+        == NodeKind.INLINE
+    )
+    basic = GraphNodeSpec(
+        key="lin",
+        block=_block(attr_name="q_proj", is_basic=True, children=[]),
+    )
+    assert (
+        model_graph._node_kind_for_spec(
+            basic,
+            root=root,
+            inline_member_indices=set(),
+            node_index=2,
+            subgraph_keys=set(),
+        )
+        == NodeKind.LEAF
+    )
+    synthetic = GraphNodeSpec(key="in", label="hidden_states", synthetic="@input")
+    assert (
+        model_graph._node_kind_for_spec(
+            synthetic,
+            root=root,
+            inline_member_indices=set(),
+            node_index=3,
+            subgraph_keys=set(),
+        )
+        == NodeKind.LEAF
+    )
+    composite = GraphNodeSpec(
+        key="mod",
+        block=_block(attr_name="mlp", is_basic=False, children=[_block()]),
+    )
+    assert (
+        model_graph._node_kind_for_spec(
+            composite,
+            root=root,
+            inline_member_indices=set(),
+            node_index=4,
+            subgraph_keys=set(),
+        )
+        == NodeKind.BLOCK
+    )
+
+    assert (
+        model_graph.classify_operation(
+            _block(
+                class_name="Custom",
+                details=["torch.nn.functional.softmax(...)"],
+                is_basic=False,
+                attr_name="act",
+            )
+        )
+        == OperationKind.TORCH_FUNCTIONAL
+    )
+    assert (
+        model_graph.classify_operation(
+            _block(class_name="CustomOp", details=["kernel: fused"], is_basic=False)
+        )
+        == OperationKind.GPU_KERNEL
+    )
+    assert (
+        model_graph.classify_operation(
+            _block(class_name="CustomAttention", is_basic=False, attr_name="attn")
+        )
+        == OperationKind.COMPOSITE
+    )
+    assert (
+        model_graph.classify_operation(_block(class_name="RMSNorm", is_basic=True))
+        == OperationKind.NN_MODULE
+    )
+
+    payload = ModelGraph(
+        "plain",
+        nodes=[ModelGraphNode("n", NodeKind.LEAF, "Linear")],
+        edges=[GraphEdge("a", "b")],
+        inline_frames=[InlineFrame("f", "Frame", ["n"])],
+    ).to_dict()
+    assert "operation" not in payload["nodes"][0]
+    assert "label" not in payload["edges"][0]
+    assert "sublabel" not in payload["inline_frames"][0]
+
+    ok = ModelGraph(
+        "ok",
+        nodes=[
+            ModelGraphNode("in", NodeKind.LEAF, "Input", OperationKind.SYNTHETIC),
+            ModelGraphNode("op", NodeKind.LEAF, "Linear", OperationKind.NN_MODULE),
+            ModelGraphNode("block", NodeKind.BLOCK, "MLP", OperationKind.COMPOSITE),
+        ],
+    )
+    model_graph.assert_operations_reduced(ok)
+    issues = model_graph.collect_non_reduced_operations(
+        ModelGraph(
+            "root",
+            nodes=[
+                ModelGraphNode("sub", NodeKind.SUBGRAPH, "Child", metadata={}),
+                ModelGraphNode("leaf", NodeKind.LEAF, "Mod", OperationKind.COMPOSITE),
+            ],
+        )
+    )
+    assert issues and issues[0].reason.startswith("composite block")

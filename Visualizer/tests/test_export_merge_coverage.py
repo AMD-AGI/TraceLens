@@ -9,10 +9,12 @@
 from __future__ import annotations
 
 import ast
+from types import SimpleNamespace
 
 import pytest
 
 from model_explorer_export import labels, merge, overview, shapes, styles
+from visualizer.basic_ops import BasicOpFilter
 from visualizer.block_tree import BlockNode
 from visualizer.blocks import BlockComponent, LayerVariant
 from visualizer.computation_graph import ComputationGraph, GraphNodeSpec
@@ -31,7 +33,6 @@ from visualizer.shape_inference import (
     OperatorRecord,
     ShapeContext,
     ShapeInferencer,
-    Symbol,
     TensorSpec,
     _broadcast_rank,
     _config_dtype,
@@ -47,6 +48,8 @@ from visualizer.shape_inference import (
     _resolve_dim_expr,
     _symbolic_binop,
     _topological_order,
+    build_operator_export,
+    save_operator_export,
     subgraph_boundary_signature,
 )
 
@@ -1009,3 +1012,416 @@ def test_shape_misc_helper_error_and_fallback_paths():
     assert _heuristic_linear_out_features("router", ShapeContext({"E": 8})) == 8
     assert _heuristic_linear_out_features("custom_proj", ShapeContext({"H": 16})) == 16
     assert _heuristic_linear_out_features(None, ShapeContext()) is None
+
+
+def test_merge_nested_namespace_segment_variants():
+    pipeline = BlockNode("@pipeline", "KernelPipeline", "other", "Pipeline")
+    synthetic = BlockNode("@generated", "Generated", "other", "Generated")
+    regular = BlockNode("child.attr", "Child", "other", "Child")
+
+    assert (
+        merge._nested_namespace_segment(pipeline, "Chunk pipeline") == "Chunk_pipeline"
+    )
+    assert merge._nested_namespace_segment(synthetic, "Friendly title") == (
+        "Friendly_title"
+    )
+    assert merge._nested_namespace_segment(synthetic, "@generated") == "generated"
+    assert merge._nested_namespace_segment(regular, "Ignored") == "child.attr"
+    assert (
+        merge._kernel_pipeline_step(
+            BlockNode("root", "Root", "other", "Root", children=[regular, pipeline])
+        )
+        is pipeline
+    )
+    assert merge._kernel_pipeline_step(regular) is None
+    assert merge._is_tensor_port({"attrs": _attrs(synthetic="@tensor")})
+    assert not merge._is_tensor_port({})
+
+
+def test_merge_section_tree_resolution_variant_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    basic = BasicOpFilter.for_detailed()
+    attention_tree = BlockNode(
+        "attention", "VariantAttention", "attention", "Attention"
+    )
+    ffn_tree = BlockNode("experts", "VariantFFN", "moe", "Experts")
+    fallback_tree = BlockNode("experts", "FallbackFFN", "moe", "Fallback")
+    trees = [
+        ("Attention detail", attention_tree),
+        ("FFN detail", ffn_tree),
+        ("Fallback detail", fallback_tree),
+    ]
+    monkeypatch.setattr(merge, "architecture_section_trees", lambda spec: trees)
+    monkeypatch.setattr(merge, "subgraph_warrants_json_export", lambda *a, **k: True)
+    spec = _spec()
+
+    assert merge._resolve_section_tree_by_class(spec, None, basic_ops=basic) is None
+    assert (
+        merge._resolve_section_tree_by_class(spec, "VariantAttention", basic_ops=basic)
+        == trees[0]
+    )
+    assert (
+        merge._resolve_section_tree_by_class(spec, "Missing", basic_ops=basic) is None
+    )
+
+    attention = _component("self_attn", "attention", class_name="Base")
+    ffn = _component("experts", "moe", class_name="Base", label="Fallback")
+    variant = LayerVariant(
+        "variant",
+        2,
+        "Attention",
+        "VariantAttention",
+        "FFN",
+        "VariantFFN",
+        "experts",
+    )
+    assert (
+        merge._resolve_section_tree_for_component(
+            spec, attention, variant=variant, basic_ops=basic
+        )
+        == trees[0]
+    )
+    assert (
+        merge._resolve_section_tree_for_component(
+            spec, ffn, variant=variant, basic_ops=basic
+        )
+        == trees[1]
+    )
+
+    monkeypatch.setattr(
+        merge,
+        "_resolve_section_tree_by_class",
+        lambda spec, class_name, basic_ops: None,
+    )
+    variant.ffn_label = "Fallback"
+    assert (
+        merge._resolve_section_tree_for_component(
+            spec, ffn, variant=variant, basic_ops=basic
+        )
+        == trees[2]
+    )
+
+
+def test_merge_resolve_section_tree_disambiguates_and_uses_largest(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    small = BlockNode(
+        "shared",
+        "Small",
+        "other",
+        "Small",
+        children=[BlockNode("a", "A", "other", "A")],
+    )
+    large = BlockNode(
+        "shared",
+        "Large",
+        "other",
+        "Large",
+        children=[
+            BlockNode("a", "A", "other", "A"),
+            BlockNode("b", "B", "other", "B"),
+        ],
+    )
+    trees = [("Small section", small), ("Large section", large)]
+    monkeypatch.setattr(merge, "architecture_section_trees", lambda spec: trees)
+    monkeypatch.setattr(merge, "subgraph_warrants_json_export", lambda *a, **k: True)
+    basic = BasicOpFilter.for_detailed()
+
+    assert (
+        merge._resolve_section_tree(
+            _spec(), "shared", component_label="Small", basic_ops=basic
+        )
+        == trees[0]
+    )
+    assert (
+        merge._resolve_section_tree(
+            _spec(), "shared", component_label="Unknown", basic_ops=basic
+        )
+        == trees[1]
+    )
+    assert (
+        merge._resolve_section_tree(
+            _spec(), "missing", component_label="", basic_ops=basic
+        )
+        is None
+    )
+
+
+def test_merge_append_section_unresolved_detail_summary(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(merge, "component_has_detail_section", lambda *a: True)
+    monkeypatch.setattr(
+        merge, "_resolve_section_tree_for_component", lambda *a, **k: None
+    )
+    nodes: list[dict[str, object]] = []
+    exits = merge._append_section(
+        nodes,
+        spec=_spec(),
+        component=_component("attn", "attention", label="Attention"),
+        id_prefix="decoder/attn",
+        namespace_prefix="decoder/Attention",
+        basic_ops=BasicOpFilter.for_detailed(),
+        previous_exits=["previous"],
+        variant=LayerVariant("v", 1, "A"),
+    )
+
+    assert exits == ["decoder/attn"]
+    assert nodes[0]["namespace"] == "decoder/Attention"
+    assert nodes[0]["incomingEdges"] == [_edge("previous")]
+
+
+def test_merge_append_section_expands_nested_diagram_and_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    nested = BlockNode("nested", "NestedBlock", "other", "Nested")
+    root = BlockNode("attn", "Attention", "attention", "Attention", children=[nested])
+    parent_computation = ComputationGraph(
+        nodes=[
+            GraphNodeSpec("@input", label="input", synthetic="@input"),
+            GraphNodeSpec("tile", block=nested, label="Nested"),
+            GraphNodeSpec("after", label="After"),
+        ],
+        links=[(0, 1), (1, 2)],
+        primary_output_index=2,
+    )
+    nested_computation = ComputationGraph(
+        nodes=[
+            GraphNodeSpec("@input", label="input", synthetic="@input"),
+            GraphNodeSpec("result", label="Result"),
+        ],
+        links=[(0, 1)],
+        primary_output_index=1,
+    )
+    monkeypatch.setattr(merge, "component_has_detail_section", lambda *a: True)
+    monkeypatch.setattr(
+        merge,
+        "_resolve_section_tree_for_component",
+        lambda *a, **k: ("Attention", root),
+    )
+    monkeypatch.setattr(
+        merge,
+        "build_computation_graph",
+        lambda tree, **kwargs: (
+            parent_computation if tree is root else nested_computation
+        ),
+    )
+    monkeypatch.setattr(
+        merge, "collect_nested_diagrams", lambda *a, **k: [("Nested detail", nested)]
+    )
+    monkeypatch.setattr(
+        merge,
+        "infer_block_tree_shapes",
+        lambda inferencer, tree, title: {
+            "@input": TensorSpec(("B", "S", 16)),
+            "result" if tree is nested else "after": TensorSpec(("B", "S", 16)),
+        },
+    )
+    nodes: list[dict[str, object]] = [{"id": "duplicate"}]
+    group_attrs: dict[str, dict[str, str]] = {}
+    exits = merge._append_section(
+        nodes,
+        spec=_spec(),
+        component=_component(
+            "attn", "attention", class_name="Attention", label="Attention"
+        ),
+        id_prefix="decoder/attn",
+        namespace_prefix="decoder/Attention",
+        basic_ops=BasicOpFilter.for_detailed(),
+        previous_exits=["previous"],
+        group_node_attributes=group_attrs,
+        shape_inferencer=object(),
+    )
+
+    by_id = {node["id"]: node for node in nodes}
+    assert "decoder/attn/tile" not in by_id
+    assert "decoder/attn/tile/result" in by_id
+    assert by_id["decoder/attn/after"]["incomingEdges"][0]["sourceNodeId"] == (
+        "decoder/attn/tile/result"
+    )
+    assert exits == ["decoder/attn/after"]
+    assert group_attrs["decoder/Attention"] == {
+        "label": "Attention",
+        "operation": "Attention",
+    }
+    assert by_id["decoder/attn/tile/result"]["outputsMetadata"]
+
+
+def test_merge_build_graph_expanded_tail_and_shape_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    tail = _component("tail", "ffn", class_name="Tail", label="Tail")
+    spec = _spec(stack_pre=[], stack_tail=[tail], block_components=[])
+    calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(merge, "_stack_pre_components", lambda spec: [])
+    monkeypatch.setattr(merge, "_stack_tail_components", lambda spec: [tail])
+    monkeypatch.setattr(merge, "component_has_detail_section", lambda *a: True)
+    monkeypatch.setattr(
+        merge,
+        "_append_decoder_layers",
+        lambda nodes, **kwargs: list(kwargs["previous_exits"]),
+    )
+
+    def fake_append(nodes, **kwargs):
+        calls.append((kwargs["id_prefix"], kwargs["namespace_prefix"]))
+        nodes.append(
+            {
+                "id": kwargs["id_prefix"],
+                "label": "Tail",
+                "namespace": kwargs["namespace_prefix"],
+            }
+        )
+        return [kwargs["id_prefix"]]
+
+    monkeypatch.setattr(merge, "_append_section", fake_append)
+    monkeypatch.setattr(merge, "fill_missing_node_shapes", lambda nodes, context: None)
+    monkeypatch.setattr(
+        merge,
+        "group_boundary_shapes",
+        lambda nodes: {"tail": {"input_shape": "B x S x 16"}},
+    )
+    inferencer = SimpleNamespace(context=ShapeContext({"H": 16}))
+    graph = merge.build_merged_model_graph(spec, shape_inferencer=inferencer)
+
+    assert calls == [("tail", "tail")]
+    assert graph["groupNodeAttributes"]["tail"]["input_shape"] == "B x S x 16"
+    assert any(
+        "tail" in config["namespaceRegex"] for config in graph["groupNodeConfigs"]
+    )
+
+
+def test_overview_forward_operation_labels(monkeypatch: pytest.MonkeyPatch):
+    operations = {
+        "scores": SimpleNamespace(
+            label="MatMul", external_inputs=["query", "key_states"]
+        ),
+        "activation": SimpleNamespace(label="SiLU", class_name=None),
+    }
+    decoder = SimpleNamespace(forward_operations=operations)
+    spec = _spec(
+        decoder_class="Decoder",
+        class_registry={"Decoder": decoder},
+        forward_sequence=["scores", "activation"],
+    )
+    monkeypatch.setattr(
+        "visualizer.ast_analyze.classify_matmul_label",
+        lambda external_inputs: f"matmul({','.join(external_inputs)})",
+    )
+    monkeypatch.setattr(
+        "visualizer.ast_analyze.operation_display_label",
+        lambda label, class_name: f"display:{label}",
+    )
+
+    assert overview.forward_sequence_display_labels(spec) == [
+        "matmul(query,key_states)",
+        "display:SiLU",
+    ]
+    assert overview.forward_sequence_display_labels(_spec(forward_sequence=[])) == []
+
+
+def test_overview_detail_tree_filtering_and_component_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    direct = BlockNode("direct", "Direct", "attention", "Direct")
+    straight_ffn = BlockNode("ffn", "VariantFFN", "ffn", "FFN")
+    nested_omit = BlockNode("omit", "Nested", "other", "Omit")
+    nested_hide = BlockNode("hide", "Nested", "other", "Hide")
+    nested_keep = BlockNode("keep", "Nested", "other", "Keep")
+    trees = [("Direct", direct), ("FFN", straight_ffn)]
+    spec = _spec(
+        export_block_trees=trees,
+        layer_variants=[LayerVariant("v", 1, "A", ffn_class="VariantFFN")],
+    )
+    monkeypatch.setattr(overview, "architecture_section_trees", lambda spec: trees)
+    monkeypatch.setattr(
+        overview, "prepare_diagram_section_trees", lambda *a, **k: trees
+    )
+    monkeypatch.setattr(
+        overview,
+        "collect_nested_diagrams",
+        lambda tree, **k: (
+            [
+                ("Omit", nested_omit),
+                ("Hide", nested_hide),
+                ("Keep", nested_keep),
+            ]
+            if tree is direct
+            else []
+        ),
+    )
+    monkeypatch.setattr(overview, "expand_block_tree_inplace", lambda tree, **k: tree)
+    monkeypatch.setattr(
+        overview, "is_straight_line_module", lambda tree: tree is straight_ffn
+    )
+    monkeypatch.setattr(overview, "subgraph_warrants_export", lambda *a, **k: True)
+    monkeypatch.setattr(
+        overview,
+        "is_single_function_tree",
+        lambda tree: tree is nested_omit or tree is nested_hide,
+    )
+    monkeypatch.setattr(
+        overview, "_omit_from_detailed_view", lambda tree: tree is nested_omit
+    )
+    monkeypatch.setattr(
+        overview,
+        "_show_single_function_in_diagram",
+        lambda tree: tree is not nested_hide,
+    )
+
+    assert [tree.attr_name for tree in overview._detail_section_trees(spec)] == [
+        "direct",
+        "keep",
+        "ffn",
+    ]
+    assert overview.component_has_detail_section(
+        _component("direct", "attention"), spec
+    )
+
+    monkeypatch.setattr(overview, "_detail_section_trees", lambda spec: [])
+    assert overview.component_has_detail_section(_component("ffn", "ffn"), spec)
+    monkeypatch.setattr(overview, "subgraph_warrants_export", lambda *a, **k: False)
+    assert not overview.component_has_detail_section(_component("ffn", "ffn"), spec)
+
+
+def test_shape_external_spec_and_empty_combine_fallbacks():
+    context = ShapeContext({"H": 16, "E": 8})
+    registry = ModuleDimRegistry(
+        parameter_by_attr={"matrix": ModuleParameterSpec((3, 4))}
+    )
+    inferencer = ShapeInferencer(_spec(), context=context, module_dims=registry)
+
+    combine = inferencer._infer_node_output(
+        _model_node("Combine", synthetic="@combine"), [], root=None
+    )
+    assert combine == TensorSpec(("B", "S", 16))
+    parameter_view = inferencer._infer_node_output(
+        _model_node("view", external_inputs=["self.matrix"]), [], root=None
+    )
+    assert parameter_view == TensorSpec((3, 4))
+    weight_view = inferencer._infer_node_output(
+        _model_node("flatten", external_inputs=["expert_weight"]), [], root=None
+    )
+    assert weight_view == TensorSpec((8, 16), "float32")
+    bias_unsqueeze = inferencer._infer_node_output(
+        _model_node("unsqueeze", external_inputs=["router_bias"]), [], root=None
+    )
+    assert bias_unsqueeze == TensorSpec((1, 8))
+    default_view = inferencer._infer_node_output(_model_node("reshape"), [], root=None)
+    assert default_view == TensorSpec(("B", "S", 16))
+
+
+def test_shape_build_and_save_operator_export_fallbacks(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    payload = {"name": "synthetic", "sections": []}
+    monkeypatch.setattr(
+        ShapeInferencer, "export_architecture", lambda self, **kwargs: payload
+    )
+    assert build_operator_export(_spec(), include_model_output=False) is payload
+
+    target = save_operator_export(payload, tmp_path / "nested" / "operators.json")
+    assert target.read_text(encoding="utf-8") == (
+        '{\n  "name": "synthetic",\n  "sections": []\n}\n'
+    )

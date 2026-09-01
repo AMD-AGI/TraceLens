@@ -107,9 +107,29 @@ def test_public_name_role_and_kernel_helpers_cover_fallbacks():
     ) == ["value", "q"]
 
 
+def test_ast_dump_and_init_only_forward_fallbacks():
+    dumped = aa.dump_ast("answer = factory.value[0]()", filename="fixture.py")
+    assert "Module(" in dumped
+    assert "Subscript(" in dumped
+
+    registry = aa.build_class_registry("""
+class InitOnly:
+    def __init__(self):
+        self.config = Config()
+        self._private = Hidden()
+        self.layers = ModuleList()
+        self.proj = Linear()
+""")
+    info = registry["InitOnly"]
+    assert aa.infer_forward_steps_from_init(info) == ["proj"]
+    assert aa.effective_forward_calls(info) == ["proj"]
+
+    info.forward_calls = ["Parameter", "@op_l1_c0_add"]
+    assert aa.effective_forward_calls(info) == ["@op_l1_c0_add"]
+
+
 def test_forward_operation_extractor_covers_expressions_and_conditions():
-    func = _function(
-        """
+    func = _function("""
 def forward(self, x, weight, index, flag):
     a = torch.matmul(x, self.weight)
     b = (a + x).reshape(2, -1).float()
@@ -121,8 +141,7 @@ def forward(self, x, weight, index, flag):
     d = c if flag else [a, b][-1]
     d.scatter_(1, index, x)
     return a, d
-"""
-    )
+""")
     analysis = aa._forward_operations_from_forward(
         func,
         self_values={"enabled": aa._UNKNOWN},
@@ -555,6 +574,332 @@ def test_fanout_residual_gated_and_kernel_graph_branches(monkeypatch):
     norm_graph = cg.build_computation_graph(_node("norm_root", children=[norm]))
     assert any(spec.block is norm for spec in norm_graph.nodes)
     assert "Multiply" in {spec.label for spec in norm_graph.nodes}
+
+
+def test_method_wrappers_in_chains_prefixes_and_sequences(monkeypatch):
+    first = _node("first", details=["method `first()`"], label="_first")
+    second = _node("second", details=["method `second()`"], label="Second")
+    indices: dict[str, int] = {}
+    direct = cg.ComputationGraph()
+    head, tail = cg._add_chain(
+        direct,
+        [first, second],
+        key_prefix="methods",
+        attr_last_index=indices,
+    )
+    assert (head, tail) == (0, 1)
+    assert direct.links == [(0, 1)]
+    assert indices == {"first": 0, "second": 1}
+    assert [spec.label for spec in direct.nodes] == ["first", "Second"]
+
+    ordinary = _node("ordinary")
+    monkeypatch.setattr(
+        cg,
+        "flatten_computation_segments",
+        lambda _root: [SeqSegment(second)],
+    )
+    graph = cg.build_computation_graph(
+        _node("root", children=[ordinary, second]),
+        prefix_steps=[ordinary, first, second],
+    )
+    assert [spec.block for spec in graph.nodes if spec.block] == [first, second, second]
+    assert graph.links == [(0, 1), (1, 2), (2, 3)]
+
+
+def test_nested_linear_wrapper_tracks_frames_and_aliases(monkeypatch):
+    inner_a = _node("inner_a")
+    inner_b = _node("inner_b")
+    nested = _node("nested", class_name="Nested", children=[inner_a, inner_b])
+    tail_step = _node("tail")
+    outer = _node("outer", class_name="Outer", children=[nested, tail_step])
+
+    def expand(step, basic_ops=None):
+        del basic_ops
+        if step is outer:
+            return [nested, tail_step], outer
+        if step is nested:
+            return [inner_a, inner_b], nested
+        return [step], None
+
+    monkeypatch.setattr(cg, "inline_composite_steps", expand)
+    graph = cg.ComputationGraph()
+    input_index = cg._add_node(
+        graph, key=cg.SYNTHETIC_INPUT, synthetic=cg.SYNTHETIC_INPUT
+    )
+    aliases: dict[str, int] = {}
+    chain, tail = cg._add_linear_pipeline_chain(
+        graph,
+        [nested, tail_step],
+        wrapper=outer,
+        key_prefix="outer",
+        attr_last_index=aliases,
+        input_index=input_index,
+        fork_from_input=True,
+        port_label="aux",
+        port_style="inline",
+    )
+    assert len(chain) == 3
+    assert tail == chain[-1]
+    assert aliases["nested"] == aliases["inner_b"]
+    assert aliases["tail"] == tail
+    assert len(graph.inline_frames) == 2
+    assert set(graph.inline_frames[0].node_indices) == set(chain)
+    assert graph.nodes[chain[0]].port_label == "aux"
+
+
+@pytest.mark.parametrize("kernel_output", [True, False])
+def test_fanout_inline_merge_variants(monkeypatch, kernel_output):
+    left = _node("left")
+    right = _node("right")
+    merge_a = _node("merge_a", class_name="KernelOp")
+    merge_b = _node("merge_b", class_name="KernelOutput" if kernel_output else "Linear")
+    merge = _node("merge", class_name="MergeWrapper", children=[merge_a, merge_b])
+
+    def expand(step, basic_ops=None):
+        del basic_ops
+        if step is merge:
+            return [merge_a, merge_b], merge
+        if step is merge_a:
+            return [merge_a], None
+        return [step], None
+
+    monkeypatch.setattr(cg, "inline_composite_steps", expand)
+    monkeypatch.setattr(cg, "is_kernel_pipeline_tree", lambda node: False)
+    monkeypatch.setattr(
+        cg,
+        "flatten_computation_segments",
+        lambda _root: [
+            FanOutSegment([Branch("left", [left]), Branch("right", [right])], merge)
+        ],
+    )
+    graph = cg.build_computation_graph(_node("root", children=[left, right, merge]))
+    first_merge = next(i for i, spec in enumerate(graph.nodes) if spec.block is merge_a)
+    assert len([link for link in graph.links if link[1] == first_merge]) == 2
+    if kernel_output:
+        assert any(spec.block is merge_b for spec in graph.nodes)
+    else:
+        assert any(frame.frame_id == "merge" for frame in graph.inline_frames)
+
+
+def test_side_combine_moe_and_missing_sources(monkeypatch):
+    aggregate = _node(
+        "aggregate",
+        details=["method `aggregate()`", f"combine: {aa.MOE_AGGREGATION_LABEL}"],
+    )
+    forward_side = aa.SideInputSpec("hidden", "hidden", [], "forward_input")
+    empty_side = aa.SideInputSpec("empty", "empty", [], "prior_step")
+    missing_side = aa.SideInputSpec("lost", "lost", ["missing"], "prior_step")
+    monkeypatch.setattr(
+        cg,
+        "flatten_computation_segments",
+        lambda _root: [
+            SideCombineSegment(
+                aggregate,
+                [forward_side, empty_side, missing_side],
+                aa.MOE_AGGREGATION_LABEL,
+            )
+        ],
+    )
+    graph = cg.build_computation_graph(_node("root", children=[aggregate]))
+    aggregation_index = next(
+        i
+        for i, spec in enumerate(graph.nodes)
+        if spec.label == aa.MOE_AGGREGATION_LABEL
+    )
+    assert graph.links.count((0, aggregation_index)) == 2
+
+    combine = _node("combine", details=["method `combine()`"])
+    monkeypatch.setattr(
+        cg,
+        "flatten_computation_segments",
+        lambda _root: [
+            SideCombineSegment(
+                combine,
+                [forward_side, empty_side, missing_side],
+                "×",
+            )
+        ],
+    )
+    ordinary = cg.build_computation_graph(_node("root2", children=[combine]))
+    multiply_index = next(
+        i for i, spec in enumerate(ordinary.nodes) if spec.label == "Multiply"
+    )
+    assert ordinary.links.count((0, multiply_index)) == 2
+
+
+def test_expanded_side_feed_targets_parameter_reader(monkeypatch):
+    source_a = _node("source_a")
+    source_b = _node("source_b")
+    consume_aux = _node(
+        "@op_l1_c0_add",
+        class_name="Add",
+        param_inputs=["aux"],
+        operation_predecessors=[],
+    )
+    consume_main = _node("@op_l2_c0_mul", class_name="Multiply")
+    consumer = _node(
+        "consumer",
+        class_name="Consumer",
+        children=[consume_aux, consume_main],
+    )
+    side = aa.SideInputSpec("aux", "aux", ["source_a", "source_b"], "prior_step")
+
+    def expand(step, basic_ops=None):
+        del basic_ops
+        if step is consumer:
+            return [consume_aux, consume_main], consumer
+        return [step], None
+
+    monkeypatch.setattr(cg, "inline_composite_steps", expand)
+    monkeypatch.setattr(
+        cg,
+        "flatten_computation_segments",
+        lambda _root: [
+            SideFeedSegment(
+                consumer,
+                [side],
+                side_producer_nodes={"source_b": source_b},
+                side_producer_chains={"source_b": [source_a, source_b]},
+            )
+        ],
+    )
+    graph = cg.build_computation_graph(
+        _node("root", children=[source_a, source_b, consumer])
+    )
+    source_index = next(
+        i for i, spec in enumerate(graph.nodes) if spec.block is source_b
+    )
+    aux_index = next(
+        i for i, spec in enumerate(graph.nodes) if spec.block is consume_aux
+    )
+    main_index = next(
+        i for i, spec in enumerate(graph.nodes) if spec.block is consume_main
+    )
+    assert (source_index, aux_index) in graph.links
+    assert (source_index, main_index) not in graph.links
+    assert graph.nodes[aux_index].port_label == "aux"
+
+
+@pytest.mark.parametrize("wrapped", [True, False])
+def test_combine_side_method_and_inline_wrapper(monkeypatch, wrapped):
+    main = _node("main")
+    after = _node("after", details=["method `after()`"])
+    if wrapped:
+        side_a = _node("side_a")
+        side_b = _node("side_b")
+        side = _node("side", class_name="SideWrapper", children=[side_a, side_b])
+    else:
+        side_a = side_b = None
+        side = _node("side", details=["method `side()`"])
+
+    def expand(step, basic_ops=None):
+        del basic_ops
+        if wrapped and step is side:
+            return [side_a, side_b], side
+        return [step], None
+
+    monkeypatch.setattr(cg, "inline_composite_steps", expand)
+    monkeypatch.setattr(
+        cg,
+        "flatten_computation_segments",
+        lambda _root: [
+            SeqSegment(main),
+            CombineSegment(
+                side,
+                after=[after],
+                side_port_label="gate",
+                side_port_style="floating",
+            ),
+        ],
+    )
+    graph = cg.build_computation_graph(_node("root", children=[main, side, after]))
+    multiply = next(i for i, spec in enumerate(graph.nodes) if spec.label == "Multiply")
+    after_index = next(i for i, spec in enumerate(graph.nodes) if spec.block is after)
+    assert (multiply, after_index) in graph.links
+    if wrapped:
+        assert any(frame.frame_id == "side" for frame in graph.inline_frames)
+    else:
+        side_index = next(i for i, spec in enumerate(graph.nodes) if spec.block is side)
+        assert graph.nodes[side_index].port_label is None
+
+
+def test_ast_compact_expression_and_provenance_helpers():
+    expression = ast.parse(
+        "(self.norm(x) + F.relu(self.proj(y)), "
+        "apply_rotary_emb(z, f) if flag else custom_attention(q, k))[0] < limit",
+        mode="eval",
+    ).body
+    calls: list[str] = []
+    aa._extract_self_calls_ordered(expression, calls)
+    assert calls == [
+        "norm",
+        "proj",
+        aa.functional_synthetic_attr("relu"),
+        aa.positional_synthetic_attr("apply_rotary_emb", 1),
+        aa.SYNTHETIC_ATTENTION,
+    ]
+
+    assert aa._call_undoes_rotation(ast.parse("rope(q, k, True)", mode="eval").body)
+    assert not aa._call_undoes_rotation(
+        ast.parse("rope(q, k, inverse=False)", mode="eval").body
+    )
+    assert aa._tuple_source_names(ast.parse("map(fn, (q, k))", mode="eval").body) == [
+        "q",
+        "k",
+    ]
+    assert (
+        aa._tuple_source_names(ast.parse("map(fn, values)", mode="eval").body) is None
+    )
+    assert aa._tuple_source_names(ast.parse("(q, obj.k)", mode="eval").body) is None
+
+    assignment = ast.parse("(q2, k2) = map(fn, (q, k))").body[0]
+    chains = {"q": ["q_proj"], "k": ["k_proj"]}
+    aa._record_assign_targets(assignment, ["norm"], chains)
+    assert chains["q2"] == ["q_proj", "norm"]
+    assert chains["k2"] == ["k_proj", "norm"]
+
+
+def test_ast_forward_statement_variants_and_assignment_details():
+    source = """
+class BranchBlock:
+    def __init__(self, config):
+        self.shared = SharedExpert(num_experts=4, top_k=2, activation="sigmoid")
+        self.act_fn = ACT2FN[config.hidden_act]
+        self.proj: Linear = Linear()
+    def forward(self, x, aux):
+        y: Tensor = self.proj(x)
+        with context():
+            self.shared(x)
+        for _ in range(2):
+            y = self.proj(y)
+        if flag:
+            z = self.left(y)
+        else:
+            z = self.right(y)
+        y += self.shared(x)
+        self.proj(aux)
+        return z
+"""
+    registry = aa.build_class_registry(
+        source,
+        config={"hidden_act": "silu"},
+        all_tensor_ops=True,
+    )
+    info = registry["BranchBlock"]
+    assert info.init_assignments == {
+        "shared": "SharedExpert",
+        "act_fn": "SiLU",
+        "proj": "Linear",
+    }
+    assert info.init_details["shared"] == [
+        "num_experts=4",
+        "top_k=2",
+        "Sigmoid",
+        "shared expert path",
+    ]
+    assert {"proj", "shared", "left"} <= set(info.forward_calls)
+    assert "right" not in info.forward_calls
+    assert info.side_inputs["shared"][0].source_kind == "forward_input"
 
 
 @pytest.mark.parametrize(

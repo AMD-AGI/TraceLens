@@ -11,9 +11,13 @@ from __future__ import annotations
 import ast
 import json
 import re
+from types import SimpleNamespace
 
 import pytest
 
+import visualizer.block_tree as bt
+import visualizer.extract as extract
+import visualizer.layer_repeat_simplify as repeat
 from visualizer.ast_analyze import ClassStructure, SideInputSpec
 from visualizer.basic_ops import (
     BasicOpFilter,
@@ -854,3 +858,864 @@ def test_graph_segments_and_spine_labels():
         spine_expanded_frame_label(positional, positional_encoding="RoPE")
         == "Positional (RoPE) (rotary)"
     )
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    [
+        (
+            node(
+                "@attention",
+                "AttentionOp",
+                basic=False,
+                details=["delta rule recurrence"],
+            ),
+            "delta rule recurrence",
+        ),
+        (node("gate", "OutputGate", role="gate", basic=False), None),
+        (
+            node(
+                "gate",
+                "OutputGate",
+                role="gate",
+                basic=False,
+                details=["Linear", "Sigmoid"],
+            ),
+            "Sigmoid",
+        ),
+        (
+            node(
+                "pipeline",
+                "KernelPipeline",
+                basic=False,
+                details=["kernel pipeline · scan"],
+            ),
+            "kernel pipeline · scan",
+        ),
+        (
+            node(
+                "conv",
+                "ShortConvolution",
+                label="Short Conv",
+                basic=False,
+                details=["depthwise conv"],
+            ),
+            "depthwise conv",
+        ),
+        (
+            node(
+                "merge",
+                "AttentionMerge",
+                basic=False,
+                details=["ports:q,k,v"],
+            ),
+            "ports:q,k,v",
+        ),
+        (node("op", "KernelOp", basic=False), None),
+        (node("lm_head", "Linear", role="head"), "Project to vocabulary logits"),
+        (
+            node("router", "Router", role="router", basic=False),
+            "Score and route tokens to experts",
+        ),
+        (
+            node(
+                "split_gate_up",
+                "Split",
+                basic=False,
+                label="Split",
+            ),
+            "Split fused gate/up projection",
+        ),
+        (
+            node(
+                "mul",
+                "Multiply",
+                basic=False,
+                label="×",
+            ),
+            "Multiply gate and up activations",
+        ),
+    ],
+)
+def test_block_purpose_specialized_branches(candidate, expected):
+    assert block_purpose(candidate) == expected
+
+
+def test_block_purpose_skips_functional_details_and_formats_fused_ops():
+    fused = node(
+        "act_fn",
+        "SiluAndMul",
+        basic=False,
+        details=["F.silu(...)"],
+    )
+    activation = node(
+        "activation",
+        "ActivationOp",
+        label="GELU",
+        basic=False,
+    )
+
+    assert block_purpose(fused) == "Silu(gate) × up branch"
+    assert block_purpose(activation) == "Apply GELU to gate half"
+    assert bt.wrapper_module_comment(node("embed_tokens", "Embedding")) is None
+    assert bt.inline_wrapper_step_label(fused, activation, 0) == "GELU"
+    assert bt.inline_wrapper_step_label(fused, activation, 1) is None
+
+
+def test_single_op_subgraph_substitution_preserves_outer_input(monkeypatch):
+    inner = node("inner")
+    wrapper = node(
+        "wrapper",
+        "Wrapper",
+        basic=False,
+        children=[inner],
+    )
+    wrapper.input_source = "Residual stream"
+    wrapper.side_inputs = {
+        "inner": [
+            SideInputSpec(
+                "residual",
+                "residual",
+                [],
+                source_kind="forward_input",
+            )
+        ]
+    }
+    monkeypatch.setattr(bt, "forward_operation_count", lambda *_args, **_kwargs: 1)
+
+    assert bt._is_substitutable_single_op_subgraph(wrapper)
+    substitute = bt._substitute_single_op_subgraph(wrapper)
+    assert substitute.attr_name == "inner"
+    assert substitute.input_source == "Residual stream"
+    assert bt.expand_block_tree_inplace(wrapper).attr_name == "inner"
+
+    norm = node(
+        "norm",
+        "RMSNorm",
+        role="norm",
+        basic=False,
+        children=[node("helper", "helper", details=["method `helper()`"])],
+    )
+    assert bt.expand_block_tree_inplace(norm).children == []
+
+
+def test_bypass_span_detection_and_pipeline_exclusions():
+    one = node("one")
+    two = node("two")
+    three = node("three")
+    four = node("four")
+    three.operation_predecessors = ["one"]
+    four.operation_predecessors = ["two"]
+    crossing = node(
+        "crossing",
+        "Crossing",
+        basic=False,
+        children=[one, two, three, four],
+    )
+
+    assert bt._bypass_spans(crossing) == [(0, 2), (1, 3)]
+    assert bt._has_overlapping_bypass_spans(crossing)
+    assert is_straight_line_module(crossing)
+    assert not is_straight_line_module(
+        node(
+            "embed",
+            "EmbeddingWrapper",
+            role="embedding",
+            basic=False,
+            children=[one],
+        )
+    )
+    assert not is_straight_line_module(
+        node(
+            "kernel",
+            "KernelPipeline",
+            basic=False,
+            children=[one],
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("side_inputs", "activations", "consumer_class", "norm_activation", "expected"),
+    [
+        ({}, {}, None, None, ["Linear", "output gate for normalized branch"]),
+        (
+            {
+                "norm": [
+                    SideInputSpec("gate", "g", ["g_proj"], source_kind="prior_step")
+                ]
+            },
+            {"g_proj": "SiLU"},
+            "FusedRMSNormGated",
+            None,
+            ["Linear", "SiLU(linear out)", "norm(attn_out) × gate → norm"],
+        ),
+        (
+            {
+                "norm": [
+                    SideInputSpec("gate", "g", ["g_proj"], source_kind="prior_step")
+                ]
+            },
+            {},
+            "FusedRMSNormGated",
+            "Tanh",
+            ["Linear", "Tanh inside norm", "norm(attn_out) × gate"],
+        ),
+        (
+            {
+                "consumer": [
+                    SideInputSpec("gate", "gate", ["g_proj"], source_kind="prior_step")
+                ]
+            },
+            {"g_proj": "Sigmoid"},
+            "Linear",
+            None,
+            ["Linear", "Sigmoid(linear out)", "feeds consumer port 'gate'"],
+        ),
+    ],
+)
+def test_output_gate_detail_variants(
+    side_inputs, activations, consumer_class, norm_activation, expected
+):
+    assert (
+        bt._output_gate_details(
+            "g_proj",
+            side_inputs=side_inputs,
+            gate_activations=activations,
+            consumer_class=consumer_class,
+            norm_gate_activation=norm_activation,
+        )
+        == expected
+    )
+
+
+def test_output_gate_wrapping_and_short_convolution_helpers():
+    linear = node("g_proj")
+    consumer = node("norm", "FusedRMSNormGated", role="norm", basic=False)
+    side_inputs = {
+        "norm": [SideInputSpec("gate", "gate", ["g_proj"], source_kind="prior_step")]
+    }
+    wrapped = bt._wrap_parallel_gate_children(
+        [linear, consumer],
+        ["g_proj"],
+        {"g_proj": "Sigmoid"},
+        side_inputs,
+    )
+    assert wrapped[0].class_name == "OutputGate"
+    assert [child.label for child in wrapped[0].children] == ["Linear", "Sigmoid"]
+    assert (
+        bt._short_conv_activation(
+            ["method `forward()`", "kernel: conv", "activation=silu", "SiLU"]
+        )
+        == "SiLU"
+    )
+    assert bt._short_conv_activation([]) is None
+    conv_steps = bt._short_convolution_block_node(
+        attr_name="conv", forward_order=4, activation="SiLU"
+    )
+    assert [step.label for step in conv_steps] == ["Depthwise Conv", "SiLU"]
+
+
+def test_tile_display_label_branches(monkeypatch):
+    basic = node("proj", label="Projection")
+    kernel = node("scan", "KernelOp", label="chunk_scan", basic=False)
+    activation = node("act", "ActivationOp", label="SiLU", basic=False)
+
+    monkeypatch.setattr(
+        "visualizer.kernel_pipeline.kernel_op_display_label",
+        lambda label: f"display:{label}",
+    )
+    assert tile_display_labels(basic, in_inline_frame=True) == ("Projection", None)
+    assert tile_display_labels(basic, port_label="q", port_style="inline") == (
+        "Projection",
+        None,
+    )
+    assert tile_display_labels(kernel) == ("display:chunk_scan", None)
+    assert tile_display_labels(activation) == ("SiLU", None)
+    assert not is_basic_op_tile(None)
+
+
+def test_collect_nested_diagrams_assigns_source_and_deduplicates(monkeypatch):
+    nested = node(
+        "nested",
+        "NestedBlock",
+        basic=False,
+        children=[node("producer"), node("consumer")],
+    )
+    nested.side_inputs = {
+        "consumer": [
+            SideInputSpec("side", "side", ["producer"], source_kind="prior_step")
+        ]
+    }
+    root = node("root", "RootBlock", basic=False, children=[nested, nested])
+
+    def fake_graph(current, **_kwargs):
+        return SimpleNamespace(
+            nodes=(
+                [SimpleNamespace(block=nested), SimpleNamespace(block=nested)]
+                if current is root
+                else []
+            )
+        )
+
+    monkeypatch.setattr(
+        "visualizer.computation_graph.build_computation_graph", fake_graph
+    )
+    monkeypatch.setattr(bt, "subgraph_warrants_export", lambda *_args, **_kwargs: True)
+
+    assert bt.collect_nested_diagrams(root) == [("NestedBlock", nested)]
+    assert nested.input_source == "RootBlock"
+    assert bt.flatten_computation_segments(root) == collect_computation_segments(root)
+
+
+def test_build_block_node_functional_positional_and_skipped_calls():
+    cls = structure(
+        "Operations",
+        assignments={"parameter": "Parameter"},
+        calls=[
+            "@functional_softmax",
+            "@positional_l12_apply_rotary_emb",
+            "parameter",
+        ],
+    )
+    cls.forward_step_details["@positional_l12_apply_rotary_emb"] = ["RoPE helper"]
+    built = build_block_node(
+        attr_name="ops",
+        class_name="Operations",
+        registry={"Operations": cls},
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+
+    assert [child.label for child in built.children] == [
+        "Softmax",
+        "Apply rotary emb",
+    ]
+    assert built.children[1].class_name == "PositionalOp"
+
+
+def test_build_block_node_infers_init_steps_and_empty_class():
+    inferred = structure(
+        "Inferred",
+        assignments={"proj": "Linear", "dropout": "Dropout"},
+    )
+    empty = structure("Empty")
+    registry = {"Inferred": inferred, "Empty": empty}
+    basic_filter = BasicOpFilter.for_detailed()
+
+    built = build_block_node(
+        attr_name="inferred",
+        class_name="Inferred",
+        registry=registry,
+        basic_ops=basic_filter,
+        infer_init_steps=True,
+    )
+    assert [child.attr_name for child in built.children] == ["proj", "dropout"]
+    assert build_block_node(
+        attr_name="empty",
+        class_name="Empty",
+        registry=registry,
+        basic_ops=basic_filter,
+    ).is_basic
+
+
+def test_stack_tree_builders_cover_registry_and_leaf_paths():
+    registered = structure("Registered", assignments={"proj": "Linear"}, calls=["proj"])
+    registry = {"Registered": registered}
+    basic_filter = BasicOpFilter.for_detailed()
+    known = BlockComponent("known", "Registered", "ffn", "Known", 1)
+    external = BlockComponent("external", "External", "other", "External", 2)
+    norm = BlockComponent("norm", "RMSNorm", "norm", "Norm", 0)
+
+    assert bt.build_stack_component_tree(known, registry, basic_filter).children
+    assert not bt.build_stack_component_tree(external, registry, basic_filter).is_basic
+    pipeline = bt.build_pipeline_block_trees(
+        stack_pre=[external, norm],
+        registry=registry,
+        basic_ops=basic_filter,
+        include_norms=True,
+    )
+    head = bt.build_head_block_trees(
+        stack_tail=[known],
+        registry=registry,
+        basic_ops=basic_filter,
+    )
+    assert [tree.attr_name for _, tree in pipeline] == ["norm", "external"]
+    assert head[0][1].attr_name == "known"
+    assert (
+        bt.spine_expanded_frame_label(known, positional_encoding="RoPE")
+        == "Known (known)"
+    )
+
+
+def test_resolve_checkpoint_from_github_config(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"_class_name": "GithubModel", "num_layers": 2}),
+        encoding="utf-8",
+    )
+    ref = SimpleNamespace(display="org/repo@main")
+    monkeypatch.setattr(extract, "parse_github_url", lambda _url: ref)
+    monkeypatch.setattr(extract, "fetch_github_source", lambda _ref: tmp_path)
+    monkeypatch.setattr(extract, "github_config_path", lambda _root: config_path)
+
+    config, label = _resolve_checkpoint(checkpoint=None, github="github:org/repo")
+    assert config["model_type"] == "githubmodel"
+    assert config["num_hidden_layers"] == 2
+    assert label == "github-config://org/repo@main"
+
+    monkeypatch.setattr(extract, "github_config_path", lambda _root: None)
+    with pytest.raises(FileNotFoundError, match="No checkpoint provided"):
+        _resolve_checkpoint(checkpoint=None, github="github:org/repo")
+
+
+def test_additional_attention_inference_branches():
+    mqa = parse_architecture(
+        {
+            "model_type": "x",
+            "num_attention_heads": 8,
+            "num_key_value_heads": 1,
+            "use_sliding_window": True,
+            "sliding_window_size": 64,
+        },
+        "fixture",
+    )
+    mha = parse_architecture(
+        {
+            "model_type": "x",
+            "num_attention_heads": 8,
+            "num_key_value_heads": 8,
+            "rope_theta": 500_000,
+        },
+        "fixture",
+    )
+
+    assert mqa.attention_type == "MQA"
+    assert mqa.layer_notes == ["Sliding window attention (window=64)"]
+    assert mha.attention_type == "MHA"
+    assert "RoPE theta=500000" in mha.attention_notes
+
+
+def test_extract_conditional_and_default_resolution_helpers():
+    decoder = structure(
+        "Decoder",
+        assignments={"self_attn": "DefaultAttention"},
+    )
+    registry = {"Decoder": decoder}
+
+    assert extract._config_has_per_layer_typing({"nested": {"linear_layers": [1, 2]}})
+    assert not extract._config_has_per_layer_typing({"layer_types": ["full"]})
+    assert (
+        extract._resolve_conditional_class(
+            2,
+            [("Early", "layer_idx < 2"), ("Late", "else")],
+            {},
+        )
+        == "Late"
+    )
+    assert extract._resolve_conditional_class(0, [], {}) is None
+    assert extract._default_attention_class(registry, "Decoder") == "DefaultAttention"
+    assert extract._default_attention_class({}, "Decoder") is None
+    assert extract._default_attention_class({"Decoder": object()}, "Decoder") is None
+
+
+def test_extract_ffn_resolution_and_uniform_component_update():
+    rules = [
+        ("mlp", "DenseMLP", "layer_idx < 2"),
+        ("block_sparse_moe", "SparseMoeBlock", "else"),
+    ]
+    assert extract._resolve_ffn_for_layer(0, rules, {}) == ("mlp", "DenseMLP")
+    assert extract._resolve_ffn_for_layer(3, rules, {}) == (
+        "block_sparse_moe",
+        "SparseMoeBlock",
+    )
+    assert extract._resolve_ffn_for_layer(
+        2,
+        [("block_sparse_moe", "SparseMoeBlock", "never")],
+        {"num_experts": 8},
+    ) == ("block_sparse_moe", "SparseMoeBlock")
+    assert extract._resolve_ffn_for_layer(0, [("mlp", "DenseMLP", "never")], {}) == (
+        "mlp",
+        "DenseMLP",
+    )
+
+    spec = ArchitectureSpec(
+        name="x",
+        model_type="x",
+        block_components=[
+            BlockComponent("mlp", "OldMLP", "ffn", "FFN", 1),
+        ],
+    )
+    extract._apply_uniform_ffn_component(spec, ffn_attr="mlp", ffn_class="DenseMLP")
+    assert spec.block_components[0].class_name == "DenseMLP"
+    extract._apply_uniform_ffn_component(spec, ffn_attr=None, ffn_class=None)
+
+
+def test_infer_layer_variants_from_config_moe_pattern():
+    decoder = structure(
+        "Decoder",
+        assignments={"self_attn": "DefaultAttention", "mlp": "DenseMLP"},
+    )
+    decoder.init_assignment_options = {
+        "mlp": ["DenseMLP", "SparseMoeBlock"],
+        "block_sparse_moe": ["SparseMoeBlock"],
+    }
+    spec = ArchitectureSpec(
+        name="x",
+        model_type="x",
+        num_hidden_layers=4,
+        block_components=[
+            BlockComponent("mlp", "DenseMLP", "ffn", "FFN", 1),
+        ],
+    )
+    config = {"num_experts": 8, "moe_layer_freq": [0, 1, 0, 1]}
+
+    extract._infer_layer_variants(
+        config,
+        spec,
+        class_registry={"Decoder": decoder},
+        decoder_class="Decoder",
+    )
+
+    assert len(spec.layer_variants) == 2
+    assert sorted(variant.count for variant in spec.layer_variants) == [2, 2]
+    assert spec.decoder_type == "Hybrid"
+    assert "Per-layer module types from AST/config" in spec.layer_notes
+
+
+def test_layer_repeat_nested_config_flags_and_defaults():
+    config = {
+        "nested": {
+            "special_layer_ids": [1, "2", "bad", 4],
+            "use_flash": True,
+        }
+    }
+
+    assert repeat._config_get(config, "use_flash") is True
+    assert repeat._config_get(config, "missing", 7) == 7
+    assert len(repeat._config_containers(config)) == 2
+    assert repeat._as_int(None) is None
+    assert repeat._as_int("bad") is None
+    assert repeat._layer_index_list(config, "special") == [0, 1, 3]
+    assert repeat._layer_index_list(config, "special", zero_based=True) == [1, 2, 4]
+    assert (
+        repeat._layer_index_predicate({}, "missing")
+        == "(layer_idx + 1) in missing_layers"
+    )
+    assert repeat._config_is_named_flag(config, "flash") == "True"
+    assert repeat._config_is_named_flag(config, "unknown") == "False"
+    assert repeat._config_is_named_flag({"num_experts": 0}, "moe") == "True"
+
+
+def test_layer_repeat_long_predicates_parsing_and_literals():
+    config = {"linear_layers": list(range(1, 15))}
+    predicate = repeat._layer_index_predicate(config, "linear")
+
+    assert predicate == "(layer_idx + 1) in linear_layers (14 layers)"
+    assert layer_condition_matches(13, predicate, config)
+    assert repeat._parse_layer_index_set("[]") == set()
+    assert repeat._parse_layer_index_set("[, 1-3, nope-x, 8]") == {1, 2, 3, 8}
+    assert repeat._parse_default("{'x': 1}") == {"x": 1}
+    assert repeat._parse_default("not valid python") == "not valid python"
+    assert repeat._compact_ranges([]) == ""
+    assert repeat._format_literal(True) == "True"
+    assert repeat._format_literal("x") == '"x"'
+    assert repeat._format_literal([1, 2]) == "[1, 2]"
+    assert repeat._format_literal(3) == "3"
+    assert simplify_layer_repeat_lines(["unchanged"], {}) == ["unchanged"]
+
+
+@pytest.mark.parametrize(
+    ("expression", "layer", "expected"),
+    [
+        ("-layer_idx == -2", 2, True),
+        ("layer_idx // 2 == 2", 5, True),
+        ("layer_idx + 1 in (1, 2, 3)", 1, True),
+        ("layer_idx < 3 < 4", 2, True),
+        ("layer_idx == 0 or layer_idx == 4", 4, True),
+        ("layer_idx == 1 and layer_idx != 2", 1, True),
+        ("layer_idx ** 2 == 4", 2, None),
+        ("other_name", 0, None),
+        ("invalid +", 0, None),
+    ],
+)
+def test_safe_condition_decider_operations(expression, layer, expected):
+    assert repeat._decide_condition(expression, layer) is expected
+
+
+def test_additional_block_purpose_fallbacks():
+    assert block_purpose(node("@attention", "AttentionOp", basic=False)) is None
+    assert (
+        block_purpose(
+            node(
+                "conv",
+                "ShortConvolution",
+                label="Depthwise Conv",
+                basic=False,
+                details=["SiLU"],
+            )
+        )
+        is None
+    )
+    assert (
+        block_purpose(node("conv", "ShortConvolution", basic=False)) == "depthwise conv"
+    )
+    assert (
+        block_purpose(node("embedding", "Embedding", role="embedding"))
+        == "Gather rows by token id"
+    )
+    assert (
+        block_purpose(
+            node(
+                "gate_activation",
+                "ActivationOp",
+                label="SiLU",
+                basic=False,
+            )
+        )
+        is None
+    )
+
+
+def test_substitution_rejections_and_existing_source(monkeypatch):
+    leaf = node("leaf")
+    composite = node(
+        "composite",
+        "Composite",
+        basic=False,
+        children=[leaf],
+    )
+    monkeypatch.setattr(bt, "forward_operation_count", lambda *_args, **_kwargs: 2)
+    assert not bt._is_substitutable_single_op_subgraph(composite)
+    assert not bt._is_substitutable_single_op_subgraph(leaf)
+
+    composite.side_inputs = {
+        "leaf": [SideInputSpec("residual", "residual", [], "forward_input")]
+    }
+    monkeypatch.setattr(bt, "forward_operation_count", lambda *_args, **_kwargs: 1)
+    leaf.input_source = "Already set"
+    assert bt._substitute_single_op_subgraph(composite) is leaf
+
+
+def test_nested_diagram_filters_non_candidates(monkeypatch):
+    basic = node("basic")
+    inline = node(
+        "inline",
+        "Inline",
+        basic=False,
+        children=[node("one"), node("two")],
+    )
+    too_small = node(
+        "small",
+        "Small",
+        basic=False,
+        children=[node("producer"), node("consumer")],
+    )
+    too_small.side_inputs = {
+        "consumer": [SideInputSpec("side", "side", ["producer"], "prior_step")]
+    }
+    root = node("root", "Root", basic=False, children=[basic, inline, too_small])
+
+    monkeypatch.setattr(
+        "visualizer.computation_graph.build_computation_graph",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            nodes=[
+                SimpleNamespace(block=None),
+                SimpleNamespace(block=basic),
+                SimpleNamespace(block=inline),
+                SimpleNamespace(block=too_small),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        bt,
+        "subgraph_warrants_export",
+        lambda candidate, **_kwargs: candidate is not too_small,
+    )
+    assert bt.collect_nested_diagrams(root) == []
+
+
+def test_decoder_and_full_tree_builders_order_filter_and_deduplicate():
+    registered = structure(
+        "Registered",
+        assignments={"proj": "Linear"},
+        calls=["proj"],
+    )
+    registry = {"Registered": registered}
+    basic_filter = BasicOpFilter.for_detailed()
+    norm = BlockComponent("norm", "RMSNorm", "norm", "Norm", 0)
+    known = BlockComponent("known", "Registered", "ffn", "Known", 2)
+    duplicate = BlockComponent("known", "Registered", "ffn", "Known again", 3)
+    unknown_order = BlockComponent("unknown", "Registered", "ffn", "Unknown", None)
+
+    trees = bt.build_decoder_block_trees(
+        [duplicate, unknown_order, known, norm],
+        registry,
+        basic_filter,
+        include_norms=True,
+    )
+    assert [tree.attr_name for _, tree in trees] == ["norm", "known"]
+    assert trees[1][1].input_label == "hidden_states"
+
+    all_trees = bt.build_full_detailed_block_trees(
+        components=[known],
+        registry=registry,
+        basic_ops=basic_filter,
+        positional_encoding="RoPE",
+        norm_type="RMSNorm",
+        stack_pre=[BlockComponent("embed", "Embedding", "embedding", "Embed", 0)],
+        stack_tail=[BlockComponent("head", "Linear", "head", "Head", 3)],
+        partition=False,
+        include_norms=True,
+    )
+    assert [tree.attr_name for _, tree in all_trees] == ["embed", "known", "head"]
+
+
+def test_detail_tree_builder_skips_method_wrappers_and_non_pipeline_items():
+    helper = structure("Helper", calls=["method"])
+    registry = {"Helper": helper}
+    basic_filter = BasicOpFilter.for_detailed()
+    method_component = BlockComponent("helper", "Helper", "ffn", "Helper", 1)
+    late = BlockComponent("late", "External", "other", "Late", None)
+
+    trees = bt._build_component_block_trees(
+        [method_component, late],
+        registry,
+        basic_filter,
+    )
+    assert [tree.attr_name for _, tree in trees] == ["helper"]
+
+
+def test_attention_and_ffn_config_list_resolution():
+    decoder = structure("Decoder")
+    decoder.init_assignment_options = {
+        "self_attn": ["LinearAttention", "FlashAttention"]
+    }
+    registry = {"Decoder": decoder}
+
+    assert (
+        extract._resolve_attention_from_config_lists(
+            0,
+            {"layer_types": ["linear_attention"]},
+            class_registry=registry,
+            decoder_class="Decoder",
+        )
+        == "LinearAttention"
+    )
+    assert (
+        extract._resolve_attention_from_config_lists(
+            1,
+            {"layer_types": ["linear_attention", "full_attention"]},
+            class_registry=registry,
+            decoder_class="Decoder",
+        )
+        == "FlashAttention"
+    )
+    assert (
+        extract._resolve_attention_from_config_lists(
+            3,
+            {"layer_types": ["full_attention"]},
+            class_registry=registry,
+            decoder_class="Decoder",
+        )
+        is None
+    )
+    assert extract._resolve_ffn_from_config_lists(
+        0,
+        {"mlp_layer_types": ["sparse"]},
+        moe_option="SparseMoeBlock",
+        dense_option="DenseMLP",
+    ) == ("mlp", "SparseMoeBlock")
+    assert extract._resolve_ffn_from_config_lists(
+        0,
+        {"mlp_layer_types": ["dense"]},
+        moe_option="SparseMoeBlock",
+        dense_option="DenseMLP",
+    ) == ("mlp", "DenseMLP")
+
+
+def test_infer_hybrid_attention_variants_from_layer_types():
+    decoder = structure(
+        "Decoder",
+        assignments={"self_attn": "FlashAttention", "mlp": "DenseMLP"},
+    )
+    decoder.init_assignment_options = {
+        "self_attn": ["LinearAttention", "FlashAttention"],
+        "mlp": ["DenseMLP", "SparseMoeBlock"],
+    }
+    spec = ArchitectureSpec(
+        name="x",
+        model_type="x",
+        num_hidden_layers=4,
+    )
+
+    extract._infer_layer_variants(
+        {
+            "layer_types": [
+                "linear_attention",
+                "full_attention",
+                "linear_attention",
+                "full_attention",
+            ],
+            "mlp_layer_types": ["dense", "sparse", "dense", "sparse"],
+        },
+        spec,
+        class_registry={"Decoder": decoder},
+        decoder_class="Decoder",
+    )
+
+    assert spec.attention_type == "Hybrid"
+    assert len(spec.layer_variants) == 2
+    assert all(variant.count == 2 for variant in spec.layer_variants)
+    assert "/" in spec.attention_notes[-1]
+
+
+def test_infer_uniform_variant_updates_attention_and_ffn():
+    decoder = structure(
+        "Decoder",
+        assignments={"self_attn": "FlashAttention", "mlp": "DenseMLP"},
+    )
+    decoder.init_assignment_options = {"mlp": ["DenseMLP"]}
+    spec = ArchitectureSpec(
+        name="x",
+        model_type="x",
+        num_hidden_layers=2,
+        block_components=[BlockComponent("mlp", "OldMLP", "ffn", "Old", 1)],
+    )
+
+    extract._infer_layer_variants(
+        {"special_layers": [1]},
+        spec,
+        class_registry={"Decoder": decoder},
+        decoder_class="Decoder",
+    )
+
+    assert "Attention module: FlashAttention" in spec.attention_notes
+    assert spec.block_components[0].class_name == "DenseMLP"
+
+
+def test_repeat_fallback_patterns_when_ast_decision_is_unavailable(monkeypatch):
+    monkeypatch.setattr(repeat, "_decide_condition", lambda *_args: None)
+
+    assert layer_condition_matches(2, "True", {})
+    assert not layer_condition_matches(2, "False", {})
+    assert layer_condition_matches(4, "layer_idx >= 3", {})
+    assert layer_condition_matches(4, "layer_idx % 2 == 0", {})
+    assert layer_condition_matches(4, "(layer_idx % 2 == 0)", {})
+    assert not layer_condition_matches(1, "symbolic expression", {})
+
+
+def test_repeat_private_edge_branches():
+    assert repeat._substitute_config_attrs("config.missing", {}) == "config.missing"
+    assert repeat._config_get({"top": 1}, "top") == 1
+    assert repeat._layer_index_list({"x_layers": ["bad"]}, "x") == []
+    assert (
+        repeat._layer_index_predicate({"x_layers": [1, 2]}, "x")
+        == "(layer_idx + 1) in [1–2]"
+    )
+    assert repeat._format_layer_index_set([]) == "[]"
+    assert repeat._simplify_boolean_expr("") == ""
+
+    with pytest.raises(repeat._UndecidableCondition):
+        repeat._condition_value(ast.parse("~layer_idx", mode="eval").body, 0)
+    with pytest.raises(repeat._UndecidableCondition):
+        repeat._condition_value(ast.parse("layer_idx is 1", mode="eval").body, 0)
