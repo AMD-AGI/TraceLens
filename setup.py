@@ -42,7 +42,8 @@ def _read_requirements(path: Path) -> list[str]:
 
 _VISUALIZER_PACKAGES = find_packages(where="Visualizer")
 _VISUALIZER_PACKAGE_DIR = {
-    package: f"Visualizer/{package.replace('.', '/')}" for package in _VISUALIZER_PACKAGES
+    package: f"Visualizer/{package.replace('.', '/')}"
+    for package in _VISUALIZER_PACKAGES
 }
 
 with open("README.md", encoding="utf-8") as _readme:
