@@ -15,7 +15,6 @@ correct root set from one that locked onto a warmup loop.
 
 from typing import List, Optional, Sequence, Tuple
 
-from ...Trace2Tree.inference_iteration_roots import _hit
 from ..annotation_utils import (
     ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
@@ -207,18 +206,12 @@ def find_iteration_roots_ex(events: Sequence[dict]) -> RootSet:
     annotations = collect_annotations(events)
 
     root_set = _detect_annotated(events, attribution)
-    if root_set is not None:
-        _hit("ex.annotated")
-    else:
+    if root_set is None:
         root_set = detect_from_unknown_family(events, attribution)
-        if root_set is not None:
-            _hit("ex.unknown_family")
     if root_set is None:
         generic = detect_generic(events, attribution)
         if generic is not None:
-            _hit("ex.generic")
             return generic
-        _hit("ex.none")
         return RootSet(
             roots=[],
             method="none",
@@ -239,13 +232,11 @@ def find_iteration_roots_ex(events: Sequence[dict]) -> RootSet:
     if coverage.passes and (
         known_labels or not root_set.diagnostics.get("suspiciously_few_roots")
     ):
-        _hit("ex.grade.splittable_known" if known_labels else "ex.grade.splittable")
         root_set.status = DetectStatus.SPLITTABLE
         return root_set
 
     # No probes: grade directly on how much GPU work the roots explain.
     if coverage and coverage.covered_selected >= COVERAGE_FLOOR:
-        _hit("ex.grade.degraded")
         root_set.status = DetectStatus.DEGRADED
         return root_set
 
@@ -257,9 +248,6 @@ def find_iteration_roots_ex(events: Sequence[dict]) -> RootSet:
     # adopt it if it clears its own gate; otherwise keep the honest refusal.
     generic = detect_generic(events, attribution)
     if generic is not None and generic.status is DetectStatus.SPLITTABLE:
-        _hit("ex.cascade_to_generic")
         return generic
-
-    _hit("ex.grade.not_splittable")
     root_set.status = DetectStatus.NOT_SPLITTABLE
     return root_set

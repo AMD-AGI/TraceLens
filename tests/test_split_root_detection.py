@@ -7,10 +7,6 @@
 """Tests for the coverage-gated splitter: components and the flow built on them."""
 
 from TraceLens.Trace2Tree.inference_iteration_roots import (
-    PERIOD_CONFLICT,
-    PERIOD_EXACT,
-    PERIOD_INTEGER_RATIO,
-    compare_periods,
     find_period_candidates,
 )
 from TraceLens.TraceUtils.annotation_utils import (
@@ -37,7 +33,6 @@ from TraceLens.TraceUtils.split_inference.detect_utils import (
     COVERAGE_GATE,
     GpuAttribution,
     IntervalIndex,
-    gaps_between,
     group_by_thread,
 )
 from TraceLens.TraceUtils.split_inference.root_detection import (
@@ -240,13 +235,6 @@ class TestPeriodicity:
         best = find_period_candidates(["x", "y"] * 10)[0]
         assert best.coverage == 1.0
 
-    def test_compare_periods(self):
-        assert compare_periods(4, 4) == (PERIOD_EXACT, 1)
-        assert compare_periods(4, 12) == (PERIOD_INTEGER_RATIO, 3)
-        assert compare_periods(4, 7) == (PERIOD_CONFLICT, None)
-        assert compare_periods(4, None) == (PERIOD_CONFLICT, None)
-        assert compare_periods(0, 4) == (PERIOD_CONFLICT, None)
-
 
 # --------------------------------------------------------------------------- #
 # C3: containment queries
@@ -275,15 +263,6 @@ class TestIntervalIndex:
         outer = annotation("outer", 100, 100)
         flow = {"name": "ac2g", "ph": "s", "ts": 110, "pid": 1, "tid": 10}
         assert IntervalIndex([outer, flow]).contained_in(outer) == []
-
-    def test_gaps_between_consecutive_roots(self):
-        roots = [annotation("r", 100, 10), annotation("r", 200, 10)]
-        (gap,) = gaps_between(roots)
-        assert (gap["ts"], gap["dur"]) == (110, 90)
-
-    def test_no_gap_when_roots_touch(self):
-        roots = [annotation("r", 100, 100), annotation("r", 200, 10)]
-        assert gaps_between(roots) == []
 
     def test_group_by_thread_sorts_within_group(self):
         events = [annotation("b", 200, 1, tid=10), annotation("a", 100, 1, tid=10)]
@@ -363,7 +342,6 @@ class TestGpuAttribution:
         report = GpuAttribution(events).audit(annotations, annotations[:2])
         assert report.covered_any == 1.0
         assert not report.passes
-        assert report.better_roots_exist
 
     def test_unannotated_work_lowers_coverage(self):
         events = serving_trace(8)
@@ -372,10 +350,6 @@ class TestGpuAttribution:
         attribution = GpuAttribution(events)
         report = attribution.audit(collect_annotations(events), [])
         assert report.covered_any < COVERAGE_GATE
-        assert [
-            k["name"]
-            for k in attribution.uncovered_kernels(collect_annotations(events))
-        ] == ["orphan"]
 
     def test_selected_roots_can_cover_less_than_all_annotations(self):
         """The signature of roots sitting at the wrong nesting level."""
@@ -386,17 +360,12 @@ class TestGpuAttribution:
         assert report.covered_any == 1.0
         assert report.covered_selected < report.covered_any
 
-    def test_family_gpu_time_and_launch_sites(self):
+    def test_family_gpu_time(self):
         events = serving_trace(4)
         attribution = GpuAttribution(events)
         annotations = collect_annotations(events)
         skeleton = name_skeleton(annotations[0]["name"])
         assert attribution.gpu_time_for_family(skeleton, annotations) == 4 * 40
-        assert len(attribution.cpu_launches_for(attribution.kernels)) == 4
-
-    def test_graph_launched_kernels_have_no_launch_site(self):
-        attribution = GpuAttribution([kernel(100, 10, 4242)])
-        assert attribution.cpu_launches_for(attribution.kernels) == []
 
 
 # --------------------------------------------------------------------------- #

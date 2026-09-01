@@ -15,20 +15,14 @@ call-tree periodicity.
 from collections import Counter
 from dataclasses import dataclass, field
 from statistics import mean, pstdev
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 from ...Trace2Tree.inference_iteration_roots import (
-    BRANCH_DESCENT_TIER,
     GRAPH_LAUNCH_TIER,
-    PERIOD_CONFLICT,
-    _hit,
-    compare_periods,
     find_iteration_roots_generic,
-    find_period_candidates,
 )
 from ..annotation_utils import (
     ANNOTATION_CAT,
-    inherit_identity,
     is_parseable,
     name_skeleton,
 )
@@ -171,122 +165,7 @@ def resolve_nesting(families: Sequence[AnnotationFamily], index: IntervalIndex) 
         family.encloses = counts
 
 
-# --- step 1.5: choose the nesting level and where metadata comes from --------
-def select_root_family(
-    families: Sequence[AnnotationFamily],
-) -> Tuple[Optional[AnnotationFamily], List[AnnotationFamily]]:
-    """Outermost regular family that wraps something parseable.
-
-    Separating "which span" from "which label" is the point: a scheduler span
-    can be the right window while carrying no metadata, and the annotation that
-    carries it can be too narrow. Returns the family and what it wraps.
-    """
-    parseable = [f for f in families if f.parseable]
-    if not parseable:
-        return None, []
-
-    candidates = []
-    for family in families:
-        if not family.regular:
-            continue
-        wrapped = [p for p in parseable if family.is_outer_to(p)]
-        if wrapped:
-            candidates.append((family, wrapped))
-    if not candidates:
-        return None, []
-
-    # Outermost means not enclosed by another candidate. Being outermost is not
-    # sufficient on its own -- a whole-run wrapper would win every time -- which
-    # is why only regular families were considered above.
-    outermost = [
-        (family, wrapped)
-        for family, wrapped in candidates
-        if not any(other.is_outer_to(family) for other, _ in candidates)
-    ]
-    pool = outermost or candidates
-    return min(pool, key=lambda item: item[0].rank)
-
-
-def enrich_roots(
-    family: AnnotationFamily, index: IntervalIndex
-) -> Tuple[List[dict], int, float]:
-    """Roots from ``family``, each carrying its inner annotation's identity.
-
-    Instances enclosing nothing parseable do no iteration work and are dropped.
-    Their count and span share are returned because a large dropped share next
-    to passing coverage means the wrong nesting level.
-    """
-    roots: List[dict] = []
-    dropped_dur = 0.0
-    total_dur = 0.0
-    for instance in family.instances:
-        total_dur += instance.get("dur", 0)
-        inner = [
-            e for e in index.contained_in(instance) if is_parseable(e.get("name", ""))
-        ]
-        if not inner:
-            dropped_dur += instance.get("dur", 0)
-            continue
-        # Longest *parseable* child, not longest child: an unparseable winner
-        # leaves the metadata fabricated and silently collapses batch size to 1.
-        source = max(inner, key=lambda e: e.get("dur", 0))
-        roots.append(inherit_identity(instance, source))
-    roots.sort(key=lambda e: e.get("ts", 0))
-    dropped = family.count - len(roots)
-    return roots, dropped, (dropped_dur / total_dur if total_dur else 0.0)
-
-
 # --- steps ------------------------------------------------------------------
-def detect_from_families(
-    events: Sequence[dict], attribution: GpuAttribution
-) -> Optional[RootSet]:
-    """Steps 1 and 1.5: families, then the chosen nesting level.
-
-    ``None`` when no family wraps anything parseable, handing off to step 3.
-    """
-    annotations = collect_annotations(events)
-    if not annotations:
-        return None
-
-    families = build_families(annotations, attribution)
-    if not families:
-        return None
-
-    index = IntervalIndex(annotations)
-    resolve_nesting(families, index)
-    family, wrapped = select_root_family(families)
-
-    diagnostics = {
-        "n_families": len(families),
-        "n_annotations": len(annotations),
-    }
-    if family is None:
-        return None
-
-    roots, dropped, dropped_share = enrich_roots(family, index)
-    if not roots:
-        return None
-
-    inner = min(wrapped, key=lambda f: f.rank)
-    diagnostics.update(
-        {
-            "root_family_skeleton": family.skeleton,
-            "root_family_known": family.parseable,
-            "inherited_from_skeleton": inner.skeleton,
-            "n_root_instances_dropped": dropped,
-            "dropped_gpu_time_share": round(dropped_share, 4),
-            "suspiciously_few_roots": len(roots) < MIN_ROOTS,
-        }
-    )
-    known = "known" if family.parseable else "unknown"
-    return RootSet(
-        roots=roots,
-        method=f"family:{known}_outer+parseable_inner",
-        phase_confidence=PhaseConfidence.HIGH,
-        diagnostics=diagnostics,
-    )
-
-
 def detect_from_unknown_family(
     events: Sequence[dict], attribution: GpuAttribution
 ) -> Optional[RootSet]:
@@ -318,12 +197,14 @@ def detect_from_unknown_family(
 def detect_generic(
     events: Sequence[dict], attribution: GpuAttribution
 ) -> Optional[RootSet]:
-    """Step 5: call-tree periodicity, cross-checked against the kernel stream.
+    """Step 5: grade the generic call-tree split into a :class:`RootSet`.
 
-    Two independent detections make this trustworthy without a coverage gate.
-    They are compared on *iteration count*, not raw period: the periods are
-    measured in different units -- python frames versus kernels -- so a kernel
-    loop at an exact multiple is the same loop at finer grain, and confirms it.
+    The detectors in ``find_iteration_roots_generic`` all judge their own split by
+    GPU coverage -- branch-descent and sibling-roots on tree-descendant kernels,
+    graph launches on launch-window coverage here (they are gathered before a tree
+    exists). So there is no kernel-stream period cross-check anymore: it duplicated
+    the coverage guard and, worse, refused graph-replay splits because capture
+    erases the per-step kernel period.
     """
     diagnostics: dict = {}
     roots = find_iteration_roots_generic(list(events), diagnostics)
@@ -333,15 +214,11 @@ def detect_generic(
     tier = diagnostics.get("period_label_tier")
     method = f"generic:{tier}" if tier else "generic:python_function"
 
-    # Graph launches are a direct per-iteration marker (one launch per replay).
-    # The name-based kernel period check below cannot confirm them -- graph
-    # capture hides the per-step kernel period -- so instead confirm them the way
-    # the annotated paths do: audit how much GPU work the launch tiles actually
-    # account for, by projection or by launch correlation. span_share is skipped
-    # because a launch is a point event, so it explains ~no time on its own even
-    # when there is exactly one per iteration; kernel coverage is the real signal.
+    # Graph launches are gathered off the flat event list (no tree), so their
+    # coverage is audited here by projection / launch correlation rather than by
+    # tree descendants. span_share is skipped because a launch is a point event
+    # that explains ~no time on its own; kernel coverage is the real signal.
     if tier == GRAPH_LAUNCH_TIER:
-        _hit("detect_generic.graph_launch_tier")
         coverage = attribution.audit(collect_annotations(events), roots)
         if coverage.covered_selected >= COVERAGE_GATE:
             status = DetectStatus.SPLITTABLE
@@ -359,42 +236,9 @@ def detect_generic(
             diagnostics=diagnostics,
         )
 
-    # Branch descent already gated its windows on tree-descendant GPU coverage,
-    # which is cross-thread exact (it credits work on dispatch threads a launch-
-    # correlation audit on the host thread would miss). Trust that gate rather
-    # than re-confirming against the kernel period, which does not repeat cleanly
-    # for training backward passes.
-    if tier == BRANCH_DESCENT_TIER:
-        _hit("detect_generic.branch_descent_tier")
-        return RootSet(
-            roots=roots,
-            method=method,
-            phase_confidence=PhaseConfidence.UNKNOWN,
-            status=DetectStatus.SPLITTABLE,
-            diagnostics=diagnostics,
-        )
-
-    _hit("detect_generic.kernel_period_crosscheck")
-    kernel_names = [k.get("name", "") for k in attribution.kernels]
-    kernel_candidates = find_period_candidates(kernel_names)
-    kernel_blocks = kernel_candidates[0].repeats if kernel_candidates else None
-    verdict, ratio = compare_periods(len(roots), kernel_blocks)
-
-    diagnostics.update(
-        {
-            "kernel_loop_blocks": kernel_blocks,
-            "period_agreement": verdict,
-            "generic_ratio_k": ratio,
-        }
-    )
-    if verdict == PERIOD_CONFLICT:
-        return RootSet(
-            roots=roots,
-            method=method,
-            phase_confidence=PhaseConfidence.UNKNOWN,
-            status=DetectStatus.NOT_SPLITTABLE,
-            diagnostics=diagnostics,
-        )
+    # branch-descent and sibling-roots already gated on tree-descendant GPU
+    # coverage inside the detector (cross-thread exact after reattachment), so
+    # reaching here means the split cleared the bar -- accept it.
     return RootSet(
         roots=roots,
         method=method,
