@@ -55,7 +55,7 @@ def compose_viewer_html(
         replacement_parts.append(render_worker_script(_worker_js_source().read_text(encoding="utf-8")))
         replacement_parts.append(f"    <script>\n{app_js}\n    </script>")
     else:
-        replacement_parts.append('    <script src="./app.js?v=9"></script>')
+        replacement_parts.append('    <script src="./app.js?v=10"></script>')
 
     if replacement_parts:
         replacement = "\n".join(replacement_parts)

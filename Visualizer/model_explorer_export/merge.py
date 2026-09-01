@@ -20,7 +20,12 @@ from model_explorer_export.adapter import (
     _sanitize_namespace_segment,
 )
 from model_explorer_export.fact_sheet import build_fact_sheet_group_attributes
-from model_explorer_export.shapes import annotate_nodes_with_shapes, infer_block_tree_shapes
+from model_explorer_export.shapes import (
+    annotate_nodes_with_shapes,
+    fill_missing_node_shapes,
+    group_boundary_shapes,
+    infer_block_tree_shapes,
+)
 from model_explorer_export.labels import (
     apply_kernel_frame_labels,
     skip_merged_tensor_port_parent,
@@ -289,11 +294,55 @@ def _boundary_nodes(nodes: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
     return entries or sorted(node_ids)[:1], exits or sorted(node_ids)[-1:]
 
 
+def _block_tile_ids(computation: ComputationGraph, *, id_prefix: str) -> dict[int, str]:
+    """Merged node id of the tile each block renders as, keyed by block identity."""
+    tiles: dict[int, str] = {}
+    for index, spec in enumerate(computation.nodes):
+        if spec.block is None:
+            continue
+        tiles.setdefault(id(spec.block), _merge_node_id(id_prefix, spec.key or f"node:{index}"))
+    return tiles
+
+
+def _replace_tile_with_group(
+    section_nodes: list[dict[str, Any]],
+    nested_nodes: list[dict[str, Any]],
+    *,
+    tile_id: str,
+    exit_id: str | None,
+) -> None:
+    """Put a nested diagram where its collapsed tile sat, instead of beside the section.
+
+    Model Explorer draws an unconnected group as a floating island, so the tile's
+    producers feed the group's input port and its consumers read the group's output.
+    """
+    tile = next((node for node in section_nodes if node["id"] == tile_id), None)
+    if tile is None:
+        return
+    incoming = tile.get("incomingEdges", [])
+    entries = [node for node in nested_nodes if _is_primary_section_input(node)]
+    if not entries:
+        entry_ids, _exits = _boundary_nodes(nested_nodes)
+        entries = [node for node in nested_nodes if node["id"] in set(entry_ids)]
+    for entry in entries:
+        if incoming and not entry.get("incomingEdges"):
+            entry["incomingEdges"] = [dict(edge) for edge in incoming]
+
+    section_nodes.remove(tile)
+    if exit_id is None:
+        return
+    for node in section_nodes:
+        for edge in node.get("incomingEdges", []):
+            if edge.get("sourceNodeId") == tile_id:
+                edge["sourceNodeId"] = exit_id
+
+
 def _section_exits(
     computation: ComputationGraph,
     section_nodes: list[dict[str, Any]],
     *,
     id_prefix: str,
+    replacements: dict[str, str] | None = None,
 ) -> list[str]:
     """Return the section output node(s) that feed the next spine step.
 
@@ -310,6 +359,7 @@ def _section_exits(
         primary_local = index_to_local.get(computation.primary_output_index)
         if primary_local is not None:
             primary_id = _merge_node_id(id_prefix, primary_local)
+            primary_id = (replacements or {}).get(primary_id, primary_id)
             if primary_id in node_ids:
                 return [primary_id]
     _entries, exits = _boundary_nodes(section_nodes)
@@ -879,13 +929,18 @@ def _append_section(
             group_node_attributes=group_node_attributes,
             inject_skip=pipeline_inject_skip,
         )
+    tile_ids = _block_tile_ids(computation, id_prefix=id_prefix)
+    tile_replacements: dict[str, str] = {}
     for nested_label, nested_block in collect_nested_diagrams(block_tree, basic_ops=basic_ops):
-        nested_prefix = _merge_node_id(id_prefix, nested_block.attr_name)
+        tile_id = tile_ids.get(id(nested_block))
+        nested_prefix = tile_id or _merge_node_id(id_prefix, nested_block.attr_name)
         if any(node["id"].startswith(f"{nested_prefix}/") for node in section_nodes):
             continue
         nested_namespace = _join_namespace(
             namespace_prefix,
-            _nested_namespace_segment(nested_block, nested_label),
+            _sanitize_namespace_segment(nested_label)
+            if tile_id
+            else _nested_namespace_segment(nested_block, nested_label),
         )
         if nested_block.class_name == "KernelPipeline" and any(
             node.get("namespace", "").startswith(nested_namespace) and _is_tensor_port(node)
@@ -897,13 +952,26 @@ def _append_section(
             basic_ops=basic_ops,
             strip_unused_return_branches=True,
         )
-        section_nodes.extend(
-            _computation_nodes(
-                nested_computation,
-                id_prefix=nested_prefix,
-                namespace_prefix=nested_namespace,
-            )
+        nested_nodes = _computation_nodes(
+            nested_computation,
+            id_prefix=nested_prefix,
+            namespace_prefix=nested_namespace,
         )
+        section_nodes.extend(nested_nodes)
+        if tile_id is not None:
+            nested_exits = _section_exits(
+                nested_computation,
+                nested_nodes,
+                id_prefix=nested_prefix,
+            )
+            _replace_tile_with_group(
+                section_nodes,
+                nested_nodes,
+                tile_id=tile_id,
+                exit_id=nested_exits[0] if nested_exits else None,
+            )
+            if nested_exits:
+                tile_replacements[tile_id] = nested_exits[0]
         if shape_inferencer is not None:
             annotate_nodes_with_shapes(
                 section_nodes,
@@ -931,7 +999,12 @@ def _append_section(
         namespace_prefix=namespace_prefix,
         previous_exits=previous_exits,
     )
-    exits = _section_exits(computation, section_nodes, id_prefix=id_prefix)
+    exits = _section_exits(
+        computation,
+        section_nodes,
+        id_prefix=id_prefix,
+        replacements=tile_replacements,
+    )
 
     merged_nodes.extend(section_nodes)
     apply_kernel_frame_labels(section_nodes, group_node_attributes)
@@ -1160,6 +1233,9 @@ def build_merged_model_graph(
             shape_inferencer=shape_inferencer,
         )
 
+    if shape_inferencer is not None:
+        fill_missing_node_shapes(nodes, context=shape_inferencer.context)
+
     model_attrs: dict[str, str] = {
         "title": spec.name,
         "model_type": spec.model_type,
@@ -1176,18 +1252,23 @@ def build_merged_model_graph(
 
     finalize_graph_node_styles(nodes)
 
+    graph_attributes: dict[str, dict[str, str]] = {
+        "": model_attrs,
+        decoder_namespace: {
+            "repeat": decoder_namespace,
+            "forward": format_forward_sequence(spec),
+            **({"layer_mix": spec.layer_mix} if spec.layer_mix else {}),
+        },
+        **group_node_attributes,
+    }
+    if shape_inferencer is not None:
+        for namespace, boundary in group_boundary_shapes(nodes).items():
+            graph_attributes.setdefault(namespace, {}).update(boundary)
+
     return {
         "id": graph_id,
         "nodes": nodes,
-        "groupNodeAttributes": {
-            "": model_attrs,
-            decoder_namespace: {
-                "repeat": decoder_namespace,
-                "forward": format_forward_sequence(spec),
-                **({"layer_mix": spec.layer_mix} if spec.layer_mix else {}),
-            },
-            **group_node_attributes,
-        },
+        "groupNodeAttributes": graph_attributes,
         "groupNodeConfigs": build_group_node_configs(
             decoder_namespace=decoder_namespace,
             group_node_attributes={

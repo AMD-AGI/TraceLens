@@ -226,6 +226,62 @@ def test_inject_group_inputs_adds_namespace_input_port():
     ]
 
 
+def test_replace_tile_with_group_puts_nested_diagram_in_the_tile_slot():
+    from model_explorer_export.merge import _replace_tile_with_group
+
+    def edge(source: str) -> dict[str, Any]:
+        return {
+            "sourceNodeId": source,
+            "sourceNodeOutputId": "0",
+            "targetNodeInputId": "0",
+        }
+
+    producer = "self_attn/fan0-2:q_a_layernorm:q_a_layernorm:0"
+    tile = "self_attn/fan0-2:indexer:indexer:0"
+    consumer = "self_attn/fan0-2:q_b_proj:q_b_proj:0"
+    nested_input = f"{tile}/@input"
+    nested_exit = f"{tile}/seq:1:mask:mask:0"
+    nested_ns = "Attention/Glm5NextTextIndexer"
+
+    nested_nodes = [
+        {
+            "id": nested_input,
+            "label": "hidden_states",
+            "namespace": nested_ns,
+            "attrs": [{"key": "synthetic", "value": "@input"}],
+        },
+        {
+            "id": nested_exit,
+            "label": "Masked fill",
+            "namespace": nested_ns,
+            "incomingEdges": [edge(nested_input)],
+        },
+    ]
+    section_nodes = [
+        {"id": producer, "label": "RMSNorm", "namespace": "Attention"},
+        {
+            "id": tile,
+            "label": "Glm5NextTextIndexer",
+            "namespace": "Attention",
+            "incomingEdges": [edge(producer)],
+        },
+        {
+            "id": consumer,
+            "label": "Linear",
+            "namespace": "Attention",
+            "incomingEdges": [edge(tile)],
+        },
+        *nested_nodes,
+    ]
+
+    _replace_tile_with_group(section_nodes, nested_nodes, tile_id=tile, exit_id=nested_exit)
+
+    by_id = {node["id"]: node for node in section_nodes}
+    assert tile not in by_id
+    assert [item["sourceNodeId"] for item in by_id[nested_input]["incomingEdges"]] == [producer]
+    assert [item["sourceNodeId"] for item in by_id[consumer]["incomingEdges"]] == [nested_exit]
+
+
 def test_inject_group_inputs_treats_nested_ops_as_internal():
     from model_explorer_export.merge import _inject_group_inputs
 
@@ -821,6 +877,53 @@ def test_kernel_frame_labels_split_l2norm_q_and_k_and_sanitize_unicode():
     assert group_attrs[nodes[1]["namespace"]]["label"] == "L2Norm (k)"
 
 
+def test_fill_missing_node_shapes_seeds_and_propagates():
+    from visualizer.shape_inference import ShapeContext
+
+    from model_explorer_export.shapes import fill_missing_node_shapes
+
+    context = ShapeContext(dims={"B": "B", "S": "S", "H": 4096, "V": 32000}, dtype="float16")
+    nodes: list[dict[str, Any]] = [
+        {"id": "@input", "label": "Tokenized text"},
+        {
+            "id": "embed_tokens",
+            "label": "Token Embedding",
+            "incomingEdges": [{"sourceNodeId": "@input", "sourceNodeOutputId": "0"}],
+        },
+        {
+            "id": "decoder/norm",
+            "label": "RMSNorm",
+            "incomingEdges": [{"sourceNodeId": "embed_tokens", "sourceNodeOutputId": "0"}],
+        },
+        {
+            "id": "mlp",
+            "label": "MLP",
+            "incomingEdges": [{"sourceNodeId": "decoder/norm", "sourceNodeOutputId": "0"}],
+        },
+        {"id": "lm_head", "label": "Logits"},
+        {"id": "orphan", "label": "Detached"},
+    ]
+
+    fill_missing_node_shapes(nodes, context=context)
+
+    shapes = {
+        node["id"]: next(
+            attr["value"]
+            for attr in node["outputsMetadata"][0]["attrs"]
+            if attr["key"] == "shape"
+        )
+        for node in nodes
+    }
+    assert shapes == {
+        "@input": "B x S",
+        "embed_tokens": "B x S x 4096",
+        "decoder/norm": "B x S x 4096",
+        "mlp": "B x S x 4096",
+        "lm_head": "B x S x 32000",
+        "orphan": "B x S x 4096",
+    }
+
+
 def test_merged_graph_includes_output_shape_attrs():
     spec = load_architecture(
         FIXTURES / "custom_model",
@@ -828,29 +931,83 @@ def test_merged_graph_includes_output_shape_attrs():
         detailed=True,
         basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$"]),
     )
-    payload = build_model_explorer_payload(spec, include_shapes=True)
+    payload = build_model_explorer_payload(spec)
+    nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
     shaped_nodes = [
         node
-        for node in payload["graphCollections"][0]["graphs"][0]["nodes"]
+        for node in nodes
         if any(attr.get("key") == "output_shape" for attr in node.get("attrs", []))
     ]
     assert shaped_nodes
+    # Every node needs output metadata or Model Explorer labels its edges "?".
+    assert all(node.get("outputsMetadata") for node in nodes)
     router = next(
         node
         for node in shaped_nodes
         if node["id"].endswith("router:router:0")
     )
     shape_attr = next(attr for attr in router["attrs"] if attr["key"] == "output_shape")
-    assert shape_attr["value"] == "B x T x 64"
+    assert shape_attr["value"] == "B x S x 64"
     assert payload["tracelensViewer"]["dimensions"]["H"] == 4096
     assert payload["tracelensViewer"]["dtype"] == "float16"
 
-    payload_default = build_model_explorer_payload(spec)
-    assert "dimensions" not in payload_default["tracelensViewer"]
+    payload_without = build_model_explorer_payload(spec, include_shapes=False)
+    assert "dimensions" not in payload_without["tracelensViewer"]
     assert not any(
         any(attr.get("key") == "output_shape" for attr in node.get("attrs", []))
-        for node in payload_default["graphCollections"][0]["graphs"][0]["nodes"]
+        for node in payload_without["graphCollections"][0]["graphs"][0]["nodes"]
     )
+
+
+def test_expandable_groups_carry_their_boundary_shapes():
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        name="Custom MLA MoE",
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$"]),
+    )
+    graph = build_model_explorer_payload(spec)["graphCollections"][0]["graphs"][0]
+    attrs = graph["groupNodeAttributes"]
+    namespaces = {
+        node["namespace"] for node in graph["nodes"] if node.get("namespace")
+    }
+    assert namespaces
+    # Model Explorer leaves edges into collapsed groups unlabeled, so each group states
+    # what crosses its boundary.
+    for namespace in namespaces:
+        assert attrs[namespace]["input_shape"]
+        assert attrs[namespace]["output_shape"]
+
+    decoder = next(name for name in namespaces if "/" not in name)
+    assert attrs[decoder]["input_shape"] == "B x S x 4096"
+    assert attrs[decoder]["output_shape"] == "B x S x 4096"
+
+    without_shapes = build_model_explorer_payload(spec, include_shapes=False)
+    plain_attrs = without_shapes["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+    assert "input_shape" not in plain_attrs.get(decoder, {})
+
+
+def test_group_boundary_shapes_reads_the_crossing_tensor():
+    from model_explorer_export.shapes import group_boundary_shapes
+
+    def node(node_id: str, namespace: str, shape: str, sources: list[str]):
+        return {
+            "id": node_id,
+            "namespace": namespace,
+            "outputsMetadata": [{"id": "0", "attrs": [{"key": "shape", "value": shape}]}],
+            "incomingEdges": [{"sourceNodeId": source} for source in sources],
+        }
+
+    nodes = [
+        node("embed", "", "B x S x 8", []),
+        node("mlp/@input", "mlp", "B x S x 8", ["embed"]),
+        node("mlp/up", "mlp", "B x S x 32", ["mlp/@input"]),
+        node("mlp/down", "mlp", "B x S x 8", ["mlp/up"]),
+        node("norm", "", "B x S x 8", ["mlp/down"]),
+    ]
+    assert group_boundary_shapes(nodes) == {
+        "mlp": {"input_shape": "B x S x 8", "output_shape": "B x S x 8"},
+    }
 
 
 def test_build_model_explorer_payload_includes_operator_export():

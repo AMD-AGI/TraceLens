@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, TYPE_CHECKING
 
 from visualizer.extract import architecture_section_trees
@@ -34,7 +35,7 @@ class Symbol(str, Enum):
     """Common symbolic dimensions propagated through the graph."""
 
     BATCH = "B"
-    SEQ = "T"
+    SEQ = "S"
     HIDDEN = "H"
     VOCAB = "V"
     HEADS = "N"
@@ -43,6 +44,31 @@ class Symbol(str, Enum):
     INTERMEDIATE = "I"
     EXPERTS = "E"
     EXPERTS_PER_TOK = "TopK"
+
+
+# Config attribute names modeling code reads for each symbolic dimension. Registered as
+# fallbacks, so a key the checkpoint config actually defines always wins.
+_SPEC_DIM_ALIASES: dict[Symbol, tuple[str, ...]] = {
+    Symbol.HIDDEN: ("hidden_size", "hidden_dim", "d_model", "model_dim", "embed_dim"),
+    Symbol.VOCAB: ("vocab_size",),
+    Symbol.HEADS: ("num_attention_heads", "num_heads", "n_heads", "num_query_heads"),
+    Symbol.KV_HEADS: ("num_key_value_heads", "num_kv_heads", "n_kv_heads"),
+    Symbol.HEAD_DIM: ("head_dim", "attention_head_dim", "qk_head_dim"),
+    Symbol.INTERMEDIATE: ("intermediate_size", "ffn_hidden_size", "ffn_dim", "moe_intermediate_size"),
+    Symbol.EXPERTS: (
+        "num_experts",
+        "num_local_experts",
+        "n_routed_experts",
+        "num_routed_experts",
+        "moe_num_experts",
+    ),
+    Symbol.EXPERTS_PER_TOK: (
+        "num_experts_per_tok",
+        "num_experts_per_token",
+        "moe_top_k",
+        "num_selected_experts",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -72,6 +98,13 @@ class ModuleEmbeddingSpec:
 
 
 @dataclass
+class ModuleParameterSpec:
+    """Shape of an ``nn.Parameter`` / raw tensor buffer declared in ``__init__``."""
+
+    shape: tuple[DimExpr, ...]
+
+
+@dataclass
 class ShapeContext:
     """Resolved and symbolic dimensions derived from model config."""
 
@@ -94,7 +127,7 @@ class ShapeContext:
             dims[Symbol.HEADS.value] = spec.num_attention_heads
         if spec.num_key_value_heads is not None:
             dims[Symbol.KV_HEADS.value] = spec.num_key_value_heads
-        if spec.head_dim is not None:
+        if spec.head_dim:
             dims[Symbol.HEAD_DIM.value] = spec.head_dim
         elif spec.hidden_size and spec.num_attention_heads:
             dims[Symbol.HEAD_DIM.value] = spec.hidden_size // spec.num_attention_heads
@@ -115,6 +148,23 @@ class ShapeContext:
             elif isinstance(value, float) and value.is_integer():
                 dims[key] = int(value)
 
+        # Sub-configs such as `linear_attn_config` are exposed on the config object as
+        # flattened properties (`config.linear_head_dim`), so register those aliases too.
+        for key, value in config.items():
+            if not isinstance(value, dict):
+                continue
+            for alias, nested in _nested_dim_aliases(key, value):
+                dims.setdefault(alias, nested)
+
+        # Modeling code reads names that the checkpoint config spells differently
+        # (`config.num_local_experts` against `n_routed_experts`, say).
+        for symbol, aliases in _SPEC_DIM_ALIASES.items():
+            resolved = dims.get(symbol.value)
+            if not isinstance(resolved, int):
+                continue
+            for alias in aliases:
+                dims.setdefault(alias, resolved)
+
         return cls(dims=dims, dtype=dtype)
 
 
@@ -126,6 +176,11 @@ class ModuleDimRegistry:
     linear_by_attr: dict[str, ModuleLinearSpec] = field(default_factory=dict)
     embedding: dict[tuple[str, str], ModuleEmbeddingSpec] = field(default_factory=dict)
     embedding_by_attr: dict[str, ModuleEmbeddingSpec] = field(default_factory=dict)
+    parameter: dict[tuple[str, str], ModuleParameterSpec] = field(default_factory=dict)
+    parameter_by_attr: dict[str, ModuleParameterSpec] = field(default_factory=dict)
+    # Names like `weight` are declared by many modules with different shapes; guessing
+    # across classes would be worse than having no shape at all.
+    ambiguous_parameters: set[str] = field(default_factory=set)
 
     @classmethod
     def from_registry(
@@ -143,32 +198,68 @@ class ModuleDimRegistry:
             local_vars: dict[str, DimExpr] = {}
             for node in ast.walk(init_func):
                 if isinstance(node, ast.Assign):
-                    for target in node.targets:
-                        if isinstance(target, ast.Attribute) and _is_self_attr(target):
-                            resolved = _resolve_dim_expr(node.value, config=config, local_vars=local_vars, context=context)
-                            if resolved is not None:
-                                local_vars[target.attr] = resolved
-                            spec = _parse_module_ctor(node.value, config=config, local_vars=local_vars, context=context)
-                            if isinstance(spec, ModuleLinearSpec):
-                                registry.linear[(class_name, target.attr)] = spec
-                                registry.linear_by_attr[target.attr] = spec
-                            elif isinstance(spec, ModuleEmbeddingSpec):
-                                registry.embedding[(class_name, target.attr)] = spec
-                                registry.embedding_by_attr[target.attr] = spec
+                    targets = list(node.targets)
                 elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                    target = node.target
-                    if isinstance(target, ast.Attribute) and _is_self_attr(target):
-                        resolved = _resolve_dim_expr(node.value, config=config, local_vars=local_vars, context=context)
-                        if resolved is not None:
-                            local_vars[target.attr] = resolved
-                        spec = _parse_module_ctor(node.value, config=config, local_vars=local_vars, context=context)
-                        if isinstance(spec, ModuleLinearSpec):
-                            registry.linear[(class_name, target.attr)] = spec
-                            registry.linear_by_attr[target.attr] = spec
-                        elif isinstance(spec, ModuleEmbeddingSpec):
-                            registry.embedding[(class_name, target.attr)] = spec
-                            registry.embedding_by_attr[target.attr] = spec
+                    targets = [node.target]
+                else:
+                    continue
+                for target in targets:
+                    registry._record_assignment(
+                        class_name,
+                        target,
+                        node.value,
+                        config=config,
+                        local_vars=local_vars,
+                        context=context,
+                    )
         return registry
+
+    def _record_assignment(
+        self,
+        class_name: str,
+        target: ast.AST,
+        value: ast.AST,
+        *,
+        config: dict[str, Any],
+        local_vars: dict[str, DimExpr],
+        context: ShapeContext,
+    ) -> None:
+        if isinstance(target, ast.Name):
+            # Plain locals feed later parameter shapes, e.g. `mix = (2 + hc) * hc`.
+            resolved = _resolve_dim_expr(value, config=config, local_vars=local_vars, context=context)
+            if resolved is not None:
+                local_vars[target.id] = resolved
+            return
+        if not (isinstance(target, ast.Attribute) and _is_self_attr(target)):
+            return
+
+        resolved = _resolve_dim_expr(value, config=config, local_vars=local_vars, context=context)
+        if resolved is not None:
+            local_vars[target.attr] = resolved
+        spec = _parse_module_ctor(value, config=config, local_vars=local_vars, context=context)
+        if isinstance(spec, ModuleLinearSpec):
+            self.linear[(class_name, target.attr)] = spec
+            self.linear_by_attr[target.attr] = spec
+        elif isinstance(spec, ModuleEmbeddingSpec):
+            self.embedding[(class_name, target.attr)] = spec
+            self.embedding_by_attr[target.attr] = spec
+        elif isinstance(spec, ModuleParameterSpec):
+            self.parameter[(class_name, target.attr)] = spec
+            existing = self.parameter_by_attr.get(target.attr)
+            if existing is not None and existing.shape != spec.shape:
+                self.ambiguous_parameters.add(target.attr)
+            self.parameter_by_attr[target.attr] = spec
+
+    def lookup_parameter(self, attr: str | None, class_name: str | None) -> ModuleParameterSpec | None:
+        if not attr:
+            return None
+        if class_name:
+            spec = self.parameter.get((class_name, attr))
+            if spec is not None:
+                return spec
+        if attr in self.ambiguous_parameters:
+            return None
+        return self.parameter_by_attr.get(attr)
 
 
 @dataclass
@@ -217,6 +308,9 @@ class ShapeInferencer:
         )
         self._tensor_names: dict[str, str] = {}
         self._tensor_specs: dict[str, TensorSpec] = {}
+        self._owner_classes: dict[int, dict[str, str]] = {}
+        # Specs carrying the activation a block's forward receives.
+        self._forward_input_specs: set[int] = set()
 
     def infer_model_graph(self, graph: ModelGraph, *, root: BlockNode | None = None) -> dict[str, TensorSpec]:
         """Infer output tensor specs for every node id in one model graph."""
@@ -227,6 +321,7 @@ class ShapeInferencer:
             else:
                 self._tensor_names[node.id] = _output_tensor_name(node)
         self._tensor_specs = {}
+        self._forward_input_specs = set()
         order = _topological_order(graph)
         node_by_id = {node.id: node for node in graph.nodes}
 
@@ -235,6 +330,8 @@ class ShapeInferencer:
             input_specs = self._gather_input_specs(graph, node_id)
             output = self._infer_node_output(node, input_specs, root=root)
             self._tensor_specs[node_id] = output
+            if node.metadata.get("synthetic") == "@input":
+                self._forward_input_specs.add(id(output))
 
         for node in graph.nodes:
             if node.kind == NodeKind.SUBGRAPH:
@@ -400,6 +497,21 @@ class ShapeInferencer:
             "sections": sections,
         }
 
+    def _elementwise_operand(self, inputs: list[TensorSpec]) -> TensorSpec:
+        """Operand an elementwise op takes its shape from.
+
+        Broadcasting against the block's own forward input widens the result, which is
+        how a stream-collapse multiply recovers the activation width from the mixing
+        weights feeding it. Every other operand keeps chain order, since a step's width
+        is often inherited rather than known.
+        """
+        widest = max(inputs, key=_broadcast_rank)
+        if id(widest) in self._forward_input_specs and _broadcast_rank(widest) > _broadcast_rank(
+            inputs[0]
+        ):
+            return widest
+        return inputs[0]
+
     def _gather_input_specs(self, graph: ModelGraph, node_id: str) -> list[TensorSpec]:
         specs: list[TensorSpec] = []
         for edge in graph.edges:
@@ -432,6 +544,9 @@ class ShapeInferencer:
             label = (node.metadata.get("port_label") or node.label or "").lower()
             experts = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
             hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+            parameter = self._lookup_parameter_spec(node, root=root, names=[label])
+            if parameter is not None:
+                return TensorSpec(shape=parameter.shape, dtype=dtype)
             if "weight" in label:
                 return TensorSpec(shape=(experts, hidden), dtype="float32")
             if "bias" in label:
@@ -440,7 +555,7 @@ class ShapeInferencer:
 
         if node.label in {"×", "+", "Elementwise ×", "Multiply", "Add"} or synthetic == "@combine":
             if inputs:
-                return inputs[0]
+                return self._elementwise_operand(inputs)
             hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
             return TensorSpec(shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype)
 
@@ -451,6 +566,9 @@ class ShapeInferencer:
         def external_spec() -> TensorSpec | None:
             experts = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
             hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+            parameter = self._lookup_parameter_spec(node, root=root, names=external_inputs)
+            if parameter is not None:
+                return TensorSpec(parameter.shape, dtype)
             if any("weight" in item for item in external_inputs):
                 return TensorSpec((experts, hidden), "float32")
             if any("bias" in item for item in external_inputs):
@@ -461,7 +579,8 @@ class ShapeInferencer:
             source = inputs[0] if inputs else external_spec() or TensorSpec(_default_hidden_shape(self.context), dtype)
             shape_detail = next((item.split(":", 1)[1].strip() for item in details if item.startswith("shape:")), "")
             if "-1" in shape_detail:
-                return TensorSpec(shape=("B*T", source.shape[-1]), dtype=source.dtype)
+                flattened = f"{Symbol.BATCH.value}*{Symbol.SEQ.value}"
+                return TensorSpec(shape=(flattened, source.shape[-1]), dtype=source.dtype)
             return source
 
         if operation_label == "unsqueeze":
@@ -494,11 +613,15 @@ class ShapeInferencer:
 
         if operation_label == "sum":
             source = inputs[0] if inputs else TensorSpec(_default_hidden_shape(self.context), dtype)
+            reduced_dim = _detail_value(details, "dim")
+            if reduced_dim is not None and reduced_dim != "-1":
+                # Reductions over stream or head axes the symbolic (B, S, H) view omits.
+                return source
             return TensorSpec(shape=_replace_last_dim(source.shape, 1), dtype=source.dtype)
 
         if operation_label in {"add", "subtract", "multiply", "divide", "floor divide", "power", "sigmoid", "softmax", "masked fill", "scatter"}:
             if inputs:
-                source = max(inputs, key=lambda item: len(item.shape))
+                source = max(inputs, key=_broadcast_rank)
                 return TensorSpec(shape=source.shape, dtype=source.dtype)
             return TensorSpec(shape=_default_hidden_shape(self.context), dtype=dtype)
 
@@ -521,8 +644,12 @@ class ShapeInferencer:
             )
             if out_features is None and root is not None and re.search(r"(?i)(MoE)?Gate|Router", root.class_name):
                 out_features = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
-            if out_features is None and operation_label == "linear" and str(node.metadata.get("attr_name", "")).startswith("@op_"):
-                out_features = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
+            if out_features is None and operation_label == "linear":
+                # `F.linear(x, w)` reads out features from w's row axis; stacked expert
+                # weights (E, out, in) are indexed per expert before the call.
+                parameter = self._lookup_parameter_spec(node, root=root, names=external_inputs)
+                if parameter is not None and len(parameter.shape) >= 2:
+                    out_features = parameter.shape[-2]
             if out_features is None and inputs:
                 out_features = in_shape[-1]
             if out_features is None:
@@ -584,6 +711,47 @@ class ShapeInferencer:
                 return spec
         if attr:
             return self.module_dims.linear_by_attr.get(attr)
+        return None
+
+    def _lookup_parameter_spec(
+        self,
+        node: ModelGraphNode,
+        *,
+        root: BlockNode | None,
+        names: Sequence[str],
+    ) -> ModuleParameterSpec | None:
+        candidates = [
+            node.metadata.get("class_name"),
+            self._owner_class_name(node, root),
+            root.class_name if root is not None else None,
+        ]
+        for name in names:
+            attr = str(name).split(".")[-1].strip()
+            for class_name in candidates:
+                spec = self.module_dims.lookup_parameter(attr, class_name)
+                if spec is not None:
+                    return spec
+        return None
+
+    def _owner_class_name(self, node: ModelGraphNode, root: BlockNode | None) -> str | None:
+        """Class of the submodule a functional op lives in, read off the node id path.
+
+        Node ids keep the module path (``sideproducer:0:gate:@op_..._linear:0``), so the
+        trailing module segment says which class declared the parameters the op reads.
+        """
+        if root is None:
+            return None
+        classes = self._owner_classes.get(id(root))
+        if classes is None:
+            classes = _descendant_classes(root)
+            self._owner_classes[id(root)] = classes
+        for segment in reversed(re.split(r"[:/]", node.id)):
+            if segment.startswith("@"):
+                # Operation segments name the op itself, not the module that owns it.
+                continue
+            owner = classes.get(segment)
+            if owner:
+                return owner
         return None
 
     def _lookup_embedding_spec(self, node: ModelGraphNode, *, root: BlockNode | None) -> ModuleEmbeddingSpec | None:
@@ -714,17 +882,24 @@ def _resolve_dim_expr(
         return None
     if isinstance(node, ast.Attribute):
         if isinstance(node.value, ast.Name) and node.value.id == "config":
-            value = config.get(node.attr)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return int(value)
-            if isinstance(value, str) and value.isdigit():
-                return int(value)
-            return node.attr
+            return _config_dim(node.attr, config=config, context=context)
         if isinstance(node.value, ast.Name) and node.value.id == "self":
             return local_vars.get(node.attr)
+    if isinstance(node, ast.Subscript):
+        # `config.linear_attn_config["head_dim"]` and friends.
+        key = node.slice
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            container = node.value
+            if isinstance(container, ast.Attribute) and isinstance(container.value, ast.Name):
+                nested = config.get(container.attr)
+                if isinstance(nested, dict):
+                    return _int_dim(nested.get(key.value))
+            return _config_dim(key.value, config=config, context=context)
     if isinstance(node, ast.BinOp):
         left = _resolve_dim_expr(node.left, config=config, local_vars=local_vars, context=context)
         right = _resolve_dim_expr(node.right, config=config, local_vars=local_vars, context=context)
+        if left is None or right is None:
+            return None
         if isinstance(left, int) and isinstance(right, int):
             if isinstance(node.op, ast.Add):
                 return left + right
@@ -732,22 +907,106 @@ def _resolve_dim_expr(
                 return left - right
             if isinstance(node.op, ast.Mult):
                 return left * right
-            if isinstance(node.op, ast.FloorDiv):
-                return left // right
-            if isinstance(node.op, ast.Div):
-                return left // right
-        if isinstance(left, int) and isinstance(right, str):
-            return f"{left}*{right}" if isinstance(node.op, ast.Mult) else None
-        if isinstance(left, str) or isinstance(right, str):
-            return f"{left}!{type(node.op).__name__}!{right}"
+            if isinstance(node.op, (ast.FloorDiv, ast.Div)):
+                return left // right if right else None
+        return _symbolic_binop(left, right, node.op)
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "int":
         if node.args:
             return _resolve_dim_expr(node.args[0], config=config, local_vars=local_vars, context=context)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr":
+        if node.args and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str):
+            return _config_dim(node.args[1].value, config=config, context=context)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
         inner = _resolve_dim_expr(node.operand, config=config, local_vars=local_vars, context=context)
         if isinstance(inner, int):
             return -inner
     return None
+
+
+_BINOP_SYMBOLS: dict[type, str] = {
+    ast.Add: "+",
+    ast.Sub: "-",
+    ast.Mult: "*",
+    ast.FloorDiv: "/",
+    ast.Div: "/",
+}
+
+
+def _symbolic_binop(left: DimExpr, right: DimExpr, op: ast.operator) -> DimExpr | None:
+    """Render a partially-resolved dimension as readable algebra (``4*H``), not a marker."""
+    symbol = _BINOP_SYMBOLS.get(type(op))
+    if symbol is None:
+        return None
+    return f"{_dim_term(left, symbol)}{symbol}{_dim_term(right, symbol)}"
+
+
+def _dim_term(value: DimExpr, symbol: str) -> str:
+    text = str(value)
+    if symbol in {"*", "/"} and any(char in text for char in "+-"):
+        return f"({text})"
+    return text
+
+
+def _broadcast_rank(spec: TensorSpec) -> tuple[int, float]:
+    """Order operands of an elementwise op by what broadcasting keeps.
+
+    Highest rank wins, then the widest trailing dimension; unresolved symbolic widths
+    outrank concrete ones because they stand for the model's activation width.
+    """
+    last = spec.shape[-1] if spec.shape else 1
+    width = float(last) if isinstance(last, int) else float("inf")
+    return len(spec.shape), width
+
+
+def _detail_value(details: Sequence[str], key: str) -> str | None:
+    """Read a recorded call detail such as ``dim: -1``."""
+    prefix = f"{key}:"
+    for item in details:
+        text = str(item).strip()
+        if text.startswith(prefix):
+            return text[len(prefix) :].strip()
+    return None
+
+
+def _int_dim(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _config_dim(name: str, *, config: dict[str, Any], context: ShapeContext) -> DimExpr:
+    """Resolve `config.<name>`, falling back to flattened sub-config aliases."""
+    resolved = _int_dim(config.get(name))
+    if resolved is not None:
+        return resolved
+    alias = context.dims.get(name)
+    if isinstance(alias, int):
+        return alias
+    return name
+
+
+def _nested_dim_aliases(name: str, mapping: dict[str, Any]):
+    """Yield (alias, value) pairs for integer entries of a nested config dict.
+
+    A sub-config named ``linear_attn_config`` is surfaced by HF config classes as both
+    ``config.linear_attn_head_dim`` and ``config.linear_head_dim``, so register every
+    leading-token prefix as well as the bare key.
+    """
+    tokens = [token for token in name.split("_") if token and token != "config"]
+    prefixes = ["_".join(tokens[: index + 1]) for index in range(len(tokens))]
+    for key, value in mapping.items():
+        resolved = _int_dim(value)
+        if resolved is None:
+            continue
+        yield key, resolved
+        for prefix in prefixes:
+            yield f"{prefix}_{key}", resolved
 
 
 def _parse_module_ctor(
@@ -756,7 +1015,7 @@ def _parse_module_ctor(
     config: dict[str, Any],
     local_vars: dict[str, DimExpr],
     context: ShapeContext,
-) -> ModuleLinearSpec | ModuleEmbeddingSpec | None:
+) -> ModuleLinearSpec | ModuleEmbeddingSpec | ModuleParameterSpec | None:
     if not isinstance(node, ast.Call):
         return None
     class_name = _call_class_name(node) or ""
@@ -781,7 +1040,47 @@ def _parse_module_ctor(
                 embedding_dim = _resolve_dim_expr(keyword.value, config=config, local_vars=local_vars, context=context)
         if num_embeddings is not None and embedding_dim is not None:
             return ModuleEmbeddingSpec(num_embeddings=num_embeddings, embedding_dim=embedding_dim)
+    if class_name == "Parameter":
+        inner = args[0] if args else None
+        shape = _parse_tensor_ctor_shape(inner, config=config, local_vars=local_vars, context=context)
+        if shape:
+            return ModuleParameterSpec(shape=shape)
+    shape = _parse_tensor_ctor_shape(node, config=config, local_vars=local_vars, context=context)
+    if shape:
+        return ModuleParameterSpec(shape=shape)
     return None
+
+
+_TENSOR_FACTORIES = {"empty", "zeros", "ones", "randn", "rand", "full", "tensor"}
+
+
+def _parse_tensor_ctor_shape(
+    node: ast.AST | None,
+    *,
+    config: dict[str, Any],
+    local_vars: dict[str, DimExpr],
+    context: ShapeContext,
+) -> tuple[DimExpr, ...] | None:
+    """Extract the shape from `torch.empty(a, b)` / `torch.zeros((a, b))` style calls."""
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and func.attr in _TENSOR_FACTORIES):
+        return None
+    args = list(node.args)
+    if len(args) == 1 and isinstance(args[0], (ast.Tuple, ast.List)):
+        args = list(args[0].elts)
+    if func.attr == "full" and args:
+        args = args[:1]
+        if isinstance(args[0], (ast.Tuple, ast.List)):
+            args = list(args[0].elts)
+    dims: list[DimExpr] = []
+    for arg in args:
+        resolved = _resolve_dim_expr(arg, config=config, local_vars=local_vars, context=context)
+        if resolved is None:
+            return None
+        dims.append(resolved)
+    return tuple(dims) if dims else None
 
 
 def _topological_order(graph: ModelGraph) -> list[str]:
@@ -822,6 +1121,17 @@ def _output_tensor_name(node: ModelGraphNode) -> str:
     if attr:
         return attr
     return node.label or node.id
+
+
+def _descendant_classes(root: BlockNode) -> dict[str, str]:
+    classes: dict[str, str] = {}
+    stack = [root]
+    while stack:
+        block = stack.pop()
+        if block.attr_name and block.class_name:
+            classes.setdefault(block.attr_name, block.class_name)
+        stack.extend(block.children)
+    return classes
 
 
 def _node_attr_name(node: ModelGraphNode) -> str | None:

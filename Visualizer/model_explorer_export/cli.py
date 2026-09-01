@@ -129,10 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Open the viewer in a browser after export (implies --serve)",
     )
     parser.add_argument(
-        "--shapes",
-        action="store_true",
-        help="Add symbolic output_shape/output_dtype annotations on graph nodes",
+        "--no-shapes",
+        dest="shapes",
+        action="store_false",
+        help="Skip symbolic output_shape/output_dtype annotations on graph nodes",
     )
+    parser.set_defaults(shapes=True)
     parser.add_argument(
         "--operators-json",
         type=Path,

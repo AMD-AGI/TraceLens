@@ -184,23 +184,31 @@ const TRACE_LENS_SHOW_ON_NODE = {
   "Op node outputs": { selected: false },
   "Layer node children count": { selected: false },
   "Layer node descendants count": { selected: false },
-  "Layer node attributes": { selected: false },
+  // Model Explorer leaves an edge unlabeled when either end is a collapsed group, so
+  // expandable blocks carry their boundary shapes as layer attributes instead.
+  "Layer node attributes": { selected: true, filterRegex: "shape" },
 };
 
 const TRACE_LENS_SHOW_ON_EDGE = {
-  type: "Input metadata",
-  filterText: "port_label",
+  type: "Tensor shape",
 };
+
+// Bump when the defaults below change so one refresh picks them up; between bumps the
+// viewer keeps whatever the user selected in the Model Explorer display menu.
+const DEFAULTS_VERSION_KEY = "tracelens_display_defaults_version";
+const DEFAULTS_VERSION = "3";
 
 function configureModelExplorerDisplay() {
   for (const legacyKey of LEGACY_SHOW_ON_NODE_KEYS) {
     localStorage.removeItem(legacyKey);
   }
 
-  // Always apply TraceLens defaults so stale ME settings (e.g. "Tensor shape"
-  // on edges, which renders "?" without metadata) do not override us.
+  if (localStorage.getItem(DEFAULTS_VERSION_KEY) === DEFAULTS_VERSION) {
+    return;
+  }
   localStorage.setItem(SHOW_ON_NODE_KEY, JSON.stringify(TRACE_LENS_SHOW_ON_NODE));
   localStorage.setItem(SHOW_ON_EDGE_KEY, JSON.stringify(TRACE_LENS_SHOW_ON_EDGE));
+  localStorage.setItem(DEFAULTS_VERSION_KEY, DEFAULTS_VERSION);
 }
 
 function mountVisualizer(graphCollections) {

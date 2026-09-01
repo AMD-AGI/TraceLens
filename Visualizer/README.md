@@ -14,7 +14,7 @@ For example, this is the top-level visualization of GLM 5.3 Flash
 
 - **Single-page HTML export** — self-contained `.html` file (graph payload, viewer, and layout worker embedded); open directly in a browser, no local server or sidecar files
 - **Model Explorer export** — interactive layered graph with fact sheet, kernel styling, and collapsible pipelines
-- **Optional shape inference** — symbolic tensor shapes on expanded detail nodes (`--shapes`)
+- **Shape inference** — symbolic tensor shapes (`B x S x H`) on every exported node, shown on graph edges (disable with `--no-shapes`)
 - **Operator JSON export** — flat per-op shape lists for tooling (`--operators-json`)
 - **Model graph IR** — serializable computation graph (nodes, edges, inline frames, subgraphs)
 - **Flexible sources** — Hugging Face Hub checkpoints, local checkpoint directories, or GitHub modeling repos
@@ -80,10 +80,10 @@ Export raw Model Explorer JSON:
 python visualize_model_in_explorer.py moonshotai/Kimi-K3 -o kimi.json
 ```
 
-Enable symbolic shape annotations on graph nodes:
+Skip symbolic shape annotations on graph nodes (they are on by default):
 
 ```bash
-python visualize_model_in_explorer.py moonshotai/Kimi-K3 --serve --open --shapes
+python visualize_model_in_explorer.py moonshotai/Kimi-K3 --serve --open --no-shapes
 ```
 
 Write a flat operator export with inferred shapes (also embeds `operatorExport` in the payload when used with `-o`):
@@ -117,11 +117,11 @@ python visualize_model_in_explorer.py moonshotai/Kimi-K3 --operators-json kimi_o
 | `--basic-op-add REGEX`          | Treat matching block names as leaf/basic ops (repeatable)                                               |
 | `--basic-op-remove REGEX`       | Remove a default basic-op pattern (repeatable)                                                          |
 | `--all-tensor-ops`              | Include tensor housekeeping ops in detailed graphs                                                      |
-| `--shapes`                      | Add `output_shape` / `output_dtype` on expanded detail nodes                                            |
+| `--no-shapes`                   | Skip `output_shape` / `output_dtype` annotations                                                        |
 | `--operators-json PATH`         | Also write flat operator export JSON with inferred shapes                                               |
 
 
-Shape inference is **off by default**. When enabled, shapes are attached to nodes inside expanded detail sections (MoE internals, kernel pipelines, etc.), not to single-tile overview spine nodes.
+Shape inference is **on by default**, and every exported node carries output metadata so the viewer shows tensor shapes on edges instead of `?`. Nodes without an inferred shape of their own (overview spine tiles, group input ports) inherit the shape of whatever feeds them. Model Explorer cannot label an edge that ends on a collapsed group, so expandable blocks also carry `input_shape` and `output_shape` layer attributes describing what crosses their boundary. Dimensions use the symbols `B` (batch), `S` (sequence), `H` (hidden), `V` (vocab), `N`/`K` (attention and KV heads), `D` (head dim), `I` (intermediate), `E` (experts) and `TopK`.
 
 ## Source resolution
 
@@ -165,7 +165,7 @@ falls back to config heuristics.
 3. **Block trees** — builds recursive block diagrams from the parsed structure
 4. **Computation graph** — converts block trees to a directed graph for Model Explorer export
 5. **Single-page HTML** — embeds payload, viewer script, and layout worker into one `.html` file for offline-friendly sharing (Model Explorer assets load from unpkg)
-6. **Shape inference** (optional) — propagates symbolic dimensions (`B`, `T`, `H`, …) through the model graph and annotates exported nodes
+6. **Shape inference** — propagates symbolic dimensions (`B`, `S`, `H`, …) through the model graph and annotates exported nodes
 
 Composite GPU kernels (e.g. fused attention, MoE dispatch) remain opaque leaf nodes unless expanded by custom kernel pipeline parsing.
 
@@ -212,9 +212,9 @@ from model_explorer_export.build import build_model_explorer_payload
 
 spec = load_model_spec("moonshotai/Kimi-K3", detailed=True)
 
-# Model Explorer payload (shapes off by default)
+# Model Explorer payload (shapes on by default)
 payload = build_model_explorer_payload(spec)
-payload_with_shapes = build_model_explorer_payload(spec, include_shapes=True)
+payload_without_shapes = build_model_explorer_payload(spec, include_shapes=False)
 
 # Flat operator list with inferred shapes
 operators = build_operator_export(spec)

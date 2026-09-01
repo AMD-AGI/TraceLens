@@ -146,7 +146,12 @@ def _rebuild_attr_last_index(graph: ComputationGraph) -> dict[str, int]:
     return attr_last_index
 
 
-def _wire_operation_predecessor_links(graph: ComputationGraph, root: BlockNode) -> None:
+def _wire_operation_predecessor_links(
+    graph: ComputationGraph,
+    root: BlockNode,
+    *,
+    input_index: int | None = None,
+) -> None:
     """Attach operand edges for inline ops once every forward step has been materialized."""
     attr_last_index = _rebuild_attr_last_index(graph)
     last_forward_order = max((child.forward_order or 0 for child in root.children), default=0)
@@ -165,8 +170,10 @@ def _wire_operation_predecessor_links(graph: ComputationGraph, root: BlockNode) 
         ]
         for pred in child.operation_predecessors:
             if pred == FORWARD_METHOD_INPUT:
-                continue
-            source_index = attr_last_index.get(pred)
+                # Reading the forward's own parameter means reading what enters the block.
+                source_index = input_index
+            else:
+                source_index = attr_last_index.get(pred)
             if source_index is None:
                 continue
             link = (source_index, target_index)
@@ -1882,7 +1889,11 @@ def build_computation_graph(
                     label=inline_wrapper_step_label(None, sub_step, sub_index),
                 )
                 # An operation naming the steps it reads keeps those dataflow edges.
-                explicit_sources = _operation_source_indices(sub_step, attr_last_index)
+                explicit_sources = _operation_source_indices(
+                    sub_step,
+                    attr_last_index,
+                    chain_input_index=input_index,
+                )
                 if explicit_sources:
                     for source_index in explicit_sources:
                         graph.links.append((source_index, step_index))
@@ -1900,7 +1911,7 @@ def build_computation_graph(
             if expanded_steps:
                 _track_attr_index(attr_last_index, step.attr_name, last_index)
 
-    _wire_operation_predecessor_links(graph, root)
+    _wire_operation_predecessor_links(graph, root, input_index=input_index)
     if not (strip_unused_return_branches and root.multi_return_module):
         _wire_multi_input_op_forward_links(graph, root)
         _wire_inline_frame_dangling_outputs(graph)

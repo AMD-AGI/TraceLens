@@ -648,7 +648,6 @@ def _multi_op_forward_methods(
             func,
             self_values=self_values,
             all_tensor_ops=all_tensor_ops,
-            name_primary_input=True,
         )
         if len(operations.operations) > 1:
             expanded[call_attr] = operations.operations
@@ -1247,7 +1246,9 @@ class _ForwardOperationExtractor:
 
     def _self_attr_input(self, node: ast.Attribute) -> tuple[str | None, list[str]]:
         if isinstance(node.value, ast.Name) and node.value.id == "self":
-            if node.attr in self.self_values:
+            # Attributes with a known scalar value are settings, not tensor inputs;
+            # ones that could not be evaluated (parameters, buffers) are inputs.
+            if self.self_values.get(node.attr, _UNKNOWN) is not _UNKNOWN:
                 return None, []
             return None, [node.attr]
         return None, []
@@ -1824,7 +1825,6 @@ def _forward_operations_from_forward(
     *,
     self_values: dict[str, Any],
     all_tensor_ops: bool,
-    name_primary_input: bool = False,
 ) -> ForwardAnalysis:
     # The primary parameter is the main path, so only the extra ones can identify
     # which step consumes a side feed.
@@ -1834,10 +1834,10 @@ def _forward_operations_from_forward(
         all_tensor_ops=all_tensor_ops,
         param_names=_forward_input_names(func) - {primary} if primary else set(),
     )
-    # A helper method's operations are inlined into the caller's chain, so an operation
-    # reading the parameter partway through reads the value arriving at that chain.
-    # Naming it lets those reads resolve instead of falling back to the previous step.
-    if name_primary_input and primary:
+    # An operation reading the primary parameter partway through the forward reads the
+    # value arriving at the chain, not the previous step. Naming it lets those reads
+    # resolve to the chain input instead of silently inheriting the wrong producer.
+    if primary:
         extractor.var_producer[primary] = FORWARD_METHOD_INPUT
     extractor.statements(func.body)
     return_slots, return_order, primary_return_slot = _extract_forward_return_metadata(
@@ -1968,7 +1968,6 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     forward_func,
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
-                    name_primary_input=delegates_inline,
                 )
                 if analysis.operations:
                     module_calls = _module_calls_for_forward_merge(

@@ -24,7 +24,7 @@ def build_model_explorer_payload(
     *,
     basic_ops: BasicOpFilter | None = None,
     collection_label: str | None = None,
-    include_shapes: bool = False,
+    include_shapes: bool = True,
     include_operator_export: bool = False,
 ) -> dict[str, Any]:
     """Build a single merged Model Explorer graph with in-place namespace expansion."""

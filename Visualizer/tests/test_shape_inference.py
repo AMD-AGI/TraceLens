@@ -94,10 +94,10 @@ def test_shape_inferencer_mla_fixture_linear_shapes():
     operators = inferencer.export_operators(graph, root=root)
 
     by_name = {op.name: op for op in operators}
-    assert by_name["q_a_proj"].output.shape == ("B", "T", 4096)
-    assert by_name["o_proj"].output.shape == ("B", "T", 4096)
+    assert by_name["q_a_proj"].output.shape == ("B", "S", 4096)
+    assert by_name["o_proj"].output.shape == ("B", "S", 4096)
     assert by_name["Attention"].computation == "AttentionOp"
-    assert by_name["Attention"].output.shape == ("B", "T", 4096)
+    assert by_name["Attention"].output.shape == ("B", "S", 4096)
     assert by_name["×"].computation == "elementwise_mul"
     assert "input" in by_name["q_a_proj"].inputs
     assert by_name["input"].operation == "input"
@@ -117,7 +117,7 @@ def test_model_output_operator():
     assert output.name == "output"
     assert output.operation == "output"
     assert output.computation == "output"
-    assert output.output.shape == ("B", "T", 32000)
+    assert output.output.shape == ("B", "S", 32000)
 
 
 def test_build_operator_export_custom_model():
@@ -276,6 +276,218 @@ def test_export_block_trees_expand_init_only_modules():
     assert [child.attr_name for child in attn_tree.children] == ["q_proj", "kv_proj"]
 
 
+def test_shape_context_flattens_nested_sub_config_dims():
+    spec = ArchitectureSpec(
+        name="GLM-like",
+        model_type="glm",
+        hidden_size=4096,
+        raw_config={
+            "hidden_size": 4096,
+            "linear_attn_config": {"head_dim": 128, "num_heads": 64},
+        },
+    )
+    context = ShapeContext.from_spec(spec)
+    assert context.dims["linear_head_dim"] == 128
+    assert context.dims["linear_attn_head_dim"] == 128
+    assert context.dims["linear_num_heads"] == 64
+    assert context.dims["head_dim"] == 128
+
+
+def test_module_registry_resolves_parameter_shapes_through_locals():
+    source = """
+import torch
+import torch.nn as nn
+
+
+class HyperConnection(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        mix = (2 + config.hc_mult) * config.hc_mult
+        self.fn = nn.Parameter(torch.empty(mix, config.hc_mult * config.hidden_size))
+        self.head_proj = nn.Linear(
+            config.hidden_size,
+            config.linear_head_dim * config.linear_num_heads,
+        )
+"""
+    config = {
+        "hidden_size": 4096,
+        "hc_mult": 4,
+        "linear_attn_config": {"head_dim": 128, "num_heads": 64},
+    }
+    analysis = analyze_source(source, config=config)
+    spec = ArchitectureSpec(
+        name="hc",
+        model_type="glm",
+        hidden_size=4096,
+        raw_config=config,
+        class_registry=analysis.class_registry,
+    )
+    context = ShapeContext.from_spec(spec)
+    registry = ModuleDimRegistry.from_registry(
+        analysis.class_registry,
+        config=config,
+        context=context,
+    )
+    assert registry.parameter_by_attr["fn"].shape == (24, 16384)
+    assert registry.linear_by_attr["head_proj"].out_features == 8192
+
+
+def test_functional_linear_uses_owning_module_parameter_shape():
+    source = """
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class Norm(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(config.hidden_size))
+
+    def forward(self, hidden_states):
+        return hidden_states * self.weight
+
+
+class Router(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(config.num_local_experts, config.hidden_size))
+
+    def forward(self, hidden_states):
+        router_logits = F.linear(hidden_states, self.weight)
+        scores = router_logits.sigmoid()
+        return scores
+
+
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.norm = Norm(config)
+        self.gate = Router(config)
+
+    def forward(self, hidden_states):
+        hidden_states = self.norm(hidden_states)
+        scores = self.gate(hidden_states)
+        return scores
+"""
+    config = {"hidden_size": 4096, "n_routed_experts": 288}
+    analysis = analyze_source(source, config=config)
+    basic = BasicOpFilter.for_detailed()
+    block = build_block_node(
+        attr_name="block",
+        class_name="Block",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    spec = ArchitectureSpec(
+        name="router owner",
+        model_type="test",
+        hidden_size=4096,
+        num_experts=288,
+        raw_config=config,
+        class_registry=analysis.class_registry,
+        basic_ops=basic,
+        export_block_trees=[("Block", block)],
+    )
+    inferencer = ShapeInferencer(spec)
+    operators = inferencer.export_operators(
+        build_model_graph(block, title="Block", basic_ops=basic),
+        root=block,
+    )
+    linear = next(op for op in operators if op.computation == "Linear")
+    # `weight` is declared by both classes; the router's shape must win here.
+    assert linear.output.shape == ("B", "S", 288)
+
+
+HYPERCONNECTION_SOURCE = """
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class Norm(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(config.hidden_size))
+
+    def forward(self, hidden_states):
+        return hidden_states * self.weight
+
+
+class HyperConnection(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.input_norm = Norm(config)
+        self.fn = nn.Parameter(torch.empty(24, config.hidden_size))
+
+    def forward(self, hidden_streams):
+        flat = self.input_norm(hidden_streams)
+        mix = F.linear(flat, self.fn)
+        pre = mix.sigmoid()
+        collapsed = (pre * hidden_streams).sum(dim=2)
+        return collapsed
+"""
+
+
+def _hyperconnection_spec() -> tuple[ArchitectureSpec, BlockNode, BasicOpFilter]:
+    config = {"hidden_size": 4096}
+    analysis = analyze_source(HYPERCONNECTION_SOURCE, config=config)
+    basic = BasicOpFilter.for_detailed()
+    block = build_block_node(
+        attr_name="hc",
+        class_name="HyperConnection",
+        registry=analysis.class_registry,
+        basic_ops=basic,
+    )
+    spec = ArchitectureSpec(
+        name="hyperconnection",
+        model_type="test",
+        hidden_size=4096,
+        raw_config=config,
+        class_registry=analysis.class_registry,
+        basic_ops=basic,
+        export_block_trees=[("HyperConnection", block)],
+    )
+    return spec, block, basic
+
+
+def test_stream_collapse_takes_width_from_the_forward_input():
+    spec, block, basic = _hyperconnection_spec()
+    graph = build_model_graph(block, title="HyperConnection", basic_ops=basic)
+    specs = ShapeInferencer(spec).infer_model_graph(graph, root=block)
+    by_label = {}
+    for node in graph.nodes:
+        by_label.setdefault(node.label, []).append(specs[node.id])
+
+    # The mixing weights are one value per stream ...
+    assert by_label["Linear"][0].shape == ("B", "S", 24)
+    # ... while collapsing the streams reads `hidden_streams` and stays activation wide.
+    assert by_label["Multiply"][0].shape == ("B", "S", 4096)
+    assert by_label["Sum"][0].shape == ("B", "S", 4096)
+
+
+def test_forward_parameter_reads_link_back_to_the_block_input():
+    from visualizer.ast_analyze import FORWARD_METHOD_INPUT
+    from visualizer.computation_graph import build_computation_graph
+
+    spec, block, basic = _hyperconnection_spec()
+    collapse = next(
+        step
+        for step in block.children
+        if step.label == "Multiply" and FORWARD_METHOD_INPUT in step.operation_predecessors
+    )
+    graph = build_computation_graph(block, basic_ops=basic)
+    input_index = next(
+        index for index, node in enumerate(graph.nodes) if node.synthetic == "@input"
+    )
+    collapse_index = next(
+        index
+        for index, node in enumerate(graph.nodes)
+        if node.block is not None and node.block.attr_name == collapse.attr_name
+    )
+    assert (input_index, collapse_index) in graph.links
+
+
 def test_kimi_router_export_uses_real_ops_and_topk_shapes():
     config = {
         "hidden_size": 7168,
@@ -312,13 +524,13 @@ def test_kimi_router_export_uses_real_ops_and_topk_shapes():
     exported = build_operator_export(spec)
     operators = exported["sections"][0]["operators"]
     by_computation = {item["computation"]: item for item in operators}
-    assert by_computation["Linear"]["output"]["shape"] == ["B", "T", 896]
+    assert by_computation["Linear"]["output"]["shape"] == ["B", "S", 896]
     assert by_computation["TopK"]["output"] == {
-        "shape": ["B", "T", 16],
+        "shape": ["B", "S", 16],
         "dtype": "int64",
     }
-    assert by_computation["Gather"]["output"]["shape"] == ["B", "T", 16]
-    assert by_computation["Sum"]["output"]["shape"] == ["B", "T", 1]
+    assert by_computation["Gather"]["output"]["shape"] == ["B", "S", 16]
+    assert by_computation["Sum"]["output"]["shape"] == ["B", "S", 1]
     assert all(
         item["operation"] == "torch_functional"
         for item in operators
