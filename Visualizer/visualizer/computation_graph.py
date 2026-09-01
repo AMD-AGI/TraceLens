@@ -18,8 +18,10 @@ from visualizer.block_tree import (
     SideFeedSegment,
     TensorPortsSegment,
     collect_computation_segments,
+    collect_function_steps,
     flatten_computation_segments,
     gated_norm_activation,
+    gated_norm_tile_label,
     inline_block_frame_label,
     inline_block_frame_sublabel,
     inline_composite_steps,
@@ -932,6 +934,130 @@ def _append_step_link(
         graph.links.append((input_index, step_index))
 
 
+def _node_has_outgoing_links(graph: ComputationGraph, index: int) -> bool:
+    return any(source == index for source, _target in graph.links)
+
+
+def _forward_steps_by_attr(root: BlockNode) -> dict[str, BlockNode]:
+    return {step.attr_name: step for step in root.children if step.attr_name}
+
+
+def _first_graph_index_for_module(
+    module: BlockNode,
+    attr_last_index: dict[str, int],
+) -> int | None:
+    steps = collect_function_steps(module)
+    if not steps:
+        return attr_last_index.get(module.attr_name)
+    first = min(steps, key=lambda step: step.forward_order or 0)
+    return attr_last_index.get(first.attr_name)
+
+
+def _wire_multi_input_op_forward_links(graph: ComputationGraph, root: BlockNode) -> None:
+    """Connect multi-input ops to the next forward step once all operands are wired."""
+    attr_last_index = _rebuild_attr_last_index(graph)
+    steps_by_attr = _forward_steps_by_attr(root)
+    ordered_steps = sorted(
+        root.children,
+        key=lambda step: (step.forward_order or 0, step.attr_name),
+    )
+
+    for step in ordered_steps:
+        if not step.operation_predecessors:
+            continue
+        source_index = attr_last_index.get(step.attr_name)
+        if source_index is None or _node_has_outgoing_links(graph, source_index):
+            continue
+
+        pred_orders = [
+            steps_by_attr[pred].forward_order or 0
+            for pred in step.operation_predecessors
+            if pred in steps_by_attr
+        ]
+        if not pred_orders:
+            continue
+
+        min_consumer_order = max(pred_orders) + 1
+        consumer = next(
+            (
+                candidate
+                for candidate in ordered_steps
+                if (candidate.forward_order or 0) >= min_consumer_order
+                and candidate.attr_name != step.attr_name
+            ),
+            None,
+        )
+        if consumer is None:
+            continue
+
+        target_index = _first_graph_index_for_module(consumer, attr_last_index)
+        if target_index is None:
+            target_index = attr_last_index.get(consumer.attr_name)
+        if target_index is not None and (source_index, target_index) not in graph.links:
+            graph.links.append((source_index, target_index))
+
+
+def _inline_frame_exit_index(graph: ComputationGraph, member_indices: set[int]) -> int | None:
+    exit_candidates = [
+        source
+        for source, target in graph.links
+        if source in member_indices and target not in member_indices
+    ]
+    if exit_candidates:
+        return exit_candidates[-1]
+
+    sources_inside = {source for source, _target in graph.links if source in member_indices}
+    dangling = [index for index in member_indices if index not in sources_inside]
+    return dangling[-1] if dangling else None
+
+
+def _wire_inline_frame_dangling_outputs(graph: ComputationGraph) -> None:
+    """Connect dead-end steps inside an inline frame to that frame's outward exit."""
+    for frame in graph.inline_frames:
+        members = set(frame.node_indices)
+        if len(members) < 2:
+            continue
+        exit_index = _inline_frame_exit_index(graph, members)
+        if exit_index is None:
+            continue
+        sources_inside = {source for source, _target in graph.links if source in members}
+        for index in members:
+            if index in sources_inside or index == exit_index:
+                continue
+            if (index, exit_index) not in graph.links:
+                graph.links.append((index, exit_index))
+
+
+def _predecessor_map(graph: ComputationGraph) -> dict[int, list[int]]:
+    preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    for source, target in graph.links:
+        preds[target].append(source)
+    return preds
+
+
+def _live_node_indices_to_fixpoint(
+    graph: ComputationGraph,
+    seeds: list[int],
+) -> set[int]:
+    """Backward close seeds under predecessors until the live set reaches a fixed point.
+
+    Long operand chains and cyclic graphs both require repeated predecessor expansion.
+    Conditional alternative links are materialized first so branch recurrences are included.
+    """
+    _add_conditional_alternative_links(graph)
+    keep = set(seeds)
+    changed = True
+    while changed:
+        changed = False
+        preds = _predecessor_map(graph)
+        for index in list(keep):
+            for pred in preds[index]:
+                if pred not in keep:
+                    keep.add(pred)
+                    changed = True
+    return keep
+
+
 def _dead_node_indices(
     graph: ComputationGraph,
     root: BlockNode,
@@ -941,26 +1067,10 @@ def _dead_node_indices(
     """Nodes not on any path feeding kept return values."""
     if graph.primary_output_index is None or not root.primary_output_step:
         return set()
-    preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
-    for source, target in graph.links:
-        preds[target].append(source)
+    if not strip_unused_return_branches or not root.multi_return_module:
+        return set()
 
-    keep: set[int] = set()
-    seeds: list[int] = [graph.primary_output_index]
-    if not strip_unused_return_branches:
-        for producer in root.referenced_return_producers:
-            for index, spec in enumerate(graph.nodes):
-                if spec.block is not None and spec.block.attr_name == producer:
-                    seeds.append(index)
-                    break
-
-    pending = list(dict.fromkeys(seeds))
-    while pending:
-        index = pending.pop()
-        if index in keep:
-            continue
-        keep.add(index)
-        pending.extend(preds[index])
+    keep = _live_node_indices_to_fixpoint(graph, [graph.primary_output_index])
 
     dead: set[int] = set()
     for index, spec in enumerate(graph.nodes):
@@ -970,6 +1080,40 @@ def _dead_node_indices(
             continue
         dead.add(index)
     return dead
+
+
+def _apply_dead_code_elimination(
+    graph: ComputationGraph,
+    root: BlockNode,
+    *,
+    strip_unused_return_branches: bool,
+) -> ComputationGraph:
+    """Remove unreachable nodes, iterating until the graph reaches a fixed point."""
+    if not strip_unused_return_branches or not root.multi_return_module:
+        graph.dead_node_indices = set()
+        return graph
+
+    max_passes = max(len(graph.nodes), 1) + 1
+    for _ in range(max_passes):
+        dead = _dead_node_indices(
+            graph,
+            root,
+            strip_unused_return_branches=True,
+        )
+        graph.dead_node_indices = dead
+        if not dead:
+            return graph
+        pruned = _strip_dead_nodes(graph)
+        if len(pruned.nodes) >= len(graph.nodes):
+            return pruned
+        graph = pruned
+
+    graph.dead_node_indices = _dead_node_indices(
+        graph,
+        root,
+        strip_unused_return_branches=True,
+    )
+    return graph
 
 
 def _prune_computation_nodes(
@@ -1195,6 +1339,13 @@ def _add_tensor_ports_segment(
     return step_indices.get(segment.steps[-1].attr_name)
 
 
+def _fanout_merge_key_prefix(merge: BlockNode, segment_index: int) -> str:
+    """Stable node-id prefix for fan-out merge steps."""
+    if merge.class_name == "KernelPipeline" and merge.attr_name:
+        return merge.attr_name.lstrip("@")
+    return f"merge:{segment_index}"
+
+
 def build_computation_graph(
     root: BlockNode,
     *,
@@ -1278,23 +1429,47 @@ def build_computation_graph(
                 if tail is not None:
                     branch_tails.append(tail)
             merge_steps, merge_wrapper = inline_composite_steps(segment.merge, basic_ops=basic_ops)
-            if merge_wrapper is not None and merge_wrapper.class_name == "KernelPipeline":
-                merge_index = _add_node(
+            merge_key_prefix = _fanout_merge_key_prefix(segment.merge, segment_index)
+            if (
+                merge_wrapper is not None
+                and is_kernel_pipeline_tree(segment.merge)
+                and segment.merge.tensor_input_labels
+            ):
+                provenance = segment.merge.attention_inputs or root.attention_inputs or {}
+                frame = _start_inline_frame(graph, merge_wrapper)
+                start_index = len(graph.nodes)
+                pipeline_tail = _add_tensor_ports_segment(
                     graph,
-                    key=f"merge:{segment_index}:pipeline",
-                    block=merge_wrapper,
+                    TensorPortsSegment(
+                        labels=list(segment.merge.tensor_input_labels),
+                        targets=dict(segment.merge.tensor_step_targets),
+                        steps=list(segment.merge.children),
+                    ),
+                    key_prefix=merge_key_prefix,
+                    port_sublabels=_tensor_port_input_sublabels(provenance),
                 )
+                for index in range(start_index, len(graph.nodes)):
+                    _append_inline_frame_node(frame, index)
+                port_index_by_label = {
+                    spec.label: index
+                    for index, spec in enumerate(graph.nodes)
+                    if spec.synthetic == SYNTHETIC_TENSOR
+                    and spec.key.startswith(f"{merge_key_prefix}:tensor:")
+                }
                 for tail, branch in zip(branch_tails, branch_specs):
-                    graph.links.append((tail, merge_index))
-                    graph.link_port_labels[(tail, merge_index)] = branch.port_label
-                last_index = merge_index
-                if merge_wrapper is not None:
-                    _track_attr_index(attr_last_index, merge_wrapper.attr_name, merge_index)
-            elif merge_wrapper is not None and len(merge_steps) == 2 and merge_steps[1].class_name == "KernelOutput":
+                    port_index = port_index_by_label.get(branch.port_label)
+                    if port_index is not None:
+                        graph.links.append((tail, port_index))
+                        graph.link_port_labels[(tail, port_index)] = branch.port_label
+                last_index = pipeline_tail
+                if pipeline_tail is not None:
+                    _track_attr_index(attr_last_index, merge_wrapper.attr_name, pipeline_tail)
+                continue
+            if merge_wrapper is not None and len(merge_steps) == 2 and merge_steps[1].class_name == "KernelOutput":
                 merge_indices, merge_tail = _add_kernel_pipeline_merge_chain(
                     graph,
                     merge_steps,
-                    key_prefix=f"merge:{segment_index}",
+                    key_prefix=merge_key_prefix,
                     attr_last_index=attr_last_index,
                 )
                 merge_first = merge_indices[0] if merge_indices else None
@@ -1309,7 +1484,7 @@ def build_computation_graph(
                     graph,
                     merge_steps,
                     wrapper=merge_wrapper,
-                    key_prefix=f"merge:{segment_index}",
+                    key_prefix=merge_key_prefix,
                     attr_last_index=attr_last_index,
                 )
                 merge_first = merge_indices[0] if merge_indices else None
@@ -1322,7 +1497,7 @@ def build_computation_graph(
             else:
                 merge_index = _add_node(
                     graph,
-                    key=f"merge:{segment_index}",
+                    key=merge_key_prefix,
                     block=segment.merge,
                 )
                 for branch_offset, tail in enumerate(branch_tails):
@@ -1456,7 +1631,7 @@ def build_computation_graph(
                     graph,
                     key=f"sidefeed:{segment_index}:{consumer.attr_name}:norm",
                     block=consumer,
-                    label="Gated RMSNorm",
+                    label=gated_norm_tile_label(consumer),
                     sublabel="",
                 )
                 if last_index is not None:
@@ -1467,7 +1642,7 @@ def build_computation_graph(
                 combine_index = _add_node(
                     graph,
                     key=f"sidefeed:{segment_index}:{consumer.attr_name}:mul",
-                    label="Multiply",
+                    label=_operation_tile_label("Multiply"),
                 )
                 graph.links.append((norm_index, combine_index))
 
@@ -1599,51 +1774,46 @@ def build_computation_graph(
 
         if isinstance(segment, CombineSegment):
             after_nodes = list(segment.after)
-            if is_method_wrapper(segment.side):
-                if last_index is None:
-                    continue
-                first_after, tail = _add_chain(
-                    graph,
-                    after_nodes,
-                    key_prefix=f"post:{segment_index}",
-                    attr_last_index=attr_last_index,
-                    basic_ops=basic_ops,
-                )
-                if first_after is not None:
-                    graph.links.append((last_index, first_after))
-                last_index = tail
-                continue
-
             side = segment.side
-            expanded_side, side_wrapper = inline_composite_steps(side, basic_ops=basic_ops)
-            if side_wrapper is not None:
-                _side_indices, side_tail = _add_linear_pipeline_chain(
+            if is_method_wrapper(side):
+                side_index = _add_method_wrapper_node(
                     graph,
-                    expanded_side,
-                    wrapper=side_wrapper,
-                    key_prefix=f"side:{segment_index}",
-                    attr_last_index=attr_last_index,
-                    port_label=segment.side_port_label,
-                    port_style=segment.side_port_style,
-                    input_index=input_index,
-                    last_index=None,
-                    branch_from_input_dashed=segment.side_source == "forward_input",
-                )
-                side_index = side_tail
-                _track_attr_index(attr_last_index, side_wrapper.attr_name, side_index)
-                _track_attr_index(attr_last_index, side.attr_name, side_index)
-            else:
-                side_block = expanded_side[0] if len(expanded_side) == 1 else side
-                side_index = _add_node(
-                    graph,
+                    side,
                     key=f"side:{segment_index}",
-                    block=side_block,
-                    port_label=segment.side_port_label,
-                    port_style=segment.side_port_style,
                 )
-                _track_attr_index(attr_last_index, side.attr_name, side_index)
                 if input_index is not None and segment.side_source == "forward_input":
                     _link_forward_input(graph, input_index, side_index)
+                _track_attr_index(attr_last_index, side.attr_name, side_index)
+            else:
+                expanded_side, side_wrapper = inline_composite_steps(side, basic_ops=basic_ops)
+                if side_wrapper is not None:
+                    _side_indices, side_tail = _add_linear_pipeline_chain(
+                        graph,
+                        expanded_side,
+                        wrapper=side_wrapper,
+                        key_prefix=f"side:{segment_index}",
+                        attr_last_index=attr_last_index,
+                        port_label=segment.side_port_label,
+                        port_style=segment.side_port_style,
+                        input_index=input_index,
+                        last_index=None,
+                        branch_from_input_dashed=segment.side_source == "forward_input",
+                    )
+                    side_index = side_tail
+                    _track_attr_index(attr_last_index, side_wrapper.attr_name, side_index)
+                    _track_attr_index(attr_last_index, side.attr_name, side_index)
+                else:
+                    side_block = expanded_side[0] if len(expanded_side) == 1 else side
+                    side_index = _add_node(
+                        graph,
+                        key=f"side:{segment_index}",
+                        block=side_block,
+                        port_label=segment.side_port_label,
+                        port_style=segment.side_port_style,
+                    )
+                    _track_attr_index(attr_last_index, side.attr_name, side_index)
+                    if input_index is not None and segment.side_source == "forward_input":
+                        _link_forward_input(graph, input_index, side_index)
             if last_index is None:
                 continue
 
@@ -1731,6 +1901,9 @@ def build_computation_graph(
                 _track_attr_index(attr_last_index, step.attr_name, last_index)
 
     _wire_operation_predecessor_links(graph, root)
+    if not (strip_unused_return_branches and root.multi_return_module):
+        _wire_multi_input_op_forward_links(graph, root)
+        _wire_inline_frame_dangling_outputs(graph)
     if root.primary_output_step:
         for index, spec in enumerate(graph.nodes):
             if spec.block is not None and spec.block.attr_name == root.primary_output_step:
@@ -1740,13 +1913,11 @@ def build_computation_graph(
             graph.primary_output_index = last_index
     else:
         graph.primary_output_index = last_index
-    graph.dead_node_indices = _dead_node_indices(
+    graph = _apply_dead_code_elimination(
         graph,
         root,
         strip_unused_return_branches=strip_unused_return_branches,
     )
-    _add_conditional_alternative_links(graph)
-    graph = _strip_dead_nodes(graph)
     if basic_ops is not None and basic_ops.basic_only:
         return _filter_graph_basic_only(graph)
     return graph

@@ -65,6 +65,8 @@ def test_glm53_linear_attention_gate_chain_is_not_short_circuited():
     assert o_norm_key in keys
 
     key_to_index = {node.key: index for index, node in enumerate(graph.nodes)}
+    assert graph.nodes[key_to_index[o_norm_key]].label == "RMSNorm"
+    assert graph.nodes[key_to_index[o_norm_mul_key]].label == "Multiply"
     links = set(graph.links)
 
     assert (key_to_index[g_a_key], key_to_index[g_b_key]) in links
@@ -127,6 +129,121 @@ def test_glm53_hyperconnection_expands_mhc_math():
     assert "Sigmoid" in labels
     assert "Softmax" in labels
     assert "Sum" in labels
+
+
+def test_glm53_o_norm_uses_rmsnorm_and_multiply_labels_in_merged_graph():
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    prefix = _linear_attn_variant_prefix(spec)
+    o_norm_nodes = [
+        node
+        for node in graph["nodes"]
+        if node["id"].startswith(f"{prefix}/self_attn/") and "o_norm" in node["id"]
+    ]
+    labels = {node.get("label") for node in o_norm_nodes}
+    assert "RMSNorm" in labels
+    assert "Multiply" in labels
+    assert "Gated RMSNorm" not in labels
+
+
+def test_glm53_forget_gate_expands_internal_computation():
+    pytest.importorskip("huggingface_hub")
+    from visualizer.block_tree import build_block_node, collect_function_steps
+    from visualizer.computation_graph import build_computation_graph
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    tree = build_block_node(
+        attr_name="self_attn",
+        class_name="Glm5NextTextLinearAttention",
+        registry=spec.class_registry,
+        basic_ops=spec.basic_ops,
+        infer_init_steps=True,
+    )
+    forget = next(child for child in tree.children if child.attr_name == "forget_gate")
+    assert forget.class_name == "Glm5NextTextForgetGate"
+    assert len(collect_function_steps(forget)) >= 6
+
+    graph = build_computation_graph(forget, basic_ops=spec.basic_ops)
+    labels = {node.label for node in graph.nodes}
+    assert "Linear" in labels
+    assert "Sigmoid" in labels
+    assert "Multiply" in labels
+
+    merged = build_merged_model_graph(spec)
+    prefix = _linear_attn_variant_prefix(spec)
+    forget_nodes = [
+        node
+        for node in merged["nodes"]
+        if node["id"].startswith(f"{prefix}/self_attn/") and "forget_gate" in node["id"]
+    ]
+    forget_labels = {node.get("label") for node in forget_nodes}
+    assert "Sigmoid" in forget_labels
+    assert "Linear" in forget_labels
+
+
+def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
+    pytest.importorskip("huggingface_hub")
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import build_computation_graph
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    tree = build_block_node(
+        attr_name="self_attn",
+        class_name="Glm5NextTextLinearAttention",
+        registry=spec.class_registry,
+        basic_ops=spec.basic_ops,
+        infer_init_steps=True,
+    )
+    graph = build_computation_graph(tree, basic_ops=spec.basic_ops)
+    key_to_index = {node.key: index for index, node in enumerate(graph.nodes)}
+    sources = {source for source, _target in graph.links}
+
+    concat_key = _graph_key(graph, ":@op_l642_c20_concat:@op_l642_c20_concat:0")
+    forget_entry_key = _graph_key(graph, ":forget_gate:f_a_proj:0")
+    branch_mul_key = _graph_key(graph, ":forget_gate:@op_l329_c19_multiply:5")
+    branch_add_key = _graph_key(graph, ":forget_gate:@op_l323_c13_add:2")
+
+    assert key_to_index[concat_key] in sources
+    assert (key_to_index[concat_key], key_to_index[forget_entry_key]) in set(graph.links)
+    assert key_to_index[branch_mul_key] in sources
+    assert key_to_index[branch_add_key] in sources
+
+
+def test_glm53_dead_code_elimination_is_idempotent_for_hyperconnection():
+    pytest.importorskip("huggingface_hub")
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import (
+        _apply_dead_code_elimination,
+        build_computation_graph,
+    )
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    tree = build_block_node(
+        attr_name="ffn_hc",
+        class_name="Glm5NextTextHyperConnection",
+        registry=spec.class_registry,
+        basic_ops=spec.basic_ops,
+        infer_init_steps=True,
+    )
+    graph = build_computation_graph(
+        tree,
+        basic_ops=spec.basic_ops,
+        strip_unused_return_branches=True,
+    )
+    once = _apply_dead_code_elimination(
+        graph,
+        tree,
+        strip_unused_return_branches=True,
+    )
+    twice = _apply_dead_code_elimination(
+        once,
+        tree,
+        strip_unused_return_branches=True,
+    )
+    assert len(once.nodes) == len(twice.nodes)
+    assert set(once.links) == set(twice.links)
+    assert not twice.dead_node_indices
 
 
 def test_glm53_ffn_hc_input_norm_precedes_linear():

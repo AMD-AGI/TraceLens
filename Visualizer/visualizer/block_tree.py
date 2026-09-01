@@ -137,7 +137,7 @@ def block_purpose(node: BlockNode) -> str | None:
         stem = class_name[: match.end()] if match else "SiLU"
         return f"{stem}(gate) × up branch"
     if class_name == "FusedRMSNormGated":
-        return "RMSNorm × gated activation"
+        return "RMSNorm, then multiply by gate"
     if class_name == "Split" or node.attr_name == "split_gate_up":
         return "Split fused gate/up projection"
     if class_name in {"ActivationOp", "SituActivation"}:
@@ -499,7 +499,20 @@ def inline_composite_steps(
     *,
     basic_ops: BasicOpFilter | None = None,
 ) -> tuple[list[BlockNode], BlockNode | None]:
-    """Inline a straight-line composite wrapper into its internal forward steps."""
+    """Inline a composite wrapper into its internal forward steps.
+
+    Prefer showing actual computations (linear layers, activations, kernel substeps)
+    over a single opaque module tile whenever internal structure is known.
+    """
+    del basic_ops
+    if is_kernel_pipeline_tree(step) and step.children:
+        return list(step.children), step
+
+    if _is_output_gate_node(step) and step.children:
+        inner_steps = straight_line_steps(step) if is_straight_line_module(step) else list(step.children)
+        if inner_steps:
+            return inner_steps, step
+
     if not is_straight_line_module(step):
         return [step], None
     if not is_inline_expandable_module(step):
@@ -508,7 +521,7 @@ def inline_composite_steps(
     if len(inner_steps) > 1:
         return inner_steps, step
     if len(inner_steps) == 1 and _is_output_gate_node(step):
-        return inner_steps, None
+        return inner_steps, step
     return [step], None
 
 
@@ -599,6 +612,7 @@ class BlockNode:
     param_inputs: list[str] = field(default_factory=list)
     primary_output_step: str | None = None
     referenced_return_producers: set[str] = field(default_factory=set)
+    multi_return_module: bool = False
 
 
 PortStyle = Literal["floating", "inline"]
@@ -1013,6 +1027,13 @@ def _output_gate_block_node(
     )
 
 
+def _is_simple_parallel_output_gate(child: BlockNode) -> bool:
+    """True when a parallel gate is a single linear (+ optional activation), not a composite module."""
+    if displays_as_linear(child.attr_name, child.class_name):
+        return True
+    return len(collect_function_steps(child)) <= 1
+
+
 def _wrap_parallel_gate_children(
     child_nodes: list[BlockNode],
     parallel_gates: list[str],
@@ -1026,6 +1047,9 @@ def _wrap_parallel_gate_children(
     wrapped: list[BlockNode] = []
     for child in child_nodes:
         if child.attr_name not in gate_attrs:
+            wrapped.append(child)
+            continue
+        if not _is_simple_parallel_output_gate(child):
             wrapped.append(child)
             continue
         activation = gate_activations.get(child.attr_name)
@@ -1067,6 +1091,16 @@ def is_gated_norm_module(node: BlockNode) -> bool:
     return node.role == "norm" and bool(
         re.search(r"Fused.*Gated|Gated.*Norm|NormGated", class_name, re.I)
     )
+
+
+def gated_norm_tile_label(node: BlockNode) -> str:
+    """Norm operator label for a gated norm decomposed into norm then multiply."""
+    class_name = node.class_name or ""
+    if "Layer" in class_name and "Norm" in class_name:
+        return "LayerNorm"
+    if "RMS" in class_name or re.search(r"RMSNorm", class_name, re.I):
+        return "RMSNorm"
+    return "RMSNorm"
 
 
 def gated_norm_activation(node: BlockNode) -> str | None:
@@ -1494,8 +1528,8 @@ def is_simple_modeled_tile(node: BlockNode) -> bool:
     """Modeled op rendered as a gray tile with operation text (not a role-colored leaf)."""
     if node.is_basic or is_method_wrapper(node):
         return False
-    if node.class_name == "OutputGate" and len(straight_line_steps(node)) <= 1:
-        return True
+    if _is_output_gate_node(node) or is_kernel_pipeline_tree(node):
+        return False
     if _is_composite_block(node):
         return False
     return introspect_is_modeling_operation(node.class_name, node.attr_name, node.details)
@@ -1894,6 +1928,7 @@ def build_block_node(
         input_label=cls.forward_input_name,
         primary_output_step=primary_output_step,
         referenced_return_producers=set(cls.referenced_return_producers),
+        multi_return_module=len(cls.forward_return_order) >= 2,
     )
 
 

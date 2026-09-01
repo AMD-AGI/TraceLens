@@ -531,6 +531,14 @@ def _is_tensor_port(node: dict[str, Any]) -> bool:
     return _node_attr(node, "synthetic") == "@tensor"
 
 
+def _kernel_pipeline_step(block_tree: BlockNode) -> BlockNode | None:
+    """Return the kernel pipeline child of an attention block tree, if present."""
+    return next(
+        (child for child in block_tree.children if child.class_name == "KernelPipeline"),
+        None,
+    )
+
+
 def _integrate_kernel_pipeline_merge(
     section_nodes: list[dict[str, Any]],
     *,
@@ -541,7 +549,13 @@ def _integrate_kernel_pipeline_merge(
     group_node_attributes: dict[str, dict[str, str]] | None = None,
     inject_skip: set[str] | None = None,
 ) -> None:
-    """Replace the collapsed KernelPipeline merge tile with an expanded subgraph."""
+    """Ensure kernel pipeline merge tiles expand and keep a stable group label."""
+    del pipeline_prefix
+    pipeline_nodes = [
+        node
+        for node in section_nodes
+        if node.get("namespace", "").startswith(pipeline_namespace)
+    ]
     merge_nodes = [
         node
         for node in section_nodes
@@ -549,53 +563,47 @@ def _integrate_kernel_pipeline_merge(
         and _node_attr(node, "class_name") == "KernelPipeline"
         and node.get("namespace") in {namespace_prefix, pipeline_namespace}
     ]
-    if not merge_nodes:
+    if not merge_nodes and not pipeline_nodes:
         return
 
-    merge = merge_nodes[0]
-    merge_id = merge["id"]
-    merge_edges = list(merge.get("incomingEdges", []))
+    merge = merge_nodes[0] if merge_nodes else None
+    merge_id = merge["id"] if merge is not None else None
+
+    if inject_skip is not None:
+        inject_skip.add(pipeline_namespace)
 
     tensor_by_label = {
         node.get("label", ""): node
         for node in section_nodes
         if node.get("namespace") == pipeline_namespace and _is_tensor_port(node)
     }
-    if not tensor_by_label:
-        return
 
-    if inject_skip is not None:
-        inject_skip.add(pipeline_namespace)
+    if merge is not None and tensor_by_label:
+        merge_edges = list(merge.get("incomingEdges", []))
+        section_nodes.remove(merge)
 
-    section_nodes.remove(merge)
+        default_labels = ["q", "k", "v", "g", "beta"]
+        merge_edge_by_port: dict[int, dict[str, Any]] = {}
+        for edge in merge_edges:
+            try:
+                port_index = int(edge.get("targetNodeInputId", "0"))
+            except ValueError:
+                continue
+            if 0 <= port_index < len(default_labels):
+                merge_edge_by_port[port_index] = edge
 
-    default_labels = ["q", "k", "v", "g", "beta"]
-    merge_edge_by_port: dict[int, dict[str, Any]] = {}
-    for edge in merge_edges:
-        try:
-            port_index = int(edge.get("targetNodeInputId", "0"))
-        except ValueError:
-            continue
-        if 0 <= port_index < len(default_labels):
-            merge_edge_by_port[port_index] = edge
+        for port_index, label in enumerate(default_labels):
+            tensor = tensor_by_label.get(label)
+            if tensor is None:
+                continue
+            merge_edge = merge_edge_by_port.get(port_index)
+            if merge_edge is not None:
+                tensor["incomingEdges"] = [
+                    _label_input_edge({**merge_edge, "targetNodeInputId": "0"}, label)
+                ]
+                _set_input_port_metadata(tensor, "0", label)
 
-    for port_index, label in enumerate(default_labels):
-        tensor = tensor_by_label.get(label)
-        if tensor is None:
-            continue
-        merge_edge = merge_edge_by_port.get(port_index)
-        if merge_edge is not None:
-            tensor["incomingEdges"] = [
-                _label_input_edge({**merge_edge, "targetNodeInputId": "0"}, label)
-            ]
-            _set_input_port_metadata(tensor, "0", label)
-
-    pipeline_nodes = [
-        node
-        for node in section_nodes
-        if node.get("namespace", "").startswith(pipeline_namespace)
-    ]
-    _, pipeline_exits = _boundary_nodes(pipeline_nodes)
+    _, pipeline_exits = _boundary_nodes(pipeline_nodes) if pipeline_nodes else ([], [])
     pipeline_exit = next(
         (
             node_id
@@ -605,7 +613,7 @@ def _integrate_kernel_pipeline_merge(
         pipeline_exits[-1] if pipeline_exits else None,
     )
 
-    if pipeline_exit is not None:
+    if merge_id is not None and pipeline_exit is not None:
         for node in section_nodes:
             if node.get("namespace") != namespace_prefix:
                 continue
@@ -619,14 +627,15 @@ def _integrate_kernel_pipeline_merge(
                     rewired.append(edge)
             node["incomingEdges"] = rewired
 
-    if group_node_attributes is not None:
+    if group_node_attributes is not None and pipeline_nodes:
         attrs = {
             "label": pipeline_label,
             "operation": "kernel pipeline",
         }
-        details = _node_attr(merge, "details")
-        if details:
-            attrs["details"] = details
+        if merge is not None:
+            details = _node_attr(merge, "details")
+            if details:
+                attrs["details"] = details
         group_node_attributes[pipeline_namespace] = attrs
 
 
@@ -856,6 +865,20 @@ def _append_section(
 
     seen_ids = {node["id"] for node in merged_nodes}
     pipeline_inject_skip: set[str] = set()
+    pipeline_step = _kernel_pipeline_step(block_tree)
+    if pipeline_step is not None:
+        _integrate_kernel_pipeline_merge(
+            section_nodes,
+            namespace_prefix=namespace_prefix,
+            pipeline_namespace=_join_namespace(
+                namespace_prefix,
+                _sanitize_namespace_segment(pipeline_step.label),
+            ),
+            pipeline_prefix=id_prefix,
+            pipeline_label=pipeline_step.label,
+            group_node_attributes=group_node_attributes,
+            inject_skip=pipeline_inject_skip,
+        )
     for nested_label, nested_block in collect_nested_diagrams(block_tree, basic_ops=basic_ops):
         nested_prefix = _merge_node_id(id_prefix, nested_block.attr_name)
         if any(node["id"].startswith(f"{nested_prefix}/") for node in section_nodes):
@@ -864,6 +887,11 @@ def _append_section(
             namespace_prefix,
             _nested_namespace_segment(nested_block, nested_label),
         )
+        if nested_block.class_name == "KernelPipeline" and any(
+            node.get("namespace", "").startswith(nested_namespace) and _is_tensor_port(node)
+            for node in section_nodes
+        ):
+            continue
         nested_computation = build_computation_graph(
             nested_block,
             basic_ops=basic_ops,
