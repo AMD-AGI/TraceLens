@@ -653,6 +653,20 @@ def test_default_html_output_path_replaces_slashes():
     assert default_html_output_path("moonshotai/Kimi-K3", None).name == "moonshotai_Kimi-K3.html"
 
 
+def test_implicit_cli_output_uses_html_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from model_explorer_export.cli import main
+
+    fixture = FIXTURES / "llama_like"
+    monkeypatch.chdir(tmp_path)
+    exit_code = main([str(fixture), "--title", "LlamaLike"])
+    assert exit_code == 0
+    html_files = list(tmp_path.glob("*.html"))
+    assert len(html_files) == 1
+    assert html_files[0].name == "llama_like.html"
+    assert not list(tmp_path.glob("*_model_explorer.json"))
+    assert not list(tmp_path.glob("worker.js"))
+
+
 def test_viewer_url_uses_root_path():
     from model_explorer_export.serve import viewer_url
 
@@ -673,9 +687,13 @@ def test_viewer_shell_reserves_fact_sheet_column():
         / "app.js"
     ).read_text(encoding="utf-8")
     assert "tracelens-fact-sheet" in index_html
+    assert "tracelens-fact-sheet-resizer" in index_html
+    assert "--tracelens-fact-sheet-width" in index_html
     assert "grid-template-columns" in index_html
     assert "body {" in index_html and "display: grid" in index_html
     assert "tracelens-fact-sheet-body" in app_js
+    assert "initFactSheetResize" in app_js
+    assert "bodyHtml" in app_js
     assert "factSheet.hidden = false" in app_js
     assert "hideInfoPanel: true" in app_js
     assert "loadEmbeddedPayload" in app_js
@@ -699,6 +717,7 @@ def test_compose_viewer_html_embeds_payload_without_external_json():
     assert 'id="tracelens-payload"' in html
     assert "graphCollections" in html
     assert "tracelensViewer" in html
+    assert 'id="tracelens-worker-source"' in html
     assert "./app.js" not in html
     assert "loadEmbeddedPayload" in html
     start_tag = '<script id="tracelens-payload" type="application/json">'
@@ -709,7 +728,7 @@ def test_compose_viewer_html_embeds_payload_without_external_json():
     assert "\n" not in embedded_json
 
 
-def test_save_viewer_html_writes_worker_js(tmp_path: Path):
+def test_save_viewer_html_is_self_contained(tmp_path: Path):
     from model_explorer_export.viewer_page import save_viewer_html
 
     spec = load_architecture(
@@ -722,8 +741,10 @@ def test_save_viewer_html_writes_worker_js(tmp_path: Path):
     html_path = save_viewer_html(payload, tmp_path / "custom_model.html")
 
     assert html_path.exists()
-    assert (tmp_path / "worker.js").exists()
-    assert 'id="tracelens-payload"' in html_path.read_text(encoding="utf-8")
+    assert not (tmp_path / "worker.js").exists()
+    html = html_path.read_text(encoding="utf-8")
+    assert 'id="tracelens-payload"' in html
+    assert 'id="tracelens-worker-source"' in html
 
 
 def test_fact_sheet_group_attributes_in_graph_info():

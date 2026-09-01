@@ -151,11 +151,6 @@ def model_output_stem(checkpoint: str | Path | None, github: str | None) -> str:
 
 
 def default_html_output_path(checkpoint: str | Path | None, github: str | None) -> Path:
-    filename = model_output_stem(checkpoint, github).replace("/", "_") + ".html"
-    return Path.cwd() / filename
-
-
-def default_output_path(checkpoint: str | Path | None, github: str | None) -> Path:
     stem = model_output_stem(checkpoint, github)
     if checkpoint is not None:
         path = Path(checkpoint)
@@ -163,15 +158,14 @@ def default_output_path(checkpoint: str | Path | None, github: str | None) -> Pa
             stem = path.name if path.is_dir() else path.stem
     elif github:
         stem = stem.rstrip("/").split("/")[-1]
-    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stem)
-    return Path.cwd() / f"{safe}_model_explorer.json"
+    filename = stem.replace("/", "_") + ".html"
+    return Path.cwd() / filename
 
 
 def write_optional_output(payload: dict, output: Path) -> Path:
     if is_html_output(output):
         saved = save_viewer_html(payload, output)
         print(f"Wrote standalone viewer: {saved}")
-        print(f"Copied worker.js beside export: {saved.parent / 'worker.js'}")
         return saved
     saved = save_model_explorer_payload(payload, output)
     print(f"Wrote Model Explorer JSON: {saved}")
@@ -256,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     elif not serve_requested:
         try:
-            output = default_output_path(checkpoint, args.github)
+            output = default_html_output_path(checkpoint, args.github)
             write_optional_output(payload, output)
         except Exception as exc:  # noqa: BLE001
             print(f"Error writing output: {exc}", file=sys.stderr)

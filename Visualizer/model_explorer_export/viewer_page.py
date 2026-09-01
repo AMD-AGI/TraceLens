@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +24,21 @@ def render_payload_script(payload: dict[str, Any]) -> str:
     return f'    <script id="tracelens-payload" type="application/json">{blob}</script>'
 
 
+def _worker_js_source() -> Path:
+    for candidate in (VISUALIZER_DIST / "worker.js", VIEWER_DIR / "worker.js"):
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        "worker.js not found; install ai-edge-model-explorer-visualizer or bundle viewer/worker.js"
+    )
+
+
+def render_worker_script(worker_js: str) -> str:
+    """Embed layout worker source for file:// exports (Workers cannot load local paths)."""
+    safe = worker_js.replace("</", "<\\/")
+    return f'    <script id="tracelens-worker-source" type="text/plain">{safe}</script>'
+
+
 def compose_viewer_html(
     payload: dict[str, Any] | None = None,
     *,
@@ -38,9 +52,10 @@ def compose_viewer_html(
     if payload is not None:
         replacement_parts.append(render_payload_script(payload))
     if inline_app:
+        replacement_parts.append(render_worker_script(_worker_js_source().read_text(encoding="utf-8")))
         replacement_parts.append(f"    <script>\n{app_js}\n    </script>")
     else:
-        replacement_parts.append('    <script src="./app.js?v=7"></script>')
+        replacement_parts.append('    <script src="./app.js?v=9"></script>')
 
     if replacement_parts:
         replacement = "\n".join(replacement_parts)
@@ -51,19 +66,9 @@ def compose_viewer_html(
     return shell
 
 
-def copy_worker_js(directory: Path) -> None:
-    """Place worker.js beside a standalone HTML export."""
-    worker_src = VISUALIZER_DIST / "worker.js"
-    worker_dst = directory / "worker.js"
-    if worker_src.exists():
-        worker_dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(worker_src, worker_dst)
-
-
 def save_viewer_html(payload: dict[str, Any], path: Path | str) -> Path:
-    """Write a standalone viewer page with embedded payload and worker.js."""
+    """Write a self-contained standalone viewer page (payload, worker, and app inline)."""
     target = Path(path).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(compose_viewer_html(payload, inline_app=True), encoding="utf-8")
-    copy_worker_js(target.parent)
     return target

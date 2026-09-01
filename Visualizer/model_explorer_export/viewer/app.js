@@ -5,10 +5,19 @@
  * ?graph=<filename> (copied next to this page by the local server).
  */
 
+function resolveWorkerScriptPath() {
+  const embedded = document.getElementById("tracelens-worker-source");
+  if (embedded?.textContent) {
+    const blob = new Blob([embedded.textContent], { type: "application/javascript" });
+    return URL.createObjectURL(blob);
+  }
+  return "./worker.js";
+}
+
 if (window.modelExplorer) {
   window.modelExplorer.assetFilesBaseUrl =
     "https://unpkg.com/ai-edge-model-explorer-visualizer@0.1.2/dist/static_files";
-  window.modelExplorer.workerScriptPath = "./worker.js";
+  window.modelExplorer.workerScriptPath = resolveWorkerScriptPath();
 }
 
 const status = document.getElementById("status");
@@ -16,6 +25,98 @@ const graphPane = document.getElementById("tracelens-graph-pane");
 const factSheet = document.getElementById("tracelens-fact-sheet");
 const factSheetTitle = document.getElementById("tracelens-fact-sheet-title");
 const factSheetBody = document.getElementById("tracelens-fact-sheet-body");
+const factSheetResizer = document.getElementById("tracelens-fact-sheet-resizer");
+
+const FACT_SHEET_WIDTH_KEY = "tracelens_fact_sheet_width";
+const DEFAULT_FACT_SHEET_WIDTH = 420;
+const MIN_FACT_SHEET_WIDTH = 240;
+const MAX_FACT_SHEET_WIDTH_RATIO = 0.6;
+
+function clampFactSheetWidth(width) {
+  const maxWidth = Math.max(
+    MIN_FACT_SHEET_WIDTH,
+    Math.floor(window.innerWidth * MAX_FACT_SHEET_WIDTH_RATIO),
+  );
+  return Math.min(maxWidth, Math.max(MIN_FACT_SHEET_WIDTH, Math.round(width)));
+}
+
+function setFactSheetWidth(width) {
+  const clamped = clampFactSheetWidth(width);
+  document.body.style.setProperty("--tracelens-fact-sheet-width", `${clamped}px`);
+  try {
+    localStorage.setItem(FACT_SHEET_WIDTH_KEY, String(clamped));
+  } catch (_error) {
+    // Ignore storage failures in restricted contexts.
+  }
+  return clamped;
+}
+
+function restoreFactSheetWidth() {
+  try {
+    const stored = localStorage.getItem(FACT_SHEET_WIDTH_KEY);
+    if (stored) {
+      const parsed = Number.parseInt(stored, 10);
+      if (!Number.isNaN(parsed)) {
+        setFactSheetWidth(parsed);
+      }
+    }
+  } catch (_error) {
+    // Ignore storage failures in restricted contexts.
+  }
+}
+
+function initFactSheetResize() {
+  if (!factSheetResizer) {
+    return;
+  }
+
+  restoreFactSheetWidth();
+
+  let dragging = false;
+
+  const stopDragging = () => {
+    if (!dragging) {
+      return;
+    }
+    dragging = false;
+    document.body.classList.remove("tracelens-fact-sheet-resizing");
+  };
+
+  factSheetResizer.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    dragging = true;
+    document.body.classList.add("tracelens-fact-sheet-resizing");
+  });
+
+  window.addEventListener("mousemove", (event) => {
+    if (!dragging) {
+      return;
+    }
+    setFactSheetWidth(window.innerWidth - event.clientX);
+  });
+
+  window.addEventListener("mouseup", stopDragging);
+  window.addEventListener("blur", stopDragging);
+
+  factSheetResizer.addEventListener("keydown", (event) => {
+    const step = event.shiftKey ? 40 : 16;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      const current = factSheet.getBoundingClientRect().width;
+      setFactSheetWidth(current + step);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      const current = factSheet.getBoundingClientRect().width;
+      setFactSheetWidth(current - step);
+    }
+  });
+
+  window.addEventListener("resize", () => {
+    setFactSheetWidth(factSheet.getBoundingClientRect().width);
+  });
+}
+
+initFactSheetResize();
 
 function showError(message) {
   status.textContent = message;
@@ -64,7 +165,11 @@ function mountFactSheet(factSheetData) {
   }
 
   factSheetTitle.textContent = factSheetData.title || "Fact sheet";
-  factSheetBody.textContent = factSheetData.body;
+  if (factSheetData.bodyHtml) {
+    factSheetBody.innerHTML = factSheetData.bodyHtml;
+  } else {
+    factSheetBody.textContent = factSheetData.body;
+  }
 }
 
 const SHOW_ON_NODE_KEY = "model_explorer_show_on_node_item_types_v2";
