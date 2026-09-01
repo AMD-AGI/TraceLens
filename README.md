@@ -51,16 +51,6 @@ To try out TraceLens without collecting your own trace, use the [demo traces](te
 
 ### 3. Analyze your Workload
 
-## Supported Profile Formats
-
-| Format | Tool | Documentation |
-|--------|------|---------------|
-| **PyTorch** | `torch.profiler` | [docs/generate_perf_report.md](docs/generate_perf_report.md) |
-| **JAX** | XPlane protobuf | [docs/jax_analyses.md](docs/jax_analyses.md) |
-| **rocprofv3 JSON** | AMD ROCm rocprofiler-sdk | [docs/generate_perf_report_rocprof.md](docs/generate_perf_report_rocprof.md) |
-| **rocprofv3 pftrace** | Perfetto-style | [docs/generate_perf_report_rocprof_pftrace.md](docs/generate_perf_report_rocprof_pftrace.md) |
-| **Genesis / Taichi** | rocprofv3 + pftrace | [docs/generate_perf_report_genesis.md](docs/generate_perf_report_genesis.md) |
-
 Generate a performance analysis report from an eager execution PyTorch trace with a single command:
 
 ```bash
@@ -117,6 +107,7 @@ Analyze a workload autonomously using an agentic system that automates performan
 | **JAX**               | XPlane protobuf          | [docs/how-to/generate-perf-report-jax.md](docs/how-to/generate-perf-report-jax.md)                             |
 | **rocprofv3 JSON**    | AMD ROCm rocprofiler-sdk | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md)                     |
 | **rocprofv3 pftrace** | Perfetto-style           | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md)                     |
+| **Genesis / Taichi**  | rocprofv3 + pftrace      | [docs/how-to/generate-perf-report-genesis.md](docs/how-to/generate-perf-report-genesis.md)                     |
 
 Each format's linked doc covers its full CLI reference. For PyTorch report comparison and multi-rank collective analysis, see the corresponding docs in the [Documentation](#documentation) table.
 
@@ -127,12 +118,12 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 | Module                       | Doc                                                                                                                              |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | Trace2Tree                   | [docs/conceptual/trace2tree.md](docs/conceptual/trace2tree.md)                                                                   |
-| TreePerf                     | [docs/how-to/tree-perf-analysis.md](docs/how-to/tree-perf-analysis.md)                                                           |
+| TreePerf                     | [docs/how-to/sdk-analysis.md](docs/how-to/sdk-analysis.md)                                                                       |
 | NCCL Analyser                | [docs/how-to/nccl-analysis.md](docs/how-to/nccl-analysis.md)                                                                     |
 | TraceDiff                    | [docs/how-to/compare-traces.md](docs/how-to/compare-traces.md)                                                                   |
 | Event Replay                 | [docs/how-to/event-replay.md](docs/how-to/event-replay.md)                                                                       |
 | TraceFusion                  | [docs/how-to/trace-fusion.md](docs/how-to/trace-fusion.md)                                                                       |
-| GPU Event Analyser           | [docs/how-to/gpu-event-analysis.md](docs/how-to/gpu-event-analysis.md)                                                           |
+| GPU Event Analyser           | [docs/how-to/sdk-analysis.md](docs/how-to/sdk-analysis.md)                                                                       |
 | JAX Analyses                 | [docs/how-to/generate-perf-report-jax.md](docs/how-to/generate-perf-report-jax.md)                                               |
 | pftrace Reports              | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md)                                       |
 | Compare PyTorch Reports      | [docs/how-to/compare-perf-reports.md](docs/how-to/compare-perf-reports.md)                                                       |
