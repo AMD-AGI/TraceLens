@@ -39,13 +39,16 @@ VLLM_NATIVE_PATTERN = re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d
 # step[DECODE bs=64 g_sq=128 g_sqsq=256 g_sqsk=262144 g_sk=131072]  <- MTP: g_sq > bs
 # step[MIXED bs=2 c=1 g=1 c_sq=5 c_sk=8 c_sqsq=25 c_sqsk=40
 #     g_sq=1 g_sk=12 g_sqsq=1 g_sqsk=12]
+# Case-insensitive: some builds emit lowercase phases (``step[decode bs=1]``).
 SGLANG_DETAILED_PATTERN = re.compile(
-    r"step\[(?:EXTEND|DECODE|MIXED)\b[^\]]*sqsq=\d+[^\]]*\]"
+    r"step\[(?:EXTEND|DECODE|MIXED)\b[^\]]*sqsq=\d+[^\]]*\]", re.IGNORECASE
 )
 # step[EXTEND bs=2 toks=14721]
 # step[DECODE bs=64]
 # step[MIXED bs=2]  <- neither toks nor sq/sk, so bs is the only count
-SGLANG_NATIVE_PATTERN = re.compile(r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]")
+SGLANG_NATIVE_PATTERN = re.compile(
+    r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]", re.IGNORECASE
+)
 
 # prefill[bs=2 tok=14721 ctx=[7803, 6918]]
 # prefill[bs=6 tok=17408 ctx=[4096, 4096, 4096]...+3]  <- ctx truncated past 5
@@ -131,7 +134,7 @@ def _fill_sglang_native(ann, name):
     m = re.match(r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]", name)
     if not m:
         return False
-    kind_word, bs = m.group(1), int(m.group(2))
+    kind_word, bs = m.group(1).upper(), int(m.group(2))
     toks = int(m.group(3) or 0)
     if kind_word == "DECODE":
         ann.generation_requests = ann.generation_sum = ann.g_sq = bs
@@ -148,7 +151,7 @@ def _fill_sglang_detailed(ann, name):
     if not m:
         return False
     body = name[name.index("[") + 1 : name.rindex("]")]
-    mode = body.split()[0]
+    mode = body.split()[0].upper()
     kv = dict(re.findall(r"(\w+)=(\d+)", body))
     bs, toks = _safe_int(kv.get("bs", 0)), _safe_int(kv.get("toks", 0))
     ann.c_sq, ann.c_sk = _safe_int(kv.get("c_sq", 0)), _safe_int(kv.get("c_sk", 0))
