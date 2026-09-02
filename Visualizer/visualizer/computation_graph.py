@@ -88,6 +88,7 @@ class ComputationGraph:
     output_ports: dict[str, int] = field(default_factory=dict)
     primary_output_port: str | None = None
     loop_carried_nodes: dict[str, int] = field(default_factory=dict)
+    attr_output_indices: dict[str, int] = field(default_factory=dict)
     dead_node_indices: set[int] = field(default_factory=set)
 
 
@@ -143,7 +144,7 @@ def _track_attr_index(
 
 
 def _rebuild_attr_last_index(graph: ComputationGraph) -> dict[str, int]:
-    attr_last_index: dict[str, int] = {}
+    attr_last_index: dict[str, int] = dict(graph.attr_output_indices)
     for index, spec in enumerate(graph.nodes):
         if spec.block is not None:
             _track_attr_index(attr_last_index, spec.block.attr_name, index)
@@ -200,21 +201,38 @@ def _wire_attention_provenance_links(graph: ComputationGraph, root: BlockNode) -
         if spec.block is not None and spec.block.attr_name == SYNTHETIC_ATTENTION
     ]
     for target_index in targets:
+        ports_by_source: dict[int, list[str]] = {}
         for port, chain in root.attention_inputs.items():
-            source_index = next(
-                (
-                    attr_last_index[attr]
-                    for attr in reversed(chain)
-                    if attr in attr_last_index
-                ),
-                None,
+            preferred_label = (
+                "Split"
+                if port in {"q", "k", "v", "query", "key", "value"}
+                else "Sigmoid" if port == "beta" else None
+            )
+            preferred = [
+                index
+                for index, spec in enumerate(graph.nodes[:target_index])
+                if spec.label == preferred_label
+            ]
+            source_index = (
+                preferred[-1]
+                if preferred
+                else next(
+                    (
+                        attr_last_index[attr]
+                        for attr in reversed(chain)
+                        if attr in attr_last_index
+                    ),
+                    None,
+                )
             )
             if source_index is None or source_index == target_index:
                 continue
+            ports_by_source.setdefault(source_index, []).append(port)
+        for source_index, ports in ports_by_source.items():
             link = (source_index, target_index)
             if link not in graph.links:
                 graph.links.append(link)
-            graph.link_port_labels[link] = port
+            graph.link_port_labels[link] = "/".join(ports)
 
 
 def _operation_source_indices(
@@ -1472,6 +1490,11 @@ def _prune_computation_nodes(
             for producer, index in graph.loop_carried_nodes.items()
             if (kept := _remap(index)) is not None
         },
+        attr_output_indices={
+            attr: kept
+            for attr, index in graph.attr_output_indices.items()
+            if (kept := _remap(index)) is not None
+        },
         dead_node_indices=set(),
     )
 
@@ -2157,6 +2180,7 @@ def build_computation_graph(
             if expanded_steps:
                 _track_attr_index(attr_last_index, step.attr_name, last_index)
 
+    graph.attr_output_indices.update(attr_last_index)
     _wire_operation_predecessor_links(graph, root, input_index=input_index)
     _wire_attention_provenance_links(graph, root)
     _add_loop_frames(graph)

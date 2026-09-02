@@ -1421,6 +1421,8 @@ def _output_tensor_name(node: ModelGraphNode) -> str:
         return node.label
     if node.metadata.get("port_label"):
         return str(node.metadata["port_label"])
+    if node.metadata.get("class_name") == "AttentionOp":
+        return node.label or "Attention"
     attr = _node_attr_name(node)
     if attr:
         return attr
@@ -1457,6 +1459,8 @@ def _node_attr_name(node: ModelGraphNode) -> str | None:
 
 
 def _operator_name(node: ModelGraphNode) -> str:
+    if node.metadata.get("class_name") == "AttentionOp":
+        return node.label or "Attention"
     attr = _node_attr_name(node)
     if attr and is_forward_operation(attr):
         return operation_display_label(
