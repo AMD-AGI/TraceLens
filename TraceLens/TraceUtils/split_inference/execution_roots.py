@@ -8,12 +8,7 @@
 
 from typing import List, Optional, Sequence, Tuple
 
-from ...Trace2Tree.inference_iteration_roots import (
-    _detect_by_branch_descent,
-    _detect_sibling_roots,
-    _entry_roots,
-    _reattach_worker_threads,
-)
+from ...Trace2Tree.inference_iteration_roots import _reattach_worker_threads
 from ...Trace2Tree.trace_to_tree import TraceToTree
 from ..annotation_utils import (
     PROVENANCE_KEY,
@@ -37,7 +32,9 @@ from .root_detection import (
     AnnotationFamily,
     build_families,
     collect_annotations,
+    detect_from_branch_descent,
     detect_from_graph_launches,
+    detect_from_sibling_roots,
 )
 
 __all__ = [
@@ -222,7 +219,7 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
 
     # --- 2. Graph-launch fast path (flat event list, no tree) -----------------
     graph_set = detect_from_graph_launches(events, attribution, annotations)
-    if graph_set is not None:
+    if graph_set is not None and graph_set.coverage.covered_selected >= COVERAGE_FLOOR:
         return graph_set
 
     # --- 3 & 4. Tree-based detectors (built once) ----------------------------
@@ -231,6 +228,8 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
         tree.build_tree(add_python_func=True)
     except Exception as exc:
         print(f"TraceToTree build failed ({exc}), skipping tree detectors.")
+        if graph_set is not None:
+            return graph_set
         if root_set is not None:
             root_set.status = DetectStatus.NOT_SPLITTABLE
             return root_set
@@ -241,36 +240,23 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
             diagnostics={"reason": "tree build failed and no annotations"},
         )
 
-    _reattach_worker_threads(tree)
+    tree = _reattach_worker_threads(tree)
 
     # --- 3. Branch descent ----------------------------------------------------
-    bd_diag: dict = {}
-    branch_roots = _detect_by_branch_descent(tree, bd_diag)
-    if branch_roots is not None:
-        tier = bd_diag.get("period_label_tier", "branch_descent")
-        return RootSet(
-            roots=branch_roots,
-            method=f"generic:{tier}",
-            phase_confidence=PhaseConfidence.UNKNOWN,
-            status=DetectStatus.SPLITTABLE,
-            diagnostics=bd_diag,
-        )
+    branch_set = detect_from_branch_descent(tree)
+    if branch_set is not None and branch_set.status is not DetectStatus.NOT_SPLITTABLE:
+        return branch_set
 
     # --- 4. Sibling roots ----------------------------------------------------
-    trace_roots = _entry_roots(tree)
-    sr_diag: dict = {}
-    sibling_roots = _detect_sibling_roots(tree, trace_roots, sr_diag)
-    if sibling_roots is not None:
-        tier = sr_diag.get("period_label_tier", "sibling_roots")
-        return RootSet(
-            roots=sibling_roots,
-            method=f"generic:{tier}",
-            phase_confidence=PhaseConfidence.UNKNOWN,
-            status=DetectStatus.SPLITTABLE,
-            diagnostics=sr_diag,
-        )
+    sibling_set = detect_from_sibling_roots(tree)
+    if sibling_set is not None and sibling_set.status is not DetectStatus.NOT_SPLITTABLE:
+        return sibling_set
 
     # --- Nothing worked -------------------------------------------------------
+    # Return whichever detector produced the best roots, even with poor coverage.
+    for candidate in (branch_set, sibling_set, graph_set):
+        if candidate is not None:
+            return candidate
     if root_set is not None:
         root_set.status = DetectStatus.NOT_SPLITTABLE
         return root_set

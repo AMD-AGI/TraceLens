@@ -37,12 +37,9 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
 )
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from tests.fixtures.traces import INFERENCE_ROOT
+from TraceLens.Trace2Tree.inference_iteration_roots import _reattach_worker_threads
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.Trace2Tree.inference_iteration_roots import (
-    _detect_by_branch_descent,
-    _reattach_worker_threads,
-)
-from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+from TraceLens.TraceUtils.split_inference.root_detection import detect_from_branch_descent
 from TraceLens.Trace2Tree import trace_capture_merge_experimental as tcm
 
 # --------------------------------------------------------------------------- #
@@ -508,9 +505,9 @@ def test_branch_descent_from_synthetic_events():
     tree = TraceToTree(events, prune_nongpu_paths=False)
     tree.build_tree(add_python_func=True)
     _reattach_worker_threads(tree)
-    roots = _detect_by_branch_descent(tree)
-    assert roots is not None
-    assert len(roots) >= 1
+    result = detect_from_branch_descent(tree)
+    assert result is not None
+    assert len(result.roots) >= 1
 
 
 VLLM_PRIMARY = (

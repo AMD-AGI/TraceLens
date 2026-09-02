@@ -7,7 +7,7 @@
 """Generic iteration-root detection via TraceToTree call-tree traversal."""
 
 from bisect import bisect_right
-from collections import Counter, deque
+from collections import Counter
 from dataclasses import dataclass
 from statistics import mean, pstdev
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -188,69 +188,6 @@ def _find_repeating_period(
     return best.period, list(names[best.start : best.start + best.period]), best.start
 
 
-def _detect_sibling_roots(
-    tree: TraceToTree, roots, diagnostics: Optional[dict] = None
-) -> Optional[List[dict]]:
-    """Periodicity ACROSS the top-level roots themselves.
-
-    When each iteration is its own top-level frame -- separate parentless roots on
-    one thread, rather than repeating children of a shared loop -- the repeating
-    unit is the sequence of roots. Reattachment folds cross-thread worker roots
-    away first, so this only fires for genuine same-thread sibling iterations:
-    the one shape :func:`_detect_by_branch_descent`, which inspects a node's
-    children, cannot see. Each returned event spans one block, first child's start
-    to last child's end.
-    """
-    if isinstance(roots, dict):
-        roots = [roots]
-    if len(roots) < MIN_LABEL_CHILDREN:
-        return None
-
-    ordered = sorted(roots, key=lambda e: e.get("ts", 0))
-    period, _, start = _find_repeating_period([e.get("name", "") for e in ordered])
-    if period is None:
-        return None
-
-    blocks = (len(ordered) - start) // period
-    sibling_roots = []
-    blocked: List[dict] = []
-    for index in range(blocks):
-        block = ordered[start + index * period : start + (index + 1) * period]
-        first, last = block[0], block[-1]
-        event = dict(first)
-        event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
-        sibling_roots.append(event)
-        blocked.extend(block)
-    if not sibling_roots:
-        return None
-
-    # Grade the same way branch-descent and graph-launch do: the per-iteration
-    # windows must account for ~all the GPU work (tree-descendant, so cross-thread
-    # after reattachment). A spurious sibling period that wraps little GPU work is
-    # rejected here -- no need for the kernel-stream period cross-check, which
-    # graph capture makes impossible to satisfy anyway.
-    total_gpu = sum(
-        e.get("dur", 0)
-        for e in tree.events_by_uid.values()
-        if e.get("cat") in GPU_KERNEL_CATS
-    )
-    cov = _descendant_gpu_time(tree, blocked) / total_gpu if total_gpu else 0.0
-    if cov < BRANCH_COVERAGE_GATE:
-        return None
-
-    print(
-        f"Generic: {len(sibling_roots)} sibling-root iterations "
-        f"(period={period}, coverage={cov:.3f})."
-    )
-    if diagnostics is not None:
-        diagnostics.update(
-            {
-                "period_label_tier": "sibling_roots",
-                "period": period,
-                "branch_coverage": round(cov, 4),
-            }
-        )
-    return sibling_roots
 
 
 def _entry_roots(tree: TraceToTree) -> List[dict]:
@@ -270,7 +207,7 @@ def _entry_roots(tree: TraceToTree) -> List[dict]:
     return roots
 
 
-def _reattach_worker_threads(tree: TraceToTree) -> int:
+def _reattach_worker_threads(tree: TraceToTree) -> TraceToTree:
     """Fold roots living on a worker thread under the host frame that, in time,
     encloses them.
 
@@ -279,14 +216,14 @@ def _reattach_worker_threads(tree: TraceToTree) -> int:
     yet the profiler records no parent link across the thread boundary. Rebuilding
     that link reunites e.g. ``backward_step`` with the kernels it triggered and
     lifts the worker roots off the top level, where they otherwise swamp the
-    repeating-pattern search. Returns the number of roots reattached.
+    repeating-pattern search.
     """
     pyf: Counter = Counter()
     for e in tree.events_by_uid.values():
         if e.get("cat") == PYTHON_TIER:
             pyf[(e.get("pid"), e.get("tid"))] += 1
     if not pyf:
-        return 0
+        return tree
     host = pyf.most_common(1)[0][0]
 
     host_nodes = sorted(
@@ -300,7 +237,7 @@ def _reattach_worker_threads(tree: TraceToTree) -> int:
         key=lambda e: e["ts"],
     )
     if not host_nodes:
-        return 0
+        return tree
     starts = [e["ts"] for e in host_nodes]
 
     def deepest_container(lo: float, hi: float) -> Optional[dict]:
@@ -333,7 +270,7 @@ def _reattach_worker_threads(tree: TraceToTree) -> int:
             ancestor["_kernel_bearing"] = True
             ancestor = tree.get_parent_event(ancestor)
         reattached += 1
-    return reattached
+    return tree
 
 
 def _gpu_bearing(event: dict) -> bool:
@@ -401,79 +338,5 @@ def _blocks_by_pattern(
     return blocks
 
 
-def _detect_by_branch_descent(
-    tree: TraceToTree, diagnostics: Optional[dict] = None
-) -> Optional[List[dict]]:
-    """Descend the call tree until a frame's own children repeat and cover the GPU.
-
-    Category-agnostic: single-child scaffolding frames are traversed for free (a
-    node with fewer than a loop's worth of children is skipped), and each node is
-    judged on *its own* children rather than a pool merged across sibling branches
-    -- pooling mixes the training loop with logging/optimizer branches and hides
-    the period. The first frame whose per-iteration windows explain at least
-    :data:`BRANCH_COVERAGE_GATE` of GPU time is the iteration boundary; grading on
-    coverage keeps the walk from stopping on a deep sub-loop (a grad-norm poll,
-    say) that repeats but does almost no work.
-    """
-    total_gpu = sum(
-        e.get("dur", 0)
-        for e in tree.events_by_uid.values()
-        if e.get("cat") in GPU_KERNEL_CATS
-    )
-    if not total_gpu:
-        return None
-
-    queue = deque((r, 0) for r in _entry_roots(tree))
-    visited = 0
-    while queue:
-        node, depth = queue.popleft()
-        visited += 1
-        if visited > BRANCH_MAX_NODES:
-            break
-        children = tree.get_children_events(node)
-        if len(children) >= MIN_LABEL_CHILDREN:
-            ordered = sorted(children, key=lambda e: e.get("ts", 0))
-            period, pattern, start = _find_repeating_period(
-                [e.get("name", "") for e in ordered]
-            )
-            if period is not None:
-                unit_blocks = _blocks_by_pattern(ordered, pattern, start)
-                if len(unit_blocks) >= MIN_LABEL_CHILDREN:
-                    iteration_roots: List[dict] = []
-                    blocked: List[dict] = []
-                    for block in unit_blocks:
-                        first, last = block[0], block[-1]
-                        # One window per period, named for the loop frame that
-                        # owns it (``node``) rather than the arbitrary first child
-                        # in the block, which is just whatever call happens to
-                        # start the iteration. Time span stays the block's own.
-                        event = dict(first)
-                        event["name"] = node.get("name", event.get("name", ""))
-                        event["dur"] = (
-                            last["ts"] + last.get("dur", 0)
-                        ) - first["ts"]
-                        iteration_roots.append(event)
-                        blocked.extend(block)
-                    cov = _descendant_gpu_time(tree, blocked) / total_gpu
-                    if cov >= BRANCH_COVERAGE_GATE:
-                        print(
-                            f"Generic: branch-descent found {len(unit_blocks)} "
-                            f"iterations under '{node.get('name')}' "
-                            f"(period={period}, coverage={cov:.3f}, depth={depth})."
-                        )
-                        if diagnostics is not None:
-                            diagnostics.update(
-                                {
-                                    "period_label_tier": BRANCH_DESCENT_TIER,
-                                    "period": period,
-                                    "period_depth": depth,
-                                    "branch_coverage": round(cov, 4),
-                                }
-                            )
-                        return iteration_roots
-        for child in children:
-            if _gpu_bearing(child):
-                queue.append((child, depth + 1))
-    return None
 
 
