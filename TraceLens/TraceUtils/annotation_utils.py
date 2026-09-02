@@ -398,23 +398,19 @@ def find_events_by_patterns(
     return matches
 
 
-def find_iteration_roots_by_priority(
+def find_known_annotations(
     events: List[dict],
-    label: Optional[str] = None,
     cat: Optional[str] = ANNOTATION_CAT,
-    verbose: bool = False,
 ) -> List[dict]:
-    """Roots from the first pattern tier that matches anything.
+    """Annotations matching a recognized iteration pattern, sorted by timestamp.
 
-    Tries the detailed tier, then the native/backup tier.
+    Tries the detailed tier first, then the native/backup tier, returning the
+    first tier that produces any matches.
     """
-    pattern_tiers = (ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS)
-    for patterns in pattern_tiers:
-        roots = find_events_by_patterns(
-            events, patterns, cat=cat, label=label, verbose=verbose
-        )
-        if len(roots) > 0:
-            return roots
+    for patterns in (ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS):
+        matches = find_events_by_patterns(events, patterns, cat=cat)
+        if matches:
+            return matches
     return []
 
 
