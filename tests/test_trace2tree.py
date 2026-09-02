@@ -12,9 +12,11 @@ import pytest
 from copy import deepcopy
 from typing import Dict, List
 from TraceLens.Trace2Tree.inference_iteration_roots import (
-    _detect_by_branch_descent,
     _find_repeating_period,
     _reattach_worker_threads,
+)
+from TraceLens.TraceUtils.split_inference.root_detection import (
+    detect_from_branch_descent,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _align_capture_to_graph,
@@ -195,10 +197,10 @@ class TestInferenceIterationRoots:
                 corr += 1
 
         tree = _build_tree(events)
-        roots = _detect_by_branch_descent(tree)
-        assert roots is not None
-        assert len(roots) == 8
-        assert all(root["dur"] > 0 for root in roots)
+        result = detect_from_branch_descent(tree)
+        assert result is not None
+        assert len(result.roots) == 8
+        assert all(root["dur"] > 0 for root in result.roots)
 
     def test_branch_descent_end_to_end(self):
         events: List[Dict] = []
@@ -238,9 +240,9 @@ class TestInferenceIterationRoots:
 
         tree = _build_tree(events)
         _reattach_worker_threads(tree)
-        roots = _detect_by_branch_descent(tree)
-        assert roots is not None
-        assert len(roots) >= 1
+        result = detect_from_branch_descent(tree)
+        assert result is not None
+        assert len(result.roots) >= 1
 
 
 class TestPseudoOpsUtils:
