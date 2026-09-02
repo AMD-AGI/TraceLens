@@ -284,7 +284,13 @@ def keep_detail_graph_node(
     """Return True when a graph node spec should be kept in basic-only detail mode."""
     if not basic_only:
         return True
-    if synthetic in {"@input", "@hidden_states", "@tensor"}:
+    if synthetic in {
+        "@input",
+        "@output",
+        "@loop_carried",
+        "@hidden_states",
+        "@tensor",
+    }:
         return True
     if synthetic is not None:
         return label in _DETAIL_COMBINE_LABELS

@@ -275,7 +275,8 @@ def component_has_detail_section(
     for _title, tree in architecture_section_trees(spec):
         if tree.attr_name != component.attr_name:
             continue
-        if subgraph_warrants_export(tree, basic_ops=basic_ops):
+        prepared = expand_block_tree_inplace(tree, basic_ops=basic_ops)
+        if subgraph_warrants_export(prepared, basic_ops=basic_ops):
             return True
     return False
 

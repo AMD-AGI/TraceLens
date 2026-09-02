@@ -155,3 +155,32 @@ def test_dead_code_elimination_is_idempotent():
     assert len(once.nodes) == len(twice.nodes)
     assert set(once.links) == set(twice.links)
     assert not twice.dead_node_indices
+
+
+def test_dead_code_elimination_keeps_referenced_multi_return_branches():
+    root = BlockNode(
+        attr_name="hc",
+        class_name="HyperConnection",
+        role="other",
+        label="HC",
+        primary_output_step="collapsed",
+        referenced_return_producers={"post", "comb", "collapsed"},
+        multi_return_module=True,
+    )
+    graph = ComputationGraph(
+        nodes=[
+            GraphNodeSpec(key="collapsed", block=_block("collapsed")),
+            GraphNodeSpec(key="pre", block=_block("pre")),
+            GraphNodeSpec(key="post", block=_block("post")),
+            GraphNodeSpec(key="post_setup", block=_block("post_setup")),
+            GraphNodeSpec(key="comb", block=_block("comb")),
+            GraphNodeSpec(key="sinkhorn", block=_block("sinkhorn")),
+            GraphNodeSpec(key="unused", block=_block("unused")),
+        ],
+        links=[(1, 0), (3, 2), (5, 4)],
+        primary_output_index=0,
+    )
+
+    dead = _dead_node_indices(graph, root, strip_unused_return_branches=True)
+
+    assert dead == {6}

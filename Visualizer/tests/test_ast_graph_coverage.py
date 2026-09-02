@@ -323,13 +323,59 @@ class Parent:
     assert set(add.predecessors) & set(split.forward_return_slots.values())
 
 
+def test_submoduleless_norm_and_static_loop_keep_all_computations():
+    source = """
+class ExpandedRMSNorm:
+    def forward(self, x):
+        variance = x.square().mean(-1, keepdim=True)
+        return x * (variance + self.eps).rsqrt()
+
+class Sinkhorn:
+    def __init__(self, config):
+        self.iters = config.iters
+        self.eps = config.eps
+    def forward(self, x):
+        for _ in range(self.iters - 1):
+            x = x / (x.sum(dim=-1, keepdim=True) + self.eps)
+            x = x / (x.sum(dim=-2, keepdim=True) + self.eps)
+        return x
+"""
+    registry = aa.build_class_registry(
+        source,
+        config={"iters": 20, "eps": 1.0e-6},
+    )
+
+    norm = registry["ExpandedRMSNorm"]
+    assert [op.label for op in norm.forward_operations.values()] == [
+        "Square",
+        "Mean",
+        "Add",
+        "Reciprocal sqrt",
+        "Multiply",
+    ]
+
+    sinkhorn = registry["Sinkhorn"]
+    assert [op.label for op in sinkhorn.forward_operations.values()] == [
+        "Sum",
+        "Add",
+        "Divide",
+        "Sum",
+        "Add",
+        "Divide",
+    ]
+    assert all(
+        "loop: 19 iterations" in op.details
+        for op in sinkhorn.forward_operations.values()
+    )
+
+
 def test_graph_node_helpers_outputs_frames_and_pruning():
     a = _node("a", is_basic=True)
     b = _node("b", is_basic=True)
     root = _node("root", class_name="Pipeline", children=[a, b], input_label="tokens")
     graph = cg.build_computation_graph(root)
     assert graph.nodes[0].label == "tokens"
-    assert graph.links == [(0, 1), (1, 2)]
+    assert graph.links == [(0, 1), (1, 2), (2, 3)]
     assert cg.add_forward_output(graph, label="Result") == 3
     assert graph.links[-1] == (2, 3)
     cg.add_root_pipeline_frame(graph, root)
@@ -563,17 +609,28 @@ def test_fanout_residual_gated_and_kernel_graph_branches(monkeypatch):
     assert fallback and fallback_tail is not None
 
     monkeypatch.setattr(block_tree, "_situ_gated_mlp_parts", original_parts)
-    norm = _node("norm", class_name="FusedRMSNormGated")
+    norm = _node(
+        "norm",
+        class_name="FusedRMSNormGated",
+        children=[
+            _node("power", class_name="Power", is_basic=True),
+            _node("mean", class_name="Mean", is_basic=True),
+            _node(
+                "multiply",
+                class_name="Multiply",
+                is_basic=True,
+                param_inputs=["gate"],
+            ),
+        ],
+    )
     side = aa.SideInputSpec("gate", "gate", [], source_kind="forward_input")
-    monkeypatch.setattr(cg, "is_gated_norm_module", lambda node: node is norm)
     monkeypatch.setattr(
         cg,
         "flatten_computation_segments",
         lambda _root: [SideFeedSegment(norm, [side])],
     )
     norm_graph = cg.build_computation_graph(_node("norm_root", children=[norm]))
-    assert any(spec.block is norm for spec in norm_graph.nodes)
-    assert "Multiply" in {spec.label for spec in norm_graph.nodes}
+    assert {"Power", "Mean", "Multiply"} <= {spec.label for spec in norm_graph.nodes}
 
 
 def test_method_wrappers_in_chains_prefixes_and_sequences(monkeypatch):
@@ -603,7 +660,7 @@ def test_method_wrappers_in_chains_prefixes_and_sequences(monkeypatch):
         prefix_steps=[ordinary, first, second],
     )
     assert [spec.block for spec in graph.nodes if spec.block] == [first, second, second]
-    assert graph.links == [(0, 1), (1, 2), (2, 3)]
+    assert graph.links == [(0, 1), (1, 2), (2, 3), (3, 4)]
 
 
 def test_nested_linear_wrapper_tracks_frames_and_aliases(monkeypatch):
@@ -897,8 +954,7 @@ class BranchBlock:
         "Sigmoid",
         "shared expert path",
     ]
-    assert {"proj", "shared", "left"} <= set(info.forward_calls)
-    assert "right" not in info.forward_calls
+    assert {"proj", "shared", "left", "right"} <= set(info.forward_calls)
     assert info.side_inputs["shared"][0].source_kind == "forward_input"
 
 

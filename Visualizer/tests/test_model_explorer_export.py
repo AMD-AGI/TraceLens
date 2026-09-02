@@ -29,6 +29,40 @@ from model_explorer_export.build import build_model_explorer_payload
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
+def test_output_boundary_exports_duplicate_producers_as_named_ports():
+    producer = BlockNode(
+        attr_name="producer",
+        class_name="Mean",
+        role="other",
+        label="Mean",
+        is_basic=True,
+    )
+    root = BlockNode(
+        attr_name="root",
+        class_name="Wrapper",
+        role="other",
+        label="Wrapper",
+        children=[producer],
+        input_label="x",
+        forward_return_slots={"left": "producer", "right": "producer"},
+        forward_return_order=["left", "right"],
+        primary_return_slot="right",
+        primary_output_step="producer",
+        multi_return_module=True,
+    )
+    graph = build_computation_graph(root)
+    exported = computation_graph_to_explorer_graph(graph, graph_id="duplicate")
+    output = next(node for node in exported["nodes"] if node["label"] == "Output")
+
+    assert [item["id"] for item in output["inputsMetadata"]] == ["left", "right"]
+    assert [item["id"] for item in output["outputsMetadata"]] == ["left", "right"]
+    assert {edge["targetNodeInputId"] for edge in output["incomingEdges"]} == {
+        "left",
+        "right",
+    }
+    assert len({edge["sourceNodeId"] for edge in output["incomingEdges"]}) == 1
+
+
 def _mla_fixture_root() -> BlockNode:
     def leaf(name: str) -> BlockNode:
         return BlockNode(
@@ -645,21 +679,31 @@ def test_kimi_layer_variants_export_three_decoder_splits():
         )
     }
     assert gate_labels == {"Exp", "Softplus", "X", "Sigmoid", "CumSum"}
-    assert not any(
-        node["id"] == f"decoder/1x_KimiDeltaAttention_KimiMLP/{norm_attr}/@input"
-        for norm_attr in ("input_layernorm", "post_attention_layernorm")
-        for node in graph["nodes"]
-    )
+    node_ids = {node["id"] for node in graph["nodes"]}
+    for norm_attr in ("input_layernorm", "post_attention_layernorm"):
+        prefix = f"decoder/1x_KimiDeltaAttention_KimiMLP/{norm_attr}"
+        assert f"{prefix}/@input" in node_ids
+        assert f"{prefix}/@output" in node_ids
     input_norm = next(
         node
         for node in graph["nodes"]
-        if node["id"] == "decoder/1x_KimiDeltaAttention_KimiMLP/input_layernorm"
+        if node["id"].startswith(
+            "decoder/1x_KimiDeltaAttention_KimiMLP/input_layernorm/"
+        )
+        and node["label"] == "Power"
     )
-    assert input_norm["label"] == "RMSNorm"
-    assert input_norm["incomingEdges"][0]["sourceNodeId"] == "embed_tokens"
-    assert not any(node.get("namespace") == "norm" for node in graph["nodes"])
-    assert any(node["id"] == "norm" for node in graph["nodes"])
-    assert not any(node["id"] == "norm/@input" for node in graph["nodes"])
+    input_boundary = next(
+        node
+        for node in graph["nodes"]
+        if node["id"] == "decoder/1x_KimiDeltaAttention_KimiMLP/input_layernorm/@input"
+    )
+    assert input_norm["incomingEdges"][0]["sourceNodeId"] == input_boundary["id"]
+    assert input_boundary["incomingEdges"][0]["sourceNodeId"] == "embed_tokens"
+    norm_nodes = [node for node in graph["nodes"] if node["id"].startswith("norm/")]
+    assert {"Power", "Mean", "Reciprocal sqrt", "Multiply"} <= {
+        node["label"] for node in norm_nodes
+    }
+    assert any(node["id"] == "norm/@input" for node in norm_nodes)
     assert any(node["id"] == "lm_head" for node in graph["nodes"])
     assert not any(node.get("namespace") == "lm_head" for node in graph["nodes"])
     assert not any(node["id"] == "lm_head/@input" for node in graph["nodes"])

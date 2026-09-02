@@ -307,6 +307,64 @@ class OperatorRecord:
         return payload
 
 
+# Display labels (lowercased) whose op collapses one axis of its input.
+_REDUCTION_LABELS = frozenset(
+    {
+        "sum",
+        "mean",
+        "product",
+        "block max",
+        "block min",
+        "max",
+        "min",
+        "argmax",
+        "argmin",
+        "logsumexp",
+        "norm",
+        "variance",
+        "std",
+    }
+)
+# Display labels (lowercased) whose op keeps the shape of its widest operand.
+_POINTWISE_LABELS = frozenset(
+    {
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "floor divide",
+        "power",
+        "sigmoid",
+        "softmax",
+        "logsoftmax",
+        "softplus",
+        "tanh",
+        "relu",
+        "silu",
+        "gelu",
+        "erf",
+        "exp",
+        "log",
+        "log1p",
+        "sqrt",
+        "reciprocal sqrt",
+        "square",
+        "abs",
+        "negate",
+        "reciprocal",
+        "sign",
+        "clamp",
+        "nan to num",
+        "maximum",
+        "minimum",
+        "where",
+        "cumulative sum",
+        "masked fill",
+        "scatter",
+    }
+)
+
+
 class ShapeInferencer:
     """Infer symbolic/concrete tensor shapes for every node in a model graph."""
 
@@ -352,6 +410,36 @@ class ShapeInferencer:
             self._tensor_specs[node_id] = output
             if node.metadata.get("synthetic") == "@input":
                 self._forward_input_specs.add(id(output))
+
+        if root is not None and "HyperConnection" in root.class_name:
+            batch = Symbol.BATCH.value
+            seq = Symbol.SEQ.value
+            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+            streams = self.context.dims.get(
+                "hc_mult", self.context.dims.get("text_hc_mult", "HC")
+            )
+            dtype = self.context.dtype
+            slot_specs = {
+                "post": TensorSpec((batch, seq, streams), "float32"),
+                "comb": TensorSpec((batch, seq, streams, streams), "float32"),
+                "collapsed": TensorSpec((batch, seq, hidden), dtype),
+            }
+            for node in graph.nodes:
+                synthetic = node.metadata.get("synthetic")
+                if synthetic == "@input":
+                    self._tensor_specs[node.id] = TensorSpec(
+                        (batch, seq, streams, hidden), dtype
+                    )
+                if synthetic == "@loop_carried":
+                    self._tensor_specs[node.id] = slot_specs["comb"]
+                attr_name = node.metadata.get("attr_name")
+                for slot, producer in root.forward_return_slots.items():
+                    if attr_name == producer and slot in slot_specs:
+                        self._tensor_specs[node.id] = slot_specs[slot]
+                if synthetic == "@output":
+                    self._tensor_specs[node.id] = slot_specs.get(
+                        root.primary_return_slot or "", slot_specs["collapsed"]
+                    )
 
         for node in graph.nodes:
             if node.kind == NodeKind.SUBGRAPH:
@@ -577,6 +665,13 @@ class ShapeInferencer:
                 shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
             )
 
+        if synthetic in {"@output", "@loop_carried"}:
+            if inputs:
+                return inputs[-1]
+            return TensorSpec(
+                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
+            )
+
         if synthetic == "@tensor":
             label = (node.metadata.get("port_label") or node.label or "").lower()
             experts = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
@@ -700,32 +795,25 @@ class ShapeInferencer:
             )
             return TensorSpec(shape=shape, dtype=source.dtype)
 
-        if operation_label == "sum":
+        if operation_label in _REDUCTION_LABELS:
             source = (
                 inputs[0]
                 if inputs
                 else TensorSpec(_default_hidden_shape(self.context), dtype)
             )
+            index_reduction = operation_label in {"argmax", "argmin"}
             reduced_dim = _detail_value(details, "dim")
             if reduced_dim is not None and reduced_dim != "-1":
                 # Reductions over stream or head axes the symbolic (B, S, H) view omits.
-                return source
+                if not index_reduction:
+                    return source
+                return TensorSpec(shape=source.shape, dtype="int64")
             return TensorSpec(
-                shape=_replace_last_dim(source.shape, 1), dtype=source.dtype
+                shape=_replace_last_dim(source.shape, 1),
+                dtype="int64" if index_reduction else source.dtype,
             )
 
-        if operation_label in {
-            "add",
-            "subtract",
-            "multiply",
-            "divide",
-            "floor divide",
-            "power",
-            "sigmoid",
-            "softmax",
-            "masked fill",
-            "scatter",
-        }:
+        if operation_label in _POINTWISE_LABELS:
             if inputs:
                 source = max(inputs, key=_broadcast_rank)
                 return TensorSpec(shape=source.shape, dtype=source.dtype)

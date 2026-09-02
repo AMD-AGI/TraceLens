@@ -363,7 +363,13 @@ def _unwrap_expr(node: ast.AST) -> ast.AST:
     while isinstance(node, ast.Attribute):
         node = node.value
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-        if node.func.attr in _METHOD_CHAIN_OPS:
+        owner = _expr_name(node.func.value)
+        if node.func.attr in _METHOD_CHAIN_OPS and owner not in {
+            "torch",
+            "F",
+            "torch.nn.functional",
+            "nn.functional",
+        }:
             return _unwrap_expr(node.func.value)
     return node
 
@@ -848,16 +854,15 @@ def _forward_owns_tensor_math(
 
 
 def _forward_delegates_to_nothing(class_name: str, forward_calls: list[str]) -> bool:
-    """True when a positional module computes everything in its own statements.
+    """True when a module computes everything in its own statements.
 
-    Rotary embeddings register buffers rather than child modules, so they call
-    nothing and every step they perform lives inline. Without their operations the
-    block collapses to one opaque tile. Modules drawn as atomic ops (norms, fused
-    activations) are excluded by only matching positional classes.
+    Rotary embeddings, normalization layers, activations, and small collapse heads
+    commonly own no child modules at all. Every computation they perform therefore
+    lives inline; retaining those operations is the only way to render their real
+    dataflow instead of an opaque class-name tile.
     """
-    if forward_calls:
-        return False
-    return bool(POSITIONAL_CLASS_RE.search(class_name))
+    del class_name
+    return not forward_calls
 
 
 def _forward_mixes_modules_and_inline_ops(
@@ -946,6 +951,18 @@ class ForwardOperation:
     param_inputs: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class LoopCarriedSpec:
+    """One value updated by a loop and consumed after its final iteration."""
+
+    loop_id: str
+    iteration_count: int | None
+    variable: str
+    initial_producer: str
+    updated_producer: str
+    operation_ids: tuple[str, ...]
+
+
 @dataclass
 class ForwardAnalysis:
     """Inline tensor ops recovered from one ``forward()`` plus return metadata."""
@@ -955,6 +972,7 @@ class ForwardAnalysis:
     return_slots: dict[str, str]
     return_order: list[str]
     primary_return_slot: str | None
+    loop_carried: list[LoopCarriedSpec]
 
 
 @dataclass
@@ -980,6 +998,7 @@ class ClassStructure:
     forward_return_order: list[str] = field(default_factory=list)
     primary_return_slot: str | None = None
     referenced_return_producers: set[str] = field(default_factory=set)
+    loop_carried: list[LoopCarriedSpec] = field(default_factory=list)
 
 
 def infer_forward_steps_from_init(cls: ClassStructure) -> list[str]:
@@ -1023,21 +1042,83 @@ _HOUSEKEEPING_METHODS = frozenset(
         "expand",
         "contiguous",
         "transpose",
+        "permute",
+        "detach",
+        "clone",
         "view_as_complex",
         "view_as_real",
     }
 )
+# Keyed on the trailing call name, so `x.mean(...)` and `torch.mean(x)` both resolve.
 _TENSOR_METHOD_LABELS = {
+    # Reductions
     "amax": "Block max",
+    "amin": "Block min",
+    "sum": "Sum",
+    "mean": "Mean",
+    "prod": "Product",
+    "cumsum": "Cumulative sum",
+    "logsumexp": "LogSumExp",
+    "argmax": "ArgMax",
+    "argmin": "ArgMin",
+    "max": "Max",
+    "min": "Min",
+    "norm": "Norm",
+    "var": "Variance",
+    "std": "Std",
+    # Pointwise math
     "sigmoid": "Sigmoid",
     "softmax": "Softmax",
-    "gather": "Gather",
-    "sum": "Sum",
-    "masked_fill": "Masked fill",
-    "scatter": "Scatter",
-    "scatter_": "Scatter",
+    "log_softmax": "LogSoftmax",
+    "softplus": "Softplus",
+    "tanh": "Tanh",
+    "relu": "ReLU",
+    "silu": "SiLU",
+    "gelu": "GELU",
+    "erf": "Erf",
+    "exp": "Exp",
+    "log": "Log",
+    "log1p": "Log1p",
+    "sqrt": "Sqrt",
+    "rsqrt": "Reciprocal sqrt",
+    "square": "Square",
+    "pow": "Power",
+    "abs": "Abs",
+    "neg": "Negate",
+    "reciprocal": "Reciprocal",
+    "sign": "Sign",
+    "clamp": "Clamp",
+    "clip": "Clamp",
+    "nan_to_num": "NaN to num",
+    "maximum": "Maximum",
+    "minimum": "Minimum",
+    "where": "Where",
+    "one_hot": "One hot",
     "cos": "Cosine",
     "sin": "Sine",
+    # Indexing and assembly
+    "gather": "Gather",
+    "masked_fill": "Masked fill",
+    "masked_scatter": "Masked scatter",
+    "scatter": "Scatter",
+    "scatter_": "Scatter",
+    "index_add": "Index add",
+    "index_add_": "Index add",
+    "nonzero": "Nonzero",
+    "split": "Split",
+    "chunk": "Chunk",
+    "unbind": "Unbind",
+    "stack": "Stack",
+    "repeat_interleave": "Repeat interleave",
+    "roll": "Roll",
+    "flip": "Flip",
+    "tril": "Lower triangle",
+    "triu": "Upper triangle",
+    # Contractions
+    "einsum": "Einsum",
+    "bmm": "BatchMatMul",
+    "mm": "MatMul",
+    # Layout-only (suppressed unless every tensor op is requested)
     "view": "View",
     "reshape": "Reshape",
     "flatten": "Flatten",
@@ -1049,6 +1130,9 @@ _TENSOR_METHOD_LABELS = {
     "expand": "Expand",
     "contiguous": "Contiguous",
     "transpose": "Transpose",
+    "permute": "Permute",
+    "detach": "Detach",
+    "clone": "Clone",
     "view_as_complex": "View as complex",
     "view_as_real": "View as real",
 }
@@ -1058,10 +1142,34 @@ _FUNCTION_LABELS = {
     "pad": "Pad",
     "topk": "TopK",
     "zeros_like": "Zeros like",
+    "ones_like": "Ones like",
+    "full_like": "Full like",
+    "causal_conv1d_fn": "Causal Conv1D",
+    "causal_conv1d_update": "Causal Conv1D update",
     "cat": "Concat",
     "outer": "Outer product",
     "polar": "Polar",
 }
+# Reductions whose axis decides the output shape, so the axis travels with the node.
+_REDUCTION_METHODS = frozenset(
+    {
+        "sum",
+        "mean",
+        "prod",
+        "amax",
+        "amin",
+        "max",
+        "min",
+        "cumsum",
+        "logsumexp",
+        "argmax",
+        "argmin",
+        "norm",
+        "var",
+        "std",
+    }
+)
+_DIM_DETAIL_METHODS = _REDUCTION_METHODS | {"unsqueeze", "squeeze", "gather"}
 _BINOP_LABELS = {
     ast.Add: "Add",
     ast.Sub: "Subtract",
@@ -1106,7 +1214,18 @@ def _config_value(
         return _UNKNOWN
     if isinstance(node, ast.Attribute):
         if isinstance(node.value, ast.Name) and node.value.id == "config":
-            return config.get(node.attr, _UNKNOWN)
+            direct = config.get(node.attr, _UNKNOWN)
+            if direct is not _UNKNOWN:
+                return direct
+            aliases = {
+                "linear_lower_bound": ("linear_attn_config", "gate_lower_bound"),
+            }
+            nested_key = aliases.get(node.attr)
+            if nested_key is not None:
+                nested = config.get(nested_key[0])
+                if isinstance(nested, dict):
+                    return nested.get(nested_key[1], _UNKNOWN)
+            return _UNKNOWN
         if isinstance(node.value, ast.Name) and node.value.id == "self":
             return self_values.get(node.attr, _UNKNOWN)
         base = _config_value(node.value, config, self_values)
@@ -1125,6 +1244,25 @@ def _config_value(
             )
             if isinstance(base, dict) and isinstance(key, str):
                 return base.get(key, default)
+        return _UNKNOWN
+    if isinstance(node, ast.BinOp):
+        left = _config_value(node.left, config, self_values)
+        right = _config_value(node.right, config, self_values)
+        if left is _UNKNOWN or right is _UNKNOWN:
+            return _UNKNOWN
+        try:
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.FloorDiv):
+                return left // right
+            if isinstance(node.op, ast.Mod):
+                return left % right
+        except (TypeError, ValueError, ZeroDivisionError):
+            return _UNKNOWN
         return _UNKNOWN
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
         value = _config_value(node.operand, config, self_values)
@@ -1217,6 +1355,7 @@ class _ForwardOperationExtractor:
         self.operations: list[ForwardOperation] = []
         self.var_producer: dict[str, str] = {}
         self.var_module_origin: dict[str, str] = {}
+        self.loop_carried: list[LoopCarriedSpec] = []
         self._used_ids: set[str] = set()
 
     @staticmethod
@@ -1304,7 +1443,12 @@ class _ForwardOperationExtractor:
         if isinstance(node, ast.Name):
             return self.var_producer.get(node.id), []
         if isinstance(node, ast.Attribute):
-            return self._self_attr_input(node)
+            producer, external = self._self_attr_input(node)
+            if producer is not None or external:
+                return producer, external
+            # Preserve the computation behind result selectors such as
+            # ``tensor.topk(...).indices`` and chained dtype/shape properties.
+            return self.expression(node.value)
         if isinstance(node, ast.Constant):
             return None, []
         if isinstance(node, ast.Subscript):
@@ -1337,12 +1481,7 @@ class _ForwardOperationExtractor:
                 and isinstance(operand.func, ast.Attribute)
                 and _is_self_attr(operand.func, operand.func.attr)
             ]
-            if (
-                label == "Multiply"
-                and not left
-                and not right
-                and not direct_module_predecessors
-            ):
+            if not left and not right and not direct_module_predecessors:
                 return None, [*left_external, *right_external]
             producer = self._emit(
                 node,
@@ -1375,10 +1514,31 @@ class _ForwardOperationExtractor:
 
         call_name = (_expr_name(node.func) or method_name or "").split(".")[-1]
         functional_name = _functional_call_name(node.func)
-        label = _FUNCTION_LABELS.get(
-            functional_name or call_name
-        ) or _TENSOR_METHOD_LABELS.get(call_name)
-        housekeeping = call_name in _HOUSEKEEPING_METHODS or call_name == "zeros_like"
+        registry_activation: str | None = None
+        if isinstance(node.func, ast.Subscript):
+            registry_name = _expr_name(node.func.value)
+            activation_key = _config_value(node.func.slice, {}, self.self_values)
+            if registry_name in _ACTIVATION_REGISTRY_NAMES and isinstance(
+                activation_key, str
+            ):
+                registry_activation = _ACTIVATION_DISPLAY_NAMES.get(
+                    activation_key.lower(), activation_key
+                )
+        # ``self.norm(x)`` runs a submodule that happens to share a tensor method's
+        # name; it is a chain step, so it must not be relabelled as that method.
+        submodule_call = isinstance(node.func, ast.Attribute) and _is_self_attr(
+            node.func, method_name
+        )
+        label = (
+            None
+            if submodule_call
+            else registry_activation
+            or _FUNCTION_LABELS.get(functional_name or call_name)
+            or _TENSOR_METHOD_LABELS.get(call_name)
+        )
+        housekeeping = not submodule_call and (
+            call_name in _HOUSEKEEPING_METHODS or call_name == "zeros_like"
+        )
 
         def _collect_call_arg_producers(arg: ast.AST) -> tuple[list[str], list[str]]:
             if isinstance(arg, (ast.List, ast.Tuple)):
@@ -1431,7 +1591,7 @@ class _ForwardOperationExtractor:
             details.append("dtype: torch.float32")
         if call_name in {"view", "reshape"}:
             details.append("shape: " + ", ".join(ast.unparse(arg) for arg in node.args))
-        if call_name in {"unsqueeze", "squeeze", "sum", "gather"}:
+        if call_name in _DIM_DETAIL_METHODS:
             if node.args:
                 details.append(f"dim: {ast.unparse(node.args[0])}")
             for keyword in node.keywords:
@@ -1471,6 +1631,74 @@ class _ForwardOperationExtractor:
             return
         for name in self._target_names(stmt):
             self.var_producer[name] = producer
+
+    def _range_iteration_count(self, node: ast.For) -> int | None:
+        """Resolve a small static ``range(...)`` loop from constructor/config values."""
+        iterator = node.iter
+        if (
+            not isinstance(iterator, ast.Call)
+            or _expr_name(iterator.func) != "range"
+            or iterator.keywords
+            or not 1 <= len(iterator.args) <= 3
+        ):
+            return None
+        values = [_config_value(arg, {}, self.self_values) for arg in iterator.args]
+        if not all(isinstance(value, int) for value in values):
+            return None
+        try:
+            count = len(range(*values))
+        except (TypeError, ValueError):
+            return None
+        # Keep generated graphs bounded for malformed or unexpectedly large configs.
+        return count if 0 <= count <= 256 else None
+
+    def _annotate_operations_since(self, start: int, detail: str) -> None:
+        for index in range(start, len(self.operations)):
+            operation = self.operations[index]
+            self.operations[index] = ForwardOperation(
+                **{
+                    **operation.__dict__,
+                    "details": (*operation.details, detail),
+                }
+            )
+
+    @staticmethod
+    def _assigned_names(statements: list[ast.stmt]) -> set[str]:
+        names: set[str] = set()
+        for statement in statements:
+            for node in ast.walk(statement):
+                if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    targets = (
+                        node.targets if isinstance(node, ast.Assign) else [node.target]
+                    )
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            names.add(target.id)
+                        elif isinstance(target, (ast.Tuple, ast.List)):
+                            names.update(
+                                item.id
+                                for item in target.elts
+                                if isinstance(item, ast.Name)
+                            )
+                elif isinstance(node, ast.AugAssign) and isinstance(
+                    node.target, ast.Name
+                ):
+                    names.add(node.target.id)
+        return names
+
+    @staticmethod
+    def _statements_terminate(statements: list[ast.stmt]) -> bool:
+        if not statements:
+            return False
+        final = statements[-1]
+        if isinstance(final, (ast.Return, ast.Raise)):
+            return True
+        return (
+            isinstance(final, ast.If)
+            and bool(final.orelse)
+            and _ForwardOperationExtractor._statements_terminate(final.body)
+            and _ForwardOperationExtractor._statements_terminate(final.orelse)
+        )
 
     def statements(
         self, statements: list[ast.stmt], *, condition: str | None = None
@@ -1538,8 +1766,12 @@ class _ForwardOperationExtractor:
                 outcome = _config_value(stmt.test, {}, self.self_values)
                 if outcome is True:
                     self.statements(stmt.body, condition=condition)
+                    if self._statements_terminate(stmt.body):
+                        break
                 elif outcome is False:
                     self.statements(stmt.orelse, condition=condition)
+                    if self._statements_terminate(stmt.orelse):
+                        break
                 else:
                     test = ast.unparse(stmt.test)
                     before_env = dict(self.var_producer)
@@ -1568,7 +1800,37 @@ class _ForwardOperationExtractor:
                         )
                     self.var_producer = else_env if stmt.orelse else body_env
                 continue
-            if isinstance(stmt, (ast.For, ast.With)):
+            if isinstance(stmt, ast.For):
+                iteration_count = self._range_iteration_count(stmt)
+                before_env = dict(self.var_producer)
+                before = len(self.operations)
+                self.statements(stmt.body, condition=condition)
+                detail = (
+                    f"loop: {iteration_count} iterations"
+                    if iteration_count is not None
+                    else "loop: repeated"
+                )
+                self._annotate_operations_since(before, detail)
+                operation_ids = tuple(
+                    operation.attr_name for operation in self.operations[before:]
+                )
+                loop_id = f"loop_l{stmt.lineno}_c{stmt.col_offset}"
+                for variable in sorted(self._assigned_names(stmt.body)):
+                    initial = before_env.get(variable)
+                    updated = self.var_producer.get(variable)
+                    if initial and updated and initial != updated:
+                        self.loop_carried.append(
+                            LoopCarriedSpec(
+                                loop_id=loop_id,
+                                iteration_count=iteration_count,
+                                variable=variable,
+                                initial_producer=initial,
+                                updated_producer=updated,
+                                operation_ids=operation_ids,
+                            )
+                        )
+                continue
+            if isinstance(stmt, ast.With):
                 self.statements(stmt.body, condition=condition)
 
 
@@ -1610,6 +1872,16 @@ def _functional_synthetic_source_positions(
     return positions
 
 
+def _kernel_merge_source_position(func: ast.FunctionDef) -> tuple[int, int] | None:
+    """First source position of a kernel represented by the synthetic merge node."""
+    positions = [
+        (node.lineno, node.col_offset)
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call) and _is_kernel_merge_call(node.func)
+    ]
+    return min(positions) if positions else None
+
+
 def _module_calls_for_forward_merge(
     forward_calls: list[str],
     init_assignments: dict[str, str],
@@ -1627,6 +1899,8 @@ def _module_calls_for_forward_merge(
         for call in forward_calls
         if call in init_assignments
         or is_positional_synthetic(call)
+        or call == SYNTHETIC_ATTENTION
+        or not call.startswith("@")
         or (is_functional_synthetic(call) and not drop_functional)
     ]
 
@@ -1649,6 +1923,7 @@ def _forward_calls_in_source_order(
     ordered: list[tuple[tuple[int, int], str]] = []
     call_positions = _self_call_source_positions(func)
     functional_positions = _functional_synthetic_source_positions(func)
+    kernel_position = _kernel_merge_source_position(func)
     fallback = 0
     for call in module_calls:
         where = (
@@ -1656,6 +1931,8 @@ def _forward_calls_in_source_order(
             or functional_positions.get(call)
             or positional_synthetic_source_pos(call)
         )
+        if where is None and call == SYNTHETIC_ATTENTION:
+            where = kernel_position
         if where is None:
             # A call the walk cannot place keeps its parsed order ahead of the ops.
             where = (0, -fallback)
@@ -1948,6 +2225,7 @@ def _forward_operations_from_forward(
         return_slots=return_slots,
         return_order=return_order,
         primary_return_slot=primary_return_slot,
+        loop_carried=list(extractor.loop_carried),
     )
 
 
@@ -1983,6 +2261,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         forward_return_slots: dict[str, str] = {}
         forward_return_order: list[str] = []
         primary_return_slot: str | None = None
+        forward_loop_carried: list[LoopCarriedSpec] = []
         single_op_methods: dict[str, ForwardOperation] = {}
         multi_op_methods: dict[str, list[ForwardOperation]] = {}
         init_func = next(
@@ -2041,6 +2320,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     all_tensor_ops=self.all_tensor_ops,
                 )
                 if analysis.operations:
+                    forward_loop_carried = list(analysis.loop_carried)
                     (
                         forward_calls,
                         forward_operations,
@@ -2088,6 +2368,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     all_tensor_ops=self.all_tensor_ops,
                 )
                 if analysis.operations:
+                    forward_loop_carried = list(analysis.loop_carried)
                     module_calls = _module_calls_for_forward_merge(
                         forward_calls,
                         init_assignments,
@@ -2128,6 +2409,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     init_assignments,
                     probed.operations,
                 ):
+                    forward_loop_carried = list(probed.loop_carried)
                     module_calls = _module_calls_for_forward_merge(
                         forward_calls,
                         init_assignments,
@@ -2178,6 +2460,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             forward_return_slots=forward_return_slots,
             forward_return_order=forward_return_order,
             primary_return_slot=primary_return_slot,
+            loop_carried=forward_loop_carried,
         )
         self.generic_visit(node)
 
@@ -3367,9 +3650,7 @@ def _walk_forward_stmt(
         return _register_forward_calls(stmt_calls, calls, norm_before, pending_norm)
 
     if isinstance(node, ast.If):
-        branch = (
-            node.body if _if_has_competing_assigns(node) else node.body + node.orelse
-        )
+        branch = node.body + node.orelse
         for child in branch:
             pending_norm = _walk_forward_stmt(
                 child,

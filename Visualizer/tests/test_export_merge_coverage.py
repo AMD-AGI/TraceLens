@@ -366,7 +366,15 @@ def test_merge_section_exits_and_computation_node_filtering():
         skip_synthetic_input=True,
     )
     assert [node["id"] for node in nodes] == ["p/work"]
-    assert "incomingEdges" not in nodes[0]
+    assert nodes[0]["incomingEdges"][0]["sourceNodeId"] == (
+        merge._SKIPPED_SECTION_INPUT
+    )
+    merge._connect_external_inputs(
+        nodes,
+        namespace_prefix="ns",
+        previous_exits=["previous"],
+    )
+    assert nodes[0]["incomingEdges"][0]["sourceNodeId"] == "previous"
     assert merge._section_exits(computation, nodes, id_prefix="p") == ["p/work"]
     assert merge._section_exits(
         computation,
@@ -710,6 +718,68 @@ def test_shape_format_annotation_and_empty_shape_paths():
     shapes._apply_shape_attrs(empty, TensorSpec((), "float16"))
     assert empty == {"id": "empty"}
     shapes.annotate_nodes_with_shapes([empty], {}, id_prefix="")
+
+
+def test_unconsumed_output_port_prunes_its_producer_backwards():
+    nodes = [
+        {"id": "@input", "attrs": [{"key": "synthetic", "value": "@input"}]},
+        {
+            "id": "live",
+            "incomingEdges": [{"sourceNodeId": "@input", "sourceNodeOutputId": "0"}],
+        },
+        {
+            "id": "dead_setup",
+            "incomingEdges": [{"sourceNodeId": "@input", "sourceNodeOutputId": "0"}],
+        },
+        {
+            "id": "dead_result",
+            "incomingEdges": [
+                {"sourceNodeId": "dead_setup", "sourceNodeOutputId": "0"}
+            ],
+        },
+        {
+            "id": "block/@output",
+            "attrs": [{"key": "synthetic", "value": "@output"}],
+            "inputsMetadata": [{"id": "used"}, {"id": "unused"}],
+            "outputsMetadata": [{"id": "used"}, {"id": "unused"}],
+            "incomingEdges": [
+                {
+                    "sourceNodeId": "live",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "used",
+                },
+                {
+                    "sourceNodeId": "dead_result",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "unused",
+                },
+            ],
+        },
+        {
+            "id": "consumer",
+            "incomingEdges": [
+                {
+                    "sourceNodeId": "block/@output",
+                    "sourceNodeOutputId": "used",
+                }
+            ],
+        },
+        {
+            "id": "@output",
+            "attrs": [{"key": "synthetic", "value": "@output"}],
+            "incomingEdges": [{"sourceNodeId": "consumer", "sourceNodeOutputId": "0"}],
+        },
+    ]
+
+    merge._prune_unconsumed_outputs(nodes)
+
+    by_id = {node["id"]: node for node in nodes}
+    assert "dead_setup" not in by_id
+    assert "dead_result" not in by_id
+    assert by_id["block/@output"]["outputsMetadata"] == [{"id": "used"}]
+    assert {
+        edge["targetNodeInputId"] for edge in by_id["block/@output"]["incomingEdges"]
+    } == {"used"}
 
 
 def test_shape_fill_and_boundary_multiple_crossings():
@@ -1200,6 +1270,7 @@ def test_merge_append_section_expands_nested_diagram_and_shapes(
         "_resolve_section_tree_for_component",
         lambda *a, **k: ("Attention", root),
     )
+    monkeypatch.setattr(merge, "expand_block_tree_inplace", lambda tree, **kwargs: tree)
     monkeypatch.setattr(
         merge,
         "build_computation_graph",
@@ -1240,6 +1311,7 @@ def test_merge_append_section_expands_nested_diagram_and_shapes(
     assert by_id["decoder/attn/after"]["incomingEdges"][0]["sourceNodeId"] == (
         "decoder/attn/tile/result"
     )
+    assert by_id["decoder/attn/after"]["incomingEdges"][0]["sourceNodeOutputId"] == "0"
     assert exits == ["decoder/attn/after"]
     assert group_attrs["decoder/Attention"] == {
         "label": "Attention",

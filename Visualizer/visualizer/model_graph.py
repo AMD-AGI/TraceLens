@@ -69,7 +69,7 @@ _REDUCED_OPERATION_KINDS = frozenset(
 )
 
 _SYNTHETIC_KEYS = frozenset(
-    {"@input", "@output", "@hidden_states", "@tensor", "@combine"}
+    {"@input", "@output", "@loop_carried", "@hidden_states", "@tensor", "@combine"}
 )
 _COMBINE_LABELS = frozenset({"×", "+", "Elementwise ×", "Multiply", "Add"})
 _KERNEL_CLASS_NAMES = frozenset(
@@ -134,6 +134,7 @@ class GraphEdge:
     target: str
     style: str = "solid"
     label: str | None = None
+    source_port: str | None = None
 
 
 @dataclass
@@ -417,6 +418,7 @@ def build_model_graph(
                 target=index_to_id[target],
                 style=_edge_style(computation_graph, source, target),
                 label=port_label,
+                source_port=computation_graph.link_output_ports.get((source, target)),
             )
         )
 

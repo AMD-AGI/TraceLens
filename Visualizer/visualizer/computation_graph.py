@@ -23,29 +23,26 @@ from visualizer.block_tree import (
     TensorPortsSegment,
     collect_function_steps,
     flatten_computation_segments,
-    gated_norm_activation,
-    gated_norm_tile_label,
     inline_block_frame_label,
     inline_block_frame_sublabel,
     inline_composite_steps,
     inline_wrapper_step_label,
-    is_gated_norm_module,
     is_kernel_pipeline_tree,
     is_situ_gated_mlp,
     is_straight_line_module,
     is_method_wrapper,
-    side_producer_has_activation,
     wrapper_bullet_lines,
 )
 from visualizer.ast_analyze import (
     FORWARD_METHOD_INPUT,
-    SYNTHETIC_GATE_ACTIVATION,
+    SYNTHETIC_ATTENTION,
     is_forward_operation,
 )
 from visualizer.basic_ops import BasicOpFilter, keep_detail_graph_node
 
 SYNTHETIC_INPUT = "@input"
 SYNTHETIC_OUTPUT = "@output"
+SYNTHETIC_LOOP_CARRIED = "@loop_carried"
 SYNTHETIC_HIDDEN = (
     "@hidden_states"  # legacy alias; replaced by SYNTHETIC_INPUT in graphs
 )
@@ -82,10 +79,15 @@ class ComputationGraph:
     nodes: list[GraphNodeSpec] = field(default_factory=list)
     links: list[tuple[int, int]] = field(default_factory=list)
     link_port_labels: dict[tuple[int, int], str] = field(default_factory=dict)
+    link_output_ports: dict[tuple[int, int], str] = field(default_factory=dict)
     inline_frames: list[InlineFrameSpec] = field(default_factory=list)
     side_effect_frame_ids: set[str] = field(default_factory=set)
     excluded_output_indices: set[int] = field(default_factory=set)
     primary_output_index: int | None = None
+    output_node_index: int | None = None
+    output_ports: dict[str, int] = field(default_factory=dict)
+    primary_output_port: str | None = None
+    loop_carried_nodes: dict[str, int] = field(default_factory=dict)
     dead_node_indices: set[int] = field(default_factory=set)
 
 
@@ -185,6 +187,34 @@ def _wire_operation_predecessor_links(
                 graph.links.append(link)
         if len(module_preds) >= 2 and (child.forward_order or 0) < last_forward_order:
             graph.excluded_output_indices.add(target_index)
+
+
+def _wire_attention_provenance_links(graph: ComputationGraph, root: BlockNode) -> None:
+    """Connect named q/k/v/g/beta producers to a sequential attention merge."""
+    if not root.attention_inputs:
+        return
+    attr_last_index = _rebuild_attr_last_index(graph)
+    targets = [
+        index
+        for index, spec in enumerate(graph.nodes)
+        if spec.block is not None and spec.block.attr_name == SYNTHETIC_ATTENTION
+    ]
+    for target_index in targets:
+        for port, chain in root.attention_inputs.items():
+            source_index = next(
+                (
+                    attr_last_index[attr]
+                    for attr in reversed(chain)
+                    if attr in attr_last_index
+                ),
+                None,
+            )
+            if source_index is None or source_index == target_index:
+                continue
+            link = (source_index, target_index)
+            if link not in graph.links:
+                graph.links.append(link)
+            graph.link_port_labels[link] = port
 
 
 def _operation_source_indices(
@@ -367,10 +397,44 @@ def _add_forward_input(graph: ComputationGraph, root: BlockNode) -> int:
     )
 
 
-def add_forward_output(graph: ComputationGraph, *, label: str = "Output") -> int | None:
-    """Append one output node fed by every terminal computation path."""
+def add_forward_output(
+    graph: ComputationGraph,
+    *,
+    root: BlockNode | None = None,
+    label: str = "Output",
+) -> int | None:
+    """Append the graph boundary Output with one named port per return value."""
+    if graph.output_node_index is not None:
+        return graph.output_node_index
     if not graph.nodes:
         return None
+    if not any(spec.synthetic == SYNTHETIC_INPUT for spec in graph.nodes):
+        return None
+    attr_last_index = _rebuild_attr_last_index(graph)
+    input_index = next(
+        (
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.synthetic == SYNTHETIC_INPUT
+        ),
+        None,
+    )
+    ports: dict[str, int] = {}
+    if root is not None and root.forward_return_slots:
+        for slot in root.forward_return_order:
+            producer = root.forward_return_slots.get(slot)
+            if not producer:
+                continue
+            source = graph.loop_carried_nodes.get(producer)
+            if source is None:
+                source = (
+                    input_index
+                    if producer == FORWARD_METHOD_INPUT
+                    else attr_last_index.get(producer)
+                )
+            if source is not None:
+                ports[slot] = source
+
     source_indices = {src for src, _target in graph.links}
     exits = [
         index
@@ -378,19 +442,24 @@ def add_forward_output(graph: ComputationGraph, *, label: str = "Output") -> int
         if index not in source_indices
         and spec.synthetic not in {SYNTHETIC_INPUT, SYNTHETIC_HIDDEN, SYNTHETIC_TENSOR}
     ]
-    if not exits:
-        return None
-    framed_indices = {
-        index for frame in graph.inline_frames for index in frame.node_indices
-    }
-    unframed_exits = [index for index in exits if index not in framed_indices]
-    if unframed_exits:
-        exits = unframed_exits
-    if graph.primary_output_index is not None:
-        exits = [graph.primary_output_index]
-    else:
-        exits = [index for index in exits if index not in graph.excluded_output_indices]
-    if not exits:
+    if not ports:
+        framed_indices = {
+            index for frame in graph.inline_frames for index in frame.node_indices
+        }
+        unframed_exits = [index for index in exits if index not in framed_indices]
+        if unframed_exits:
+            exits = unframed_exits
+        if graph.primary_output_index is not None:
+            exits = [graph.primary_output_index]
+        else:
+            exits = [
+                index for index in exits if index not in graph.excluded_output_indices
+            ]
+        ports = {
+            ("result" if len(exits) == 1 else f"result_{position + 1}"): index
+            for position, index in enumerate(exits)
+        }
+    if not ports:
         return None
     output_index = _add_node(
         graph,
@@ -398,7 +467,16 @@ def add_forward_output(graph: ComputationGraph, *, label: str = "Output") -> int
         label=label,
         synthetic=SYNTHETIC_OUTPUT,
     )
-    graph.links.extend((index, output_index) for index in exits)
+    for port, source in ports.items():
+        graph.links.append((source, output_index))
+        graph.link_port_labels[(source, output_index)] = port
+    graph.output_node_index = output_index
+    graph.output_ports = ports
+    graph.primary_output_port = (
+        root.primary_return_slot
+        if root is not None and root.primary_return_slot in ports
+        else next(iter(ports))
+    )
     return output_index
 
 
@@ -980,8 +1058,12 @@ def _wire_multi_input_op_forward_links(
         key=lambda step: (step.forward_order or 0, step.attr_name),
     )
 
+    live_returns = root.referenced_return_producers
     for step in ordered_steps:
         if not step.operation_predecessors:
+            continue
+        # A returned tensor such as mHC `comb` is an output, not the next op's operand.
+        if step.attr_name in live_returns:
             continue
         source_index = attr_last_index.get(step.attr_name)
         if source_index is None or _node_has_outgoing_links(graph, source_index):
@@ -1006,6 +1088,9 @@ def _wire_multi_input_op_forward_links(
             None,
         )
         if consumer is None:
+            continue
+        named = consumer.operation_predecessors
+        if named and step.attr_name not in named:
             continue
 
         target_index = _first_graph_index_for_module(consumer, attr_last_index)
@@ -1036,6 +1121,8 @@ def _inline_frame_exit_index(
 def _wire_inline_frame_dangling_outputs(graph: ComputationGraph) -> None:
     """Connect dead-end steps inside an inline frame to that frame's outward exit."""
     for frame in graph.inline_frames:
+        if frame.frame_id.startswith("loop:"):
+            continue
         members = set(frame.node_indices)
         if len(members) < 2:
             continue
@@ -1050,6 +1137,109 @@ def _wire_inline_frame_dangling_outputs(graph: ComputationGraph) -> None:
                 continue
             if (index, exit_index) not in graph.links:
                 graph.links.append((index, exit_index))
+
+
+def _add_loop_frames(graph: ComputationGraph) -> None:
+    """Group contiguous loop-body operations without introducing graph cycles."""
+    active_detail: str | None = None
+    active_indices: list[int] = []
+
+    def flush() -> None:
+        nonlocal active_detail, active_indices
+        if active_detail is not None and len(active_indices) >= 2:
+            graph.inline_frames.append(
+                InlineFrameSpec(
+                    frame_id=f"loop:{graph.nodes[active_indices[0]].key}",
+                    label=active_detail.replace("loop:", "Loop ·", 1).strip(),
+                    node_indices=list(active_indices),
+                )
+            )
+        active_detail = None
+        active_indices = []
+
+    for index, spec in enumerate(graph.nodes):
+        loop_detail = next(
+            (
+                detail
+                for detail in (spec.block.details if spec.block is not None else [])
+                if detail.startswith("loop:")
+            ),
+            None,
+        )
+        if loop_detail != active_detail:
+            flush()
+            active_detail = loop_detail
+        if loop_detail is not None:
+            active_indices.append(index)
+    flush()
+
+
+def _add_loop_carried_nodes(graph: ComputationGraph, root: BlockNode) -> None:
+    """Materialize acyclic loop-result boundaries for values updated by a loop."""
+    if not root.loop_carried:
+        return
+    attr_last_index = _rebuild_attr_last_index(graph)
+    input_index = next(
+        (
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.synthetic == SYNTHETIC_INPUT
+        ),
+        None,
+    )
+    for carried in root.loop_carried:
+        initial_index = (
+            input_index
+            if carried.initial_producer == FORWARD_METHOD_INPUT
+            else attr_last_index.get(carried.initial_producer)
+        )
+        updated_index = attr_last_index.get(carried.updated_producer)
+        if initial_index is None or updated_index is None:
+            continue
+        member_indices = {
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.block is not None and spec.block.attr_name in carried.operation_ids
+        }
+        loop_frame = next(
+            (
+                frame
+                for frame in graph.inline_frames
+                if member_indices and member_indices.issubset(set(frame.node_indices))
+            ),
+            None,
+        )
+        node_index = _add_node(
+            graph,
+            key=f"@loop_carried:{carried.loop_id}:{carried.variable}",
+            label="Loop carried dependency",
+            sublabel=(
+                f"{carried.variable} · {carried.iteration_count} iterations"
+                if carried.iteration_count is not None
+                else f"{carried.variable} · repeated"
+            ),
+            synthetic=SYNTHETIC_LOOP_CARRIED,
+        )
+
+        rewired: list[tuple[int, int]] = []
+        for source, target in graph.links:
+            if source == updated_index and target not in member_indices:
+                rewired.append((node_index, target))
+                port = graph.link_port_labels.pop((source, target), None)
+                if port:
+                    graph.link_port_labels[(node_index, target)] = port
+                output_port = graph.link_output_ports.pop((source, target), None)
+                if output_port:
+                    graph.link_output_ports[(node_index, target)] = output_port
+            else:
+                rewired.append((source, target))
+        graph.links = rewired
+        graph.links.extend([(initial_index, node_index), (updated_index, node_index)])
+        graph.link_port_labels[(initial_index, node_index)] = "initial"
+        graph.link_port_labels[(updated_index, node_index)] = "updated"
+        graph.loop_carried_nodes[carried.updated_producer] = node_index
+        if loop_frame is not None:
+            loop_frame.node_indices.append(node_index)
 
 
 def _predecessor_map(graph: ComputationGraph) -> dict[int, list[int]]:
@@ -1094,7 +1284,22 @@ def _dead_node_indices(
     if not strip_unused_return_branches or not root.multi_return_module:
         return set()
 
-    keep = _live_node_indices_to_fixpoint(graph, [graph.primary_output_index])
+    seed_indices = [graph.primary_output_index]
+    referenced_returns = root.referenced_return_producers
+    if referenced_returns:
+        seed_indices.extend(
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.block is not None
+            and spec.block.attr_name in referenced_returns
+            and index not in seed_indices
+        )
+        seed_indices.extend(
+            index
+            for producer, index in graph.loop_carried_nodes.items()
+            if producer in referenced_returns and index not in seed_indices
+        )
+    keep = _live_node_indices_to_fixpoint(graph, seed_indices)
 
     dead: set[int] = set()
     for index, spec in enumerate(graph.nodes):
@@ -1178,6 +1383,7 @@ def _prune_computation_nodes(
 
     bridged_links: set[tuple[int, int]] = set()
     bridged_port_labels: dict[tuple[int, int], str] = {}
+    bridged_output_ports: dict[tuple[int, int], str] = {}
     for source, target in graph.links:
         if source in remove_indices or target in remove_indices:
             continue
@@ -1185,6 +1391,9 @@ def _prune_computation_nodes(
         port_label = graph.link_port_labels.get((source, target))
         if port_label:
             bridged_port_labels[(source, target)] = port_label
+        output_port = graph.link_output_ports.get((source, target))
+        if output_port:
+            bridged_output_ports[(source, target)] = output_port
     for removed in remove_indices:
         for source in preds[removed]:
             for target in succs[removed]:
@@ -1201,6 +1410,16 @@ def _prune_computation_nodes(
                             and (kept_source, kept_target) not in bridged_port_labels
                         ):
                             bridged_port_labels[(kept_source, kept_target)] = port_label
+                        output_port = graph.link_output_ports.get(
+                            (source, removed)
+                        ) or graph.link_output_ports.get((removed, target))
+                        if (
+                            output_port
+                            and (kept_source, kept_target) not in bridged_output_ports
+                        ):
+                            bridged_output_ports[(kept_source, kept_target)] = (
+                                output_port
+                            )
 
     old_to_new: dict[int, int] = {}
     new_nodes: list[GraphNodeSpec] = []
@@ -1229,12 +1448,30 @@ def _prune_computation_nodes(
             if (kept_source := _remap(source)) is not None
             and (kept_target := _remap(target)) is not None
         },
+        link_output_ports={
+            (kept_source, kept_target): port
+            for (source, target), port in bridged_output_ports.items()
+            if (kept_source := _remap(source)) is not None
+            and (kept_target := _remap(target)) is not None
+        },
         excluded_output_indices={
             _remap(index)
             for index in graph.excluded_output_indices
             if _remap(index) is not None
         },
         primary_output_index=_remap(graph.primary_output_index),
+        output_node_index=_remap(graph.output_node_index),
+        output_ports={
+            port: kept
+            for port, index in graph.output_ports.items()
+            if (kept := _remap(index)) is not None
+        },
+        primary_output_port=graph.primary_output_port,
+        loop_carried_nodes={
+            producer: kept
+            for producer, index in graph.loop_carried_nodes.items()
+            if (kept := _remap(index)) is not None
+        },
         dead_node_indices=set(),
     )
 
@@ -1401,6 +1638,8 @@ def build_computation_graph(
         node_index = _add_node(graph, key=root.attr_name, block=root)
         if input_index is not None:
             graph.links.append((input_index, node_index))
+            graph.primary_output_index = node_index
+            add_forward_output(graph, root=root)
         return graph
 
     resolved_include_input = include_input and not root.tensor_input_labels
@@ -1434,6 +1673,8 @@ def build_computation_graph(
             last_index=last_index,
             create_outer_frame=False,
         )
+        graph.primary_output_index = last_index
+        add_forward_output(graph, root=root)
         return graph
 
     for segment_index, segment in enumerate(segments):
@@ -1691,73 +1932,6 @@ def build_computation_graph(
                 side.source_kind == "forward_input" for side in segment.sides
             )
 
-            if is_gated_norm_module(consumer):
-                norm_index = _add_node(
-                    graph,
-                    key=f"sidefeed:{segment_index}:{consumer.attr_name}:norm",
-                    block=consumer,
-                    label=gated_norm_tile_label(consumer),
-                    sublabel="",
-                )
-                if last_index is not None:
-                    graph.links.append((last_index, norm_index))
-                elif input_index is not None:
-                    graph.links.append((input_index, norm_index))
-
-                combine_index = _add_node(
-                    graph,
-                    key=f"sidefeed:{segment_index}:{consumer.attr_name}:mul",
-                    label=_operation_tile_label("Multiply"),
-                )
-                graph.links.append((norm_index, combine_index))
-
-                activation = gated_norm_activation(consumer)
-                for side in segment.sides:
-                    if side.source_kind == "forward_input":
-                        if input_index is not None:
-                            _link_forward_input(graph, input_index, combine_index)
-                        continue
-                    source_attr = side.source_chain[-1] if side.source_chain else None
-                    if source_attr is None:
-                        continue
-                    source_index = _ensure_side_chain_tail_index(
-                        graph,
-                        segment,
-                        side,
-                        segment_index=segment_index,
-                        input_index=input_index,
-                        attr_last_index=attr_last_index,
-                        root=root,
-                        basic_ops=basic_ops,
-                    )
-                    if source_index is None:
-                        continue
-                    gate_index = source_index
-                    producer = segment.side_producer_nodes.get(source_attr)
-                    if (
-                        activation
-                        and producer is not None
-                        and not side_producer_has_activation(producer)
-                        and not is_gated_norm_module(consumer)
-                    ):
-                        gate_index = _add_node(
-                            graph,
-                            key=f"sidefeed:{segment_index}:{consumer.attr_name}:gate_act",
-                            label=activation,
-                            sublabel=None,
-                            synthetic=SYNTHETIC_GATE_ACTIVATION,
-                        )
-                        _append_side_producer_link(
-                            graph, source_index=source_index, target_index=gate_index
-                        )
-                    _append_side_producer_link(
-                        graph, source_index=gate_index, target_index=combine_index
-                    )
-
-                last_index = combine_index
-                _track_attr_index(attr_last_index, consumer.attr_name, combine_index)
-                continue
-
             entry_index: int | None = None
             param_entry_indices: dict[str, int] = {}
             if is_method_wrapper(consumer):
@@ -1984,8 +2158,12 @@ def build_computation_graph(
                 _track_attr_index(attr_last_index, step.attr_name, last_index)
 
     _wire_operation_predecessor_links(graph, root, input_index=input_index)
+    _wire_attention_provenance_links(graph, root)
+    _add_loop_frames(graph)
     if not (strip_unused_return_branches and root.multi_return_module):
         _wire_multi_input_op_forward_links(graph, root)
+    _add_loop_carried_nodes(graph, root)
+    if not (strip_unused_return_branches and root.multi_return_module):
         _wire_inline_frame_dangling_outputs(graph)
     if root.primary_output_step:
         for index, spec in enumerate(graph.nodes):
@@ -1993,7 +2171,9 @@ def build_computation_graph(
                 spec.block is not None
                 and spec.block.attr_name == root.primary_output_step
             ):
-                graph.primary_output_index = index
+                graph.primary_output_index = graph.loop_carried_nodes.get(
+                    root.primary_output_step, index
+                )
                 break
         else:
             graph.primary_output_index = last_index
@@ -2004,6 +2184,7 @@ def build_computation_graph(
         root,
         strip_unused_return_branches=strip_unused_return_branches,
     )
+    add_forward_output(graph, root=root)
     if basic_ops is not None and basic_ops.basic_only:
         return _filter_graph_basic_only(graph)
     return graph

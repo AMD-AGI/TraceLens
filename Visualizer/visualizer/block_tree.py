@@ -16,6 +16,7 @@ from visualizer.ast_analyze import (
     SYNTHETIC_ATTENTION,
     SYNTHETIC_GATE_ACTIVATION,
     ClassStructure,
+    LoopCarriedSpec,
     SideInputSpec,
     attention_kernel_details,
     attention_kernel_label,
@@ -239,7 +240,7 @@ def forward_operation_count(
     return sum(
         1
         for spec in graph.nodes
-        if spec.synthetic not in {SYNTHETIC_INPUT, "@combine"}
+        if spec.synthetic not in {SYNTHETIC_INPUT, "@output", "@combine"}
         and spec.label not in {"×", "+", "Elementwise ×"}
     )
 
@@ -289,11 +290,6 @@ def _is_substitutable_single_op_subgraph(
     """True when a composite wrapper should be replaced by its single inner op."""
     if is_method_wrapper(node) or node.is_basic:
         return False
-    # A helper such as MiniMaxM3VLRMSNorm._norm is implementation detail. Replacing
-    # the wrapper with that helper turns the semantically useful "RMSNorm" tile into
-    # a generic "Norm" tile.
-    if node.role == "norm":
-        return False
     if is_inline_expandable_module(node):
         return False
     if not _is_composite_block(node):
@@ -331,13 +327,6 @@ def expand_block_tree_inplace(
         expand_block_tree_inplace(child, basic_ops=basic_ops) for child in node.children
     ]
     node = _clone_block_node(node, children=expanded_children)
-
-    if (
-        node.role == "norm"
-        and len(node.children) == 1
-        and is_method_wrapper(node.children[0])
-    ):
-        return _clone_block_node(node, children=[])
 
     if _is_substitutable_single_op_subgraph(node, basic_ops=basic_ops):
         substitute = _substitute_single_op_subgraph(node, basic_ops=basic_ops)
@@ -547,6 +536,13 @@ def inline_composite_steps(
         if inner_steps:
             return inner_steps, step
 
+    if _is_composite_block(step):
+        inner_ops = collect_function_steps(step)
+        if len(inner_ops) == 1:
+            # A semantic wrapper around one operation adds no information. Replace
+            # it directly in its parent's dataflow (for example hc_head -> Mean).
+            return inner_ops, None
+
     if not is_straight_line_module(step):
         return [step], None
     if not is_inline_expandable_module(step):
@@ -649,7 +645,11 @@ class BlockNode:
     external_inputs: list[str] = field(default_factory=list)
     param_inputs: list[str] = field(default_factory=list)
     primary_output_step: str | None = None
+    forward_return_slots: dict[str, str] = field(default_factory=dict)
+    forward_return_order: list[str] = field(default_factory=list)
+    primary_return_slot: str | None = None
     referenced_return_producers: set[str] = field(default_factory=set)
+    loop_carried: list[LoopCarriedSpec] = field(default_factory=list)
     multi_return_module: bool = False
 
 
@@ -1542,7 +1542,14 @@ def collect_computation_segments(node: BlockNode) -> list[ComputationSegment]:
         provenance = pipeline_child.attention_inputs
 
     branches = _branches_from_provenance(pre_merge, provenance)
-    if len(branches) < 2:
+    represented = {step.attr_name for branch in branches for step in branch.steps}
+    incomplete_provenance = any(step.attr_name not in represented for step in pre_merge)
+    if incomplete_provenance:
+        # A single fan-out cannot represent a projection fan-in followed by a
+        # second q/k/v/g/beta fan-out. Keep every step and let explicit
+        # predecessor wiring carry the DAG instead of dropping shared setup.
+        branches = []
+    if len(branches) < 2 and not incomplete_provenance:
         branches = [
             Branch(label=branch.label, steps=branch.steps, port_style="inline")
             for branch in _partition_named_branches(pre_merge)
@@ -1905,7 +1912,7 @@ def build_block_node(
             if child_class in _SKIP_INIT_CLASS_NAMES:
                 continue
             method_ops = cls.multi_op_methods.get(call_attr)
-            if method_ops and role != "norm":
+            if method_ops:
                 child_nodes.append(
                     BlockNode(
                         attr_name=call_attr,
@@ -2025,7 +2032,11 @@ def build_block_node(
         side_inputs=dict(cls.side_inputs),
         input_label=cls.forward_input_name,
         primary_output_step=primary_output_step,
+        forward_return_slots=dict(cls.forward_return_slots),
+        forward_return_order=list(cls.forward_return_order),
+        primary_return_slot=cls.primary_return_slot,
         referenced_return_producers=set(cls.referenced_return_producers),
+        loop_carried=list(cls.loop_carried),
         multi_return_module=len(cls.forward_return_order) >= 2,
     )
 

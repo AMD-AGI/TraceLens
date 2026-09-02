@@ -178,6 +178,11 @@ def input_port_style() -> dict[str, str]:
     return {"backgroundColor": _INPUT, "textColor": _DARK_TEXT}
 
 
+def output_port_style() -> dict[str, str]:
+    """Synthetic @output ports on graph and subgraph boundaries."""
+    return {"backgroundColor": "#d5f5e3", "textColor": _DARK_TEXT}
+
+
 def detail_tile_style(
     block: BlockNode | None,
     *,
@@ -193,6 +198,14 @@ def detail_tile_style(
 
     if synthetic == "@input":
         return input_port_style()
+    if synthetic == "@output":
+        return output_port_style()
+    if synthetic == "@loop_carried":
+        return {
+            "backgroundColor": "#f9e79f",
+            "textColor": _DARK_TEXT,
+            "borderColor": "#b7950b",
+        }
 
     # Combine tiles (Multiply, Add, …) use the same gray as Linear/RMSNorm.
     if synthetic == "@combine" or label in _COMBINE_LABELS:

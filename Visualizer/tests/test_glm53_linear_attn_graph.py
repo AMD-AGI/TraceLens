@@ -13,6 +13,7 @@ import pytest
 from model_explorer_export.merge import build_merged_model_graph
 from visualizer.computation_graph import add_forward_output, build_computation_graph
 from visualizer.loader import load_model_spec
+from visualizer.shape_inference import ShapeInferencer
 
 
 def _linear_attn_tree(spec):
@@ -21,6 +22,13 @@ def _linear_attn_tree(spec):
 
 def _graph_key(graph, suffix: str) -> str:
     matches = [node.key for node in graph.nodes if node.key.endswith(suffix)]
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
+def _graph_key_for_op(graph, fragment: str) -> str:
+    """Locate a node by block and op identity, ignoring its slot within the block."""
+    matches = [node.key for node in graph.nodes if fragment in node.key]
     assert len(matches) == 1, matches
     return matches[0]
 
@@ -63,20 +71,27 @@ def test_glm53_linear_attention_gate_chain_is_not_short_circuited():
 
     g_a_key = _graph_key(graph, ":g_a_proj")
     g_b_key = _graph_key(graph, ":g_b_proj")
-    o_norm_key = _graph_key(graph, ":o_norm:norm")
-    o_norm_mul_key = _graph_key(graph, ":o_norm:mul")
+    o_norm_power_key = _graph_key_for_op(graph, ":o_norm:@op_l351_c19_power:")
+    o_norm_mean_key = _graph_key_for_op(graph, ":o_norm:@op_l351_c19_mean:")
+    o_norm_rsqrt_key = _graph_key_for_op(graph, ":o_norm:@op_l352_c40_reciprocal_sqrt:")
+    o_norm_gate_key = _graph_key_for_op(graph, ":o_norm:@op_l356_c40_sigmoid:")
+    o_norm_mul_key = _graph_key_for_op(graph, ":o_norm:@op_l356_c24_multiply:")
 
     assert g_a_key in keys
     assert g_b_key in keys
-    assert o_norm_key in keys
+    assert o_norm_power_key in keys
 
     key_to_index = {node.key: index for index, node in enumerate(graph.nodes)}
-    assert graph.nodes[key_to_index[o_norm_key]].label == "RMSNorm"
+    assert graph.nodes[key_to_index[o_norm_power_key]].label == "Power"
+    assert graph.nodes[key_to_index[o_norm_mean_key]].label == "Mean"
+    assert graph.nodes[key_to_index[o_norm_rsqrt_key]].label == "Reciprocal sqrt"
+    assert graph.nodes[key_to_index[o_norm_gate_key]].label == "Sigmoid"
     assert graph.nodes[key_to_index[o_norm_mul_key]].label == "Multiply"
     links = set(graph.links)
 
     assert (key_to_index[g_a_key], key_to_index[g_b_key]) in links
-    assert (key_to_index[g_b_key], key_to_index[o_norm_mul_key]) in links
+    assert (key_to_index[g_b_key], key_to_index[o_norm_gate_key]) in links
+    assert (key_to_index[o_norm_gate_key], key_to_index[o_norm_mul_key]) in links
     assert (key_to_index["@input"], key_to_index[g_b_key]) not in links
 
 
@@ -88,7 +103,7 @@ def test_glm53_spine_hyperconnection_stays_on_variant_namespace():
     variant_namespace = next(
         node["namespace"]
         for node in graph["nodes"]
-        if node["id"] == f"{prefix}/input_layernorm"
+        if node["id"].startswith(f"{prefix}/input_layernorm/")
     )
 
     attn_nodes = [
@@ -98,8 +113,8 @@ def test_glm53_spine_hyperconnection_stays_on_variant_namespace():
         node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/ffn_hc/")
     ]
     assert attn_nodes and ffn_nodes
-    assert all(node.get("namespace", "").endswith("/attn_hc") for node in attn_nodes)
-    assert all(node.get("namespace", "").endswith("/ffn_hc") for node in ffn_nodes)
+    assert all("/attn_hc" in node.get("namespace", "") for node in attn_nodes)
+    assert all("/ffn_hc" in node.get("namespace", "") for node in ffn_nodes)
     assert variant_namespace in attn_nodes[0].get("namespace", "")
 
 
@@ -122,15 +137,80 @@ def test_glm53_hyperconnection_expands_mhc_math():
 
     graph = build_computation_graph(tree, basic_ops=spec.basic_ops)
     labels = {node.label for node in graph.nodes}
+    assert {"Square", "Mean", "Reciprocal sqrt"} <= labels
     assert "Sigmoid" in labels
     assert "Softmax" in labels
     assert "Sum" in labels
+    assert any(frame.label == "Loop · 19 iterations" for frame in graph.inline_frames)
+    assert set(graph.output_ports) == {"post", "comb", "collapsed"}
+    carried_index = graph.loop_carried_nodes["@op_l290_c19_divide"]
+    assert graph.nodes[carried_index].label == "Loop carried dependency"
+    carried_inputs = {
+        graph.link_port_labels[(source, carried_index)]
+        for source, target in graph.links
+        if target == carried_index
+    }
+    assert carried_inputs == {"initial", "updated"}
+    assert graph.output_ports["comb"] == carried_index
+
+    multiply_index = next(
+        index
+        for index, node in enumerate(graph.nodes)
+        if node.block is not None and node.block.attr_name == "@op_l294_c21_multiply"
+    )
+    incoming_labels = {
+        graph.nodes[source].label
+        for source, dest in graph.links
+        if dest == multiply_index
+    }
+    assert incoming_labels == {"Add", "hidden_streams"}
+    assert "Divide" not in incoming_labels
 
 
-def test_glm53_o_norm_uses_rmsnorm_and_multiply_labels_in_merged_graph():
+@pytest.mark.parametrize(
+    ("class_name", "required_labels"),
+    [
+        (
+            "Glm5NextRMSNorm",
+            {"Power", "Mean", "Add", "Reciprocal sqrt", "Multiply"},
+        ),
+        (
+            "Glm5NextTextRMSNorm",
+            {"Power", "Mean", "Add", "Reciprocal sqrt", "Multiply"},
+        ),
+        (
+            "Glm5NextTextRMSNormGated",
+            {"Power", "Mean", "Add", "Reciprocal sqrt", "Sigmoid", "Multiply"},
+        ),
+        (
+            "Glm5NextTextUnweightedRMSNorm",
+            {"Square", "Mean", "Add", "Reciprocal sqrt", "Multiply"},
+        ),
+    ],
+)
+def test_glm53_rmsnorm_classes_expand_real_math(class_name, required_labels):
+    pytest.importorskip("huggingface_hub")
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import build_computation_graph
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    tree = build_block_node(
+        attr_name="norm",
+        class_name=class_name,
+        registry=spec.class_registry,
+        basic_ops=spec.basic_ops,
+        infer_init_steps=True,
+    )
+    graph = build_computation_graph(tree, basic_ops=spec.basic_ops)
+
+    assert required_labels <= {node.label for node in graph.nodes}
+    assert "RMSNorm" not in {node.label for node in graph.nodes}
+
+
+def test_glm53_o_norm_expands_rmsnorm_math_in_merged_graph():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     prefix = _linear_attn_variant_prefix(spec)
     o_norm_nodes = [
         node
@@ -138,9 +218,8 @@ def test_glm53_o_norm_uses_rmsnorm_and_multiply_labels_in_merged_graph():
         if node["id"].startswith(f"{prefix}/self_attn/") and "o_norm" in node["id"]
     ]
     labels = {node.get("label") for node in o_norm_nodes}
-    assert "RMSNorm" in labels
-    assert "Multiply" in labels
-    assert "Gated RMSNorm" not in labels
+    assert {"Power", "Mean", "Reciprocal sqrt", "Multiply"} <= labels
+    assert "RMSNorm" not in labels
 
 
 def test_glm53_forget_gate_expands_internal_computation():
@@ -196,14 +275,24 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     sources = {source for source, _target in graph.links}
 
     concat_key = _graph_key(graph, ":@op_l642_c20_concat:@op_l642_c20_concat:0")
+    conv_update_key = _graph_key_for_op(graph, ":@op_l659_c24_causal_conv1d_update:")
+    conv_key = _graph_key_for_op(graph, ":@op_l674_c24_causal_conv1d:")
+    split_key = _graph_key_for_op(graph, ":@op_l685_c28_split:")
     forget_entry_key = _graph_key(graph, ":forget_gate:f_a_proj:0")
-    branch_mul_key = _graph_key(graph, ":forget_gate:@op_l329_c19_multiply:5")
-    branch_add_key = _graph_key(graph, ":forget_gate:@op_l323_c13_add:2")
+    branch_mul_key = _graph_key_for_op(graph, ":forget_gate:@op_l329_c19_multiply:")
+    branch_add_key = _graph_key_for_op(graph, ":forget_gate:@op_l323_c13_add:")
+    input_index = next(
+        index for index, node in enumerate(graph.nodes) if node.synthetic == "@input"
+    )
 
     assert key_to_index[concat_key] in sources
-    assert (key_to_index[concat_key], key_to_index[forget_entry_key]) in set(
-        graph.links
-    )
+    # The decode/update and prefill convolution alternatives both consume mixed_qkv;
+    # the selected convolution output is then split into query, key, and value.
+    links = set(graph.links)
+    assert (key_to_index[concat_key], key_to_index[conv_update_key]) in links
+    assert (key_to_index[concat_key], key_to_index[conv_key]) in links
+    assert (key_to_index[conv_key], key_to_index[split_key]) in links
+    assert (input_index, key_to_index[forget_entry_key]) in set(graph.links)
     assert key_to_index[branch_mul_key] in sources
     assert key_to_index[branch_add_key] in sources
 
@@ -292,13 +381,47 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
     prefix = _linear_attn_variant_prefix(spec)
     node_by_id = {node["id"]: node for node in graph["nodes"]}
 
+    source_component = {
+        "input_layernorm": "attn_hc",
+        "post_attention_layernorm": "ffn_hc",
+    }
     for target in ("input_layernorm", "post_attention_layernorm"):
-        node = node_by_id[f"{prefix}/{target}"]
+        node = next(
+            candidate
+            for candidate in graph["nodes"]
+            if candidate["id"].startswith(f"{prefix}/{target}/")
+            and candidate.get("label") == "Power"
+        )
         incoming = node.get("incomingEdges", [])
         assert len(incoming) == 1, (target, incoming)
-        source = node_by_id[incoming[0]["sourceNodeId"]]
-        assert source.get("label") == "Sum"
-        assert "/seq:24:" in source["id"]
+        input_node = node_by_id[f"{prefix}/{target}/@input"]
+        assert incoming[0]["sourceNodeId"] == input_node["id"]
+        boundary_edges = input_node.get("incomingEdges", [])
+        assert len(boundary_edges) == 1
+        edge = boundary_edges[0]
+        source = node_by_id[edge["sourceNodeId"]]
+        assert source.get("label") == "Output"
+        assert source["id"] == f"{prefix}/{source_component[target]}/@output"
+        assert edge["sourceNodeOutputId"] == "collapsed"
+        assert {item["id"] for item in source["outputsMetadata"]} == {
+            "post",
+            "comb",
+            "collapsed",
+        }
+        outgoing = [
+            candidate_edge
+            for candidate in graph["nodes"]
+            for candidate_edge in candidate.get("incomingEdges", [])
+            if candidate_edge.get("sourceNodeId") == source["id"]
+        ]
+        assert {
+            candidate_edge["sourceNodeOutputId"] for candidate_edge in outgoing
+        } == {
+            "post",
+            "comb",
+            "collapsed",
+        }
+        assert len(outgoing) == 3
 
     hc = spec.class_registry["Glm5NextTextHyperConnection"]
     assert hc.primary_return_slot == "collapsed"
@@ -308,11 +431,30 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
         node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/ffn_hc/")
     ]
     ffn_labels = {node.get("label") for node in ffn_nodes}
-    assert "Softmax" not in ffn_labels
-    assert "Divide" not in ffn_labels
+    assert {"Softmax", "Divide"} <= ffn_labels
     for slot in ("post", "comb"):
         producer = hc.forward_return_slots[slot]
-        assert not any(producer in node["id"] for node in ffn_nodes)
+        assert any(producer in node["id"] for node in ffn_nodes)
+
+    input_namespaces = {
+        node.get("namespace", "")
+        for node in graph["nodes"]
+        if any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@input"
+            for attr in node.get("attrs", [])
+        )
+    }
+    output_namespaces = {
+        node.get("namespace", "")
+        for node in graph["nodes"]
+        if any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@output"
+            for attr in node.get("attrs", [])
+        )
+    }
+    # Transparent inline groups may expose entry labels, but only actual block
+    # boundaries own Output nodes.
+    assert output_namespaces <= input_namespaces
 
 
 def test_glm53_decoder_residual_ops_use_return_slot_producers():
@@ -350,17 +492,22 @@ def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
     )
     assert title == "FFN"
 
-    graph = build_merged_model_graph(spec)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     ffn_nodes = [
         node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/ffn_hc/")
     ]
     labels = {node.get("label") for node in ffn_nodes}
-    assert "RMSNorm" in labels
+    assert {"Square", "Mean", "Reciprocal sqrt"} <= labels
     assert "Linear" in labels
     assert all("TopkRouter" not in node["id"] for node in ffn_nodes)
     assert all(
-        "Glm5NextTextHyperConnection" in node.get("namespace", "")
-        or node.get("namespace", "").endswith("/ffn_hc")
+        "/ffn_hc" in node.get("namespace", "")
         for node in ffn_nodes
         if not node["id"].endswith("/@input")
+    )
+    output = next(node for node in ffn_nodes if node["id"].endswith("/@output"))
+    boundary = graph["groupNodeAttributes"][output["namespace"]]
+    assert boundary["input_shape"] == "B x S x 4 x 4096"
+    assert boundary["output_shape"] == (
+        "post: B x S x 4, comb: B x S x 4 x 4, " "collapsed: B x S x 4096"
     )

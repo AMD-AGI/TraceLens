@@ -110,3 +110,25 @@ def test_output_gate_is_not_simple_modeled_tile():
     )
 
     assert not is_simple_modeled_tile(gate)
+
+
+def test_single_operation_head_is_replaced_inline_without_wrapper():
+    mean = BlockNode(
+        attr_name="@op_mean",
+        class_name="Mean",
+        role="other",
+        label="Mean",
+        is_basic=True,
+    )
+    head = BlockNode(
+        attr_name="hc_head",
+        class_name="Glm5NextTextHyperHead",
+        role="head",
+        label="Glm5NextTextHyperHead",
+        children=[mean],
+    )
+
+    steps, wrapper = inline_composite_steps(head)
+
+    assert steps == [mean]
+    assert wrapper is None

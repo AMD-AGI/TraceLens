@@ -115,13 +115,11 @@ def test_rotary_pos_emb_shows_multiply_not_buffer():
     assert "Buffer" not in child_labels
 
     graph = build_merged_model_graph(spec)
-    rotary_labels = {
-        node.get("label")
-        for node in graph["nodes"]
-        if node.get("namespace") == "rotary_pos_emb"
-    }
-    assert "Multiply" in rotary_labels
-    assert "Buffer" not in rotary_labels
+    rotary_node = next(
+        node for node in graph["nodes"] if node.get("id") == "rotary_pos_emb"
+    )
+    assert rotary_node["label"] == "Multiply"
+    assert not any(node.get("namespace") == "rotary_pos_emb" for node in graph["nodes"])
 
 
 def test_merged_graph_uses_operator_labels_not_op_ids():

@@ -51,15 +51,25 @@ def _apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
     attrs.append({"key": "output_shape", "value": shape_text})
     attrs.append({"key": "output_dtype", "value": spec.dtype})
     node["attrs"] = attrs
+    existing = node.get("outputsMetadata", [])
+    port_ids = [item.get("id", "0") for item in existing] or ["0"]
+    labels = {
+        item.get("id", "0"): [
+            attr for attr in item.get("attrs", []) if attr.get("key") == "port_label"
+        ]
+        for item in existing
+    }
     node["outputsMetadata"] = [
         {
-            "id": "0",
+            "id": port_id,
             "attrs": [
+                *labels.get(port_id, []),
                 {"key": "shape", "value": shape_text},
                 {"key": "tensor_shape", "value": tensor_shape},
                 {"key": "dtype", "value": spec.dtype},
             ],
         }
+        for port_id in port_ids
     ]
 
 
@@ -85,6 +95,52 @@ def annotate_nodes_with_shapes(
         if spec is None:
             continue
         _apply_shape_attrs(node, spec)
+        if any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@output"
+            for attr in node.get("attrs", [])
+        ):
+            incoming_by_port = {
+                edge.get("targetNodeInputId"): edge.get("sourceNodeId", "")
+                for edge in node.get("incomingEdges", [])
+            }
+            for metadata in node.get("outputsMetadata", []):
+                port = metadata.get("id")
+                source_id = incoming_by_port.get(port, "")
+                source_key = (
+                    source_id[len(prefix) :]
+                    if prefix and source_id.startswith(prefix)
+                    else source_id
+                )
+                port_spec = shape_specs.get(source_key)
+                if port_spec is None:
+                    continue
+                metadata["attrs"] = [
+                    attr
+                    for attr in metadata.get("attrs", [])
+                    if attr.get("key") not in {"shape", "tensor_shape", "dtype"}
+                ] + [
+                    {"key": "shape", "value": format_shape(port_spec)},
+                    {
+                        "key": "tensor_shape",
+                        "value": format_shape_tensor(port_spec),
+                    },
+                    {"key": "dtype", "value": port_spec.dtype},
+                ]
+            output_by_port = {
+                str(metadata.get("id")): metadata
+                for metadata in node.get("outputsMetadata", [])
+            }
+            node["inputsMetadata"] = [
+                {
+                    "id": metadata.get("id"),
+                    "attrs": list(
+                        output_by_port.get(str(metadata.get("id")), metadata).get(
+                            "attrs", []
+                        )
+                    ),
+                }
+                for metadata in node.get("inputsMetadata", [])
+            ]
 
 
 def _node_spec(node: dict[str, Any]) -> TensorSpec | None:
@@ -224,6 +280,39 @@ def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, st
     for key, store in (("input_shape", inputs), ("output_shape", outputs)):
         for group, group_shapes in store.items():
             attributes.setdefault(group, {})[key] = ", ".join(group_shapes[:3])
+
+    for node in nodes:
+        namespace = str(node.get("namespace") or "")
+        if not namespace:
+            continue
+        synthetic = next(
+            (
+                attr.get("value")
+                for attr in node.get("attrs", [])
+                if attr.get("key") == "synthetic"
+            ),
+            None,
+        )
+        if synthetic not in {"@input", "@output"}:
+            continue
+        output_metadata = node.get("outputsMetadata", [])
+        values: list[str] = []
+        for metadata in output_metadata:
+            metadata_attrs = {
+                attr.get("key"): attr.get("value") for attr in metadata.get("attrs", [])
+            }
+            shape = metadata_attrs.get("shape")
+            if not shape:
+                continue
+            port = str(metadata.get("id", "0"))
+            if len(output_metadata) == 1:
+                values.append(str(shape))
+            else:
+                label = str(node.get("label") or "input") if port == "0" else port
+                values.append(f"{label}: {shape}")
+        if values:
+            key = "input_shape" if synthetic == "@input" else "output_shape"
+            attributes.setdefault(namespace, {})[key] = ", ".join(values)
     return attributes
 
 

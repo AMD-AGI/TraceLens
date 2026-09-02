@@ -15,6 +15,7 @@ from visualizer.basic_ops import BasicOpFilter
 from visualizer.block_tree import (
     BlockNode,
     collect_nested_diagrams,
+    expand_block_tree_inplace,
     subgraph_warrants_json_export,
 )
 from visualizer.blocks import BlockComponent, LayerVariant
@@ -27,6 +28,7 @@ from model_explorer_export.adapter import (
     _node_attrs,
     _node_namespaces,
     _node_style,
+    _output_port_metadata,
     _sanitize_namespace_segment,
 )
 from model_explorer_export.fact_sheet import build_fact_sheet_group_attributes
@@ -62,8 +64,25 @@ from model_explorer_export.styles import (
     ensure_readable_text,
     finalize_graph_node_styles,
     input_port_style,
+    output_port_style,
     spine_tile_style,
 )
+
+_SKIPPED_SECTION_INPUT = "@skipped_section_input"
+SourceRef = str | tuple[str, str]
+
+
+def _source_parts(source: SourceRef) -> tuple[str, str]:
+    return source if isinstance(source, tuple) else (source, "0")
+
+
+def _source_edge(source: SourceRef, target_input_id: str) -> dict[str, str]:
+    source_id, output_port = _source_parts(source)
+    return {
+        "sourceNodeId": source_id,
+        "sourceNodeOutputId": output_port,
+        "targetNodeInputId": target_input_id,
+    }
 
 
 def _join_namespace(prefix: str, suffix: str) -> str:
@@ -86,6 +105,13 @@ def _is_synthetic_input(node: dict[str, Any]) -> bool:
         if attr.get("key") == "synthetic" and attr.get("value") == "@input":
             return True
     return False
+
+
+def _is_synthetic_output(node: dict[str, Any]) -> bool:
+    node_id = node.get("id", "")
+    if node_id == "@output" or node_id.endswith("/@output"):
+        return True
+    return _node_attr(node, "synthetic") == "@output"
 
 
 def _node_attr(node: dict[str, Any], key: str) -> str | None:
@@ -234,6 +260,39 @@ def _make_group_input_node(
     return node
 
 
+def _make_group_output_node(
+    *,
+    output_id: str,
+    namespace: str,
+    ports: list[tuple[str, str, str]],
+) -> dict[str, Any]:
+    metadata = [
+        {
+            "id": port,
+            "attrs": [{"key": "port_label", "value": port}],
+        }
+        for port, _source, _source_port in ports
+    ]
+    return {
+        "id": output_id,
+        "label": "Output",
+        "namespace": namespace,
+        "attrs": [{"key": "synthetic", "value": "@output"}],
+        "style": ensure_readable_text(output_port_style()),
+        "incomingEdges": [
+            {
+                "sourceNodeId": source,
+                "sourceNodeOutputId": source_port,
+                "targetNodeInputId": port,
+                "metadata": {"port_label": port},
+            }
+            for port, source, source_port in ports
+        ],
+        "inputsMetadata": [dict(item) for item in metadata],
+        "outputsMetadata": metadata,
+    }
+
+
 def _input_style() -> dict[str, str]:
     return ensure_readable_text(input_port_style())
 
@@ -289,12 +348,19 @@ def _computation_nodes(
         for edge in incoming_local.get(local_id, []):
             source_local = edge["sourceNodeId"]
             if skip_synthetic_input and source_local == "@input":
+                remapped = dict(edge)
+                remapped["sourceNodeId"] = _SKIPPED_SECTION_INPUT
+                remapped_incoming.append(remapped)
                 continue
             remapped = dict(edge)
             remapped["sourceNodeId"] = local_to_prefixed[source_local]
             remapped_incoming.append(remapped)
         if remapped_incoming:
             node["incomingEdges"] = remapped_incoming
+        if index == computation.output_node_index:
+            ports = _output_port_metadata(computation)
+            node["inputsMetadata"] = [dict(port) for port in ports]
+            node["outputsMetadata"] = ports
         nodes.append(node)
 
     return nodes
@@ -328,7 +394,8 @@ def _replace_tile_with_group(
     nested_nodes: list[dict[str, Any]],
     *,
     tile_id: str,
-    exit_id: str | None,
+    exit_ref: SourceRef | None = None,
+    exit_id: str | None = None,
 ) -> None:
     """Put a nested diagram where its collapsed tile sat, instead of beside the section.
 
@@ -348,12 +415,16 @@ def _replace_tile_with_group(
             entry["incomingEdges"] = [dict(edge) for edge in incoming]
 
     section_nodes.remove(tile)
-    if exit_id is None:
+    if exit_ref is None:
+        exit_ref = exit_id
+    if exit_ref is None:
         return
+    exit_id, exit_port = _source_parts(exit_ref)
     for node in section_nodes:
         for edge in node.get("incomingEdges", []):
             if edge.get("sourceNodeId") == tile_id:
                 edge["sourceNodeId"] = exit_id
+                edge["sourceNodeOutputId"] = exit_port
 
 
 def _section_exits(
@@ -361,8 +432,8 @@ def _section_exits(
     section_nodes: list[dict[str, Any]],
     *,
     id_prefix: str,
-    replacements: dict[str, str] | None = None,
-) -> list[str]:
+    replacements: dict[str, SourceRef] | None = None,
+) -> list[SourceRef]:
     """Return the section output node(s) that feed the next spine step.
 
     Branchy inline graphs (for example mHC hyperconnections) can leave several
@@ -370,6 +441,16 @@ def _section_exits(
     continue on the main forward path.
     """
     node_ids = {node["id"] for node in section_nodes}
+    if computation.output_node_index is not None:
+        output_local = computation.nodes[computation.output_node_index].key or "@output"
+        output_id = _merge_node_id(id_prefix, output_local)
+        if output_id in node_ids:
+            return [
+                (
+                    output_id,
+                    computation.primary_output_port or "result",
+                )
+            ]
     if computation.primary_output_index is not None:
         index_to_local = {
             index: spec.key or f"node:{index}"
@@ -378,9 +459,10 @@ def _section_exits(
         primary_local = index_to_local.get(computation.primary_output_index)
         if primary_local is not None:
             primary_id = _merge_node_id(id_prefix, primary_local)
-            primary_id = (replacements or {}).get(primary_id, primary_id)
-            if primary_id in node_ids:
-                return [primary_id]
+            replacement = (replacements or {}).get(primary_id, primary_id)
+            replacement_id, _port = _source_parts(replacement)
+            if replacement_id in node_ids:
+                return [replacement]
     _entries, exits = _boundary_nodes(section_nodes)
     return exits
 
@@ -409,9 +491,30 @@ def _connect_external_inputs(
     section_nodes: list[dict[str, Any]],
     *,
     namespace_prefix: str,
-    previous_exits: list[str],
+    previous_exits: list[SourceRef],
 ) -> None:
     if not previous_exits:
+        return
+    placeholder_targets = [
+        node
+        for node in section_nodes
+        if any(
+            edge.get("sourceNodeId") == _SKIPPED_SECTION_INPUT
+            for edge in node.get("incomingEdges", [])
+        )
+    ]
+    if placeholder_targets:
+        for node in placeholder_targets:
+            preserved = [
+                edge
+                for edge in node.get("incomingEdges", [])
+                if edge.get("sourceNodeId") != _SKIPPED_SECTION_INPUT
+            ]
+            replacement_edges = [
+                _source_edge(source, str(index))
+                for index, source in enumerate(previous_exits)
+            ]
+            node["incomingEdges"] = [*preserved, *replacement_edges]
         return
     input_ids = _section_input_nodes(section_nodes, namespace_prefix)
     connect_targets = input_ids or _boundary_nodes(section_nodes)[0]
@@ -421,12 +524,8 @@ def _connect_external_inputs(
         if target is None:
             continue
         target["incomingEdges"] = [
-            {
-                "sourceNodeId": source_id,
-                "sourceNodeOutputId": "0",
-                "targetNodeInputId": str(index),
-            }
-            for index, source_id in enumerate(previous_exits)
+            _source_edge(source, str(index))
+            for index, source in enumerate(previous_exits)
         ]
 
 
@@ -478,8 +577,9 @@ def _infer_group_input_label(
 
 
 def _skip_variant_root_input(component: BlockComponent) -> bool:
-    """Decoder norms at the variant namespace are single tiles, not expanded input groups."""
-    return component.role == "norm" and component.attr_name in _DECODER_NORM_ATTRS
+    """Actual expanded decoder blocks keep their explicit Input boundary."""
+    del component
+    return False
 
 
 def _namespace_is_descendant(node_namespace: str, group_namespace: str) -> bool:
@@ -545,7 +645,7 @@ def _inject_group_inputs(
         internal_ids = _namespace_internal_ids(section_nodes, namespace)
         entry_ports = _collect_group_entry_ports(group_nodes, internal_ids, node_by_id)
         entry_nodes: list[dict[str, Any]] = []
-        outside_sources: set[str] = set()
+        outside_sources: set[tuple[str, str]] = set()
 
         for node in group_nodes:
             incoming = list(node.get("incomingEdges", []))
@@ -554,7 +654,13 @@ def _inject_group_inputs(
             ]
             if external or not incoming:
                 entry_nodes.append(node)
-                outside_sources.update(edge["sourceNodeId"] for edge in external)
+                outside_sources.update(
+                    (
+                        edge["sourceNodeId"],
+                        edge.get("sourceNodeOutputId", "0"),
+                    )
+                    for edge in external
+                )
 
         if not entry_nodes:
             continue
@@ -580,10 +686,12 @@ def _inject_group_inputs(
             input_node["incomingEdges"] = [
                 {
                     "sourceNodeId": source_id,
-                    "sourceNodeOutputId": "0",
+                    "sourceNodeOutputId": source_port,
                     "targetNodeInputId": str(index),
                 }
-                for index, source_id in enumerate(sorted(outside_sources))
+                for index, (source_id, source_port) in enumerate(
+                    sorted(outside_sources)
+                )
             ]
 
         for entry in entry_nodes:
@@ -601,6 +709,157 @@ def _inject_group_inputs(
 
         section_nodes.append(input_node)
         node_by_id[input_id] = input_node
+
+
+def _inject_group_outputs(section_nodes: list[dict[str, Any]]) -> None:
+    """Give every visible Input namespace a matching Output boundary."""
+    input_namespaces = {
+        node.get("namespace", "") for node in section_nodes if _is_synthetic_input(node)
+    }
+    for namespace in sorted(
+        (item for item in input_namespaces if item),
+        key=lambda item: item.count("/"),
+        reverse=True,
+    ):
+        if any(
+            _is_synthetic_output(node) and node.get("namespace", "") == namespace
+            for node in section_nodes
+        ):
+            continue
+        input_node = next(
+            node
+            for node in section_nodes
+            if _is_synthetic_input(node) and node.get("namespace", "") == namespace
+        )
+        prefix = input_node["id"].split("/@input", 1)[0]
+        output_id = f"{prefix}/@output"
+        internal_ids = _namespace_internal_ids(section_nodes, namespace)
+        outgoing: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for target in section_nodes:
+            if target["id"] in internal_ids:
+                continue
+            for edge in target.get("incomingEdges", []):
+                if edge.get("sourceNodeId") in internal_ids:
+                    outgoing.append((target, edge))
+
+        sources: list[tuple[str, str]] = []
+        for _target, edge in outgoing:
+            source = (
+                edge["sourceNodeId"],
+                edge.get("sourceNodeOutputId", "0"),
+            )
+            if source not in sources:
+                sources.append(source)
+        if not sources:
+            graph_sources = {
+                edge["sourceNodeId"]
+                for node in section_nodes
+                if node["id"] in internal_ids
+                for edge in node.get("incomingEdges", [])
+                if edge.get("sourceNodeId") in internal_ids
+            }
+            sources = [
+                (node["id"], "0")
+                for node in section_nodes
+                if node["id"] in internal_ids
+                and node["id"] not in graph_sources
+                and not _is_synthetic_input(node)
+                and not _is_synthetic_output(node)
+            ]
+        if not sources:
+            continue
+
+        ports = [
+            (
+                "result" if len(sources) == 1 else f"result_{index + 1}",
+                source,
+                source_port,
+            )
+            for index, (source, source_port) in enumerate(sources)
+        ]
+        port_by_source = {
+            (source, source_port): port for port, source, source_port in ports
+        }
+        for _target, edge in outgoing:
+            source = (
+                edge["sourceNodeId"],
+                edge.get("sourceNodeOutputId", "0"),
+            )
+            edge["sourceNodeId"] = output_id
+            edge["sourceNodeOutputId"] = port_by_source[source]
+
+        section_nodes.append(
+            _make_group_output_node(
+                output_id=output_id,
+                namespace=namespace,
+                ports=ports,
+            )
+        )
+
+
+def _prune_unconsumed_outputs(nodes: list[dict[str, Any]]) -> None:
+    """Strip unused boundary ports, then remove their dead producer subgraphs."""
+    outgoing_ports: dict[str, set[str]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []):
+            outgoing_ports.setdefault(edge["sourceNodeId"], set()).add(
+                str(edge.get("sourceNodeOutputId", "0"))
+            )
+
+    dead_candidates: set[str] = set()
+    for node in nodes:
+        if not _is_synthetic_output(node) or node.get("id") == "@output":
+            continue
+        used = outgoing_ports.get(str(node.get("id")), set())
+        if not used:
+            dead_candidates.add(str(node.get("id")))
+        dead_candidates.update(
+            str(edge["sourceNodeId"])
+            for edge in node.get("incomingEdges", [])
+            if str(edge.get("targetNodeInputId")) not in used
+        )
+        node["inputsMetadata"] = [
+            metadata
+            for metadata in node.get("inputsMetadata", [])
+            if str(metadata.get("id")) in used
+        ]
+        node["outputsMetadata"] = [
+            metadata
+            for metadata in node.get("outputsMetadata", [])
+            if str(metadata.get("id")) in used
+        ]
+        node["incomingEdges"] = [
+            edge
+            for edge in node.get("incomingEdges", [])
+            if str(edge.get("targetNodeInputId")) in used
+        ]
+
+    node_by_id = {str(node.get("id")): node for node in nodes}
+    outgoing_count: dict[str, int] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []):
+            source_id = str(edge["sourceNodeId"])
+            outgoing_count[source_id] = outgoing_count.get(source_id, 0) + 1
+    dead: set[str] = set()
+    pending = list(dead_candidates)
+    while pending:
+        node_id = pending.pop()
+        if (
+            node_id in dead
+            or outgoing_count.get(node_id, 0)
+            or node_id not in node_by_id
+        ):
+            continue
+        node = node_by_id[node_id]
+        if _is_synthetic_input(node):
+            continue
+        dead.add(node_id)
+        for edge in node.get("incomingEdges", []):
+            source_id = str(edge["sourceNodeId"])
+            outgoing_count[source_id] = max(outgoing_count.get(source_id, 0) - 1, 0)
+            pending.append(source_id)
+    if dead:
+        nodes[:] = [node for node in nodes if str(node.get("id")) not in dead]
 
 
 def _nested_namespace_segment(nested_block: BlockNode, nested_label: str) -> str:
@@ -874,36 +1133,45 @@ def _append_section(
     id_prefix: str,
     namespace_prefix: str,
     basic_ops: BasicOpFilter,
-    previous_exits: list[str],
+    previous_exits: list[SourceRef],
     variant: LayerVariant | None = None,
     spine_namespace_prefix: str | None = None,
     group_node_attributes: dict[str, dict[str, str]] | None = None,
     shape_inferencer: ShapeInferencer | None = None,
-) -> list[str]:
+) -> list[SourceRef]:
     if not component_has_detail_section(component, spec):
         summary_namespace = spine_namespace_prefix or _flat_spine_namespace(
             component,
             namespace_prefix,
             variant=variant,
         )
+        summary_label = (
+            _group_node_label(spec, component)
+            if component.role == "norm"
+            else _display_label(component, spec)
+        )
+        single_op = _resolve_section_tree_for_component(
+            spec,
+            component,
+            variant=variant,
+            basic_ops=basic_ops,
+        )
+        if single_op is not None:
+            _single_title, single_tree = single_op
+            prepared_single = expand_block_tree_inplace(
+                single_tree, basic_ops=basic_ops
+            )
+            if single_tree.children and not prepared_single.children:
+                summary_label = prepared_single.label
         summary = _summary_node(
             id_prefix,
-            (
-                _group_node_label(spec, component)
-                if component.role == "norm"
-                else _display_label(component, spec)
-            ),
+            summary_label,
             namespace=summary_namespace,
             component=component,
         )
         if previous_exits:
             summary["incomingEdges"] = [
-                {
-                    "sourceNodeId": source_id,
-                    "sourceNodeOutputId": "0",
-                    "targetNodeInputId": "0",
-                }
-                for source_id in previous_exits
+                _source_edge(source, "0") for source in previous_exits
             ]
         merged_nodes.append(summary)
         return [id_prefix]
@@ -927,21 +1195,39 @@ def _append_section(
         )
         if previous_exits:
             summary["incomingEdges"] = [
-                {
-                    "sourceNodeId": source_id,
-                    "sourceNodeOutputId": "0",
-                    "targetNodeInputId": "0",
-                }
-                for source_id in previous_exits
+                _source_edge(source, "0") for source in previous_exits
             ]
         merged_nodes.append(summary)
         return [id_prefix]
 
     _title, block_tree = resolved
+    prepared_tree = expand_block_tree_inplace(block_tree, basic_ops=basic_ops)
+    if block_tree.children and not prepared_tree.children:
+        # A wrapper around one real operation belongs directly on the spine. Keep
+        # the component ID for wiring, but show only the operation (hc_head -> Mean).
+        summary = _summary_node(
+            id_prefix,
+            prepared_tree.label,
+            namespace=_flat_spine_namespace(
+                component,
+                namespace_prefix,
+                variant=variant,
+            ),
+            component=component,
+        )
+        if previous_exits:
+            summary["incomingEdges"] = [
+                _source_edge(source, "0") for source in previous_exits
+            ]
+        merged_nodes.append(summary)
+        return [id_prefix]
+    block_tree = prepared_tree
     computation = build_computation_graph(
         block_tree,
         basic_ops=basic_ops,
-        strip_unused_return_branches=True,
+        # Return branches may be consumed by later caller-side operations. Keeping
+        # them also preserves real setup work such as mHC's Sinkhorn projection.
+        strip_unused_return_branches=False,
     )
     skip_variant_root_input = _skip_variant_root_input(component)
     section_nodes = _computation_nodes(
@@ -974,7 +1260,7 @@ def _append_section(
             inject_skip=pipeline_inject_skip,
         )
     tile_ids = _block_tile_ids(computation, id_prefix=id_prefix)
-    tile_replacements: dict[str, str] = {}
+    tile_replacements: dict[str, SourceRef] = {}
     for nested_label, nested_block in collect_nested_diagrams(
         block_tree, basic_ops=basic_ops
     ):
@@ -999,7 +1285,7 @@ def _append_section(
         nested_computation = build_computation_graph(
             nested_block,
             basic_ops=basic_ops,
-            strip_unused_return_branches=True,
+            strip_unused_return_branches=False,
         )
         nested_nodes = _computation_nodes(
             nested_computation,
@@ -1017,7 +1303,7 @@ def _append_section(
                 section_nodes,
                 nested_nodes,
                 tile_id=tile_id,
-                exit_id=nested_exits[0] if nested_exits else None,
+                exit_ref=nested_exits[0] if nested_exits else None,
             )
             if nested_exits:
                 tile_replacements[tile_id] = nested_exits[0]
@@ -1088,13 +1374,82 @@ def _append_variant_layer(
     id_prefix: str,
     namespace_prefix: str,
     basic_ops: BasicOpFilter,
-    previous_exits: list[str],
+    previous_exits: list[SourceRef],
     group_node_configs: list[dict[str, Any]],
     group_node_attributes: dict[str, dict[str, str]],
     shape_inferencer: ShapeInferencer | None = None,
-) -> list[str]:
+) -> list[SourceRef]:
     chain_exits = list(previous_exits)
+    residual_source = chain_exits[0] if chain_exits else None
+    hc_outputs: dict[str, SourceRef] = {}
+
+    def output_refs(section_prefix: str) -> dict[str, SourceRef]:
+        output_id = _merge_node_id(section_prefix, "@output")
+        output = next(
+            (node for node in merged_nodes if node.get("id") == output_id),
+            None,
+        )
+        if output is None:
+            return {}
+        return {
+            str(metadata["id"]): (output_id, str(metadata["id"]))
+            for metadata in output.get("outputsMetadata", [])
+            if metadata.get("id")
+        }
+
+    def append_residual_mix(site: str, branch_output: SourceRef) -> SourceRef:
+        post = hc_outputs["post"]
+        comb = hc_outputs["comb"]
+        base = residual_source
+        assert base is not None
+        residual_namespace = _join_namespace(namespace_prefix, f"{site} residual")
+        matmul_id = _merge_node_id(id_prefix, f"@residual:{site}:matmul")
+        multiply_id = _merge_node_id(id_prefix, f"@residual:{site}:multiply")
+        add_id = _merge_node_id(id_prefix, f"@residual:{site}:add")
+        merged_nodes.extend(
+            [
+                {
+                    "id": matmul_id,
+                    "label": "MatMul",
+                    "namespace": residual_namespace,
+                    "incomingEdges": [
+                        _source_edge(comb, "comb"),
+                        _source_edge(base, "residual"),
+                    ],
+                },
+                {
+                    "id": multiply_id,
+                    "label": "Multiply",
+                    "namespace": residual_namespace,
+                    "incomingEdges": [
+                        _source_edge(post, "post"),
+                        _source_edge(branch_output, "hidden_states"),
+                    ],
+                },
+                {
+                    "id": add_id,
+                    "label": "Add",
+                    "namespace": residual_namespace,
+                    "incomingEdges": [
+                        {
+                            "sourceNodeId": multiply_id,
+                            "sourceNodeOutputId": "0",
+                            "targetNodeInputId": "post",
+                        },
+                        {
+                            "sourceNodeId": matmul_id,
+                            "sourceNodeOutputId": "0",
+                            "targetNodeInputId": "comb",
+                        },
+                    ],
+                },
+            ]
+        )
+        return add_id
+
     for component in _ordered_decoder_components(spec):
+        if component.attr_name in {"attn_hc", "ffn_hc"}:
+            residual_source = chain_exits[0] if chain_exits else None
         section_prefix = _merge_node_id(id_prefix, component.attr_name)
         section_namespace = _section_namespace_for_component(
             spec,
@@ -1118,6 +1473,26 @@ def _append_variant_layer(
             group_node_attributes=group_node_attributes,
             shape_inferencer=shape_inferencer,
         )
+        if component.attr_name in {"attn_hc", "ffn_hc"}:
+            hc_outputs = output_refs(section_prefix)
+        elif (
+            component.attr_name == "self_attn"
+            and {
+                "post",
+                "comb",
+            }
+            <= hc_outputs.keys()
+        ):
+            chain_exits = [append_residual_mix("attention", chain_exits[0])]
+        elif (
+            component.attr_name == "mlp"
+            and {
+                "post",
+                "comb",
+            }
+            <= hc_outputs.keys()
+        ):
+            chain_exits = [append_residual_mix("ffn", chain_exits[0])]
     return chain_exits
 
 
@@ -1127,13 +1502,13 @@ def _append_decoder_layers(
     spec: ArchitectureSpec,
     decoder_namespace: str,
     basic_ops: BasicOpFilter,
-    previous_exits: list[str],
+    previous_exits: list[SourceRef],
     group_node_configs: list[dict[str, Any]],
     group_node_attributes: dict[str, dict[str, str]],
     shape_inferencer: ShapeInferencer | None = None,
-) -> list[str]:
+) -> list[SourceRef]:
     if spec.layer_variants:
-        variant_exits: list[str] = []
+        variant_exits: list[SourceRef] = []
         for variant in spec.layer_variants:
             slug = _variant_namespace_slug(variant)
             variant_prefix = _merge_node_id("decoder", slug)
@@ -1285,6 +1660,25 @@ def build_merged_model_graph(
             previous_exits=previous_exits,
             shape_inferencer=shape_inferencer,
         )
+
+    root_sources = [_source_parts(source) for source in previous_exits]
+    root_ports = [
+        (
+            "result" if len(root_sources) == 1 else f"result_{index + 1}",
+            source_id,
+            source_port,
+        )
+        for index, (source_id, source_port) in enumerate(root_sources)
+    ]
+    if root_ports:
+        nodes.append(
+            _make_group_output_node(
+                output_id="@output",
+                namespace="",
+                ports=root_ports,
+            )
+        )
+    _prune_unconsumed_outputs(nodes)
 
     if shape_inferencer is not None:
         fill_missing_node_shapes(nodes, context=shape_inferencer.context)

@@ -91,25 +91,58 @@ def _incoming_edges(
         target_id = index_to_id.get(target_index)
         if source_id is None or target_id is None:
             continue
+        if target_index == computation.output_node_index:
+            continue
 
         metadata: dict[str, str] = {}
         port_label = computation.link_port_labels.get((source_index, target_index))
         if port_label:
             metadata["port_label"] = port_label
 
-        target_input_id = str(target_input_counter[target_id])
-        target_input_counter[target_id] += 1
+        if target_index == computation.output_node_index and port_label:
+            target_input_id = port_label
+        else:
+            target_input_id = str(target_input_counter[target_id])
+            target_input_counter[target_id] += 1
 
         edge: dict[str, Any] = {
             "sourceNodeId": source_id,
-            "sourceNodeOutputId": _DEFAULT_OUTPUT_ID,
+            "sourceNodeOutputId": computation.link_output_ports.get(
+                (source_index, target_index), _DEFAULT_OUTPUT_ID
+            ),
             "targetNodeInputId": target_input_id,
         }
         if metadata:
             edge["metadata"] = metadata
         incoming[target_id].append(edge)
 
+    if computation.output_node_index is not None:
+        target_id = index_to_id.get(computation.output_node_index)
+        if target_id is not None:
+            for port, source_index in computation.output_ports.items():
+                source_id = index_to_id.get(source_index)
+                if source_id is None:
+                    continue
+                incoming[target_id].append(
+                    {
+                        "sourceNodeId": source_id,
+                        "sourceNodeOutputId": _DEFAULT_OUTPUT_ID,
+                        "targetNodeInputId": port,
+                        "metadata": {"port_label": port},
+                    }
+                )
+
     return incoming
+
+
+def _output_port_metadata(computation: ComputationGraph) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": port,
+            "attrs": [_kv("port_label", port)],
+        }
+        for port in computation.output_ports
+    ]
 
 
 def computation_graph_to_explorer_graph(
@@ -142,6 +175,10 @@ def computation_graph_to_explorer_graph(
             node["style"] = style
         if node_id in incoming:
             node["incomingEdges"] = incoming[node_id]
+        if index == computation.output_node_index:
+            ports = _output_port_metadata(computation)
+            node["inputsMetadata"] = [dict(port) for port in ports]
+            node["outputsMetadata"] = ports
         nodes.append(node)
 
     finalize_graph_node_styles(nodes)
