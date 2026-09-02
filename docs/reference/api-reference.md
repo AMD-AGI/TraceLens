@@ -192,7 +192,6 @@ Global options: `--backend` (default `sqlite`) and `--db` (default
 | `build --traces-file FILE` | Create or open the catalog and append a batch of traces (one path per line). Repeatable `--trace-path` is also accepted. |
 | `search TERMS` | Full-text search over indexed traces, ops, kernels, and categories. |
 | `sqlite-sql SQL` | Run one read-only SQL statement. |
-| `serve` | HTTP SQL endpoint on `127.0.0.1:8765` by default. |
 
 ## Python SDK
 

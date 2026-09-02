@@ -138,19 +138,6 @@ def sqlite_sql_cmd(args: argparse.Namespace) -> int:
         store.close()
 
 
-def serve_cmd(args: argparse.Namespace) -> int:
-    from TraceLens.TraceIndex.server import serve
-
-    serve(
-        db_path=args.db,
-        host=args.host,
-        port=args.port,
-        default_limit=args.default_limit,
-        max_limit=args.max_limit,
-    )
-    return 0
-
-
 def add_generate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--report-root",
@@ -247,13 +234,6 @@ def build_parser() -> argparse.ArgumentParser:
     sql.add_argument("sql")
     sql.add_argument("--limit", type=int, default=500)
     sql.set_defaults(func=sqlite_sql_cmd)
-
-    serve = sub.add_parser("serve", help="Serve read-only HTTP SQL access")
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8765)
-    serve.add_argument("--default-limit", type=int, default=500)
-    serve.add_argument("--max-limit", type=int, default=5000)
-    serve.set_defaults(func=serve_cmd)
 
     return parser
 

@@ -228,26 +228,6 @@ The longest attention here is a video/DiT-style shape: `N_Q` ≈ 119k, 3 heads
 (`H_Q`), `d_h_qk` 128, BF16 — not LLM decode. Because `N_Q` / `N_KV` / `H_Q` /
 `d_h_qk` are columns, finding long-context attention is a range query.
 
-## Serve read-only SQL
-
-For notebook or browser workflows, serve the SQLite catalog over HTTP:
-
-```bash
-TraceLens_trace_index --backend sqlite --db trace_index.sqlite serve --host 127.0.0.1 --port 8765
-```
-
-The server exposes:
-
-- `GET /health`
-- `GET /tables`
-- `POST /query` with `{"sql": "SELECT ...", "params": [], "limit": 500}`
-
-```{note}
-Only a single `SELECT`, `WITH`, or `PRAGMA` statement is accepted. The server
-is read-only but isn't authenticated, so bind it to loopback unless you put it
-behind your own access control.
-```
-
 ## Python API
 
 ```python
