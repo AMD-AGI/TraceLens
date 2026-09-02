@@ -66,6 +66,26 @@ pip install -e .[dev]
 python -m pytest tests/ -v
 ```
 
+### Optional: Visualizer (Model Explorer export)
+
+Install the CPU-only LLM architecture visualizer and its `huggingface_hub`
+dependency with the `[Visualizer]` extra:
+
+```bash
+pip install -e ".[Visualizer]"
+```
+
+This installs the `visualizer` and `model_explorer_export` packages and adds
+`TraceLens_visualize_model_in_explorer` (alias: `visualize_model_in_explorer`)
+to your `PATH`. See `Visualizer/README.md` for usage.
+
+For development on the visualizer, combine extras:
+
+```bash
+pip install -e ".[Visualizer,dev]"
+cd Visualizer && PYTHONPATH=. pytest tests/
+```
+
 ## Optional: `traceconv` for `.pftrace` input
 
 `traceconv` is needed only when you pass a Perfetto-style `.pftrace` trace
