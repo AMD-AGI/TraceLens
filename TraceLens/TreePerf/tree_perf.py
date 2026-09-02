@@ -33,7 +33,7 @@ from ..PerfModel.torch_op_mapping import (
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
 from ..Trace2Tree.trace_capture_merge_experimental import merge_capture_trace_into_graph
 from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
-from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
+from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils, merge_intervals
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
@@ -981,9 +981,7 @@ class TreePerfAnalyzer:
         total_kernel_runtime = (
             sum(
                 e - s
-                for s, e in GPUEventAnalyser.merge_intervals(
-                    [(k["ts"], k["t_end"]) for k in kernels]
-                )
+                for s, e in merge_intervals([(k["ts"], k["t_end"]) for k in kernels])
             )
             if kernels
             else 0
@@ -1042,7 +1040,7 @@ class TreePerfAnalyzer:
                     oe = min(kernel["t_end"], ov_evt.get("t_end", 0))
                     if oe > os:
                         ov_intervals.append((os, oe))
-                merged = GPUEventAnalyser.merge_intervals(ov_intervals)
+                merged = merge_intervals(ov_intervals)
                 total_overlap_time += sum(e - s for s, e in merged)
             event["overlap_pct"] = round(
                 (
