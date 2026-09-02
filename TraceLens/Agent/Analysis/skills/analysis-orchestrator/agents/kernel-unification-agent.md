@@ -49,8 +49,8 @@ in `only_in_<name_b>` when you are **certain** they are the same operation.
 
 - **`perf_categories`** -- a GEMM only unifies with a GEMM, SDPA with SDPA,
   etc. Never unify across different perf categories.
-- **Name semantics** -- decode the mangled name. `nvjet_*`, `Cijk_*`,
-  `cublasLt::*`, `_gemm_a16_w16_*` are vendor GEMM kernels; `*paged_attention*`,
+- **Name semantics** -- decode the mangled name. Vendor GEMM kernels often have
+  characteristic mangled names; `*paged_attention*`,
   `*fmha*`, `*flash*` are attention; `*rmsnorm*`, `*layer_norm*` are
   normalization; `*reduce*`, `*all_reduce*`, `*allgather*` are communication.
 - **`sample_input_dims`** -- matching shapes across traces strengthen a pairing.
@@ -82,8 +82,8 @@ Write to the output directory. Exact shape:
 
 ```json
 {
-  "name_a": "MI300",
-  "name_b": "B300",
+  "name_a": "(platform 1 name)",
+  "name_b": "(platform 2 name)",
   "map_a": {
     "moe_attn_vllm": "moe_attn",
     "(vendor1_gemm_name)_(shape1)": "expert_gemm"

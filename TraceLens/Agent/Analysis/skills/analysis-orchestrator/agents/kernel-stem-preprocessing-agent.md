@@ -27,9 +27,9 @@ default 5000). Otherwise skip it entirely.
 High-cardinality name families blow up the unique count. A single logical GEMM
 family can appear as thousands of variants that differ only by an autotuner id
 or embedded shape, e.g. `gemm_013123`, `gemm_013124`, ... or
-`Cijk_..._MT32x16x512_...`, `Cijk_..._MT64x16x256_...`. These variants are the
+`(vendor gemm name)_..._MT32x16x512_...`, `(vendor gemm name)_..._MT64x16x256_...`. These variants are the
 same operation for the purpose of establishing cross-trace anchors, so
-collapsing them to a **stem** (e.g. `gemm`, `Cijk_..._MT#_...`) drastically
+collapsing them to a **stem** (e.g. `gemm`, `(vendor gemm name)_..._MT#_...`) drastically
 shrinks the set.
 
 But **not every varying parameter is noise.** Some distinctions should be kept
@@ -73,8 +73,8 @@ setup kernels). Use judgment.
 - Anchor to the family so a rule cannot over-match a different family.
 - Collapse the varying token, not the whole name: replace digit runs / shape
   tokens with a placeholder rather than erasing the identifying prefix. E.g.
-  `('_MT\d+x\d+x\d+', '_MT#')` keeps `Cijk_..._MT#_...` distinguishable from a
-  different Cijk variant, while `('_[0-9]+$', '')` strips a trailing id.
+  `('_MT\d+x\d+x\d+', '_MT#')` keeps `(vendor gemm name)_..._MT#_...` distinguishable from a
+  different vendor GEMM variant, while `('_[0-9]+$', '')` strips a trailing id.
 - Keep the stem **stable across both traces** where the operation is the same,
   but you do not need to make two frameworks' stems identical here -- the
   `kernel-unification-agent` maps stems across traces afterward.
@@ -87,10 +87,10 @@ setup kernels). Use judgment.
     {"pattern": "^gemm_[0-9]+$", "replacement": "gemm",
      "action": "collapse", "note": "autotuner-id GEMM family"},
     {"pattern": "_MT[0-9]+x[0-9]+x[0-9]+", "replacement": "_MT#",
-     "action": "collapse", "note": "collapse Cijk tile-size id, keep family"},
+     "action": "collapse", "note": "collapse vendor GEMM tile-size id, keep family"},
     {"pattern": "(?i)profiler|marker|nvtx", "replacement": "",
      "action": "drop", "note": "profiler noise"},
-    {"pattern": "^(nvjet|cublasLt)", "replacement": "",
+    {"pattern": "^(vendor gemm prefix)", "replacement": "",
      "action": "preserve", "note": "keep vendor GEMM dims for later analysis"}
   ]
 }

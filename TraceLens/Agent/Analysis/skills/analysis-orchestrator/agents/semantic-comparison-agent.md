@@ -234,9 +234,7 @@ shared vocabulary.
 ### 2.6 Coherence Pass (second pass, LLM)
 
 The first pass leaves **one-sided** buckets -- kernels whose unified name
-appears in only one trace (most importantly vendor GEMM families: e.g.
-`(vendor1_gemm_name)_*` on one platform vs `(vendor2_gemm_name)_*` on the
-other, which cannot be paired by name). This pass uses
+appears in only one trace. This pass uses
 the first-pass **shared** buckets as cross-trace positional anchors and
 re-labels one-sided buckets by their shared-neighbor context, which (a)
 pairs GEMMs across vendors by position and (b) splits a name that occurs in

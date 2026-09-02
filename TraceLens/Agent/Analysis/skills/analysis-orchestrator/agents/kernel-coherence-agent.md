@@ -14,8 +14,8 @@ model: claude-opus-4-8
 
 Second pass over the name-first unification. The first pass leaves **one-sided**
 buckets: kernels whose unified name appears in only one trace -- most importantly
-vendor GEMM families that could not be paired by name (MI300 `Cijk_*` vs B300
-`nvjet_*`). This pass uses the first-pass **shared** buckets as cross-trace
+vendor GEMM families that could not be paired by name ((platform 1 name) `(likely gemm name platform 1)_*` vs
+(platform 2 name) `(likely gemm name platform 2)_*`). This pass uses the first-pass **shared** buckets as cross-trace
 positional anchors and re-labels the one-sided buckets by their **neighbor
 context**.
 
@@ -25,7 +25,7 @@ Two capabilities:
    one-sided bucket in trace B that sit in the *same* shared-neighbor context are
    the same operation -- give them the **same new shared name**. (The GEMM
    between `add_rmsnorm` and `rotary_embedding` is the QKV projection on both
-   traces, even though the raw kernels are `Cijk_...` vs `nvjet_...`.)
+   traces, even though the raw kernels are `(likely gemm name platform 1)_...` vs `(likely gemm name platform 2)_...`.)
 2. **Context-dependent splitting.** One name that appears in *different* contexts
    should become *different* buckets (a GEMM between attention and norm vs a GEMM
    between embedding and MoE).
@@ -52,13 +52,12 @@ The full `kernel_coherence_context.json` is provided inline. Key fields:
 For each one-sided context, work out the operation from:
 
 - **`left_window` / `right_window`** -- the primary signal. In a transformer
-  decoder layer the projections are pinned by their neighbors:
+  decoder layer the projections are pinned by their neighbors. Possible likely examples (not strict rules):
   - `(*norm* | rotary_embedding)` -> QKV projection
   - `(paged_attention | *norm*)` -> output projection
   - `(*norm* | act_and_mul)` -> gate/up projection
   - `(act_and_mul | *norm*)` -> down projection
-- **kernel name** -- `Cijk_*`, `nvjet_*`, `cublasLt::*`, `_gemm_*` are GEMMs;
-  `*paged_attention*`, `*fmha*` attention; `*rmsnorm*` norm; `*rope*` rotary.
+- **kernel name** -- for example, GEMMs, attention, norms, and rotary embeddings often have characteristic names.
 - **`sample_input_dims`** and **`kernels_in_run`** -- corroborate a pairing
   (matching shapes / per-layer counts).
 
@@ -68,7 +67,7 @@ name. Pick a short, vendor-neutral name (`qkv_projection`, `output_projection`,
 `gate_up_projection`, `down_projection`, ...).
 
 **perf_category caveat:** the regex classifier may tag a vendor kernel as
-`Others` (e.g. `nvjet_*`). Do **not** require identical `perf_category` to pair
+`Others`. Do **not** require identical `perf_category` to pair
 -- rely on the kernel name and the neighbor context. Still never pair operations
 that are clearly different types.
 
@@ -77,14 +76,14 @@ that are clearly different types.
 ```json
 {
   "context_renames": {
-    "MI300:6": "qkv_projection",
-    "B300:6":  "qkv_projection"
+    "(platform 1 name):6": "qkv_projection",
+    "(platform 2 name):6":  "qkv_projection"
   },
   "fallback_remap_a": {
-    "Cijk_..._MT64x16x128_...": "qkv_projection"
+    "(likely gemm name platform 1)_..._(likely gemm signature)_...": "qkv_projection"
   },
   "fallback_remap_b": {
-    "nvjet_sm103_tst_64x16_64x16_4x1_v_bz_TNT": "qkv_projection"
+    "(likely gemm name platform 2)_..._(likely gemm signature)_...": "qkv_projection"
   },
   "notes": "optional rationale"
 }
