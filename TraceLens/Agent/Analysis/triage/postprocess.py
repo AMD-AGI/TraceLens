@@ -150,14 +150,23 @@ def load_from_mapping(mapping_path: str) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def collect_findings(run_dirs: List[str]) -> Tuple[List[TriageFinding], int]:
-    """Parse triage_details.csv from each run_dir. Returns (findings, total_runs)."""
+def collect_findings(run_dirs: List[str]) -> Tuple[List[TriageFinding], int, int]:
+    """Parse triage_details.csv from each run_dir.
+
+    Returns (findings, total_runs, unassessed). ``total_runs`` counts every
+    discovered run; ``unassessed`` counts runs with no triage_details.csv (e.g.
+    a run whose dir was not writable, so the runner gracefully skipped output).
+    An unassessed run is neither "with findings" nor "clean" — it was never
+    checked — so callers must not fold it into either bucket.
+    """
     findings: List[TriageFinding] = []
     total_runs = len(run_dirs)
+    unassessed = 0
 
     for run_dir in run_dirs:
         csv_path = os.path.join(run_dir, "triage_details.csv")
         if not os.path.isfile(csv_path):
+            unassessed += 1
             continue
         model_name = extract_model_name(run_dir)
         try:
@@ -179,7 +188,7 @@ def collect_findings(run_dirs: List[str]) -> Tuple[List[TriageFinding], int]:
         except (OSError, csv.Error):
             continue
 
-    return findings, total_runs
+    return findings, total_runs, unassessed
 
 
 # ---------------------------------------------------------------------------
@@ -305,12 +314,15 @@ def write_summary_report(
     total_runs: int,
     reproducers: List[Tuple[str, str, List[TriageFinding]]],
     report_dir: str,
+    unassessed: int = 0,
 ) -> str:
     path = os.path.join(report_dir, "summary_report.md")
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     runs_with_findings = len(set(f.run_dir for f in findings))
-    clean_runs = total_runs - runs_with_findings
+    # "Clean" means assessed with zero findings — a run that was never assessed
+    # (no triage output) must not be counted as clean/healthy.
+    clean_runs = total_runs - runs_with_findings - unassessed
 
     lines = [
         "# Triage Summary Report",
@@ -323,7 +335,8 @@ def write_summary_report(
         "|---|---|",
         f"| Total runs analyzed | {total_runs} |",
         f"| Runs with findings | {runs_with_findings} ({_pct(runs_with_findings, total_runs)}%) |",
-        f"| Clean runs (no findings) | {clean_runs} ({_pct(clean_runs, total_runs)}%) |",
+        f"| Runs not assessed (no triage output) | {unassessed} ({_pct(unassessed, total_runs)}%) |",
+        f"| Clean runs (assessed, no findings) | {clean_runs} ({_pct(clean_runs, total_runs)}%) |",
         f"| Total findings | {len(findings)} |",
         f"| Unique failure modes | {len(agg['by_failure_mode'])} |",
         "",
@@ -707,10 +720,13 @@ def main() -> int:
         print("No run directories found. Nothing to process.")
         return 1
 
-    # Collect findings
+    # Collect findings. With --traces-root, discover_triage_csvs only yields
+    # dirs that already hold a triage_details.csv, so unassessed is 0 there;
+    # with --mapping, run_dirs includes gracefully-skipped (unwritable) runs.
     print("Collecting findings from triage CSVs...")
-    findings, total_runs = collect_findings(run_dirs)
+    findings, total_runs, unassessed = collect_findings(run_dirs)
     print(f"  Total runs: {total_runs}")
+    print(f"  Unassessed (no triage output): {unassessed}")
     print(f"  Total findings: {len(findings)}")
 
     if not findings:
@@ -736,7 +752,7 @@ def main() -> int:
 
     # Write summary report
     report_path = write_summary_report(
-        findings, agg, total_runs, reproducers, report_dir
+        findings, agg, total_runs, reproducers, report_dir, unassessed=unassessed
     )
     print(f"\nSummary report: {report_path}")
 

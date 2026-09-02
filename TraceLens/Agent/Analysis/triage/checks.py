@@ -16,14 +16,16 @@ in ``ALL_CHECKS``; the runner builds the final ``Finding`` from spec + draft.
 """
 
 import csv
+import functools
 import glob
-import gzip
 import json
 import math
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
+
+from TraceLens.util import DataLoader
 
 # ---------------------------------------------------------------------------
 # Finding / FindingDraft / CheckSpec
@@ -98,6 +100,25 @@ _PATH_REMAPS_CACHE = None
 _SDK_PREFIX_RE = re.compile(r"^\[claude-sdk\]\s*")
 _TBS_TFLOPS_EXEMPT_SUBSTRINGS = ("collective", "custom")
 
+# Trace files larger than this (bytes) are skipped by detection checks: parsing
+# multi-GB traces in-process is too costly for a fast triage pass.
+_MAX_TRACE_BYTES = 5_000_000_000
+# Traces below this (bytes) are treated as empty / warmup-only.
+_MIN_TRACE_BYTES = 100_000
+# "Significant op" band for unified_perf_summary rows.
+_SIGNIFICANT_CUM_PCT_MAX = 90
+_SIGNIFICANT_PCT_MIN = 4
+# Kernel-time coefficient-of-variation (std/mean) above which a run is unstable.
+_RUNTIME_INSTABILITY_CV = 0.25
+# kernel/cpu_op ratio below which a split trace is flagged as missing GPU kernels.
+_SPLIT_LOW_KERNEL_RATIO = 0.1
+# GPU idle percentage above which idle time is flagged.
+_HIGH_IDLE_PCT = 15
+# Minimum cpu_op events carrying input shapes before a capture is deemed OK.
+_MIN_CPU_OP_SHAPES = 10
+# Zero-byte file count above which disk exhaustion is suspected.
+_MAX_ZERO_BYTE_FILES = 3
+
 
 def _path_remaps():
     """Return the list of ``(old_prefix, new_prefix)`` remaps from the environment.
@@ -168,35 +189,42 @@ def resolve_trace_path(run_dir):
             if resolved:
                 return resolved
 
-    manifest = os.path.join(run_dir, "category_data", "category_manifest.json")
-    if os.path.isfile(manifest):
-        with open(manifest) as f:
-            data = json.load(f)
+    data = _load_manifest(run_dir)
+    if data:
         tp = data.get("trace_path")
         if tp:
             return _resolve_path(tp, os.path.isfile) or tp
     return None
 
 
-def resolve_main_trace_path(run_dir):
-    """Resolve the main rank-0 trace file for a run."""
+def _trace_input_dir(run_dir):
+    """Resolve the ``trace_input`` directory from the sibling ``trace_input_manifest.json``.
+
+    The manifest sits one level above ``run_dir``; returns the resolved input
+    directory or None if the manifest is missing, unreadable, or its path can't
+    be resolved.
+    """
     manifest_path = os.path.join(
         os.path.dirname(os.path.abspath(run_dir)), "trace_input_manifest.json"
     )
-    if os.path.isfile(manifest_path):
-        try:
-            with open(manifest_path) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            data = None
+    if not os.path.isfile(manifest_path):
+        return None
+    try:
+        with open(manifest_path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return _resolve_path(data.get("trace_input"), os.path.isdir)
 
-        if data is not None:
-            trace_input = _resolve_path(data.get("trace_input"), os.path.isdir)
-            if trace_input:
-                for pattern in ("*TP-0*.json*", "*rank0*.json*"):
-                    matches = sorted(glob.glob(os.path.join(trace_input, pattern)))
-                    if matches:
-                        return matches[0]
+
+def resolve_main_trace_path(run_dir):
+    """Resolve the main rank-0 trace file for a run."""
+    trace_input = _trace_input_dir(run_dir)
+    if trace_input:
+        for pattern in ("*TP-0*.json*", "*rank0*.json*"):
+            matches = sorted(glob.glob(os.path.join(trace_input, pattern)))
+            if matches:
+                return matches[0]
 
     # Fallback: search within this run only.
     for search_root in (os.path.join(run_dir, "trace_split"), run_dir):
@@ -213,21 +241,9 @@ def resolve_main_trace_path(run_dir):
 
 def resolve_capture_folder(run_dir):
     """Resolve the ``capture_traces`` folder for a run."""
-    manifest_path = os.path.join(
-        os.path.dirname(os.path.abspath(run_dir)), "trace_input_manifest.json"
-    )
-    if not os.path.isfile(manifest_path):
-        return None
-    try:
-        with open(manifest_path) as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-    trace_input = _resolve_path(data.get("trace_input"), os.path.isdir)
+    trace_input = _trace_input_dir(run_dir)
     if not trace_input:
         return None
-
     return _resolve_path(os.path.join(trace_input, "capture_traces"), os.path.isdir)
 
 
@@ -266,13 +282,45 @@ def _load_manifest(run_dir):
         return json.load(f)
 
 
+@functools.lru_cache(maxsize=1)
 def _load_trace_json(trace_path):
-    """Parse a trace file (plain or gzipped). Returns parsed data or raises."""
-    if trace_path.endswith(".gz"):
-        with gzip.open(trace_path, "rt", errors="replace") as f:
-            return json.load(f)
-    with open(trace_path, errors="replace") as f:
-        return json.load(f)
+    """Parse a trace file (plain or gzipped) via the library loader. Returns
+    parsed data or raises.
+
+    Delegates to ``DataLoader.load_data`` (orjson, strict UTF-8) and caches the
+    single most-recent parse so checks resolving the same rank-0 file don't
+    re-parse a multi-GB trace. ``orjson.JSONDecodeError`` subclasses
+    ``json.JSONDecodeError``, so callers guarding ``(OSError, json.JSONDecodeError)``
+    still catch parse failures; ``lru_cache`` does not memoize exceptions, so a
+    corrupt file re-raises on every call.
+    """
+    return DataLoader.load_data(trace_path)
+
+
+def _events_of(data):
+    """Extract the trace-event list from parsed trace data.
+
+    Traces are either a bare event list or a dict with a ``traceEvents`` key; a
+    dict without that key yields ``[]`` (empty, not an error).
+    """
+    return data if isinstance(data, list) else data.get("traceEvents", [])
+
+
+def _load_events(trace_path):
+    """Resolve, size-guard, load, and extract events for a detection check.
+
+    Returns the event list, or ``None`` when the file is absent, too large, or
+    fails to parse. Error-*reporting* checks that must distinguish missing from
+    corrupt call ``_load_trace_json`` directly instead.
+    """
+    if not trace_path or not os.path.exists(trace_path):
+        return None
+    if os.path.getsize(trace_path) > _MAX_TRACE_BYTES:
+        return None
+    try:
+        return _events_of(_load_trace_json(trace_path))
+    except (OSError, ValueError):
+        return None
 
 
 def resolve_split_trace_dir(run_dir):
@@ -309,13 +357,10 @@ def _load_gpu_timeline(run_dir):
         with open(path, newline="") as f:
             for row in csv.DictReader(f):
                 t = (row.get("type") or "").strip()
-                pct_str = (row.get("percent") or "").strip()
-                if not t or not pct_str:
+                pct = _parse_float(row.get("percent"))
+                if not t or pct is None:
                     continue
-                try:
-                    out[t] = float(pct_str)
-                except ValueError:
-                    continue
+                out[t] = pct
     except (OSError, csv.Error):
         return None
     return out
@@ -333,7 +378,7 @@ def _significant_rows(rows):
         cum = _parse_float(row.get("Cumulative Percentage (%)"))
         if pct is None or cum is None:
             continue
-        if cum <= 90 and pct >= 4:
+        if cum <= _SIGNIFICANT_CUM_PCT_MAX and pct >= _SIGNIFICANT_PCT_MIN:
             out.append(row)
     return out
 
@@ -343,7 +388,7 @@ def _parse_float(value):
     if value is None:
         return None
     s = str(value).strip()
-    if not s or s.lower() in {"nan", "none", "null"}:
+    if not s:
         return None
     try:
         v = float(s)
@@ -372,7 +417,7 @@ def _first_load_capture_event_set(capture_folder):
             data = _load_trace_json(os.path.join(capture_folder, fname))
         except (OSError, json.JSONDecodeError):
             continue
-        return data if isinstance(data, list) else data.get("traceEvents", [])
+        return _events_of(data)
     return None
 
 
@@ -406,7 +451,7 @@ def check_trace_missing(run_dir, _stream_file):
             "Check profiling setting in workload, or if trace path passed in correctly",
         )
 
-    # Helper: list any *json.gz traces sitting 5 levels above the run_dir.
+    # Helper: list any *json.gz traces sitting 6 levels above the run_dir.
     def _nearby_traces():
         nearby_root = os.path.normpath(os.path.join(run_dir, *([".."] * 6)))
         if not os.path.isdir(nearby_root):
@@ -422,7 +467,7 @@ def check_trace_missing(run_dir, _stream_file):
             return evidence + " | nearby *.json.gz: " + ", ".join(nearby)
         return evidence
 
-    # Recursive scan: find every *.json.gz under run_dir/../../../../../ (5 levels up).
+    # Recursive scan: find every *.json.gz under run_dir/../../../../../../ (6 levels up).
     # Used only when no trace can be resolved at all, to help operators locate
     # the trace artefact wherever it actually landed.
     def _recursive_traces(limit=50):
@@ -431,9 +476,7 @@ def check_trace_missing(run_dir, _stream_file):
             return None, []
         found = []
         try:
-            for dirpath, _dirnames, filenames in os.walk(
-                nearby_root, followlinks=False
-            ):
+            for dirpath, _, filenames in os.walk(nearby_root, followlinks=False):
                 for name in filenames:
                     if name.endswith(".json.gz"):
                         found.append(os.path.join(dirpath, name))
@@ -444,8 +487,8 @@ def check_trace_missing(run_dir, _stream_file):
         return nearby_root, sorted(found)
 
     # Step 2: trace_split exists with *.gz files but orchestrator never recorded a trace path
-    split_dir = os.path.join(run_dir, "trace_split")
-    if os.path.isdir(split_dir):
+    split_dir = resolve_split_trace_dir(run_dir)
+    if split_dir:
         gz_files = glob.glob(os.path.join(split_dir, "*.gz"))
         if gz_files:
             return FindingDraft(
@@ -488,13 +531,13 @@ def check_trace_size(run_dir, _stream_file):
     if not trace_path or not os.path.exists(trace_path):
         return None
     size = os.path.getsize(trace_path)
-    if size < 100_000:
+    if size < _MIN_TRACE_BYTES:
         return FindingDraft(
             "Trace files too small (< 100KB)",
             f"Trace file is {size:,} bytes — may be empty or warmup-only",
             "Profiling window too short or no GPU ops captured",
         )
-    if size > 5_000_000_000:
+    if size > _MAX_TRACE_BYTES:
         return FindingDraft(
             "Trace files too large (> 5GB)",
             f"Trace file is {size / 1e9:.1f} GB — consider splitting",
@@ -504,23 +547,15 @@ def check_trace_size(run_dir, _stream_file):
 
 
 def check_no_gpu_kernels(run_dir, _stream_file):
-    trace_path = resolve_trace_path(run_dir)
-    if not trace_path or not os.path.exists(trace_path):
+    events = _load_events(resolve_trace_path(run_dir))
+    if events is None:
         return None
-    if os.path.getsize(trace_path) > 5_000_000_000:
-        return None
-
-    try:
-        data = _load_trace_json(trace_path)
-        events = data if isinstance(data, list) else data.get("traceEvents", [])
-        if not any(e.get("cat") == "kernel" for e in events):
-            return FindingDraft(
-                "No GPU kernel events in trace",
-                "Trace contains no events with cat='kernel'",
-                "Ensure ProfilerActivity.CUDA is enabled in profiler config",
-            )
-    except (json.JSONDecodeError, OSError):
-        pass
+    if not any(e.get("cat") == "kernel" for e in events):
+        return FindingDraft(
+            "No GPU kernel events in trace",
+            "Trace contains no events with cat='kernel'",
+            "Ensure ProfilerActivity.CUDA is enabled in profiler config",
+        )
 
 
 def check_capture_missing(run_dir, _stream_file):
@@ -568,7 +603,7 @@ def check_high_idle(run_dir, stream_file):
             if idle is not None:
                 source = "category_manifest.json gpu_utilization.idle_time_percent"
 
-    if idle is not None and idle > 15:
+    if idle is not None and idle > _HIGH_IDLE_PCT:
         return FindingDraft(
             "High idle time (> 15% GPU idle)",
             f"GPU idle time is {idle:.1f}% ({source})",
@@ -584,34 +619,7 @@ def check_gpu_graph_replay(run_dir, stream_file):
             "DIAG tag found in agent stream",
             "Switch to inference analysis mode (--analysis_mode inference)",
         )
-    return None
-    # ToDo: add detailed check once we have stream file
-    candidates = []
-    main_path = resolve_main_trace_path(run_dir)
-    if main_path:
-        candidates.append(main_path)
-    trace_path = resolve_trace_path(run_dir)
-    if trace_path and trace_path not in candidates:
-        candidates.append(trace_path)
-
-    for path in candidates:
-        if not path or not os.path.exists(path):
-            continue
-        if os.path.getsize(path) > 5_000_000_000:
-            continue
-        try:
-            data = _load_trace_json(path)
-        except (OSError, json.JSONDecodeError):
-            continue
-        events = data if isinstance(data, list) else data.get("traceEvents", [])
-        for e in events:
-            name = e.get("name") or ""
-            if "hipGraphLaunch" in name or "cuGraphLaunch" in name:
-                return FindingDraft(
-                    "GPU Graph Replay detected in default mode",
-                    f"Trace contains '{name}' event in {os.path.basename(path)}",
-                    "Switch to inference analysis mode (--analysis_mode inference)",
-                )
+    # ToDo: add detailed trace-scan check once we have a stream file
     return None
 
 
@@ -619,15 +627,18 @@ def check_corrupt_json(run_dir, _stream_file):
     trace_path = resolve_trace_path(run_dir)
     if not trace_path or not os.path.exists(trace_path):
         return None
-    if os.path.getsize(trace_path) > 5_000_000_000:
+    if os.path.getsize(trace_path) > _MAX_TRACE_BYTES:
         return None
 
     try:
         _load_trace_json(trace_path)
-    except json.JSONDecodeError as e:
+    except ValueError as e:
+        # orjson.JSONDecodeError subclasses ValueError; DataLoader also raises a
+        # bare ValueError for an unknown/unloadable file type. Both mean the trace
+        # is not parseable, so report corrupt rather than crash.
         return FindingDraft(
             "Trace file is corrupted/invalid JSON",
-            f"JSONDecodeError: {str(e)[:150]}",
+            f"{type(e).__name__}: {str(e)[:150]}",
             "Re-collect the trace; verify .json.gz files are not truncated",
         )
     except OSError as e:
@@ -653,7 +664,7 @@ def check_missing_cpu_op_shapes(run_dir, _stream_file):
             "Profile with cpu_callstack and record_shapes enabled in profiler config",
         )
     with_shapes = sum(1 for e in cpu_ops if "Input Dims" in (e.get("args") or {}))
-    if with_shapes < 10:
+    if with_shapes < _MIN_CPU_OP_SHAPES:
         return FindingDraft(
             "Trace missing cpu_op events with input shapes",
             f"Only {with_shapes} of {len(cpu_ops)} cpu_op events carry 'Input Dims' in capture trace",
@@ -670,17 +681,20 @@ def check_inference_annotation_missing(run_dir, _stream_file):
             f"No trace found at path: {main_path}",
             "Verify the correct trace was selected and that the inference mode was enabled",
         )
-    if os.path.getsize(main_path) > 5_000_000_000:
+    if os.path.getsize(main_path) > _MAX_TRACE_BYTES:
         return None
     try:
         data = _load_trace_json(main_path)
     except (OSError, json.JSONDecodeError):
+        # Narrow on purpose: main_path is glob-restricted to a .json* file, so the
+        # bare ValueError("Unknown file type") that check_corrupt_json guards against
+        # (arbitrary resolved path) cannot arise here.
         return FindingDraft(
-            "Main inference trace corrupted/invalid JSON at path: {main_path}",
+            f"Main inference trace corrupted/invalid JSON at path: {main_path}",
             f"JSONDecodeError reading trace at path: {main_path}",
             "Verify the correct trace was selected and that the inference mode was enabled",
         )
-    events = data if isinstance(data, list) else data.get("traceEvents", [])
+    events = _events_of(data)
     execs = sum(
         1
         for e in events
@@ -716,10 +730,11 @@ def check_split_trace_missing(run_dir, _stream_file):
 
 
 def check_split_incorrect(_run_dir, _stream_file):
+    # Reserved placeholder for sublabel 2d; kept to preserve sublabel numbering.
     return None
 
 
-def check_sglang_shape_missing(run_dir, _stream_file):
+def check_shape_profiler_missing(run_dir, _stream_file):
     capture_folder = resolve_capture_folder(run_dir)
     events = None
     source_name = None
@@ -728,15 +743,9 @@ def check_sglang_shape_missing(run_dir, _stream_file):
         source_name = capture_folder
     if events is None:
         trace_path = resolve_trace_path(run_dir)
-        if not trace_path or not os.path.exists(trace_path):
+        events = _load_events(trace_path)
+        if events is None:
             return None
-        if os.path.getsize(trace_path) > 5_000_000_000:
-            return None
-        try:
-            data = _load_trace_json(trace_path)
-        except (OSError, json.JSONDecodeError):
-            return None
-        events = data if isinstance(data, list) else data.get("traceEvents", [])
         source_name = os.path.basename(trace_path)
 
     sglang_cpu = sum(
@@ -778,19 +787,15 @@ def check_split_low_gpu_kernels(run_dir, _stream_file):
 
     failures = []
     for path in candidates:
-        if not os.path.exists(path) or os.path.getsize(path) > 5_000_000_000:
+        events = _load_events(path)
+        if events is None:
             continue
-        try:
-            data = _load_trace_json(path)
-        except (OSError, json.JSONDecodeError):
-            continue
-        events = data if isinstance(data, list) else data.get("traceEvents", [])
         cpu_ops = sum(1 for e in events if e.get("cat") == "cpu_op")
         kernels = sum(1 for e in events if e.get("cat") == "kernel")
         if cpu_ops == 0:
             continue
         ratio = kernels / cpu_ops
-        if ratio < 0.1:
+        if ratio < _SPLIT_LOW_KERNEL_RATIO:
             failures.append((path, ratio, kernels, cpu_ops))
 
     if not failures:
@@ -802,7 +807,8 @@ def check_split_low_gpu_kernels(run_dir, _stream_file):
     ]
     return FindingDraft(
         "No / very few GPU kernel events in split trace",
-        f"{len(failures)} split trace(s) with kernel/cpu_op < 0.5: " + "; ".join(parts),
+        f"{len(failures)} split trace(s) with kernel/cpu_op < {_SPLIT_LOW_KERNEL_RATIO}: "
+        + "; ".join(parts),
         "Likely a spurious ROCm bug; apply correct fixes inside the docker container",
     )
 
@@ -818,7 +824,7 @@ def check_runtime_instability(run_dir, _stream_file):
         if not mean or std is None or mean <= 0:
             continue
         cv = std / mean
-        if cv > 0.25:
+        if cv > _RUNTIME_INSTABILITY_CV:
             unstable.append((cv, row))
     if not unstable:
         return None
@@ -985,7 +991,7 @@ def check_subagent_budget(run_dir, _stream_file):
         name = cat.get("name", "")
         if not name:
             continue
-        if name == "cpu_idle" and idle_pct is not None and idle_pct <= 15:
+        if name == "cpu_idle" and idle_pct is not None and idle_pct <= _HIGH_IDLE_PCT:
             continue
         tier = cat.get("tier", "compute_kernel")
         target_dir = system_dir if tier == "system" else findings_dir
@@ -1055,7 +1061,7 @@ def check_disk_full(run_dir, stream_file):
             fpath = os.path.join(dirpath, fname)
             if os.path.getsize(fpath) == 0 and not fname.startswith("."):
                 zero_byte.append(os.path.relpath(fpath, run_dir))
-    if len(zero_byte) > 3:
+    if len(zero_byte) > _MAX_ZERO_BYTE_FILES:
         return FindingDraft(
             "Disk space exhausted",
             f"{len(zero_byte)} zero-byte files found (e.g. {zero_byte[0]})",
@@ -1126,8 +1132,7 @@ def check_kernel_candidates_missing(run_dir_or_session_dir, _stream_file=None):
     except (OSError, json.JSONDecodeError):
         return None
 
-    # Hyperloom writes the kernel phase as the canonical "KERNEL_AGENT"; the old
-    # exact match on "KERNEL" never succeeded and silently disabled this check.
+    # Hyperloom writes the kernel phase as the canonical "KERNEL_AGENT"
     phases = [p.get("phase", "") for p in sbd.get("phase_segments", [])]
     if "KERNEL_AGENT" not in phases:
         return None
@@ -1305,7 +1310,6 @@ ALL_CHECKS = [
         "TRACE_MISSING",
         "profiling",
         check_trace_missing,
-        implies_failures=["1b", "1c"],
     ),
     CheckSpec("1b", "TRACE_SIZE", "profiling", check_trace_size),
     CheckSpec("1c", "NO_GPU_KERNELS", "profiling", check_no_gpu_kernels),
@@ -1342,9 +1346,9 @@ ALL_CHECKS = [
     ),
     CheckSpec(
         "2e",
-        "SGLANG_SHAPE_MISSING",
+        "SHAPE_PROFILER_MISSING",
         "trace_quality",
-        check_sglang_shape_missing,
+        check_shape_profiler_missing,
         detailed_only=True,
     ),
     CheckSpec(
