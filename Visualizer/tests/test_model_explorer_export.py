@@ -525,6 +525,24 @@ def test_kimi_layer_variants_export_three_decoder_splits():
         f"{decoder_ns}/24x_KimiMLAAttention_KimiSparseMoeBlock/KimiMLAAttention"
     )
     assert any(node["namespace"].startswith(mla_prefix) for node in graph["nodes"])
+    q_norm_ns = next(
+        node["namespace"]
+        for node in graph["nodes"]
+        if ":q_a_layernorm:" in node["id"] and node.get("label") == "Power"
+    )
+    kv_norm_ns = next(
+        node["namespace"]
+        for node in graph["nodes"]
+        if ":kv_a_layernorm:" in node["id"] and node.get("label") == "Power"
+    )
+    assert q_norm_ns.endswith("/q_a_layernorm")
+    assert kv_norm_ns.endswith("/kv_a_layernorm")
+    assert q_norm_ns != kv_norm_ns
+    assert not any(
+        (node.get("namespace") or "").endswith("/KimiRMSNorm")
+        for node in graph["nodes"]
+        if (node.get("namespace") or "").startswith(mla_prefix)
+    )
     assert not any(node["label"] == "LayerNorm" for node in graph["nodes"])
     assert any(node["label"] == "RMSNorm" for node in graph["nodes"])
     assert not any(
@@ -687,13 +705,9 @@ def test_kimi_layer_variants_export_three_decoder_splits():
         assert [item["id"] for item in output["outputsMetadata"]] == [
             "hidden_states"
         ]
-        mirror = next(
-            node
-            for node in graph["nodes"]
-            if node["id"] == f"{prefix}/@output^hidden_states"
-        )
-        assert mirror["label"] == "hidden_states"
-        assert mirror["incomingEdges"][0]["sourceNodeId"] == output["id"]
+        # One returned tensor, so no mirror is drawn outside the block.
+        assert output["label"] == "hidden_states"
+        assert f"{prefix}/@output^hidden_states" not in node_ids
     input_norm = next(
         node
         for node in graph["nodes"]
@@ -715,18 +729,15 @@ def test_kimi_layer_variants_export_three_decoder_splits():
     assert {"Power", "Mean", "Reciprocal sqrt", "Multiply"} <= {
         node["label"] for node in norm_nodes
     }
-    assert {"norm/@input", "norm/@output", "norm/@output^hidden_states"} <= node_ids
+    assert {"norm/@input", "norm/@output"} <= node_ids
+    assert "norm/@output^hidden_states" not in node_ids
     final_norm_output = next(
         node for node in graph["nodes"] if node["id"] == "norm/@output"
     )
     assert [item["id"] for item in final_norm_output["outputsMetadata"]] == [
         "hidden_states"
     ]
-    final_norm_mirror = next(
-        node for node in graph["nodes"] if node["id"] == "norm/@output^hidden_states"
-    )
-    assert final_norm_mirror["label"] == "hidden_states"
-    assert final_norm_mirror["incomingEdges"][0]["sourceNodeId"] == "norm/@output"
+    assert final_norm_output["label"] == "hidden_states"
     assert any(node["id"] == "lm_head" for node in graph["nodes"])
     assert not any(node.get("namespace") == "lm_head" for node in graph["nodes"])
     assert not any(node["id"] == "lm_head/@input" for node in graph["nodes"])

@@ -13,9 +13,11 @@ from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from visualizer.ast_analyze import (
+    FORWARD_METHOD_INPUT,
     SYNTHETIC_ATTENTION,
     SYNTHETIC_GATE_ACTIVATION,
     ClassStructure,
+    ForwardOperation,
     LoopCarriedSpec,
     SideInputSpec,
     attention_kernel_details,
@@ -644,6 +646,7 @@ class BlockNode:
     kernel_second_operand: str | None = None
     external_inputs: list[str] = field(default_factory=list)
     param_inputs: list[str] = field(default_factory=list)
+    boundary_input_name: str | None = None
     primary_output_step: str | None = None
     forward_return_slots: dict[str, str] = field(default_factory=dict)
     forward_return_order: list[str] = field(default_factory=list)
@@ -838,6 +841,7 @@ def _leaf_node(
     kernel_second_operand: str | None = None,
     external_inputs: list[str] | None = None,
     param_inputs: list[str] | None = None,
+    boundary_input_name: str | None = None,
 ) -> BlockNode:
     role = _classify_role(attr_name, class_name)
     return BlockNode(
@@ -853,7 +857,24 @@ def _leaf_node(
         kernel_second_operand=kernel_second_operand,
         external_inputs=list(external_inputs or []),
         param_inputs=list(param_inputs or []),
+        boundary_input_name=boundary_input_name,
     )
+
+
+def _boundary_input_name(
+    operation: ForwardOperation,
+    cls: ClassStructure,
+) -> str | None:
+    """The forward parameter an operation reads straight from the block boundary.
+
+    Only these operations sit on the block's edge, so they are what a boundary input
+    has to be named after: everything else reads a tensor produced inside the block.
+    """
+    if FORWARD_METHOD_INPUT in operation.predecessors:
+        return cls.forward_input_name
+    if operation.param_inputs and not operation.predecessors:
+        return operation.param_inputs[0]
+    return None
 
 
 def _gate_side_consumer(
@@ -1879,6 +1900,7 @@ def build_block_node(
                     operation_predecessors=list(operation.predecessors),
                     external_inputs=list(operation.external_inputs),
                     param_inputs=list(operation.param_inputs),
+                    boundary_input_name=_boundary_input_name(operation, cls),
                 )
             )
             continue

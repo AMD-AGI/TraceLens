@@ -1012,6 +1012,7 @@ class ClassStructure:
     forward_call_output_names: dict[str, str] = field(default_factory=dict)
     referenced_return_producers: set[str] = field(default_factory=set)
     loop_carried: list[LoopCarriedSpec] = field(default_factory=list)
+    dataflow_expanded: bool = False
 
 
 def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
@@ -2098,11 +2099,18 @@ def _extract_forward_return_metadata(
             break
     slots = {name: var_producer[name] for name in return_order if name in var_producer}
     input_name = _primary_forward_input_name(func)
+    # A tuple return's last value is often the continuation (``post, comb,
+    # collapsed``). The first value is the continuation when it is the module's
+    # actual result (``attn_output, attn_weights``). Prefer a tensor the forward
+    # names as the main hidden state before falling back to the last slot.
+    main_names = {"hidden_states", "hidden_state", "attn_output", "output", "result"}
     primary = (
         input_name
         if input_name in return_order
-        else (return_order[-1] if return_order else None)
+        else next((name for name in return_order if name in main_names), None)
     )
+    if primary is None:
+        primary = return_order[-1] if return_order else None
     return slots, return_order, primary
 
 
@@ -2465,6 +2473,8 @@ def expand_class_forward_dataflow(
     registry: dict[str, ClassStructure],
 ) -> None:
     """Populate all source tensor-method steps for one selected class."""
+    if cls.dataflow_expanded:
+        return
     forward = next(
         (
             item
@@ -2475,6 +2485,7 @@ def expand_class_forward_dataflow(
     )
     if forward is None:
         return
+    cls.dataflow_expanded = True
     init_func = next(
         (
             item

@@ -29,8 +29,28 @@ def _sanitize_namespace_segment(text: str) -> str:
     return cleaned or "group"
 
 
+def _duplicate_frame_labels(computation: ComputationGraph) -> set[str]:
+    """Labels used by more than one inline frame in this graph.
+
+    Two sibling modules of the same class (``q_a_layernorm`` and
+    ``kv_a_layernorm``) both frame as that class. Keying the namespace on the
+    class then merges their internals into one group, which reads as a loop.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    for frame in computation.inline_frames:
+        counts[frame.label] += 1
+    return {label for label, count in counts.items() if count > 1}
+
+
+def _frame_namespace_segment(frame, *, duplicate_labels: set[str]) -> str:
+    if frame.label in duplicate_labels:
+        return _sanitize_namespace_segment(frame.frame_id)
+    return _sanitize_namespace_segment(frame.label)
+
+
 def _node_namespaces(computation: ComputationGraph) -> dict[int, str]:
     namespaces: dict[int, str] = {index: "" for index in range(len(computation.nodes))}
+    duplicate_labels = _duplicate_frame_labels(computation)
     # Outer frames contain their nested frames' nodes. Apply larger frames first
     # so a helper called inside a loop becomes `Loop/_apply_gate`, not the
     # inverted `_apply_gate/Loop` hierarchy.
@@ -38,7 +58,7 @@ def _node_namespaces(computation: ComputationGraph) -> dict[int, str]:
         computation.inline_frames,
         key=lambda item: -len(set(item.node_indices)),
     ):
-        segment = _sanitize_namespace_segment(frame.label)
+        segment = _frame_namespace_segment(frame, duplicate_labels=duplicate_labels)
         for index in frame.node_indices:
             if index not in namespaces:
                 continue
@@ -60,6 +80,8 @@ def _node_attrs(spec) -> list[dict[str, str]]:
         attrs.append(_kv("class_name", block.class_name))
     if block is not None and block.role:
         attrs.append(_kv("role", block.role))
+    if block is not None and block.boundary_input_name:
+        attrs.append(_kv("boundary_input", block.boundary_input_name))
     if spec.sublabel:
         attrs.append(_kv("sublabel", spec.sublabel))
     if spec.port_label:

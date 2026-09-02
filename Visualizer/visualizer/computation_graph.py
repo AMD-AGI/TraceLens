@@ -415,6 +415,42 @@ def _add_forward_input(graph: ComputationGraph, root: BlockNode) -> int:
     )
 
 
+def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
+    """Give each extra forward parameter its own boundary input.
+
+    A forward like ``forward(hidden_states, gate)`` reads two tensors, but only the
+    primary one arrives on the chain. The steps that open the other parameter's path
+    read a name that no node produces, so without an input of its own that path
+    starts from nothing and the parameter has nowhere to dock.
+    """
+    primary = _input_label_for(root)
+    fed = {target for _source, target in graph.links}
+    param_index: dict[str, int] = {}
+    for index, spec in enumerate(list(graph.nodes)):
+        block = spec.block
+        if block is None or not _reads_only_a_side_parameter(block):
+            continue
+        # Expanding a submodule into its parent puts the parameter's real producer
+        # in the same graph, and it already docks onto this step. Only a step left
+        # without any producer is reading a tensor the graph does not yet carry.
+        if index in fed:
+            continue
+        for param in block.param_inputs:
+            if param == primary:
+                continue
+            source = param_index.get(param)
+            if source is None:
+                source = _add_node(
+                    graph,
+                    key=f"{SYNTHETIC_INPUT}:{param}",
+                    label=param,
+                    synthetic=SYNTHETIC_INPUT,
+                )
+                param_index[param] = source
+            if (source, index) not in graph.links:
+                graph.links.append((source, index))
+
+
 def add_forward_output(
     graph: ComputationGraph,
     *,
@@ -2203,6 +2239,8 @@ def build_computation_graph(
             graph.primary_output_index = last_index
     else:
         graph.primary_output_index = last_index
+    if resolved_include_input:
+        _add_forward_param_inputs(graph, root)
     graph = _apply_dead_code_elimination(
         graph,
         root,

@@ -72,6 +72,10 @@ def load_model_spec(
         analyze_code=analyze_code,
         detailed=detailed,
         basic_ops=resolved_basic_ops,
+        # A detailed export draws each forward as its source operations, so the
+        # layout-only steps between them have to survive analysis: dropping a
+        # `gate.to(float32)` leaves the sigmoid that reads it with no producer.
+        all_tensor_ops=detailed,
         allow_github_repos=allow_github_repos,
     )
 

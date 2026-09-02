@@ -791,6 +791,62 @@ def _skip_nested_inline_frame_input(
     )
 
 
+def _group_entry_buckets(
+    entry_nodes: list[dict[str, Any]],
+    internal_ids: set[str],
+) -> list[tuple[frozenset[tuple[str, str]], list[dict[str, Any]]]]:
+    """Split a group's entry nodes by the outside tensor each one reads.
+
+    ``forward(hidden_states, gate)`` enters the block at two unrelated steps fed by
+    two unrelated producers. Collapsing them onto one boundary tile would claim the
+    normalization reads the gate, so each distinct producer keeps its own entry.
+    """
+    buckets: dict[frozenset[tuple[str, str]], list[dict[str, Any]]] = {}
+    order: list[frozenset[tuple[str, str]]] = []
+    for node in entry_nodes:
+        sources = frozenset(
+            (edge["sourceNodeId"], edge.get("sourceNodeOutputId", "0"))
+            for edge in node.get("incomingEdges", [])
+            if edge["sourceNodeId"] not in internal_ids
+        )
+        if sources not in buckets:
+            buckets[sources] = []
+            order.append(sources)
+        buckets[sources].append(node)
+    return [(sources, buckets[sources]) for sources in order]
+
+
+def _entry_bucket_label(
+    entries: list[dict[str, Any]],
+    internal_ids: set[str],
+    node_by_id: dict[str, dict[str, Any]],
+) -> str | None:
+    """Name a boundary input after the tensor arriving on it, when it is known."""
+    for node in entries:
+        # The consuming step records which forward parameter it reads, which names
+        # the boundary more reliably than anything recoverable from the edge.
+        parameter = _node_attr(node, "boundary_input")
+        if parameter:
+            return parameter
+    for node in entries:
+        for edge in node.get("incomingEdges", []):
+            if edge["sourceNodeId"] in internal_ids:
+                continue
+            label = _edge_port_label(edge) or _labeled_tensor_port_label(
+                node_by_id.get(edge["sourceNodeId"])
+            )
+            if label:
+                return label
+    return None
+
+
+def _next_input_label(label: str, used: set[str]) -> str:
+    index = 2
+    while f"{label}_{index}" in used:
+        index += 1
+    return f"{label}_{index}"
+
+
 def _inject_group_inputs(
     section_nodes: list[dict[str, Any]],
     *,
@@ -844,44 +900,69 @@ def _inject_group_inputs(
         group_ids = [node["id"] for node in group_nodes]
         prefix = _group_input_prefix(group_ids) or group_ids[0].rsplit("/", 1)[0]
 
-        input_id = _group_input_id(prefix)
-        if input_id in node_by_id:
-            continue
-
-        input_node = _make_group_input_node(
-            input_id=input_id,
-            label=_infer_group_input_label(
-                group_nodes, namespace, entry_ports=entry_ports
-            ),
-            namespace=namespace,
-        )
-        if outside_sources:
-            input_node["incomingEdges"] = [
-                {
-                    "sourceNodeId": source_id,
-                    "sourceNodeOutputId": source_port,
-                    "targetNodeInputId": str(index),
-                }
-                for index, (source_id, source_port) in enumerate(
-                    sorted(outside_sources)
+        buckets = _group_entry_buckets(entry_nodes, internal_ids)
+        bucket_labels = [
+            _entry_bucket_label(entries, internal_ids, node_by_id)
+            for _sources, entries in buckets
+        ]
+        # Several entries reading the same parameter name are separate modules that
+        # happen to share a namespace, not one forward taking several tensors. Only
+        # distinctly named parameters earn a boundary tile each.
+        single = len(buckets) == 1 or len(
+            {label for label in bucket_labels if label}
+        ) < len(buckets)
+        if single:
+            buckets = [(frozenset(outside_sources), entry_nodes)]
+            bucket_labels = [
+                _infer_group_input_label(
+                    group_nodes, namespace, entry_ports=entry_ports
                 )
             ]
 
-        for entry in entry_nodes:
-            incoming = list(entry.get("incomingEdges", []))
-            internal = [
-                edge for edge in incoming if edge["sourceNodeId"] in internal_ids
-            ]
-            entry["incomingEdges"] = internal + [
-                {
-                    "sourceNodeId": input_id,
-                    "sourceNodeOutputId": "0",
-                    "targetNodeInputId": str(len(internal)),
-                }
-            ]
+        used_labels: set[str] = set()
+        for (sources, entries), label in zip(buckets, bucket_labels):
+            if not label:
+                label = _infer_group_input_label(group_nodes, namespace)
+            while label in used_labels:
+                label = _next_input_label(label, used_labels)
+            used_labels.add(label)
 
-        section_nodes.append(input_node)
-        node_by_id[input_id] = input_node
+            input_id = _group_input_id(prefix, None if single else label)
+            if input_id in node_by_id:
+                continue
+
+            input_node = _make_group_input_node(
+                input_id=input_id,
+                label=label,
+                namespace=namespace,
+                port_label=None if single else label,
+            )
+            bucket_sources = sorted(sources)
+            if bucket_sources:
+                input_node["incomingEdges"] = [
+                    {
+                        "sourceNodeId": source_id,
+                        "sourceNodeOutputId": source_port,
+                        "targetNodeInputId": str(index),
+                    }
+                    for index, (source_id, source_port) in enumerate(bucket_sources)
+                ]
+
+            for entry in entries:
+                incoming = list(entry.get("incomingEdges", []))
+                internal = [
+                    edge for edge in incoming if edge["sourceNodeId"] in internal_ids
+                ]
+                entry["incomingEdges"] = internal + [
+                    {
+                        "sourceNodeId": input_id,
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": str(len(internal)),
+                    }
+                ]
+
+            section_nodes.append(input_node)
+            node_by_id[input_id] = input_node
 
 
 def _tile_prefix_attr_name(prefix: str) -> str:
@@ -1202,13 +1283,26 @@ def _mirror_boundary_outputs(nodes: list[dict[str, Any]]) -> None:
     The Output sits inside the block namespace, so consumers otherwise reach across
     the boundary. A mirror in the parent namespace gives the escaping tensor a
     visible identity on both sides of the block.
+
+    A block returning one tensor needs no mirror: its single Output already carries
+    that tensor's name, and repeating it outside only doubles the tile.
     """
+    outputs_per_namespace: dict[str, int] = {}
+    for node in nodes:
+        if _is_synthetic_output(node):
+            namespace = str(node.get("namespace", ""))
+            outputs_per_namespace[namespace] = (
+                outputs_per_namespace.get(namespace, 0) + 1
+            )
+
     mirrors: list[dict[str, Any]] = []
     for node in list(nodes):
         if not _is_synthetic_output(node):
             continue
         namespace = str(node.get("namespace", ""))
         if not namespace:
+            continue
+        if outputs_per_namespace.get(namespace, 0) < 2:
             continue
         output_id = str(node.get("id"))
         parent_namespace = namespace.rsplit("/", 1)[0] if "/" in namespace else ""
@@ -1328,6 +1422,25 @@ def _nested_namespace_segment(nested_block: BlockNode, nested_label: str) -> str
             return _sanitize_namespace_segment(nested_label)
         return _sanitize_namespace_segment(nested_block.attr_name.lstrip("@"))
     return _sanitize_namespace_segment(nested_block.attr_name)
+
+
+def _nested_group_segment(
+    nested_block: BlockNode,
+    nested_label: str,
+    *,
+    has_tile: bool,
+    duplicate_labels: set[str],
+) -> str:
+    """Namespace for a nested submodule, unique when siblings share a class label."""
+    if nested_block.class_name == "KernelPipeline":
+        return _sanitize_namespace_segment(nested_label)
+    if nested_label in duplicate_labels:
+        return _sanitize_namespace_segment(
+            nested_block.attr_name.lstrip("@") or nested_block.attr_name
+        )
+    if has_tile:
+        return _sanitize_namespace_segment(nested_label)
+    return _nested_namespace_segment(nested_block, nested_label)
 
 
 def _is_tensor_port(node: dict[str, Any]) -> bool:
@@ -1719,9 +1832,14 @@ def _append_section(
     tile_ids = _block_tile_ids(computation, id_prefix=id_prefix)
     tile_replacements: dict[str, SourceRef] = {}
     nested_output_names: dict[str, str] = {}
-    for nested_label, nested_block in collect_nested_diagrams(
-        block_tree, basic_ops=basic_ops
-    ):
+    nested_diagrams = collect_nested_diagrams(block_tree, basic_ops=basic_ops)
+    nested_label_counts: dict[str, int] = {}
+    for nested_label, _nested_block in nested_diagrams:
+        nested_label_counts[nested_label] = nested_label_counts.get(nested_label, 0) + 1
+    duplicate_nested_labels = {
+        label for label, count in nested_label_counts.items() if count > 1
+    }
+    for nested_label, nested_block in nested_diagrams:
         tile_id = tile_ids.get(id(nested_block))
         nested_prefix = tile_id or _merge_node_id(id_prefix, nested_block.attr_name)
         nested_name = _caller_output_name(
@@ -1733,10 +1851,11 @@ def _append_section(
             continue
         nested_namespace = _join_namespace(
             namespace_prefix,
-            (
-                _sanitize_namespace_segment(nested_label)
-                if tile_id
-                else _nested_namespace_segment(nested_block, nested_label)
+            _nested_group_segment(
+                nested_block,
+                nested_label,
+                has_tile=tile_id is not None,
+                duplicate_labels=duplicate_nested_labels,
             ),
         )
         if nested_block.class_name == "KernelPipeline" and any(

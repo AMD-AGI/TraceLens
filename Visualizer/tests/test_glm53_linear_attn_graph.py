@@ -244,7 +244,8 @@ def test_glm53_hyperconnection_expands_mhc_math():
         for source, dest in graph.links
         if dest == multiply_index
     }
-    assert incoming_labels == {"Add", "hidden_streams"}
+    # `collapsed = (pre.unsqueeze(-1) * hidden_streams)` reshapes `pre` first.
+    assert incoming_labels == {"Unsqueeze", "hidden_streams"}
     assert "Divide" not in incoming_labels
 
 
@@ -286,6 +287,92 @@ def test_glm53_rmsnorm_classes_expand_real_math(class_name, required_labels):
 
     assert required_labels <= {node.label for node in graph.nodes}
     assert "RMSNorm" not in {node.label for node in graph.nodes}
+
+
+def test_glm53_gated_norm_gives_each_forward_parameter_its_own_input():
+    """`forward(hidden_states, gate)` reads two tensors, so it shows two inputs."""
+    pytest.importorskip("huggingface_hub")
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import build_computation_graph
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    tree = build_block_node(
+        attr_name="o_norm",
+        class_name="Glm5NextTextRMSNormGated",
+        registry=spec.class_registry,
+        basic_ops=spec.basic_ops,
+        infer_init_steps=True,
+    )
+    graph = build_computation_graph(tree, basic_ops=spec.basic_ops)
+
+    inputs = {
+        index: node.label
+        for index, node in enumerate(graph.nodes)
+        if node.synthetic == "@input"
+    }
+    assert set(inputs.values()) == {"hidden_states", "gate"}
+
+    gate_index = next(index for index, label in inputs.items() if label == "gate")
+    consumers = [target for source, target in graph.links if source == gate_index]
+    assert consumers, "the gate input has to feed the step that reads it"
+    # `sigmoid(gate.to(torch.float32))` retypes the gate before activating it.
+    assert {graph.nodes[index].label for index in consumers} == {"Cast"}
+
+    # The two parameters meet at the multiply that scales the norm by the gate.
+    sigmoid = next(
+        index for index, node in enumerate(graph.nodes) if node.label == "Sigmoid"
+    )
+    combine = next(
+        target for source, target in graph.links if source == sigmoid
+    )
+    assert graph.nodes[combine].label == "Multiply"
+    assert len([1 for _source, target in graph.links if target == combine]) == 2
+
+
+def test_glm53_gated_norm_boundary_inputs_come_from_their_own_producers():
+    """Each boundary tile is fed by the producer of the tensor it is named for."""
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    prefix = _linear_attn_variant_prefix(spec)
+
+    namespace = next(
+        node["namespace"]
+        for node in graph["nodes"]
+        if (node.get("namespace") or "").endswith("Glm5NextTextRMSNormGated")
+        and node["id"].startswith(prefix)
+    )
+    group = [node for node in graph["nodes"] if node.get("namespace") == namespace]
+    inputs = {
+        node["label"]: node
+        for node in group
+        if any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@input"
+            for attr in node.get("attrs", [])
+        )
+    }
+    assert set(inputs) == {"hidden_states", "gate"}
+
+    # The gate arrives from the projection that computes it, not from the spine.
+    gate_sources = [
+        edge["sourceNodeId"] for edge in inputs["gate"].get("incomingEdges", [])
+    ]
+    assert gate_sources and all("g_b_proj" in source for source in gate_sources)
+    hidden_sources = [
+        edge["sourceNodeId"]
+        for edge in inputs["hidden_states"].get("incomingEdges", [])
+    ]
+    assert hidden_sources and not any("g_b_proj" in item for item in hidden_sources)
+
+    gate_consumers = {
+        str(node.get("label"))
+        for node in group
+        if any(
+            edge["sourceNodeId"] == inputs["gate"]["id"]
+            for edge in node.get("incomingEdges", [])
+        )
+    }
+    assert gate_consumers == {"Cast"}
 
 
 def test_glm53_o_norm_expands_rmsnorm_math_in_merged_graph():
@@ -503,15 +590,22 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
             for attr in mirror.get("attrs", [])
         )
         assert node_by_id[norm_input_id]["incomingEdges"][0]["sourceNodeId"] == mirror_id
-        assert incoming[0]["sourceNodeId"] == norm_input_id
+        # RMSNorm casts to float32 before squaring, so the cast is what the block
+        # boundary hands the norm math.
+        cast_id = incoming[0]["sourceNodeId"]
+        assert node_by_id[cast_id].get("label") == "Cast"
+        assert (
+            node_by_id[cast_id]["incomingEdges"][0]["sourceNodeId"] == norm_input_id
+        )
         assert _has_export_path(graph["nodes"], output_id, node["id"])
         assert norm_output_id in node_by_id
         norm_output = node_by_id[norm_output_id]
         assert [item["id"] for item in norm_output["outputsMetadata"]] == [
             "hidden_states"
         ]
-        norm_mirror = node_by_id[f"{norm_output_id}^hidden_states"]
-        assert norm_mirror["label"] == "hidden_states"
+        assert norm_output["label"] == "hidden_states"
+        # A single-output block needs no mirror; the Output already names the tensor.
+        assert f"{norm_output_id}^hidden_states" not in node_by_id
 
         output_prefix = f"{prefix}/{source_component[target]}/@output:"
         output_nodes = [
@@ -726,29 +820,66 @@ def test_glm53_spine_norms_do_not_share_a_namespace():
     post_ns = section_namespace("post_attention_layernorm")
     assert input_ns != post_ns
 
-    # Neither norm group may both feed and be fed by the decoder spine, which is
-    # what a shared namespace produced.
-    spine = namespace_of[f"{prefix}/@input"]
+    # A shared namespace made a norm both feed and be fed by the same group, which
+    # is what read as a loop.
+    reaches: dict[str, set[str]] = {}
+    for node in graph["nodes"]:
+        target = namespace_of.get(node["id"], "")
+        for edge in node.get("incomingEdges", []):
+            source = namespace_of.get(edge["sourceNodeId"], "")
+            if source != target:
+                reaches.setdefault(source, set()).add(target)
     for norm_ns in (input_ns, post_ns):
-        into_spine = False
-        out_of_spine = False
-        for node in graph["nodes"]:
-            target = namespace_of.get(node["id"], "")
-            for edge in node.get("incomingEdges", []):
-                source = namespace_of.get(edge["sourceNodeId"], "")
-                if source == norm_ns and target == spine:
-                    into_spine = True
-                if source == spine and target == norm_ns:
-                    out_of_spine = True
-        assert into_spine and out_of_spine
+        both_ways = {
+            other
+            for other in reaches.get(norm_ns, set())
+            if norm_ns in reaches.get(other, set())
+        }
+        assert not both_ways, (norm_ns, both_ways)
+
     # The real order is attn_hc -> input_layernorm -> self_attn.
-    norm_mirror = f"{prefix}/input_layernorm/@output^hidden_states"
+    norm_output = f"{prefix}/input_layernorm/@output"
     attention_input = next(
         node
         for node in graph["nodes"]
         if node["id"] == f"{prefix}/self_attn/@input"
     )
-    assert attention_input["incomingEdges"][0]["sourceNodeId"] == norm_mirror
+    assert attention_input["incomingEdges"][0]["sourceNodeId"] == norm_output
+
+
+def test_glm53_attention_lora_norms_do_not_share_a_namespace():
+    """q_a_layernorm and kv_a_layernorm are two RMSNorms, not one looping group."""
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+
+    def namespace_for(attr: str) -> str:
+        node = next(
+            candidate
+            for candidate in graph["nodes"]
+            if candidate.get("label") == "Power"
+            and (
+                f":{attr}:" in candidate["id"]
+                or str(candidate.get("namespace", "")).endswith(f"/{attr}")
+            )
+        )
+        return str(node.get("namespace", ""))
+
+    q_ns = namespace_for("q_a_layernorm")
+    kv_ns = namespace_for("kv_a_layernorm")
+    assert q_ns.endswith("/q_a_layernorm")
+    assert kv_ns.endswith("/kv_a_layernorm")
+    assert q_ns != kv_ns
+
+    residual = next(
+        node
+        for node in graph["nodes"]
+        if node["id"].endswith("/@op_l1316_c55_unsqueeze")
+        and "Glm5NextTextAttention_Glm5NextTextMoE" in node["id"]
+    )
+    assert residual["incomingEdges"][0]["sourceNodeId"].endswith(
+        "/self_attn/@output:attn_output"
+    )
 
 
 def test_glm53_operation_tile_colors_are_consistent_per_label():
@@ -860,17 +991,19 @@ def test_glm53_forget_gate_has_real_boundary_nodes():
         if node.get("label") == "Multiply"
         and forget_output["incomingEdges"][0]["sourceNodeId"] == node["id"]
     )
-    mirror_id = f"{forget_output['id']}^g"
-    mirror = next(node for node in graph["nodes"] if node["id"] == mirror_id)
-    assert mirror["label"] == "g"
-    assert mirror["incomingEdges"][0]["sourceNodeId"] == forget_output["id"]
+    # One returned tensor, so the Output carries the name on its own.
+    assert forget_output["label"] == "g"
+    assert not any(
+        node["id"] == f"{forget_output['id']}^g" for node in graph["nodes"]
+    )
     attention = next(
         node for node in graph["nodes"] if node["id"].startswith(prefix) and ":@attention:" in node["id"]
     )
     assert _has_export_path(graph["nodes"], terminal_multiply["id"], attention["id"])
 
 
-def test_glm53_norm_boundary_connects_to_attention_input_through_mirror():
+def test_glm53_norm_boundary_connects_directly_to_attention_input():
+    """One-tensor blocks hand off Output to Input without a mirror in between."""
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec)
@@ -881,16 +1014,16 @@ def test_glm53_norm_boundary_connects_to_attention_input_through_mirror():
     norm_input = node_by_id[f"{norm_prefix}@input"]
     norm_output = node_by_id[f"{norm_prefix}@output"]
     assert norm_input["label"] == "hidden_states"
+    assert norm_output["label"] == "hidden_states"
     assert [item["id"] for item in norm_output["outputsMetadata"]] == [
         "hidden_states"
     ]
-    mirror_id = f"{norm_prefix}@output^hidden_states"
-    mirror = node_by_id[mirror_id]
-    assert mirror["label"] == "hidden_states"
-    assert mirror["incomingEdges"][0]["sourceNodeId"] == norm_output["id"]
+    assert f"{norm_prefix}@output^hidden_states" not in node_by_id
+
     attention_input = node_by_id[f"{prefix}/self_attn/@input"]
-    source_id = attention_input["incomingEdges"][0]["sourceNodeId"]
-    assert source_id == mirror_id
+    assert (
+        attention_input["incomingEdges"][0]["sourceNodeId"] == norm_output["id"]
+    )
     assert _has_export_path(
         graph["nodes"], norm_input["id"], attention_input["id"]
     )
@@ -907,7 +1040,6 @@ def test_glm53_hyper_head_precedes_final_norm():
     norm_output = node_by_id["norm/@output"]
     assert norm_input["incomingEdges"][0]["sourceNodeId"] == "hc_head"
     assert [item["id"] for item in norm_output["outputsMetadata"]] == ["hidden_states"]
-    norm_mirror = node_by_id["norm/@output^hidden_states"]
-    assert norm_mirror["label"] == "hidden_states"
-    assert norm_mirror["incomingEdges"][0]["sourceNodeId"] == norm_output["id"]
-    assert _has_export_path(graph["nodes"], "hc_head", norm_mirror["id"])
+    assert norm_output["label"] == "hidden_states"
+    assert "norm/@output^hidden_states" not in node_by_id
+    assert _has_export_path(graph["nodes"], "hc_head", norm_output["id"])
