@@ -1207,18 +1207,16 @@ class TraceToTree(BaseTraceToTree):
         ac2g_start_event = self.ac2g_event_map["start"].get(link_id)
         ac2g_end_event = self.ac2g_event_map["end"].get(link_id)
 
-        output_event = None
         if ac2g_start_event and ac2g_end_event:
             pid = ac2g_end_event.get(TraceEventUtils.TraceKeys.PID)
             tid = ac2g_end_event.get(TraceEventUtils.TraceKeys.TID)
             end_link_id = ac2g_end_event.get("id")
-            output_event = self.pid_tid_event_map.get((pid, tid, end_link_id))
-
-        if output_event is None:
+            return self.pid_tid_event_map.get((pid, tid, end_link_id))
+        else:
             gpu_events = self.linking_id_to_gpu_events.get(link_id, [])
             if len(gpu_events) == 1:
-                output_event = gpu_events[0]
-        return output_event
+                return gpu_events[0]
+            return None
 
     def get_nn_module_children(self, nn_module_event: Dict[str, Any]):
         """
