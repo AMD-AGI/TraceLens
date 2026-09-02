@@ -56,7 +56,7 @@ from .annotation_utils import (
     PHASE_PREFILL_ONLY,
     average_detail,
     classify_phase,
-    find_iteration_roots_by_priority,
+    find_known_annotations,
     find_phase_from_window,
     iteration_details,
 )
@@ -484,9 +484,7 @@ def load_trace(path: str):
     events = trace_json.get("traceEvents", [])
     gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
     print(f"Loaded {len(events)} events from {path}")
-    # Detailed patterns take priority over the native patterns.
-    label = f"execution steps (iteration) [{os.path.basename(path)}]"
-    iteration_roots = find_iteration_roots_by_priority(events, label=label)
+    iteration_roots = find_known_annotations(events)
     return {
         "trace_json": trace_json,
         "events": events,

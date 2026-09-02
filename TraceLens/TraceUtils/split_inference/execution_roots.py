@@ -12,7 +12,7 @@ from ...Trace2Tree.inference_iteration_roots import _entry_roots, _reattach_work
 from ...Trace2Tree.trace_to_tree import TraceToTree
 from ..annotation_utils import (
     PROVENANCE_KEY,
-    find_iteration_roots_by_priority,
+    find_known_annotations,
     inherit_identity,
     is_parseable,
     name_skeleton,
@@ -124,7 +124,7 @@ def _detect_from_annotations(
     real iteration marker never carries Input Dims).
     """
     families = build_families(annotations, attribution)
-    known = find_iteration_roots_by_priority(annotations)
+    known = find_known_annotations(annotations)
 
     if known:
         index = IntervalIndex(annotations)

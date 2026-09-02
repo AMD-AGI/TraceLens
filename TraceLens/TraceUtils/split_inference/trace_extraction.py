@@ -75,6 +75,29 @@ def preprocess_trace(events: list[dict]):
     return gpu_corr_map, flow_corr_map, meta_events
 
 
+def build_cpu_event_index(
+    events: list[dict],
+) -> tuple[list[dict], list[float]]:
+    """Pre-filter and sort CPU-side events for extraction.
+
+    Returns ``(cpu_events, cpu_starts)`` -- the sorted event list and a parallel
+    list of timestamps for bisect lookups.  Build once, pass to every
+    :func:`extract_iteration` call on the same trace.
+    """
+    cpu_events = []
+    for e in events:
+        ts = e.get("ts")
+        dur = e.get("dur")
+        if ts is None or dur is None:
+            continue
+        if e.get("cat") in GPU_EVENT_CATEGORIES:
+            continue
+        cpu_events.append(e)
+    cpu_events.sort(key=lambda e: e["ts"])
+    cpu_starts = [e["ts"] for e in cpu_events]
+    return cpu_events, cpu_starts
+
+
 def extract_iteration(
     iteration_roots: list[dict],
     events: list[dict],
@@ -84,6 +107,7 @@ def extract_iteration(
     meta_events: list[dict],
     root_tiles: dict | None = None,
     gap_fill: bool = True,
+    cpu_event_index: tuple[list[dict], list[float]] | None = None,
 ) -> dict:
     """Extract a single iteration trace.
 
@@ -100,6 +124,10 @@ def extract_iteration(
     list: built from a selected window instead, the window's last root would lose
     the boundary of the root that follows it. Pass ``gap_fill=False`` to score
     each root by its own span.
+
+    ``cpu_event_index`` is an optional ``(cpu_events, cpu_starts)`` tuple from
+    :func:`build_cpu_event_index`.  When provided the expensive full-event scan
+    and sort is skipped -- pass it when calling in a loop over many roots.
     """
 
     filtered_events = []
@@ -131,35 +159,13 @@ def extract_iteration(
 
     min_iter_ts = min(start for start, _ in windows)
     max_iter_end = max(end for _, end in windows)
-    # When tiles come from the full root list (the normal case), the true last
-    # window is the one ending at the global tile maximum -- not just the last
-    # window in this call.  Without this, single-root extract_iteration calls
-    # (--store-single-iteration) treat every window as "last" and close the
-    # right boundary, leaking the next root's events into the current window.
     if root_tiles:
         max_iter_end = max(max_iter_end, max(end for _, end in root_tiles.values()))
 
-    # Pre-filter every timestamped CPU-side event in the global window, on ANY
-    # thread. Iterations are time windows, so work dispatched to a sibling thread
-    # -- the autograd engine's backward pass, a stream-side worker -- belongs to
-    # the window its launch falls in and is kept, on its own thread, in the
-    # output. Restricting to the root's thread dropped that work entirely.
-    cpu_events = []
-    for e in events:
-        ts = e.get("ts")
-        dur = e.get("dur")
-        if ts is None or dur is None:
-            continue
-        # GPU events arrive only via their launch's correlation id below; the
-        # per-thread pre-filter used to exclude them implicitly (they sit on the
-        # GPU streams, not a root thread), so widening to all threads must skip
-        # them explicitly or every kernel is counted twice.
-        if e.get("cat") in GPU_EVENT_CATEGORIES:
-            continue
-        if min_iter_ts <= ts <= max_iter_end:
-            cpu_events.append(e)
-    cpu_events.sort(key=lambda e: e["ts"])
-    cpu_starts = [e["ts"] for e in cpu_events]
+    if cpu_event_index is not None:
+        cpu_events, cpu_starts = cpu_event_index
+    else:
+        cpu_events, cpu_starts = build_cpu_event_index(events)
 
     # For each iteration window collect the CPU events whose start falls in it,
     # regardless of thread, then follow their correlation ids to the GPU work.
@@ -252,7 +258,6 @@ def extract_and_save(
     edge of a selected window still knows where its successor begins.
     """
     extraction_summary = []
-    # print(f"roots: {roots}")
     if len(roots) == 0 or len(roots[0]) == 0:
         print(f"No {prefix} events found in the specified range, skipping extraction")
         return extraction_summary
@@ -261,6 +266,7 @@ def extract_and_save(
     if len(selected) == 0:
         print(f"No {prefix} events found in the specified range, skipping extraction")
         return extraction_summary
+    cpu_idx = build_cpu_event_index(events)
     for idx, root in zip(indices, selected):
         iter_details = iteration_details(root)
         iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = extract_iteration(
@@ -271,6 +277,7 @@ def extract_and_save(
             flow_corr_map,
             meta_events,
             root_tiles=root_tiles,
+            cpu_event_index=cpu_idx,
         )
         is_annotation = "annotation_iteration" in prefix
         # Use the structured phase-aware name for any annotation extraction

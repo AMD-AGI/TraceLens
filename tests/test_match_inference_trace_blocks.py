@@ -156,8 +156,8 @@ def make_trace(root_names, pid=1, cpu_tid=10, gpu_tid=99):
 # The pipeline, run once. Discovery mirrors load_trace(); windowing and
 # selection mirror main(). Nothing below mutates these.
 A_TRACE, B_TRACE = make_trace(TRACE_A_NAMES), make_trace(TRACE_B_NAMES)
-A_ROOTS = match.find_iteration_roots_by_priority(A_TRACE["traceEvents"])
-B_ROOTS = match.find_iteration_roots_by_priority(B_TRACE["traceEvents"])
+A_ROOTS = match.find_known_annotations(A_TRACE["traceEvents"])
+B_ROOTS = match.find_known_annotations(B_TRACE["traceEvents"])
 A_BLOCKS, B_BLOCKS = match.find_blocks(A_ROOTS), match.find_blocks(B_ROOTS)
 A_WINDOWS = match.window_blocks(A_BLOCKS, NUM_STEPS)
 B_WINDOWS = match.window_blocks(B_BLOCKS, NUM_STEPS)

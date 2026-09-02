@@ -18,7 +18,7 @@ from TraceLens.TraceUtils.annotation_utils import (
     PHASE_PREFILLDECODE,
     average_detail,
     find_events_by_patterns,
-    find_iteration_roots_by_priority,
+    find_known_annotations,
     find_phase_from_window,
     ITERATION_PATTERNS,
 )
@@ -158,17 +158,17 @@ def test_find_events_by_patterns_filters_and_sorts():
     assert [e["ts"] for e in matches] == [1, 3]
 
 
-def test_find_iteration_roots_by_priority_prefers_primary_patterns():
+def test_find_known_annotations_prefers_primary_patterns():
     events = [
         _root(VLLM_PREFILLDECODE, ts=1),
         _root("execute_context_3(100)_generation_2(50)", ts=2),
     ]
-    roots = find_iteration_roots_by_priority(events)
+    roots = find_known_annotations(events)
     assert len(roots) == 1
     assert "sq128" in roots[0]["name"]
 
     backup_only = [_root("execute_context_3(100)_generation_2(50)", ts=1)]
-    roots = find_iteration_roots_by_priority(backup_only)
+    roots = find_known_annotations(backup_only)
     assert len(roots) == 1
     assert roots[0]["name"].startswith("execute_context")
 
