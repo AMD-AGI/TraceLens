@@ -36,7 +36,7 @@ from ..Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
-from ..PerfModel.utils import add_simulation_time_columns
+from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
 
 
 def normalize_dtype_to_precision(dtype_str):
@@ -439,12 +439,6 @@ class TreePerfAnalyzer:
 
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
 
-        tflops_per_s = (
-            (gflops / 1e3) / (busy_kernel_time / 1e6)
-            if busy_kernel_time > 0
-            else float("nan")
-        )
-
         non_data_mov_tflops_per_s = (
             (gflops / 1e3) / (busy_non_data_mov_time / 1e6)
             if busy_non_data_mov_time > 0
@@ -452,28 +446,10 @@ class TreePerfAnalyzer:
         )
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
-        dict_metrics = {
-            "GFLOPS": gflops,
-            "Kernel Time (µs)": busy_kernel_time,
-            "TFLOPS/s": tflops_per_s,
-        }
+        dict_metrics = build_perf_metrics_dict(gflops, bytes_moved, busy_kernel_time)
         if non_data_mov:
             dict_metrics["Non-Data-Mov Kernel Time (µs)"] = busy_non_data_mov_time
             dict_metrics["Non-Data-Mov TFLOPS/s"] = non_data_mov_tflops_per_s
-        if bytes_moved is not None:
-            dict_metrics["Data Moved (MB)"] = bytes_moved / (1024 * 1024)
-            dict_metrics["FLOPS/Byte"] = (
-                (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float("nan")
-            )
-            dict_metrics["TB/s"] = (
-                (bytes_moved / 1e12) / (busy_kernel_time / 1e6)
-                if busy_kernel_time > 0
-                else float("nan")
-            )
-        else:
-            dict_metrics["Data Moved (MB)"] = float("nan")
-            dict_metrics["FLOPS/Byte"] = float("nan")
-            dict_metrics["TB/s"] = float("nan")
 
         # Add compute spec column (e.g., "matrix_fp16", "vector_bf16")
         compute_spec = get_compute_spec(perf_model)
@@ -3633,33 +3609,9 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
         busy_kernel_time = event[TraceEventUtils.TraceKeys.Duration]
 
-        tflops_per_s = (
-            (gflops / 1e3) / (busy_kernel_time / 1e6)
-            if busy_kernel_time > 0
-            else float("nan")
-        )
-
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
-        dict_metrics = {
-            "GFLOPS": gflops,
-            "Kernel Time (µs)": busy_kernel_time,
-            "TFLOPS/s": tflops_per_s,
-        }
-        if bytes_moved is not None:
-            dict_metrics["Data Moved (MB)"] = bytes_moved / (1024 * 1024)
-            dict_metrics["FLOPS/Byte"] = (
-                (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float("nan")
-            )
-            dict_metrics["TB/s"] = (
-                (bytes_moved / 1e12) / (busy_kernel_time / 1e6)
-                if busy_kernel_time > 0
-                else float("nan")
-            )
-        else:
-            dict_metrics["Data Moved (MB)"] = float("nan")
-            dict_metrics["FLOPS/Byte"] = float("nan")
-            dict_metrics["TB/s"] = float("nan")
+        dict_metrics = build_perf_metrics_dict(gflops, bytes_moved, busy_kernel_time)
 
         # JaxGemm (constructor may set simulation_time from Origami)
         if hasattr(perf_model, "simulation_time"):
