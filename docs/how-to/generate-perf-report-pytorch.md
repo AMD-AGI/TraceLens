@@ -167,6 +167,7 @@ can define any of:
 | `tree_postprocess_extension` | `Callable` | Called with `perf_analyzer.tree`; update the tree post-construction. |
 | `perf_model_extension` | `dict` | Map op name → custom perf-model class; overrides or extends built-in models. |
 | `op_category_extension` | `dict` | Map category-only op names to final categories, so an op appears in unified reports without a perf model. |
+| `categorize_extension` | `Callable` | Called with `(row, perf_analyzer)`; return a category or `None` to use the default categorizer. |
 
 ```bash
 TraceLens_generate_perf_report_pytorch \

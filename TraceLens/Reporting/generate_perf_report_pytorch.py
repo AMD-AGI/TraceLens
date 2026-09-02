@@ -318,6 +318,15 @@ def apply_extension(perf_analyzer, extension_path):
             op_category_extension,
             OP_CATEGORY_REGISTRY,
         )
+    if hasattr(extension, "categorize_extension"):
+        custom_categorizer = getattr(extension, "categorize_extension")
+        base_categorizer = perf_analyzer.op_categorizer
+
+        def op_categorizer(row):
+            category = custom_categorizer(row, perf_analyzer)
+            return category if category is not None else base_categorizer(row)
+
+        perf_analyzer.op_categorizer = op_categorizer
     if hasattr(extension, "dict_cat2names_extension"):
         warnings.warn(
             "dict_cat2names_extension is deprecated and ignored. Use "
