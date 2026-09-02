@@ -969,10 +969,19 @@ class ForwardAnalysis:
 
     operations: list[ForwardOperation]
     var_producer: dict[str, str]
+    step_predecessors: dict[str, tuple[str, ...]]
     return_slots: dict[str, str]
     return_order: list[str]
     primary_return_slot: str | None
     loop_carried: list[LoopCarriedSpec]
+
+
+@dataclass(frozen=True)
+class StackEntryDataflow:
+    """Source operations that transform embeddings into decoder-loop input."""
+
+    operations: tuple[ForwardOperation, ...]
+    output_producer: str
 
 
 @dataclass
@@ -992,13 +1001,97 @@ class ClassStructure:
     init_assignment_options: dict[str, list[str]] = field(default_factory=dict)
     forward_input_name: str | None = None
     forward_operations: dict[str, ForwardOperation] = field(default_factory=dict)
+    forward_step_predecessors: dict[str, tuple[str, ...]] = field(
+        default_factory=dict
+    )
     single_op_methods: dict[str, ForwardOperation] = field(default_factory=dict)
     multi_op_methods: dict[str, list[ForwardOperation]] = field(default_factory=dict)
     forward_return_slots: dict[str, str] = field(default_factory=dict)
     forward_return_order: list[str] = field(default_factory=list)
     primary_return_slot: str | None = None
+    forward_call_output_names: dict[str, str] = field(default_factory=dict)
     referenced_return_producers: set[str] = field(default_factory=set)
     loop_carried: list[LoopCarriedSpec] = field(default_factory=list)
+
+
+def stack_entry_dataflow(cls: ClassStructure) -> StackEntryDataflow | None:
+    """Recover the exact tensor-method chain feeding an iterated decoder module."""
+    forward = next(
+        (
+            item
+            for item in cls.node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+    if forward is None:
+        return None
+
+    decoder_loop: ast.For | None = None
+    input_name: str | None = None
+    for statement in forward.body:
+        if not isinstance(statement, ast.For):
+            continue
+        loop_names = {
+            node.id for node in ast.walk(statement.target) if isinstance(node, ast.Name)
+        }
+        loop_call = next(
+            (
+                call
+                for call in ast.walk(statement)
+                if isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id in loop_names
+                and call.args
+                and isinstance(call.args[0], ast.Name)
+            ),
+            None,
+        )
+        if loop_call is not None:
+            decoder_loop = statement
+            input_name = loop_call.args[0].id
+            break
+    if decoder_loop is None or input_name is None:
+        return None
+
+    init_func = next(
+        (
+            item
+            for item in cls.node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+        ),
+        None,
+    )
+    primary = _primary_forward_input_name(forward)
+    extractor = _ForwardOperationExtractor(
+        self_values=_self_config_values(init_func, {}),
+        all_tensor_ops=True,
+        param_names=_forward_input_names(forward) - {primary} if primary else set(),
+    )
+    if primary:
+        extractor.var_producer[primary] = FORWARD_METHOD_INPUT
+    loop_index = forward.body.index(decoder_loop)
+    extractor.statements(forward.body[:loop_index])
+    output_producer = extractor.var_producer.get(input_name)
+    if output_producer is None or not is_forward_operation(output_producer):
+        return None
+
+    by_name = {operation.attr_name: operation for operation in extractor.operations}
+    live = {output_producer}
+    pending = [output_producer]
+    while pending:
+        producer = pending.pop()
+        operation = by_name.get(producer)
+        if operation is None:
+            continue
+        for predecessor in operation.predecessors:
+            if predecessor in by_name and predecessor not in live:
+                live.add(predecessor)
+                pending.append(predecessor)
+    operations = tuple(
+        operation for operation in extractor.operations if operation.attr_name in live
+    )
+    return StackEntryDataflow(operations, output_producer)
 
 
 def infer_forward_steps_from_init(cls: ClassStructure) -> list[str]:
@@ -1049,6 +1142,35 @@ _HOUSEKEEPING_METHODS = frozenset(
         "view_as_real",
     }
 )
+# Layout-only tensor methods: they rearrange or retype a tensor without computing
+# new values, so the exporter renders them differently from real math.
+_LAYOUT_ONLY_METHOD_LABELS = {
+    "view": "View",
+    "reshape": "Reshape",
+    "flatten": "Flatten",
+    "type": "Cast",
+    "float": "Cast",
+    "to": "Cast",
+    "unsqueeze": "Unsqueeze",
+    "squeeze": "Squeeze",
+    "expand": "Expand",
+    "contiguous": "Contiguous",
+    "transpose": "Transpose",
+    "permute": "Permute",
+    "detach": "Detach",
+    "clone": "Clone",
+    "view_as_complex": "View as complex",
+    "view_as_real": "View as real",
+}
+
+# Split / Concat rearrange tensors without computing new values. They stay
+# visible in the graph (unlike the layout methods above, which are optional)
+# but share the white data-movement fill.
+LAYOUT_ONLY_LABELS = frozenset(_LAYOUT_ONLY_METHOD_LABELS.values()) | {
+    "Split",
+    "Concat",
+}
+
 # Keyed on the trailing call name, so `x.mean(...)` and `torch.mean(x)` both resolve.
 _TENSOR_METHOD_LABELS = {
     # Reductions
@@ -1119,22 +1241,7 @@ _TENSOR_METHOD_LABELS = {
     "bmm": "BatchMatMul",
     "mm": "MatMul",
     # Layout-only (suppressed unless every tensor op is requested)
-    "view": "View",
-    "reshape": "Reshape",
-    "flatten": "Flatten",
-    "type": "Cast",
-    "float": "Cast",
-    "to": "Cast",
-    "unsqueeze": "Unsqueeze",
-    "squeeze": "Squeeze",
-    "expand": "Expand",
-    "contiguous": "Contiguous",
-    "transpose": "Transpose",
-    "permute": "Permute",
-    "detach": "Detach",
-    "clone": "Clone",
-    "view_as_complex": "View as complex",
-    "view_as_real": "View as real",
+    **_LAYOUT_ONLY_METHOD_LABELS,
 }
 _FUNCTION_LABELS = {
     "linear": "Linear",
@@ -1355,6 +1462,7 @@ class _ForwardOperationExtractor:
         self.operations: list[ForwardOperation] = []
         self.var_producer: dict[str, str] = {}
         self.var_module_origin: dict[str, str] = {}
+        self.step_predecessors: dict[str, tuple[str, ...]] = {}
         self.loop_carried: list[LoopCarriedSpec] = []
         self._used_ids: set[str] = set()
 
@@ -1570,6 +1678,9 @@ class _ForwardOperationExtractor:
             # an operation reading the result looks like it has no source at all.
             own_step = self._call_step_producer(node, method_name)
             if own_step is not None:
+                self.step_predecessors[own_step] = self._dedupe(
+                    [value for value in (base_producer, *arg_producers) if value]
+                )
                 return own_step, external
             producers = [value for value in (base_producer, *arg_producers) if value]
             return (producers[-1] if producers else None), external
@@ -1589,7 +1700,7 @@ class _ForwardOperationExtractor:
             for item in ast.walk(arg)
         ):
             details.append("dtype: torch.float32")
-        if call_name in {"view", "reshape"}:
+        if call_name in {"view", "reshape", "expand"}:
             details.append("shape: " + ", ".join(ast.unparse(arg) for arg in node.args))
         if call_name in _DIM_DETAIL_METHODS:
             if node.args:
@@ -1943,7 +2054,28 @@ def _forward_calls_in_source_order(
         where = (int(match.group(1)), int(match.group(2))) if match else (10**6, 0)
         ordered.append((sort_key(where), op.attr_name))
     ordered.sort(key=lambda item: item[0])
-    return [name for _where, name in ordered]
+    source_order = [name for _where, name in ordered]
+    operation_by_name = {operation.attr_name: operation for operation in operations}
+    remaining = list(source_order)
+    result: list[str] = []
+    while remaining:
+        ready = next(
+            (
+                name
+                for name in remaining
+                if all(
+                    predecessor not in remaining
+                    for predecessor in operation_by_name.get(
+                        name,
+                        ForwardOperation(name, name, name),
+                    ).predecessors
+                )
+            ),
+            remaining[0],
+        )
+        result.append(ready)
+        remaining.remove(ready)
+    return result
 
 
 def _return_value_names(value: ast.AST) -> list[str]:
@@ -1965,7 +2097,12 @@ def _extract_forward_return_metadata(
             return_order = _return_value_names(stmt.value)
             break
     slots = {name: var_producer[name] for name in return_order if name in var_producer}
-    primary = return_order[-1] if return_order else None
+    input_name = _primary_forward_input_name(func)
+    primary = (
+        input_name
+        if input_name in return_order
+        else (return_order[-1] if return_order else None)
+    )
     return slots, return_order, primary
 
 
@@ -2024,6 +2161,29 @@ def _self_module_call_attr(node: ast.AST) -> str | None:
     return None
 
 
+def _forward_call_output_names(forward_func: ast.FunctionDef) -> dict[str, str]:
+    """Map ``module_attr -> local variable`` the caller binds its result to.
+
+    Modules that return a bare expression (`return self.weight * hidden_states`)
+    expose no tensor name of their own, so the name the caller gives the result is
+    the only source-derived label available for that boundary.
+    """
+    names: dict[str, str] = {}
+    for node in ast.walk(forward_func):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        attr = _self_module_call_attr(node.value) if node.value is not None else None
+        if attr is None:
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+            continue
+        # A reassigned spine variable keeps the first binding: later statements
+        # rebind the same name for unrelated steps.
+        names.setdefault(attr, targets[0].id)
+    return names
+
+
 def _module_return_unpacks(
     forward_func: ast.FunctionDef,
     init_assignments: dict[str, str],
@@ -2063,12 +2223,33 @@ def _module_return_unpacks(
 def _expression_at_operation_line(
     func: ast.FunctionDef,
     attr_name: str,
+    operation_label: str,
 ) -> ast.AST | None:
     match = _OPERATION_SOURCE_POS_RE.match(attr_name)
     if match is None:
         return None
     target_line = int(match.group(1))
+    target_col = int(match.group(2))
     for stmt in func.body:
+        for node in ast.walk(stmt):
+            if (
+                getattr(node, "lineno", None) != target_line
+                or getattr(node, "col_offset", None) != target_col
+            ):
+                continue
+            label: str | None = None
+            if isinstance(node, ast.BinOp):
+                raw_label = _BINOP_LABELS.get(type(node.op))
+                label = operation_display_label(raw_label) if raw_label else None
+            elif isinstance(node, ast.Call):
+                call_name = (_expr_name(node.func) or "").split(".")[-1]
+                raw_label = (
+                    _FUNCTION_LABELS.get(_functional_call_name(node.func) or call_name)
+                    or _TENSOR_METHOD_LABELS.get(call_name)
+                )
+                label = operation_display_label(raw_label) if raw_label else None
+            if label == operation_label:
+                return node
         if getattr(stmt, "lineno", None) != target_line:
             continue
         if isinstance(stmt, ast.Return):
@@ -2088,6 +2269,38 @@ def _vars_read_in_expr(node: ast.AST | None) -> set[str]:
     return {item.id for item in ast.walk(node) if isinstance(item, ast.Name)}
 
 
+def _latest_module_assignment_before(
+    func: ast.FunctionDef,
+    variable: str,
+    *,
+    line: int,
+    column: int,
+) -> str | None:
+    latest: tuple[tuple[int, int], str | None] | None = None
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        position = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+        if position >= (line, column):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        names: list[str] = []
+        for target in targets:
+            if isinstance(target, ast.Name):
+                names.append(target.id)
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                names.extend(
+                    item.id for item in target.elts if isinstance(item, ast.Name)
+                )
+        if variable not in names:
+            continue
+        value = node.value
+        module = _self_module_call_attr(value)
+        if latest is None or position > latest[0]:
+            latest = (position, module)
+    return latest[1] if latest is not None else None
+
+
 def _refine_forward_operation_predecessors(
     forward_func: ast.FunctionDef,
     forward_operations: dict[str, ForwardOperation],
@@ -2098,14 +2311,31 @@ def _refine_forward_operation_predecessors(
         return forward_operations
     refined: dict[str, ForwardOperation] = {}
     for name, operation in forward_operations.items():
-        expr = _expression_at_operation_line(forward_func, name)
+        match = _OPERATION_SOURCE_POS_RE.match(name)
+        position = (
+            (int(match.group(1)), int(match.group(2)))
+            if match is not None
+            else (10**9, 10**9)
+        )
+        expr = _expression_at_operation_line(
+            forward_func, name, operation.label
+        )
         vars_read = _vars_read_in_expr(expr)
         predecessors: list[str] = []
         for pred in operation.predecessors:
             var_map = module_unpacks.get(pred)
             if var_map:
                 mapped = [
-                    producer for var, producer in var_map.items() if var in vars_read
+                    producer
+                    for var, producer in var_map.items()
+                    if var in vars_read
+                    and _latest_module_assignment_before(
+                        forward_func,
+                        var,
+                        line=position[0],
+                        column=position[1],
+                    )
+                    == pred
                 ]
                 if mapped:
                     predecessors.extend(mapped)
@@ -2222,10 +2452,71 @@ def _forward_operations_from_forward(
     return ForwardAnalysis(
         operations=extractor.operations,
         var_producer=dict(extractor.var_producer),
+        step_predecessors=dict(extractor.step_predecessors),
         return_slots=return_slots,
         return_order=return_order,
         primary_return_slot=primary_return_slot,
         loop_carried=list(extractor.loop_carried),
+    )
+
+
+def expand_class_forward_dataflow(
+    cls: ClassStructure,
+    registry: dict[str, ClassStructure],
+) -> None:
+    """Populate all source tensor-method steps for one selected class."""
+    forward = next(
+        (
+            item
+            for item in cls.node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+    if forward is None:
+        return
+    init_func = next(
+        (
+            item
+            for item in cls.node.body
+            if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+        ),
+        None,
+    )
+    analysis = _forward_operations_from_forward(
+        forward,
+        self_values=_self_config_values(init_func, {}),
+        all_tensor_ops=True,
+    )
+    if not analysis.operations:
+        return
+    module_calls = _module_calls_for_forward_merge(
+        cls.forward_calls,
+        cls.init_assignments,
+        parsed_operations=analysis.operations,
+    )
+    merged_calls = _forward_calls_in_source_order(
+        forward, module_calls, analysis.operations
+    )
+    (
+        cls.forward_calls,
+        cls.forward_operations,
+        cls.forward_return_slots,
+        cls.forward_return_order,
+        cls.primary_return_slot,
+    ) = _apply_forward_analysis(
+        forward,
+        analysis,
+        forward_calls=merged_calls,
+        init_assignments=cls.init_assignments,
+    )
+    cls.forward_step_predecessors = dict(analysis.step_predecessors)
+    cls.forward_operations = _refine_forward_operation_predecessors(
+        forward,
+        cls.forward_operations,
+        module_unpacks=_module_return_unpacks(
+            forward, cls.init_assignments, registry
+        ),
     )
 
 
@@ -2258,9 +2549,11 @@ class _ModelAstVisitor(ast.NodeVisitor):
         side_inputs: dict[str, list[SideInputSpec]] = {}
         forward_input_name: str | None = None
         forward_operations: dict[str, ForwardOperation] = {}
+        forward_step_predecessors: dict[str, tuple[str, ...]] = {}
         forward_return_slots: dict[str, str] = {}
         forward_return_order: list[str] = []
         primary_return_slot: str | None = None
+        forward_call_output_names: dict[str, str] = {}
         forward_loop_carried: list[LoopCarriedSpec] = []
         single_op_methods: dict[str, ForwardOperation] = {}
         multi_op_methods: dict[str, list[ForwardOperation]] = {}
@@ -2288,6 +2581,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             )
         if forward_func is not None:
             forward_input_name = _primary_forward_input_name(forward_func)
+            forward_call_output_names = _forward_call_output_names(forward_func)
             resolved_forward_func = _resolve_local_module_alias_calls(forward_func)
             (
                 forward_calls,
@@ -2320,6 +2614,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     all_tensor_ops=self.all_tensor_ops,
                 )
                 if analysis.operations:
+                    forward_step_predecessors = dict(analysis.step_predecessors)
                     forward_loop_carried = list(analysis.loop_carried)
                     (
                         forward_calls,
@@ -2368,6 +2663,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     all_tensor_ops=self.all_tensor_ops,
                 )
                 if analysis.operations:
+                    forward_step_predecessors = dict(analysis.step_predecessors)
                     forward_loop_carried = list(analysis.loop_carried)
                     module_calls = _module_calls_for_forward_merge(
                         forward_calls,
@@ -2409,6 +2705,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     init_assignments,
                     probed.operations,
                 ):
+                    forward_step_predecessors = dict(probed.step_predecessors)
                     forward_loop_carried = list(probed.loop_carried)
                     module_calls = _module_calls_for_forward_merge(
                         forward_calls,
@@ -2455,11 +2752,13 @@ class _ModelAstVisitor(ast.NodeVisitor):
             side_inputs=side_inputs,
             forward_input_name=forward_input_name,
             forward_operations=forward_operations,
+            forward_step_predecessors=forward_step_predecessors,
             single_op_methods=single_op_methods,
             multi_op_methods=multi_op_methods,
             forward_return_slots=forward_return_slots,
             forward_return_order=forward_return_order,
             primary_return_slot=primary_return_slot,
+            forward_call_output_names=forward_call_output_names,
             loop_carried=forward_loop_carried,
         )
         self.generic_visit(node)
@@ -3698,25 +3997,25 @@ def _walk_forward_stmt(
     return pending_norm
 
 
+def _decoder_class_score(info: ClassStructure) -> int:
+    score = 0
+    if DECODER_CLASS_RE.search(info.name):
+        score += 10
+    if any(_classify_role(a, c) == "attention" for a, c in info.init_assignments.items()):
+        score += 5
+    if any(
+        _classify_role(a, c) in {"ffn", "moe"} for a, c in info.init_assignments.items()
+    ):
+        score += 3
+    if info.forward_calls:
+        score += 2
+    return score
+
+
 def _pick_decoder_class(classes: dict[str, ClassStructure]) -> ClassStructure | None:
     ranked: list[tuple[int, ClassStructure]] = []
     for info in classes.values():
-        score = 0
-        name = info.name
-        if DECODER_CLASS_RE.search(name):
-            score += 10
-        if any(
-            _classify_role(a, c) == "attention"
-            for a, c in info.init_assignments.items()
-        ):
-            score += 5
-        if any(
-            _classify_role(a, c) in {"ffn", "moe"}
-            for a, c in info.init_assignments.items()
-        ):
-            score += 3
-        if info.forward_calls:
-            score += 2
+        score = _decoder_class_score(info)
         if score > 0:
             ranked.append((score, info))
     if not ranked:
@@ -3725,11 +4024,42 @@ def _pick_decoder_class(classes: dict[str, ClassStructure]) -> ClassStructure | 
     return ranked[0][1]
 
 
+def _model_class_score(info: ClassStructure) -> int:
+    """Rank stack/backbone classes so a vision tower cannot beat the language model.
+
+    Name matching alone is not enough: multimodal repos name both the ViT and the
+    text backbone ``*Model`` / ``*PreTrainedModel``, and dict order follows file
+    order. Owning an embedding plus a decoder-layer child is the language stack.
+    """
+    if not info.init_assignments:
+        return 0
+    score = 0
+    if MODEL_CLASS_RE.search(info.name):
+        score += 10
+    roles = {
+        _classify_role(attr, class_name)
+        for attr, class_name in info.init_assignments.items()
+    }
+    if "embedding" in roles:
+        score += 5
+    if "head" in roles:
+        score += 3
+    if "norm" in roles:
+        score += 1
+    if any(DECODER_CLASS_RE.search(class_name) for class_name in info.init_assignments.values()):
+        score += 8
+    return score
+
+
 def _pick_model_class(classes: dict[str, ClassStructure]) -> ClassStructure | None:
+    ranked: list[tuple[int, ClassStructure]] = []
     for info in classes.values():
-        if MODEL_CLASS_RE.search(info.name) and info.init_assignments:
-            if any("embed" in attr.lower() for attr in info.init_assignments):
-                return info
+        score = _model_class_score(info)
+        if score > 0:
+            ranked.append((score, info))
+    if ranked:
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return ranked[0][1]
     return _pick_model_class_by_structure(classes)
 
 
@@ -3918,8 +4248,9 @@ def build_stack_components(
     )
     tail.sort(
         key=lambda comp: (
-            {"norm": 0, "head": 1}.get(comp.role, 99),
+            comp.forward_order is None,
             comp.forward_order if comp.forward_order is not None else 999,
+            {"norm": 0, "head": 1}.get(comp.role, 99),
             comp.attr_name,
         )
     )
@@ -4428,6 +4759,7 @@ def analyze_sources(
     """Analyze multiple files and merge into one CodeAnalysis."""
     merged = CodeAnalysis()
     registries: list[dict[str, ClassStructure]] = []
+    best_decoder_score = 0
     for path, text in sources.items():
         partial = analyze_source(
             text,
@@ -4441,7 +4773,12 @@ def analyze_sources(
         merged.external_imports.update(partial.external_imports)
         merged.positional_helpers.extend(partial.positional_helpers)
 
-        if partial.decoder_class and not merged.decoder_class:
+        # Multimodal repos ship several modeling files; the language decoder can live
+        # in any of them, so rank candidates across files instead of taking the first.
+        decoder_info = partial.class_registry.get(partial.decoder_class or "")
+        decoder_score = _decoder_class_score(decoder_info) if decoder_info else 0
+        if partial.decoder_class and decoder_score > best_decoder_score:
+            best_decoder_score = decoder_score
             merged.decoder_class = partial.decoder_class
             merged.block_components = partial.block_components
             merged.forward_sequence = partial.forward_sequence
@@ -4452,12 +4789,20 @@ def analyze_sources(
             merged.ffn_type = partial.ffn_type
             merged.norm_type = partial.norm_type
             merged.norm_placement = partial.norm_placement
-            merged.custom_blocks.extend(partial.custom_blocks)
-
-        if partial.model_class and not merged.model_class:
-            merged.model_class = partial.model_class
+            merged.custom_blocks = list(partial.custom_blocks)
 
     merged.class_registry = merge_class_registries(*registries)
+    # Re-pick graph-owning classes from the combined registry. First-file-wins
+    # lets a vision modeling file stamp a ViT backbone (or leave these unset).
+    causal_lm = _pick_causal_lm_class(merged.class_registry)
+    stack_model = _pick_stack_model_class(merged.class_registry, causal_lm)
+    model = stack_model or _pick_model_class(merged.class_registry)
+    if causal_lm is not None:
+        merged.causal_lm_class = causal_lm.name
+    if stack_model is not None:
+        merged.stack_model_class = stack_model.name
+    if model is not None:
+        merged.model_class = model.name
     merged.custom_blocks = sorted(set(merged.custom_blocks))
     merged.positional_helpers = sorted(set(merged.positional_helpers))
     return merged

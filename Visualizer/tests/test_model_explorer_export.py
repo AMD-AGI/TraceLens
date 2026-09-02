@@ -683,7 +683,17 @@ def test_kimi_layer_variants_export_three_decoder_splits():
     for norm_attr in ("input_layernorm", "post_attention_layernorm"):
         prefix = f"decoder/1x_KimiDeltaAttention_KimiMLP/{norm_attr}"
         assert f"{prefix}/@input" in node_ids
-        assert f"{prefix}/@output" in node_ids
+        output = next(node for node in graph["nodes"] if node["id"] == f"{prefix}/@output")
+        assert [item["id"] for item in output["outputsMetadata"]] == [
+            "hidden_states"
+        ]
+        mirror = next(
+            node
+            for node in graph["nodes"]
+            if node["id"] == f"{prefix}/@output^hidden_states"
+        )
+        assert mirror["label"] == "hidden_states"
+        assert mirror["incomingEdges"][0]["sourceNodeId"] == output["id"]
     input_norm = next(
         node
         for node in graph["nodes"]
@@ -698,12 +708,25 @@ def test_kimi_layer_variants_export_three_decoder_splits():
         if node["id"] == "decoder/1x_KimiDeltaAttention_KimiMLP/input_layernorm/@input"
     )
     assert input_norm["incomingEdges"][0]["sourceNodeId"] == input_boundary["id"]
-    assert input_boundary["incomingEdges"][0]["sourceNodeId"] == "embed_tokens"
+    assert input_boundary["incomingEdges"][0]["sourceNodeId"] == (
+        "decoder/1x_KimiDeltaAttention_KimiMLP/@input"
+    )
     norm_nodes = [node for node in graph["nodes"] if node["id"].startswith("norm/")]
     assert {"Power", "Mean", "Reciprocal sqrt", "Multiply"} <= {
         node["label"] for node in norm_nodes
     }
-    assert any(node["id"] == "norm/@input" for node in norm_nodes)
+    assert {"norm/@input", "norm/@output", "norm/@output^hidden_states"} <= node_ids
+    final_norm_output = next(
+        node for node in graph["nodes"] if node["id"] == "norm/@output"
+    )
+    assert [item["id"] for item in final_norm_output["outputsMetadata"]] == [
+        "hidden_states"
+    ]
+    final_norm_mirror = next(
+        node for node in graph["nodes"] if node["id"] == "norm/@output^hidden_states"
+    )
+    assert final_norm_mirror["label"] == "hidden_states"
+    assert final_norm_mirror["incomingEdges"][0]["sourceNodeId"] == "norm/@output"
     assert any(node["id"] == "lm_head" for node in graph["nodes"])
     assert not any(node.get("namespace") == "lm_head" for node in graph["nodes"])
     assert not any(node["id"] == "lm_head/@input" for node in graph["nodes"])
@@ -1129,7 +1152,7 @@ def test_expandable_groups_carry_their_boundary_shapes():
         assert attrs[namespace]["input_shape"]
         assert attrs[namespace]["output_shape"]
 
-    decoder = next(name for name in namespaces if "/" not in name)
+    decoder = next(name for name in attrs if name and "/" not in name)
     assert attrs[decoder]["input_shape"] == "B x S x 4096"
     assert attrs[decoder]["output_shape"] == "B x S x 4096"
 

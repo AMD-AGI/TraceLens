@@ -581,11 +581,22 @@ def test_styles_readability_finalization_and_group_config_ordering():
     nodes = [
         {"style": {"backgroundColor": "#5dade2", "textColor": "wrong"}},
         {"style": "not-a-dict"},
-        {},
+        {"label": "Multiply"},
+        {"label": "Unsqueeze"},
+        {"label": "Reshape", "style": {"backgroundColor": "#bdc3c7"}},
+        {"label": "Split"},
+        {"label": "Concat", "style": {"backgroundColor": "#bdc3c7"}},
     ]
     styles.finalize_graph_node_styles(nodes)
     assert nodes[0]["style"]["textColor"] == "#ffffff"
     assert nodes[1]["style"] == "not-a-dict"
+    # Unstyled merge-synthesized tiles pick a fill from what the op does.
+    assert nodes[2]["style"]["backgroundColor"] == "#bdc3c7"
+    assert nodes[3]["style"]["backgroundColor"] == "#ffffff"
+    # A layout-only op never keeps the computation gray.
+    assert nodes[4]["style"]["backgroundColor"] == "#ffffff"
+    assert nodes[5]["style"]["backgroundColor"] == "#ffffff"
+    assert nodes[6]["style"]["backgroundColor"] == "#ffffff"
 
     attrs = {
         "decoder/KimiMoEGate": {"label": "Gate"},
@@ -1308,10 +1319,18 @@ def test_merge_append_section_expands_nested_diagram_and_shapes(
     by_id = {node["id"]: node for node in nodes}
     assert "decoder/attn/tile" not in by_id
     assert "decoder/attn/tile/result" in by_id
-    assert by_id["decoder/attn/after"]["incomingEdges"][0]["sourceNodeId"] == (
+    nested_output = by_id["decoder/attn/tile/@output"]
+    assert nested_output["incomingEdges"][0]["sourceNodeId"] == (
         "decoder/attn/tile/result"
     )
-    assert by_id["decoder/attn/after"]["incomingEdges"][0]["sourceNodeOutputId"] == "0"
+    assert [item["id"] for item in nested_output["outputsMetadata"]] == ["result"]
+    assert by_id["decoder/attn/after"]["incomingEdges"][0]["sourceNodeId"] == (
+        "decoder/attn/tile/@output"
+    )
+    assert (
+        by_id["decoder/attn/after"]["incomingEdges"][0]["sourceNodeOutputId"]
+        == "result"
+    )
     assert exits == ["decoder/attn/after"]
     assert group_attrs["decoder/Attention"] == {
         "label": "Attention",

@@ -690,6 +690,8 @@ class ShapeInferencer:
             or synthetic == "@combine"
         ):
             if inputs:
+                if node.label in {"+", "Add"}:
+                    return max(inputs, key=_broadcast_rank)
                 return self._elementwise_operand(inputs)
             hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
             return TensorSpec(

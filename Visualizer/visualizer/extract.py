@@ -91,6 +91,7 @@ class ArchitectureSpec:
     stack_tail: list[BlockComponent] = field(default_factory=list)
     forward_sequence: list[str] = field(default_factory=list)
     decoder_class: str | None = None
+    stack_model_class: str | None = None
     code_sources: list[str] = field(default_factory=list)
     analysis_notes: list[str] = field(default_factory=list)
     custom_blocks: list[str] = field(default_factory=list)
@@ -921,6 +922,7 @@ def _finalize_layer_repeat_lines(spec: ArchitectureSpec) -> None:
 
 def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None:
     spec.decoder_class = analysis.decoder_class
+    spec.stack_model_class = analysis.stack_model_class
     spec.block_components = list(analysis.block_components)
     spec.forward_sequence = list(analysis.forward_sequence)
     spec.code_sources = list(analysis.source_files)

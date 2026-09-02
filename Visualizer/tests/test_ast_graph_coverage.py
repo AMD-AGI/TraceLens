@@ -299,6 +299,97 @@ class Transformer:
     assert {"model.py", "empty.py"} == set(merged.source_files)
 
 
+def test_analyze_sources_ranks_decoder_candidates_across_files():
+    """Multimodal repos put the vision tower ahead of the language decoder."""
+    vision = """
+class VisionEncoderLayer:
+    def __init__(self):
+        self.attn = VisionAttention()
+
+    def forward(self, x):
+        return self.attn(x)
+
+class VisionPreTrainedModel:
+    def __init__(self):
+        self.patch_embed = PatchEmbed()
+        self.encoder = VisionEncoder()
+"""
+    text = """
+class TextDecoderLayer:
+    def __init__(self):
+        self.self_attn = Attention()
+        self.mlp = MLP()
+
+    def forward(self, x):
+        x = x + self.self_attn(x)
+        return x + self.mlp(x)
+
+class TextModel:
+    def __init__(self):
+        self.embed_tokens = Embedding()
+        self.layers = TextDecoderLayer()
+        self.norm = RMSNorm()
+
+class TextForCausalLM:
+    def __init__(self):
+        self.model = TextModel()
+        self.lm_head = Linear()
+"""
+    merged = aa.analyze_sources(
+        {Path("modeling_vision.py"): vision, Path("modeling_text.py"): text},
+    )
+    assert merged.decoder_class == "TextDecoderLayer"
+    assert merged.model_class == "TextModel"
+    assert merged.stack_model_class == "TextModel"
+    assert merged.causal_lm_class == "TextForCausalLM"
+
+    # File ordering must not change the winner.
+    reversed_merge = aa.analyze_sources(
+        {Path("modeling_text.py"): text, Path("modeling_vision.py"): vision},
+    )
+    assert reversed_merge.decoder_class == "TextDecoderLayer"
+    assert reversed_merge.model_class == "TextModel"
+    assert reversed_merge.stack_model_class == "TextModel"
+    assert reversed_merge.causal_lm_class == "TextForCausalLM"
+
+
+def test_stack_entry_dataflow_keeps_source_tensor_method_chain():
+    source = """
+class Model:
+    def __init__(self, config):
+        self.embed = Embedding()
+        self.layers = ModuleList([Layer() for _ in range(config.depth)])
+
+    def forward(self, input_ids):
+        hidden = self.embed(input_ids)
+        hidden = hidden.unsqueeze(2).expand(-1, -1, 4, -1).reshape(-1, 4, 16)
+        for layer in self.layers:
+            hidden = layer(hidden)
+        return hidden
+"""
+    classes = aa.build_class_registry(
+        source,
+        filename="stack_dataflow.py",
+        config={"depth": 2},
+        all_tensor_ops=False,
+    )
+    dataflow = aa.stack_entry_dataflow(classes["Model"])
+
+    assert dataflow is not None
+    assert [operation.label for operation in dataflow.operations] == [
+        "Unsqueeze",
+        "Expand",
+        "Reshape",
+    ]
+    assert dataflow.operations[0].predecessors == ("embed",)
+    assert dataflow.operations[1].predecessors == (
+        dataflow.operations[0].attr_name,
+    )
+    assert dataflow.operations[2].predecessors == (
+        dataflow.operations[1].attr_name,
+    )
+
+
 def test_registry_finalization_refines_tuple_return_dependencies():
     source = """
 class SparseMoeGate:

@@ -40,6 +40,42 @@ def _linear_attn_variant_prefix(spec) -> str:
     return f"decoder/{variant.count}x_{variant.attention_class}_{variant.ffn_class}"
 
 
+def _has_computation_path(graph, source: int, target: int) -> bool:
+    pending = [source]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current == target:
+            return True
+        if current in visited:
+            continue
+        visited.add(current)
+        pending.extend(
+            destination
+            for start, destination in graph.links
+            if start == current
+        )
+    return False
+
+
+def _has_export_path(nodes, source_id: str, target_id: str) -> bool:
+    outgoing: dict[str, list[str]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []):
+            outgoing.setdefault(edge["sourceNodeId"], []).append(node["id"])
+    pending = [source_id]
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current == target_id:
+            return True
+        if current in visited:
+            continue
+        visited.add(current)
+        pending.extend(outgoing.get(current, []))
+    return False
+
+
 def test_glm53_linear_attention_has_single_output_exit():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -90,7 +126,9 @@ def test_glm53_linear_attention_gate_chain_is_not_short_circuited():
     links = set(graph.links)
 
     assert (key_to_index[g_a_key], key_to_index[g_b_key]) in links
-    assert (key_to_index[g_b_key], key_to_index[o_norm_gate_key]) in links
+    assert _has_computation_path(
+        graph, key_to_index[g_b_key], key_to_index[o_norm_gate_key]
+    )
     assert (key_to_index[o_norm_gate_key], key_to_index[o_norm_mul_key]) in links
     assert (key_to_index["@input"], key_to_index[g_b_key]) not in links
 
@@ -104,7 +142,7 @@ def test_glm53_spine_hyperconnection_stays_on_variant_namespace():
         node["namespace"]
         for node in graph["nodes"]
         if node["id"].startswith(f"{prefix}/input_layernorm/")
-    )
+    ).rsplit("/", 1)[0]
 
     attn_nodes = [
         node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/attn_hc/")
@@ -113,9 +151,28 @@ def test_glm53_spine_hyperconnection_stays_on_variant_namespace():
         node for node in graph["nodes"] if node["id"].startswith(f"{prefix}/ffn_hc/")
     ]
     assert attn_nodes and ffn_nodes
-    assert all("/attn_hc" in node.get("namespace", "") for node in attn_nodes)
-    assert all("/ffn_hc" in node.get("namespace", "") for node in ffn_nodes)
-    assert variant_namespace in attn_nodes[0].get("namespace", "")
+    for component, component_nodes in (("attn_hc", attn_nodes), ("ffn_hc", ffn_nodes)):
+        output_prefix = f"{prefix}/{component}/@output:"
+        mirrors = [
+            node
+            for node in component_nodes
+            if node["id"].startswith(output_prefix)
+            and any(
+                attr.get("key") == "synthetic"
+                and attr.get("value") == "@output_mirror"
+                for attr in node.get("attrs", [])
+            )
+        ]
+        internal_nodes = [
+            node
+            for node in component_nodes
+            if node not in mirrors
+        ]
+        assert all(
+            f"/{component}" in node.get("namespace", "") for node in internal_nodes
+        )
+        assert {node["label"] for node in mirrors} == {"post", "comb", "collapsed"}
+        assert all(node.get("namespace") == variant_namespace for node in mirrors)
 
 
 def test_glm53_hyperconnection_expands_mhc_math():
@@ -289,9 +346,15 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     # The decode/update and prefill convolution alternatives both consume mixed_qkv;
     # the selected convolution output is then split into query, key, and value.
     links = set(graph.links)
-    assert (key_to_index[concat_key], key_to_index[conv_update_key]) in links
-    assert (key_to_index[concat_key], key_to_index[conv_key]) in links
-    assert (key_to_index[conv_key], key_to_index[split_key]) in links
+    assert _has_computation_path(
+        graph, key_to_index[concat_key], key_to_index[conv_update_key]
+    )
+    assert _has_computation_path(
+        graph, key_to_index[concat_key], key_to_index[conv_key]
+    )
+    assert _has_computation_path(
+        graph, key_to_index[conv_key], key_to_index[split_key]
+    )
     assert (input_index, key_to_index[forget_entry_key]) in set(graph.links)
     assert key_to_index[branch_mul_key] in sources
     assert key_to_index[branch_add_key] in sources
@@ -394,34 +457,54 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
         )
         incoming = node.get("incomingEdges", [])
         assert len(incoming) == 1, (target, incoming)
-        input_node = node_by_id[f"{prefix}/{target}/@input"]
-        assert incoming[0]["sourceNodeId"] == input_node["id"]
-        boundary_edges = input_node.get("incomingEdges", [])
-        assert len(boundary_edges) == 1
-        edge = boundary_edges[0]
-        source = node_by_id[edge["sourceNodeId"]]
+        output_id = (
+            f"{prefix}/{source_component[target]}/@output:collapsed"
+        )
+        source = node_by_id[output_id]
         assert source.get("label") == "Output"
-        assert source["id"] == f"{prefix}/{source_component[target]}/@output"
-        assert edge["sourceNodeOutputId"] == "collapsed"
-        assert {item["id"] for item in source["outputsMetadata"]} == {
-            "post",
-            "comb",
-            "collapsed",
-        }
-        outgoing = [
-            candidate_edge
-            for candidate in graph["nodes"]
-            for candidate_edge in candidate.get("incomingEdges", [])
-            if candidate_edge.get("sourceNodeId") == source["id"]
+        assert [item["id"] for item in source["outputsMetadata"]] == ["collapsed"]
+        mirror_id = f"{output_id}^collapsed"
+        norm_input_id = f"{prefix}/{target}/@input"
+        norm_output_id = f"{prefix}/{target}/@output"
+        mirror = node_by_id[mirror_id]
+        assert mirror.get("label") == "collapsed"
+        assert any(
+            attr.get("key") == "synthetic"
+            and attr.get("value") == "@output_mirror"
+            for attr in mirror.get("attrs", [])
+        )
+        assert node_by_id[norm_input_id]["incomingEdges"][0]["sourceNodeId"] == mirror_id
+        assert incoming[0]["sourceNodeId"] == norm_input_id
+        assert _has_export_path(graph["nodes"], output_id, node["id"])
+        assert norm_output_id in node_by_id
+        norm_output = node_by_id[norm_output_id]
+        assert [item["id"] for item in norm_output["outputsMetadata"]] == [
+            "hidden_states"
         ]
-        assert {
-            candidate_edge["sourceNodeOutputId"] for candidate_edge in outgoing
-        } == {
+        norm_mirror = node_by_id[f"{norm_output_id}^hidden_states"]
+        assert norm_mirror["label"] == "hidden_states"
+
+        output_prefix = f"{prefix}/{source_component[target]}/@output:"
+        output_nodes = [
+            candidate
+            for candidate in graph["nodes"]
+            if candidate["id"].startswith(output_prefix)
+            and any(
+                attr.get("key") == "synthetic" and attr.get("value") == "@output"
+                for attr in candidate.get("attrs", [])
+            )
+        ]
+        assert {candidate["id"].removeprefix(output_prefix) for candidate in output_nodes} == {
             "post",
             "comb",
             "collapsed",
         }
-        assert len(outgoing) == 3
+        for output in output_nodes:
+            port = output["outputsMetadata"][0]["id"]
+            output_mirror = node_by_id[f"{output['id']}^{port}"]
+            assert output_mirror["label"] == port
+            assert output_mirror["incomingEdges"][0]["sourceNodeId"] == output["id"]
+            assert output_mirror["incomingEdges"][0]["sourceNodeOutputId"] == port
 
     hc = spec.class_registry["Glm5NextTextHyperConnection"]
     assert hc.primary_return_slot == "collapsed"
@@ -452,8 +535,7 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
             for attr in node.get("attrs", [])
         )
     }
-    # Transparent inline groups may expose entry labels, but only actual block
-    # boundaries own Output nodes.
+    # Every real sub-module boundary that owns an Output also owns an Input.
     assert output_namespaces <= input_namespaces
 
 
@@ -464,8 +546,25 @@ def test_glm53_decoder_residual_ops_use_return_slot_producers():
     attn_hc = spec.class_registry["Glm5NextTextHyperConnection"]
     matmul = decoder.forward_operations["@op_l1316_c85_matmul"]
     multiply = decoder.forward_operations["@op_l1316_c24_multiply"]
-    assert attn_hc.forward_return_slots["comb"] in matmul.predecessors
-    assert attn_hc.forward_return_slots["post"] in multiply.predecessors
+    operations = decoder.forward_operations
+
+    def depends_on(operation, producer):
+        pending = list(operation.predecessors)
+        visited = set()
+        while pending:
+            predecessor = pending.pop()
+            if predecessor == producer:
+                return True
+            if predecessor in visited:
+                continue
+            visited.add(predecessor)
+            nested = operations.get(predecessor)
+            if nested is not None:
+                pending.extend(nested.predecessors)
+        return False
+
+    assert depends_on(matmul, attn_hc.forward_return_slots["comb"])
+    assert depends_on(multiply, attn_hc.forward_return_slots["post"])
     assert "attn_hc" not in matmul.predecessors
     assert "attn_hc" not in multiply.predecessors
 
@@ -503,11 +602,214 @@ def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
     assert all(
         "/ffn_hc" in node.get("namespace", "")
         for node in ffn_nodes
-        if not node["id"].endswith("/@input")
+        if not any(
+            attr.get("key") == "synthetic"
+            and attr.get("value") == "@output_mirror"
+            for attr in node.get("attrs", [])
+        )
     )
-    output = next(node for node in ffn_nodes if node["id"].endswith("/@output"))
-    boundary = graph["groupNodeAttributes"][output["namespace"]]
+    outputs = [
+        node
+        for node in ffn_nodes
+        if "/@output:" in node["id"]
+        and any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@output"
+            for attr in node.get("attrs", [])
+        )
+    ]
+    assert len(outputs) == 3
+    assert all(len(node["outputsMetadata"]) == 1 for node in outputs)
+    node_by_id = {node["id"]: node for node in graph["nodes"]}
+    for output in outputs:
+        port = output["outputsMetadata"][0]["id"]
+        mirror = node_by_id[f"{output['id']}^{port}"]
+        assert mirror["label"] == port
+        assert mirror["incomingEdges"][0]["sourceNodeId"] == output["id"]
+    boundary = graph["groupNodeAttributes"][outputs[0]["namespace"]]
     assert boundary["input_shape"] == "B x S x 4 x 4096"
     assert boundary["output_shape"] == (
         "post: B x S x 4, comb: B x S x 4 x 4, " "collapsed: B x S x 4096"
     )
+
+
+def test_glm53_decoder_boundary_keeps_hyper_stream_shape():
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    boundary = graph["groupNodeAttributes"]["45x_Glm5NextTextDecoderLayer"]
+
+    assert boundary["input_shape"] == "B x S x 4 x 4096"
+    assert boundary["output_shape"] == "B x S x 4 x 4096"
+
+    prefix = _linear_attn_variant_prefix(spec)
+    node_by_id = {node["id"]: node for node in graph["nodes"]}
+    for operation_id in ("@op_l1316_c24_add", "@op_l1325_c24_add"):
+        residual_add = node_by_id[f"{prefix}/{operation_id}"]
+        output_shape = next(
+            attr["value"]
+            for attr in residual_add["attrs"]
+            if attr["key"] == "output_shape"
+        )
+        assert output_shape == "B x S x 4 x 4096"
+
+
+def test_glm53_operation_tile_colors_are_consistent_per_label():
+    """One op must not render gray in one block and white in another."""
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+
+    fills: dict[str, set[str]] = {}
+    for node in graph["nodes"]:
+        style = node.get("style")
+        assert isinstance(style, dict), node["id"]
+        # Boundary ports are deliberately colored by direction, not by op identity,
+        # and they carry tensor names rather than operation names.
+        if any(
+            attr.get("key") == "synthetic" for attr in node.get("attrs", [])
+        ):
+            continue
+        label = node.get("label", "")
+        fills.setdefault(label, set()).add(style.get("backgroundColor"))
+
+    inconsistent = {
+        label: colors for label, colors in fills.items() if len(colors) > 1
+    }
+    assert not inconsistent, inconsistent
+
+    # Computation is gray; layout-only data movement is white.
+    for label in ("Multiply", "Add", "MatMul", "Power", "Mean", "Linear"):
+        assert fills[label] == {"#bdc3c7"}, (label, fills[label])
+    for label in (
+        "Unsqueeze",
+        "Expand",
+        "Contiguous",
+        "Cast",
+        "Transpose",
+        "Split",
+        "Concat",
+    ):
+        assert fills[label] == {"#ffffff"}, (label, fills[label])
+
+
+def test_glm53_decoder_input_uses_source_data_movement_chain():
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    model_ops = [
+        node
+        for node in graph["nodes"]
+        if node["id"].startswith("@model_forward/")
+    ]
+
+    assert [node["label"] for node in model_ops] == [
+        "Unsqueeze",
+        "Expand",
+        "Contiguous",
+    ]
+    assert model_ops[0]["incomingEdges"][0]["sourceNodeId"] == "embed_tokens"
+    assert model_ops[1]["incomingEdges"][0]["sourceNodeId"] == model_ops[0]["id"]
+    assert model_ops[2]["incomingEdges"][0]["sourceNodeId"] == model_ops[1]["id"]
+    assert not any(node["id"] == "rotary_pos_emb" for node in graph["nodes"])
+    assert [
+        next(
+            attr["value"]
+            for attr in node["attrs"]
+            if attr["key"] == "output_shape"
+        )
+        for node in model_ops
+    ] == [
+        "B x S x 1 x 4096",
+        "B x S x 4 x 4096",
+        "B x S x 4 x 4096",
+    ]
+
+
+def test_glm53_forget_gate_has_real_boundary_nodes():
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    prefix = _linear_attn_variant_prefix(spec)
+    forget_nodes = [
+        node
+        for node in graph["nodes"]
+        if node["id"].startswith(f"{prefix}/self_attn/")
+        and "Glm5NextTextForgetGate" in node.get("namespace", "")
+    ]
+
+    assert forget_nodes
+    forget_input = next(
+        node
+        for node in forget_nodes
+        if any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@input"
+            for attr in node.get("attrs", [])
+        )
+    )
+    forget_output = next(
+        node
+        for node in forget_nodes
+        if any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@output"
+            for attr in node.get("attrs", [])
+        )
+    )
+    assert forget_input["label"] == "hidden_states"
+    assert [item["id"] for item in forget_output["outputsMetadata"]] == ["g"]
+    terminal_multiply = next(
+        node
+        for node in forget_nodes
+        if node.get("label") == "Multiply"
+        and forget_output["incomingEdges"][0]["sourceNodeId"] == node["id"]
+    )
+    mirror_id = f"{forget_output['id']}^g"
+    mirror = next(node for node in graph["nodes"] if node["id"] == mirror_id)
+    assert mirror["label"] == "g"
+    assert mirror["incomingEdges"][0]["sourceNodeId"] == forget_output["id"]
+    attention = next(
+        node for node in graph["nodes"] if node["id"].startswith(prefix) and ":@attention:" in node["id"]
+    )
+    assert _has_export_path(graph["nodes"], terminal_multiply["id"], attention["id"])
+
+
+def test_glm53_norm_boundary_connects_to_attention_input_through_mirror():
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    prefix = _linear_attn_variant_prefix(spec)
+    node_by_id = {node["id"]: node for node in graph["nodes"]}
+    norm_prefix = f"{prefix}/input_layernorm/"
+
+    norm_input = node_by_id[f"{norm_prefix}@input"]
+    norm_output = node_by_id[f"{norm_prefix}@output"]
+    assert norm_input["label"] == "hidden_states"
+    assert [item["id"] for item in norm_output["outputsMetadata"]] == [
+        "hidden_states"
+    ]
+    mirror_id = f"{norm_prefix}@output^hidden_states"
+    mirror = node_by_id[mirror_id]
+    assert mirror["label"] == "hidden_states"
+    assert mirror["incomingEdges"][0]["sourceNodeId"] == norm_output["id"]
+    attention_input = node_by_id[f"{prefix}/self_attn/@input"]
+    source_id = attention_input["incomingEdges"][0]["sourceNodeId"]
+    assert source_id == mirror_id
+    assert _has_export_path(
+        graph["nodes"], norm_input["id"], attention_input["id"]
+    )
+
+
+def test_glm53_hyper_head_precedes_final_norm():
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    assert [component.attr_name for component in spec.stack_tail] == ["hc_head", "norm"]
+
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    node_by_id = {node["id"]: node for node in graph["nodes"]}
+    norm_input = node_by_id["norm/@input"]
+    norm_output = node_by_id["norm/@output"]
+    assert norm_input["incomingEdges"][0]["sourceNodeId"] == "hc_head"
+    assert [item["id"] for item in norm_output["outputsMetadata"]] == ["hidden_states"]
+    norm_mirror = node_by_id["norm/@output^hidden_states"]
+    assert norm_mirror["label"] == "hidden_states"
+    assert norm_mirror["incomingEdges"][0]["sourceNodeId"] == norm_output["id"]
+    assert _has_export_path(graph["nodes"], "hc_head", norm_mirror["id"])

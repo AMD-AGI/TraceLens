@@ -12,6 +12,11 @@ import re
 from typing import Any
 
 from visualizer.basic_ops import BasicOpFilter
+from visualizer.ast_analyze import (
+    _pick_stack_model_class,
+    expand_class_forward_dataflow,
+    stack_entry_dataflow,
+)
 from visualizer.block_tree import (
     BlockNode,
     collect_nested_diagrams,
@@ -21,7 +26,7 @@ from visualizer.block_tree import (
 from visualizer.blocks import BlockComponent, LayerVariant
 from visualizer.computation_graph import ComputationGraph, build_computation_graph
 from visualizer.extract import ArchitectureSpec, architecture_section_trees
-from visualizer.shape_inference import ShapeInferencer
+from visualizer.shape_inference import ShapeInferencer, Symbol, TensorSpec
 
 from model_explorer_export.adapter import (
     _incoming_edges,
@@ -34,9 +39,11 @@ from model_explorer_export.adapter import (
 from model_explorer_export.fact_sheet import build_fact_sheet_group_attributes
 from model_explorer_export.shapes import (
     annotate_nodes_with_shapes,
+    apply_shape_attrs,
     fill_missing_node_shapes,
     group_boundary_shapes,
     infer_block_tree_shapes,
+    node_output_spec,
 )
 from model_explorer_export.labels import (
     apply_kernel_frame_labels,
@@ -72,6 +79,149 @@ _SKIPPED_SECTION_INPUT = "@skipped_section_input"
 SourceRef = str | tuple[str, str]
 
 
+def _config_leaf(config: dict[str, Any], name: str) -> Any:
+    if name in config:
+        return config[name]
+    for value in config.values():
+        if isinstance(value, dict):
+            resolved = _config_leaf(value, name)
+            if resolved is not None:
+                return resolved
+    return None
+
+
+def _operation_detail(operation: Any, key: str) -> str | None:
+    prefix = f"{key}:"
+    return next(
+        (
+            str(detail)[len(prefix) :].strip()
+            for detail in operation.details
+            if str(detail).startswith(prefix)
+        ),
+        None,
+    )
+
+
+def _data_movement_shape(
+    operation: Any,
+    source: TensorSpec | None,
+    *,
+    spec: ArchitectureSpec,
+) -> TensorSpec | None:
+    if source is None:
+        return None
+    label = str(operation.label)
+    if label == "Unsqueeze":
+        dim_text = _operation_detail(operation, "dim")
+        if dim_text is None:
+            return source
+        try:
+            dim = int(dim_text)
+        except ValueError:
+            return source
+        if dim < 0:
+            dim += len(source.shape) + 1
+        dim = max(0, min(dim, len(source.shape)))
+        shape = list(source.shape)
+        shape.insert(dim, 1)
+        return TensorSpec(tuple(shape), source.dtype)
+    if label in {"Expand", "Reshape", "View"}:
+        shape_text = _operation_detail(operation, "shape")
+        if not shape_text:
+            return source
+        resolved: list[Any] = []
+        parts = [part.strip() for part in shape_text.split(",")]
+        for index, part in enumerate(parts):
+            if part == "-1" and index < len(source.shape):
+                resolved.append(source.shape[index])
+            elif re.fullmatch(r"-?\d+", part):
+                resolved.append(int(part))
+            elif ".config." in part:
+                value = _config_leaf(spec.raw_config, part.rsplit(".", 1)[-1])
+                resolved.append(value if value is not None else part)
+            else:
+                resolved.append(part)
+        return TensorSpec(tuple(resolved), source.dtype)
+    return source
+
+
+def _append_stack_entry_dataflow(
+    nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    module_sources: dict[str, SourceRef],
+    shape_inferencer: ShapeInferencer | None,
+) -> list[SourceRef] | None:
+    cls = spec.class_registry.get(spec.stack_model_class or "")
+    if cls is None:
+        cls = _pick_stack_model_class(spec.class_registry, None)
+    dataflow = stack_entry_dataflow(cls) if cls is not None else None
+    if dataflow is None:
+        return None
+
+    refs: dict[str, SourceRef] = dict(module_sources)
+    node_by_id = {str(node.get("id", "")): node for node in nodes}
+    ref_specs: dict[str, TensorSpec] = {}
+    if shape_inferencer is not None:
+        context = shape_inferencer.context
+        for component in spec.stack_pre:
+            if component.role != "embedding" or component.attr_name not in refs:
+                continue
+            hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+            ref_specs[component.attr_name] = TensorSpec(
+                (Symbol.BATCH.value, Symbol.SEQ.value, hidden),
+                context.dtype,
+            )
+    for operation in dataflow.operations:
+        source_pairs = [
+            (predecessor, refs[predecessor])
+            for predecessor in operation.predecessors
+            if predecessor in refs
+        ]
+        sources = [source for _predecessor, source in source_pairs]
+        if not sources:
+            continue
+        node_id = _merge_node_id("@model_forward", operation.attr_name)
+        node: dict[str, Any] = {
+            "id": node_id,
+            "label": operation.label,
+            "namespace": "",
+            "attrs": [
+                {"key": "operation", "value": "source"},
+                *[
+                    {"key": "detail", "value": str(detail)}
+                    for detail in operation.details
+                ],
+            ],
+            "incomingEdges": [
+                _source_edge(source, str(index))
+                for index, source in enumerate(sources)
+            ],
+        }
+        if shape_inferencer is not None:
+            predecessor, source = source_pairs[0]
+            source_spec = ref_specs.get(predecessor)
+            if source_spec is None:
+                source_id, source_port = _source_parts(source)
+                source_node = node_by_id.get(source_id)
+                source_spec = (
+                    node_output_spec(source_node, source_port)
+                    if source_node is not None
+                    else None
+                )
+            operation_spec = _data_movement_shape(
+                operation, source_spec, spec=spec
+            )
+            if operation_spec is not None:
+                apply_shape_attrs(node, operation_spec)
+                ref_specs[operation.attr_name] = operation_spec
+        nodes.append(node)
+        node_by_id[node_id] = node
+        refs[operation.attr_name] = node_id
+    output = refs.get(dataflow.output_producer)
+    return [output] if output is not None else None
+
+
 def _source_parts(source: SourceRef) -> tuple[str, str]:
     return source if isinstance(source, tuple) else (source, "0")
 
@@ -83,6 +233,10 @@ def _source_edge(source: SourceRef, target_input_id: str) -> dict[str, str]:
         "sourceNodeOutputId": output_port,
         "targetNodeInputId": target_input_id,
     }
+
+
+def _port_output_id(base_id: str, port: str, port_count: int) -> str:
+    return base_id if port_count == 1 else f"{base_id}:{port}"
 
 
 def _join_namespace(prefix: str, suffix: str) -> str:
@@ -359,6 +513,20 @@ def _computation_nodes(
             node["incomingEdges"] = remapped_incoming
         if index == computation.output_node_index:
             ports = _output_port_metadata(computation)
+            if len(ports) > 1:
+                for port_metadata in ports:
+                    port = str(port_metadata.get("id", "result"))
+                    port_node = dict(node)
+                    port_node["id"] = _port_output_id(prefixed_id, port, len(ports))
+                    port_node["incomingEdges"] = [
+                        edge
+                        for edge in remapped_incoming
+                        if str(edge.get("targetNodeInputId", "")) == port
+                    ]
+                    port_node["inputsMetadata"] = [dict(port_metadata)]
+                    port_node["outputsMetadata"] = [dict(port_metadata)]
+                    nodes.append(port_node)
+                continue
             node["inputsMetadata"] = [dict(port) for port in ports]
             node["outputsMetadata"] = ports
         nodes.append(node)
@@ -444,6 +612,11 @@ def _section_exits(
     if computation.output_node_index is not None:
         output_local = computation.nodes[computation.output_node_index].key or "@output"
         output_id = _merge_node_id(id_prefix, output_local)
+        output_id = _port_output_id(
+            output_id,
+            computation.primary_output_port or "result",
+            len(computation.output_ports),
+        )
         if output_id in node_ids:
             return [
                 (
@@ -711,7 +884,25 @@ def _inject_group_inputs(
         node_by_id[input_id] = input_node
 
 
-def _inject_group_outputs(section_nodes: list[dict[str, Any]]) -> None:
+def _tile_prefix_attr_name(prefix: str) -> str:
+    """Recover the submodule attribute encoded in a tile id.
+
+    Tile ids carry their slot and producer (``seq:7:forget_gate``,
+    ``sidefeed:11:o_norm:@op_l35``); only the attribute names the tensor.
+    """
+    segment = prefix.rsplit("/", 1)[-1]
+    parts = segment.split(":")
+    if len(parts) >= 3 and parts[0] in {"seq", "sidefeed", "branch"}:
+        return parts[2]
+    return segment
+
+
+def _inject_group_outputs(
+    section_nodes: list[dict[str, Any]],
+    *,
+    output_names: dict[str, str] | None = None,
+    resolve_name: Any = None,
+) -> None:
     """Give every visible Input namespace a matching Output boundary."""
     input_namespaces = {
         node.get("namespace", "") for node in section_nodes if _is_synthetic_input(node)
@@ -769,9 +960,13 @@ def _inject_group_outputs(section_nodes: list[dict[str, Any]]) -> None:
         if not sources:
             continue
 
+        name = (output_names or {}).get(prefix)
+        if not name and resolve_name is not None:
+            name = resolve_name(prefix)
+        name = name or "result"
         ports = [
             (
-                "result" if len(sources) == 1 else f"result_{index + 1}",
+                name if len(sources) == 1 else f"{name}_{index + 1}",
                 source,
                 source_port,
             )
@@ -795,6 +990,253 @@ def _inject_group_outputs(section_nodes: list[dict[str, Any]]) -> None:
                 ports=ports,
             )
         )
+
+
+def _flatten_transparent_group_inputs(section_nodes: list[dict[str, Any]]) -> None:
+    """Remove Input nodes from inline expansions that have no block Output."""
+    output_namespaces = {
+        str(node.get("namespace", ""))
+        for node in section_nodes
+        if _is_synthetic_output(node)
+    }
+    transparent_inputs = [
+        node
+        for node in section_nodes
+        if _is_primary_section_input(node)
+        and str(node.get("label", "")).lower() in {"hidden_states", "input"}
+        and str(node.get("namespace", "")) not in output_namespaces
+    ]
+    for input_node in transparent_inputs:
+        input_id = str(input_node["id"])
+        incoming = list(input_node.get("incomingEdges", []))
+        if not incoming:
+            continue
+        for target in section_nodes:
+            replacement: list[dict[str, Any]] = []
+            changed = False
+            for edge in target.get("incomingEdges", []):
+                if edge.get("sourceNodeId") != input_id:
+                    replacement.append(edge)
+                    continue
+                changed = True
+                target_port = str(edge.get("targetNodeInputId", "0"))
+                for index, source_edge in enumerate(incoming):
+                    rewired = dict(source_edge)
+                    rewired["targetNodeInputId"] = (
+                        target_port if len(incoming) == 1 else f"{target_port}_{index}"
+                    )
+                    replacement.append(rewired)
+            if changed:
+                target["incomingEdges"] = replacement
+        section_nodes.remove(input_node)
+
+
+_GENERIC_OUTPUT_PORT_RE = re.compile(r"^result(_\d+)?$")
+
+
+def _caller_output_name(
+    spec: ArchitectureSpec,
+    parent_class: str | None,
+    attr_name: str,
+) -> str | None:
+    """Tensor name the calling module binds this submodule's result to."""
+    parent = spec.class_registry.get(parent_class or "")
+    if parent is None:
+        return None
+    return parent.forward_call_output_names.get(attr_name)
+
+
+def _rename_generic_output_ports(
+    nodes: list[dict[str, Any]],
+    *,
+    output_id: str,
+    name: str,
+) -> dict[str, str]:
+    """Replace placeholder ``result`` ports with the caller's tensor name.
+
+    Modules returning a bare expression carry no name of their own, so the
+    boundary would otherwise read ``result`` instead of the tensor the caller
+    actually threads onward.
+    """
+    output = next((node for node in nodes if node.get("id") == output_id), None)
+    if output is None:
+        return {}
+    ports = [str(item.get("id")) for item in output.get("outputsMetadata", [])]
+    renames = {
+        port: (name if len(ports) == 1 else f"{name}_{index + 1}")
+        for index, port in enumerate(ports)
+        if _GENERIC_OUTPUT_PORT_RE.match(port)
+    }
+    if not renames:
+        return {}
+    for key in ("inputsMetadata", "outputsMetadata"):
+        for metadata in output.get(key, []):
+            renamed = renames.get(str(metadata.get("id")))
+            if not renamed:
+                continue
+            metadata["id"] = renamed
+            for attr in metadata.get("attrs", []):
+                if attr.get("key") == "port_label":
+                    attr["value"] = renamed
+    for edge in output.get("incomingEdges", []):
+        renamed = renames.get(str(edge.get("targetNodeInputId", "")))
+        if not renamed:
+            continue
+        edge["targetNodeInputId"] = renamed
+        metadata = edge.get("metadata")
+        if isinstance(metadata, dict) and "port_label" in metadata:
+            metadata["port_label"] = renamed
+    for node in nodes:
+        for edge in node.get("incomingEdges", []):
+            if str(edge.get("sourceNodeId")) != output_id:
+                continue
+            renamed = renames.get(str(edge.get("sourceNodeOutputId", "0")))
+            if renamed:
+                edge["sourceNodeOutputId"] = renamed
+    return renames
+
+
+def _remove_transparent_root_output(
+    section_nodes: list[dict[str, Any]],
+    *,
+    id_prefix: str,
+    primary_port: str | None,
+) -> SourceRef | None:
+    """Replace an inline-expanded root Output boundary with its real producer."""
+    output_id = _merge_node_id(id_prefix, "@output")
+    output = next(
+        (node for node in section_nodes if node.get("id") == output_id),
+        None,
+    )
+    if output is None:
+        return None
+    incoming = list(output.get("incomingEdges", []))
+    selected = next(
+        (
+            edge
+            for edge in incoming
+            if str(edge.get("targetNodeInputId", "")) == str(primary_port or "")
+        ),
+        incoming[0] if incoming else None,
+    )
+    section_nodes.remove(output)
+    if selected is None:
+        return None
+    return (
+        str(selected["sourceNodeId"]),
+        str(selected.get("sourceNodeOutputId", "0")),
+    )
+
+
+def _wrap_actual_group_boundary(
+    nodes: list[dict[str, Any]],
+    *,
+    namespace: str,
+    id_prefix: str,
+    inputs: list[SourceRef],
+    outputs: list[SourceRef],
+    first_node_index: int,
+) -> list[SourceRef]:
+    """Put explicit boundaries around one real, non-transparent source block."""
+    if not inputs or not outputs:
+        return outputs
+    input_id = _merge_node_id(id_prefix, "@input")
+    input_node = _make_group_input_node(
+        input_id=input_id,
+        label="hidden_states",
+        namespace=namespace,
+        incoming_edges=[
+            _source_edge(source, str(index)) for index, source in enumerate(inputs)
+        ],
+    )
+    input_keys = {_source_parts(source) for source in inputs}
+    for node in nodes[first_node_index:]:
+        if not _namespace_is_descendant(str(node.get("namespace", "")), namespace):
+            continue
+        for edge in node.get("incomingEdges", []):
+            source = (
+                str(edge.get("sourceNodeId", "")),
+                str(edge.get("sourceNodeOutputId", "0")),
+            )
+            if source in input_keys:
+                edge["sourceNodeId"] = input_id
+                edge["sourceNodeOutputId"] = "0"
+    nodes.append(input_node)
+
+    output_refs: list[SourceRef] = []
+    for index, source in enumerate(outputs):
+        port = "result" if len(outputs) == 1 else f"result_{index + 1}"
+        output_id = _port_output_id(
+            _merge_node_id(id_prefix, "@output"), port, len(outputs)
+        )
+        nodes.append(
+            _make_group_output_node(
+                output_id=output_id,
+                namespace=namespace,
+                ports=[(port, *_source_parts(source))],
+            )
+        )
+        output_refs.append((output_id, port))
+    return output_refs
+
+
+def _mirror_boundary_outputs(nodes: list[dict[str, Any]]) -> None:
+    """Pair each submodule Output port with a same-named node outside the block.
+
+    The Output sits inside the block namespace, so consumers otherwise reach across
+    the boundary. A mirror in the parent namespace gives the escaping tensor a
+    visible identity on both sides of the block.
+    """
+    mirrors: list[dict[str, Any]] = []
+    for node in list(nodes):
+        if not _is_synthetic_output(node):
+            continue
+        namespace = str(node.get("namespace", ""))
+        if not namespace:
+            continue
+        output_id = str(node.get("id"))
+        parent_namespace = namespace.rsplit("/", 1)[0] if "/" in namespace else ""
+        internal = _namespace_internal_ids(nodes, namespace)
+        for metadata in node.get("outputsMetadata", []):
+            port = str(metadata.get("id", ""))
+            if not port:
+                continue
+            consumers = [
+                (target, edge)
+                for target in nodes
+                if target["id"] not in internal
+                for edge in target.get("incomingEdges", [])
+                if str(edge.get("sourceNodeId")) == output_id
+                and str(edge.get("sourceNodeOutputId", "0")) == port
+            ]
+            if not consumers:
+                continue
+            mirror_id = f"{output_id}^{port}"
+            mirrors.append(
+                {
+                    "id": mirror_id,
+                    "label": port,
+                    "namespace": parent_namespace,
+                    "attrs": [{"key": "synthetic", "value": "@output_mirror"}],
+                    "style": ensure_readable_text(output_port_style()),
+                    "incomingEdges": [
+                        {
+                            "sourceNodeId": output_id,
+                            "sourceNodeOutputId": port,
+                            "targetNodeInputId": port,
+                        }
+                    ],
+                    "outputsMetadata": [
+                        {
+                            "id": port,
+                            "attrs": [{"key": "port_label", "value": port}],
+                        }
+                    ],
+                }
+            )
+            for _target, edge in consumers:
+                edge["sourceNodeId"] = mirror_id
+    nodes.extend(mirrors)
 
 
 def _prune_unconsumed_outputs(nodes: list[dict[str, Any]]) -> None:
@@ -1067,8 +1509,6 @@ def _section_namespace_for_component(
     variant: LayerVariant | None,
     namespace_prefix: str,
 ) -> str:
-    if component.role == "norm" and component.attr_name in _DECODER_NORM_ATTRS:
-        return namespace_prefix
     segment = _section_namespace_segment(spec, component, variant=variant)
     return _join_namespace(namespace_prefix, segment)
 
@@ -1138,6 +1578,7 @@ def _append_section(
     spine_namespace_prefix: str | None = None,
     group_node_attributes: dict[str, dict[str, str]] | None = None,
     shape_inferencer: ShapeInferencer | None = None,
+    parent_class: str | None = None,
 ) -> list[SourceRef]:
     if not component_has_detail_section(component, spec):
         summary_namespace = spine_namespace_prefix or _flat_spine_namespace(
@@ -1261,11 +1702,17 @@ def _append_section(
         )
     tile_ids = _block_tile_ids(computation, id_prefix=id_prefix)
     tile_replacements: dict[str, SourceRef] = {}
+    nested_output_names: dict[str, str] = {}
     for nested_label, nested_block in collect_nested_diagrams(
         block_tree, basic_ops=basic_ops
     ):
         tile_id = tile_ids.get(id(nested_block))
         nested_prefix = tile_id or _merge_node_id(id_prefix, nested_block.attr_name)
+        nested_name = _caller_output_name(
+            spec, block_tree.class_name, nested_block.attr_name
+        )
+        if nested_name:
+            nested_output_names[nested_prefix] = nested_name
         if any(node["id"].startswith(f"{nested_prefix}/") for node in section_nodes):
             continue
         nested_namespace = _join_namespace(
@@ -1331,17 +1778,45 @@ def _append_section(
     if skip_variant_root_input:
         inject_skip.add(namespace_prefix)
     _inject_group_inputs(section_nodes, skip_namespaces=frozenset(inject_skip))
+    _inject_group_outputs(
+        section_nodes,
+        output_names=nested_output_names,
+        resolve_name=lambda prefix: _caller_output_name(
+            spec, block_tree.class_name, _tile_prefix_attr_name(prefix)
+        ),
+    )
     _connect_external_inputs(
         section_nodes,
         namespace_prefix=namespace_prefix,
         previous_exits=previous_exits,
     )
-    exits = _section_exits(
-        computation,
-        section_nodes,
-        id_prefix=id_prefix,
-        replacements=tile_replacements,
+    transparent_exit = None
+    _flatten_transparent_group_inputs(section_nodes)
+    caller_name = _caller_output_name(spec, parent_class, component.attr_name)
+    port_renames = (
+        _rename_generic_output_ports(
+            section_nodes,
+            output_id=_merge_node_id(id_prefix, "@output"),
+            name=caller_name,
+        )
+        if caller_name
+        else {}
     )
+    exits = (
+        [transparent_exit]
+        if transparent_exit is not None
+        else _section_exits(
+            computation,
+            section_nodes,
+            id_prefix=id_prefix,
+            replacements=tile_replacements,
+        )
+    )
+    if port_renames:
+        exits = [
+            (node_id, port_renames.get(port, port))
+            for node_id, port in (_source_parts(exit_ref) for exit_ref in exits)
+        ]
 
     merged_nodes.extend(section_nodes)
     apply_kernel_frame_labels(section_nodes, group_node_attributes)
@@ -1384,18 +1859,19 @@ def _append_variant_layer(
     hc_outputs: dict[str, SourceRef] = {}
 
     def output_refs(section_prefix: str) -> dict[str, SourceRef]:
-        output_id = _merge_node_id(section_prefix, "@output")
-        output = next(
-            (node for node in merged_nodes if node.get("id") == output_id),
-            None,
-        )
-        if output is None:
-            return {}
-        return {
-            str(metadata["id"]): (output_id, str(metadata["id"]))
-            for metadata in output.get("outputsMetadata", [])
-            if metadata.get("id")
-        }
+        output_prefix = _merge_node_id(section_prefix, "@output")
+        refs: dict[str, SourceRef] = {}
+        for output in merged_nodes:
+            output_id = str(output.get("id", ""))
+            if output_id != output_prefix and not output_id.startswith(
+                f"{output_prefix}:"
+            ):
+                continue
+            for metadata in output.get("outputsMetadata", []):
+                port = str(metadata.get("id", ""))
+                if port:
+                    refs[port] = (output_id, port)
+        return refs
 
     def append_residual_mix(site: str, branch_output: SourceRef) -> SourceRef:
         post = hc_outputs["post"]
@@ -1472,6 +1948,7 @@ def _append_variant_layer(
             spine_namespace_prefix=namespace_prefix,
             group_node_attributes=group_node_attributes,
             shape_inferencer=shape_inferencer,
+            parent_class=spec.decoder_class,
         )
         if component.attr_name in {"attn_hc", "ffn_hc"}:
             hc_outputs = output_refs(section_prefix)
@@ -1496,6 +1973,134 @@ def _append_variant_layer(
     return chain_exits
 
 
+def _exported_section_outputs(
+    nodes: list[dict[str, Any]], section_prefix: str
+) -> dict[str, SourceRef]:
+    output_prefix = _merge_node_id(section_prefix, "@output")
+    refs: dict[str, SourceRef] = {}
+    for node in nodes:
+        node_id = str(node.get("id", ""))
+        if node_id != output_prefix and not node_id.startswith(f"{output_prefix}:"):
+            continue
+        for metadata in node.get("outputsMetadata", []):
+            port = str(metadata.get("id", ""))
+            if port:
+                refs[port] = (node_id, port)
+    return refs
+
+
+def _append_source_decoder_layer(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    id_prefix: str,
+    namespace_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    variant: LayerVariant | None,
+    group_node_configs: list[dict[str, Any]],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+) -> list[SourceRef]:
+    """Export one decoder layer from its parsed forward dependency graph."""
+    decoder = spec.class_registry.get(spec.decoder_class or "")
+    if decoder is None or not decoder.forward_calls:
+        return list(previous_exits)
+    components = {component.attr_name: component for component in spec.block_components}
+    refs: dict[str, SourceRef] = {}
+    if previous_exits:
+        refs["@method_input"] = previous_exits[0]
+
+    for step in decoder.forward_calls:
+        operation = decoder.forward_operations.get(step)
+        if operation is not None:
+            sources = [
+                refs[predecessor]
+                for predecessor in operation.predecessors
+                if predecessor in refs
+            ]
+            if not sources:
+                continue
+            node_id = _merge_node_id(id_prefix, step)
+            merged_nodes.append(
+                {
+                    "id": node_id,
+                    "label": operation.label,
+                    "namespace": namespace_prefix,
+                    "attrs": [
+                        {"key": "operation", "value": "source"},
+                        *[
+                            {"key": "detail", "value": str(detail)}
+                            for detail in operation.details
+                        ],
+                    ],
+                    "incomingEdges": [
+                        _source_edge(source, str(index))
+                        for index, source in enumerate(sources)
+                    ],
+                }
+            )
+            refs[step] = node_id
+            continue
+
+        component = components.get(step)
+        if component is None:
+            continue
+        predecessors = decoder.forward_step_predecessors.get(step, ())
+        inputs = [
+            refs[predecessor] for predecessor in predecessors if predecessor in refs
+        ]
+        if not inputs:
+            continue
+        section_prefix = _merge_node_id(id_prefix, component.attr_name)
+        section_namespace = _section_namespace_for_component(
+            spec,
+            component,
+            variant=variant,
+            namespace_prefix=namespace_prefix,
+        )
+        group = _group_config_for_role(section_namespace, component.role)
+        if group:
+            group_node_configs.append(group)
+        exits = _append_section(
+            merged_nodes,
+            spec=spec,
+            component=component,
+            id_prefix=section_prefix,
+            namespace_prefix=section_namespace,
+            basic_ops=basic_ops,
+            previous_exits=inputs,
+            variant=variant,
+            spine_namespace_prefix=namespace_prefix,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            parent_class=spec.decoder_class,
+        )
+        if exits:
+            refs[step] = exits[0]
+        outputs = _exported_section_outputs(merged_nodes, section_prefix)
+        class_name = component.class_name
+        if variant is not None and _component_uses_variant_attention_class(
+            component, variant
+        ):
+            class_name = variant.attention_class or class_name
+        elif variant is not None and _component_uses_variant_ffn_class(
+            component, variant
+        ):
+            class_name = variant.ffn_class or class_name
+        callee = spec.class_registry.get(class_name)
+        if callee is not None:
+            for slot, producer in callee.forward_return_slots.items():
+                if slot in outputs:
+                    refs[producer] = outputs[slot]
+
+    if decoder.primary_return_slot:
+        producer = decoder.forward_return_slots.get(decoder.primary_return_slot)
+        if producer in refs:
+            return [refs[producer]]
+    return [refs[step] for step in reversed(decoder.forward_calls) if step in refs][:1]
+
+
 def _append_decoder_layers(
     merged_nodes: list[dict[str, Any]],
     *,
@@ -1507,9 +2112,13 @@ def _append_decoder_layers(
     group_node_attributes: dict[str, dict[str, str]],
     shape_inferencer: ShapeInferencer | None = None,
 ) -> list[SourceRef]:
+    decoder = spec.class_registry.get(spec.decoder_class or "")
+    if decoder is not None:
+        expand_class_forward_dataflow(decoder, spec.class_registry)
     if spec.layer_variants:
         variant_exits: list[SourceRef] = []
         for variant in spec.layer_variants:
+            first_node_index = len(merged_nodes)
             slug = _variant_namespace_slug(variant)
             variant_prefix = _merge_node_id("decoder", slug)
             variant_namespace = _join_namespace(decoder_namespace, slug)
@@ -1528,24 +2137,56 @@ def _append_decoder_layers(
                     "layoutDirection": "TOP_BOTTOM",
                 }
             )
-            exits = _append_variant_layer(
-                merged_nodes,
-                spec=spec,
-                variant=variant,
-                id_prefix=variant_prefix,
-                namespace_prefix=variant_namespace,
-                basic_ops=basic_ops,
-                previous_exits=previous_exits,
-                group_node_configs=group_node_configs,
-                group_node_attributes=group_node_attributes,
-                shape_inferencer=shape_inferencer,
+            decoder = spec.class_registry.get(spec.decoder_class or "")
+            if decoder is not None and (
+                decoder.forward_operations
+                or decoder.forward_step_predecessors
+            ):
+                exits = _append_source_decoder_layer(
+                    merged_nodes,
+                    spec=spec,
+                    id_prefix=variant_prefix,
+                    namespace_prefix=variant_namespace,
+                    basic_ops=basic_ops,
+                    previous_exits=previous_exits,
+                    variant=variant,
+                    group_node_configs=group_node_configs,
+                    group_node_attributes=group_node_attributes,
+                    shape_inferencer=shape_inferencer,
+                )
+            else:
+                exits = _append_variant_layer(
+                    merged_nodes,
+                    spec=spec,
+                    variant=variant,
+                    id_prefix=variant_prefix,
+                    namespace_prefix=variant_namespace,
+                    basic_ops=basic_ops,
+                    previous_exits=previous_exits,
+                    group_node_configs=group_node_configs,
+                    group_node_attributes=group_node_attributes,
+                    shape_inferencer=shape_inferencer,
+                )
+            variant_exits.extend(
+                _wrap_actual_group_boundary(
+                    merged_nodes,
+                    namespace=variant_namespace,
+                    id_prefix=variant_prefix,
+                    inputs=previous_exits,
+                    outputs=exits,
+                    first_node_index=first_node_index,
+                )
             )
-            variant_exits.extend(exits)
-        return variant_exits or list(previous_exits)
+        result = variant_exits or list(previous_exits)
+        if shape_inferencer is not None:
+            fill_missing_node_shapes(
+                merged_nodes, context=shape_inferencer.context
+            )
+        return result
 
-    chain_exits = list(previous_exits)
+    decoder_inputs = list(previous_exits)
+    first_node_index = len(merged_nodes)
     for component in _ordered_decoder_components(spec):
-        section_prefix = _merge_node_id("decoder", component.attr_name)
         section_namespace = _section_namespace_for_component(
             spec,
             component,
@@ -1555,18 +2196,29 @@ def _append_decoder_layers(
         group = _group_config_for_role(section_namespace, component.role)
         if group:
             group_node_configs.append(group)
-        chain_exits = _append_section(
-            merged_nodes,
-            spec=spec,
-            component=component,
-            id_prefix=section_prefix,
-            namespace_prefix=section_namespace,
-            basic_ops=basic_ops,
-            previous_exits=chain_exits,
-            group_node_attributes=group_node_attributes,
-            shape_inferencer=shape_inferencer,
-        )
-    return chain_exits
+    chain_exits = _append_source_decoder_layer(
+        merged_nodes,
+        spec=spec,
+        id_prefix="decoder",
+        namespace_prefix=decoder_namespace,
+        basic_ops=basic_ops,
+        previous_exits=previous_exits,
+        variant=None,
+        group_node_configs=group_node_configs,
+        group_node_attributes=group_node_attributes,
+        shape_inferencer=shape_inferencer,
+    )
+    result = _wrap_actual_group_boundary(
+        merged_nodes,
+        namespace=decoder_namespace,
+        id_prefix="decoder",
+        inputs=decoder_inputs,
+        outputs=chain_exits,
+        first_node_index=first_node_index,
+    )
+    if shape_inferencer is not None:
+        fill_missing_node_shapes(merged_nodes, context=shape_inferencer.context)
+    return result
 
 
 def _group_config_for_role(namespace: str, role: str) -> dict[str, Any] | None:
@@ -1606,10 +2258,20 @@ def build_merged_model_graph(
         }
     ]
     previous_exits = ["@input"]
+    stack_module_sources: dict[str, SourceRef] = {}
     group_node_configs: list[dict[str, Any]] = []
     group_node_attributes: dict[str, dict[str, str]] = {}
+    stack_cls = spec.class_registry.get(spec.stack_model_class or "")
+    if stack_cls is None:
+        stack_cls = _pick_stack_model_class(spec.class_registry, None)
 
     for component in _stack_pre_components(spec):
+        if (
+            component.role == "positional"
+            and stack_cls is not None
+            and component.attr_name not in stack_cls.forward_calls
+        ):
+            continue
         expands = component_has_detail_section(component, spec)
         namespace_prefix = (
             _sanitize_namespace_segment(component.attr_name) if expands else ""
@@ -1627,7 +2289,19 @@ def build_merged_model_graph(
             basic_ops=resolved_basic_ops,
             previous_exits=previous_exits,
             shape_inferencer=shape_inferencer,
+            parent_class=spec.stack_model_class,
         )
+        if previous_exits:
+            stack_module_sources[component.attr_name] = previous_exits[0]
+
+    source_entry = _append_stack_entry_dataflow(
+        nodes,
+        spec=spec,
+        module_sources=stack_module_sources,
+        shape_inferencer=shape_inferencer,
+    )
+    if source_entry is not None:
+        previous_exits = source_entry
 
     decoder_namespace = _decoder_namespace(spec)
     previous_exits = _append_decoder_layers(
@@ -1659,6 +2333,7 @@ def build_merged_model_graph(
             basic_ops=resolved_basic_ops,
             previous_exits=previous_exits,
             shape_inferencer=shape_inferencer,
+            parent_class=spec.stack_model_class,
         )
 
     root_sources = [_source_parts(source) for source in previous_exits]
@@ -1679,6 +2354,7 @@ def build_merged_model_graph(
             )
         )
     _prune_unconsumed_outputs(nodes)
+    _mirror_boundary_outputs(nodes)
 
     if shape_inferencer is not None:
         fill_missing_node_shapes(nodes, context=shape_inferencer.context)

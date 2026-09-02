@@ -27,6 +27,7 @@ _GPU_KERNEL_BORDER = "#d98888"
 _LEGACY_GPU_KERNEL = "#8e44ad"
 _SYNTHETIC = "#ecf0f1"
 _INPUT = "#d9e8f5"
+_LAYOUT_ONLY = "#ffffff"
 
 _GPU_KERNEL_FILLS = frozenset(
     {
@@ -84,12 +85,38 @@ def ensure_readable_text(style: dict[str, str]) -> dict[str, str]:
     return resolved
 
 
+def is_layout_only_label(label: str) -> bool:
+    """True for ops that only rearrange or retype a tensor, computing no values."""
+    from visualizer.ast_analyze import LAYOUT_ONLY_LABELS
+
+    return (label or "").strip() in LAYOUT_ONLY_LABELS
+
+
+def operation_tile_style(label: str) -> dict[str, str]:
+    """Color an operation tile by whether it computes values or only moves them."""
+    if is_layout_only_label(label):
+        return {"backgroundColor": _LAYOUT_ONLY, "textColor": _DARK_TEXT}
+    return {"backgroundColor": _BASIC_OP, "textColor": _DARK_TEXT}
+
+
 def finalize_graph_node_styles(nodes: list[dict[str, Any]]) -> None:
-    """Ensure op nodes on dark fills always export white label text."""
+    """Normalize label colors and give every operation tile a consistent fill.
+
+    Nodes synthesized during merge carry no style of their own, so without this
+    an identical op renders gray in one block and white in another.
+    """
     for node in nodes:
         style = node.get("style")
         if not isinstance(style, dict):
+            if style is None:
+                node["style"] = ensure_readable_text(
+                    operation_tile_style(str(node.get("label", "")))
+                )
             continue
+        if is_layout_only_label(str(node.get("label",""))) and style.get(
+            "backgroundColor"
+        ) == _BASIC_OP:
+            style = {**style, "backgroundColor": _LAYOUT_ONLY}
         node["style"] = ensure_readable_text(style)
 
 

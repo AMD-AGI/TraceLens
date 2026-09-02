@@ -73,6 +73,11 @@ def _apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
     ]
 
 
+def apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
+    """Attach one known output shape to an exported node."""
+    _apply_shape_attrs(node, spec)
+
+
 def annotate_nodes_with_shapes(
     nodes: list[dict[str, Any]],
     shape_specs: dict[str, TensorSpec],
@@ -143,8 +148,19 @@ def annotate_nodes_with_shapes(
             ]
 
 
-def _node_spec(node: dict[str, Any]) -> TensorSpec | None:
-    for metadata in node.get("outputsMetadata", []):
+def _node_spec(
+    node: dict[str, Any], output_port: str | None = None
+) -> TensorSpec | None:
+    metadata_items = node.get("outputsMetadata", [])
+    if output_port is not None:
+        matching = [
+            metadata
+            for metadata in metadata_items
+            if str(metadata.get("id", "0")) == str(output_port)
+        ]
+        if matching:
+            metadata_items = matching
+    for metadata in metadata_items:
         attrs = {
             item.get("key"): item.get("value") for item in metadata.get("attrs", [])
         }
@@ -157,12 +173,110 @@ def _node_spec(node: dict[str, Any]) -> TensorSpec | None:
     return None
 
 
-def _incoming_source_ids(node: dict[str, Any]) -> list[str]:
+def node_output_spec(
+    node: dict[str, Any], output_port: str | None = None
+) -> TensorSpec | None:
+    """Read one exported output port's symbolic tensor specification."""
+    return _node_spec(node, output_port)
+
+
+def _incoming_sources(node: dict[str, Any]) -> list[tuple[str, str, str]]:
     return [
-        str(edge.get("sourceNodeId"))
+        (
+            str(edge.get("sourceNodeId")),
+            str(edge.get("sourceNodeOutputId", "0")),
+            str(edge.get("targetNodeInputId", "0")),
+        )
         for edge in node.get("incomingEdges", [])
         if edge.get("sourceNodeId")
     ]
+
+
+def _incoming_source_ids(node: dict[str, Any]) -> list[str]:
+    return [source_id for source_id, _source_port, _target_port in _incoming_sources(node)]
+
+
+def _fallback_node_spec(
+    node: dict[str, Any], sources: list[tuple[str, TensorSpec]]
+) -> TensorSpec:
+    """Infer merge-only synthetic ops that have no block-tree shape record."""
+    specs = [spec for _target_port, spec in sources]
+    label = str(node.get("label") or "")
+    node_id = str(node.get("id") or "")
+    details = [
+        str(attr.get("value"))
+        for attr in node.get("attrs", [])
+        if attr.get("key") == "detail"
+    ]
+
+    if label == "Unsqueeze":
+        source = specs[0]
+        dim_detail = next(
+            (detail.split(":", 1)[1].strip() for detail in details if detail.startswith("dim:")),
+            None,
+        )
+        if dim_detail is not None:
+            try:
+                dim = int(dim_detail)
+            except ValueError:
+                dim = 0
+            if dim < 0:
+                dim += len(source.shape) + 1
+            shape = list(source.shape)
+            shape.insert(max(0, min(dim, len(shape))), 1)
+            return TensorSpec(tuple(shape), source.dtype)
+
+    if label in {"Multiply", "Add", "×", "+"} and len(specs) >= 2:
+        rank = max(len(spec.shape) for spec in specs)
+        padded = [
+            (1,) * (rank - len(spec.shape)) + tuple(spec.shape) for spec in specs
+        ]
+        shape: list[Any] = []
+        for dimensions in zip(*padded):
+            non_unit = [dimension for dimension in dimensions if dimension != 1]
+            if non_unit and all(
+                isinstance(dimension, int)
+                or (isinstance(dimension, str) and dimension.isdigit())
+                for dimension in non_unit
+            ):
+                shape.append(max(non_unit, key=lambda dimension: int(dimension)))
+            else:
+                shape.append(non_unit[-1] if non_unit else 1)
+        return TensorSpec(tuple(shape), specs[-1].dtype)
+
+    if label == "MatMul" and len(specs) >= 2:
+        left, right = specs[:2]
+        if left.shape and right.shape:
+            return TensorSpec((*left.shape[:-1], right.shape[-1]), right.dtype)
+
+    if "@residual:" in node_id and label == "Multiply":
+        by_input = {target_port: spec for target_port, spec in sources}
+        post = by_input.get("post")
+        hidden_states = by_input.get("hidden_states")
+        if post is not None and hidden_states is not None and hidden_states.shape:
+            return TensorSpec((*post.shape, hidden_states.shape[-1]), hidden_states.dtype)
+
+    if "@residual:" in node_id and label == "MatMul":
+        by_input = {target_port: spec for target_port, spec in sources}
+        comb = by_input.get("comb")
+        residual = by_input.get("residual")
+        if comb is not None and residual is not None and comb.shape and residual.shape:
+            return TensorSpec((*comb.shape[:-1], residual.shape[-1]), residual.dtype)
+
+    if node_id.split("/")[-1] == "hc_head" and label == "Mean":
+        source = sources[0][1]
+        if len(source.shape) >= 4:
+            return TensorSpec((*source.shape[:2], source.shape[-1]), source.dtype)
+
+    return max(
+        specs,
+        key=lambda item: (
+            len(item.shape),
+            item.shape[-1]
+            if item.shape and isinstance(item.shape[-1], int)
+            else 0,
+        ),
+    )
 
 
 def fill_missing_node_shapes(
@@ -182,14 +296,20 @@ def fill_missing_node_shapes(
     logits = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value, vocab), context.dtype)
     tokens = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value), "int64")
 
-    known: dict[str, TensorSpec] = {}
+    node_by_id = {str(node.get("id", "")): node for node in nodes}
+    known: dict[tuple[str, str], TensorSpec] = {}
     pending: list[dict[str, Any]] = []
     for node in nodes:
-        spec = _node_spec(node)
-        if spec is None:
+        metadata_items = node.get("outputsMetadata", [])
+        found = False
+        for metadata in metadata_items:
+            port = str(metadata.get("id", "0"))
+            spec = _node_spec(node, port)
+            if spec is not None:
+                known[(str(node.get("id", "")), port)] = spec
+                found = True
+        if not found:
             pending.append(node)
-        else:
-            known[node.get("id", "")] = spec
 
     for node in list(pending):
         label = str(node.get("label") or "").strip().lower()
@@ -206,22 +326,28 @@ def fill_missing_node_shapes(
             # Spine norms sit on the residual stream whatever the preceding tile computed.
             seeded = activation
         if seeded is not None:
-            known[node.get("id", "")] = seeded
+            known[(node_id, "0")] = seeded
             _apply_shape_attrs(node, seeded)
             pending.remove(node)
 
     while pending:
         progressed = False
         for node in list(pending):
-            sources = [
-                known[source]
-                for source in _incoming_source_ids(node)
-                if source in known
-            ]
-            if not sources:
+            sources: list[tuple[str, TensorSpec]] = []
+            incoming_sources = _incoming_sources(node)
+            for source_id, source_port, target_port in incoming_sources:
+                spec = known.get((source_id, source_port))
+                if spec is None:
+                    source_node = node_by_id.get(source_id)
+                    if source_node is not None:
+                        spec = _node_spec(source_node, source_port)
+                if spec is not None:
+                    sources.append((target_port, spec))
+            if not sources or len(sources) != len(incoming_sources):
                 continue
-            spec = max(sources, key=lambda item: len(item.shape))
-            known[node.get("id", "")] = spec
+            spec = _fallback_node_spec(node, sources)
+            node_id = str(node.get("id", ""))
+            known[(node_id, "0")] = spec
             _apply_shape_attrs(node, spec)
             pending.remove(node)
             progressed = True
@@ -254,20 +380,18 @@ def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, st
     namespaces = {
         str(node.get("id", "")): str(node.get("namespace") or "") for node in nodes
     }
-    shapes: dict[str, str] = {}
-    for node in nodes:
-        spec = _node_spec(node)
-        if spec is not None:
-            shapes[str(node.get("id", ""))] = format_shape(spec)
+    node_by_id = {str(node.get("id", "")): node for node in nodes}
 
     inputs: dict[str, list[str]] = {}
     outputs: dict[str, list[str]] = {}
     for node in nodes:
         target_chain = _namespace_chain(namespaces.get(str(node.get("id", "")), ""))
-        for source_id in _incoming_source_ids(node):
-            shape_text = shapes.get(source_id)
-            if not shape_text or source_id not in namespaces:
+        for source_id, source_port, _target_port in _incoming_sources(node):
+            source_node = node_by_id.get(source_id)
+            spec = _node_spec(source_node, source_port) if source_node is not None else None
+            if spec is None or source_id not in namespaces:
                 continue
+            shape_text = format_shape(spec)
             source_chain = _namespace_chain(namespaces[source_id])
             for group in target_chain:
                 if group not in source_chain:
@@ -281,6 +405,7 @@ def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, st
         for group, group_shapes in store.items():
             attributes.setdefault(group, {})[key] = ", ".join(group_shapes[:3])
 
+    boundary_values: dict[tuple[str, str], list[str]] = {}
     for node in nodes:
         namespace = str(node.get("namespace") or "")
         if not namespace:
@@ -305,14 +430,18 @@ def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, st
             if not shape:
                 continue
             port = str(metadata.get("id", "0"))
-            if len(output_metadata) == 1:
+            if len(output_metadata) == 1 and port in {"0", "result", "output"}:
                 values.append(str(shape))
             else:
                 label = str(node.get("label") or "input") if port == "0" else port
                 values.append(f"{label}: {shape}")
         if values:
             key = "input_shape" if synthetic == "@input" else "output_shape"
-            attributes.setdefault(namespace, {})[key] = ", ".join(values)
+            boundary_values.setdefault((namespace, key), []).extend(values)
+    for (namespace, key), values in boundary_values.items():
+        attributes.setdefault(namespace, {})[key] = ", ".join(
+            dict.fromkeys(values)
+        )
     return attributes
 
 

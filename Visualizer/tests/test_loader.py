@@ -56,6 +56,8 @@ def test_load_model_spec_hf_kimi():
     )
     assert spec.checkpoint_source
     assert any(src.startswith("hf://") for src in spec.code_sources)
+    assert spec.decoder_class == "KimiDecoderLayer"
+    assert spec.stack_model_class == "KimiLinearModel"
     assert len(spec.export_block_trees) >= 4
     titles = [title for title, _ in spec.export_block_trees]
     assert any("Attn" in title for title in titles)
