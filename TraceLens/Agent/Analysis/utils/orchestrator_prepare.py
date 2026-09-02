@@ -7,7 +7,7 @@
 
 """
 TraceLens Agent - Orchestrator Preparation Script
-Steps 2-5: GPU Utilization, Top Ops, Tree Data Pre-computation, Category Filtering
+Steps 3-6: GPU Utilization, Top Ops, Tree Data Pre-computation, Category Filtering
 """
 
 import argparse
@@ -858,9 +858,9 @@ def main():
     platform_specs = load_arch(platform)
 
     # ============================================================================
-    # STEP 2: Assess GPU Utilization
+    # STEP 3: Assess GPU Utilization
     # ============================================================================
-    print("\n[STEP 2] Assessing GPU Utilization...")
+    print("\n[STEP 3] Assessing GPU Utilization...")
 
     gpu_timeline = pd.read_csv(os.path.join(trace1_csv_dir, "gpu_timeline.csv"))
     gpu_utilization_metrics = _gpu_utilization_metrics_from_gpu_timeline_df(
@@ -899,9 +899,9 @@ def main():
         print(f"  [DIAG:trace_quality:HIGH_IDLE] Compute utilization < 85%")
 
     # ============================================================================
-    # STEP 3: Identify Top Operations
+    # STEP 4: Identify Top Operations
     # ============================================================================
-    print("\n[STEP 3] Identifying Top Operations...")
+    print("\n[STEP 4] Identifying Top Operations...")
 
     ops_summary = pd.read_csv(os.path.join(trace1_csv_dir, "ops_summary.csv"))
 
@@ -932,9 +932,9 @@ def main():
             print(f"  {op_name:50s} | {time_val:10.2f} | {category}")
 
     # ============================================================================
-    # STEP 4: Pre-compute Tree Data (Optimization)
+    # STEP 5: Pre-compute Tree Data (Optimization)
     # ============================================================================
-    print("\n[STEP 4] Pre-computing Tree Data for Bottleneck Operations...")
+    print("\n[STEP 5] Pre-computing Tree Data for Bottleneck Operations...")
 
     try:
         print(f"  Loading trace: {trace_path}")
@@ -998,9 +998,9 @@ def main():
         print(f"  ✓ Identified bottleneck operations")
 
         # ====================================================================
-        # STEP 4.5: Pre-compute Multi-Kernel Issue Data
+        # STEP 5.5: Pre-compute Multi-Kernel Issue Data
         # ====================================================================
-        print("\n[STEP 4.5] Pre-computing Multi-Kernel Issue Data...")
+        print("\n[STEP 5.5] Pre-computing Multi-Kernel Issue Data...")
 
         try:
             gpu_analyser = GPUEventAnalyser(tree.events)
@@ -1164,9 +1164,9 @@ def main():
                 json.dump(multi_kernel_data, f, indent=2)
 
         # ====================================================================
-        # STEP 4b: Extract Kernel Fusion Candidates (Experimental)
+        # STEP 5b: Extract Kernel Fusion Candidates (Experimental)
         # ====================================================================
-        print("\n[STEP 4b] Extracting Kernel Fusion Candidates...")
+        print("\n[STEP 5b] Extracting Kernel Fusion Candidates...")
 
         fusion_candidates_file = f"{output_dir}/category_data/fusion_candidates.json"
 
@@ -1223,14 +1223,14 @@ def main():
 
     except Exception as e:
         print(
-            f"  [DIAG:pipeline:STEP2_5_FAIL] Error during tree data pre-computation: {e}"
+            f"  [DIAG:pipeline:STEP3_6_FAIL] Error during tree data pre-computation: {e}"
         )
         traceback.print_exc()
 
     # ============================================================================
-    # STEP 5: Filter and Export Category Data
+    # STEP 6: Filter and Export Category Data
     # ============================================================================
-    print("\n[STEP 5] Filtering and Exporting Category Data...")
+    print("\n[STEP 6] Filtering and Exporting Category Data...")
 
     unified_df = pd.read_csv(os.path.join(trace1_csv_dir, "unified_perf_summary.csv"))
 
@@ -1404,9 +1404,9 @@ def main():
             )
 
     # ============================================================================
-    # STEP 5.5: Calculate Time Metric Breakdown per Category
+    # STEP 6.5: Calculate Time Metric Breakdown per Category
     # ============================================================================
-    print("\n[STEP 5.5] Calculating Time Metric Breakdown per Category...")
+    print("\n[STEP 6.5] Calculating Time Metric Breakdown per Category...")
 
     # Calculate GPU kernel time vs CPU duration per category
     # GPU kernel time = actual GPU execution (use for bottleneck prioritization)
@@ -1519,7 +1519,7 @@ def main():
         json.dump(model_info, f, indent=2)
 
     print(f"\n{'='*80}")
-    print(f"✓ Orchestrator Preparation Complete (Steps 2-5)")
+    print(f"✓ Orchestrator Preparation Complete (Steps 3-6)")
     print(f"✓ Exported {len(exported_categories)} categories")
     print(f"✓ Manifest saved: {manifest_file}")
     if comparison_scope == "comparative":
