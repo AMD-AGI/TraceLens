@@ -131,6 +131,13 @@ def extract_iteration(
 
     min_iter_ts = min(start for start, _ in windows)
     max_iter_end = max(end for _, end in windows)
+    # When tiles come from the full root list (the normal case), the true last
+    # window is the one ending at the global tile maximum -- not just the last
+    # window in this call.  Without this, single-root extract_iteration calls
+    # (--store-single-iteration) treat every window as "last" and close the
+    # right boundary, leaking the next root's events into the current window.
+    if root_tiles:
+        max_iter_end = max(max_iter_end, max(end for _, end in root_tiles.values()))
 
     # Pre-filter every timestamped CPU-side event in the global window, on ANY
     # thread. Iterations are time windows, so work dispatched to a sibling thread

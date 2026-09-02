@@ -30,10 +30,6 @@ MIN_LABEL_CHILDREN = 6
 # when scanning a thread's frames.
 PYTHON_TIER = "python_function"
 
-# Graph replay: each engine step replays a captured graph with a single launch.
-# That launch survives graph capture (which erases the per-op python/kernel
-# signal) and sits at iteration granularity, so it is tried before everything.
-GRAPH_LAUNCH_TIER = "graph_launch"
 GRAPH_LAUNCH_NAMES = {"hipGraphLaunch", "cudaGraphLaunch"}
 
 # Branch-descent tier: walk down the call tree until a frame's own children form
