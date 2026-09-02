@@ -31,7 +31,13 @@ def _sanitize_namespace_segment(text: str) -> str:
 
 def _node_namespaces(computation: ComputationGraph) -> dict[int, str]:
     namespaces: dict[int, str] = {index: "" for index in range(len(computation.nodes))}
-    for frame in computation.inline_frames:
+    # Outer frames contain their nested frames' nodes. Apply larger frames first
+    # so a helper called inside a loop becomes `Loop/_apply_gate`, not the
+    # inverted `_apply_gate/Loop` hierarchy.
+    for frame in sorted(
+        computation.inline_frames,
+        key=lambda item: -len(set(item.node_indices)),
+    ):
         segment = _sanitize_namespace_segment(frame.label)
         for index in frame.node_indices:
             if index not in namespaces:

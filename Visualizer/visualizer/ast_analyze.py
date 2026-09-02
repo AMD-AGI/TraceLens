@@ -3965,6 +3965,7 @@ def _walk_forward_stmt(
         return pending_norm
 
     if isinstance(node, ast.For):
+        first_loop_call = len(calls)
         for child in node.body:
             pending_norm = _walk_forward_stmt(
                 child,
@@ -3977,6 +3978,14 @@ def _walk_forward_stmt(
                 forward_input_names,
                 forward_step_details,
             )
+        # Tensor operations are annotated by _ForwardOperationExtractor, but
+        # expanded helper calls (for example `_apply_gate()`) are not operations
+        # in this method's graph. Preserve their call-site loop context too so
+        # their expanded children remain inside the source loop.
+        for call in calls[first_loop_call:]:
+            details = forward_step_details.setdefault(call, [])
+            if not any(detail.startswith("loop:") for detail in details):
+                details.append("loop: repeated")
         return pending_norm
 
     if isinstance(node, ast.With):

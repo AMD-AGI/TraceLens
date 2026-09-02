@@ -1913,6 +1913,11 @@ def build_block_node(
                 continue
             method_ops = cls.multi_op_methods.get(call_attr)
             if method_ops:
+                call_context = [
+                    detail
+                    for detail in child_details
+                    if detail.startswith(("loop:", "condition:"))
+                ]
                 child_nodes.append(
                     BlockNode(
                         attr_name=call_attr,
@@ -1920,13 +1925,20 @@ def build_block_node(
                         role=_classify_role(call_attr, call_attr),
                         label=call_attr.strip("_").replace("_", " "),
                         forward_order=child_order,
-                        details=[f"method `{call_attr}()`"],
+                        details=[f"method `{call_attr}()`", *call_context],
                         children=[
                             _leaf_node(
                                 attr_name=operation.attr_name,
                                 class_name=operation.class_name,
                                 forward_order=operation_index,
-                                details=list(operation.details),
+                                details=[
+                                    *operation.details,
+                                    *(
+                                        detail
+                                        for detail in call_context
+                                        if detail not in operation.details
+                                    ),
+                                ],
                                 label=operation.label,
                                 basic=True,
                                 operation_predecessors=list(operation.predecessors),

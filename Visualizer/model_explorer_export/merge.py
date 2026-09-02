@@ -1180,6 +1180,22 @@ def _wrap_actual_group_boundary(
     return output_refs
 
 
+def _label_boundary_outputs_by_port(nodes: list[dict[str, Any]]) -> None:
+    """Name a single-port boundary Output after the tensor it carries.
+
+    A multi-return module splits into one Output per slot, so a generic
+    ``Output`` label would hide which of ``post``/``comb``/``collapsed`` each
+    boundary is. Matching the mirror outside keeps one tensor reading the same
+    on both sides of the block.
+    """
+    for node in nodes:
+        if not _is_synthetic_output(node):
+            continue
+        ports = [str(item.get("id", "")) for item in node.get("outputsMetadata", [])]
+        if len(ports) == 1 and ports[0]:
+            node["label"] = ports[0]
+
+
 def _mirror_boundary_outputs(nodes: list[dict[str, Any]]) -> None:
     """Pair each submodule Output port with a same-named node outside the block.
 
@@ -2354,6 +2370,7 @@ def build_merged_model_graph(
             )
         )
     _prune_unconsumed_outputs(nodes)
+    _label_boundary_outputs_by_port(nodes)
     _mirror_boundary_outputs(nodes)
 
     if shape_inferencer is not None:

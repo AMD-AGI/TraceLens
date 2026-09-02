@@ -195,6 +195,16 @@ def _section_namespace_segment(
     from model_explorer_export.adapter import _sanitize_namespace_segment
 
     if component.role == "norm":
+        # Every norm shares one class name, so keying the namespace on the class
+        # would merge distinct instances into one group and make the spine look
+        # like it loops back (attn_hc -> norm -> ... -> ffn_hc -> same norm).
+        norm_attrs = {
+            other.attr_name
+            for other in (spec.block_components or [])
+            if other.role == "norm"
+        }
+        if len(norm_attrs) > 1:
+            return _sanitize_namespace_segment(component.attr_name)
         return _sanitize_namespace_segment(spec.norm_type or "RMSNorm")
     if variant is not None:
         if _component_uses_variant_attention_class(component, variant):

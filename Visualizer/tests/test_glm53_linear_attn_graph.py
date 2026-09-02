@@ -76,6 +76,30 @@ def _has_export_path(nodes, source_id: str, target_id: str) -> bool:
     return False
 
 
+def _assert_export_is_acyclic(nodes) -> None:
+    outgoing: dict[str, list[str]] = {}
+    for node in nodes:
+        for edge in node.get("incomingEdges", []):
+            outgoing.setdefault(edge["sourceNodeId"], []).append(node["id"])
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(node_id: str) -> None:
+        if node_id in visiting:
+            raise AssertionError(f"cycle reaches {node_id}")
+        if node_id in visited:
+            return
+        visiting.add(node_id)
+        for target_id in outgoing.get(node_id, []):
+            visit(target_id)
+        visiting.remove(node_id)
+        visited.add(node_id)
+
+    for node in nodes:
+        visit(node["id"])
+
+
 def test_glm53_linear_attention_has_single_output_exit():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -461,7 +485,12 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
             f"{prefix}/{source_component[target]}/@output:collapsed"
         )
         source = node_by_id[output_id]
-        assert source.get("label") == "Output"
+        # The boundary inside the block reads the same as its mirror outside.
+        assert source.get("label") == "collapsed"
+        assert any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@output"
+            for attr in source.get("attrs", [])
+        )
         assert [item["id"] for item in source["outputsMetadata"]] == ["collapsed"]
         mirror_id = f"{output_id}^collapsed"
         norm_input_id = f"{prefix}/{target}/@input"
@@ -624,12 +653,41 @@ def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
         port = output["outputsMetadata"][0]["id"]
         mirror = node_by_id[f"{output['id']}^{port}"]
         assert mirror["label"] == port
+        # Boundary and mirror name the same tensor on both sides of the block.
+        assert output["label"] == port
         assert mirror["incomingEdges"][0]["sourceNodeId"] == output["id"]
+    assert {node["label"] for node in outputs} == {"post", "comb", "collapsed"}
     boundary = graph["groupNodeAttributes"][outputs[0]["namespace"]]
     assert boundary["input_shape"] == "B x S x 4 x 4096"
     assert boundary["output_shape"] == (
         "post: B x S x 4, comb: B x S x 4 x 4, " "collapsed: B x S x 4096"
     )
+
+
+def test_glm53_expert_helper_stays_inside_loop_without_cycle():
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    prefix = _linear_attn_variant_prefix(spec)
+
+    helper_nodes = [
+        node
+        for node in graph["nodes"]
+        if node["id"].startswith(f"{prefix}/mlp/")
+        and ":experts:_apply_gate:" in node["id"]
+        and not any(
+            attr.get("key") == "synthetic"
+            and attr.get("value") == "@output_mirror"
+            for attr in node.get("attrs", [])
+        )
+    ]
+    assert helper_nodes
+    assert all(
+        "/Glm5NextTextExperts/Loop_repeated/_apply_gate"
+        in node.get("namespace", "")
+        for node in helper_nodes
+    )
+    _assert_export_is_acyclic(graph["nodes"])
 
 
 def test_glm53_decoder_boundary_keeps_hyper_stream_shape():
@@ -651,6 +709,46 @@ def test_glm53_decoder_boundary_keeps_hyper_stream_shape():
             if attr["key"] == "output_shape"
         )
         assert output_shape == "B x S x 4 x 4096"
+
+
+def test_glm53_spine_norms_do_not_share_a_namespace():
+    """Merging both norms into one group made the spine look like it loops."""
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    prefix = _linear_attn_variant_prefix(spec)
+    namespace_of = {node["id"]: node.get("namespace", "") for node in graph["nodes"]}
+
+    def section_namespace(attr: str) -> str:
+        return namespace_of[f"{prefix}/{attr}/@input"]
+
+    input_ns = section_namespace("input_layernorm")
+    post_ns = section_namespace("post_attention_layernorm")
+    assert input_ns != post_ns
+
+    # Neither norm group may both feed and be fed by the decoder spine, which is
+    # what a shared namespace produced.
+    spine = namespace_of[f"{prefix}/@input"]
+    for norm_ns in (input_ns, post_ns):
+        into_spine = False
+        out_of_spine = False
+        for node in graph["nodes"]:
+            target = namespace_of.get(node["id"], "")
+            for edge in node.get("incomingEdges", []):
+                source = namespace_of.get(edge["sourceNodeId"], "")
+                if source == norm_ns and target == spine:
+                    into_spine = True
+                if source == spine and target == norm_ns:
+                    out_of_spine = True
+        assert into_spine and out_of_spine
+    # The real order is attn_hc -> input_layernorm -> self_attn.
+    norm_mirror = f"{prefix}/input_layernorm/@output^hidden_states"
+    attention_input = next(
+        node
+        for node in graph["nodes"]
+        if node["id"] == f"{prefix}/self_attn/@input"
+    )
+    assert attention_input["incomingEdges"][0]["sourceNodeId"] == norm_mirror
 
 
 def test_glm53_operation_tile_colors_are_consistent_per_label():
