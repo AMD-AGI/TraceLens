@@ -4,12 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""
-Shared helper functions for the semantic_analyses scripts.
-
-Merged from the former trace_breakdown/_helpers.py (build_rle, detect_period)
-and trace_comparison/_helpers.py (load_labels).
-"""
+"""Shared helper functions for the semantic_analyses scripts."""
 
 import gzip
 import json

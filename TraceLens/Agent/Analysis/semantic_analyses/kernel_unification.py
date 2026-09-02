@@ -310,7 +310,22 @@ def stem_for(name, compiled):
     for r in compiled:
         if r["regex"].search(name):
             if r["action"] == "collapse":
-                return r["regex"].sub(r["replacement"], name), "collapse"
+                try:
+                    return r["regex"].sub(r["replacement"], name), "collapse"
+                except re.error as e:
+                    # A malformed replacement template (e.g. a backreference with
+                    # no matching capture group) is only detected by re at
+                    # substitution time. Don't let one bad rule crash the whole
+                    # run: warn once and fall back to preserving the name.
+                    if not r.get("_warned"):
+                        print(
+                            f"[kernel_unification] ignoring stem rule with bad "
+                            f"replacement {r['replacement']!r} for pattern "
+                            f"{r['regex'].pattern!r}: {e}",
+                            file=sys.stderr,
+                        )
+                        r["_warned"] = True
+                    return name, "preserve"
             if r["action"] == "preserve":
                 return name, "preserve"
             return name, "drop"

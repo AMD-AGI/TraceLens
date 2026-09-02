@@ -71,8 +71,21 @@ MIN_STRICT_FORWARD_AVG = {
     "semantic_purity_qwen3_30b_a3b": 0.30,
 }
 
+# Degenerate-collapse guard. strict_forward saturates to ~1.0 when the candidate
+# partition collapses toward a single LCA bucket (every gold group is trivially
+# homogeneous inside one bucket), so the floor above cannot catch total collapse.
+# Distinct candidate LCA buckets on the matched set of observed healthy runs
+# ranged 26-32 for both models; total collapse is 1. A floor of 10 sits ~2.6x
+# below the worst healthy run and ~10x above collapse, so ordinary bucketing
+# variance never false-alarms while any real collapse fails hard.
+MIN_SHARED_BUCKETS = {
+    "semantic_purity_deepseek_r1": 10,
+    "semantic_purity_qwen3_30b_a3b": 10,
+}
+
 DETAILS_RE = re.compile(r"strict_forward=([0-9.]+)")
 FORWARD_RE = re.compile(r"forward_purity=([0-9.]+)")
+BUCKETS_RE = re.compile(r"shared_buckets=([0-9]+)")
 
 
 def find_run_csvs(results_root: str, test_id: str) -> list[str]:
@@ -91,11 +104,13 @@ def parse_run(csv_path: str):
     details = row.get("details", "")
     m_sfwd = DETAILS_RE.search(details)
     m_fwd = FORWARD_RE.search(details)
+    m_buckets = BUCKETS_RE.search(details)
     if not m_sfwd:
         return None  # pipeline failure row, no metrics to parse
     return {
         "strict_forward": float(m_sfwd.group(1)),
         "forward_purity": float(m_fwd.group(1)) if m_fwd else None,
+        "shared_buckets": int(m_buckets.group(1)) if m_buckets else None,
         "source": csv_path,
     }
 
@@ -130,15 +145,54 @@ def aggregate_one(results_root: str, test_id: str) -> dict:
         }
 
     passed = avg >= floor
+
+    # Collapse guard: fail hard if the distinct candidate LCA count on the
+    # matched set drops below the floor, which would saturate strict_forward.
+    bucket_floor = MIN_SHARED_BUCKETS.get(test_id)
+    bucket_vals = [
+        p["shared_buckets"] for p in parsed if p.get("shared_buckets") is not None
+    ]
+    min_buckets = min(bucket_vals) if bucket_vals else None
+    collapsed = (
+        bucket_floor is not None
+        and min_buckets is not None
+        and min_buckets < bucket_floor
+    )
+    passed = passed and not collapsed
+
     n_note = (
         ""
         if len(parsed) > 1
         else " (single run; a multi-run average is a stronger estimate)"
     )
+    bucket_note = (
+        f" min_shared_buckets={min_buckets} bucket_floor={bucket_floor}"
+        if bucket_floor is not None
+        else ""
+    )
     details = (
         f"n_runs={len(parsed)} strict_forward_values={[round(v, 4) for v in values]} "
-        f"avg_strict_forward={avg:.4f} floor={floor}{n_note}"
+        f"avg_strict_forward={avg:.4f} floor={floor}{bucket_note}{n_note}"
     )
+    if collapsed:
+        details += (
+            f" -- FAIL: candidate partition collapsed toward a single LCA bucket "
+            f"(min {min_buckets} < {bucket_floor}); strict_forward is unreliable"
+        )
+
+    if passed:
+        recommended_fix = ""
+    elif collapsed:
+        recommended_fix = (
+            "Candidate LCA partition collapsed (near-single-bucket); strict_forward "
+            "is saturated and meaningless. Investigate the clustering/coherence step."
+        )
+    else:
+        recommended_fix = (
+            "Semantic-bucketing quality regressed below the observed-performance "
+            "floor; investigate the clustering change"
+        )
+
     return {
         "index": "semantic_purity_aggregate",
         "category": "Quality",
@@ -146,11 +200,7 @@ def aggregate_one(results_root: str, test_id: str) -> dict:
         "result": "PASS" if passed else "FAIL",
         "details": details,
         "root_cause": "" if passed else "quality",
-        "recommended_fix": (
-            ""
-            if passed
-            else "Semantic-bucketing quality regressed below the observed-performance floor; investigate the clustering change"
-        ),
+        "recommended_fix": recommended_fix,
     }
 
 

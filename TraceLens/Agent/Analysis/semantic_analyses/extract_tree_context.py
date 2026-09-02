@@ -83,11 +83,18 @@ def _build_ts_index(tree):
     return index
 
 
-def _find_tree_event(ts_index, name, ts, dur):
+def _find_tree_event(ts_index, name, ts, dur, uid=None):
     """Find a tree event matching by name, timestamp, and duration."""
     candidates = ts_index.get((name, ts), [])
     if len(candidates) == 1:
         return candidates[0]
+    # On a (name, ts) collision (concurrent same-name kernels in multi-stream /
+    # graph traces) prefer the exact stable-UID match: the kernel's gpu_op_uid
+    # equals its tree event UID, so this avoids a silent wrong attach.
+    if uid is not None:
+        for c in candidates:
+            if c.get("UID") == uid:
+                return c
     for c in candidates:
         if c.get("dur") == dur:
             return c
@@ -142,7 +149,11 @@ def extract_tree_context(tree, extracted_data, ts_index=None, capture_augmented=
 
     for i, kernel in enumerate(kernels):
         tree_event = _find_tree_event(
-            ts_index, kernel["name"], kernel["ts"], kernel["dur"]
+            ts_index,
+            kernel["name"],
+            kernel["ts"],
+            kernel["dur"],
+            kernel.get("gpu_op_uid"),
         )
 
         if tree_event is None:

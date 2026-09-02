@@ -125,7 +125,7 @@ def purity_frac(labels_a: np.ndarray, labels_b: np.ndarray) -> float:
     matched = 0
     for _, grp in df.groupby("a", sort=False):
         matched += int(grp["b"].value_counts().iloc[0])
-    return matched / len(df)
+    return matched / len(df) if len(df) else float("nan")
 
 
 def both_purities(gold: np.ndarray, nc: np.ndarray):
@@ -359,6 +359,15 @@ def main() -> None:
 
     gold = load(args.with_capture)
     ncap = load(args.no_capture)
+
+    # Guard: with no shared identity keys the matched set is empty and every
+    # downstream report divides by zero / sorts an empty frame. Fail cleanly.
+    if not (set(gold["key"]) & set(ncap["key"])):
+        print(
+            f"No matched keys between the two files ({len(gold)} gold rows, "
+            f"{len(ncap)} no-capture rows, 0 shared keys). Nothing to compare."
+        )
+        return
 
     # ---- Part 1: LCA-partition agreement ----
     agreement_report(gold, ncap)

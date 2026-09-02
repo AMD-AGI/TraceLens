@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
-# Loop-detection engine (formerly kernel_loop_detection.py)
+# Loop-detection engine (data classes + iterative pattern-finding algorithm)
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
@@ -833,12 +833,20 @@ def find_repeating_pattern(
     covered_dense = loop_structures.get_covered_indices()
     covered_orig = set(idx_map[i] for i in covered_dense)
 
-    primary_first = n
-    primary_last = -1
-    if sequences:
-        for start, end in sequences[0]:
-            primary_first = min(primary_first, start)
-            primary_last = max(primary_last, end)
+    # Primary loop region spans the first to the last covered kernel across ALL
+    # detected patterns. Patterns are ordered by seed frequency, not position,
+    # so using sequences[0] alone would miss earlier/later patterns and mislabel
+    # their gaps. covered_orig already unions every pattern's covered indices.
+    if covered_orig:
+        primary_first = min(covered_orig)
+        primary_last = max(covered_orig)
+    else:
+        # No repeating pattern: there is no primary region. Put all uncovered
+        # kernels in preamble and leave epilogue empty so none are counted twice
+        # (primary_first=n -> preamble=range(n); primary_last=n-1 ->
+        # epilogue=range(n, n) is empty).
+        primary_first = n
+        primary_last = n - 1
 
     secondary_set = set(secondary_indices)
     preamble_indices = [

@@ -37,9 +37,7 @@ import csv
 import os
 import sys
 
-# compare_lca_partitions.py is the shared metric implementation; it stays in
-# agent_evals/Analysis/eval_utils/ (also imported by tests/test_compare_lca_partitions.py).
-# This eval now lives in partial_tests/eval_utils/, so reach two levels up.
+# compare_lca_partitions lives two dirs up in eval_utils/ (not a package).
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ANALYSIS_EVAL_UTILS = os.path.abspath(os.path.join(_HERE, "..", "..", "eval_utils"))
 sys.path.insert(0, _ANALYSIS_EVAL_UTILS)
@@ -131,6 +129,7 @@ def run(output_dir: str, reference_dir: str, results_path: str) -> list[dict]:
     details = (
         f"matched={len(merged)} forward_purity={fwd:.4f} reverse_purity={rev:.4f} "
         f"strict_forward={sfwd:.4f} strict_reverse={srev:.4f} "
+        f"shared_buckets={merged['lca_cand'].nunique()} "
         f"(informational only -- see semantic_purity_aggregate.py for the actual gate)"
     )
     rows = [
