@@ -38,7 +38,11 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from tests.fixtures.traces import INFERENCE_ROOT
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.Trace2Tree.inference_iteration_roots import find_iteration_roots_generic
+from TraceLens.Trace2Tree.inference_iteration_roots import (
+    _detect_by_branch_descent,
+    _reattach_worker_threads,
+)
+from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.Trace2Tree import trace_capture_merge_experimental as tcm
 
 # --------------------------------------------------------------------------- #
@@ -118,7 +122,7 @@ def test_1211_only_selection_and_splitting():
     events = trace["traceEvents"]
     gpu_map, flow_map, meta = split.preprocess_trace(events)
 
-    roots = split.find_iteration_roots(events)
+    roots = split.find_iteration_roots(events).roots
     assert roots is not None
     assert len(roots) == 16
 
@@ -167,7 +171,7 @@ def test_1211_prioritized_over_1219():
     names += [SGLANG_DECODE_ANNOTATION.format(i=20) for _ in range(16)]
     trace = make_trace(names)
 
-    roots = split.find_iteration_roots(trace["traceEvents"])
+    roots = split.find_iteration_roots(trace["traceEvents"]).roots
     assert roots is not None
     assert len(roots) == 16  # only the 1211 roots
     primary = split.ITERATION_PATTERNS[0]
@@ -190,7 +194,7 @@ def test_1219_only_uses_backup():
             names.append(SGLANG_EXTEND_ANNOTATION.format(t=800))
     trace = make_trace(names)
 
-    roots = split.find_iteration_roots(trace["traceEvents"])
+    roots = split.find_iteration_roots(trace["traceEvents"]).roots
     assert roots is not None
     assert len(roots) == 16
 
@@ -212,7 +216,7 @@ def test_1213_only_uses_backup():
     names = [VLLM_BACKUP_ANNOTATION.format(i=100 + i) for i in range(16)]
     trace = make_trace(names)
 
-    roots = split.find_iteration_roots(trace["traceEvents"])
+    roots = split.find_iteration_roots(trace["traceEvents"]).roots
     assert roots is not None
     assert len(roots) == 16
 
@@ -319,7 +323,7 @@ def test_extract_and_save_writes_gzip(tmp_path):
     trace = make_trace(names)
     events = trace["traceEvents"]
     gpu_map, flow_map, meta = split.preprocess_trace(events)
-    roots = split.find_iteration_roots(events)
+    roots = split.find_iteration_roots(events).roots
     grouped = [[r] for r in roots]
     summary = split.extract_and_save(
         grouped,
@@ -346,7 +350,7 @@ def test_extract_phases_and_save(tmp_path):
     trace = make_trace(names)
     events = trace["traceEvents"]
     gpu_map, flow_map, meta = split.preprocess_trace(events)
-    roots = split.find_iteration_roots(events)
+    roots = split.find_iteration_roots(events).roots
     summary = split.extract_phases_and_save(
         [[r] for r in roots],
         events,
@@ -399,7 +403,7 @@ def test_divide_phases_and_save(tmp_path):
     trace = make_trace(names)
     events = trace["traceEvents"]
     gpu_map, flow_map, meta = split.preprocess_trace(events)
-    roots = split.find_iteration_roots(events)
+    roots = split.find_iteration_roots(events).roots
     summary = split.divide_phases_and_save(
         roots,
         events,
@@ -427,8 +431,7 @@ def test_get_filename_json_and_zip(tmp_path):
     assert split.get_filename(str(zip_path)) == "inner/trace.json"
 
 
-def test_find_iteration_roots_generic_fallback():
-
+def test_branch_descent_from_synthetic_events():
     events: List[Dict] = []
     events.append(
         {
@@ -438,12 +441,12 @@ def test_find_iteration_roots_generic_fallback():
             "pid": 1,
             "tid": 1,
             "ts": 0,
-            "dur": 7000,
+            "dur": 20000,
             "args": {"Sequence number": 0},
         }
     )
     corr = 300
-    for iteration in range(3):
+    for iteration in range(8):
         base_ts = 100 + iteration * 2000
         for step_name, offset in [("iter_fwd", 0), ("iter_bwd", 400)]:
             op = {
@@ -502,7 +505,10 @@ def test_find_iteration_roots_generic_fallback():
             )
             corr += 1
 
-    roots = find_iteration_roots_generic(events)
+    tree = TraceToTree(events, prune_nongpu_paths=False)
+    tree.build_tree(add_python_func=True)
+    _reattach_worker_threads(tree)
+    roots = _detect_by_branch_descent(tree)
     assert roots is not None
     assert len(roots) >= 1
 
@@ -581,17 +587,15 @@ def test_get_filename_zip_raises_when_no_json(tmp_path):
         split.get_filename(str(zip_path))
 
 
-def test_find_iteration_roots_backup_fallback(capsys):
+def test_find_iteration_roots_backup_fallback():
     names = [SGLANG_DECODE.format(i=20) for _ in range(8)]
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"])
-    captured = capsys.readouterr().out
-    assert "falling back to backup patterns" in captured
+    roots = split.find_iteration_roots(trace["traceEvents"]).roots
     assert roots is not None
     assert len(roots) == 8
 
 
-def test_find_iteration_roots_generic_fallback(capsys):
+def test_find_iteration_roots_no_annotation_trace():
     events = [
         {
             "ph": "X",
@@ -653,15 +657,14 @@ def test_find_iteration_roots_generic_fallback(capsys):
         )
         corr += 1
 
-    split.find_iteration_roots(events)
-    captured = capsys.readouterr().out
-    assert "trying generic call-tree traversal" in captured
+    result = split.find_iteration_roots(events)
+    assert result.status.name == "NOT_SPLITTABLE"
 
 
 def test_find_steady_state_window_mixed_mode_with_conc_osl_r():
     names = _mixed_phase_roots(48)
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"])
+    roots = split.find_iteration_roots(trace["traceEvents"]).roots
     regions, _ = split.identify_steady_state_regions(
         split.iteration_details(roots), num_steps=16
     )
@@ -680,7 +683,7 @@ def test_find_steady_state_window_mixed_mode_with_conc_osl_r():
 def test_find_steady_state_window_mixed_no_pd_candidates(capsys):
     names = [SGLANG_DECODE.format(i=20) for _ in range(24)]
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"])
+    roots = split.find_iteration_roots(trace["traceEvents"]).roots
     window = split.find_steady_state_window(
         roots,
         num_steps=8,
@@ -694,7 +697,7 @@ def test_find_steady_state_window_mixed_no_pd_candidates(capsys):
 def test_find_steady_state_window_decode_only_no_pure_run():
     names = [SGLANG_EXTEND.format(t=800) for _ in range(16)]
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"])
+    roots = split.find_iteration_roots(trace["traceEvents"]).roots
     window = split.find_steady_state_window(
         roots,
         num_steps=8,
@@ -712,7 +715,7 @@ def test_find_steady_state_window_max_prefilldecode():
         else:
             names.append(SGLANG_DECODE.format(i=20))
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"])
+    roots = split.find_iteration_roots(trace["traceEvents"]).roots
     window = split.find_steady_state_window(
         roots,
         num_steps=8,
@@ -725,7 +728,7 @@ def test_find_steady_state_window_max_prefilldecode():
 def test_find_steady_state_window_max_prefilldecode_empty():
     names = [SGLANG_DECODE.format(i=20) for _ in range(16)]
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"])
+    roots = split.find_iteration_roots(trace["traceEvents"]).roots
     window = split.find_steady_state_window(
         roots,
         num_steps=8,
@@ -738,7 +741,7 @@ def test_find_steady_state_window_max_prefilldecode_empty():
 def test_find_steady_state_window_invalid_mode():
     names = [VLLM_PRIMARY.format(i=i) for i in range(8)]
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"])
+    roots = split.find_iteration_roots(trace["traceEvents"]).roots
     with pytest.raises(ValueError, match="Unknown mode"):
         split.find_steady_state_window(
             roots, num_steps=4, steady_state_regions=[(0, 8)], mode="invalid"
@@ -748,7 +751,7 @@ def test_find_steady_state_window_invalid_mode():
 def test_find_steady_state_window_conc_mismatch_warning(capsys):
     names = [SGLANG_DECODE.format(i=5) for _ in range(16)]
     trace = _make_trace(names)
-    roots = split.find_iteration_roots(trace["traceEvents"])
+    roots = split.find_iteration_roots(trace["traceEvents"]).roots
     split.find_steady_state_window(
         roots,
         num_steps=8,
@@ -789,7 +792,7 @@ def test_extract_phases_and_save_decode_branch(tmp_path):
     trace = _make_trace(names)
     events = trace["traceEvents"]
     gpu_map, flow_map, meta = split.preprocess_trace(events)
-    roots = split.find_iteration_roots(events)
+    roots = split.find_iteration_roots(events).roots
     summary = split.extract_phases_and_save(
         [roots],
         events,
@@ -813,7 +816,7 @@ def test_extract_phases_and_save_skips_non_annotation_prefix(tmp_path):
     trace = _make_trace([VLLM_PRIMARY.format(i=0)])
     events = trace["traceEvents"]
     gpu_map, flow_map, meta = split.preprocess_trace(events)
-    roots = split.find_iteration_roots(events)
+    roots = split.find_iteration_roots(events).roots
     summary = split.extract_phases_and_save(
         [[r] for r in roots],
         events,

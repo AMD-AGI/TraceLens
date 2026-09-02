@@ -4,22 +4,20 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Annotation families, and the detection steps built on them.
+"""Annotation families and leaf detection helpers.
 
 Step 1 groups every annotation into families, known and unknown alike. Step 1.5
 chooses which nesting level is the iteration and where its metadata comes from.
-Step 3 handles traces with no recognizable annotation, and step 5 falls back to
-call-tree periodicity.
+``detect_from_graph_launches`` handles the graph-replay fast path.
 """
 
-from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from statistics import mean, pstdev
 from typing import Dict, List, Optional, Sequence
 
 from ...Trace2Tree.inference_iteration_roots import (
-    GRAPH_LAUNCH_TIER,
-    find_iteration_roots_generic,
+    GRAPH_LAUNCH_NAMES,
+    MIN_LABEL_CHILDREN,
 )
 from ..annotation_utils import (
     ANNOTATION_CAT,
@@ -32,7 +30,6 @@ from .detect_utils import (
     MIN_ROOTS,
     DetectStatus,
     GpuAttribution,
-    IntervalIndex,
     PhaseConfidence,
     RootSet,
 )
@@ -57,7 +54,6 @@ class AnnotationFamily:
     gpu_time: float = 0.0
     parseable: bool = False
     interarrival_cv: float = 0.0
-    encloses: Counter = field(default_factory=Counter)
 
     @property
     def count(self) -> int:
@@ -72,12 +68,6 @@ class AnnotationFamily:
     def rank(self) -> tuple:
         """Sort key for choosing between families: most GPU work, steadiest."""
         return (-self.gpu_time, round(self.interarrival_cv, 3), -self.count)
-
-    def is_outer_to(self, inner: "AnnotationFamily") -> bool:
-        """Whether this family encloses a majority of ``inner``'s instances."""
-        if self.skeleton == inner.skeleton or not inner.count:
-            return False
-        return self.encloses.get(inner.skeleton, 0) / inner.count > NESTING_MAJORITY
 
 
 def _interarrival_cv(instances: Sequence[dict]) -> float:
@@ -152,97 +142,49 @@ def build_families(
     return [f for f in families if f.gpu_time > 0]
 
 
-def resolve_nesting(families: Sequence[AnnotationFamily], index: IntervalIndex) -> None:
-    """How many instances of other families each family encloses.
-
-    Computed per family, not per event, which would be quadratic.
-    """
-    for family in families:
-        counts: Counter = Counter()
-        for instance in family.instances:
-            for inner in index.contained_in(instance):
-                counts[name_skeleton(inner.get("name", ""))] += 1
-        family.encloses = counts
-
-
 # --- steps ------------------------------------------------------------------
-def detect_from_unknown_family(
-    events: Sequence[dict], attribution: GpuAttribution
+def detect_from_graph_launches(
+    events: Sequence[dict],
+    attribution: GpuAttribution,
+    annotations: Sequence[dict],
 ) -> Optional[RootSet]:
-    """Step 3: no parseable annotation anywhere, but a regular family exists.
+    """Detect iteration roots from graph-replay launches.
 
-    Adopts the family doing the most GPU work on the steadiest cadence. Phases
-    are unknowable from an unrecognized name; the trace is still splittable.
+    Each ``hipGraphLaunch`` / ``cudaGraphLaunch`` event maps 1:1 to a captured
+    graph replay.  This signal survives graph capture (which erases the per-op
+    python/kernel periodicity the tree traversal relies on) and needs no call
+    tree, so it is tried before the expensive tree-based detectors.
+
+    Returns a graded :class:`RootSet` when the launches explain enough GPU work
+    (``COVERAGE_FLOOR``), or ``None`` when there are too few launches or the
+    coverage is too poor to trust.
     """
-    annotations = collect_annotations(events)
-    if not annotations:
-        return None
-    families = [f for f in build_families(annotations, attribution) if f.regular]
-    if not families:
-        return None
-
-    family = min(families, key=lambda f: f.rank)
-    return RootSet(
-        roots=sorted(family.instances, key=lambda e: e.get("ts", 0)),
-        method="family:unknown_only",
-        phase_confidence=PhaseConfidence.UNKNOWN,
-        diagnostics={
-            "n_families": len(families),
-            "root_family_skeleton": family.skeleton,
-            "root_family_known": False,
-        },
+    launches = sorted(
+        (
+            e
+            for e in events
+            if e.get("name") in GRAPH_LAUNCH_NAMES and e.get("ts") is not None
+        ),
+        key=lambda e: e["ts"],
     )
-
-
-def detect_generic(
-    events: Sequence[dict], attribution: GpuAttribution
-) -> Optional[RootSet]:
-    """Step 5: grade the generic call-tree split into a :class:`RootSet`.
-
-    The detectors in ``find_iteration_roots_generic`` all judge their own split by
-    GPU coverage -- branch-descent and sibling-roots on tree-descendant kernels,
-    graph launches on launch-window coverage here (they are gathered before a tree
-    exists). So there is no kernel-stream period cross-check anymore: it duplicated
-    the coverage guard and, worse, refused graph-replay splits because capture
-    erases the per-step kernel period.
-    """
-    diagnostics: dict = {}
-    roots = find_iteration_roots_generic(list(events), diagnostics)
-    if not roots:
+    if len(launches) < MIN_LABEL_CHILDREN:
         return None
 
-    tier = diagnostics.get("period_label_tier")
-    method = f"generic:{tier}" if tier else "generic:python_function"
+    roots = [dict(e) for e in launches]
+    coverage = attribution.audit(annotations, roots)
+    if coverage.covered_selected < COVERAGE_FLOOR:
+        return None
 
-    # Graph launches are gathered off the flat event list (no tree), so their
-    # coverage is audited here by projection / launch correlation rather than by
-    # tree descendants. span_share is skipped because a launch is a point event
-    # that explains ~no time on its own; kernel coverage is the real signal.
-    if tier == GRAPH_LAUNCH_TIER:
-        coverage = attribution.audit(collect_annotations(events), roots)
-        if coverage.covered_selected >= COVERAGE_GATE:
-            status = DetectStatus.SPLITTABLE
-        elif coverage.covered_selected >= COVERAGE_FLOOR:
-            status = DetectStatus.DEGRADED
-        else:
-            status = DetectStatus.NOT_SPLITTABLE
-        diagnostics.update({"graph_launch_count": len(roots)})
-        return RootSet(
-            roots=roots,
-            method=method,
-            phase_confidence=PhaseConfidence.UNKNOWN,
-            status=status,
-            coverage=coverage,
-            diagnostics=diagnostics,
-        )
-
-    # branch-descent and sibling-roots already gated on tree-descendant GPU
-    # coverage inside the detector (cross-thread exact after reattachment), so
-    # reaching here means the split cleared the bar -- accept it.
+    status = (
+        DetectStatus.SPLITTABLE
+        if coverage.covered_selected >= COVERAGE_GATE
+        else DetectStatus.DEGRADED
+    )
     return RootSet(
         roots=roots,
-        method=method,
+        method="generic:graph_launch",
         phase_confidence=PhaseConfidence.UNKNOWN,
-        status=DetectStatus.SPLITTABLE,
-        diagnostics=diagnostics,
+        status=status,
+        coverage=coverage,
+        diagnostics={"graph_launch_count": len(roots)},
     )
