@@ -18,7 +18,7 @@ import os
 import sys
 from pathlib import Path
 
-from .checks import ALL_CHECKS, Finding, check_kernel_candidates_missing
+from .checks import ALL_CHECKS, Finding
 
 _GEAK_SPECS = [s for s in ALL_CHECKS if s.category == "geak_interface"]
 

@@ -34,7 +34,7 @@ import tarfile
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 # ---------------------------------------------------------------------------
 # Module-level constants

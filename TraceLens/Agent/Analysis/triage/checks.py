@@ -499,6 +499,7 @@ def check_trace_size(run_dir, _stream_file):
             f"Trace file is {size / 1e9:.1f} GB — consider splitting",
             "Too many steps are being analyzed; reduce profiling window",
         )
+    return None
 
 
 def check_no_gpu_kernels(run_dir, _stream_file):
@@ -544,6 +545,7 @@ def check_capture_missing(run_dir, _stream_file):
             f"Capture folder missing or empty: {capture_folder}",
             "Collect graph capture traces following Inference_analysis.md instructions",
         )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +573,7 @@ def check_high_idle(run_dir, stream_file):
             f"GPU idle time is {idle:.1f}% ({source})",
             "Investigate CPU bottlenecks, graph capture enablement, host-side overhead",
         )
+    return None
 
 
 def check_gpu_graph_replay(run_dir, stream_file):
@@ -608,6 +611,7 @@ def check_gpu_graph_replay(run_dir, stream_file):
                     f"Trace contains '{name}' event in {os.path.basename(path)}",
                     "Switch to inference analysis mode (--analysis_mode inference)",
                 )
+    return None
 
 
 def check_corrupt_json(run_dir, _stream_file):
@@ -654,6 +658,7 @@ def check_missing_cpu_op_shapes(run_dir, _stream_file):
             f"Only {with_shapes} of {len(cpu_ops)} cpu_op events carry 'Input Dims' in capture trace",
             "Profile with cpu_callstack and record_shapes enabled in profiler config",
         )
+    return None
 
 
 def check_inference_annotation_missing(run_dir, _stream_file):
@@ -688,6 +693,7 @@ def check_inference_annotation_missing(run_dir, _stream_file):
             f"Zero user_annotation events with name starting 'execute_' in {os.path.basename(main_path)}",
             "Profile again with the correct patches and inference profiler configs",
         )
+    return None
 
 
 def check_split_trace_missing(run_dir, _stream_file):
@@ -705,6 +711,7 @@ def check_split_trace_missing(run_dir, _stream_file):
             f"trace_split/ has no mixed_steady_state*.json.gz files in {split_dir}",
             "Verify the correct trace was selected and that the split step was executed",
         )
+    return None
 
 
 def check_split_incorrect(_run_dir, _stream_file):
@@ -752,6 +759,7 @@ def check_sglang_shape_missing(run_dir, _stream_file):
             f"contains 'kernel_shape_profiler' in {source_name}",
             "Re-profile with SGLang patches",
         )
+    return None
 
 
 def check_split_low_gpu_kernels(run_dir, _stream_file):
@@ -853,6 +861,7 @@ def check_step1_fail(run_dir, stream_file):
             "DIAG tag found in agent stream",
             "Check if the perf report generation command is correct",
         )
+    return None
 
 
 def check_step2_5_fail(run_dir, stream_file):
@@ -874,6 +883,7 @@ def check_step2_5_fail(run_dir, stream_file):
             "DIAG tag found in agent stream",
             "Check that perf_report_csvs/ was generated in Step 1; verify trace path and platform",
         )
+    return None
 
 
 def check_output_incomplete(run_dir, _stream_file):
@@ -885,6 +895,7 @@ def check_output_incomplete(run_dir, _stream_file):
             f"Missing directories: {', '.join(missing)}",
             "Re-run analysis pipeline from Step 1; check disk space and write permissions",
         )
+    return None
 
 
 def check_prefix_fail(_run_dir, stream_file):
@@ -897,6 +908,7 @@ def check_prefix_fail(_run_dir, stream_file):
             "DIAG tag found in agent stream",
             "Verify TraceLens is installed; check SSH/container/venv connectivity",
         )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -920,6 +932,7 @@ def check_report_too_small(run_dir, _stream_file):
             "analysis.md does not exist but category_findings/ is present",
             "Report generation likely crashed or was interrupted",
         )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -954,6 +967,7 @@ def check_resource_exhausted(_run_dir, stream_file):
                     f"resource_exhausted in stream: {stripped[:150]}",
                     "Reduce trace size before analysis",
                 )
+    return None
 
 
 def check_subagent_budget(run_dir, _stream_file):
@@ -983,6 +997,7 @@ def check_subagent_budget(run_dir, _stream_file):
             f"Missing findings for: {', '.join(missing)}",
             "Check token budget; subagent(s) may have terminated without writing output",
         )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1001,6 +1016,7 @@ def check_ssh_fail(_run_dir, stream_file):
             match,
             "Verify node hostname, SSH keys, and network connectivity",
         )
+    return None
 
 
 def check_docker_missing(_run_dir, stream_file):
@@ -1014,6 +1030,7 @@ def check_docker_missing(_run_dir, stream_file):
             match,
             "Start the container or verify container name; check docker ps",
         )
+    return None
 
 
 def check_tl_not_installed(_run_dir, stream_file):
@@ -1027,6 +1044,7 @@ def check_tl_not_installed(_run_dir, stream_file):
             match,
             "Run pip install git+https://github.com/AMD-AGI/TraceLens.git",
         )
+    return None
 
 
 def check_disk_full(run_dir, stream_file):
@@ -1048,6 +1066,7 @@ def check_disk_full(run_dir, stream_file):
             "'No space left on device' found in agent stream",
             "Free disk space on the target node",
         )
+    return None
 
 
 def check_nfs_stale(_run_dir, stream_file):
@@ -1058,6 +1077,7 @@ def check_nfs_stale(_run_dir, stream_file):
             match,
             "Add small delays between write and read operations; verify NFS mount",
         )
+    return None
 
 
 def check_missing_dep(_run_dir, stream_file):
@@ -1071,6 +1091,7 @@ def check_missing_dep(_run_dir, stream_file):
             match,
             "Install TraceLens with all dependencies",
         )
+    return None
 
 
 # ---------------------------------------------------------------------------
