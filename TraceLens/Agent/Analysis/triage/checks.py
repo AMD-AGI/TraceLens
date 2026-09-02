@@ -556,6 +556,7 @@ def check_no_gpu_kernels(run_dir, _stream_file):
             "Trace contains no events with cat='kernel'",
             "Ensure ProfilerActivity.CUDA is enabled in profiler config",
         )
+    return None
 
 
 def check_capture_missing(run_dir, _stream_file):

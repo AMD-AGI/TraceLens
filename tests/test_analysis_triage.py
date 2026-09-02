@@ -6,20 +6,14 @@
 
 """Unit tests for the analysis triage toolkit.
 
-These are the safety net for the `feat/port-analysis-triage` refactor (see
-`Claude_Docs/Plan/PLAN_triage-code-quality-refactor.md`, Part C). Triage
-previously shipped with zero automated coverage. Everything here is hermetic:
-tiny json / json.gz / csv fixtures are synthesized under pytest ``tmp_path`` with
-no dependence on real trace trees.
-
-Tests are written against the POST-refactor contract:
+Contracts exercised:
   * ``_load_trace_json`` is ``functools.lru_cache(maxsize=1)`` and delegates to
     ``DataLoader.load_data`` (strict UTF-8 via orjson) — so a repeat call returns
     the SAME object, and a corrupt file raises (a ``ValueError`` subclass) on
     every call because ``lru_cache`` does not memoize exceptions.
-  * ``_events_of`` is a new helper collapsing the ``list`` / ``traceEvents`` idiom.
-Tests exercising these behaviors may fail against the pre-refactor code; that is
-expected and called out in the delivery report.
+  * ``_events_of`` collapses the ``list`` / ``traceEvents`` idiom.
+  * ``_load_events`` is the swallowing wrapper that converts loader errors to
+    ``None`` so detection checks degrade gracefully.
 """
 
 import gzip
@@ -29,6 +23,7 @@ import pytest
 
 from TraceLens.Agent.Analysis.triage.checks import (
     ALL_CHECKS,
+    _events_of,
     _load_events,
     _load_gpu_timeline,
     _load_trace_json,
@@ -41,9 +36,22 @@ from TraceLens.Agent.Analysis.triage.checks import (
 from TraceLens.Agent.Analysis.triage.postprocess import collect_findings
 from TraceLens.Agent.Analysis.triage.runner import run_triage, write_detail_csv
 
-# Registry size is load-bearing: the plan pins it and the reserved-stub /
-# renumber checks below depend on it not drifting silently.
+# Registry size is load-bearing: the reserved-stub and sublabel checks below
+# depend on it not drifting silently.
 _EXPECTED_CHECK_COUNT = 36
+
+_PARSE_FLOAT_CASES = [
+    (None, None),
+    ("", None),
+    ("nan", None),
+    ("none", None),
+    ("null", None),
+    ("NaN", None),
+    ("garbage", None),
+    ("1.5", 1.5),
+    (1.5, 1.5),
+    (0, 0.0),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +72,7 @@ def _write_json_gz(path, obj):
 
 
 # ---------------------------------------------------------------------------
-# _load_trace_json  (guards B1 + B3)
+# _load_trace_json
 # ---------------------------------------------------------------------------
 
 
@@ -79,9 +87,8 @@ def test_load_trace_json_gzip(tmp_path):
 
 
 def test_load_trace_json_lru_cache_returns_same_object(tmp_path):
-    # POST-refactor: lru_cache(maxsize=1) keyed on the resolved path collapses a
-    # repeat parse of the same file to a single object. Pre-refactor this is a
-    # plain function and each call re-parses to a distinct object (test fails).
+    # lru_cache(maxsize=1) keyed on the resolved path collapses a repeat parse of
+    # the same file to a single object.
     p = _write_json(tmp_path / "trace.json", {"traceEvents": []})
     first = _load_trace_json(p)
     second = _load_trace_json(p)
@@ -102,7 +109,7 @@ def test_load_trace_json_corrupt_raises_and_reraises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _load_events  (guards the checks.py:322 `except (OSError, ValueError)` swallow)
+# _load_events
 # ---------------------------------------------------------------------------
 
 
@@ -116,9 +123,8 @@ def test_load_events_unknown_type_returns_none(tmp_path):
 
 
 def test_load_events_corrupt_json_returns_none(tmp_path):
-    # A truncated .json makes _load_trace_json raise a ValueError subclass
-    # (contrast test_load_trace_json_corrupt_raises_and_reraises); _load_events
-    # is the swallowing wrapper, so it must convert that raise into None.
+    # A truncated .json makes _load_trace_json raise a ValueError subclass;
+    # _load_events is the swallowing wrapper, so it must convert that to None.
     p = tmp_path / "corrupt.json"
     p.write_text('{"traceEvents": [')
     with pytest.raises((json.JSONDecodeError, ValueError)):
@@ -127,46 +133,28 @@ def test_load_events_corrupt_json_returns_none(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _events_of  (new helper, guards A2)
+# _events_of
 # ---------------------------------------------------------------------------
 
 
 def test_events_of():
-    # Imported locally: pre-refactor the symbol does not exist yet, so only this
-    # test fails rather than breaking module collection for the whole file.
-    from TraceLens.Agent.Analysis.triage.checks import _events_of
-
     assert _events_of([{"cat": "kernel"}]) == [{"cat": "kernel"}]
     assert _events_of({"traceEvents": [{"a": 1}]}) == [{"a": 1}]
     assert _events_of({"no_events_key": True}) == []
 
 
 # ---------------------------------------------------------------------------
-# _parse_float  (guards A1 + A3 + B6)
+# _parse_float
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "value, expected",
-    [
-        (None, None),
-        ("", None),
-        ("nan", None),
-        ("none", None),
-        ("null", None),
-        ("NaN", None),
-        ("garbage", None),
-        ("1.5", 1.5),
-        (1.5, 1.5),
-        (0, 0.0),
-    ],
-)
+@pytest.mark.parametrize("value, expected", _PARSE_FLOAT_CASES)
 def test_parse_float(value, expected):
     assert _parse_float(value) == expected
 
 
 # ---------------------------------------------------------------------------
-# _significant_rows  (guards A1 threshold constants)
+# _significant_rows
 # ---------------------------------------------------------------------------
 
 
@@ -191,7 +179,7 @@ def test_significant_rows_boundary():
 
 
 # ---------------------------------------------------------------------------
-# _load_gpu_timeline  (guards A3 reuse of _parse_float)
+# _load_gpu_timeline
 # ---------------------------------------------------------------------------
 
 
@@ -214,7 +202,7 @@ def test_load_gpu_timeline_missing_file(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Registry integrity  (guards renumber drift + B5 reserved stubs)
+# Registry integrity
 # ---------------------------------------------------------------------------
 
 
@@ -248,7 +236,7 @@ def test_reserved_stubs_return_none(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# End-to-end smoke  (guards everything)
+# End-to-end smoke
 # ---------------------------------------------------------------------------
 
 
@@ -262,7 +250,7 @@ def test_run_triage_smoke_trace_missing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# runner <-> postprocess CSV seam  (guards the six-column contract)
+# runner <-> postprocess CSV seam
 # ---------------------------------------------------------------------------
 
 
