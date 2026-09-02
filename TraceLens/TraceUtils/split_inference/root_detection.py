@@ -15,10 +15,22 @@ from dataclasses import dataclass
 from statistics import mean, pstdev
 from typing import Dict, List, Optional, Sequence
 
+from collections import deque
+
 from ...Trace2Tree.inference_iteration_roots import (
+    BRANCH_COVERAGE_GATE,
+    BRANCH_DESCENT_TIER,
+    BRANCH_MAX_NODES,
+    GPU_KERNEL_CATS,
     GRAPH_LAUNCH_NAMES,
     MIN_LABEL_CHILDREN,
+    _blocks_by_pattern,
+    _descendant_gpu_time,
+    _entry_roots,
+    _find_repeating_period,
+    _gpu_bearing,
 )
+from ...Trace2Tree.trace_to_tree import TraceToTree
 from ..annotation_utils import (
     ANNOTATION_CAT,
     is_parseable,
@@ -155,9 +167,8 @@ def detect_from_graph_launches(
     python/kernel periodicity the tree traversal relies on) and needs no call
     tree, so it is tried before the expensive tree-based detectors.
 
-    Returns a graded :class:`RootSet` when the launches explain enough GPU work
-    (``COVERAGE_FLOOR``), or ``None`` when there are too few launches or the
-    coverage is too poor to trust.
+    Returns a :class:`RootSet` with coverage info, or ``None`` when there are
+    too few launches.  The caller decides whether coverage is acceptable.
     """
     launches = sorted(
         (
@@ -172,13 +183,12 @@ def detect_from_graph_launches(
 
     roots = [dict(e) for e in launches]
     coverage = attribution.audit(annotations, roots)
-    if coverage.covered_selected < COVERAGE_FLOOR:
-        return None
-
     status = (
         DetectStatus.SPLITTABLE
         if coverage.covered_selected >= COVERAGE_GATE
         else DetectStatus.DEGRADED
+        if coverage.covered_selected >= COVERAGE_FLOOR
+        else DetectStatus.NOT_SPLITTABLE
     )
     return RootSet(
         roots=roots,
@@ -187,4 +197,129 @@ def detect_from_graph_launches(
         status=status,
         coverage=coverage,
         diagnostics={"graph_launch_count": len(roots)},
+    )
+
+
+def _total_gpu_time(tree: TraceToTree) -> float:
+    return sum(
+        e.get("dur", 0)
+        for e in tree.events_by_uid.values()
+        if e.get("cat") in GPU_KERNEL_CATS
+    )
+
+
+def _grade(coverage: float) -> DetectStatus:
+    if coverage >= COVERAGE_GATE:
+        return DetectStatus.SPLITTABLE
+    if coverage >= COVERAGE_FLOOR:
+        return DetectStatus.DEGRADED
+    return DetectStatus.NOT_SPLITTABLE
+
+
+def detect_from_branch_descent(tree: TraceToTree) -> Optional[RootSet]:
+    """Walk the call tree to find the frame whose children repeat and cover the GPU.
+
+    The BFS keeps descending past nodes whose repeating pattern explains too
+    little GPU work (sub-loops). Returns a :class:`RootSet` for the best
+    candidate found, or ``None`` when no repeating pattern exists at all.
+    The caller decides whether coverage is acceptable.
+    """
+    total_gpu = _total_gpu_time(tree)
+    if not total_gpu:
+        return None
+
+    best: Optional[RootSet] = None
+    queue = deque((r, 0) for r in _entry_roots(tree))
+    visited = 0
+    while queue:
+        node, depth = queue.popleft()
+        visited += 1
+        if visited > BRANCH_MAX_NODES:
+            break
+        children = tree.get_children_events(node)
+        if len(children) >= MIN_LABEL_CHILDREN:
+            ordered = sorted(children, key=lambda e: e.get("ts", 0))
+            period, pattern, start = _find_repeating_period(
+                [e.get("name", "") for e in ordered]
+            )
+            if period is not None:
+                unit_blocks = _blocks_by_pattern(ordered, pattern, start)
+                if len(unit_blocks) >= MIN_LABEL_CHILDREN:
+                    iteration_roots = []
+                    blocked = []
+                    for block in unit_blocks:
+                        first, last = block[0], block[-1]
+                        event = dict(first)
+                        event["name"] = node.get("name", event.get("name", ""))
+                        event["dur"] = (
+                            last["ts"] + last.get("dur", 0)
+                        ) - first["ts"]
+                        iteration_roots.append(event)
+                        blocked.extend(block)
+                    cov = _descendant_gpu_time(tree, blocked) / total_gpu
+                    candidate = RootSet(
+                        roots=iteration_roots,
+                        method=f"generic:{BRANCH_DESCENT_TIER}",
+                        phase_confidence=PhaseConfidence.UNKNOWN,
+                        status=_grade(cov),
+                        diagnostics={
+                            "period_label_tier": BRANCH_DESCENT_TIER,
+                            "period": period,
+                            "period_depth": depth,
+                            "branch_coverage": round(cov, 4),
+                        },
+                    )
+                    if cov >= BRANCH_COVERAGE_GATE:
+                        return candidate
+                    if best is None or cov > best.diagnostics.get(
+                        "branch_coverage", 0
+                    ):
+                        best = candidate
+        for child in children:
+            if _gpu_bearing(child):
+                queue.append((child, depth + 1))
+    return best
+
+
+def detect_from_sibling_roots(tree: TraceToTree) -> Optional[RootSet]:
+    """Detect iterations that are top-level sibling frames.
+
+    Returns a :class:`RootSet` with coverage info, or ``None`` when there is
+    no repeating pattern among the entry roots. The caller decides whether
+    coverage is acceptable.
+    """
+    roots = _entry_roots(tree)
+    if len(roots) < MIN_LABEL_CHILDREN:
+        return None
+
+    ordered = sorted(roots, key=lambda e: e.get("ts", 0))
+    period, _, start = _find_repeating_period([e.get("name", "") for e in ordered])
+    if period is None:
+        return None
+
+    blocks = (len(ordered) - start) // period
+    sibling_roots = []
+    blocked = []
+    for index in range(blocks):
+        block = ordered[start + index * period : start + (index + 1) * period]
+        first, last = block[0], block[-1]
+        event = dict(first)
+        event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
+        sibling_roots.append(event)
+        blocked.extend(block)
+    if not sibling_roots:
+        return None
+
+    total_gpu = _total_gpu_time(tree)
+    cov = _descendant_gpu_time(tree, blocked) / total_gpu if total_gpu else 0.0
+    return RootSet(
+        roots=sibling_roots,
+        method="generic:sibling_roots",
+        phase_confidence=PhaseConfidence.UNKNOWN,
+        status=_grade(cov),
+        diagnostics={
+            "period_label_tier": "sibling_roots",
+            "period": period,
+            "branch_coverage": round(cov, 4),
+        },
     )
