@@ -1010,6 +1010,7 @@ class ClassStructure:
     forward_call_output_names: dict[str, str] = field(default_factory=dict)
     referenced_return_producers: set[str] = field(default_factory=set)
     loop_carried: list[LoopCarriedSpec] = field(default_factory=list)
+    forward_param_inputs: list[str] = field(default_factory=list)
     dataflow_expanded: bool = False
 
 
@@ -2481,6 +2482,11 @@ def expand_class_forward_dataflow(
     if forward is None:
         return
     cls.dataflow_expanded = True
+    cls.forward_param_inputs = [
+        arg.arg
+        for arg in forward.args.posonlyargs + forward.args.args
+        if arg.arg != "self"
+    ]
     init_func = next(
         (
             item
@@ -2764,6 +2770,15 @@ class _ModelAstVisitor(ast.NodeVisitor):
             primary_return_slot=primary_return_slot,
             forward_call_output_names=forward_call_output_names,
             loop_carried=forward_loop_carried,
+            forward_param_inputs=(
+                [
+                    arg.arg
+                    for arg in forward_func.args.posonlyargs + forward_func.args.args
+                    if arg.arg != "self"
+                ]
+                if forward_func is not None
+                else []
+            ),
         )
         self.generic_visit(node)
 
@@ -3492,8 +3507,12 @@ def _side_port_label(
         return _arg_name(arg, arg_index)
     if isinstance(arg, ast.Name):
         lowered = arg.id.lower()
-        if "topk" in lowered or lowered in {"topk_idx", "topk_weight", "router_logits"}:
-            return "router"
+        if "topk" in lowered or lowered in {"topk_idx", "topk_weight"}:
+            if "weight" in lowered:
+                return "top_k_weights"
+            return "top_k_index"
+        if lowered == "router_logits":
+            return "router_logits"
     if source_chain and _classify_role(source_chain[-1], "") == "router":
         return "router"
     return _arg_name(arg, arg_index)
@@ -3564,7 +3583,11 @@ def _capture_call_side_inputs(
             seen.add(key)
             specs.append(
                 SideInputSpec(
-                    arg_name=_arg_name(arg, arg_index),
+                    arg_name=(
+                        port_label
+                        if port_label in {"top_k_index", "top_k_weights"}
+                        else _arg_name(arg, arg_index)
+                    ),
                     port_label=port_label,
                     source_chain=chain,
                     source_kind=source_kind,

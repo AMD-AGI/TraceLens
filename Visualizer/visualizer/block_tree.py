@@ -14,6 +14,7 @@ from typing import Literal
 
 from visualizer.ast_analyze import (
     FORWARD_METHOD_INPUT,
+    LAYOUT_ONLY_LABELS,
     SYNTHETIC_ATTENTION,
     SYNTHETIC_GATE_ACTIVATION,
     ClassStructure,
@@ -27,7 +28,6 @@ from visualizer.ast_analyze import (
     expand_conditional_block_components,
     functional_display_label,
     is_functional_synthetic,
-    is_forward_operation,
     is_forward_operation,
     is_positional_synthetic,
     operation_display_label,
@@ -453,6 +453,25 @@ def is_inline_expandable_module(node: BlockNode) -> bool:
     return is_linear_pipeline_block(node)
 
 
+def is_transparent_inline_expansion(node: BlockNode) -> bool:
+    """True when an expanded wrapper adds no useful grouping boundary.
+
+    Helper methods that are straight pipelines already live inside their caller,
+    while modules with only one value-changing operation are more legible as that
+    operation in the surrounding flow. Layout steps remain visible, but do not
+    justify a frame of their own.
+    """
+    if not is_straight_line_module(node):
+        return False
+    return (
+        sum(
+            step.label not in LAYOUT_ONLY_LABELS
+            for step in collect_function_steps(node)
+        )
+        <= 1
+    )
+
+
 def should_expand_composite_wrapper(node: BlockNode) -> bool:
     """True when a composite wrapper should expand inline (straight-line modules only)."""
     return is_inline_expandable_module(node)
@@ -647,6 +666,7 @@ class BlockNode:
     external_inputs: list[str] = field(default_factory=list)
     param_inputs: list[str] = field(default_factory=list)
     boundary_input_name: str | None = None
+    forward_param_inputs: list[str] = field(default_factory=list)
     primary_output_step: str | None = None
     forward_return_slots: dict[str, str] = field(default_factory=dict)
     forward_return_order: list[str] = field(default_factory=list)
@@ -872,7 +892,12 @@ def _boundary_input_name(
     """
     if FORWARD_METHOD_INPUT in operation.predecessors:
         return cls.forward_input_name
-    if operation.param_inputs and not operation.predecessors:
+    # `zeros_like` takes its shape from the tensor it is handed, and the analysis
+    # records no producer for that read, so the boundary would otherwise fall back
+    # to whichever edge happened to reach it.
+    if operation.label == "Zeros like" and not operation.predecessors:
+        return cls.forward_input_name
+    if operation.param_inputs:
         return operation.param_inputs[0]
     return None
 
@@ -2068,6 +2093,7 @@ def build_block_node(
         primary_output_step=primary_output_step,
         forward_return_slots=dict(cls.forward_return_slots),
         forward_return_order=list(cls.forward_return_order),
+        forward_param_inputs=list(cls.forward_param_inputs),
         primary_return_slot=cls.primary_return_slot,
         referenced_return_producers=set(cls.referenced_return_producers),
         loop_carried=list(cls.loop_carried),

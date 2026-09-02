@@ -21,6 +21,7 @@ from visualizer.block_tree import (
     BlockNode,
     collect_nested_diagrams,
     expand_block_tree_inplace,
+    is_transparent_inline_expansion,
     subgraph_warrants_json_export,
 )
 from visualizer.blocks import BlockComponent, LayerVariant
@@ -902,19 +903,44 @@ def _inject_group_inputs(
             _entry_bucket_label(entries, internal_ids, node_by_id)
             for _sources, entries in buckets
         ]
-        # Several entries reading the same parameter name are separate modules that
-        # happen to share a namespace, not one forward taking several tensors. Only
-        # distinctly named parameters earn a boundary tile each.
-        single = len(buckets) == 1 or len(
-            {label for label in bucket_labels if label}
-        ) < len(buckets)
-        if single:
-            buckets = [(frozenset(outside_sources), entry_nodes)]
-            bucket_labels = [
-                _infer_group_input_label(
-                    group_nodes, namespace, entry_ports=entry_ports
-                )
-            ]
+        # Entry steps that read the same forward parameter share one tile even if
+        # their edges were introduced separately. Distinct parameter names remain
+        # distinct boundaries (for example hidden_states, top_k_index, and
+        # top_k_weights on an Experts block).
+        merged_buckets: dict[
+            tuple[str, object],
+            tuple[set[tuple[str, str]], list[dict[str, Any]], str | None],
+        ] = {}
+        merged_order: list[tuple[str, object]] = []
+        labels_by_source: dict[tuple[str, str], set[str]] = {}
+        for (sources, _entries), label in zip(buckets, bucket_labels):
+            if label:
+                for source in sources:
+                    labels_by_source.setdefault(source, set()).add(label)
+        for (sources, entries), label in zip(buckets, bucket_labels):
+            if label is None:
+                inferred = {
+                    candidate
+                    for source in sources
+                    for candidate in labels_by_source.get(source, set())
+                }
+                if len(inferred) == 1:
+                    label = inferred.pop()
+            key: tuple[str, object] = (
+                ("label", label) if label else ("sources", sources)
+            )
+            if key not in merged_buckets:
+                merged_buckets[key] = (set(), [], label)
+                merged_order.append(key)
+            merged_sources, merged_entries, _ = merged_buckets[key]
+            merged_sources.update(sources)
+            merged_entries.extend(entries)
+        buckets = [
+            (frozenset(merged_buckets[key][0]), merged_buckets[key][1])
+            for key in merged_order
+        ]
+        bucket_labels = [merged_buckets[key][2] for key in merged_order]
+        single = len(buckets) == 1
 
         used_labels: set[str] = set()
         for (sources, entries), label in zip(buckets, bucket_labels):
@@ -1923,6 +1949,36 @@ def _append_section(
         previous_exits=previous_exits,
     )
     transparent_exit = None
+    if is_transparent_inline_expansion(block_tree) and not namespace_prefix:
+        input_id = _merge_node_id(id_prefix, "@input")
+        output_id = _merge_node_id(id_prefix, "@output")
+        input_node = next(
+            (node for node in section_nodes if node["id"] == input_id),
+            None,
+        )
+        output_node = next(
+            (node for node in section_nodes if node["id"] == output_id),
+            None,
+        )
+        if input_node is not None:
+            incoming = list(input_node.get("incomingEdges", []))
+            for node in section_nodes:
+                for edge in node.get("incomingEdges", []):
+                    if edge.get("sourceNodeId") != input_id or len(incoming) != 1:
+                        continue
+                    source = incoming[0]
+                    edge["sourceNodeId"] = source["sourceNodeId"]
+                    edge["sourceNodeOutputId"] = source.get("sourceNodeOutputId", "0")
+            section_nodes.remove(input_node)
+        if output_node is not None:
+            incoming = list(output_node.get("incomingEdges", []))
+            if len(incoming) == 1:
+                edge = incoming[0]
+                transparent_exit = (
+                    str(edge["sourceNodeId"]),
+                    str(edge.get("sourceNodeOutputId", "0")),
+                )
+                section_nodes.remove(output_node)
     _flatten_transparent_group_inputs(section_nodes)
     caller_name = _caller_output_name(spec, parent_class, component.attr_name)
     port_renames = (
@@ -2402,8 +2458,19 @@ def build_merged_model_graph(
         ):
             continue
         expands = component_has_detail_section(component, spec)
+        resolved = _resolve_section_tree_for_component(
+            spec,
+            component,
+            variant=None,
+            basic_ops=resolved_basic_ops,
+        )
+        transparent = resolved is not None and is_transparent_inline_expansion(
+            expand_block_tree_inplace(resolved[1], basic_ops=resolved_basic_ops)
+        )
         namespace_prefix = (
-            _sanitize_namespace_segment(component.attr_name) if expands else ""
+            _sanitize_namespace_segment(component.attr_name)
+            if expands and not transparent
+            else ""
         )
         if expands:
             group = _group_config_for_role(namespace_prefix, component.role)

@@ -58,6 +58,8 @@ def _node_namespaces(computation: ComputationGraph) -> dict[int, str]:
         computation.inline_frames,
         key=lambda item: -len(set(item.node_indices)),
     ):
+        if frame.transparent:
+            continue
         segment = _frame_namespace_segment(frame, duplicate_labels=duplicate_labels)
         for index in frame.node_indices:
             if index not in namespaces:

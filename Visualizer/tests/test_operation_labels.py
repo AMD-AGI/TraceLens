@@ -114,9 +114,49 @@ def test_rotary_pos_emb_shows_multiply_not_buffer():
     assert "Multiply" in child_labels
     assert "Buffer" not in child_labels
 
+    # The text stack never calls this vision module, so it stays out of the graph
+    # rather than hanging off the embedding as a branch that feeds nothing.
     graph = build_merged_model_graph(spec)
-    assert not any(node.get("id") == "rotary_pos_emb" for node in graph["nodes"])
+    assert not any(
+        node["id"] == "rotary_pos_emb" or node["id"].startswith("rotary_pos_emb/")
+        for node in graph["nodes"]
+    )
     assert not any(node.get("namespace") == "rotary_pos_emb" for node in graph["nodes"])
+
+
+def test_glm_attention_expands_straight_line_expand_kv_without_a_frame():
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    nodes = [node for node in graph["nodes"] if "expand_kv" in node["id"]]
+
+    assert [node["label"] for node in nodes] == [
+        "View",
+        "Transpose",
+        "Split",
+        "Expand",
+    ]
+    assert all(not node.get("namespace", "").endswith("/expand_kv") for node in nodes)
+    assert not any(node["label"] in {"hidden_states", "result"} for node in nodes)
+
+
+def test_glm_experts_expands_router_boundary_into_named_parameters():
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    expert_inputs = [
+        node
+        for node in graph["nodes"]
+        if "Glm5NextTextExperts" in node.get("namespace", "")
+        and any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@input"
+            for attr in node.get("attrs", [])
+        )
+    ]
+
+    labels = {node["label"] for node in expert_inputs}
+    assert "router" not in labels
+    assert {"top_k_index", "top_k_weights"} <= labels
 
 
 def test_merged_graph_uses_operator_labels_not_op_ids():

@@ -30,6 +30,7 @@ from visualizer.block_tree import (
     is_kernel_pipeline_tree,
     is_situ_gated_mlp,
     is_straight_line_module,
+    is_transparent_inline_expansion,
     is_method_wrapper,
     wrapper_bullet_lines,
 )
@@ -70,6 +71,7 @@ class InlineFrameSpec:
     label: str
     sublabel: str | None = None
     node_indices: list[int] = field(default_factory=list)
+    transparent: bool = False
 
 
 @dataclass
@@ -424,20 +426,27 @@ def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
     starts from nothing and the parameter has nowhere to dock.
     """
     primary = _input_label_for(root)
-    fed = {target for _source, target in graph.links}
+    incoming_count: dict[int, int] = {}
+    for _source, target in graph.links:
+        incoming_count[target] = incoming_count.get(target, 0) + 1
     param_index: dict[str, int] = {}
+    param_consumers: set[str] = set()
     for index, spec in enumerate(list(graph.nodes)):
         block = spec.block
-        if block is None or not _reads_only_a_side_parameter(block):
-            continue
-        # Expanding a submodule into its parent puts the parameter's real producer
-        # in the same graph, and it already docks onto this step. Only a step left
-        # without any producer is reading a tensor the graph does not yet carry.
-        if index in fed:
+        if block is None or not is_forward_operation(block.attr_name):
             continue
         for param in block.param_inputs:
-            if param == primary:
+            # Nested expressions can repeat a parameter on each extracted operation
+            # (one_hot(x).permute(...)). Dock it only at its first visible consumer.
+            if (
+                param == primary
+                or param in param_consumers
+                or block.boundary_input_name != param
+                or param not in root.forward_param_inputs
+                or incoming_count.get(index, 0) > len(block.operation_predecessors)
+            ):
                 continue
+            param_consumers.add(param)
             source = param_index.get(param)
             if source is None:
                 source = _add_node(
@@ -573,6 +582,7 @@ def _start_inline_frame(graph: ComputationGraph, wrapper: BlockNode) -> InlineFr
         frame_id=wrapper.attr_name,
         label=inline_block_frame_label(wrapper),
         sublabel=inline_block_frame_sublabel(wrapper),
+        transparent=is_transparent_inline_expansion(wrapper),
     )
     graph.inline_frames.append(frame)
     return frame
@@ -1545,6 +1555,7 @@ def _prune_computation_nodes(
                     label=frame.label,
                     sublabel=frame.sublabel,
                     node_indices=kept_indices,
+                    transparent=frame.transparent,
                 )
             )
 
@@ -2061,6 +2072,26 @@ def build_computation_graph(
                 )
                 if source_index is None:
                     continue
+                producer = segment.side_producer_nodes.get(source_attr)
+                if producer is not None:
+                    normalized_arg = (
+                        side.arg_name.replace("indices", "index")
+                        .replace("_", "")
+                        .rstrip("s")
+                    )
+                    for (
+                        slot_name,
+                        producer_attr,
+                    ) in producer.forward_return_slots.items():
+                        normalized_slot = (
+                            slot_name.replace("indices", "index")
+                            .replace("_", "")
+                            .rstrip("s")
+                        )
+                        if normalized_slot != normalized_arg:
+                            continue
+                        source_index = attr_last_index.get(producer_attr, source_index)
+                        break
                 # A feed from the step right before the consumer is already the spine
                 # link; do not duplicate that operand edge.
                 if source_index == last_index and not forward_input_is_main:
