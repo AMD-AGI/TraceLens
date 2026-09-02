@@ -63,7 +63,7 @@ def run_triage(run_dir, stream_file=None, detailed=False):
         stream_file = None
 
     if not stream_file:
-        stream_file = _auto_detect_stream(run_dir)
+        stream_file = _auto_detect_stream(run_dir) or _auto_detect_log(run_dir)
         if stream_file:
             print(f"Auto-detected stream file: {stream_file}")
 
@@ -194,8 +194,15 @@ def main():
 
     if args.run_dir:
         findings = run_triage(args.run_dir, args.stream_file, detailed=args.detailed)
-        write_detail_csv(findings, args.run_dir)
-        write_diag_txt(findings, args.run_dir)
+        # Handling permission issues
+        if os.access(args.run_dir, os.W_OK | os.X_OK):
+            write_detail_csv(findings, args.run_dir)
+            write_diag_txt(findings, args.run_dir)
+        else:
+            print(
+                f"Warning: run dir is not writable; triage_details.csv / "
+                f"triage_diags.txt were not written: {args.run_dir}"
+            )
         all_findings.extend(findings)
 
     if args.session_dir:
@@ -208,7 +215,7 @@ def main():
         for f in all_findings:
             print(f.diag_line())
         print(f"\n{len(all_findings)} failure(s) detected.")
-        if args.run_dir:
+        if args.run_dir and os.access(args.run_dir, os.W_OK | os.X_OK):
             print(f"Details: {os.path.join(args.run_dir, 'triage_details.csv')}")
         sys.exit(1)
     else:

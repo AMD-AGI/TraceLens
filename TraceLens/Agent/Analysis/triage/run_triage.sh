@@ -59,17 +59,23 @@ echo ""
 echo "Step 1: Discovering tracelens folders..."
 
 if [ -n "$DISCOVERY_GLOB" ]; then
-    # shellcheck disable=SC2086
-    ls -d "$TRACES_ROOT"/$DISCOVERY_GLOB 2>/dev/null \
+    # A non-matching glob makes the pipeline non-zero
+    { ls -d "$TRACES_ROOT"/$DISCOVERY_GLOB 2>/dev/null || true; } \
         | sort -u > "$REPORT_DIR/run_dirs.txt"
 else
     # Layout-agnostic: a tracelens output dir is one that holds perf_report_csvs/.
-    find "$TRACES_ROOT" -type d -name perf_report_csvs 2>/dev/null \
+    { find "$TRACES_ROOT" -type d -name perf_report_csvs 2>/dev/null || true; } \
         | sed 's:/perf_report_csvs$::' \
         | sort -u > "$REPORT_DIR/run_dirs.txt"
 fi
 
 N_DIRS=$(wc -l < "$REPORT_DIR/run_dirs.txt")
+if [ "$N_DIRS" -eq 0 ]; then
+    echo "ERROR: no tracelens folders found under $TRACES_ROOT" >&2
+    echo "  Discovery: ${DISCOVERY_GLOB:-<auto: dirs containing perf_report_csvs/>}" >&2
+    echo "  Set TRIAGE_DISCOVERY_GLOB to the layout under this root, or check the path." >&2
+    exit 1
+fi
 echo "  Found $N_DIRS tracelens folders."
 echo "  Running triage (--detailed) with parallelism=$PARALLELISM..."
 
@@ -88,7 +94,8 @@ echo ""
 # ---------------------------------------------------------------
 echo "Step 2: Aggregating and building report..."
 
+# Reuse the already-discovered run dirs instead of re-walking the whole tree
 python -m TraceLens.Agent.Analysis.triage.postprocess \
-    --traces-root "$TRACES_ROOT" \
+    --mapping "$REPORT_DIR/run_dirs.txt" \
     --report-dir "$REPORT_DIR" \
     --top-reproducers "$TOP_REPRODUCERS"

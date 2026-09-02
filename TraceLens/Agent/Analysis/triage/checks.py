@@ -198,9 +198,10 @@ def resolve_main_trace_path(run_dir):
                     if matches:
                         return matches[0]
 
-    # Fallback: search recursively under run_dir/../../../../../ for trace files.
-    search_root = os.path.abspath(os.path.join(run_dir, "..", "..", "..", "..", ".."))
-    if os.path.isdir(search_root):
+    # Fallback: search within this run only.
+    for search_root in (os.path.join(run_dir, "trace_split"), run_dir):
+        if not os.path.isdir(search_root):
+            continue
         for pattern in ("*TP-0*.json*", "*rank0*.json*"):
             matches = sorted(
                 glob.glob(os.path.join(search_root, "**", pattern), recursive=True)
@@ -1125,8 +1126,10 @@ def check_kernel_candidates_missing(run_dir_or_session_dir, _stream_file=None):
     except (OSError, json.JSONDecodeError):
         return None
 
+    # Hyperloom writes the kernel phase as the canonical "KERNEL_AGENT"; the old
+    # exact match on "KERNEL" never succeeded and silently disabled this check.
     phases = [p.get("phase", "") for p in sbd.get("phase_segments", [])]
-    if "KERNEL" not in phases:
+    if "KERNEL_AGENT" not in phases:
         return None
 
     matches = glob.glob(

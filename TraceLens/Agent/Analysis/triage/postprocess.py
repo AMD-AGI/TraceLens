@@ -40,7 +40,8 @@ from typing import Dict, List, Set, Tuple
 # Module-level constants
 # ---------------------------------------------------------------------------
 
-_MODEL_RE = re.compile(r"/([^/]+)/\d{8}T\d{6}Z/kernel-agent/runs/")
+# Session dirs are <timestamp>Z or <timestamp>Z-<hash>
+_MODEL_RE = re.compile(r"/([^/]+)/\d{8}T\d{6}Z[^/]*/kernel-agent/runs/")
 
 _EG_RE = re.compile(r"\(e\.g\.\s+(.+?)\)$")
 
