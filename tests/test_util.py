@@ -14,6 +14,7 @@ from TraceLens.util import (
     PftraceParser,
     RocprofParser,
     TraceEventUtils,
+    merge_intervals,
     suppress_native_hlo_logs,
 )
 from TraceLens.Agent.Analysis.category_analyses import (
@@ -1252,3 +1253,34 @@ class TestAnalysisUtilsPhase8:
             comparison_scope="standalone",
         )
         assert isinstance(metrics, list)
+
+
+class TestMergeIntervals:
+    """Validate the canonical interval-merging helper shared by GPUEventAnalyser,
+    RocprofAnalyzer, and genesis_analysis."""
+
+    def test_non_overlapping(self):
+        intervals = [(0, 10), (20, 30), (40, 50)]
+        assert merge_intervals(intervals) == [(0, 10), (20, 30), (40, 50)]
+
+    def test_overlapping(self):
+        intervals = [(0, 15), (10, 25), (20, 30)]
+        assert merge_intervals(intervals) == [(0, 30)]
+
+    def test_adjacent(self):
+        intervals = [(0, 10), (10, 20)]
+        assert merge_intervals(intervals) == [(0, 20)]
+
+    def test_unsorted_input(self):
+        intervals = [(40, 50), (0, 10), (5, 15)]
+        assert merge_intervals(intervals) == [(0, 15), (40, 50)]
+
+    def test_empty_list(self):
+        assert merge_intervals([]) == []
+
+    def test_single_interval(self):
+        assert merge_intervals([(100, 200)]) == [(100, 200)]
+
+    def test_fully_nested(self):
+        intervals = [(0, 100), (10, 50), (20, 30)]
+        assert merge_intervals(intervals) == [(0, 100)]

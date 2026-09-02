@@ -46,6 +46,8 @@ subtrees:
     title: Fuse multi-rank traces
   - file: how-to/sdk-analysis
     title: Analyze traces with the SDK
+  - file: how-to/trace-index
+    title: Index a corpus of traces
   - file: how-to/perf-model-without-trace
     title: Model op performance without a trace
   - file: how-to/nccl-analysis
@@ -58,9 +60,9 @@ subtrees:
 - caption: Concepts
   entries:
   - file: conceptual/trace2tree
-    title: The Trace2Tree data model
+    title: Trace2Tree data model
   - file: conceptual/torch-profiling-analysis
-    title: Understanding PyTorch traces
+    title: PyTorch traces
   - file: conceptual/shape-metadata
     title: Tensor shape metadata
   - file: conceptual/gemm-analysis
@@ -70,21 +72,16 @@ subtrees:
   - file: conceptual/triton-perf-model-walkthrough
     title: Triton kernel performance model
 
-- caption: Tutorials
-  entries:
-  - file: tutorials/torch-profiling
-    title: PyTorch profiling walkthrough
-  - file: tutorials/distributed-profiling
-    title: Distributed profiling walkthrough
-  - file: tutorials/anomaly-detection
-    title: Anomaly detection walkthrough
-
 - caption: Reference
   entries:
   - file: reference/api-reference
     title: API reference
   - file: reference/perf-report-columns
     title: Performance report columns
+  - file: reference/trace-index-schema
+    title: TraceIndex catalog schema
+  - url: https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html
+    title: Hyperloom
 
 - caption: About
   entries:
