@@ -20,7 +20,6 @@ from TraceLens.TraceUtils.annotation_utils import (
     find_events_by_patterns,
     find_iteration_roots_by_priority,
     find_phase_from_window,
-    ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
 )
 from TraceLens.TraceUtils.match_inference_trace_blocks import (
@@ -169,9 +168,7 @@ def test_find_iteration_roots_by_priority_prefers_primary_patterns():
     assert "sq128" in roots[0]["name"]
 
     backup_only = [_root("execute_context_3(100)_generation_2(50)", ts=1)]
-    roots = find_iteration_roots_by_priority(
-        backup_only, pattern_tiers=[ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS]
-    )
+    roots = find_iteration_roots_by_priority(backup_only)
     assert len(roots) == 1
     assert roots[0]["name"].startswith("execute_context")
 

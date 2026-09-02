@@ -4,22 +4,19 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Stage 1: find iteration execution roots in an inference trace.
-
-Two entry points. :func:`find_iteration_roots` is the original first-tier-wins
-lookup, kept exactly as it was for callers that just want a root list.
-:func:`find_iteration_roots_ex` runs the coverage-gated flow and reports how much
-of the GPU's work the roots actually account for, which is the only way to tell a
-correct root set from one that locked onto a warmup loop.
-"""
+"""Stage 1: find iteration execution roots in an inference trace."""
 
 from typing import List, Optional, Sequence, Tuple
 
+from ...Trace2Tree.inference_iteration_roots import (
+    _detect_by_branch_descent,
+    _detect_sibling_roots,
+    _entry_roots,
+    _reattach_worker_threads,
+)
+from ...Trace2Tree.trace_to_tree import TraceToTree
 from ..annotation_utils import (
-    ITERATION_BACKUP_PATTERNS,
-    ITERATION_PATTERNS,
     PROVENANCE_KEY,
-    find_events_by_patterns,
     find_iteration_roots_by_priority,
     inherit_identity,
     is_parseable,
@@ -40,9 +37,7 @@ from .root_detection import (
     AnnotationFamily,
     build_families,
     collect_annotations,
-    detect_from_unknown_family,
-    detect_generic,
-    resolve_nesting,
+    detect_from_graph_launches,
 )
 
 __all__ = [
@@ -52,35 +47,7 @@ __all__ = [
     "PhaseConfidence",
     "RootSet",
     "find_iteration_roots",
-    "find_iteration_roots_ex",
 ]
-
-
-def find_iteration_roots(events: list[dict]) -> list[dict] | None:
-    """Return iteration-root events.
-
-    Tries the primary annotation pattern first, then backup patterns, then
-    falls back to generic call-tree traversal via Trace2Tree.
-    """
-    roots = find_events_by_patterns(
-        events, ITERATION_PATTERNS, label="execution steps (iteration)", verbose=True
-    )
-    if len(roots) == 0:
-        print("No primary annotations found; falling back to backup patterns...")
-        roots = find_events_by_patterns(
-            events,
-            ITERATION_BACKUP_PATTERNS,
-            label="execution steps (iteration, backup)",
-            verbose=True,
-        )
-    if len(roots) == 0:
-        print("No annotation patterns found; trying generic call-tree traversal...")
-        from ...Trace2Tree.inference_iteration_roots import (
-            find_iteration_roots_generic,
-        )
-
-        roots = find_iteration_roots_generic(events)
-    return roots
 
 
 # --- step 1.5: separate the extraction window from the metadata --------------
@@ -143,111 +110,173 @@ def _relabel_from_inner(roots: Sequence[dict], index: IntervalIndex) -> List[dic
     return relabelled
 
 
-def _detect_annotated(
-    events: Sequence[dict], attribution: GpuAttribution
+def _detect_from_annotations(
+    attribution: GpuAttribution, annotations: Sequence[dict]
 ) -> Optional[RootSet]:
-    """Steps 1 and 1.5 for a trace with at least one recognized annotation."""
-    known = find_iteration_roots_by_priority(events)
-    if not known:
-        return None
+    """Steps 1-3: roots from a recognized annotation, or an unknown regular family.
 
-    annotations = collect_annotations(events)
-    index = IntervalIndex(annotations)
+    A recognized iteration pattern goes through step 1.5 -- widen to the
+    enclosing family, relabel from the inner parseable annotation, and grade
+    phase confidence by how many roots actually parsed. With no recognized
+    pattern but a regular family present, that family is adopted directly: the
+    trace is still splittable, just without phase labels.
+
+    ``known`` is the subset of ``annotations`` matching a recognized pattern --
+    matched over the pre-gathered list, inheriting the same collective filter (a
+    real iteration marker never carries Input Dims).
+    """
     families = build_families(annotations, attribution)
-    resolve_nesting(families, index)
+    known = find_iteration_roots_by_priority(annotations)
 
-    diagnostics = {
-        "n_families": len(families),
-        "n_known_roots": len(known),
-    }
-    widened, outer = _widen_to_outer_family(known, families, index)
-    roots = widened if widened else list(known)
-    if outer is not None:
-        diagnostics["root_family_skeleton"] = outer.skeleton
-        diagnostics["root_family_known"] = outer.parseable
+    if known:
+        index = IntervalIndex(annotations)
+        diagnostics = {
+            "n_families": len(families),
+            "n_known_roots": len(known),
+        }
+        widened, outer = _widen_to_outer_family(known, families, index)
+        roots = widened if widened else list(known)
+        if outer is not None:
+            diagnostics["root_family_skeleton"] = outer.skeleton
+            diagnostics["root_family_known"] = outer.parseable
 
-    roots = _relabel_from_inner(roots, index)
-    inherited = {
-        r[PROVENANCE_KEY]["identity_from"] for r in roots if PROVENANCE_KEY in r
-    }
-    if inherited:
-        diagnostics["inherited_from_skeleton"] = sorted(
-            {name_skeleton(n) for n in inherited}
+        roots = _relabel_from_inner(roots, index)
+        inherited = {
+            r[PROVENANCE_KEY]["identity_from"] for r in roots if PROVENANCE_KEY in r
+        }
+        if inherited:
+            diagnostics["inherited_from_skeleton"] = sorted(
+                {name_skeleton(n) for n in inherited}
+            )
+        diagnostics["suspiciously_few_roots"] = len(roots) < MIN_ROOTS
+
+        # Trust the phase labels only as far as they were actually parsed.
+        # Adopting a whole family means some iterations may carry no recognizable
+        # annotation at all, and calling that "high" would launder a guess.
+        labelled = sum(1 for r in roots if is_parseable(r.get("name", "")))
+        diagnostics["n_roots_with_phase"] = labelled
+        if labelled == len(roots):
+            confidence = PhaseConfidence.HIGH
+        elif labelled:
+            confidence = PhaseConfidence.LOW
+        else:
+            confidence = PhaseConfidence.UNKNOWN
+
+        return RootSet(
+            roots=sorted(roots, key=lambda e: e.get("ts", 0)),
+            method="annotation:widened" if widened else "annotation:tier",
+            phase_confidence=confidence,
+            diagnostics=diagnostics,
         )
-    diagnostics["suspiciously_few_roots"] = len(roots) < MIN_ROOTS
 
-    # Trust the phase labels only as far as they were actually parsed. Adopting a
-    # whole family means some of its iterations may carry no recognizable
-    # annotation at all, and calling that "high" would launder a guess.
-    labelled = sum(1 for r in roots if is_parseable(r.get("name", "")))
-    diagnostics["n_roots_with_phase"] = labelled
-    if labelled == len(roots):
-        confidence = PhaseConfidence.HIGH
-    elif labelled:
-        confidence = PhaseConfidence.LOW
-    else:
-        confidence = PhaseConfidence.UNKNOWN
-
+    # No recognized pattern: adopt the top-ranked regular family (most GPU work,
+    # steadiest cadence), unlabeled -- phases are unknowable from an unrecognized
+    # name, but the trace is still splittable.
+    regular = [f for f in families if f.regular]
+    if not regular:
+        return None
+    family = min(regular, key=lambda f: f.rank)
     return RootSet(
-        roots=sorted(roots, key=lambda e: e.get("ts", 0)),
-        method="annotation:widened" if widened else "annotation:tier",
-        phase_confidence=confidence,
-        diagnostics=diagnostics,
+        roots=sorted(family.instances, key=lambda e: e.get("ts", 0)),
+        method="family:unknown_only",
+        phase_confidence=PhaseConfidence.UNKNOWN,
+        diagnostics={
+            "n_families": len(regular),
+            "root_family_skeleton": family.skeleton,
+            "root_family_known": False,
+        },
     )
 
 
-def find_iteration_roots_ex(events: Sequence[dict]) -> RootSet:
+def find_iteration_roots(events: Sequence[dict]) -> RootSet:
     """Find iteration roots and report how much GPU work they account for.
 
-    Escalates only when it has to: recognized annotations, the nesting level
-    around them, a coverage audit, probes, then call-tree periodicity.
+    Flat cascade -- each step is tried in order and returns as soon as a
+    detector produces roots with acceptable GPU coverage:
+
+    1. Recognized / unknown-family annotations
+    2. Graph-launch replay boundaries (no tree needed)
+    3. Branch-descent on the call tree (after cross-thread reattachment)
+    4. Sibling-root periodicity across top-level frames
     """
     attribution = GpuAttribution(events)
     annotations = collect_annotations(events)
 
-    root_set = _detect_annotated(events, attribution)
-    if root_set is None:
-        root_set = detect_from_unknown_family(events, attribution)
-    if root_set is None:
-        generic = detect_generic(events, attribution)
-        if generic is not None:
-            return generic
+    # --- 1. Annotations (known pattern or regular unknown family) -------------
+    root_set = _detect_from_annotations(attribution, annotations)
+    if root_set is not None:
+        coverage = attribution.audit(annotations, root_set.roots)
+        root_set.coverage = coverage
+
+        known_labels = root_set.phase_confidence is PhaseConfidence.HIGH
+        if coverage.passes and (
+            known_labels
+            or not root_set.diagnostics.get("suspiciously_few_roots")
+        ):
+            root_set.status = DetectStatus.SPLITTABLE
+            return root_set
+
+        if coverage.covered_selected >= COVERAGE_FLOOR:
+            root_set.status = DetectStatus.DEGRADED
+            return root_set
+
+    # --- 2. Graph-launch fast path (flat event list, no tree) -----------------
+    graph_set = detect_from_graph_launches(events, attribution, annotations)
+    if graph_set is not None:
+        return graph_set
+
+    # --- 3 & 4. Tree-based detectors (built once) ----------------------------
+    try:
+        tree = TraceToTree(list(events), prune_nongpu_paths=False)
+        tree.build_tree(add_python_func=True)
+    except Exception as exc:
+        print(f"TraceToTree build failed ({exc}), skipping tree detectors.")
+        if root_set is not None:
+            root_set.status = DetectStatus.NOT_SPLITTABLE
+            return root_set
         return RootSet(
             roots=[],
             method="none",
             status=DetectStatus.NOT_SPLITTABLE,
-            diagnostics={"reason": "no annotations and no repeating call pattern"},
+            diagnostics={"reason": "tree build failed and no annotations"},
         )
 
-    coverage = attribution.audit(annotations, root_set.roots)
-    root_set.coverage = coverage
-    root_set.diagnostics["probes_run"] = []  # escalation probes removed
+    _reattach_worker_threads(tree)
 
-    # Trust recognized labels. When the split comes from a parsed annotation
-    # (phase_confidence high) and its GPU coverage is good, a small root count is
-    # a genuinely short run, not a warmup loop -- accept it rather than second-
-    # guessing known-per-iteration labels. The warmup guard still applies to
-    # unknown families, whose meaning we cannot vouch for.
-    known_labels = root_set.phase_confidence is PhaseConfidence.HIGH
-    if coverage.passes and (
-        known_labels or not root_set.diagnostics.get("suspiciously_few_roots")
-    ):
-        root_set.status = DetectStatus.SPLITTABLE
+    # --- 3. Branch descent ----------------------------------------------------
+    bd_diag: dict = {}
+    branch_roots = _detect_by_branch_descent(tree, bd_diag)
+    if branch_roots is not None:
+        tier = bd_diag.get("period_label_tier", "branch_descent")
+        return RootSet(
+            roots=branch_roots,
+            method=f"generic:{tier}",
+            phase_confidence=PhaseConfidence.UNKNOWN,
+            status=DetectStatus.SPLITTABLE,
+            diagnostics=bd_diag,
+        )
+
+    # --- 4. Sibling roots ----------------------------------------------------
+    trace_roots = _entry_roots(tree)
+    sr_diag: dict = {}
+    sibling_roots = _detect_sibling_roots(tree, trace_roots, sr_diag)
+    if sibling_roots is not None:
+        tier = sr_diag.get("period_label_tier", "sibling_roots")
+        return RootSet(
+            roots=sibling_roots,
+            method=f"generic:{tier}",
+            phase_confidence=PhaseConfidence.UNKNOWN,
+            status=DetectStatus.SPLITTABLE,
+            diagnostics=sr_diag,
+        )
+
+    # --- Nothing worked -------------------------------------------------------
+    if root_set is not None:
+        root_set.status = DetectStatus.NOT_SPLITTABLE
         return root_set
-
-    # No probes: grade directly on how much GPU work the roots explain.
-    if coverage and coverage.covered_selected >= COVERAGE_FLOOR:
-        root_set.status = DetectStatus.DEGRADED
-        return root_set
-
-    # The annotation/family split explains too little GPU work to trust. Before
-    # refusing, fall through to the generic tree-descent path: its coverage is
-    # measured on the reattached tree, so a cross-thread workload the annotation
-    # audit is blind to -- e.g. TorchRec dlrm, whose backward/embedding kernels
-    # are launched off a worker thread -- can still be split cleanly there. Only
-    # adopt it if it clears its own gate; otherwise keep the honest refusal.
-    generic = detect_generic(events, attribution)
-    if generic is not None and generic.status is DetectStatus.SPLITTABLE:
-        return generic
-    root_set.status = DetectStatus.NOT_SPLITTABLE
-    return root_set
+    return RootSet(
+        roots=[],
+        method="none",
+        status=DetectStatus.NOT_SPLITTABLE,
+        diagnostics={"reason": "no annotations and no repeating call pattern"},
+    )

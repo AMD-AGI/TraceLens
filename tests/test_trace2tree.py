@@ -14,7 +14,7 @@ from typing import Dict, List
 from TraceLens.Trace2Tree.inference_iteration_roots import (
     _detect_by_branch_descent,
     _find_repeating_period,
-    find_iteration_roots_generic,
+    _reattach_worker_threads,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _align_capture_to_graph,
@@ -200,7 +200,7 @@ class TestInferenceIterationRoots:
         assert len(roots) == 8
         assert all(root["dur"] > 0 for root in roots)
 
-    def test_find_iteration_roots_generic_end_to_end(self):
+    def test_branch_descent_end_to_end(self):
         events: List[Dict] = []
         events.append(
             _mk_event(
@@ -236,7 +236,9 @@ class TestInferenceIterationRoots:
                 )
                 corr += 1
 
-        roots = find_iteration_roots_generic(events)
+        tree = _build_tree(events)
+        _reattach_worker_threads(tree)
+        roots = _detect_by_branch_descent(tree)
         assert roots is not None
         assert len(roots) >= 1
 

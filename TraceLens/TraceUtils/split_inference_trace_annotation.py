@@ -175,7 +175,6 @@ from .split_inference import (  # noqa: F401
     extract_iteration,
     extract_phases_and_save,
     find_iteration_roots,
-    find_iteration_roots_ex,
     find_max_pattern_window,
     find_steady_state_window,
     get_filename,
@@ -338,7 +337,7 @@ def main():
     gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
     print(f"Loaded {len(events)} events")
 
-    detection = find_iteration_roots_ex(events)
+    detection = find_iteration_roots(events)
     iteration_roots = detection.roots
     manifest = detection.to_manifest()
     print(

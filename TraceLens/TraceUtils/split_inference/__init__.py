@@ -11,7 +11,6 @@ from .execution_roots import (
     PhaseConfidence,
     RootSet,
     find_iteration_roots,
-    find_iteration_roots_ex,
 )
 from .steady_state_window import (
     classify_workload,
@@ -44,7 +43,6 @@ __all__ = [
     "extract_iteration",
     "extract_phases_and_save",
     "find_iteration_roots",
-    "find_iteration_roots_ex",
     "find_max_pattern_window",
     "find_steady_state_window",
     "get_filename",
