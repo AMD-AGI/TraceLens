@@ -136,8 +136,9 @@ The following table lists the columns in `op_kernels`.
 
 ## The gemm_perf table
 
-GEMM `perf_params` on a unified row. Primary key is `unified_row_id` (at most
-one GEMM satellite per unified row). Join `unified_perf_rows` to reach
+GEMM `perf_params` on a unified row. A row is created when `op_category` is
+`GEMM`; missing parameters remain `NULL`. Primary key is `unified_row_id` (at
+most one GEMM satellite per unified row). Join `unified_perf_rows` to reach
 `traces`. Identifiers that must keep JSON key case are quoted (`M`, `N`, `K`,
 `B`). Tuple or list values are stored as JSON text. TFLOPS stays on
 `unified_perf_rows`.
@@ -159,8 +160,9 @@ The following table lists the columns in `gemm_perf`.
 
 ## The sdpa_perf table
 
-Attention `perf_params` on a unified row. Primary key is `unified_row_id`. Join
-`unified_perf_rows` to reach `traces`.
+Attention `perf_params` on a unified row. A row is created for `SDPA` and
+`SDPA_*` categories; missing parameters remain `NULL`. Primary key is
+`unified_row_id`. Join `unified_perf_rows` to reach `traces`.
 
 The following table lists the columns in `sdpa_perf`.
 
@@ -184,8 +186,9 @@ The following table lists the columns in `sdpa_perf`.
 
 ## The conv_perf table
 
-Convolution `perf_params` on a unified row. Primary key is `unified_row_id`.
-Join `unified_perf_rows` to reach `traces`.
+Convolution `perf_params` on a unified row. A row is created for `CONV` and
+`CONV_*` categories; missing parameters remain `NULL`. Primary key is
+`unified_row_id`. Join `unified_perf_rows` to reach `traces`.
 
 The following table lists the columns in `conv_perf`.
 

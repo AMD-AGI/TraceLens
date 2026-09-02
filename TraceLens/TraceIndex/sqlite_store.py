@@ -37,6 +37,11 @@ def is_read_only_sql(sql: str) -> bool:
     return stripped.startswith(("select", "with", "pragma"))
 
 
+def matches_op_category(value: Optional[str], family: str) -> bool:
+    category = (value or "").strip().upper()
+    return category == family or category.startswith(family + "_")
+
+
 class SQLiteTraceIndexStore(TraceIndexStore):
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -524,9 +529,9 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             )
             unified_row_id = int(cursor.lastrowid)
             self._import_kernels_from_details(trace_id, unified_row_id, kernel_details)
-            self._maybe_insert_gemm(unified_row_id, params)
-            self._maybe_insert_sdpa(unified_row_id, params)
-            self._maybe_insert_conv(unified_row_id, params)
+            self._maybe_insert_gemm(unified_row_id, op_category, params)
+            self._maybe_insert_sdpa(unified_row_id, op_category, params)
+            self._maybe_insert_conv(unified_row_id, op_category, params)
             self._insert_search(
                 trace_id,
                 "op",
@@ -579,12 +584,12 @@ class SQLiteTraceIndexStore(TraceIndexStore):
     def _maybe_insert_gemm(
         self,
         unified_row_id: int,
+        op_category: Optional[str],
         params: Any,
     ) -> None:
-        if not isinstance(params, dict):
+        if not matches_op_category(op_category, "GEMM"):
             return
-        if not {"M", "N", "K"}.intersection(params):
-            return
+        params = params if isinstance(params, dict) else {}
         self.conn.execute(
             """
             INSERT OR REPLACE INTO gemm_perf(
@@ -609,12 +614,12 @@ class SQLiteTraceIndexStore(TraceIndexStore):
     def _maybe_insert_sdpa(
         self,
         unified_row_id: int,
+        op_category: Optional[str],
         params: Any,
     ) -> None:
-        if not isinstance(params, dict):
+        if not matches_op_category(op_category, "SDPA"):
             return
-        if not {"N_Q", "N_KV", "d_h_qk", "d_h_v"}.intersection(params):
-            return
+        params = params if isinstance(params, dict) else {}
         self.conn.execute(
             """
             INSERT OR REPLACE INTO sdpa_perf(
@@ -644,12 +649,12 @@ class SQLiteTraceIndexStore(TraceIndexStore):
     def _maybe_insert_conv(
         self,
         unified_row_id: int,
+        op_category: Optional[str],
         params: Any,
     ) -> None:
-        if not isinstance(params, dict):
+        if not matches_op_category(op_category, "CONV"):
             return
-        if "convNd" not in params and "filter_shape" not in params:
-            return
+        params = params if isinstance(params, dict) else {}
         self.conn.execute(
             """
             INSERT OR REPLACE INTO conv_perf(

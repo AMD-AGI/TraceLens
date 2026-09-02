@@ -345,6 +345,55 @@ def test_import_handoff_uses_runner_tracelens_id_and_artifact_paths(tmp_path):
     ]
 
 
+def test_satellites_are_routed_by_op_category(tmp_path):
+    db_path = tmp_path / "trace_index.sqlite"
+    trace_path = write_stub_trace(tmp_path / "trace.json")
+    report_path = tmp_path / "report"
+    write_csv(
+        report_path / "unified_perf_summary.csv",
+        [
+            {
+                "name": "gemm_without_params",
+                "op category": "GEMM",
+                "perf_params": "",
+            },
+            {
+                "name": "sdpa_without_params",
+                "op category": "SDPA_fwd",
+                "perf_params": "",
+            },
+            {
+                "name": "conv_without_params",
+                "op category": "CONV",
+                "perf_params": "",
+            },
+            {
+                "name": "mhc_with_mnk",
+                "op category": "mHC",
+                "perf_params": "{'M': 128, 'N': 24, 'K': 28672}",
+            },
+        ],
+    )
+
+    append_trace(db_path, trace_path, report_dir=report_path)
+
+    assert execute_read_query(
+        db_path,
+        "SELECT u.name FROM gemm_perf g "
+        "JOIN unified_perf_rows u ON u.id = g.unified_row_id",
+    ) == [{"name": "gemm_without_params"}]
+    assert execute_read_query(
+        db_path,
+        "SELECT u.name FROM sdpa_perf s "
+        "JOIN unified_perf_rows u ON u.id = s.unified_row_id",
+    ) == [{"name": "sdpa_without_params"}]
+    assert execute_read_query(
+        db_path,
+        "SELECT u.name FROM conv_perf c "
+        "JOIN unified_perf_rows u ON u.id = c.unified_row_id",
+    ) == [{"name": "conv_without_params"}]
+
+
 def test_trace_index_rejects_write_sql(tmp_path):
     """The read-only query path refuses non-SELECT statements."""
     db_path = tmp_path / "trace_index.sqlite"
