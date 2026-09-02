@@ -21,7 +21,7 @@ permissions:
 jobs:
   evals:
     name: AMD Skills Checks
-    uses: danielholanda/skillscope/.github/workflows/reusable.yml@main
+    uses: amd/skillscope/.github/workflows/reusable.yml@main
     secrets:
       api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
