@@ -43,10 +43,8 @@ import json
 import re
 import sys
 
-# Iteration-annotation markers. Mirrors
-# ``TraceLens.TraceUtils.split_inference_trace_annotation.ANNOTATION_PATTERN``
-# so detection stays consistent with the trace splitter. These match the
-# per-iteration ``user_annotation`` events emitted by vLLM/SGLang.
+# Iteration-annotation markers: per-iteration ``user_annotation`` event
+# names emitted by vLLM/SGLang.
 ANNOTATION_PATTERN = [
     re.compile(
         r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
