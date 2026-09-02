@@ -1199,26 +1199,25 @@ class TraceToTree(BaseTraceToTree):
         # 1. Get the linking id from the input event
         # 2. Find the corresponding start and end ac2g events for the linking id
         # 3. Find the output event using the pid, tid, and linking id of the end ac2g event
+        # 4. Some runtimes (e.g. hipDrvLaunchKernelEx) emit only the finish half of the
+        #    ac2g flow, so fall back to an unambiguous correlation-id match
         link_id = input_event.get(TraceEventUtils.TraceKeys.Args, {}).get(
             self.linking_key
         )
         ac2g_start_event = self.ac2g_event_map["start"].get(link_id)
         ac2g_end_event = self.ac2g_event_map["end"].get(link_id)
 
-        if not ac2g_start_event:
-            return None
+        output_event = None
+        if ac2g_start_event and ac2g_end_event:
+            pid = ac2g_end_event.get(TraceEventUtils.TraceKeys.PID)
+            tid = ac2g_end_event.get(TraceEventUtils.TraceKeys.TID)
+            end_link_id = ac2g_end_event.get("id")
+            output_event = self.pid_tid_event_map.get((pid, tid, end_link_id))
 
-        if not ac2g_end_event:
-            # print(f"Warning: start ac2g event found for {self.linking_key}={link_id} but no corresponding end ac2g event found.")
-            # print(f"Input event name: {input_event[TraceEventUtils.TraceKeys.Name]}")
-            # print(('-'*64))
-            return None
-
-        pid = ac2g_end_event.get(TraceEventUtils.TraceKeys.PID)
-        tid = ac2g_end_event.get(TraceEventUtils.TraceKeys.TID)
-        link_id = ac2g_end_event.get("id")
-
-        output_event = self.pid_tid_event_map.get((pid, tid, link_id))
+        if output_event is None:
+            gpu_events = self.linking_id_to_gpu_events.get(link_id, [])
+            if len(gpu_events) == 1:
+                output_event = gpu_events[0]
         return output_event
 
     def get_nn_module_children(self, nn_module_event: Dict[str, Any]):
