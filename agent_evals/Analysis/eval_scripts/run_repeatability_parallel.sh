@@ -7,6 +7,12 @@
 
 set -uo pipefail
 
+# Tags this process and all descendants with TRACELENS_EVAL_JOB=1.
+if [[ "${TRACELENS_EVAL_JOB:-}" != 1 ]]; then
+    export TRACELENS_EVAL_JOB=1
+    exec bash "$0" "$@"
+fi
+
 # ---------------------------------------------------------------------------
 # Usage: bash run_repeatability_parallel.sh [both|standalone|comparative] [--pi]
 #    or: bash run_repeatability_parallel.sh --pi [both|standalone|comparative]
@@ -47,6 +53,9 @@ With 'both' (or no scope argument) the script runs, sequentially:
   3. repeatability eval (standalone)
   4. repeatability eval (comparative)
   5. a single combined pr_report.md + fix_ticket_report.md
+
+To kill a running pipeline (and any orphaned jobs it spawned), use:
+  bash eval_scripts/kill_eval_jobs.sh
 EOF
 }
 
