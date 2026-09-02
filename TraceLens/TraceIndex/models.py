@@ -22,11 +22,20 @@ class TraceRecord(NamedTuple):
     parent_rel: Optional[str]
     should_enrich: bool
     skip_reason: Optional[str]
+    tracelens_id: Optional[str] = None
 
 
 class TraceReport(NamedTuple):
     report_dir: str
     sheets: Dict[str, List[Dict[str, str]]]
+    excel_path: Optional[str] = None
+
+
+class HandoffEntry(NamedTuple):
+    tracelens_id: str
+    trace_path: str
+    report_path: str
+    excel_path: Optional[str] = None
 
 
 class SearchHit(NamedTuple):

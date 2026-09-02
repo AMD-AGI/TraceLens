@@ -56,6 +56,7 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS traces (
                 id INTEGER PRIMARY KEY,
+                tracelens_id TEXT UNIQUE,
                 root TEXT,
                 path TEXT NOT NULL UNIQUE,
                 rel_path TEXT,
@@ -88,6 +89,7 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 id INTEGER PRIMARY KEY,
                 trace_id INTEGER NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
                 report_dir TEXT NOT NULL,
+                excel_path TEXT,
                 imported_at TEXT NOT NULL,
                 sheets_json TEXT NOT NULL
             );
@@ -116,6 +118,7 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 compute_spec TEXT,
                 has_perf_model INTEGER,
                 overlap_pct REAL,
+                gpu_kernel_pct REAL,
                 perf_params_json TEXT,
                 kernel_details_json TEXT,
                 raw_row_json TEXT
@@ -212,49 +215,79 @@ class SQLiteTraceIndexStore(TraceIndexStore):
 
     def upsert_trace(self, trace: TraceRecord) -> int:
         now = utc_now()
-        self.conn.execute(
-            """
-            INSERT INTO traces(
-                root, path, rel_path, name, size_bytes, md5, format, rank, top_dir,
-                parent_rel, should_enrich, skip_reason, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(path) DO UPDATE SET
-                root = excluded.root,
-                rel_path = excluded.rel_path,
-                name = excluded.name,
-                size_bytes = excluded.size_bytes,
-                md5 = COALESCE(excluded.md5, traces.md5),
-                format = excluded.format,
-                rank = excluded.rank,
-                top_dir = excluded.top_dir,
-                parent_rel = excluded.parent_rel,
-                should_enrich = excluded.should_enrich,
-                skip_reason = excluded.skip_reason,
-                updated_at = excluded.updated_at
-            """,
-            (
-                trace.root,
-                trace.path,
-                trace.rel_path,
-                trace.name,
-                trace.size_bytes,
-                trace.md5,
-                trace.format,
-                trace.rank,
-                trace.top_dir,
-                trace.parent_rel,
-                int(trace.should_enrich),
-                trace.skip_reason,
-                now,
-                now,
-            ),
-        )
-        row = self.conn.execute(
+        by_path = self.conn.execute(
             "SELECT id FROM traces WHERE path = ?", (trace.path,)
         ).fetchone()
+        by_tracelens_id = (
+            self.conn.execute(
+                "SELECT id FROM traces WHERE tracelens_id = ?",
+                (trace.tracelens_id,),
+            ).fetchone()
+            if trace.tracelens_id
+            else None
+        )
+        if (
+            by_path is not None
+            and by_tracelens_id is not None
+            and by_path["id"] != by_tracelens_id["id"]
+        ):
+            raise ValueError(
+                "trace_path and tracelens_id identify different catalog rows"
+            )
+        existing = by_tracelens_id or by_path
+        values = (
+            trace.tracelens_id,
+            trace.root,
+            trace.path,
+            trace.rel_path,
+            trace.name,
+            trace.size_bytes,
+            trace.md5,
+            trace.format,
+            trace.rank,
+            trace.top_dir,
+            trace.parent_rel,
+            int(trace.should_enrich),
+            trace.skip_reason,
+        )
+        if existing is None:
+            cursor = self.conn.execute(
+                """
+                INSERT INTO traces(
+                    tracelens_id, root, path, rel_path, name, size_bytes, md5,
+                    format, rank, top_dir, parent_rel, should_enrich, skip_reason,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values + (now, now),
+            )
+            trace_id = int(cursor.lastrowid)
+        else:
+            trace_id = int(existing["id"])
+            self.conn.execute(
+                """
+                UPDATE traces SET
+                    tracelens_id = COALESCE(?, tracelens_id),
+                    root = ?,
+                    path = ?,
+                    rel_path = ?,
+                    name = ?,
+                    size_bytes = ?,
+                    md5 = COALESCE(?, md5),
+                    format = ?,
+                    rank = ?,
+                    top_dir = ?,
+                    parent_rel = ?,
+                    should_enrich = ?,
+                    skip_reason = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                values + (now, trace_id),
+            )
         self.conn.commit()
-        return int(row["id"])
+        return trace_id
 
     def import_report(self, trace_id: int, report: TraceReport) -> None:
         self._clear_trace_payload(trace_id)
@@ -267,12 +300,15 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         self._import_gpu_mix(trace_id, report.sheets.get("gpu_timeline", []))
         self.conn.execute(
             """
-            INSERT INTO report_imports(trace_id, report_dir, imported_at, sheets_json)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO report_imports(
+                trace_id, report_dir, excel_path, imported_at, sheets_json
+            )
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 trace_id,
                 report.report_dir,
+                report.excel_path,
                 utc_now(),
                 json.dumps(
                     [name for name, rows in report.sheets.items() if rows],
@@ -394,10 +430,10 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                     kernel_time_std_us, kernel_time_min_us, kernel_time_max_us,
                     op_duration_us, tflops_mean, tflops_median, tbs_mean, tbs_median,
                     gflops, data_moved_mb, flops_per_byte, compute_spec,
-                    has_perf_model, overlap_pct, perf_params_json, kernel_details_json,
-                    raw_row_json
+                    has_perf_model, overlap_pct, gpu_kernel_pct, perf_params_json,
+                    kernel_details_json, raw_row_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trace_id,
@@ -475,6 +511,12 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                     as_text(first_value(row, ["Compute Spec", "compute_spec"])),
                     as_bool_int(first_value(row, ["has_perf_model", "Has Perf Model"])),
                     as_float(first_value(row, ["overlap_pct", "Overlap (%)"])),
+                    as_float(
+                        first_value(
+                            row,
+                            ["Percentage (%)", "gpu_kernel_pct", "percent"],
+                        )
+                    ),
                     to_json(params),
                     to_json(kernel_details),
                     to_json(dict(row)),

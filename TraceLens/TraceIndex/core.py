@@ -13,6 +13,7 @@ from TraceLens.TraceIndex.importer import (
     append_trace as append_trace_with_store,
     build_traces as build_traces_with_store,
     generate_report_and_import as generate_report_and_import_with_store,
+    import_handoff_jsonl as import_handoff_jsonl_with_store,
 )
 from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
 
@@ -81,6 +82,18 @@ def generate_report_and_import(
             force=force,
             enable_pseudo_ops=enable_pseudo_ops,
         )
+    finally:
+        store.close()
+
+
+def import_handoff_jsonl(
+    db_path: Path,
+    handoff_path: Path,
+    root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    store = SQLiteTraceIndexStore(db_path)
+    try:
+        return import_handoff_jsonl_with_store(store, handoff_path, root=root)
     finally:
         store.close()
 

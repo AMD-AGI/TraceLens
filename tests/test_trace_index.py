@@ -146,6 +146,7 @@ def test_trace_index_append_from_report_and_search(tmp_path):
                 "op category": "GEMM",
                 "operation_count": "2",
                 "Kernel Time (us)_sum": "123.5",
+                "Percentage (%)": "80.0",
                 "TFLOPS/s_mean": "98.1",
                 "perf_params": (
                     "{'M': 128, 'N': 64, 'K': 32, 'B': 1, 'bias': False, "
@@ -208,13 +209,15 @@ def test_trace_index_append_from_report_and_search(tmp_path):
 
     rows = execute_read_query(
         db_path,
-        "SELECT name, op_category, kernel_time_sum_us FROM unified_perf_rows "
+        "SELECT name, op_category, kernel_time_sum_us, gpu_kernel_pct "
+        "FROM unified_perf_rows "
         "ORDER BY source_row",
     )
     assert rows[0] == {
         "name": "aten::mm",
         "op_category": "GEMM",
         "kernel_time_sum_us": 123.5,
+        "gpu_kernel_pct": 80.0,
     }
 
     gemm = execute_read_query(db_path, 'SELECT "M", "N", "K", "B" FROM gemm_perf')
@@ -284,6 +287,62 @@ def test_trace_index_append_from_report_and_search(tmp_path):
     search_rows = search_index(db_path, "Cijk", limit=10)
     assert search_rows
     assert search_rows[0]["trace_id"] == trace_id
+
+
+def test_import_handoff_uses_runner_tracelens_id_and_artifact_paths(tmp_path):
+    db_path = tmp_path / "trace_index.sqlite"
+    trace_path = write_stub_trace(tmp_path / "runner" / "trace.json")
+    report_path = write_mini_report(tmp_path / "runner" / "report")
+    excel_path = tmp_path / "runner" / "report.xlsx"
+    handoff_path = tmp_path / "handoff.jsonl"
+    handoff_path.write_text(
+        json.dumps(
+            {
+                "tracelens_id": "hyperloom-session-1-profile",
+                "trace_path": str(trace_path),
+                "report_path": str(report_path),
+                "excel_path": str(excel_path),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = trace_index_main(
+        [
+            "--db",
+            str(db_path),
+            "import-handoff",
+            "--handoff",
+            str(handoff_path),
+        ]
+    )
+    assert result == 0
+    assert (
+        trace_index_main(
+            [
+                "--db",
+                str(db_path),
+                "import-handoff",
+                "--handoff",
+                str(handoff_path),
+            ]
+        )
+        == 0
+    )
+    rows = execute_read_query(
+        db_path,
+        "SELECT t.tracelens_id, t.path, r.report_dir, r.excel_path "
+        "FROM traces t JOIN report_imports r ON r.trace_id = t.id",
+    )
+    assert rows == [
+        {
+            "tracelens_id": "hyperloom-session-1-profile",
+            "path": str(trace_path).replace("\\", "/"),
+            "report_dir": str(report_path).replace("\\", "/"),
+            "excel_path": str(excel_path).replace("\\", "/"),
+        }
+    ]
 
 
 def test_trace_index_rejects_write_sql(tmp_path):

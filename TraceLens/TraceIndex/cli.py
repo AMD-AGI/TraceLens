@@ -14,6 +14,7 @@ from typing import List, Optional
 from TraceLens.TraceIndex.importer import (
     append_trace,
     build_traces,
+    import_handoff_jsonl,
     report_dir_for_trace,
 )
 from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
@@ -82,6 +83,23 @@ def build_cmd(args: argparse.Namespace) -> int:
             force=args.force,
             enable_pseudo_ops=args.enable_pseudo_ops,
         )
+        print_json(
+            {
+                "backend": args.backend,
+                "db": args.db,
+                "imported": result["imported"],
+                "failed": result["failed"],
+            }
+        )
+        return 1 if result["failed"] else 0
+    finally:
+        store.close()
+
+
+def import_handoff_cmd(args: argparse.Namespace) -> int:
+    store = create_store(args)
+    try:
+        result = import_handoff_jsonl(store, args.handoff, root=args.root)
         print_json(
             {
                 "backend": args.backend,
@@ -211,6 +229,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_generate_args(build)
     build.set_defaults(func=build_cmd)
+
+    handoff = sub.add_parser(
+        "import-handoff",
+        help="Import runner-produced tracelens_id and artifact paths from JSONL",
+    )
+    handoff.add_argument("--handoff", type=Path, required=True)
+    handoff.add_argument("--root", type=Path, default=None)
+    handoff.set_defaults(func=import_handoff_cmd)
 
     search = sub.add_parser("search", help="Full-text search indexed traces")
     search.add_argument("terms", nargs="+")

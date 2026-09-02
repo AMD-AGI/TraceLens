@@ -80,6 +80,29 @@ A failed trace is recorded and the rest of the list still runs. For inference,
 rocprof, or pftrace, generate the CSV reports first, then `append` each trace
 with `--report-dir`.
 
+## Import runner handoffs
+
+A workload runner should locate its own traces and reports. It can hand those
+locations to TraceIndex as JSON Lines without requiring TraceIndex to walk the
+runner's directory layout:
+
+```json
+{"tracelens_id":"nightly-model-a-profile","trace_path":"/path/to/trace.json.gz","report_path":"/path/to/perf_report_csvs","excel_path":"/path/to/report.xlsx"}
+```
+
+`tracelens_id`, `trace_path`, and `report_path` are required. `excel_path` is
+optional. Import the handoff file with:
+
+```bash
+TraceLens_trace_index --db trace_index.sqlite import-handoff \
+  --handoff handoff.jsonl
+```
+
+The runner owns discovery and emits only successful artifact locations.
+TraceIndex upserts the stable `tracelens_id`, imports the common report sheets,
+and records the report and optional workbook paths. Runner-specific failures
+remain in the runner's own diagnostics.
+
 ## Search and query
 
 Full-text search (FTS) over indexed traces, ops, kernels, and categories:
@@ -125,8 +148,8 @@ erDiagram
 
 | Table | Contents |
 |---|---|
-| `traces` | One row per indexed trace, including GPU timeline mix columns |
-| `report_imports` | Import history for TraceLens CSV report directories |
+| `traces` | One row per indexed trace, including stable runner `tracelens_id` and GPU timeline mix columns |
+| `report_imports` | Import history for TraceLens CSV report directories and optional workbooks |
 | `unified_perf_rows` | Rows from `unified_perf_summary.csv`. `perf_params_json` and `kernel_details_json` are parsed JSON, not the Python `repr` from the CSV |
 | `op_kernels` | One row per kernel exploded from `kernel_details_summary` on a unified row |
 | `gemm_perf` | GEMM `perf_params` (`M` / `N` / `K` / `B`, bias, strides, dtype, transpose) |
