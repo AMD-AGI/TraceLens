@@ -912,12 +912,6 @@ def test_find_iteration_roots_by_priority_on_no_match():
     assert find_iteration_roots_by_priority(wrong_cat) == []
 
 
-def test_find_iteration_roots_by_priority_accepts_custom_tiers():
-    events = [_event(DETAILED_DECODE, ts=10), _event(NATIVE_DECODE, ts=20)]
-    roots = find_iteration_roots_by_priority(
-        events, pattern_tiers=[ITERATION_BACKUP_PATTERNS]
-    )
-    assert [e["name"] for e in roots] == [NATIVE_DECODE]
 
 
 # --------------------------------------------------------------------------- #

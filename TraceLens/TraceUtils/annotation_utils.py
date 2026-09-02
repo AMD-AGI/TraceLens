@@ -400,16 +400,15 @@ def find_events_by_patterns(
 
 def find_iteration_roots_by_priority(
     events: List[dict],
-    pattern_tiers: Optional[List[List["re.Pattern"]]] = None,
     label: Optional[str] = None,
     cat: Optional[str] = ANNOTATION_CAT,
     verbose: bool = False,
 ) -> List[dict]:
     """Roots from the first pattern tier that matches anything.
-    Defaults to the detailed tier followed by the native tier
+
+    Tries the detailed tier, then the native/backup tier.
     """
-    if pattern_tiers is None:
-        pattern_tiers = (ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS)
+    pattern_tiers = (ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS)
     for patterns in pattern_tiers:
         roots = find_events_by_patterns(
             events, patterns, cat=cat, label=label, verbose=verbose

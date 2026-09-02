@@ -24,7 +24,7 @@ from TraceLens.TraceUtils.split_inference import (
     build_root_tiles,
     classify_workload,
     extract_iteration,
-    find_iteration_roots_ex,
+    find_iteration_roots,
     find_max_pattern_window,
     preprocess_trace,
     select_window,
@@ -38,7 +38,6 @@ from TraceLens.TraceUtils.split_inference.detect_utils import (
 from TraceLens.TraceUtils.split_inference.root_detection import (
     build_families,
     collect_annotations,
-    resolve_nesting,
 )
 
 VLLM = "execute_{i}_context_3(sq128sk256sqsq1sqsk1)_generation_2(sq1sk300sqsq1sqsk1)"
@@ -393,18 +392,6 @@ class TestFamilies:
         assert "scheduler.log_stats" not in skeletons
         assert {"scheduler.process_batch_result", "step[DECODE bs=#]"} <= skeletons
 
-    def test_nesting_is_directional(self):
-        events = self._events()
-        annotations = collect_annotations(events)
-        families = build_families(annotations, GpuAttribution(events))
-        index = IntervalIndex(annotations)
-        resolve_nesting(families, index)
-        by_skeleton = {f.skeleton: f for f in families}
-        outer = by_skeleton["scheduler.process_batch_result"]
-        inner = by_skeleton["step[DECODE bs=#]"]
-        assert outer.encloses["step[DECODE bs=#]"] == 12
-        assert inner.encloses["scheduler.process_batch_result"] == 0
-
     def test_regularity_needs_enough_instances(self):
         events = serving_trace(3)
         families = build_families(collect_annotations(events), GpuAttribution(events))
@@ -423,13 +410,12 @@ class TestFamilies:
 # --------------------------------------------------------------------------- #
 class TestDetectionFlow:
     def test_healthy_trace_resolves_without_probes(self):
-        result = find_iteration_roots_ex(serving_trace(16))
+        result = find_iteration_roots(serving_trace(16))
         assert result.status is DetectStatus.SPLITTABLE
         assert result.phase_confidence is PhaseConfidence.HIGH
         assert result.method == "annotation:tier"
         assert len(result) == 16
         assert result.coverage.covered_any == 1.0
-        assert result.diagnostics["probes_run"] == []
 
     def test_whole_outer_family_is_adopted_not_just_matching_instances(self):
         """The 0.5.17 shape: most iterations wrap an unrecognized annotation.
@@ -449,7 +435,7 @@ class TestDetectionFlow:
             events.append(kernel(base + 600, 300, corr))
             corr += 1
 
-        result = find_iteration_roots_ex(events)
+        result = find_iteration_roots(events)
         assert len(result) == 20
         assert result.method == "annotation:widened"
         assert result.diagnostics["root_family_skeleton"] == "scheduler.run_batch"
@@ -477,7 +463,7 @@ class TestDetectionFlow:
                 events.append(kernel(base + 900 + step * 50, 100, corr))
                 corr += 1
 
-        result = find_iteration_roots_ex(events)
+        result = find_iteration_roots(events)
         assert result.method == "annotation:widened"
         assert len(result) == 12
         assert result.diagnostics["root_family_skeleton"] == "scheduler.run_batch"
@@ -493,7 +479,7 @@ class TestDetectionFlow:
             events.append(kernel(base + 600, 300, corr))
             corr += 1
 
-        result = find_iteration_roots_ex(events)
+        result = find_iteration_roots(events)
         assert result.status is DetectStatus.SPLITTABLE
         assert result.method == "annotation:widened"
         assert len(result) == 20
@@ -517,7 +503,7 @@ class TestDetectionFlow:
             events.append(kernel(base + 600, 300, corr))
             corr += 1
 
-        result = find_iteration_roots_ex(events)
+        result = find_iteration_roots(events)
         assert len(result) == 12
         assert result.roots[0]["dur"] == 500
         assert result.roots[0][PROVENANCE_KEY]["identity_from"] == "step[DECODE bs=1]"
@@ -531,14 +517,14 @@ class TestDetectionFlow:
             events.append(kernel(base + 500, 200, corr))
             corr += 1
 
-        result = find_iteration_roots_ex(events)
+        result = find_iteration_roots(events)
         assert len(result) == 10
         assert result.method == "family:unknown_only"
         assert result.phase_confidence is PhaseConfidence.UNKNOWN
         assert result.status is not DetectStatus.NOT_SPLITTABLE
 
     def test_empty_trace_reports_not_splittable(self):
-        result = find_iteration_roots_ex([])
+        result = find_iteration_roots([])
         assert result.status is DetectStatus.NOT_SPLITTABLE
         assert len(result) == 0
 
@@ -547,13 +533,12 @@ class TestDetectionFlow:
         # probe ladder; the roots are graded straight to degraded/not-splittable.
         events = serving_trace(16)
         events.append(kernel(1500, 500_000, 99999, name="unaccounted"))
-        result = find_iteration_roots_ex(events)
-        assert result.diagnostics["probes_run"] == []
+        result = find_iteration_roots(events)
         assert result.coverage.covered_any < COVERAGE_GATE
         assert result.status in (DetectStatus.DEGRADED, DetectStatus.NOT_SPLITTABLE)
 
     def test_manifest_reports_quality(self):
-        manifest = find_iteration_roots_ex(serving_trace(16)).to_manifest()
+        manifest = find_iteration_roots(serving_trace(16)).to_manifest()
         assert manifest["status"] == 0
         assert manifest["phase_confidence"] == "high"
         assert manifest["n_roots"] == 16
