@@ -8,7 +8,7 @@
 
 from typing import List, Optional, Sequence, Tuple
 
-from ...Trace2Tree.inference_iteration_roots import _reattach_worker_threads
+from ...Trace2Tree.inference_iteration_roots import _entry_roots, _reattach_worker_threads
 from ...Trace2Tree.trace_to_tree import TraceToTree
 from ..annotation_utils import (
     PROVENANCE_KEY,
@@ -30,6 +30,7 @@ from .detect_utils import (
 from .root_detection import (
     NESTING_MAJORITY,
     AnnotationFamily,
+    _total_gpu_time,
     build_families,
     collect_annotations,
     detect_from_branch_descent,
@@ -241,14 +242,16 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
         )
 
     tree = _reattach_worker_threads(tree)
+    entry_roots = _entry_roots(tree)
+    total_gpu = _total_gpu_time(tree)
 
     # --- 3. Branch descent ----------------------------------------------------
-    branch_set = detect_from_branch_descent(tree)
+    branch_set = detect_from_branch_descent(tree, entry_roots, total_gpu)
     if branch_set is not None and branch_set.status is not DetectStatus.NOT_SPLITTABLE:
         return branch_set
 
     # --- 4. Sibling roots ----------------------------------------------------
-    sibling_set = detect_from_sibling_roots(tree)
+    sibling_set = detect_from_sibling_roots(tree, entry_roots, total_gpu)
     if sibling_set is not None and sibling_set.status is not DetectStatus.NOT_SPLITTABLE:
         return sibling_set
 

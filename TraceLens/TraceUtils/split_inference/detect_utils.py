@@ -39,7 +39,7 @@ COVERAGE_FLOOR = 0.75
 MIN_SPAN_SHARE = 0.5
 
 # Fewer roots than this usually means only a warmup loop matched.
-MIN_ROOTS = 8
+MIN_ROOTS = 4
 
 
 # --- result contract --------------------------------------------------------

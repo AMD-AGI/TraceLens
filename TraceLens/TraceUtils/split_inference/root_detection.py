@@ -26,7 +26,6 @@ from ...Trace2Tree.inference_iteration_roots import (
     MIN_LABEL_CHILDREN,
     _blocks_by_pattern,
     _descendant_gpu_time,
-    _entry_roots,
     _find_repeating_period,
     _gpu_bearing,
 )
@@ -216,7 +215,11 @@ def _grade(coverage: float) -> DetectStatus:
     return DetectStatus.NOT_SPLITTABLE
 
 
-def detect_from_branch_descent(tree: TraceToTree) -> Optional[RootSet]:
+def detect_from_branch_descent(
+    tree: TraceToTree,
+    entry_roots: List[dict],
+    total_gpu: float,
+) -> Optional[RootSet]:
     """Walk the call tree to find the frame whose children repeat and cover the GPU.
 
     The BFS keeps descending past nodes whose repeating pattern explains too
@@ -224,12 +227,11 @@ def detect_from_branch_descent(tree: TraceToTree) -> Optional[RootSet]:
     candidate found, or ``None`` when no repeating pattern exists at all.
     The caller decides whether coverage is acceptable.
     """
-    total_gpu = _total_gpu_time(tree)
     if not total_gpu:
         return None
 
     best: Optional[RootSet] = None
-    queue = deque((r, 0) for r in _entry_roots(tree))
+    queue = deque((r, 0) for r in entry_roots)
     visited = 0
     while queue:
         node, depth = queue.popleft()
@@ -281,18 +283,21 @@ def detect_from_branch_descent(tree: TraceToTree) -> Optional[RootSet]:
     return best
 
 
-def detect_from_sibling_roots(tree: TraceToTree) -> Optional[RootSet]:
+def detect_from_sibling_roots(
+    tree: TraceToTree,
+    entry_roots: List[dict],
+    total_gpu: float,
+) -> Optional[RootSet]:
     """Detect iterations that are top-level sibling frames.
 
     Returns a :class:`RootSet` with coverage info, or ``None`` when there is
     no repeating pattern among the entry roots. The caller decides whether
     coverage is acceptable.
     """
-    roots = _entry_roots(tree)
-    if len(roots) < MIN_LABEL_CHILDREN:
+    if len(entry_roots) < MIN_LABEL_CHILDREN:
         return None
 
-    ordered = sorted(roots, key=lambda e: e.get("ts", 0))
+    ordered = sorted(entry_roots, key=lambda e: e.get("ts", 0))
     period, _, start = _find_repeating_period([e.get("name", "") for e in ordered])
     if period is None:
         return None
@@ -310,7 +315,6 @@ def detect_from_sibling_roots(tree: TraceToTree) -> Optional[RootSet]:
     if not sibling_roots:
         return None
 
-    total_gpu = _total_gpu_time(tree)
     cov = _descendant_gpu_time(tree, blocked) / total_gpu if total_gpu else 0.0
     return RootSet(
         roots=sibling_roots,
