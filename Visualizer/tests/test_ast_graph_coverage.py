@@ -382,12 +382,8 @@ class Model:
         "Reshape",
     ]
     assert dataflow.operations[0].predecessors == ("embed",)
-    assert dataflow.operations[1].predecessors == (
-        dataflow.operations[0].attr_name,
-    )
-    assert dataflow.operations[2].predecessors == (
-        dataflow.operations[1].attr_name,
-    )
+    assert dataflow.operations[1].predecessors == (dataflow.operations[0].attr_name,)
+    assert dataflow.operations[2].predecessors == (dataflow.operations[1].attr_name,)
 
 
 def test_registry_finalization_refines_tuple_return_dependencies():

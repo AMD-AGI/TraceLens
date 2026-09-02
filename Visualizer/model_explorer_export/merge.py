@@ -194,8 +194,7 @@ def _append_stack_entry_dataflow(
                 ],
             ],
             "incomingEdges": [
-                _source_edge(source, str(index))
-                for index, source in enumerate(sources)
+                _source_edge(source, str(index)) for index, source in enumerate(sources)
             ],
         }
         if shape_inferencer is not None:
@@ -209,9 +208,7 @@ def _append_stack_entry_dataflow(
                     if source_node is not None
                     else None
                 )
-            operation_spec = _data_movement_shape(
-                operation, source_spec, spec=spec
-            )
+            operation_spec = _data_movement_shape(operation, source_spec, spec=spec)
             if operation_spec is not None:
                 apply_shape_attrs(node, operation_spec)
                 ref_specs[operation.attr_name] = operation_spec
@@ -2274,8 +2271,7 @@ def _append_decoder_layers(
             )
             decoder = spec.class_registry.get(spec.decoder_class or "")
             if decoder is not None and (
-                decoder.forward_operations
-                or decoder.forward_step_predecessors
+                decoder.forward_operations or decoder.forward_step_predecessors
             ):
                 exits = _append_source_decoder_layer(
                     merged_nodes,
@@ -2314,9 +2310,7 @@ def _append_decoder_layers(
             )
         result = variant_exits or list(previous_exits)
         if shape_inferencer is not None:
-            fill_missing_node_shapes(
-                merged_nodes, context=shape_inferencer.context
-            )
+            fill_missing_node_shapes(merged_nodes, context=shape_inferencer.context)
         return result
 
     decoder_inputs = list(previous_exits)

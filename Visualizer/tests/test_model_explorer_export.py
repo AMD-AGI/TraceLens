@@ -701,10 +701,10 @@ def test_kimi_layer_variants_export_three_decoder_splits():
     for norm_attr in ("input_layernorm", "post_attention_layernorm"):
         prefix = f"decoder/1x_KimiDeltaAttention_KimiMLP/{norm_attr}"
         assert f"{prefix}/@input" in node_ids
-        output = next(node for node in graph["nodes"] if node["id"] == f"{prefix}/@output")
-        assert [item["id"] for item in output["outputsMetadata"]] == [
-            "hidden_states"
-        ]
+        output = next(
+            node for node in graph["nodes"] if node["id"] == f"{prefix}/@output"
+        )
+        assert [item["id"] for item in output["outputsMetadata"]] == ["hidden_states"]
         # One returned tensor, so no mirror is drawn outside the block.
         assert output["label"] == "hidden_states"
         assert f"{prefix}/@output^hidden_states" not in node_ids

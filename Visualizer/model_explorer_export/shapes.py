@@ -193,7 +193,9 @@ def _incoming_sources(node: dict[str, Any]) -> list[tuple[str, str, str]]:
 
 
 def _incoming_source_ids(node: dict[str, Any]) -> list[str]:
-    return [source_id for source_id, _source_port, _target_port in _incoming_sources(node)]
+    return [
+        source_id for source_id, _source_port, _target_port in _incoming_sources(node)
+    ]
 
 
 def _fallback_node_spec(
@@ -212,7 +214,11 @@ def _fallback_node_spec(
     if label == "Unsqueeze":
         source = specs[0]
         dim_detail = next(
-            (detail.split(":", 1)[1].strip() for detail in details if detail.startswith("dim:")),
+            (
+                detail.split(":", 1)[1].strip()
+                for detail in details
+                if detail.startswith("dim:")
+            ),
             None,
         )
         if dim_detail is not None:
@@ -228,9 +234,7 @@ def _fallback_node_spec(
 
     if label in {"Multiply", "Add", "×", "+"} and len(specs) >= 2:
         rank = max(len(spec.shape) for spec in specs)
-        padded = [
-            (1,) * (rank - len(spec.shape)) + tuple(spec.shape) for spec in specs
-        ]
+        padded = [(1,) * (rank - len(spec.shape)) + tuple(spec.shape) for spec in specs]
         shape: list[Any] = []
         for dimensions in zip(*padded):
             non_unit = [dimension for dimension in dimensions if dimension != 1]
@@ -254,7 +258,9 @@ def _fallback_node_spec(
         post = by_input.get("post")
         hidden_states = by_input.get("hidden_states")
         if post is not None and hidden_states is not None and hidden_states.shape:
-            return TensorSpec((*post.shape, hidden_states.shape[-1]), hidden_states.dtype)
+            return TensorSpec(
+                (*post.shape, hidden_states.shape[-1]), hidden_states.dtype
+            )
 
     if "@residual:" in node_id and label == "MatMul":
         by_input = {target_port: spec for target_port, spec in sources}
@@ -272,9 +278,7 @@ def _fallback_node_spec(
         specs,
         key=lambda item: (
             len(item.shape),
-            item.shape[-1]
-            if item.shape and isinstance(item.shape[-1], int)
-            else 0,
+            item.shape[-1] if item.shape and isinstance(item.shape[-1], int) else 0,
         ),
     )
 
@@ -388,7 +392,11 @@ def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, st
         target_chain = _namespace_chain(namespaces.get(str(node.get("id", "")), ""))
         for source_id, source_port, _target_port in _incoming_sources(node):
             source_node = node_by_id.get(source_id)
-            spec = _node_spec(source_node, source_port) if source_node is not None else None
+            spec = (
+                _node_spec(source_node, source_port)
+                if source_node is not None
+                else None
+            )
             if spec is None or source_id not in namespaces:
                 continue
             shape_text = format_shape(spec)
@@ -439,9 +447,7 @@ def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, st
             key = "input_shape" if synthetic == "@input" else "output_shape"
             boundary_values.setdefault((namespace, key), []).extend(values)
     for (namespace, key), values in boundary_values.items():
-        attributes.setdefault(namespace, {})[key] = ", ".join(
-            dict.fromkeys(values)
-        )
+        attributes.setdefault(namespace, {})[key] = ", ".join(dict.fromkeys(values))
     return attributes
 
 

@@ -51,9 +51,7 @@ def _has_computation_path(graph, source: int, target: int) -> bool:
             continue
         visited.add(current)
         pending.extend(
-            destination
-            for start, destination in graph.links
-            if start == current
+            destination for start, destination in graph.links if start == current
         )
     return False
 
@@ -182,16 +180,11 @@ def test_glm53_spine_hyperconnection_stays_on_variant_namespace():
             for node in component_nodes
             if node["id"].startswith(output_prefix)
             and any(
-                attr.get("key") == "synthetic"
-                and attr.get("value") == "@output_mirror"
+                attr.get("key") == "synthetic" and attr.get("value") == "@output_mirror"
                 for attr in node.get("attrs", [])
             )
         ]
-        internal_nodes = [
-            node
-            for node in component_nodes
-            if node not in mirrors
-        ]
+        internal_nodes = [node for node in component_nodes if node not in mirrors]
         assert all(
             f"/{component}" in node.get("namespace", "") for node in internal_nodes
         )
@@ -322,9 +315,7 @@ def test_glm53_gated_norm_gives_each_forward_parameter_its_own_input():
     sigmoid = next(
         index for index, node in enumerate(graph.nodes) if node.label == "Sigmoid"
     )
-    combine = next(
-        target for source, target in graph.links if source == sigmoid
-    )
+    combine = next(target for source, target in graph.links if source == sigmoid)
     assert graph.nodes[combine].label == "Multiply"
     assert len([1 for _source, target in graph.links if target == combine]) == 2
 
@@ -463,10 +454,8 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     assert _has_computation_path(
         graph, key_to_index[concat_key], key_to_index[conv_key]
     )
-    assert _has_computation_path(
-        graph, key_to_index[conv_key], key_to_index[split_key]
-    )
-    assert (input_index, key_to_index[forget_entry_key]) in set(graph.links)
+    assert _has_computation_path(graph, key_to_index[conv_key], key_to_index[split_key])
+    assert (input_index, key_to_index[forget_entry_key]) in links
     assert key_to_index[branch_mul_key] in sources
     assert key_to_index[branch_add_key] in sources
 
@@ -568,9 +557,7 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
         )
         incoming = node.get("incomingEdges", [])
         assert len(incoming) == 1, (target, incoming)
-        output_id = (
-            f"{prefix}/{source_component[target]}/@output:collapsed"
-        )
+        output_id = f"{prefix}/{source_component[target]}/@output:collapsed"
         source = node_by_id[output_id]
         # The boundary inside the block reads the same as its mirror outside.
         assert source.get("label") == "collapsed"
@@ -585,18 +572,17 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
         mirror = node_by_id[mirror_id]
         assert mirror.get("label") == "collapsed"
         assert any(
-            attr.get("key") == "synthetic"
-            and attr.get("value") == "@output_mirror"
+            attr.get("key") == "synthetic" and attr.get("value") == "@output_mirror"
             for attr in mirror.get("attrs", [])
         )
-        assert node_by_id[norm_input_id]["incomingEdges"][0]["sourceNodeId"] == mirror_id
+        assert (
+            node_by_id[norm_input_id]["incomingEdges"][0]["sourceNodeId"] == mirror_id
+        )
         # RMSNorm casts to float32 before squaring, so the cast is what the block
         # boundary hands the norm math.
         cast_id = incoming[0]["sourceNodeId"]
         assert node_by_id[cast_id].get("label") == "Cast"
-        assert (
-            node_by_id[cast_id]["incomingEdges"][0]["sourceNodeId"] == norm_input_id
-        )
+        assert node_by_id[cast_id]["incomingEdges"][0]["sourceNodeId"] == norm_input_id
         assert _has_export_path(graph["nodes"], output_id, node["id"])
         assert norm_output_id in node_by_id
         norm_output = node_by_id[norm_output_id]
@@ -617,7 +603,9 @@ def test_glm53_hyperconnection_feeds_single_output_to_next_norm():
                 for attr in candidate.get("attrs", [])
             )
         ]
-        assert {candidate["id"].removeprefix(output_prefix) for candidate in output_nodes} == {
+        assert {
+            candidate["id"].removeprefix(output_prefix) for candidate in output_nodes
+        } == {
             "post",
             "comb",
             "collapsed",
@@ -726,8 +714,7 @@ def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
         "/ffn_hc" in node.get("namespace", "")
         for node in ffn_nodes
         if not any(
-            attr.get("key") == "synthetic"
-            and attr.get("value") == "@output_mirror"
+            attr.get("key") == "synthetic" and attr.get("value") == "@output_mirror"
             for attr in node.get("attrs", [])
         )
     )
@@ -770,15 +757,13 @@ def test_glm53_expert_helper_stays_inside_loop_without_cycle():
         if node["id"].startswith(f"{prefix}/mlp/")
         and ":experts:_apply_gate:" in node["id"]
         and not any(
-            attr.get("key") == "synthetic"
-            and attr.get("value") == "@output_mirror"
+            attr.get("key") == "synthetic" and attr.get("value") == "@output_mirror"
             for attr in node.get("attrs", [])
         )
     ]
     assert helper_nodes
     assert all(
-        "/Glm5NextTextExperts/Loop_repeated/_apply_gate"
-        in node.get("namespace", "")
+        "/Glm5NextTextExperts/Loop_repeated/_apply_gate" in node.get("namespace", "")
         for node in helper_nodes
     )
     _assert_export_is_acyclic(graph["nodes"])
@@ -840,9 +825,7 @@ def test_glm53_spine_norms_do_not_share_a_namespace():
     # The real order is attn_hc -> input_layernorm -> self_attn.
     norm_output = f"{prefix}/input_layernorm/@output"
     attention_input = next(
-        node
-        for node in graph["nodes"]
-        if node["id"] == f"{prefix}/self_attn/@input"
+        node for node in graph["nodes"] if node["id"] == f"{prefix}/self_attn/@input"
     )
     assert attention_input["incomingEdges"][0]["sourceNodeId"] == norm_output
 
@@ -894,16 +877,12 @@ def test_glm53_operation_tile_colors_are_consistent_per_label():
         assert isinstance(style, dict), node["id"]
         # Boundary ports are deliberately colored by direction, not by op identity,
         # and they carry tensor names rather than operation names.
-        if any(
-            attr.get("key") == "synthetic" for attr in node.get("attrs", [])
-        ):
+        if any(attr.get("key") == "synthetic" for attr in node.get("attrs", [])):
             continue
         label = node.get("label", "")
         fills.setdefault(label, set()).add(style.get("backgroundColor"))
 
-    inconsistent = {
-        label: colors for label, colors in fills.items() if len(colors) > 1
-    }
+    inconsistent = {label: colors for label, colors in fills.items() if len(colors) > 1}
     assert not inconsistent, inconsistent
 
     # Computation is gray; layout-only data movement is white.
@@ -926,9 +905,7 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     model_ops = [
-        node
-        for node in graph["nodes"]
-        if node["id"].startswith("@model_forward/")
+        node for node in graph["nodes"] if node["id"].startswith("@model_forward/")
     ]
 
     assert [node["label"] for node in model_ops] == [
@@ -941,11 +918,7 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
     assert model_ops[2]["incomingEdges"][0]["sourceNodeId"] == model_ops[1]["id"]
     assert not any(node["id"] == "rotary_pos_emb" for node in graph["nodes"])
     assert [
-        next(
-            attr["value"]
-            for attr in node["attrs"]
-            if attr["key"] == "output_shape"
-        )
+        next(attr["value"] for attr in node["attrs"] if attr["key"] == "output_shape")
         for node in model_ops
     ] == [
         "B x S x 1 x 4096",
@@ -993,11 +966,11 @@ def test_glm53_forget_gate_has_real_boundary_nodes():
     )
     # One returned tensor, so the Output carries the name on its own.
     assert forget_output["label"] == "g"
-    assert not any(
-        node["id"] == f"{forget_output['id']}^g" for node in graph["nodes"]
-    )
+    assert not any(node["id"] == f"{forget_output['id']}^g" for node in graph["nodes"])
     attention = next(
-        node for node in graph["nodes"] if node["id"].startswith(prefix) and ":@attention:" in node["id"]
+        node
+        for node in graph["nodes"]
+        if node["id"].startswith(prefix) and ":@attention:" in node["id"]
     )
     assert _has_export_path(graph["nodes"], terminal_multiply["id"], attention["id"])
 
@@ -1015,18 +988,12 @@ def test_glm53_norm_boundary_connects_directly_to_attention_input():
     norm_output = node_by_id[f"{norm_prefix}@output"]
     assert norm_input["label"] == "hidden_states"
     assert norm_output["label"] == "hidden_states"
-    assert [item["id"] for item in norm_output["outputsMetadata"]] == [
-        "hidden_states"
-    ]
+    assert [item["id"] for item in norm_output["outputsMetadata"]] == ["hidden_states"]
     assert f"{norm_prefix}@output^hidden_states" not in node_by_id
 
     attention_input = node_by_id[f"{prefix}/self_attn/@input"]
-    assert (
-        attention_input["incomingEdges"][0]["sourceNodeId"] == norm_output["id"]
-    )
-    assert _has_export_path(
-        graph["nodes"], norm_input["id"], attention_input["id"]
-    )
+    assert attention_input["incomingEdges"][0]["sourceNodeId"] == norm_output["id"]
+    assert _has_export_path(graph["nodes"], norm_input["id"], attention_input["id"])
 
 
 def test_glm53_hyper_head_precedes_final_norm():

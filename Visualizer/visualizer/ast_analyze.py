@@ -1001,9 +1001,7 @@ class ClassStructure:
     init_assignment_options: dict[str, list[str]] = field(default_factory=dict)
     forward_input_name: str | None = None
     forward_operations: dict[str, ForwardOperation] = field(default_factory=dict)
-    forward_step_predecessors: dict[str, tuple[str, ...]] = field(
-        default_factory=dict
-    )
+    forward_step_predecessors: dict[str, tuple[str, ...]] = field(default_factory=dict)
     single_op_methods: dict[str, ForwardOperation] = field(default_factory=dict)
     multi_op_methods: dict[str, list[ForwardOperation]] = field(default_factory=dict)
     forward_return_slots: dict[str, str] = field(default_factory=dict)
@@ -2251,10 +2249,9 @@ def _expression_at_operation_line(
                 label = operation_display_label(raw_label) if raw_label else None
             elif isinstance(node, ast.Call):
                 call_name = (_expr_name(node.func) or "").split(".")[-1]
-                raw_label = (
-                    _FUNCTION_LABELS.get(_functional_call_name(node.func) or call_name)
-                    or _TENSOR_METHOD_LABELS.get(call_name)
-                )
+                raw_label = _FUNCTION_LABELS.get(
+                    _functional_call_name(node.func) or call_name
+                ) or _TENSOR_METHOD_LABELS.get(call_name)
                 label = operation_display_label(raw_label) if raw_label else None
             if label == operation_label:
                 return node
@@ -2325,9 +2322,7 @@ def _refine_forward_operation_predecessors(
             if match is not None
             else (10**9, 10**9)
         )
-        expr = _expression_at_operation_line(
-            forward_func, name, operation.label
-        )
+        expr = _expression_at_operation_line(forward_func, name, operation.label)
         vars_read = _vars_read_in_expr(expr)
         predecessors: list[str] = []
         for pred in operation.predecessors:
@@ -2525,9 +2520,7 @@ def expand_class_forward_dataflow(
     cls.forward_operations = _refine_forward_operation_predecessors(
         forward,
         cls.forward_operations,
-        module_unpacks=_module_return_unpacks(
-            forward, cls.init_assignments, registry
-        ),
+        module_unpacks=_module_return_unpacks(forward, cls.init_assignments, registry),
     )
 
 
@@ -4021,7 +4014,9 @@ def _decoder_class_score(info: ClassStructure) -> int:
     score = 0
     if DECODER_CLASS_RE.search(info.name):
         score += 10
-    if any(_classify_role(a, c) == "attention" for a, c in info.init_assignments.items()):
+    if any(
+        _classify_role(a, c) == "attention" for a, c in info.init_assignments.items()
+    ):
         score += 5
     if any(
         _classify_role(a, c) in {"ffn", "moe"} for a, c in info.init_assignments.items()
@@ -4066,7 +4061,10 @@ def _model_class_score(info: ClassStructure) -> int:
         score += 3
     if "norm" in roles:
         score += 1
-    if any(DECODER_CLASS_RE.search(class_name) for class_name in info.init_assignments.values()):
+    if any(
+        DECODER_CLASS_RE.search(class_name)
+        for class_name in info.init_assignments.values()
+    ):
         score += 8
     return score
 

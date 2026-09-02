@@ -113,9 +113,10 @@ def finalize_graph_node_styles(nodes: list[dict[str, Any]]) -> None:
                     operation_tile_style(str(node.get("label", "")))
                 )
             continue
-        if is_layout_only_label(str(node.get("label",""))) and style.get(
-            "backgroundColor"
-        ) == _BASIC_OP:
+        if (
+            is_layout_only_label(str(node.get("label", "")))
+            and style.get("backgroundColor") == _BASIC_OP
+        ):
             style = {**style, "backgroundColor": _LAYOUT_ONLY}
         node["style"] = ensure_readable_text(style)
 
