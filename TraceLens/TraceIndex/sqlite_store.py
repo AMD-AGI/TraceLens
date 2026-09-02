@@ -68,6 +68,13 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                 parent_rel TEXT,
                 should_enrich INTEGER NOT NULL DEFAULT 1,
                 skip_reason TEXT,
+                gpu_total_ms REAL,
+                gpu_compute_pct REAL,
+                gpu_idle_pct REAL,
+                gpu_exposed_comm_pct REAL,
+                gpu_exposed_memcpy_pct REAL,
+                gpu_total_comm_pct REAL,
+                gpu_total_memcpy_pct REAL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -194,27 +201,6 @@ class SQLiteTraceIndexStore(TraceIndexStore):
 
             CREATE INDEX IF NOT EXISTS idx_trace_index_category_trace ON op_category_rows(trace_id);
 
-            CREATE TABLE IF NOT EXISTS gpu_timeline_rows (
-                id INTEGER PRIMARY KEY,
-                trace_id INTEGER NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
-                type TEXT NOT NULL,
-                time_ms REAL,
-                percent REAL,
-                raw_row_json TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_trace_index_timeline_trace ON gpu_timeline_rows(trace_id);
-            CREATE INDEX IF NOT EXISTS idx_trace_index_timeline_type ON gpu_timeline_rows(type);
-
-            CREATE TABLE IF NOT EXISTS trace_summary (
-                trace_id INTEGER PRIMARY KEY REFERENCES traces(id) ON DELETE CASCADE,
-                total_duration_us REAL,
-                top_categories_json TEXT,
-                max_gemm_tflops REAL,
-                max_sdpa_tflops REAL,
-                imported_at TEXT NOT NULL
-            );
-
             CREATE VIRTUAL TABLE IF NOT EXISTS trace_search_FTS5 USING fts5(
                 trace_id UNINDEXED,
                 kind UNINDEXED,
@@ -272,33 +258,13 @@ class SQLiteTraceIndexStore(TraceIndexStore):
 
     def import_report(self, trace_id: int, report: TraceReport) -> None:
         self._clear_trace_payload(trace_id)
-        unified_summary = self._import_unified_rows(
+        self._import_unified_rows(
             trace_id, report.sheets.get("unified_perf_summary", [])
         )
-        top_categories_json = self._import_category_rows(
+        self._import_category_rows(
             trace_id, report.sheets.get("ops_summary_by_category", [])
         )
-        total_duration_us = self._import_gpu_timeline_rows(
-            trace_id, report.sheets.get("gpu_timeline", [])
-        )
-
-        self.conn.execute(
-            """
-            INSERT INTO trace_summary(
-                trace_id, total_duration_us, top_categories_json, max_gemm_tflops,
-                max_sdpa_tflops, imported_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                trace_id,
-                total_duration_us,
-                top_categories_json,
-                unified_summary["max_gemm_tflops"],
-                unified_summary["max_sdpa_tflops"],
-                utc_now(),
-            ),
-        )
+        self._import_gpu_mix(trace_id, report.sheets.get("gpu_timeline", []))
         self.conn.execute(
             """
             INSERT INTO report_imports(trace_id, report_dir, imported_at, sheets_json)
@@ -369,11 +335,23 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         for table in (
             "report_imports",
             "op_category_rows",
-            "gpu_timeline_rows",
-            "trace_summary",
             "unified_perf_rows",
         ):
             self.conn.execute("DELETE FROM %s WHERE trace_id = ?" % table, (trace_id,))
+        self.conn.execute(
+            """
+            UPDATE traces SET
+                gpu_total_ms = NULL,
+                gpu_compute_pct = NULL,
+                gpu_idle_pct = NULL,
+                gpu_exposed_comm_pct = NULL,
+                gpu_exposed_memcpy_pct = NULL,
+                gpu_total_comm_pct = NULL,
+                gpu_total_memcpy_pct = NULL
+            WHERE id = ?
+            """,
+            (trace_id,),
+        )
         self.conn.execute(
             "DELETE FROM trace_search_FTS5 WHERE trace_id = ?", (trace_id,)
         )
@@ -390,9 +368,7 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         self,
         trace_id: int,
         rows: Sequence[Dict[str, str]],
-    ) -> Dict[str, Optional[float]]:
-        max_gemm_tflops = None
-        max_sdpa_tflops = None
+    ) -> None:
         for source_row, row in enumerate(rows):
             name = as_text(first_value(row, ["name", "Name", "op_name"]))
             op_category = as_text(
@@ -406,25 +382,6 @@ class SQLiteTraceIndexStore(TraceIndexStore):
             tflops_median = as_float(
                 first_value(row, ["TFLOPS/s_median", "tflops_median", "TFLOPS_median"])
             )
-            tflops_for_summary = (
-                tflops_mean if tflops_mean is not None else tflops_median
-            )
-            if (
-                op_category
-                and "gemm" in op_category.lower()
-                and tflops_for_summary is not None
-            ):
-                max_gemm_tflops = max(
-                    max_gemm_tflops or tflops_for_summary, tflops_for_summary
-                )
-            if (
-                op_category
-                and "sdpa" in op_category.lower()
-                and tflops_for_summary is not None
-            ):
-                max_sdpa_tflops = max(
-                    max_sdpa_tflops or tflops_for_summary, tflops_for_summary
-                )
             params = parse_repr(first_value(row, ["perf_params", "Perf Params"]))
             kernel_details = parse_repr(
                 first_value(row, ["kernel_details_summary", "trunc_kernel_details"])
@@ -539,7 +496,6 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                     ),
                 ],
             )
-        return {"max_gemm_tflops": max_gemm_tflops, "max_sdpa_tflops": max_sdpa_tflops}
 
     def _import_kernels_from_details(
         self,
@@ -682,8 +638,7 @@ class SQLiteTraceIndexStore(TraceIndexStore):
         self,
         trace_id: int,
         rows: Sequence[Dict[str, str]],
-    ) -> str:
-        top_categories = []
+    ) -> None:
         for row in rows:
             category = as_text(
                 first_value(row, ["op category", "category", "Categories", "name"])
@@ -724,37 +679,62 @@ class SQLiteTraceIndexStore(TraceIndexStore):
                     json.dumps(row, sort_keys=True),
                 ),
             )
-            top_categories.append(
-                {"category": category, "kernel_time_sum_us": kernel_time or 0.0}
-            )
             self._insert_search(trace_id, "category", [category])
-        top_categories.sort(key=lambda item: item["kernel_time_sum_us"], reverse=True)
-        return json.dumps(top_categories[:5], sort_keys=True)
 
-    def _import_gpu_timeline_rows(
+    def _import_gpu_mix(
         self,
         trace_id: int,
         rows: Sequence[Dict[str, str]],
-    ) -> Optional[float]:
-        total_duration_us = None
+    ) -> None:
+        values: Dict[str, Optional[float]] = {
+            "gpu_total_ms": None,
+            "gpu_compute_pct": None,
+            "gpu_idle_pct": None,
+            "gpu_exposed_comm_pct": None,
+            "gpu_exposed_memcpy_pct": None,
+            "gpu_total_comm_pct": None,
+            "gpu_total_memcpy_pct": None,
+        }
+        metric_columns = {
+            "total_time": "gpu_total_ms",
+            "computation_time": "gpu_compute_pct",
+            "idle_time": "gpu_idle_pct",
+            "exposed_comm_time": "gpu_exposed_comm_pct",
+            "exposed_memcpy_time": "gpu_exposed_memcpy_pct",
+            "total_comm_time": "gpu_total_comm_pct",
+            "total_memcpy_time": "gpu_total_memcpy_pct",
+        }
         for row in rows:
-            metric_type = as_text(first_value(row, ["type", "metric"]))
-            if not metric_type:
+            metric_type = as_text(first_value(row, ["type", "Type", "metric"]))
+            column = metric_columns.get(metric_type or "")
+            if not column:
                 continue
-            time_ms = as_float(first_value(row, ["time ms", "time_ms"]))
-            if metric_type == "total_time" and time_ms is not None:
-                total_duration_us = time_ms * 1000.0
-            self.conn.execute(
-                """
-                INSERT INTO gpu_timeline_rows(trace_id, type, time_ms, percent, raw_row_json)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    trace_id,
-                    metric_type,
-                    time_ms,
-                    as_float(first_value(row, ["percent", "Percentage (%)"])),
-                    json.dumps(row, sort_keys=True),
-                ),
+            source_fields = (
+                ["time ms", "time_ms", "time"]
+                if column == "gpu_total_ms"
+                else ["percent", "Percentage (%)"]
             )
-        return total_duration_us
+            values[column] = as_float(first_value(row, source_fields))
+        self.conn.execute(
+            """
+            UPDATE traces SET
+                gpu_total_ms = ?,
+                gpu_compute_pct = ?,
+                gpu_idle_pct = ?,
+                gpu_exposed_comm_pct = ?,
+                gpu_exposed_memcpy_pct = ?,
+                gpu_total_comm_pct = ?,
+                gpu_total_memcpy_pct = ?
+            WHERE id = ?
+            """,
+            (
+                values["gpu_total_ms"],
+                values["gpu_compute_pct"],
+                values["gpu_idle_pct"],
+                values["gpu_exposed_comm_pct"],
+                values["gpu_exposed_memcpy_pct"],
+                values["gpu_total_comm_pct"],
+                values["gpu_total_memcpy_pct"],
+                trace_id,
+            ),
+        )

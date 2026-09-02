@@ -217,9 +217,7 @@ def test_trace_index_append_from_report_and_search(tmp_path):
         "kernel_time_sum_us": 123.5,
     }
 
-    gemm = execute_read_query(
-        db_path, 'SELECT "M", "N", "K", "B" FROM gemm_perf'
-    )
+    gemm = execute_read_query(db_path, 'SELECT "M", "N", "K", "B" FROM gemm_perf')
     assert gemm == [{"M": 128, "N": 64, "K": 32, "B": 1}]
 
     params = execute_read_query(
@@ -252,6 +250,23 @@ def test_trace_index_append_from_report_and_search(tmp_path):
     assert conv[0]["groups"] == 32
     assert conv[0]["transposed_conv"] == 0
     assert json.loads(conv[0]["filter_shape"]) == [32, 1, 3, 3]
+
+    gpu_mix = execute_read_query(
+        db_path,
+        "SELECT gpu_total_ms, gpu_compute_pct, gpu_idle_pct FROM traces",
+    )
+    assert gpu_mix == [
+        {"gpu_total_ms": 1.0, "gpu_compute_pct": 80.0, "gpu_idle_pct": None}
+    ]
+    tables = {
+        row["name"]
+        for row in execute_read_query(
+            db_path,
+            "SELECT name FROM sqlite_master WHERE type = 'table'",
+        )
+    }
+    assert "gpu_timeline_rows" not in tables
+    assert "trace_summary" not in tables
 
     for table in ("op_kernels", "gemm_perf", "sdpa_perf", "conv_perf"):
         cols = table_column_names(db_path, table)

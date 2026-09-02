@@ -98,15 +98,15 @@ TraceLens_trace_index --backend sqlite --db trace_index.sqlite sqlite-sql \
 
 ## What the catalog stores
 
-The following tables are the catalog schema. There are ten relational tables
+The following tables are the catalog schema. There are eight relational tables
 plus a full-text search (FTS) virtual table. SQLite holds this comfortably for
 typical TraceLens corpora (hundreds of traces, hundreds of thousands of kernel
 rows). The practical limit is one writer at a time, not row count.
 
 The following diagram shows how those tables relate. Per-trace fact tables
-(`report_imports`, `unified_perf_rows`, `op_category_rows`,
-`gpu_timeline_rows`, `trace_summary`, and `trace_search_FTS5`) point at
-`traces`. Kernel rows and GEMM / SDPA / convolution satellites point at the
+(`report_imports`, `unified_perf_rows`, `op_category_rows`, and
+`trace_search_FTS5`) point at `traces`. Kernel rows and GEMM / SDPA /
+convolution satellites point at the
 `unified_perf_rows` row they came from; join `traces` through that parent when
 you need the file path. Column lists are in
 [TraceIndex catalog schema](../reference/trace-index-schema.md).
@@ -116,8 +116,6 @@ erDiagram
     traces ||--o{ report_imports : "trace_id"
     traces ||--o{ unified_perf_rows : "trace_id"
     traces ||--o{ op_category_rows : "trace_id"
-    traces ||--o{ gpu_timeline_rows : "trace_id"
-    traces ||--o| trace_summary : "trace_id"
     traces ||--o{ trace_search_FTS5 : "trace_id"
     unified_perf_rows ||--o{ op_kernels : "unified_row_id"
     unified_perf_rows ||--o| gemm_perf : "unified_row_id"
@@ -127,7 +125,7 @@ erDiagram
 
 | Table | Contents |
 |---|---|
-| `traces` | One row per indexed trace |
+| `traces` | One row per indexed trace, including GPU timeline mix columns |
 | `report_imports` | Import history for TraceLens CSV report directories |
 | `unified_perf_rows` | Rows from `unified_perf_summary.csv`. `perf_params_json` and `kernel_details_json` are parsed JSON, not the Python `repr` from the CSV |
 | `op_kernels` | One row per kernel exploded from `kernel_details_summary` on a unified row |
@@ -135,8 +133,6 @@ erDiagram
 | `sdpa_perf` | Attention `perf_params` (`B`, `N_Q`, `H_Q`, `N_KV`, `d_h_qk`, causal) |
 | `conv_perf` | Convolution `perf_params` (`convNd`, shapes, groups, stride, padding) |
 | `op_category_rows` | Rows from `ops_summary_by_category.csv` |
-| `gpu_timeline_rows` | Rows from `gpu_timeline.csv` |
-| `trace_summary` | Per-trace summary metrics derived during import |
 | `trace_search_FTS5` | Full-text search over traces, ops, kernels, and categories |
 
 Query GEMM / SDPA / convolution shapes from the satellite tables, or with

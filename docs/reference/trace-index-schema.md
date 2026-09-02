@@ -16,10 +16,10 @@ is the first backend; column names and types come from the `CREATE TABLE`
 statements in the TraceIndex store.
 
 Per-trace fact tables (`report_imports`, `unified_perf_rows`,
-`op_category_rows`, `gpu_timeline_rows`, `trace_summary`, and
-`trace_search_FTS5`) point at `traces` with `trace_id`. Kernel rows and GEMM /
-SDPA / convolution satellites hang off `unified_perf_rows` with
-`unified_row_id`. Join those satellites to `traces` through the unified parent:
+`op_category_rows`, and `trace_search_FTS5`) point at `traces` with `trace_id`.
+Kernel rows and GEMM / SDPA / convolution satellites hang off
+`unified_perf_rows` with `unified_row_id`. Join those satellites to `traces`
+through the unified parent:
 
 ```sql
 JOIN unified_perf_rows u ON u.id = satellite.unified_row_id
@@ -50,6 +50,13 @@ The following table lists the columns in `traces`.
 | `parent_rel` | TEXT | Parent directory of the trace, relative to `root`. |
 | `should_enrich` | INTEGER | `1` when the file is a supported trace that isn't skipped; default `1`. |
 | `skip_reason` | TEXT | Why a path was skipped, or `NULL`. |
+| `gpu_total_ms` | REAL | Total GPU timeline duration in milliseconds. |
+| `gpu_compute_pct` | REAL | Percentage of GPU timeline spent computing. |
+| `gpu_idle_pct` | REAL | Percentage of GPU timeline spent idle. |
+| `gpu_exposed_comm_pct` | REAL | Percentage of exposed communication time. |
+| `gpu_exposed_memcpy_pct` | REAL | Percentage of exposed memory-copy time. |
+| `gpu_total_comm_pct` | REAL | Percentage of total communication time. |
+| `gpu_total_memcpy_pct` | REAL | Percentage of total memory-copy time. |
 | `created_at` | TEXT | UTC timestamp when the row was inserted. |
 | `updated_at` | TEXT | UTC timestamp of the last upsert. |
 
@@ -211,36 +218,6 @@ The following table lists the columns in `op_category_rows`.
 | `kernel_time_sum_us` | REAL | Sum of kernel time in microseconds. |
 | `percent` | REAL | Share of total time from the report. |
 | `raw_row_json` | TEXT | Full source CSV row as JSON. |
-
-## The gpu_timeline_rows table
-
-Rows imported from `gpu_timeline.csv`.
-
-The following table lists the columns in `gpu_timeline_rows`.
-
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER | Primary key. |
-| `trace_id` | INTEGER | Foreign key to `traces.id`. `ON DELETE CASCADE`. |
-| `type` | TEXT | Timeline metric name (for example `total_time`, `computation_time`). `NOT NULL`. |
-| `time_ms` | REAL | Duration in milliseconds. |
-| `percent` | REAL | Share of total GPU time. |
-| `raw_row_json` | TEXT | Full source CSV row as JSON. |
-
-## The trace_summary table
-
-Per-trace summary metrics derived during import. One row per trace.
-
-The following table lists the columns in `trace_summary`.
-
-| Column | Type | Description |
-|---|---|---|
-| `trace_id` | INTEGER | Primary key and foreign key to `traces.id`. `ON DELETE CASCADE`. |
-| `total_duration_us` | REAL | `total_time` from `gpu_timeline`, converted to microseconds. |
-| `top_categories_json` | TEXT | JSON array of the top five categories by kernel time. |
-| `max_gemm_tflops` | REAL | Maximum GEMM TFLOPS/s seen on unified rows. |
-| `max_sdpa_tflops` | REAL | Maximum SDPA TFLOPS/s seen on unified rows. |
-| `imported_at` | TEXT | UTC timestamp of this import. |
 
 ## The trace_search_FTS5 table
 
