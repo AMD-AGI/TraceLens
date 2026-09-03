@@ -469,9 +469,7 @@ class TestDetectionFlow:
         for i in range(20):
             base = 1000 + i * 1000
             events.append(annotation("scheduler.process_batch_result", base, 500))
-            inner = (
-                f"step[DECODE bs={i + 1}]" if i < 3 else f"custom_step_{i}"
-            )
+            inner = f"step[DECODE bs={i + 1}]" if i < 3 else f"custom_step_{i}"
             events.append(annotation(inner, base + 50, 200))
             events.append(launch(base + 60, corr))
             events.append(kernel(base + 600, 300, corr))
@@ -481,7 +479,10 @@ class TestDetectionFlow:
         assert result.status is DetectStatus.SPLITTABLE
         assert result.method == "family:unknown_only"
         assert len(result) == 20
-        assert result.diagnostics["root_family_skeleton"] == "scheduler.process_batch_result"
+        assert (
+            result.diagnostics["root_family_skeleton"]
+            == "scheduler.process_batch_result"
+        )
 
     def test_known_annotations_used_when_all_match(self):
         """When every iteration has a known annotation, use them directly."""

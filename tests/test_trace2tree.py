@@ -199,7 +199,9 @@ class TestInferenceIterationRoots:
                 corr += 1
 
         tree = _build_tree(events)
-        result = detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu_time(tree))
+        result = detect_from_branch_descent(
+            tree, _entry_roots(tree), _total_gpu_time(tree)
+        )
         assert result is not None
         assert len(result.roots) == 8
         assert all(root["dur"] > 0 for root in result.roots)
@@ -242,7 +244,9 @@ class TestInferenceIterationRoots:
 
         tree = _build_tree(events)
         _reattach_worker_threads(tree)
-        result = detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu_time(tree))
+        result = detect_from_branch_descent(
+            tree, _entry_roots(tree), _total_gpu_time(tree)
+        )
         assert result is not None
         assert len(result.roots) >= 1
 
