@@ -4,11 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Annotation families and leaf detection helpers.
+"""Annotation families and tree-based detection helpers.
 
 Step 1 groups every annotation into families, known and unknown alike. Step 1.5
 chooses which nesting level is the iteration and where its metadata comes from.
-``detect_from_graph_launches`` handles the graph-replay fast path.
+``detect_from_branch_descent`` and ``detect_from_sibling_roots`` handle the
+tree-based detection path.
 """
 
 from dataclasses import dataclass
@@ -22,7 +23,6 @@ from ...Trace2Tree.inference_iteration_roots import (
     BRANCH_DESCENT_TIER,
     BRANCH_MAX_NODES,
     GPU_KERNEL_CATS,
-    GRAPH_LAUNCH_NAMES,
     MIN_LABEL_CHILDREN,
     _blocks_by_pattern,
     _descendant_gpu_time,
@@ -154,51 +154,6 @@ def build_families(
 
 
 # --- steps ------------------------------------------------------------------
-def detect_from_graph_launches(
-    events: Sequence[dict],
-    attribution: GpuAttribution,
-    annotations: Sequence[dict],
-) -> Optional[RootSet]:
-    """Detect iteration roots from graph-replay launches.
-
-    Each ``hipGraphLaunch`` / ``cudaGraphLaunch`` event maps 1:1 to a captured
-    graph replay.  This signal survives graph capture (which erases the per-op
-    python/kernel periodicity the tree traversal relies on) and needs no call
-    tree, so it is tried before the expensive tree-based detectors.
-
-    Returns a :class:`RootSet` with coverage info, or ``None`` when there are
-    too few launches.  The caller decides whether coverage is acceptable.
-    """
-    launches = sorted(
-        (
-            e
-            for e in events
-            if e.get("name") in GRAPH_LAUNCH_NAMES and e.get("ts") is not None
-        ),
-        key=lambda e: e["ts"],
-    )
-    if len(launches) < MIN_LABEL_CHILDREN:
-        return None
-
-    roots = [dict(e) for e in launches]
-    coverage = attribution.audit(annotations, roots)
-    status = (
-        DetectStatus.SPLITTABLE
-        if coverage.covered_selected >= COVERAGE_GATE
-        else DetectStatus.DEGRADED
-        if coverage.covered_selected >= COVERAGE_FLOOR
-        else DetectStatus.NOT_SPLITTABLE
-    )
-    return RootSet(
-        roots=roots,
-        method="generic:graph_launch",
-        phase_confidence=PhaseConfidence.UNKNOWN,
-        status=status,
-        coverage=coverage,
-        diagnostics={"graph_launch_count": len(roots)},
-    )
-
-
 def _total_gpu_time(tree: TraceToTree) -> float:
     return sum(
         e.get("dur", 0)
