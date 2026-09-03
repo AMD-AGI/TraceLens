@@ -211,7 +211,7 @@ def find_steady_state_window(
 
         min_steps_for_ratio = math.ceil(1.0 / ideal_pd_ratio)
         if num_steps < min_steps_for_ratio:
-            print( 
+            print(
                 f"Warning: --num-steps={num_steps} is too small to capture the true "
                 f"decode_only/prefilldecodemix distribution. At prefilldecodemix_to_totalsteps_ratio={ideal_pd_ratio:.4f} you need at "
                 f"least {min_steps_for_ratio} steps to see a representative mix. "

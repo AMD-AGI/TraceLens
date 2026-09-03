@@ -911,8 +911,6 @@ def test_find_known_annotations_on_no_match():
     assert find_known_annotations(wrong_cat) == []
 
 
-
-
 # --------------------------------------------------------------------------- #
 # Phase classification
 # --------------------------------------------------------------------------- #

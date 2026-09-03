@@ -208,9 +208,7 @@ def detect_from_branch_descent(
                         first, last = block[0], block[-1]
                         event = dict(first)
                         event["name"] = node.get("name", event.get("name", ""))
-                        event["dur"] = (
-                            last["ts"] + last.get("dur", 0)
-                        ) - first["ts"]
+                        event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
                         iteration_roots.append(event)
                         blocked.extend(block)
                     cov = _descendant_gpu_time(tree, blocked) / total_gpu
@@ -228,9 +226,7 @@ def detect_from_branch_descent(
                     )
                     if cov >= BRANCH_COVERAGE_GATE:
                         return candidate
-                    if best is None or cov > best.diagnostics.get(
-                        "branch_coverage", 0
-                    ):
+                    if best is None or cov > best.diagnostics.get("branch_coverage", 0):
                         best = candidate
         for child in children:
             if _gpu_bearing(child):
