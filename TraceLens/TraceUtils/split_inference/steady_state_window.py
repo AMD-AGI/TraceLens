@@ -7,7 +7,7 @@
 """Stage 2: steady-state region detection and window selection."""
 
 import math
-from statistics import mean
+from statistics import mean, pstdev
 
 from ..annotation_utils import (
     has_context,
@@ -117,7 +117,7 @@ def compute_reference_pd_ratio(
     return (largest["start"], largest["end"]), average_ratio, largest_window_ratio
 
 
-def find_steady_state_window(
+def find_steady_state_annotations(
     iteration_roots: list[dict],
     num_steps: int,
     steady_state_regions: list[tuple[int, int]],
@@ -362,3 +362,60 @@ def find_steady_state_window(
         )
 
     return iteration_roots[best["start"] : best["end"]]
+
+
+MIN_STEADY_WINDOW = 4
+CV_THRESHOLD = 0.15
+
+
+def find_steady_state_generic(
+    iteration_roots: list[dict],
+    num_steps: int,
+) -> list[dict]:
+    """Find steady state by duration consistency for non-serving workloads.
+
+    Slides an overlapping window (stride 1) across all iterations, computes
+    the coefficient of variation of wall-clock duration for each position,
+    and picks the fastest window whose CV is below ``CV_THRESHOLD``.  Falls
+    back to the lowest-CV window when nothing passes.
+
+    A minimum scan window of ``MIN_STEADY_WINDOW`` ensures the CV is
+    meaningful even when ``num_steps`` is small.
+    """
+    total = len(iteration_roots)
+    if total == 0:
+        return []
+
+    durations = [r.get("dur", 0) for r in iteration_roots]
+    scan_size = min(max(num_steps, MIN_STEADY_WINDOW), total)
+
+    windows = []
+    for start in range(total - scan_size + 1):
+        chunk = durations[start : start + scan_size]
+        m = mean(chunk)
+        cv = pstdev(chunk) / m if m else 0.0
+        windows.append((start, start + scan_size, cv, m))
+
+    if not windows:
+        return iteration_roots[:num_steps]
+
+    passing = [(s, e, cv, m) for s, e, cv, m in windows if cv < CV_THRESHOLD]
+    if passing:
+        best_start, best_end, best_cv, best_mean = min(passing, key=lambda x: x[3])
+    else:
+        best_start, best_end, best_cv, best_mean = min(windows, key=lambda x: x[2])
+
+    print(
+        f"[generic] Steady state by duration: [{best_start}, {best_end}) "
+        f"cv={best_cv:.4f}, mean_dur={best_mean:.0f}us"
+    )
+
+    if num_steps < scan_size:
+        center = (best_start + best_end) // 2
+        half = num_steps // 2
+        final_start = max(best_start, center - half)
+        final_end = min(final_start + num_steps, total)
+        final_start = max(0, final_end - num_steps)
+        return iteration_roots[final_start:final_end]
+
+    return iteration_roots[best_start:best_end]
