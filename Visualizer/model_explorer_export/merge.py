@@ -1048,7 +1048,7 @@ def _tile_prefix_attr_name(prefix: str) -> str:
     """
     segment = prefix.rsplit("/", 1)[-1]
     parts = segment.split(":")
-    if len(parts) >= 3 and parts[0] in {"seq", "sidefeed", "branch"}:
+    if len(parts) >= 3 and parts[0] in {"seq", "sidefeed", "branch", "sideproducer"}:
         return parts[2]
     return segment
 
@@ -1058,6 +1058,7 @@ def _inject_group_outputs(
     *,
     output_names: dict[str, str] | None = None,
     resolve_name: Any = None,
+    resolve_slot_names: Any = None,
 ) -> None:
     """Give every visible Input namespace a matching Output boundary."""
     input_namespaces = {
@@ -1120,32 +1121,81 @@ def _inject_group_outputs(
         if not name and resolve_name is not None:
             name = resolve_name(prefix)
         name = name or "result"
-        ports = [
-            (
-                name if len(sources) == 1 else f"{name}_{index + 1}",
-                source,
-                source_port,
-            )
-            for index, (source, source_port) in enumerate(sources)
-        ]
-        port_by_source = {
-            (source, source_port): port for port, source, source_port in ports
-        }
-        for _target, edge in outgoing:
-            source = (
-                edge["sourceNodeId"],
-                edge.get("sourceNodeOutputId", "0"),
-            )
-            edge["sourceNodeId"] = output_id
-            edge["sourceNodeOutputId"] = port_by_source[source]
 
-        section_nodes.append(
-            _make_group_output_node(
-                output_id=output_id,
-                namespace=namespace,
-                ports=ports,
+        # Try to resolve named return slots for multi-output modules.
+        slot_names: dict[str, str] | None = None
+        if len(sources) > 1 and resolve_slot_names is not None:
+            slot_names = resolve_slot_names(prefix)
+
+        if slot_names and len(sources) > 1:
+            ports = []
+            for source, source_port in sources:
+                slot = next(
+                    (
+                        slot_name
+                        for attr, slot_name in slot_names.items()
+                        if attr in source
+                    ),
+                    None,
+                )
+                port_label = slot or f"{name}_{len(ports) + 1}"
+                ports.append((port_label, source, source_port))
+        else:
+            ports = [
+                (
+                    name if len(sources) == 1 else f"{name}_{index + 1}",
+                    source,
+                    source_port,
+                )
+                for index, (source, source_port) in enumerate(sources)
+            ]
+        if len(ports) <= 1:
+            # Single output → one Output node.
+            port_by_source = {
+                (source, source_port): port
+                for port, source, source_port in ports
+            }
+            for _target, edge in outgoing:
+                source = (
+                    edge["sourceNodeId"],
+                    edge.get("sourceNodeOutputId", "0"),
+                )
+                edge["sourceNodeId"] = output_id
+                edge["sourceNodeOutputId"] = port_by_source[source]
+
+            section_nodes.append(
+                _make_group_output_node(
+                    output_id=output_id,
+                    namespace=namespace,
+                    ports=ports,
+                )
             )
-        )
+        else:
+            # Multiple outputs → one Output node per source,
+            # matching _wrap_actual_group_boundary for consistency.
+            source_to_port_id: dict[tuple[str, str], str] = {}
+            for port, source, source_port in ports:
+                per_port_id = _port_output_id(output_id, port, len(ports))
+                source_to_port_id[(source, source_port)] = per_port_id
+                section_nodes.append(
+                    _make_group_output_node(
+                        output_id=per_port_id,
+                        namespace=namespace,
+                        ports=[(port, source, source_port)],
+                    )
+                )
+
+            for _target, edge in outgoing:
+                source = (
+                    edge["sourceNodeId"],
+                    edge.get("sourceNodeOutputId", "0"),
+                )
+                per_port_id = source_to_port_id[source]
+                port_label = next(
+                    p for p, s, sp in ports if (s, sp) == source
+                )
+                edge["sourceNodeId"] = per_port_id
+                edge["sourceNodeOutputId"] = port_label
 
 
 def _flatten_transparent_group_inputs(section_nodes: list[dict[str, Any]]) -> None:
@@ -2054,12 +2104,26 @@ def _append_section(
     if skip_variant_root_input:
         inject_skip.add(namespace_prefix)
     _inject_group_inputs(section_nodes, skip_namespaces=frozenset(inject_skip))
+    def _resolve_slot_names_for_prefix(prefix: str) -> dict[str, str] | None:
+        """Map source attr_names → return slot names for multi-return children."""
+        attr = _tile_prefix_attr_name(prefix)
+        child = next(
+            (c for c in block_tree.children if c.attr_name == attr), None
+        )
+        if child is None or not child.forward_return_slots:
+            return None
+        return {
+            producer: slot
+            for slot, producer in child.forward_return_slots.items()
+        }
+
     _inject_group_outputs(
         section_nodes,
         output_names=nested_output_names,
         resolve_name=lambda prefix: _caller_output_name(
             spec, block_tree.class_name, _tile_prefix_attr_name(prefix)
         ),
+        resolve_slot_names=_resolve_slot_names_for_prefix,
     )
     _connect_external_inputs(
         section_nodes,
