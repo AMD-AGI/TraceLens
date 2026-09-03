@@ -199,7 +199,7 @@ const TRACE_LENS_SHOW_ON_EDGE = {
 // Bump when the defaults below change so one refresh picks them up; between bumps the
 // viewer keeps whatever the user selected in the Model Explorer display menu.
 const DEFAULTS_VERSION_KEY = "tracelens_display_defaults_version";
-const DEFAULTS_VERSION = "3";
+const DEFAULTS_VERSION = "4";
 
 function configureModelExplorerDisplay() {
   for (const legacyKey of LEGACY_SHOW_ON_NODE_KEYS) {
