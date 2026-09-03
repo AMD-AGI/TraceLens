@@ -34,7 +34,6 @@ from .root_detection import (
     build_families,
     collect_annotations,
     detect_from_branch_descent,
-    detect_from_graph_launches,
     detect_from_sibling_roots,
 )
 
@@ -193,9 +192,8 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
     detector produces roots with acceptable GPU coverage:
 
     1. Recognized / unknown-family annotations
-    2. Graph-launch replay boundaries (no tree needed)
-    3. Branch-descent on the call tree (after cross-thread reattachment)
-    4. Sibling-root periodicity across top-level frames
+    2. Branch-descent on the call tree (after cross-thread reattachment)
+    3. Sibling-root periodicity across top-level frames
     """
     attribution = GpuAttribution(events)
     annotations = collect_annotations(events)
@@ -218,19 +216,12 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
             root_set.status = DetectStatus.DEGRADED
             return root_set
 
-    # --- 2. Graph-launch fast path (flat event list, no tree) -----------------
-    graph_set = detect_from_graph_launches(events, attribution, annotations)
-    if graph_set is not None and graph_set.coverage.covered_selected >= COVERAGE_FLOOR:
-        return graph_set
-
-    # --- 3 & 4. Tree-based detectors (built once) ----------------------------
+    # --- 2 & 3. Tree-based detectors (built once) ----------------------------
     try:
         tree = TraceToTree(list(events), prune_nongpu_paths=False)
         tree.build_tree(add_python_func=True)
     except Exception as exc:
         print(f"TraceToTree build failed ({exc}), skipping tree detectors.")
-        if graph_set is not None:
-            return graph_set
         if root_set is not None:
             root_set.status = DetectStatus.NOT_SPLITTABLE
             return root_set
@@ -245,19 +236,18 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
     entry_roots = _entry_roots(tree)
     total_gpu = _total_gpu_time(tree)
 
-    # --- 3. Branch descent ----------------------------------------------------
+    # --- 2. Branch descent ----------------------------------------------------
     branch_set = detect_from_branch_descent(tree, entry_roots, total_gpu)
     if branch_set is not None and branch_set.status is not DetectStatus.NOT_SPLITTABLE:
         return branch_set
 
-    # --- 4. Sibling roots ----------------------------------------------------
+    # --- 3. Sibling roots ----------------------------------------------------
     sibling_set = detect_from_sibling_roots(tree, entry_roots, total_gpu)
     if sibling_set is not None and sibling_set.status is not DetectStatus.NOT_SPLITTABLE:
         return sibling_set
 
     # --- Nothing worked -------------------------------------------------------
-    # Return whichever detector produced the best roots, even with poor coverage.
-    for candidate in (branch_set, sibling_set, graph_set):
+    for candidate in (branch_set, sibling_set):
         if candidate is not None:
             return candidate
     if root_set is not None:
