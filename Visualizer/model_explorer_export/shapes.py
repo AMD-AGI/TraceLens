@@ -18,7 +18,7 @@ SHAPE_SEPARATOR = " x "
 
 def _font_safe(dim: Any) -> str:
     """Model Explorer renders characters outside its font atlas as ``?``."""
-    text = str(dim).replace("\u00d7", "x").replace("\u2217", "*")
+    text = str(dim).replace("\u00d7", "x").replace("\u2217", "x").replace("*", "x")
     return "".join(char if 32 <= ord(char) < 127 else "" for char in text)
 
 
