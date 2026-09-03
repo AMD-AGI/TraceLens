@@ -539,17 +539,26 @@ def _computation_nodes(
         nodes.append(node)
 
     # Float loop-carried-in nodes to the front of their namespace so ME's
-    # dagre layout places them at the top of the loop group.
-    def _loop_carried_sort_key(node: dict[str, Any]) -> tuple[str, int]:
-        ns = node.get("namespace", "")
+    # dagre layout places them at the top of the loop group.  We must
+    # preserve the relative order of *different* namespaces (otherwise
+    # cross-namespace dataflow edges break), so we sort only within each
+    # namespace group using a stable partition.
+    from itertools import groupby as _groupby
+
+    def _lc_priority(node: dict[str, Any]) -> int:
         nid = node.get("id", "")
         if "@loop_carried_in:" in nid:
-            return (ns, 0)
+            return 0
         if "@loop_carried_out:" in nid:
-            return (ns, 2)
-        return (ns, 1)
+            return 2
+        return 1
 
-    nodes.sort(key=_loop_carried_sort_key)
+    reordered: list[dict[str, Any]] = []
+    for _ns, group in _groupby(nodes, key=lambda n: n.get("namespace", "")):
+        chunk = list(group)
+        chunk.sort(key=_lc_priority)
+        reordered.extend(chunk)
+    nodes = reordered
 
     return nodes
 
