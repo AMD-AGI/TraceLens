@@ -1477,8 +1477,11 @@ def _add_loop_carried_nodes(graph: ComputationGraph, root: BlockNode) -> None:
         )
 
         rewired: list[tuple[int, int]] = []
+        in_feeds_member = False
         for source, target in graph.links:
             if source == updated_index and target not in member_indices:
+                # Route outgoing edges from the loop's updated value through
+                # the "out" boundary node.
                 rewired.append((out_node_index, target))
                 port = graph.link_port_labels.pop((source, target), None)
                 if port:
@@ -1486,6 +1489,14 @@ def _add_loop_carried_nodes(graph: ComputationGraph, root: BlockNode) -> None:
                 output_port = graph.link_output_ports.pop((source, target), None)
                 if output_port:
                     graph.link_output_ports[(out_node_index, target)] = output_port
+            elif source == initial_index and target in member_indices:
+                # Route the initial value into the loop body through the "in"
+                # boundary node so the dependency is visible.
+                rewired.append((in_node_index, target))
+                port = graph.link_port_labels.pop((source, target), None)
+                if port:
+                    graph.link_port_labels[(in_node_index, target)] = port
+                in_feeds_member = True
             else:
                 rewired.append((source, target))
         graph.links = rewired
