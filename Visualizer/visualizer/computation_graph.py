@@ -177,6 +177,7 @@ def _wire_operation_predecessor_links(
             for pred in child.operation_predecessors
             if pred != FORWARD_METHOD_INPUT and not is_forward_operation(pred)
         ]
+        multi_input = len(child.operation_predecessors) >= 2
         for pred in child.operation_predecessors:
             if pred == FORWARD_METHOD_INPUT:
                 # Reading the forward's own parameter means reading what enters the block.
@@ -188,6 +189,14 @@ def _wire_operation_predecessor_links(
             link = (source_index, target_index)
             if link not in graph.links:
                 graph.links.append(link)
+            if multi_input and link not in graph.link_port_labels:
+                source_label = (
+                    graph.nodes[source_index].label
+                    if source_index < len(graph.nodes)
+                    else None
+                )
+                if source_label:
+                    graph.link_port_labels[link] = source_label
         if len(module_preds) >= 2 and (child.forward_order or 0) < last_forward_order:
             graph.excluded_output_indices.add(target_index)
 
@@ -1278,37 +1287,46 @@ def _add_loop_carried_nodes(graph: ComputationGraph, root: BlockNode) -> None:
             ),
             None,
         )
-        node_index = _add_node(
+        iter_sublabel = (
+            f"{carried.variable} · {carried.iteration_count} iterations"
+            if carried.iteration_count is not None
+            else f"{carried.variable} · repeated"
+        )
+        in_node_index = _add_node(
             graph,
-            key=f"@loop_carried:{carried.loop_id}:{carried.variable}",
-            label="Loop carried dependency",
-            sublabel=(
-                f"{carried.variable} · {carried.iteration_count} iterations"
-                if carried.iteration_count is not None
-                else f"{carried.variable} · repeated"
-            ),
+            key=f"@loop_carried_in:{carried.loop_id}:{carried.variable}",
+            label="Loop carried dependencies in",
+            sublabel=iter_sublabel,
+            synthetic=SYNTHETIC_LOOP_CARRIED,
+        )
+        out_node_index = _add_node(
+            graph,
+            key=f"@loop_carried_out:{carried.loop_id}:{carried.variable}",
+            label="Loop carried dependencies out",
+            sublabel=iter_sublabel,
             synthetic=SYNTHETIC_LOOP_CARRIED,
         )
 
         rewired: list[tuple[int, int]] = []
         for source, target in graph.links:
             if source == updated_index and target not in member_indices:
-                rewired.append((node_index, target))
+                rewired.append((out_node_index, target))
                 port = graph.link_port_labels.pop((source, target), None)
                 if port:
-                    graph.link_port_labels[(node_index, target)] = port
+                    graph.link_port_labels[(out_node_index, target)] = port
                 output_port = graph.link_output_ports.pop((source, target), None)
                 if output_port:
-                    graph.link_output_ports[(node_index, target)] = output_port
+                    graph.link_output_ports[(out_node_index, target)] = output_port
             else:
                 rewired.append((source, target))
         graph.links = rewired
-        graph.links.extend([(initial_index, node_index), (updated_index, node_index)])
-        graph.link_port_labels[(initial_index, node_index)] = "initial"
-        graph.link_port_labels[(updated_index, node_index)] = "updated"
-        graph.loop_carried_nodes[carried.updated_producer] = node_index
+        graph.links.append((initial_index, in_node_index))
+        graph.link_port_labels[(initial_index, in_node_index)] = "initial"
+        graph.links.append((updated_index, out_node_index))
+        graph.link_port_labels[(updated_index, out_node_index)] = "updated"
+        graph.loop_carried_nodes[carried.updated_producer] = out_node_index
         if loop_frame is not None:
-            loop_frame.node_indices.append(node_index)
+            loop_frame.node_indices.extend([in_node_index, out_node_index])
 
 
 def _predecessor_map(graph: ComputationGraph) -> dict[int, list[int]]:
@@ -1587,6 +1605,56 @@ def _strip_dead_nodes(graph: ComputationGraph) -> ComputationGraph:
     return _prune_computation_nodes(graph, set(graph.dead_node_indices))
 
 
+def _strip_dangling_leaves(
+    graph: ComputationGraph,
+    root: BlockNode | None = None,
+) -> ComputationGraph:
+    """Remove nodes with no outgoing edges that are not outputs or other sinks."""
+    source_indices = {source for source, _target in graph.links}
+    kept_sinks = {graph.primary_output_index, graph.output_node_index}
+    kept_sinks.update(graph.output_ports.values())
+    kept_sinks.update(graph.loop_carried_nodes.values())
+    # Keep attr_output_indices only for attrs that are referenced as return producers.
+    referenced = (
+        root.referenced_return_producers if root is not None else set()
+    )
+    for attr, index in graph.attr_output_indices.items():
+        if attr in referenced:
+            kept_sinks.add(index)
+    kept_sinks.discard(None)
+
+    sink_synthetics = {SYNTHETIC_OUTPUT, SYNTHETIC_LOOP_CARRIED}
+    # Never strip nodes inside inline frames — their internal topology must stay intact.
+    framed_indices: set[int] = set()
+    for frame in graph.inline_frames:
+        framed_indices.update(frame.node_indices)
+    # Keep nodes fed by framed nodes — stripping them would orphan the frame.
+    fed_by_frame: set[int] = set()
+    for src, tgt in graph.links:
+        if src in framed_indices and tgt not in framed_indices:
+            fed_by_frame.add(tgt)
+
+    dangling: set[int] = set()
+    for index, spec in enumerate(graph.nodes):
+        if index in source_indices:
+            continue
+        if index in kept_sinks:
+            continue
+        if index in framed_indices:
+            continue
+        if index in fed_by_frame:
+            continue
+        if spec.synthetic in sink_synthetics:
+            continue
+        # Only strip non-synthetic leaves (real ops with no consumers).
+        if spec.synthetic is not None:
+            continue
+        dangling.add(index)
+    if not dangling:
+        return graph
+    return _prune_computation_nodes(graph, dangling)
+
+
 def _producer_label_from_attr(attr_name: str) -> str:
     """Map a modeling attr name to a short upstream operator label."""
     lowered = attr_name.lower()
@@ -1611,6 +1679,36 @@ def _tensor_port_input_sublabels(
         head = source.split(" in ", 1)[0]
         labels[port] = f"← {head}"
     return labels
+
+
+def _label_multi_input_kernel_edges(
+    graph: ComputationGraph,
+    step_entries: dict[str, int],
+    step_indices: dict[str, int],
+    tensor_links: list[tuple[int, int]],
+) -> None:
+    """Add port labels to incoming edges of kernel steps that have more than one input."""
+    all_kernel_indices = set(step_entries.values()) | set(step_indices.values())
+    inputs_per_target: dict[int, list[tuple[int, int]]] = {}
+    for source, target in graph.links:
+        if target in all_kernel_indices:
+            inputs_per_target.setdefault(target, []).append((source, target))
+    tensor_link_set = set(tensor_links)
+    for target, edges in inputs_per_target.items():
+        if len(edges) < 2:
+            continue
+        for source, tgt in edges:
+            if (source, tgt) in graph.link_port_labels:
+                continue
+            source_spec = graph.nodes[source] if source < len(graph.nodes) else None
+            if source_spec is None:
+                continue
+            if (source, tgt) in tensor_link_set:
+                label = source_spec.label or ""
+            else:
+                label = source_spec.label or source_spec.key or ""
+            if label:
+                graph.link_port_labels[(source, tgt)] = label
 
 
 def _add_tensor_ports_segment(
@@ -1667,6 +1765,7 @@ def _add_tensor_ports_segment(
                 graph.links.append((pred_index, node_index))
 
     default_target = segment.steps[0].attr_name
+    tensor_links: list[tuple[int, int]] = []
     for label_index, label in enumerate(segment.labels):
         target_attr = segment.targets.get(label, default_target)
         target_index = step_entries.get(target_attr)
@@ -1682,10 +1781,14 @@ def _add_tensor_ports_segment(
             synthetic=SYNTHETIC_TENSOR,
         )
         graph.links.append((port_index, target_index))
+        tensor_links.append((port_index, target_index))
         for child_attr in input_operand_attrs.get(target_attr, []):
             child_index = step_attr_indices.get(target_attr, {}).get(child_attr)
             if child_index is not None:
                 graph.links.append((port_index, child_index))
+                tensor_links.append((port_index, child_index))
+
+    _label_multi_input_kernel_edges(graph, step_entries, step_indices, tensor_links)
 
     return step_indices.get(segment.steps[-1].attr_name)
 
@@ -2282,6 +2385,7 @@ def build_computation_graph(
         root,
         strip_unused_return_branches=strip_unused_return_branches,
     )
+    graph = _strip_dangling_leaves(graph, root=root)
     add_forward_output(graph, root=root)
     if basic_ops is not None and basic_ops.basic_only:
         return _filter_graph_basic_only(graph)

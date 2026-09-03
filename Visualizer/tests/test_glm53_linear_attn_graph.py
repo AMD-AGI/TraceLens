@@ -217,15 +217,27 @@ def test_glm53_hyperconnection_expands_mhc_math():
     assert "Sum" in labels
     assert any(frame.label == "Loop · 19 iterations" for frame in graph.inline_frames)
     assert set(graph.output_ports) == {"post", "comb", "collapsed"}
-    carried_index = graph.loop_carried_nodes["@op_l290_c19_divide"]
-    assert graph.nodes[carried_index].label == "Loop carried dependency"
-    carried_inputs = {
-        graph.link_port_labels[(source, carried_index)]
+    carried_out_index = graph.loop_carried_nodes["@op_l290_c19_divide"]
+    assert graph.nodes[carried_out_index].label == "Loop carried dependencies out"
+    carried_out_inputs = {
+        graph.link_port_labels[(source, carried_out_index)]
         for source, target in graph.links
-        if target == carried_index
+        if target == carried_out_index
     }
-    assert carried_inputs == {"initial", "updated"}
-    assert graph.output_ports["comb"] == carried_index
+    assert carried_out_inputs == {"updated"}
+    carried_in_indices = [
+        index
+        for index, node in enumerate(graph.nodes)
+        if node.label == "Loop carried dependencies in"
+    ]
+    assert len(carried_in_indices) >= 1
+    carried_in_inputs = {
+        graph.link_port_labels[(source, carried_in_indices[0])]
+        for source, target in graph.links
+        if target == carried_in_indices[0]
+    }
+    assert carried_in_inputs == {"initial"}
+    assert graph.output_ports["comb"] == carried_out_index
 
     multiply_index = next(
         index

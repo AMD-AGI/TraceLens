@@ -1534,6 +1534,10 @@ class _ForwardOperationExtractor:
         if method_name is not None and _is_self_attr(func, method_name):
             return method_name
         target = _expr_name(func)
+        if target and (
+            target in _SYNTHETIC_ATTENTION_NAMES or _is_kernel_merge_call(func)
+        ):
+            return SYNTHETIC_ATTENTION
         if target and _is_positional_function_call(func, target):
             return positional_synthetic_attr(target, node.lineno)
         return None
