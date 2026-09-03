@@ -334,9 +334,9 @@ def write_summary_report(
         "| Metric | Value |",
         "|---|---|",
         f"| Total runs analyzed | {total_runs} |",
-        f"| Runs with findings | {runs_with_findings} ({_pct(runs_with_findings, total_runs)}%) |",
-        f"| Runs not assessed (no triage output) | {unassessed} ({_pct(unassessed, total_runs)}%) |",
-        f"| Clean runs (assessed, no findings) | {clean_runs} ({_pct(clean_runs, total_runs)}%) |",
+        f"| Runs with findings | {runs_with_findings} ({runs_with_findings * 100 // total_runs if total_runs else 0}%) |",
+        f"| Runs not assessed (no triage output) | {unassessed} ({unassessed * 100 // total_runs if total_runs else 0}%) |",
+        f"| Clean runs (assessed, no findings) | {clean_runs} ({clean_runs * 100 // total_runs if total_runs else 0}%) |",
         f"| Total findings | {len(findings)} |",
         f"| Unique failure modes | {len(agg['by_failure_mode'])} |",
         "",
@@ -499,12 +499,6 @@ def write_summary_report(
     with open(path, "w") as f:
         f.write("\n".join(lines))
     return path
-
-
-def _pct(part: int, total: int) -> int:
-    if total == 0:
-        return 0
-    return part * 100 // total
 
 
 # ---------------------------------------------------------------------------
@@ -768,7 +762,9 @@ def main() -> int:
     print("=" * 60)
     runs_with = len(set(f.run_dir for f in findings))
     print(f"  Total runs:        {total_runs}")
-    print(f"  Runs with issues:  {runs_with} ({_pct(runs_with, total_runs)}%)")
+    print(
+        f"  Runs with issues:  {runs_with} ({runs_with * 100 // total_runs if total_runs else 0}%)"
+    )
     print(f"  Total findings:    {len(findings)}")
     print()
     print("  Top 5 failure modes:")
