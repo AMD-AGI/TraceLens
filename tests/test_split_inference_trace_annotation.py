@@ -37,9 +37,15 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
 )
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from tests.fixtures.traces import INFERENCE_ROOT
-from TraceLens.Trace2Tree.inference_iteration_roots import _entry_roots, _reattach_worker_threads
+from TraceLens.Trace2Tree.inference_iteration_roots import (
+    _entry_roots,
+    _reattach_worker_threads,
+)
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
-from TraceLens.TraceUtils.split_inference.root_detection import _total_gpu_time, detect_from_branch_descent
+from TraceLens.TraceUtils.split_inference.root_detection import (
+    _total_gpu_time,
+    detect_from_branch_descent,
+)
 from TraceLens.Trace2Tree import trace_capture_merge_experimental as tcm
 
 # --------------------------------------------------------------------------- #

@@ -8,7 +8,10 @@
 
 from typing import Optional, Sequence
 
-from ...Trace2Tree.inference_iteration_roots import _entry_roots, _reattach_worker_threads
+from ...Trace2Tree.inference_iteration_roots import (
+    _entry_roots,
+    _reattach_worker_threads,
+)
 from ...Trace2Tree.trace_to_tree import TraceToTree
 from ..annotation_utils import (
     find_known_annotations,
@@ -123,8 +126,7 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
 
         known_labels = root_set.phase_confidence is PhaseConfidence.HIGH
         if coverage.passes and (
-            known_labels
-            or not root_set.diagnostics.get("suspiciously_few_roots")
+            known_labels or not root_set.diagnostics.get("suspiciously_few_roots")
         ):
             root_set.status = DetectStatus.SPLITTABLE
             return root_set
@@ -181,7 +183,10 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
 
     # --- Return the best result across all detectors --------------------------
     for candidate in (branch_set, sibling_set, best_fallback):
-        if candidate is not None and candidate.status is not DetectStatus.NOT_SPLITTABLE:
+        if (
+            candidate is not None
+            and candidate.status is not DetectStatus.NOT_SPLITTABLE
+        ):
             return candidate
     for candidate in (branch_set, sibling_set, best_fallback):
         if candidate is not None:
