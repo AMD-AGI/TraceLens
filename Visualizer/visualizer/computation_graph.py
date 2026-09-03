@@ -1604,6 +1604,8 @@ def _add_loop_carried_nodes(graph: ComputationGraph, root: BlockNode) -> None:
         graph.link_port_labels[(initial_index, in_node_index)] = "initial"
         graph.links.append((updated_index, out_node_index))
         graph.link_port_labels[(updated_index, out_node_index)] = "updated"
+        graph.links.append((out_node_index, in_node_index))
+        graph.link_port_labels[(out_node_index, in_node_index)] = "next iteration"
         graph.loop_carried_nodes[carried.updated_producer] = out_node_index
         if loop_frame is not None:
             loop_frame.node_indices.extend([in_node_index, out_node_index])

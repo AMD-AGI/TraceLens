@@ -75,10 +75,18 @@ def _has_export_path(nodes, source_id: str, target_id: str) -> bool:
 
 
 def _assert_export_is_acyclic(nodes) -> None:
+    # Loop-carried feedback edges (out→in) are intentionally cyclic.
+    loop_carried_in_ids = {
+        node["id"] for node in nodes if "@loop_carried_in:" in node["id"]
+    }
     outgoing: dict[str, list[str]] = {}
     for node in nodes:
         for edge in node.get("incomingEdges", []):
-            outgoing.setdefault(edge["sourceNodeId"], []).append(node["id"])
+            target_id = node["id"]
+            source_id = edge["sourceNodeId"]
+            if target_id in loop_carried_in_ids and "@loop_carried_out:" in source_id:
+                continue
+            outgoing.setdefault(source_id, []).append(target_id)
 
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -236,7 +244,7 @@ def test_glm53_hyperconnection_expands_mhc_math():
         for source, target in graph.links
         if target == carried_in_indices[0]
     }
-    assert carried_in_inputs == {"initial"}
+    assert carried_in_inputs == {"initial", "next iteration"}
     assert graph.output_ports["comb"] == carried_out_index
 
     multiply_index = next(
