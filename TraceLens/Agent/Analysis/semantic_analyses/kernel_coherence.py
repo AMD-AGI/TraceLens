@@ -69,7 +69,6 @@ from kernel_runlength import (
 )
 from _helpers import load_json
 
-
 DEFAULT_RADIUS = 1
 DEFAULT_TOP_KERNELS = 5
 

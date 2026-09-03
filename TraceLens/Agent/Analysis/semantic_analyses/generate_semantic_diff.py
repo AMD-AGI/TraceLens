@@ -47,7 +47,6 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _helpers import load_labels
 
-
 # ---------------------------------------------------------------------------
 # diff_stats.csv generation
 # ---------------------------------------------------------------------------

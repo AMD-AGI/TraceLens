@@ -97,3 +97,12 @@ def test_load_labels(tmp_path):
     payload = {"labeled_kernels": [{"semantic_block": "attn"}]}
     p.write_text(json.dumps(payload))
     assert load_labels(str(p)) == payload
+
+
+def test_detect_period_fuzzy_one_defect():
+    # ABC repeated 4x with a single defect in the last group -> matches 8/9 > 0.85,
+    # exercising the non-exact fuzzy-match branch (still returns period 3).
+    cats = ["A", "B", "C"] * 4
+    cats[-1] = "X"
+    groups = [(c,) for c in cats]
+    assert detect_period(groups) == 3

@@ -171,3 +171,14 @@ def test_extract_tree_context_empty_uses_prebuilt_index():
     assert result["total_kernels"] == 0
     assert result["coverage"] == 0.0
     assert result["source_file"] == ""
+
+
+def test_extract_tree_context_gpu_op_uid_comes_from_tree_event():
+    # The output gpu_op_uid must be the matched TREE EVENT UID, not the kernel own
+    # gpu_op_uid; give them distinct values to pin down where the value is sourced.
+    gpu = {"name": "gemm", "ts": 5, "dur": 3, "UID": 777, "_cat": "kernel"}
+    tree = FakeTree([gpu])
+    extracted = {"kernels": [{"name": "gemm", "ts": 5, "dur": 3, "gpu_op_uid": 11}]}
+    result = extract_tree_context.extract_tree_context(tree, extracted)
+    ctx = result["kernels"][0]
+    assert ctx["gpu_op_uid"] == 777
