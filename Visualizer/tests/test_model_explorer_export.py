@@ -1255,12 +1255,12 @@ def test_fill_missing_node_shapes_seeds_and_propagates():
         for node in nodes
     }
     assert shapes == {
-        "@input": "B x S",
-        "embed_tokens": "B x S x 4096",
-        "decoder/norm": "B x S x 4096",
-        "mlp": "B x S x 4096",
-        "lm_head": "B x S x 32000",
-        "orphan": "B x S x 4096",
+        "@input": "B x S int64",
+        "embed_tokens": "B x S x 4096 float16",
+        "decoder/norm": "B x S x 4096 float16",
+        "mlp": "B x S x 4096 float16",
+        "lm_head": "B x S x 32000 float16",
+        "orphan": "B x S x 4096 float16",
     }
 
 
@@ -1285,7 +1285,7 @@ def test_merged_graph_includes_output_shape_attrs():
         node for node in shaped_nodes if node["id"].endswith("router:router:0")
     )
     shape_attr = next(attr for attr in router["attrs"] if attr["key"] == "output_shape")
-    assert shape_attr["value"] == "B x S x 64"
+    assert shape_attr["value"] == "B x S x 64 float16"
     assert payload["tracelensViewer"]["dimensions"]["H"] == 4096
     assert payload["tracelensViewer"]["dtype"] == "float16"
 
@@ -1315,8 +1315,8 @@ def test_expandable_groups_carry_their_boundary_shapes():
         assert attrs[namespace]["output_shape"]
 
     decoder = next(name for name in attrs if name and "/" not in name)
-    assert attrs[decoder]["input_shape"] == "B x S x 4096"
-    assert attrs[decoder]["output_shape"] == "B x S x 4096"
+    assert attrs[decoder]["input_shape"] == "B x S x 4096 float16"
+    assert attrs[decoder]["output_shape"] == "B x S x 4096 float16"
 
     without_shapes = build_model_explorer_payload(spec, include_shapes=False)
     plain_attrs = without_shapes["graphCollections"][0]["graphs"][0][
@@ -1333,7 +1333,13 @@ def test_group_boundary_shapes_reads_the_crossing_tensor():
             "id": node_id,
             "namespace": namespace,
             "outputsMetadata": [
-                {"id": "0", "attrs": [{"key": "shape", "value": shape}]}
+                {
+                    "id": "0",
+                    "attrs": [
+                        {"key": "shape", "value": shape},
+                        {"key": "dtype", "value": "float16"},
+                    ],
+                }
             ],
             "incomingEdges": [{"sourceNodeId": source} for source in sources],
         }
@@ -1346,7 +1352,10 @@ def test_group_boundary_shapes_reads_the_crossing_tensor():
         node("norm", "", "B x S x 8", ["mlp/down"]),
     ]
     assert group_boundary_shapes(nodes) == {
-        "mlp": {"input_shape": "B x S x 8", "output_shape": "B x S x 8"},
+        "mlp": {
+            "input_shape": "B x S x 8 float16",
+            "output_shape": "B x S x 8 float16",
+        },
     }
 
 

@@ -764,9 +764,10 @@ def test_glm53_ffn_hc_expands_hyperconnection_not_moe():
         assert mirror["incomingEdges"][0]["sourceNodeId"] == output["id"]
     assert {node["label"] for node in outputs} == {"post", "comb", "collapsed"}
     boundary = graph["groupNodeAttributes"][outputs[0]["namespace"]]
-    assert boundary["input_shape"] == "B x S x 4 x 4096"
+    assert boundary["input_shape"] == "B x S x 4 x 4096 float16"
     assert boundary["output_shape"] == (
-        "post: B x S x 4, comb: B x S x 4 x 4, " "collapsed: B x S x 4096"
+        "post: B x S x 4 float32, comb: B x S x 4 x 4 float32, "
+        "collapsed: B x S x 4096 float16"
     )
 
 
@@ -876,8 +877,8 @@ def test_glm53_decoder_boundary_keeps_hyper_stream_shape():
     graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     boundary = graph["groupNodeAttributes"]["45x_Glm5NextTextDecoderLayer"]
 
-    assert boundary["input_shape"] == "B x S x 4 x 4096"
-    assert boundary["output_shape"] == "B x S x 4 x 4096"
+    assert boundary["input_shape"] == "B x S x 4 x 4096 float16"
+    assert boundary["output_shape"] == "B x S x 4 x 4096 float16"
 
     prefix = _linear_attn_variant_prefix(spec)
     node_by_id = {node["id"]: node for node in graph["nodes"]}
@@ -888,7 +889,7 @@ def test_glm53_decoder_boundary_keeps_hyper_stream_shape():
             for attr in residual_add["attrs"]
             if attr["key"] == "output_shape"
         )
-        assert output_shape == "B x S x 4 x 4096"
+        assert output_shape == "B x S x 4 x 4096 float16"
 
 
 def test_glm53_spine_norms_do_not_share_a_namespace():
@@ -1022,9 +1023,9 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
         next(attr["value"] for attr in node["attrs"] if attr["key"] == "output_shape")
         for node in model_ops
     ] == [
-        "B x S x 1 x 4096",
-        "B x S x 4 x 4096",
-        "B x S x 4 x 4096",
+        "B x S x 1 x 4096 float16",
+        "B x S x 4 x 4096 float16",
+        "B x S x 4 x 4096 float16",
     ]
 
 

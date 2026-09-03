@@ -27,6 +27,16 @@ def format_shape(spec: TensorSpec) -> str:
     return SHAPE_SEPARATOR.join(_font_safe(dim) for dim in spec.shape)
 
 
+def format_shape_with_dtype(spec: TensorSpec) -> str:
+    """Shape string with dtype suffix for display on edges and node attrs."""
+    dims = format_shape(spec)
+    if not dims:
+        return ""
+    if not spec.dtype:
+        return dims
+    return f"{dims} {spec.dtype}"
+
+
 def format_shape_tensor(spec: TensorSpec) -> str:
     """Compact ``BxSxH`` shape for outputsMetadata tensor_shape conversion."""
     return "x".join(_font_safe(dim) for dim in spec.shape)
@@ -39,16 +49,17 @@ def format_shape_bracket(spec: TensorSpec) -> str:
 
 
 def _apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
-    shape_text = format_shape(spec)
-    if not shape_text:
+    display_text = format_shape_with_dtype(spec)
+    if not display_text:
         return
+    shape_text = format_shape(spec)
     tensor_shape = format_shape_tensor(spec)
     attrs = [
         item
         for item in node.get("attrs", [])
         if item.get("key") not in {"output_shape", "output_dtype"}
     ]
-    attrs.append({"key": "output_shape", "value": shape_text})
+    attrs.append({"key": "output_shape", "value": display_text})
     attrs.append({"key": "output_dtype", "value": spec.dtype})
     node["attrs"] = attrs
     existing = node.get("outputsMetadata", [])
@@ -64,7 +75,7 @@ def _apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
             "id": port_id,
             "attrs": [
                 *labels.get(port_id, []),
-                {"key": "shape", "value": shape_text},
+                {"key": "shape", "value": display_text},
                 {"key": "tensor_shape", "value": tensor_shape},
                 {"key": "dtype", "value": spec.dtype},
             ],
@@ -166,9 +177,13 @@ def _node_spec(
         }
         shape_text = attrs.get("shape")
         if shape_text:
+            dtype = str(attrs.get("dtype") or "")
+            # Strip trailing dtype suffix from display shape text.
+            if dtype and shape_text.endswith(f" {dtype}"):
+                shape_text = shape_text[: -len(dtype) - 1]
             return TensorSpec(
                 shape=tuple(shape_text.split(SHAPE_SEPARATOR)),
-                dtype=str(attrs.get("dtype") or ""),
+                dtype=dtype,
             )
     return None
 
@@ -399,7 +414,7 @@ def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, st
             )
             if spec is None or source_id not in namespaces:
                 continue
-            shape_text = format_shape(spec)
+            shape_text = format_shape_with_dtype(spec)
             source_chain = _namespace_chain(namespaces[source_id])
             for group in target_chain:
                 if group not in source_chain:

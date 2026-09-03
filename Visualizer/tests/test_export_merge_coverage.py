@@ -721,7 +721,7 @@ def test_shape_format_annotation_and_empty_shape_paths():
     )
     assert node["attrs"] == [
         {"key": "keep", "value": "yes"},
-        {"key": "output_shape", "value": "1 x 2"},
+        {"key": "output_shape", "value": "1 x 2 float32"},
         {"key": "output_dtype", "value": "float32"},
     ]
     assert shapes._node_spec(node) == TensorSpec(("1", "2"), "float32")
@@ -817,8 +817,8 @@ def test_shape_fill_and_boundary_multiple_crossings():
     ]
     shapes.fill_missing_node_shapes(nodes, context=context)
     result = shapes.group_boundary_shapes(nodes)
-    assert result["outer"]["input_shape"] == "B x S x 16"
-    assert result["outer"]["output_shape"] == "B x S x 16"
+    assert result["outer"]["input_shape"] == "B x S x 16 float16"
+    assert result["outer"]["output_shape"] == "B x S x 16 float16"
     assert result["outer/inner"] == result["outer"]
     assert shapes._namespace_chain("/outer//inner/") == ["outer", "outer/inner"]
     store: dict[str, list[str]] = {}
