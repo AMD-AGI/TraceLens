@@ -54,10 +54,6 @@ Ask the user for:
 
 **Optional:**
 - Output directory (default: `comparison_output/`)
-- Capture trace A/B paths (for graph-mode traces with companion captures)
-
-**Auto-detection:** If the user provides a directory, look for paired
-`*_graph*` and `*_capture*` files.
 
 **vLLM / annotated traces** are auto-detected by `extract_trace_data.py`.
 No special flag is needed.
@@ -89,7 +85,7 @@ run_breakdown() {
 
     # Check whether extraction produced region subdirs or a flat file
     if ls $DIR/*/extracted.json >/dev/null 2>&1; then
-        # Multi-region. Skip extract_tree_context.py entirely for no-capture
+        # Multi-region. Skip extract_tree_context.py entirely for
         # graph-mode traces, same reasoning as the single-trace branch below:
         # cpu_op/nn_module ancestry is always empty under cudaGraphLaunch, and
         # gpu_op_uid is already populated per-region by extract_trace_data.py
@@ -117,13 +113,12 @@ run_breakdown() {
                 -o $REGION/semantic_labels.json
         done
     else
-        # Single-trace. Skip extract_tree_context.py entirely for no-capture
+        # Single-trace. Skip extract_tree_context.py entirely for
         # graph-mode traces: kernels sit directly under cudaGraphLaunch, so
         # cpu_op/nn_module ancestry is always empty there anyway, and
         # gpu_op_uid is already populated by extract_trace_data.py itself
         # (a plain raw-index lookup, no tree build needed). Only build the
-        # tree when non-graph-mode, or when a companion capture trace is
-        # available to restore ancestry via --capture-trace.
+        # tree when non-graph-mode.
         IS_GRAPH_MODE=$(python -c "import json; print(json.load(open('$DIR/extracted.json'))['metadata']['is_graph_mode'])")
         python $SCRIPTS/pattern_finder.py $DIR/extracted.json -o $DIR/pattern.json &
         python $CLASSIFY $DIR/extracted.json -o $DIR/classified.json &
@@ -145,11 +140,6 @@ run_breakdown <trace_a_path> $DIR_A &
 run_breakdown <trace_b_path> $DIR_B &
 wait
 ```
-
-For multi-region traces, and for single graph-mode traces where a
-companion capture trace **is** available, add `--capture-trace
-<capture_path>` to the `extract_tree_context.py` call to restore cpu_op
-ancestry via the capture/graph-replay merge.
 
 **Output directories:**
 - Trace A: `<output_dir>/_work/<name_a>/`

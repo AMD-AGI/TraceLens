@@ -84,7 +84,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
    - If **Graph replay + capture**, ask for the **Capture Folder Path(s)**:
      - `standalone`: one folder → `<capture_folder_path>`. Ask: "Please provide the full path to the graph capture traces folder"
      - `comparative`: one folder per trace → `<capture_folder_path>` (primary/trace1) and `<capture_folder_path2>` (comparison/trace2). Ask: "Please provide the graph capture traces folder for the primary trace and for the comparison trace."
-   - **Comparative + graph replay is routed in Step 0.5** (do not abort): collect capture folders for both traces when available.
+   - **Comparative + graph replay** (do not abort): collect capture folders for both traces when available. If capture is not available, the comparison uses the semantic path (see Step 0.5).
 
 5. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"
@@ -162,22 +162,16 @@ Do NOT proceed to Step 1 until validation passes.
 
 ---
 
-## Step 0.5: Comparison Method Detection (comparative only)
+## Step 0.5: Comparison Method (comparative only)
 
 For `standalone`, skip this step.
 
-For `comparative`, auto-detect the comparison path (structural **TraceDiff** vs **semantic**). Pass `--capture{1,2}-available` for any trace that had a capture folder collected:
+For `comparative`, set `<comparison_method>` directly from what was already collected in Step 0 — no trace inspection or classification:
 
-```bash
-<prefix> python3 TraceLens/Agent/Analysis/utils/comparison_routing.py \
-  <trace_path> <trace2_path> \
-  --platform1 <platform> --platform2 <platform2> \
-  [--capture1-available] [--capture2-available]
-```
+- If a graph-replay trace is involved (`<inference_exec_mode>` = `graph_capture`) but capture folders were **not** collected for it in Step 0, set `<comparison_method>` = `semantic` (graph traces have no alignable CPU-op tree to diff, so the name-first semantic comparison is used).
+- Otherwise set `<comparison_method>` = `tracediff`.
 
-Set `<comparison_method>` to the printed `method` field and echo `reasons`.
-
-If `method` is `semantic` and a graph-mode trace is involved but capture folders were not collected in Step 0, ask for them now: `<capture_folder_path>` (trace1) and `<capture_folder_path2>` (trace2).
+> v1 scope: semantic is used only for graph+graph comparisons without capture. Cross-framework routing to semantic is deferred to a follow-up.
 
 ---
 
@@ -294,7 +288,6 @@ Read and follow the FULL instructions in:
 - Labels: name-a trace1, name-b trace2
 - Output directory: <output_dir>/_semantic/
 - Command prefix: read <output_dir>/cache/cmd_prefix.txt — substitute {CMD}
-- Capture folders (graph mode only): trace1 <capture_folder_path>, trace2 <capture_folder_path2>
 
 Run the full semantic comparison through "Generate TraceDiff Output" so that
 <output_dir>/_semantic/tracediff_output/diff_stats.csv is produced. Return "DONE".
@@ -700,6 +693,6 @@ If the plot is skipped, the `{{PERF_PLOT}}` placeholder is removed so the report
 
 If Steps 1 or many of Steps 2-5 fail or produce unexpected results, check whether the trace uses the following features before retrying:
 - **GPU Graph Replay**: raw trace JSON contains `hipGraphLaunch` or `cudaGraphLaunch`.
-  - **Comparative scope**: graph replay is **supported**; routing (tracediff+capture vs semantic) was already decided in Step 0.5. Ensure capture folders were collected for both traces when available.
+  - **Comparative scope**: graph replay is **supported**; the comparison method (tracediff+capture vs semantic) was set in Step 0.5 from capture availability, with no trace classification. Ensure capture folders were collected for both traces when available.
   - **Default mode, standalone** (analysis_mode = `default`): Inform the user with `[DIAG:trace_quality:GPU_GRAPH_REPLAY]` that GPU graph replay was detected and that the default analysis mode supports typical PyTorch traces. **Abort** -- do not retry or continue.
   - **Inference mode, standalone**: graph launches are expected and supported; continue whether or not a capture folder was provided (eager mode has none).

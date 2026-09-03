@@ -10,7 +10,6 @@ Step 1+3: Load a Chrome trace JSON and extract structured data.
 
 Outputs a JSON with:
   - ordered kernel list (name, duration, timestamp, gpu_op_uid)
-  - python call stack (nested)
   - metadata (categories, graph mode detection, total kernel time)
 
 vLLM traces with annotation iterations are auto-detected and split into
@@ -148,20 +147,6 @@ def detect_graph_mode(by_cat):
     return len(graph_launches) > 0, graph_launches
 
 
-def extract_python_callstack(by_cat):
-    pyfuncs = sorted(by_cat.get("python_function", []), key=lambda e: e["ts"])
-    for p in pyfuncs:
-        p["_end"] = p["ts"] + p["dur"]
-    stack = []
-    result = []
-    for p in pyfuncs:
-        while stack and stack[-1]["_end"] <= p["ts"]:
-            stack.pop()
-        result.append({"name": p["name"], "dur": p["dur"], "depth": len(stack)})
-        stack.append(p)
-    return result
-
-
 def run_assertions(data, by_cat, kernels, is_graph_mode, strict=True):
     errors = []
 
@@ -232,7 +217,6 @@ def extract_and_build_result(data, by_cat, source_file, region_metadata=None):
     """Build extraction result dict."""
     kernels = extract_kernel_sequence(by_cat)
     is_graph_mode, graph_launches = detect_graph_mode(by_cat)
-    callstack = extract_python_callstack(by_cat)
     total_kernel_time = sum(k["dur"] for k in kernels)
     categories_found = sorted(by_cat.keys())
     result = {
@@ -243,10 +227,8 @@ def extract_and_build_result(data, by_cat, source_file, region_metadata=None):
             "is_graph_mode": is_graph_mode,
             "graph_launch_count": len(graph_launches),
             "categories": categories_found,
-            "has_python_stack": len(callstack) > 0,
         },
         "kernels": kernels,
-        "python_callstack": callstack,
     }
     if region_metadata:
         result["region_metadata"] = region_metadata
@@ -325,7 +307,6 @@ def main():
     _stamp_raw_uid(data)
     kernels = extract_kernel_sequence(by_cat)
     is_graph_mode, graph_launches = detect_graph_mode(by_cat)
-    callstack = extract_python_callstack(by_cat)
 
     errors = run_assertions(data, by_cat, kernels, is_graph_mode)
     if errors:
