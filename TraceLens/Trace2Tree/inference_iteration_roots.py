@@ -182,8 +182,6 @@ def _find_repeating_period(
     return best.period, list(names[best.start : best.start + best.period]), best.start
 
 
-
-
 def _entry_roots(tree: TraceToTree) -> List[dict]:
     """Parentless per-thread entry nodes, deduped, honoring current parents."""
     seen: set = set()
@@ -330,7 +328,3 @@ def _blocks_by_pattern(
         else:
             break  # cannot complete another unit -- past the end of the loop
     return blocks
-
-
-
-
