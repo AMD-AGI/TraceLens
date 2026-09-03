@@ -1806,6 +1806,19 @@ class _ForwardOperationExtractor:
                 }
             )
 
+    def _inject_iterator_predecessor(self, before: int, iterable_producer: str) -> None:
+        """Add the loop iterator as a predecessor of operations that use the loop var."""
+        for index in range(before, len(self.operations)):
+            op = self.operations[index]
+            if iterable_producer not in op.predecessors:
+                self.operations[index] = ForwardOperation(
+                    **{
+                        **op.__dict__,
+                        "predecessors": (iterable_producer, *op.predecessors),
+                    }
+                )
+                break
+
     @staticmethod
     def _assigned_names(statements: list[ast.stmt]) -> set[str]:
         names: set[str] = set()
@@ -1828,6 +1841,13 @@ class _ForwardOperationExtractor:
                     node.target, ast.Name
                 ):
                     names.add(node.target.id)
+                elif (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr.endswith("_")
+                    and isinstance(node.func.value, ast.Name)
+                ):
+                    names.add(node.func.value.id)
         return names
 
     @staticmethod
@@ -1958,6 +1978,12 @@ class _ForwardOperationExtractor:
                             }
                         )
                         break
+                    if isinstance(stmt.target, ast.Name):
+                        self.var_producer[stmt.target.id] = iterable_producer
+                    elif isinstance(stmt.target, (ast.Tuple, ast.List)):
+                        for elt in stmt.target.elts:
+                            if isinstance(elt, ast.Name):
+                                self.var_producer[elt.id] = iterable_producer
                 before_env = dict(self.var_producer)
                 before = len(self.operations)
                 self.statements(stmt.body, condition=condition)
@@ -1967,6 +1993,8 @@ class _ForwardOperationExtractor:
                     else "loop: repeated"
                 )
                 self._annotate_operations_since(before, detail)
+                if iterable_producer is not None:
+                    self._inject_iterator_predecessor(before, iterable_producer)
                 operation_ids = tuple(
                     operation.attr_name for operation in self.operations[before:]
                 )
