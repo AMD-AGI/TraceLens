@@ -706,7 +706,7 @@ def test_labels_apply_preserves_existing_group_attrs_and_updates_subops():
 def test_shape_format_annotation_and_empty_shape_paths():
     spec = TensorSpec(("B", "2×H", "N∗D", "λ"), "bfloat16")
     assert shapes.format_shape(spec) == "B x 2xH x N*D x "
-    assert shapes.format_shape_tensor(spec) == "Bx2xHxN*Dx"
+    assert shapes.format_shape_tensor(spec) == "Bx2xHxN*Dx bfloat16"
     assert shapes.format_shape_bracket(spec) == "[B, 2×H, N∗D, λ]"
 
     node = {

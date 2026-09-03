@@ -39,7 +39,10 @@ def format_shape_with_dtype(spec: TensorSpec) -> str:
 
 def format_shape_tensor(spec: TensorSpec) -> str:
     """Compact ``BxSxH`` shape for outputsMetadata tensor_shape conversion."""
-    return "x".join(_font_safe(dim) for dim in spec.shape)
+    dims = "x".join(_font_safe(dim) for dim in spec.shape)
+    if not dims or not spec.dtype:
+        return dims
+    return f"{dims} {spec.dtype}"
 
 
 def format_shape_bracket(spec: TensorSpec) -> str:
