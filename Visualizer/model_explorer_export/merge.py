@@ -312,9 +312,18 @@ def _set_input_port_metadata(node: dict[str, Any], input_id: str, label: str) ->
 def _apply_labeled_external_entry_ports(
     entry_ports: list[tuple[str | None, dict[str, Any], dict[str, Any]]],
     internal_ids: set[str],
+    node_by_id: dict[str, dict[str, Any]] | None = None,
 ) -> bool:
-    """Keep real upstream nodes and label their entry edges instead of adding @input ports."""
+    """Label pipeline tensor ports directly; module boundaries get input blocks."""
     if not entry_ports:
+        return False
+    node_by_id = node_by_id or {}
+    tensor_ports_only = all(
+        _labeled_tensor_port_label(target)
+        or _labeled_tensor_port_label(node_by_id.get(edge["sourceNodeId"]))
+        for _label, edge, target in entry_ports
+    )
+    if not tensor_ports_only:
         return False
 
     labels = [label for label, _, _ in entry_ports if label]
@@ -571,14 +580,31 @@ def _replace_tile_with_group(
     tile = next((node for node in section_nodes if node["id"] == tile_id), None)
     if tile is None:
         return
-    incoming = tile.get("incomingEdges", [])
-    entries = [node for node in nested_nodes if _is_primary_section_input(node)]
+    incoming = list(tile.get("incomingEdges", []))
+    entries = [node for node in nested_nodes if _is_synthetic_input(node)]
     if not entries:
         entry_ids, _exits = _boundary_nodes(nested_nodes)
         entries = [node for node in nested_nodes if node["id"] in set(entry_ids)]
-    for entry in entries:
-        if incoming and not entry.get("incomingEdges"):
-            entry["incomingEdges"] = [dict(edge) for edge in incoming]
+    unclaimed = list(incoming)
+    empty_entries = [entry for entry in entries if not entry.get("incomingEdges")]
+    for entry in empty_entries:
+        label = _node_attr(entry, "port_label") or str(entry.get("label", ""))
+        matches = [
+            edge
+            for edge in unclaimed
+            if (_edge_port_label(edge) or str(edge.get("targetNodeInputId", "")))
+            == label
+        ]
+        if matches:
+            entry["incomingEdges"] = [dict(edge) for edge in matches]
+            unclaimed = [edge for edge in unclaimed if edge not in matches]
+    unresolved = [entry for entry in empty_entries if not entry.get("incomingEdges")]
+    if len(unresolved) == len(unclaimed):
+        for entry, edge in zip(unresolved, unclaimed):
+            entry["incomingEdges"] = [dict(edge)]
+        unclaimed = []
+    elif len(unresolved) == 1 and unclaimed:
+        unresolved[0]["incomingEdges"] = [dict(edge) for edge in unclaimed]
 
     section_nodes.remove(tile)
     if exit_ref is None:
@@ -802,39 +828,49 @@ def _group_entry_buckets(
     buckets: dict[frozenset[tuple[str, str]], list[dict[str, Any]]] = {}
     order: list[frozenset[tuple[str, str]]] = []
     for node in entry_nodes:
-        sources = frozenset(
+        sources = [
             (edge["sourceNodeId"], edge.get("sourceNodeOutputId", "0"))
             for edge in node.get("incomingEdges", [])
             if edge["sourceNodeId"] not in internal_ids
+        ]
+        source_groups = (
+            [frozenset({source}) for source in sources] if sources else [frozenset()]
         )
-        if sources not in buckets:
-            buckets[sources] = []
-            order.append(sources)
-        buckets[sources].append(node)
+        for source_group in source_groups:
+            if source_group not in buckets:
+                buckets[source_group] = []
+                order.append(source_group)
+            buckets[source_group].append(node)
     return [(sources, buckets[sources]) for sources in order]
 
 
 def _entry_bucket_label(
+    sources: frozenset[tuple[str, str]],
     entries: list[dict[str, Any]],
     internal_ids: set[str],
     node_by_id: dict[str, dict[str, Any]],
 ) -> str | None:
     """Name a boundary input after the tensor arriving on it, when it is known."""
     for node in entries:
-        # The consuming step records which forward parameter it reads, which names
-        # the boundary more reliably than anything recoverable from the edge.
-        parameter = _node_attr(node, "boundary_input")
-        if parameter:
-            return parameter
-    for node in entries:
         for edge in node.get("incomingEdges", []):
-            if edge["sourceNodeId"] in internal_ids:
+            source = (edge["sourceNodeId"], edge.get("sourceNodeOutputId", "0"))
+            if source not in sources:
                 continue
             label = _edge_port_label(edge) or _labeled_tensor_port_label(
                 node_by_id.get(edge["sourceNodeId"])
             )
             if label:
                 return label
+    for node in entries:
+        # The consuming step records which forward parameter it reads, which names
+        # the boundary more reliably than anything recoverable from the edge.
+        parameter = _node_attr(node, "boundary_input")
+        external_count = sum(
+            edge["sourceNodeId"] not in internal_ids
+            for edge in node.get("incomingEdges", [])
+        )
+        if parameter and external_count == 1:
+            return parameter
     return None
 
 
@@ -870,11 +906,20 @@ def _inject_group_inputs(
             continue
 
         internal_ids = _namespace_internal_ids(section_nodes, namespace)
-        entry_ports = _collect_group_entry_ports(group_nodes, internal_ids, node_by_id)
+        scoped_nodes = [
+            node
+            for node in section_nodes
+            if node in group_nodes
+            or (
+                node["id"] in internal_ids
+                and _node_attr(node, "boundary_input") is not None
+            )
+        ]
+        entry_ports = _collect_group_entry_ports(scoped_nodes, internal_ids, node_by_id)
         entry_nodes: list[dict[str, Any]] = []
         outside_sources: set[tuple[str, str]] = set()
 
-        for node in group_nodes:
+        for node in scoped_nodes:
             incoming = list(node.get("incomingEdges", []))
             external = [
                 edge for edge in incoming if edge["sourceNodeId"] not in internal_ids
@@ -892,7 +937,7 @@ def _inject_group_inputs(
         if not entry_nodes:
             continue
 
-        if _apply_labeled_external_entry_ports(entry_ports, internal_ids):
+        if _apply_labeled_external_entry_ports(entry_ports, internal_ids, node_by_id):
             continue
 
         group_ids = [node["id"] for node in group_nodes]
@@ -900,8 +945,8 @@ def _inject_group_inputs(
 
         buckets = _group_entry_buckets(entry_nodes, internal_ids)
         bucket_labels = [
-            _entry_bucket_label(entries, internal_ids, node_by_id)
-            for _sources, entries in buckets
+            _entry_bucket_label(sources, entries, internal_ids, node_by_id)
+            for sources, entries in buckets
         ]
         # Entry steps that read the same forward parameter share one tile even if
         # their edges were introduced separately. Distinct parameter names remain
@@ -943,6 +988,7 @@ def _inject_group_inputs(
         single = len(buckets) == 1
 
         used_labels: set[str] = set()
+        entry_inputs: dict[str, list[str]] = {}
         for (sources, entries), label in zip(buckets, bucket_labels):
             if not label:
                 label = _infer_group_input_label(group_nodes, namespace)
@@ -972,20 +1018,26 @@ def _inject_group_inputs(
                 ]
 
             for entry in entries:
-                incoming = list(entry.get("incomingEdges", []))
-                internal = [
-                    edge for edge in incoming if edge["sourceNodeId"] in internal_ids
-                ]
-                entry["incomingEdges"] = internal + [
-                    {
-                        "sourceNodeId": input_id,
-                        "sourceNodeOutputId": "0",
-                        "targetNodeInputId": str(len(internal)),
-                    }
-                ]
+                entry_inputs.setdefault(entry["id"], []).append(input_id)
 
             section_nodes.append(input_node)
             node_by_id[input_id] = input_node
+
+        for entry_id, input_ids in entry_inputs.items():
+            entry = node_by_id[entry_id]
+            internal = [
+                edge
+                for edge in entry.get("incomingEdges", [])
+                if edge["sourceNodeId"] in internal_ids
+            ]
+            entry["incomingEdges"] = internal + [
+                {
+                    "sourceNodeId": input_id,
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": str(len(internal) + index),
+                }
+                for index, input_id in enumerate(input_ids)
+            ]
 
 
 def _tile_prefix_attr_name(prefix: str) -> str:
@@ -1369,6 +1421,72 @@ def _mirror_boundary_outputs(nodes: list[dict[str, Any]]) -> None:
             )
             for _target, edge in consumers:
                 edge["sourceNodeId"] = mirror_id
+    nodes.extend(mirrors)
+
+
+def _mirror_boundary_inputs(nodes: list[dict[str, Any]]) -> None:
+    """Pair multi-input submodule ports with same-named nodes in the caller.
+
+    Input blocks live inside the callee namespace. Mirroring each port into the
+    parent makes the call site show every operand, matching the two-sided boundary
+    already used for modules with multiple outputs.
+    """
+    inputs_per_namespace: dict[str, int] = {}
+    for node in nodes:
+        if _is_synthetic_input(node):
+            namespace = str(node.get("namespace", ""))
+            inputs_per_namespace[namespace] = inputs_per_namespace.get(namespace, 0) + 1
+
+    mirrors: list[dict[str, Any]] = []
+    for node in list(nodes):
+        if not _is_synthetic_input(node):
+            continue
+        namespace = str(node.get("namespace", ""))
+        if not namespace or inputs_per_namespace.get(namespace, 0) < 2:
+            continue
+        internal = _namespace_internal_ids(nodes, namespace)
+        external = [
+            edge
+            for edge in node.get("incomingEdges", [])
+            if edge.get("sourceNodeId") not in internal
+        ]
+        if not external:
+            continue
+        input_id = str(node["id"])
+        port = _node_attr(node, "port_label") or str(node.get("label", "input"))
+        mirror_id = f"{input_id.replace('/@input', '/@input_mirror', 1)}^{port}"
+        parent_namespace = namespace.rsplit("/", 1)[0] if "/" in namespace else ""
+        mirrors.append(
+            {
+                "id": mirror_id,
+                "label": port,
+                "namespace": parent_namespace,
+                "attrs": [
+                    {"key": "synthetic", "value": "@input_mirror"},
+                    {"key": "port_label", "value": port},
+                ],
+                "style": _input_style(),
+                "incomingEdges": [dict(edge) for edge in external],
+                "outputsMetadata": [
+                    {
+                        "id": port,
+                        "attrs": [{"key": "port_label", "value": port}],
+                    }
+                ],
+            }
+        )
+        node["incomingEdges"] = [
+            edge
+            for edge in node.get("incomingEdges", [])
+            if edge.get("sourceNodeId") in internal
+        ] + [
+            {
+                "sourceNodeId": mirror_id,
+                "sourceNodeOutputId": port,
+                "targetNodeInputId": port,
+                "metadata": {"port_label": port},
+            }
+        ]
     nodes.extend(mirrors)
 
 
@@ -2551,6 +2669,7 @@ def build_merged_model_graph(
         )
     _prune_unconsumed_outputs(nodes)
     _label_boundary_outputs_by_port(nodes)
+    _mirror_boundary_inputs(nodes)
     _mirror_boundary_outputs(nodes)
 
     if shape_inferencer is not None:

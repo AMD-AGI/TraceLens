@@ -344,15 +344,28 @@ def test_glm53_gated_norm_boundary_inputs_come_from_their_own_producers():
     }
     assert set(inputs) == {"hidden_states", "gate"}
 
+    node_by_id = {node["id"]: node for node in graph["nodes"]}
+
+    def outer_sources(input_node):
+        sources = []
+        for edge in input_node.get("incomingEdges", []):
+            source = node_by_id[edge["sourceNodeId"]]
+            if any(
+                attr.get("key") == "synthetic" and attr.get("value") == "@input_mirror"
+                for attr in source.get("attrs", [])
+            ):
+                sources.extend(
+                    incoming["sourceNodeId"]
+                    for incoming in source.get("incomingEdges", [])
+                )
+            else:
+                sources.append(edge["sourceNodeId"])
+        return sources
+
     # The gate arrives from the projection that computes it, not from the spine.
-    gate_sources = [
-        edge["sourceNodeId"] for edge in inputs["gate"].get("incomingEdges", [])
-    ]
+    gate_sources = outer_sources(inputs["gate"])
     assert gate_sources and all("g_b_proj" in source for source in gate_sources)
-    hidden_sources = [
-        edge["sourceNodeId"]
-        for edge in inputs["hidden_states"].get("incomingEdges", [])
-    ]
+    hidden_sources = outer_sources(inputs["hidden_states"])
     assert hidden_sources and not any("g_b_proj" in item for item in hidden_sources)
 
     gate_consumers = {
@@ -767,6 +780,82 @@ def test_glm53_expert_helper_stays_inside_loop_without_cycle():
         for node in helper_nodes
     )
     _assert_export_is_acyclic(graph["nodes"])
+
+
+def test_glm53_moe_keeps_only_the_live_residual_add():
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    prefix = _linear_attn_variant_prefix(spec)
+    nodes = graph["nodes"]
+
+    assert not any(
+        node["id"].startswith(f"{prefix}/mlp/residual_add:") for node in nodes
+    )
+    add = next(
+        node
+        for node in nodes
+        if node["id"].startswith(f"{prefix}/mlp/")
+        and ":@op_l206_c24_add:" in node["id"]
+    )
+    assert any(
+        edge["sourceNodeId"] == add["id"]
+        for node in nodes
+        for edge in node.get("incomingEdges", [])
+    )
+
+
+def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
+    pytest.importorskip("huggingface_hub")
+    from visualizer.block_tree import build_block_node
+    from visualizer.computation_graph import build_computation_graph
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    prefix = _linear_attn_variant_prefix(spec)
+    loop_inputs = [
+        node
+        for node in graph["nodes"]
+        if node["id"].startswith(f"{prefix}/mlp/")
+        and node.get("namespace", "").endswith("/Glm5NextTextExperts/Loop_repeated")
+        and any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@input"
+            for attr in node.get("attrs", [])
+        )
+    ]
+    assert any(node["label"] == "final" for node in loop_inputs)
+    assert all(len(node.get("incomingEdges", [])) <= 1 for node in loop_inputs)
+    assert not any(
+        "nonzero" in edge["sourceNodeId"]
+        for node in loop_inputs
+        for edge in node.get("incomingEdges", [])
+    )
+    expert_input_mirrors = [
+        node
+        for node in graph["nodes"]
+        if node["id"].startswith(f"{prefix}/mlp/")
+        and ":experts:" in node["id"]
+        and any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@input_mirror"
+            for attr in node.get("attrs", [])
+        )
+        and node.get("namespace", "").endswith("/Glm5NextTextMoE")
+    ]
+    assert {"hidden_states", "top_k_index", "top_k_weights"} <= {
+        node["label"] for node in expert_input_mirrors
+    }
+
+    experts = build_block_node(
+        attr_name="experts",
+        class_name="Glm5NextTextExperts",
+        registry=spec.class_registry,
+        basic_ops=spec.basic_ops,
+        infer_init_steps=True,
+    )
+    computation = build_computation_graph(experts, basic_ops=spec.basic_ops)
+    index_add = next(node for node in computation.nodes if node.label == "Index add")
+    assert index_add.block is not None
+    assert index_add.block.is_basic
 
 
 def test_glm53_decoder_boundary_keeps_hyper_stream_shape():

@@ -817,7 +817,21 @@ def _segment_for_step(node: BlockNode, step: BlockNode) -> ComputationSegment:
         )
 
     if has_residual_side and not has_prior_side:
-        return ResidualAddSegment(module=step, sides=list(side_specs))
+        # Some forwards expose the residual branch call and its explicit Add as
+        # separate operations. In that case the call is only a parallel side feed;
+        # synthesizing another residual Add leaves a duplicate dead combine tile.
+        step_index = next(
+            (index for index, child in enumerate(node.children) if child is step),
+            -1,
+        )
+        explicit_add = any(
+            index > step_index
+            and child.label == "Add"
+            and step.attr_name in child.operation_predecessors
+            for index, child in enumerate(node.children)
+        )
+        if not explicit_add:
+            return ResidualAddSegment(module=step, sides=list(side_specs))
 
     if is_method_wrapper(step):
         return SideCombineSegment(
@@ -897,6 +911,16 @@ def _boundary_input_name(
     # to whichever edge happened to reach it.
     if operation.label == "Zeros like" and not operation.predecessors:
         return cls.forward_input_name
+    mutated = next(
+        (
+            detail.removeprefix("mutates: ")
+            for detail in operation.details
+            if detail.startswith("mutates: ")
+        ),
+        None,
+    )
+    if mutated:
+        return mutated
     if operation.param_inputs:
         return operation.param_inputs[0]
     return None

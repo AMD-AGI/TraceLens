@@ -1199,6 +1199,11 @@ def _wire_inline_frame_dangling_outputs(graph: ComputationGraph) -> None:
         for index in members:
             if index in sources_inside or index == exit_index:
                 continue
+            block = graph.nodes[index].block
+            if block is not None and "loop iterator" in block.details:
+                # The iterable controls how often the frame executes; it is not a
+                # tensor operand of the frame's return value.
+                continue
             if (index, exit_index) not in graph.links:
                 graph.links.append((index, exit_index))
 

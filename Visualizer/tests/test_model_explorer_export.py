@@ -309,6 +309,52 @@ def test_inject_group_inputs_adds_namespace_input_port():
     ]
 
 
+def test_inject_group_inputs_splits_multiple_operands_into_input_blocks():
+    from model_explorer_export.merge import _inject_group_inputs
+
+    namespace = "Experts/Loop_repeated"
+    section_nodes = [
+        {"id": "final", "label": "Zeros like", "namespace": "Experts"},
+        {"id": "indices", "label": "Where", "namespace": "Experts"},
+        {
+            "id": "index-add",
+            "label": "Index add",
+            "namespace": namespace,
+            "attrs": [{"key": "boundary_input", "value": "final"}],
+            "incomingEdges": [
+                {
+                    "sourceNodeId": "final",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                },
+                {
+                    "sourceNodeId": "indices",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "1",
+                },
+            ],
+        },
+    ]
+
+    _inject_group_inputs(section_nodes)
+
+    inputs = [
+        node
+        for node in section_nodes
+        if node.get("namespace") == namespace
+        and any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@input"
+            for attr in node.get("attrs", [])
+        )
+    ]
+    assert len(inputs) == 2
+    assert all(len(node.get("incomingEdges", [])) == 1 for node in inputs)
+    index_add = next(node for node in section_nodes if node["id"] == "index-add")
+    assert {edge["sourceNodeId"] for edge in index_add["incomingEdges"]} == {
+        node["id"] for node in inputs
+    }
+
+
 def test_replace_tile_with_group_puts_nested_diagram_in_the_tile_slot():
     from model_explorer_export.merge import _replace_tile_with_group
 
@@ -369,6 +415,107 @@ def test_replace_tile_with_group_puts_nested_diagram_in_the_tile_slot():
     assert [item["sourceNodeId"] for item in by_id[consumer]["incomingEdges"]] == [
         nested_exit
     ]
+
+
+def test_replace_tile_with_group_distributes_named_inputs_to_nested_ports():
+    from model_explorer_export.merge import _replace_tile_with_group
+
+    def edge(source: str, label: str) -> dict[str, Any]:
+        return {
+            "sourceNodeId": source,
+            "sourceNodeOutputId": "0",
+            "targetNodeInputId": label,
+            "metadata": {"port_label": label},
+        }
+
+    tile = "moe/experts"
+    namespace = "MoE/Experts"
+    nested_inputs = [
+        {
+            "id": f"{tile}/@input:{label}",
+            "label": label,
+            "namespace": namespace,
+            "attrs": [
+                {"key": "synthetic", "value": "@input"},
+                {"key": "port_label", "value": label},
+            ],
+        }
+        for label in ("hidden_states", "top_k_index", "top_k_weights")
+    ]
+    section_nodes = [
+        {
+            "id": tile,
+            "label": "Experts",
+            "namespace": "MoE",
+            "incomingEdges": [
+                edge("tokens", "hidden_states"),
+                edge("router-index", "top_k_index"),
+                edge("router-weight", "top_k_weights"),
+            ],
+        },
+        *nested_inputs,
+    ]
+
+    _replace_tile_with_group(section_nodes, nested_inputs, tile_id=tile)
+
+    by_label = {node["label"]: node for node in nested_inputs}
+    assert by_label["hidden_states"]["incomingEdges"][0]["sourceNodeId"] == "tokens"
+    assert by_label["top_k_index"]["incomingEdges"][0]["sourceNodeId"] == "router-index"
+    assert (
+        by_label["top_k_weights"]["incomingEdges"][0]["sourceNodeId"] == "router-weight"
+    )
+
+
+def test_mirror_boundary_inputs_exposes_multi_input_ports_in_parent():
+    from model_explorer_export.merge import _mirror_boundary_inputs
+
+    namespace = "MoE/Experts"
+    nodes = [
+        {"id": "tokens", "label": "tokens", "namespace": "MoE"},
+        {"id": "indices", "label": "indices", "namespace": "MoE"},
+        *[
+            {
+                "id": f"experts/@input:{label}",
+                "label": label,
+                "namespace": namespace,
+                "attrs": [
+                    {"key": "synthetic", "value": "@input"},
+                    {"key": "port_label", "value": label},
+                ],
+                "incomingEdges": [
+                    {
+                        "sourceNodeId": source,
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": label,
+                    }
+                ],
+            }
+            for label, source in (
+                ("hidden_states", "tokens"),
+                ("top_k_index", "indices"),
+            )
+        ],
+    ]
+
+    _mirror_boundary_inputs(nodes)
+
+    mirrors = [
+        node
+        for node in nodes
+        if any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@input_mirror"
+            for attr in node.get("attrs", [])
+        )
+    ]
+    assert {node["label"] for node in mirrors} == {
+        "hidden_states",
+        "top_k_index",
+    }
+    assert all(node["namespace"] == "MoE" for node in mirrors)
+    inner = next(node for node in nodes if node["id"] == "experts/@input:top_k_index")
+    assert inner["incomingEdges"][0]["sourceNodeId"].endswith(
+        "@input_mirror:top_k_index^top_k_index"
+    )
 
 
 def test_inject_group_inputs_treats_nested_ops_as_internal():
@@ -606,7 +753,11 @@ def test_kimi_layer_variants_export_three_decoder_splits():
         for node in graph["nodes"]
         if node.get("label") == "beta" and node.get("namespace") == pipeline_ns
     )
-    assert not any("/@input:" in node.get("id", "") for node in graph["nodes"])
+    assert not any(
+        "/@input:" in node.get("id", "")
+        and node.get("namespace", "").startswith(pipeline_ns)
+        for node in graph["nodes"]
+    )
     for tensor, label in (
         (q_tensor, "q"),
         (k_tensor, "k"),

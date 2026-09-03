@@ -1715,6 +1715,12 @@ class _ForwardOperationExtractor:
                 else ("float32" if call_name == "float" else "")
             )
             details.append(f"dtype: {dtype}" if dtype else "dtype cast")
+        if (
+            call_name.endswith("_")
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+        ):
+            details.append(f"mutates: {node.func.value.id}")
         producer = self._emit(
             node,
             label,
@@ -1913,6 +1919,18 @@ class _ForwardOperationExtractor:
                 continue
             if isinstance(stmt, ast.For):
                 iteration_count = self._range_iteration_count(stmt)
+                iterable_producer, _iterable_external = self.expression(stmt.iter)
+                if iterable_producer is not None:
+                    for index, operation in enumerate(self.operations):
+                        if operation.attr_name != iterable_producer:
+                            continue
+                        self.operations[index] = ForwardOperation(
+                            **{
+                                **operation.__dict__,
+                                "details": (*operation.details, "loop iterator"),
+                            }
+                        )
+                        break
                 before_env = dict(self.var_producer)
                 before = len(self.operations)
                 self.statements(stmt.body, condition=condition)
