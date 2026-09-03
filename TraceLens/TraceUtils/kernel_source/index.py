@@ -300,7 +300,11 @@ def _cache_path(fp: str) -> Path:
     else:
         # Per-user temp subdir so users on a shared box don't share a cache.
         # POSIX uid (stable, no PII) when available, else the login name.
-        uid = str(os.getuid()) if hasattr(os, "getuid") else (getpass.getuser() or "shared")
+        uid = (
+            str(os.getuid())
+            if hasattr(os, "getuid")
+            else (getpass.getuser() or "shared")
+        )
         d = Path(tempfile.gettempdir()) / f"tracelens_ksi_{uid}"
     try:
         d.mkdir(parents=True, exist_ok=True)

@@ -301,8 +301,12 @@ class TestDemangle:
     def test_repeated_calls_do_not_cross_contaminate_cache(self):
         # Two symbols sharing a long common prefix must not leak a cached result
         # from one into the other (guards the functools.lru_cache on base_symbol).
-        a = base_symbol("_ZN4vllm9attention22paged_attention_kernelIfLi128EEEvPT_PKS2_S5_S5_i")
-        b = base_symbol("_ZN4vllm9attention22paged_attention_kernelIsLi64EEEvPT_PKS2_S5_S5_i")
+        a = base_symbol(
+            "_ZN4vllm9attention22paged_attention_kernelIfLi128EEEvPT_PKS2_S5_S5_i"
+        )
+        b = base_symbol(
+            "_ZN4vllm9attention22paged_attention_kernelIsLi64EEEvPT_PKS2_S5_S5_i"
+        )
         assert a == "paged_attention_kernel"
         assert b == "paged_attention_kernel"
         assert base_symbol("_ZN2ns6kernelEPf") == "kernel"
@@ -318,7 +322,9 @@ class TestPatchabilityGate:
         assert v.kind == "tensile_precompiled"
 
     def test_miopen_by_op_name(self):
-        v = classify_patchability("some_conv_kernel", op_name="aten::miopen_convolution")
+        v = classify_patchability(
+            "some_conv_kernel", op_name="aten::miopen_convolution"
+        )
         assert v.patchable is False
         assert v.kind == "miopen_precompiled"
 
@@ -454,7 +460,9 @@ class TestNativeResolve:
         assert loc.framework == "vllm"
 
     def test_resolve_source_path_miss(self, framework_tree):
-        assert resolve_source_path("no_such_kernel_xyz", [framework_tree["root"]]) is None
+        assert (
+            resolve_source_path("no_such_kernel_xyz", [framework_tree["root"]]) is None
+        )
 
     def test_resolve_hit_returns_symbol_index(self, framework_tree):
         res = resolve("paged_attention_kernel", [framework_tree["root"]])
@@ -515,7 +523,9 @@ class TestNativeResolve:
         root = tmp_path / "csrc"
         root.mkdir()
         f = root / "k.cu"
-        f.write_text("__global__ void real_kernel(int* p) { p[0]=0; }\n", encoding="utf-8")
+        f.write_text(
+            "__global__ void real_kernel(int* p) { p[0]=0; }\n", encoding="utf-8"
+        )
         idx = index_mod.build_index([root])
         # Rewrite the file so the indexed symbol is gone -> verification fails.
         f.write_text("// symbol removed\n", encoding="utf-8")
@@ -690,7 +700,9 @@ class TestContract:
         assert any("invalid confidence" in p for p in problems)
 
     def test_split_line_suffix(self):
-        path, line, func = contract.split_line_suffix("/repo/moe.py(247): _grouped_gemm")
+        path, line, func = contract.split_line_suffix(
+            "/repo/moe.py(247): _grouped_gemm"
+        )
         assert path == "/repo/moe.py"
         assert line == 247
         assert func == "_grouped_gemm"
@@ -702,7 +714,12 @@ class TestContract:
         # Exists and under root -> canonicalized.
         assert contract.canonical_source_path(str(real), (str(tmp_path),)) != ""
         # Under root but does not exist -> rejected.
-        assert contract.canonical_source_path(str(tmp_path / "csrc" / "nope.cu"), (str(tmp_path),)) == ""
+        assert (
+            contract.canonical_source_path(
+                str(tmp_path / "csrc" / "nope.cu"), (str(tmp_path),)
+            )
+            == ""
+        )
         # Exists but outside the roots -> rejected.
         assert contract.canonical_source_path(str(real), ("/some/other/root",)) == ""
 

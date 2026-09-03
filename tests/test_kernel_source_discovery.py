@@ -125,7 +125,9 @@ def test_find_csrc_parent_checked_exactly_not_recursively(tmp_path, monkeypatch)
     pkg.mkdir(parents=True)
     nested_under_parent = repo_root / "some_other_dir" / "csrc"
     nested_under_parent.mkdir(parents=True)
-    (nested_under_parent / "kernel.cu").write_text("__global__ void k(){}", encoding="utf-8")
+    (nested_under_parent / "kernel.cu").write_text(
+        "__global__ void k(){}", encoding="utf-8"
+    )
     monkeypatch.setenv("TRACELENS_FRAMEWORK_SOURCE_ROOTS", f"vllm={pkg}")
     monkeypatch.setenv("TRACELENS_DISCOVER_ONLY", "vllm")
 
