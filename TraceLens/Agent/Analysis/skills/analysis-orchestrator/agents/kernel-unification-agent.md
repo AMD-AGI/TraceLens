@@ -112,7 +112,7 @@ keys.
 The orchestrator runs:
 
 ```bash
-python TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py apply-map \
+<prefix> python3 TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py apply-map \
     --labels-a <dir_a>/semantic_labels.json \
     --labels-b <dir_b>/semantic_labels.json \
     --name-a <name_a> --name-b <name_b> \

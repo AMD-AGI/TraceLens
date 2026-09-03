@@ -104,8 +104,10 @@ Fields per rule:
 
 ## Apply loop
 
+The orchestrator runs:
+
 ```bash
-python TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py apply-stem-rules \
+<prefix> python3 TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py apply-stem-rules \
     --labels-a <dir_a>/semantic_labels.json \
     --labels-b <dir_b>/semantic_labels.json \
     --name-a <name_a> --name-b <name_b> \

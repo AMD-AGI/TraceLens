@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 ---
 name: semantic-comparison-agent
-description: End-to-end semantic comparison of two graph-mode GPU traces. Runs deterministic breakdown per trace (extraction + tree context + classification + pattern finding + label assembly), then a name-first LLM kernel-name unification pass that establishes cross-trace matching anchors in the semantic_block field, followed by a comparison pipeline.
+description: End-to-end semantic comparison of two graph-mode GPU traces. Runs deterministic breakdown per trace (extraction + classification + pattern finding + label assembly), then a name-first LLM kernel-name unification pass that establishes cross-trace matching anchors in the semantic_block field, followed by a comparison pipeline.
 model: claude-opus-4-8
 ---
 
@@ -28,6 +28,12 @@ field, which the downstream comparison uses as its matching key.
 
 Use vendor-agnostic terminology (GPU kernels, vendor GEMM library, etc.)
 except when quoting actual kernel names from traces.
+
+**Command prefix.** All commands below run through `<prefix>`: read the command
+prefix path from your execution context (`<output_dir>/cache/cmd_prefix.txt`) and
+substitute the command for `{CMD}`. `<prefix>` is blank for local runs and wraps
+commands into the target environment otherwise. Shell control flow (`for`, `if`,
+`wait`) and variable assignments run in the driving shell and are not prefixed.
 
 ---
 
@@ -73,35 +79,35 @@ background jobs + `wait`.
 ```bash
 SCRIPTS=TraceLens/Agent/Analysis/semantic_analyses
 CLASSIFY=TraceLens/Agent/Analysis/utils/classify_kernels.py
-DIR_A=<output_dir>/_work/<name_a>
-DIR_B=<output_dir>/_work/<name_b>
-mkdir -p $DIR_A $DIR_B
+DIR_A=<output_dir>/work/<name_a>
+DIR_B=<output_dir>/work/<name_b>
+<prefix> mkdir -p $DIR_A $DIR_B
 
 run_breakdown() {
     local TRACE=$1 DIR=$2
 
     # Extract (auto-splits vLLM traces into region subdirs)
-    python $SCRIPTS/extract_trace_data.py $TRACE -o $DIR/
+    <prefix> python3 $SCRIPTS/extract_trace_data.py $TRACE -o $DIR/
 
     # Check whether extraction produced region subdirs or a flat file.
     # gpu_op_uid is stamped by extract_trace_data.py (raw-index UID aligned
     # with the perf report); no trace-tree build is needed.
-    if ls $DIR/*/extracted.json >/dev/null 2>&1; then
+    if <prefix> ls $DIR/*/extracted.json >/dev/null 2>&1; then
         for REGION in $DIR/*/; do
-            python $SCRIPTS/pattern_finder.py $REGION/extracted.json -o $REGION/pattern.json &
-            python $CLASSIFY $REGION/extracted.json -o $REGION/classified.json &
+            <prefix> python3 $SCRIPTS/pattern_finder.py $REGION/extracted.json -o $REGION/pattern.json &
+            <prefix> python3 $CLASSIFY $REGION/extracted.json -o $REGION/classified.json &
         done
         wait
         for REGION in $DIR/*/; do
-            python $SCRIPTS/build_semantic_labels.py \
+            <prefix> python3 $SCRIPTS/build_semantic_labels.py \
                 $REGION/extracted.json $REGION/classified.json $REGION/pattern.json \
                 -o $REGION/semantic_labels.json
         done
     else
-        python $SCRIPTS/pattern_finder.py $DIR/extracted.json -o $DIR/pattern.json &
-        python $CLASSIFY $DIR/extracted.json -o $DIR/classified.json &
+        <prefix> python3 $SCRIPTS/pattern_finder.py $DIR/extracted.json -o $DIR/pattern.json &
+        <prefix> python3 $CLASSIFY $DIR/extracted.json -o $DIR/classified.json &
         wait
-        python $SCRIPTS/build_semantic_labels.py \
+        <prefix> python3 $SCRIPTS/build_semantic_labels.py \
             $DIR/extracted.json $DIR/classified.json $DIR/pattern.json \
             -o $DIR/semantic_labels.json
     fi
@@ -113,8 +119,8 @@ wait
 ```
 
 **Output directories:**
-- Trace A: `<output_dir>/_work/<name_a>/`
-- Trace B: `<output_dir>/_work/<name_b>/`
+- Trace A: `<output_dir>/work/<name_a>/`
+- Trace B: `<output_dir>/work/<name_b>/`
 
 For multi-region traces, each directory contains per-region subdirs
 (e.g., `decode_only_3/`, `prefill_only_1024/`).
@@ -140,11 +146,11 @@ Scripts: `TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py`
 ### 2.1 Prepare Unification Context
 
 ```bash
-python TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py prepare-context \
-    --labels-a <output_dir>/_work/<name_a>/semantic_labels.json \
-    --labels-b <output_dir>/_work/<name_b>/semantic_labels.json \
+<prefix> python3 TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py prepare-context \
+    --labels-a <output_dir>/work/<name_a>/semantic_labels.json \
+    --labels-b <output_dir>/work/<name_b>/semantic_labels.json \
     --name-a <name_a> --name-b <name_b> \
-    -o <output_dir>/_work/kernel_unification_context.json
+    -o <output_dir>/work/kernel_unification_context.json
 ```
 
 ### 2.2 Stem Preprocessing (conditional, only if flagged)
@@ -154,13 +160,13 @@ the threshold, default 5000), the raw name set is too large for the LLM.
 Launch the subagent `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/kernel-stem-preprocessing-agent.md`, then:
 
 ```bash
-python TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py apply-stem-rules \
-    --labels-a <output_dir>/_work/<name_a>/semantic_labels.json \
-    --labels-b <output_dir>/_work/<name_b>/semantic_labels.json \
+<prefix> python3 TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py apply-stem-rules \
+    --labels-a <output_dir>/work/<name_a>/semantic_labels.json \
+    --labels-b <output_dir>/work/<name_b>/semantic_labels.json \
     --name-a <name_a> --name-b <name_b> \
-    --rules <output_dir>/_work/stem_rules.json \
-    --raw-to-stem <output_dir>/_work/raw_to_stem.json \
-    -o <output_dir>/_work/kernel_unification_context.json
+    --rules <output_dir>/work/stem_rules.json \
+    --raw-to-stem <output_dir>/work/raw_to_stem.json \
+    -o <output_dir>/work/kernel_unification_context.json
 ```
 
 Re-run until the printed stem count is within budget.
@@ -173,18 +179,18 @@ launch it with `kernel_unification_context.json` inline. For multi-region vLLM: 
 ### 2.4 Apply the Map
 
 ```bash
-python TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py apply-map \
-    --labels-a <output_dir>/_work/<name_a>/semantic_labels.json \
-    --labels-b <output_dir>/_work/<name_b>/semantic_labels.json \
+<prefix> python3 TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py apply-map \
+    --labels-a <output_dir>/work/<name_a>/semantic_labels.json \
+    --labels-b <output_dir>/work/<name_b>/semantic_labels.json \
     --name-a <name_a> --name-b <name_b> \
-    --map <output_dir>/_work/kernel_unification_map.json \
-    --raw-to-stem <output_dir>/_work/raw_to_stem.json   # only if 2.2 ran
+    --map <output_dir>/work/kernel_unification_map.json \
+    --raw-to-stem <output_dir>/work/raw_to_stem.json   # only if 2.2 ran
 ```
 
 ### 2.5 Verify Unification
 
 Check that `kernel_unification_context.json` and `kernel_unification_map.json`
-exist in `<output_dir>/_work/`, and that `apply-map` reported a non-empty
+exist in `<output_dir>/work/`, and that `apply-map` reported a non-empty
 shared vocabulary.
 
 ### 2.6 Coherence Pass (second pass, LLM)
@@ -201,12 +207,12 @@ meaningful one-sided buckets.
 
 ```bash
 KC=TraceLens/Agent/Analysis/semantic_analyses/kernel_coherence.py
-python $KC prepare-context \
-    --labels-a <output_dir>/_work/<name_a>/semantic_labels.json \
-    --labels-b <output_dir>/_work/<name_b>/semantic_labels.json \
+<prefix> python3 $KC prepare-context \
+    --labels-a <output_dir>/work/<name_a>/semantic_labels.json \
+    --labels-b <output_dir>/work/<name_b>/semantic_labels.json \
     --name-a <name_a> --name-b <name_b> \
     --neighbor-radius 1 \
-    -o <output_dir>/_work/kernel_coherence_context.json
+    -o <output_dir>/work/kernel_coherence_context.json
 ```
 
 ### 2.6b Launch coherence agent
@@ -214,18 +220,18 @@ python $KC prepare-context \
 Read
 `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/kernel-coherence-agent.md` and launch
 it with `kernel_coherence_context.json` inline. It writes
-`<output_dir>/_work/kernel_coherence_decisions.json` (`context_renames` +
+`<output_dir>/work/kernel_coherence_decisions.json` (`context_renames` +
 `fallback_remap_a` / `fallback_remap_b`), pairing same-context one-sided buckets
 across traces into new shared names.
 
 ### 2.6c Apply
 
 ```bash
-python $KC apply \
-    --context <output_dir>/_work/kernel_coherence_context.json \
-    --decisions <output_dir>/_work/kernel_coherence_decisions.json \
-    --audit-csv-a <output_dir>/_work/per_kernel_final_<name_a>.csv \
-    --audit-csv-b <output_dir>/_work/per_kernel_final_<name_b>.csv
+<prefix> python3 $KC apply \
+    --context <output_dir>/work/kernel_coherence_context.json \
+    --decisions <output_dir>/work/kernel_coherence_decisions.json \
+    --audit-csv-a <output_dir>/work/per_kernel_final_<name_a>.csv \
+    --audit-csv-b <output_dir>/work/per_kernel_final_<name_b>.csv
 ```
 
 `apply` rewrites `semantic_block` in place and prints residual one-sided symbols.
@@ -236,9 +242,9 @@ Revise decisions and re-run 2.6b--2.6c if meaningful (non-singleton) symbols rem
 ## Step 3: Generate TraceDiff Output
 
 ```bash
-python TraceLens/Agent/Analysis/semantic_analyses/generate_semantic_diff.py \
-    <output_dir>/_work/<name_a>/semantic_labels.json \
-    <output_dir>/_work/<name_b>/semantic_labels.json \
+<prefix> python3 TraceLens/Agent/Analysis/semantic_analyses/generate_semantic_diff.py \
+    <output_dir>/work/<name_a>/semantic_labels.json \
+    <output_dir>/work/<name_b>/semantic_labels.json \
     --name-a <name_a> --name-b <name_b> \
     -o <output_dir>/tracediff_output/
 ```
@@ -259,20 +265,20 @@ This is a **final deliverable** directory for downstream TraceDiff consumers.
 
 **Single-region mode:**
 ```bash
-python TraceLens/Agent/Analysis/semantic_analyses/match_and_compare.py \
-    <output_dir>/_work/<name_a>/semantic_labels.json \
-    <output_dir>/_work/<name_b>/semantic_labels.json \
+<prefix> python3 TraceLens/Agent/Analysis/semantic_analyses/match_and_compare.py \
+    <output_dir>/work/<name_a>/semantic_labels.json \
+    <output_dir>/work/<name_b>/semantic_labels.json \
     --name-a <name_a> --name-b <name_b> \
-    -o <output_dir>/_work/comparison.csv
+    -o <output_dir>/work/comparison.csv
 ```
 
 **Multi-region mode (vLLM):**
 ```bash
-python TraceLens/Agent/Analysis/semantic_analyses/match_and_compare.py \
-    --regions-dir-a <output_dir>/_work/<name_a> \
-    --regions-dir-b <output_dir>/_work/<name_b> \
+<prefix> python3 TraceLens/Agent/Analysis/semantic_analyses/match_and_compare.py \
+    --regions-dir-a <output_dir>/work/<name_a> \
+    --regions-dir-b <output_dir>/work/<name_b> \
     --name-a <name_a> --name-b <name_b> \
-    -o <output_dir>/_work/comparison.csv
+    -o <output_dir>/work/comparison.csv
 ```
 
 ---
@@ -288,5 +294,5 @@ python TraceLens/Agent/Analysis/semantic_analyses/match_and_compare.py \
 
 ## Final Deliverables
 
-- `<output_dir>/_work/` -- per-trace `semantic_labels.json`, the unification/coherence JSON artifacts, `per_kernel_final_<name>.csv`, and `comparison.csv`
+- `<output_dir>/work/` -- per-trace `semantic_labels.json`, the unification/coherence JSON artifacts, `per_kernel_final_<name>.csv`, and `comparison.csv`
 - `<output_dir>/tracediff_output/` -- TraceDiff deliverables (see Step 3)

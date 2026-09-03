@@ -115,8 +115,10 @@ Resolution order applied per kernel (see `apply`):
 
 ## Apply + verify
 
+The orchestrator runs:
+
 ```bash
-python TraceLens/Agent/Analysis/semantic_analyses/kernel_coherence.py apply \
+<prefix> python3 TraceLens/Agent/Analysis/semantic_analyses/kernel_coherence.py apply \
     --context <out_dir>/kernel_coherence_context.json \
     --decisions <out_dir>/kernel_coherence_decisions.json \
     --audit-csv-a <out_dir>/per_kernel_final_<name_a>.csv \
