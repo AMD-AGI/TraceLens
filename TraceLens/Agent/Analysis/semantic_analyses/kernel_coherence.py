@@ -56,14 +56,11 @@ Usage:
 import argparse
 import csv
 import json
-import os
 import sys
 from collections import OrderedDict, defaultdict
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kernel_runlength import (
     collapse_consecutive,
-    load_sequence,
     run_index_per_kernel,
     shared_neighbor_windows_skip_non_shared,
 )

@@ -28,12 +28,6 @@ import json
 import os
 import sys
 
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-_repo_root = os.path.abspath(os.path.join(_this_dir, "..", "..", "..", ".."))
-if _repo_root not in sys.path:  # pragma: no cover
-    sys.path.insert(0, _repo_root)
-if _this_dir not in sys.path:  # pragma: no cover
-    sys.path.insert(0, _this_dir)
 
 from TraceLens.util import DataLoader
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
