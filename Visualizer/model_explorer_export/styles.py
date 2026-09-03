@@ -228,6 +228,12 @@ def detail_tile_style(
         return input_port_style()
     if synthetic == "@output":
         return output_port_style()
+    if synthetic == "@kernel_port":
+        return {
+            "backgroundColor": "#e8daef",
+            "textColor": _DARK_TEXT,
+            "borderColor": "#7d3c98",
+        }
     if synthetic == "@loop_carried":
         return {
             "backgroundColor": "#f9e79f",

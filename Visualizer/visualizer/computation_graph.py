@@ -264,6 +264,103 @@ def _lookup_param_entry(
     return default
 
 
+_KERNEL_CLASS_NAMES = frozenset(
+    {"AttentionOp", "KernelOp", "AttentionMerge"}
+)
+
+SYNTHETIC_KERNEL_PORT = "@kernel_port"
+
+
+def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
+    """Insert small port nodes for named inputs/outputs on kernel tiles.
+
+    For every kernel (attention/GPU kernel) node that has labeled incoming
+    edges, create a port node per label and rewire:
+    ``source → kernel`` becomes ``source → port_node(label) → kernel``.
+
+    When the kernel has more than one labeled outgoing edge, do the same
+    for outputs: ``kernel → target`` becomes ``kernel → port_node(label) → target``.
+    """
+    kernel_indices = [
+        index
+        for index, spec in enumerate(graph.nodes)
+        if spec.block is not None
+        and spec.block.class_name in _KERNEL_CLASS_NAMES
+    ]
+    for kernel_index in kernel_indices:
+        # --- Input ports ---
+        labeled_inputs: list[tuple[int, str]] = []
+        for source, target in graph.links:
+            if target != kernel_index:
+                continue
+            label = graph.link_port_labels.get((source, target))
+            if label:
+                labeled_inputs.append((source, label))
+
+        if labeled_inputs:
+            # Remove the labeled edges.
+            remove_in: set[tuple[int, int]] = {
+                (src, kernel_index) for src, _ in labeled_inputs
+            }
+            graph.links = [lk for lk in graph.links if lk not in remove_in]
+
+            for source, label in labeled_inputs:
+                graph.link_port_labels.pop((source, kernel_index), None)
+                safe_label = label.replace("/", "_")
+                port_index = _add_node(
+                    graph,
+                    key=f"@kernel_in:{kernel_index}:{safe_label}",
+                    label=label,
+                    synthetic=SYNTHETIC_KERNEL_PORT,
+                )
+                graph.links.append((source, port_index))
+                graph.links.append((port_index, kernel_index))
+
+
+
+def _add_kernel_output_port_nodes(graph: ComputationGraph) -> None:
+    """Insert port nodes for labeled outputs on kernel tiles with ≥2 outgoing edges."""
+    kernel_indices = [
+        index
+        for index, spec in enumerate(graph.nodes)
+        if spec.block is not None
+        and spec.block.class_name in _KERNEL_CLASS_NAMES
+    ]
+    for kernel_index in kernel_indices:
+        labeled_outputs: list[tuple[int, str]] = []
+        total_outgoing = 0
+        for source, target in graph.links:
+            if source != kernel_index:
+                continue
+            total_outgoing += 1
+            label = graph.link_port_labels.get((source, target))
+            if label:
+                labeled_outputs.append((target, label))
+
+        if labeled_outputs and total_outgoing >= 2:
+            remove_out: set[tuple[int, int]] = {
+                (kernel_index, tgt) for tgt, _ in labeled_outputs
+            }
+            graph.links = [lk for lk in graph.links if lk not in remove_out]
+
+            for target, label in labeled_outputs:
+                graph.link_port_labels.pop((kernel_index, target), None)
+                graph.link_output_ports.pop((kernel_index, target), None)
+                safe_label = label.replace("/", "_")
+                port_index = _add_node(
+                    graph,
+                    key=f"@kernel_out:{kernel_index}:{safe_label}",
+                    label=label,
+                    synthetic=SYNTHETIC_KERNEL_PORT,
+                )
+                graph.links.append((kernel_index, port_index))
+                graph.links.append((port_index, target))
+                # Update output_ports so the adapter routes through the port node.
+                for port_name, src in list(graph.output_ports.items()):
+                    if src == kernel_index and port_name == label:
+                        graph.output_ports[port_name] = port_index
+
+
 def _wire_all_predecessor_edges(
     graph: ComputationGraph,
     root: BlockNode,
@@ -430,6 +527,9 @@ def _wire_all_predecessor_edges(
                 if link not in graph.links:
                     graph.links.append(link)
                 graph.link_port_labels[link] = "/".join(ports)
+
+    # --- 2b. Kernel input/output port nodes ---
+    _add_kernel_port_nodes(graph)
 
     # --- 3. Loop frames (structural pass, must precede forward links) ---
     _add_loop_frames(graph)
@@ -2525,6 +2625,7 @@ def build_computation_graph(
     )
     graph = _strip_dangling_leaves(graph, root=root)
     add_forward_output(graph, root=root)
+    _add_kernel_output_port_nodes(graph)
     if basic_ops is not None and basic_ops.basic_only:
         return _filter_graph_basic_only(graph)
     return graph
