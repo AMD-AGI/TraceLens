@@ -30,8 +30,6 @@ MIN_LABEL_CHILDREN = 6
 # when scanning a thread's frames.
 PYTHON_TIER = "python_function"
 
-GRAPH_LAUNCH_NAMES = {"hipGraphLaunch", "cudaGraphLaunch"}
-
 # Branch-descent tier: walk down the call tree until a frame's own children form
 # a repeating family whose per-iteration windows account for ~all the GPU work.
 BRANCH_DESCENT_TIER = "branch_descent"
