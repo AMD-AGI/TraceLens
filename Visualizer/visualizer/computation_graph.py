@@ -184,6 +184,53 @@ def _build_module_param_entries(
     return result
 
 
+def _resolve_primary_input(
+    consumer_attr: str,
+    root: "BlockNode",
+    attr_last_index: dict[str, int],
+    input_index: int | None,
+    last_index: int | None,
+) -> int | None:
+    """Find the graph index for the consumer's primary (non-side) input.
+
+    Inspects ``forward_step_predecessor_args`` to find which predecessor
+    provides the primary input (the one that maps to @method_input inside
+    the expanded pipeline), and resolves it via *attr_last_index*.
+    Falls back to *last_index* → *input_index* when data is unavailable.
+    """
+    arg_map = root.forward_step_predecessor_args.get(consumer_attr)
+    if not arg_map:
+        return last_index if last_index is not None else input_index
+
+    # Build the set of param names that have dedicated pipeline entry points.
+    # The primary input is the arg NOT in this set.
+    from visualizer.block_tree import BlockNode as _BN
+
+    child = next(
+        (c for c in root.children if c.attr_name == consumer_attr), None
+    )
+    if child is None:
+        return last_index if last_index is not None else input_index
+
+    side_params: set[str] = set()
+    for gc in child.children:
+        side_params.update(gc.param_inputs)
+
+    for arg_name, pred in arg_map.items():
+        if _normalize_param_name(arg_name) in {
+            _normalize_param_name(p) for p in side_params
+        }:
+            continue
+        # This is the primary (non-side) input.
+        if pred == FORWARD_METHOD_INPUT:
+            return input_index
+        resolved = attr_last_index.get(pred)
+        if resolved is not None:
+            return resolved
+
+    return last_index if last_index is not None else input_index
+
+
 def _resolve_return_slot_source(
     producer: "BlockNode",
     arg_name: str,
@@ -2225,12 +2272,6 @@ def build_computation_graph(
         if isinstance(segment, SideFeedSegment):
             consumer = segment.consumer
             port_label = _consumer_port_label(segment.sides)
-            # A module invoked on the forward input branches there instead of running in
-            # series behind the step before it, even when its extra operands come from
-            # elsewhere in the graph.
-            forward_input_is_main = consumer.attr_name in root.input_fed_steps or any(
-                side.source_kind == "forward_input" for side in segment.sides
-            )
 
             entry_index: int | None = None
             if is_method_wrapper(consumer):
@@ -2250,6 +2291,17 @@ def build_computation_graph(
                     basic_ops=basic_ops,
                 )
                 if wrapper is not None:
+                    # Resolve the primary input source from
+                    # forward_step_predecessor_args so the pipeline's
+                    # @method_input ops connect to the correct predecessor
+                    # instead of the overall forward method input.
+                    primary_input = _resolve_primary_input(
+                        consumer.attr_name,
+                        root,
+                        attr_last_index,
+                        input_index,
+                        last_index,
+                    )
                     chain_indices, chain_tail = _add_linear_pipeline_chain(
                         graph,
                         expanded_steps,
@@ -2259,7 +2311,7 @@ def build_computation_graph(
                         port_label=port_label,
                         port_style="inline" if port_label else None,
                         input_index=input_index,
-                        last_index=input_index if forward_input_is_main else last_index,
+                        last_index=primary_input,
                     )
                     entry_index = chain_indices[0] if chain_indices else None
                     consumer_index = chain_tail
@@ -2274,12 +2326,8 @@ def build_computation_graph(
                     entry_index = consumer_index
             if entry_index is None:
                 entry_index = consumer_index
-                if forward_input_is_main and input_index is not None:
-                    _link_forward_input(graph, input_index, consumer_index)
-                elif last_index is not None:
-                    graph.links.append((last_index, consumer_index))
-                elif input_index is not None:
-                    graph.links.append((input_index, consumer_index))
+                # Edge wiring deferred to _wire_all_predecessor_edges via
+                # forward_step_predecessors; only track the node index here.
             # Materialize side-chain producer nodes so they exist in the
             # graph for the generic predecessor pass to wire up.
             for side in segment.sides:
