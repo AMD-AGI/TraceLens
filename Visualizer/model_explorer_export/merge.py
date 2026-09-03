@@ -541,9 +541,10 @@ def _computation_nodes(
     # Float loop-carried-in nodes to the front of their namespace so ME's
     # dagre layout places them at the top of the loop group.  We must
     # preserve the relative order of *different* namespaces (otherwise
-    # cross-namespace dataflow edges break), so we sort only within each
-    # namespace group using a stable partition.
-    from itertools import groupby as _groupby
+    # cross-namespace dataflow edges break).  Collect all nodes per
+    # namespace, reorder within each, then emit in the order each
+    # namespace was first seen.
+    from collections import OrderedDict as _ODict
 
     def _lc_priority(node: dict[str, Any]) -> int:
         nid = node.get("id", "")
@@ -553,11 +554,15 @@ def _computation_nodes(
             return 2
         return 1
 
+    ns_buckets: _ODict[str, list[dict[str, Any]]] = _ODict()
+    for node in nodes:
+        ns = node.get("namespace", "")
+        ns_buckets.setdefault(ns, []).append(node)
+
     reordered: list[dict[str, Any]] = []
-    for _ns, group in _groupby(nodes, key=lambda n: n.get("namespace", "")):
-        chunk = list(group)
-        chunk.sort(key=_lc_priority)
-        reordered.extend(chunk)
+    for bucket in ns_buckets.values():
+        bucket.sort(key=_lc_priority)
+        reordered.extend(bucket)
     nodes = reordered
 
     return nodes

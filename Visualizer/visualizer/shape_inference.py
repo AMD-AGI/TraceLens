@@ -733,6 +733,13 @@ class ShapeInferencer:
                 ),
                 "",
             )
+            # Try structured resolution first (handles starred prefixes and
+            # symbolic dimension names from the model config).
+            resolved = _resolve_view_shape(
+                shape_detail, source, self.context.dims
+            )
+            if resolved is not None:
+                return TensorSpec(shape=resolved, dtype=source.dtype)
             if "-1" in shape_detail:
                 flattened = f"{Symbol.BATCH.value}*{Symbol.SEQ.value}"
                 return TensorSpec(
@@ -1069,6 +1076,82 @@ def _dedupe_preserve(items: list[str]) -> list[str]:
             seen.add(item)
             out.append(item)
     return out
+
+
+def _resolve_dim_name(name: str, dims: dict[str, DimExpr]) -> DimExpr | None:
+    """Resolve a symbolic dimension name against config dims.
+
+    Tries direct lookup first, then ``self.xxx`` stripping, and finally
+    common suffixed variants (``_mult``, ``_size``, ``_dim``, ``_count``).
+    """
+    # Direct hit
+    val = dims.get(name)
+    if val is not None:
+        return val
+    # ``self.xxx`` → ``xxx``
+    bare = name
+    if bare.startswith("self."):
+        bare = bare[len("self."):]
+        val = dims.get(bare)
+        if val is not None:
+            return val
+    # Try common config suffixes: ``hc`` → ``hc_mult``
+    for suffix in ("_mult", "_size", "_dim", "_count"):
+        val = dims.get(bare + suffix)
+        if val is not None:
+            return val
+    return None
+
+
+def _resolve_view_shape(
+    detail: str,
+    source: TensorSpec,
+    dims: dict[str, DimExpr],
+) -> tuple[DimExpr, ...] | None:
+    """Try to resolve symbolic view/reshape arguments into a concrete shape.
+
+    Handles patterns like ``*x.shape[:-1], hc, hc`` by keeping leading dims
+    from the source shape and resolving trailing symbolic names via *dims*.
+    """
+    if not detail:
+        return None
+    parts = [p.strip() for p in detail.split(",") if p.strip()]
+    if not parts:
+        return None
+
+    leading: tuple[DimExpr, ...] = ()
+    trailing_start = 0
+
+    # Detect starred prefix like ``*foo.shape[:-1]`` or ``*foo.shape[:-N]``.
+    first = parts[0]
+    if first.startswith("*") and ".shape" in first:
+        import re
+
+        m = re.search(r"\.shape\[:\s*(-?\d+)\]", first)
+        if m:
+            cut = int(m.group(1))
+            leading = source.shape[:cut] if cut < 0 else source.shape[:cut]
+        else:
+            leading = source.shape
+        trailing_start = 1
+
+    resolved: list[DimExpr] = list(leading)
+    for part in parts[trailing_start:]:
+        # Try literal int
+        try:
+            resolved.append(int(part))
+            continue
+        except ValueError:
+            pass
+        # Try resolving via config dims (with suffix heuristics)
+        val = _resolve_dim_name(part, dims)
+        if val is not None:
+            resolved.append(val)
+            continue
+        # Cannot resolve — give up
+        return None
+
+    return tuple(resolved) if resolved else None
 
 
 def _default_hidden_shape(context: ShapeContext) -> tuple[DimExpr, ...]:
