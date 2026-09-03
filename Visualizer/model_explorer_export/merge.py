@@ -538,6 +538,19 @@ def _computation_nodes(
             node["outputsMetadata"] = ports
         nodes.append(node)
 
+    # Float loop-carried-in nodes to the front of their namespace so ME's
+    # dagre layout places them at the top of the loop group.
+    def _loop_carried_sort_key(node: dict[str, Any]) -> tuple[str, int]:
+        ns = node.get("namespace", "")
+        nid = node.get("id", "")
+        if "@loop_carried_in:" in nid:
+            return (ns, 0)
+        if "@loop_carried_out:" in nid:
+            return (ns, 2)
+        return (ns, 1)
+
+    nodes.sort(key=_loop_carried_sort_key)
+
     return nodes
 
 
