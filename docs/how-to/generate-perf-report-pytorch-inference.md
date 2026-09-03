@@ -483,6 +483,7 @@ Run the tool with `--help` for the complete, version-specific argument list.
 
 - [Inference performance analysis in TraceLens](../conceptual/inference-analysis.md)
 - [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
+- [Index a corpus of traces](./trace-index.md)
 - [Compare two traces](./compare-traces.md)
 - [Agentically orchestrate and generate optimization recommendations](./agent.md)
 - [API reference](../reference/api-reference.md)

@@ -272,5 +272,6 @@ pretty-printer.
 - [The Trace2Tree data model](../conceptual/trace2tree.md)
 - [Model op performance without a trace](./perf-model-without-trace.md)
 - [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
+- [Index a corpus of traces](./trace-index.md)
 - [Replay a single operation in TraceLens](./event-replay.md)
 - [API reference](../reference/api-reference.md)
