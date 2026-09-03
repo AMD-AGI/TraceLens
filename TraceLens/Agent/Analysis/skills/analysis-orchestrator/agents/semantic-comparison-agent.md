@@ -85,13 +85,7 @@ run_breakdown() {
 
     # Check whether extraction produced region subdirs or a flat file
     if ls $DIR/*/extracted.json >/dev/null 2>&1; then
-        # Multi-region. Skip extract_tree_context.py entirely for
-        # graph-mode traces, same reasoning as the single-trace branch below:
-        # cpu_op/nn_module ancestry is always empty under cudaGraphLaunch, and
-        # gpu_op_uid is already populated per-region by extract_trace_data.py
-        # (split_inference_trace_annotation.py persists it onto each event via
-        # --emit-gpu-op-uid before writing the per-region file, so it survives
-        # the split subprocess -- no tree build needed to recover it).
+        # Multi-region graph-mode: skip extract_tree_context.py (gpu_op_uid already populated per-region, no tree build needed).
         FIRST_REGION=$(ls -d $DIR/*/ | head -1)
         IS_GRAPH_MODE=$(python -c "import json; print(json.load(open('${FIRST_REGION}extracted.json'))['metadata']['is_graph_mode'])")
         for REGION in $DIR/*/; do
@@ -166,20 +160,15 @@ The LLM unifies raw **kernel names** across the two traces. The unified name is 
 
 Scripts: `TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py`
 
-### 2.1 Prepare Unification Context [S]
+### 2.1 Prepare Unification Context
 
 ```bash
-KU=TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py
-python $KU prepare-context \
+python TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py prepare-context \
     --labels-a <output_dir>/_work/<name_a>/semantic_labels.json \
     --labels-b <output_dir>/_work/<name_b>/semantic_labels.json \
     --name-a <name_a> --name-b <name_b> \
     -o <output_dir>/_work/kernel_unification_context.json
 ```
-
-The context lists each trace's unique kernel names with `perf_categories`,
-`kernel_count`, `total_dur_us`, and a `sample_input_dims`, split into
-`only_in_<name_a>` / `only_in_<name_b>` / `in_both`.
 
 ### 2.2 Stem Preprocessing (conditional, only if flagged)
 
@@ -188,7 +177,7 @@ the threshold, default 5000), the raw name set is too large for the LLM.
 Launch the subagent `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/kernel-stem-preprocessing-agent.md`, then:
 
 ```bash
-python $KU apply-stem-rules \
+python TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py apply-stem-rules \
     --labels-a <output_dir>/_work/<name_a>/semantic_labels.json \
     --labels-b <output_dir>/_work/<name_b>/semantic_labels.json \
     --name-a <name_a> --name-b <name_b> \
@@ -204,10 +193,10 @@ Re-run until the printed stem count is within budget.
 Read `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/kernel-unification-agent.md` and
 launch it with `kernel_unification_context.json` inline. For multi-region vLLM: run once per matching region pair.
 
-### 2.4 Apply the Map [S]
+### 2.4 Apply the Map
 
 ```bash
-python $KU apply-map \
+python TraceLens/Agent/Analysis/semantic_analyses/kernel_unification.py apply-map \
     --labels-a <output_dir>/_work/<name_a>/semantic_labels.json \
     --labels-b <output_dir>/_work/<name_b>/semantic_labels.json \
     --name-a <name_a> --name-b <name_b> \
@@ -231,7 +220,8 @@ pairs GEMMs across vendors by position and (b) splits a name that occurs in
 different contexts. Skip it only if `apply-map` already reported no
 meaningful one-sided buckets.
 
-**2.6a Prepare coherence context [S]**
+### 2.6a Prepare coherence context
+
 ```bash
 KC=TraceLens/Agent/Analysis/semantic_analyses/kernel_coherence.py
 python $KC prepare-context \
@@ -242,14 +232,17 @@ python $KC prepare-context \
     -o <output_dir>/_work/kernel_coherence_context.json
 ```
 
-**2.6b Launch coherence agent [LLM]** -- read
+### 2.6b Launch coherence agent
+
+Read
 `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/kernel-coherence-agent.md` and launch
 it with `kernel_coherence_context.json` inline. It writes
 `<output_dir>/_work/kernel_coherence_decisions.json` (`context_renames` +
 `fallback_remap_a` / `fallback_remap_b`), pairing same-context one-sided buckets
 across traces into new shared names.
 
-**2.6c Apply [S]**
+### 2.6c Apply
+
 ```bash
 python $KC apply \
     --context <output_dir>/_work/kernel_coherence_context.json \
@@ -258,15 +251,12 @@ python $KC apply \
     --audit-csv-b <output_dir>/_work/per_kernel_final_<name_b>.csv
 ```
 
-`apply` rewrites `semantic_block` in place and prints any residual one-sided
-condensed symbols. If meaningful (non-singleton) symbols remain, revise the
-decisions and re-run 2.6b--2.6c; residual pre/post-layer singletons (setup /
-copy / prefix-scan kernels with no counterpart) may be accepted. Increase
-`--neighbor-radius` in 2.6a if one-sided buckets share an ambiguous context.
+`apply` rewrites `semantic_block` in place and prints residual one-sided symbols.
+Revise decisions and re-run 2.6b--2.6c if meaningful (non-singleton) symbols remain (singleton setup/copy kernels may be accepted); raise `--neighbor-radius` in 2.6a for ambiguous contexts.
 
 ---
 
-## Step 3: Generate TraceDiff Output [S]
+## Step 3: Generate TraceDiff Output
 
 ```bash
 python TraceLens/Agent/Analysis/semantic_analyses/generate_semantic_diff.py \
@@ -284,17 +274,11 @@ Produces in `<output_dir>/tracediff_output/`:
 
 This is a **final deliverable** directory for downstream TraceDiff consumers.
 
-**Perf-report enrichment compatibility:** `diff_stats.csv` carries a
-per-kernel `gpu_op_uid` (identical to the perf report's
-`kernel_details[].gpu_op_uid`) and a per-LCA `busy_time`, making it
-consumable by `enrich_perf_report_dict_inplace` in
-`TraceLens/Reporting/tracediff_comparison_extension.py`, which matches
-diff rows to `unified_perf_summary` rows via `gpu_op_uid` and adds the
-speedup / delta / LCA columns.
+**Perf-report enrichment compatibility:** `diff_stats.csv` carries per-kernel `gpu_op_uid` and per-LCA `busy_time`, consumable by `enrich_perf_report_dict_inplace` in `TraceLens/Reporting/tracediff_comparison_extension.py`.
 
 ---
 
-## Step 4: Generate Comparison CSV [S]
+## Step 4: Generate Comparison CSV
 
 **Single-region mode:**
 ```bash
@@ -327,23 +311,5 @@ python TraceLens/Agent/Analysis/semantic_analyses/match_and_compare.py \
 
 ## Final Deliverables
 
-```
-<output_dir>/
-  _work/
-    <name_a>/semantic_labels.json
-    <name_b>/semantic_labels.json
-    kernel_unification_context.json
-    kernel_unification_map.json
-    raw_to_stem.json
-    kernel_coherence_context.json
-    kernel_coherence_decisions.json
-    per_kernel_final_<name>.csv
-    comparison.csv
-  tracediff_output/
-    diff_stats.csv
-    diff_stats_unique_args_summary.csv
-    cpu_op_map.json
-    cpu_op_map_trace1.json
-    cpu_op_map_trace2.json
-    merged_tree_output.txt
-```
+- `<output_dir>/_work/` -- per-trace `semantic_labels.json`, the unification/coherence JSON artifacts, `per_kernel_final_<name>.csv`, and `comparison.csv`
+- `<output_dir>/tracediff_output/` -- TraceDiff deliverables (see Step 3)

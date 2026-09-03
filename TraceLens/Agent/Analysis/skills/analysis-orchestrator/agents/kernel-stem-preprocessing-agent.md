@@ -26,10 +26,9 @@ default 5000). Otherwise skip it entirely.
 
 High-cardinality name families blow up the unique count. A single logical GEMM
 family can appear as thousands of variants that differ only by an autotuner id
-or embedded shape, e.g. `gemm_013123`, `gemm_013124`, ... or
-`(vendor gemm name)_..._MT32x16x512_...`, `(vendor gemm name)_..._MT64x16x256_...`. These variants are the
+or embedded shape/tile suffix. These variants are the
 same operation for the purpose of establishing cross-trace anchors, so
-collapsing them to a **stem** (e.g. `gemm`, `(vendor gemm name)_..._MT#_...`) drastically
+collapsing them to a **stem** (dropping the autotuner id and shape/tile suffix) drastically
 shrinks the set.
 
 But **not every varying parameter is noise.** Some distinctions should be kept

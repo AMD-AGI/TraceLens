@@ -38,7 +38,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
     optionally invoke agent_extension.py (when present), then embed the PNG into the report.
 ```
 
-**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Step 1.S semantic diff, Steps 6, 7, 9). All other steps (including Step 7.5) must be performed directly by the orchestrator using the command prefix.
+**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Step 1.5 semantic diff, Steps 6, 7, 9). All other steps (including Step 7.5) must be performed directly by the orchestrator using the command prefix.
 
 ---
 
@@ -82,8 +82,8 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
      2. **Graph replay + capture** (`<inference_exec_mode>` = `graph_capture`) — also requires a capture folder path
 
    - If **Graph replay + capture**, ask for the **Capture Folder Path(s)**:
-     - `standalone`: one folder → `<capture_folder_path>`. Ask: "Please provide the full path to the graph capture traces folder"
-     - `comparative`: one folder per trace → `<capture_folder_path>` (primary/trace1) and `<capture_folder_path2>` (comparison/trace2). Ask: "Please provide the graph capture traces folder for the primary trace and for the comparison trace."
+     - `standalone`: one folder → `<capture_folder_path_1>`. Ask: "Please provide the full path to the graph capture traces folder"
+     - `comparative`: one folder per trace → `<capture_folder_path_1>` (primary/trace1) and `<capture_folder_path_2>` (comparison/trace2). Ask: "Please provide the graph capture traces folder for the primary trace and for the comparison trace."
    - **Comparative + graph replay** (do not abort): collect capture folders for both traces when available. If capture is not available, the comparison uses the semantic path (see Step 0.5).
 
 5. **Environment Setup**
@@ -203,16 +203,16 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 |-------|-------|
 | `standalone` | none |
 | `comparative` trace1 | `--comparison_json_path <trace2_path>` |
-| `comparative` trace1 if `<capture_folder_path2>` provided | `--comparison_json_path <trace2_path> --comparison_capture_folder <capture_folder_path2>` |
+| `comparative` trace1 if `<capture_folder_path_2>` provided | `--comparison_json_path <trace2_path> --comparison_capture_folder <capture_folder_path_2>` |
 | `comparative` trace2 | none |
 
 **`<suffix_3>`** — graph capture flags:
 
 | scope | value |
 |-------|-------|
-| `standalone` if `<capture_folder_path>` provided | `--capture_folder <capture_folder_path>` |
-| `comparative` trace1 if `<capture_folder_path>` provided | `--capture_folder <capture_folder_path>` |
-| `comparative` trace2 if `<capture_folder_path2>` provided | `--capture_folder <capture_folder_path2>` |
+| `standalone` if `<capture_folder_path_1>` provided | `--capture_folder <capture_folder_path_1>` |
+| `comparative` trace1 if `<capture_folder_path_1>` provided | `--capture_folder <capture_folder_path_1>` |
+| `comparative` trace2 if `<capture_folder_path_2>` provided | `--capture_folder <capture_folder_path_2>` |
 
 **`<suffix_ext>`** — user extension file:
 
@@ -270,11 +270,11 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 
 ---
 
-## Step 1.S: Semantic Comparative Ordering (`<comparison_method>` = `semantic` only)
+## Step 1.5: Semantic Comparative Ordering (`<comparison_method>` = `semantic` only)
 
 When `<comparison_scope>` = `comparative` and `<comparison_method>` = `semantic`, run Step 1 in this order:
 
-1. **Trace2 report** — run the analysis-mode CLI above for trace2 using the `comparative` trace2 `<suffix_1>` and empty `<suffix_2>` (identical to the TraceDiff path). For graph mode add `--capture_folder <capture_folder_path2>`.
+1. **Trace2 report** — run the analysis-mode CLI above for trace2 using the `comparative` trace2 `<suffix_1>` and empty `<suffix_2>` (identical to the TraceDiff path). For graph mode add `--capture_folder <capture_folder_path_2>`.
 
 2. **Semantic diff (subagent)** — launch a Task subagent that reads and follows the FULL instructions in `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/semantic-comparison-agent.md`. Prompt context:
 
@@ -295,7 +295,7 @@ Run the full semantic comparison through "Generate TraceDiff Output" so that
 
    Verify `<output_dir>/_semantic/tracediff_output/diff_stats.csv` exists before continuing. If it is missing, retry the subagent once; if it still fails, stop and report.
 
-3. **Trace1 report** — run the analysis-mode CLI for trace1 with the `comparative` trace1 `<suffix_1>` and `<suffix_2>` = `--precomputed_diff_stats_csv <output_dir>/_semantic/tracediff_output/diff_stats.csv`. For graph mode also add `--capture_folder <capture_folder_path>`.
+3. **Trace1 report** — run the analysis-mode CLI for trace1 with the `comparative` trace1 `<suffix_1>` and `<suffix_2>` = `--precomputed_diff_stats_csv <output_dir>/_semantic/tracediff_output/diff_stats.csv`. For graph mode also add `--capture_folder <capture_folder_path_1>`.
 
 4. **Confirm** `<output_dir>/perf_report_trace1_csvs/diff_stats.csv` exists (written by the report script). If absent, copy `<output_dir>/_semantic/tracediff_output/diff_stats.csv` to that path so the comparative fusion step (Steps 2-5) can read it.
 

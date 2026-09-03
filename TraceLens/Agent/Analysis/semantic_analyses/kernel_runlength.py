@@ -21,11 +21,12 @@ Terminology:
 
 import json
 
+from _helpers import load_json
+
 
 def load_sequence(labels_path):
     """Return the kernel-order list of semantic_block values for a labels file."""
-    with open(labels_path) as f:
-        data = json.load(f)
+    data = load_json(labels_path)
     return [k.get("semantic_block", "") for k in data.get("labeled_kernels", [])]
 
 

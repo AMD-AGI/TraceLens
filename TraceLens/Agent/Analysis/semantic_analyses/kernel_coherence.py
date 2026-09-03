@@ -10,8 +10,8 @@ Second-pass kernel-name coherence (LLM-assisted).
 
 After the first-pass name-first unification (``kernel_unification.py``), the
 comparison still has **one-sided** buckets: kernels whose unified name appears
-in only one trace (e.g. vendor GEMM families -- MI300 ``Cijk_*`` vs B300
-``nvjet_*`` -- that could not be paired by name alone).
+in only one trace (e.g. vendor GEMM families -- platform-A ``<gemmA>_*`` vs
+platform-B ``<gemmB>_*`` -- that could not be paired by name alone).
 
 This pass uses the first-pass **shared** buckets as cross-trace-stable
 positional anchors. For each one-sided bucket it derives the *neighbor context*
@@ -42,15 +42,15 @@ Usage:
     python kernel_coherence.py prepare-context \
         --labels-a <dir_a>/semantic_labels.json \
         --labels-b <dir_b>/semantic_labels.json \
-        --name-a MI300 --name-b B300 \
+        --name-a platform_a --name-b platform_b \
         --neighbor-radius 1 \
         -o kernel_coherence_context.json
 
     python kernel_coherence.py apply \
         --context kernel_coherence_context.json \
         --decisions kernel_coherence_decisions.json \
-        [--audit-csv-a per_kernel_final_MI300.csv] \
-        [--audit-csv-b per_kernel_final_B300.csv]
+        [--audit-csv-a per_kernel_final_a.csv] \
+        [--audit-csv-b per_kernel_final_b.csv]
 """
 
 import argparse
@@ -67,6 +67,7 @@ from kernel_runlength import (
     run_index_per_kernel,
     shared_neighbor_windows_skip_non_shared,
 )
+from _helpers import load_json
 
 
 DEFAULT_RADIUS = 1
@@ -74,8 +75,7 @@ DEFAULT_TOP_KERNELS = 5
 
 
 def _load(path):
-    with open(path) as f:
-        return json.load(f)
+    return load_json(path)
 
 
 def _dims_repr(dims, limit=160):

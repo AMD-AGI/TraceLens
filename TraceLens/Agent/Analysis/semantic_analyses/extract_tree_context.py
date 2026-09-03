@@ -199,8 +199,7 @@ def _find_region_subdirs(regions_dir):
 
 def _process_single(tree, ts_index, extracted_path, output_path):
     """Process one extracted.json against a pre-built tree and ts_index."""
-    with open(extracted_path) as f:
-        extracted = json.load(f)
+    extracted = load_json(extracted_path)
 
     n_kernels = len(extracted["kernels"])
     print(f"  Matching {n_kernels} kernels...", file=sys.stderr, end=" ")
