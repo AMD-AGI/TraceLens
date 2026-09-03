@@ -44,13 +44,13 @@ Usage:
     python kernel_unification.py prepare-context \
         --labels-a <dir_a>/semantic_labels.json \
         --labels-b <dir_b>/semantic_labels.json \
-        --name-a MI300 --name-b B300 \
+        --name-a <platform_a> --name-b <platform_b> \
         -o kernel_unification_context.json
 
     python kernel_unification.py apply-stem-rules \
         --labels-a <dir_a>/semantic_labels.json \
         --labels-b <dir_b>/semantic_labels.json \
-        --name-a MI300 --name-b B300 \
+        --name-a <platform_a> --name-b <platform_b> \
         --rules stem_rules.json \
         --raw-to-stem raw_to_stem.json \
         -o kernel_unification_context.json
@@ -58,7 +58,7 @@ Usage:
     python kernel_unification.py apply-map \
         --labels-a <dir_a>/semantic_labels.json \
         --labels-b <dir_b>/semantic_labels.json \
-        --name-a MI300 --name-b B300 \
+        --name-a <platform_a> --name-b <platform_b> \
         --map kernel_unification_map.json \
         [--raw-to-stem raw_to_stem.json]
 """

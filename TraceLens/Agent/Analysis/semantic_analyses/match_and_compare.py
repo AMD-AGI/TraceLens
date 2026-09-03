@@ -15,13 +15,13 @@ Input: two semantic_labels.json files
 Output: comparison.csv
 
 Usage:
-    python match_and_compare.py <trace_a_labels.json> <trace_b_labels.json> \
-        --name-a MI355 --name-b B200 \
+    python match_and_compare.py <labels_a.json> <labels_b.json> \
+        --name-a <platform_a> --name-b <platform_b> \
         [-o comparison.csv]
 
     For multi-region (per steady-state), use --regions-dir-a and --regions-dir-b:
-    python match_and_compare.py --regions-dir-a output/MI355 --regions-dir-b output/B200 \
-        --name-a MI355 --name-b B200 -o comparison.csv
+    python match_and_compare.py --regions-dir-a output/<platform_a> --regions-dir-b output/<platform_b> \
+        --name-a <platform_a> --name-b <platform_b> -o comparison.csv
 
     This matches regions by subdir name (e.g. prefill_only_3072) and compares
     only corresponding regions (apples-to-apples).
@@ -192,10 +192,10 @@ def run_assertions(rows, labeled_a, labeled_b, total_a, total_b, name_a, name_b)
 def main():  # pragma: no cover
     parser = argparse.ArgumentParser(description="Compare two semantic breakdowns")
     parser.add_argument(
-        "trace_a", nargs="?", help="Path to trace A semantic_labels.json"
+        "labels_a", nargs="?", help="Path to trace A semantic_labels.json"
     )
     parser.add_argument(
-        "trace_b", nargs="?", help="Path to trace B semantic_labels.json"
+        "labels_b", nargs="?", help="Path to trace B semantic_labels.json"
     )
     parser.add_argument(
         "--regions-dir-a",
@@ -269,12 +269,12 @@ def main():  # pragma: no cover
             print("No matching regions found", file=sys.stderr)
             sys.exit(1)
     else:
-        if not args.trace_a or not args.trace_b:
+        if not args.labels_a or not args.labels_b:
             parser.error(
-                "Provide trace_a and trace_b, or --regions-dir-a and --regions-dir-b"
+                "Provide labels_a and labels_b, or --regions-dir-a and --regions-dir-b"
             )
-        data_a = load_labels(args.trace_a)
-        data_b = load_labels(args.trace_b)
+        data_a = load_labels(args.labels_a)
+        data_b = load_labels(args.labels_b)
         labeled_a = data_a["labeled_kernels"]
         labeled_b = data_b["labeled_kernels"]
         total_a = data_a.get("total_kernel_time_us", sum(k["dur"] for k in labeled_a))

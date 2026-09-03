@@ -187,10 +187,18 @@ def compute_gpu_timeline_metrics(events):  # pragma: no cover
     Returns None on failure.
     """
     try:
-        # Ensure events have UID (required by GPUEventAnalyser for overlap computation)
+        # GPUEventAnalyser needs a unique UID per event for overlap
+        # computation. Raw trace events don't carry one, so assign a contiguous
+        # 0..N-1. If an event already has a "UID", our assumption is broken and
+        # uniqueness is no longer guaranteed -- fail loudly rather than proceed.
         for i, e in enumerate(events):
             if "UID" not in e:
                 e["UID"] = i
+            else:
+                raise ValueError(
+                    "Event unexpectedly already carries a 'UID'; "
+                    "cannot guarantee unique ids for GPUEventAnalyser"
+                )
         analyzer = GPUEventAnalyser(events)
         metrics = analyzer.compute_metrics()
         total = metrics.get("total_time", 0)

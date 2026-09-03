@@ -284,18 +284,18 @@ Read and follow the FULL instructions in:
 - Trace A (primary/trace1): <trace_path>   (platform <platform>)
 - Trace B (comparison/trace2): <trace2_path>   (platform <platform2>)
 - Labels: name-a trace1, name-b trace2
-- Output directory: <output_dir>/_semantic/
+- Output directory: <output_dir>/semantic/
 - Command prefix: read <output_dir>/cache/cmd_prefix.txt — substitute {CMD}
 
 Run the full semantic comparison through "Generate TraceDiff Output" so that
-<output_dir>/_semantic/tracediff_output/diff_stats.csv is produced. Return "DONE".
+<output_dir>/semantic/tracediff_output/diff_stats.csv is produced. Return "DONE".
 ```
 
-   Verify `<output_dir>/_semantic/tracediff_output/diff_stats.csv` exists before continuing. If it is missing, retry the subagent once; if it still fails, stop and report.
+   Verify `<output_dir>/semantic/tracediff_output/diff_stats.csv` exists before continuing. If it is missing, retry the subagent once; if it still fails, stop and report.
 
-3. **Trace1 report** — run the analysis-mode CLI for trace1 with the `comparative` trace1 `<suffix_1>` and `<suffix_2>` = `--precomputed_diff_stats_csv <output_dir>/_semantic/tracediff_output/diff_stats.csv`.
+3. **Trace1 report** — run the analysis-mode CLI for trace1 with the `comparative` trace1 `<suffix_1>` and `<suffix_2>` = `--precomputed_diff_stats_csv <output_dir>/semantic/tracediff_output/diff_stats.csv`.
 
-4. **Confirm** `<output_dir>/perf_report_trace1_csvs/diff_stats.csv` exists (written by the report script). If absent, copy `<output_dir>/_semantic/tracediff_output/diff_stats.csv` to that path so the comparative fusion step (Steps 2-5) can read it.
+4. **Confirm** `<output_dir>/perf_report_trace1_csvs/diff_stats.csv` exists (written by the report script). If absent, copy `<output_dir>/semantic/tracediff_output/diff_stats.csv` to that path so the comparative fusion step (Steps 2-5) can read it.
 
 ---
 
