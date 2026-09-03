@@ -65,6 +65,11 @@ setup(
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
         ],
+        # Optional: robust pure-Python demangling for the kernel-source resolver.
+        # Without it the resolver falls back to c++filt / a length-prefix parser.
+        "kernel_source": [
+            "itanium-demangler>=1.0",
+        ],
         "dev": [
             "pytest",
             "black==26.3.1",
@@ -93,6 +98,7 @@ setup(
             "TraceLens_generate_perf_report_pftrace_memory_copy = TraceLens.Reporting.generate_perf_report_pftrace_memory_copy:main",
             "TraceLens_generate_perf_report_genesis = TraceLens.Reporting.generate_perf_report_genesis:main",
             "TraceLens_split_inference_trace = TraceLens.TraceUtils.split_inference_trace_annotation:main",
+            "TraceLens_resolve_kernel_source = TraceLens.TraceUtils.kernel_source.cli:main",
             "TraceLens_trace_index = TraceLens.TraceIndex.cli:main",
         ],
     },
