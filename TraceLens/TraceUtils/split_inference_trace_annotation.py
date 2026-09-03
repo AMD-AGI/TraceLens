@@ -174,7 +174,8 @@ from .split_inference import (  # noqa: F401
     extract_iteration,
     extract_phases_and_save,
     find_iteration_roots,
-    find_steady_state_window,
+    find_steady_state_annotations,
+    find_steady_state_generic,
     get_filename,
     identify_steady_state_regions,
     parse_range,
@@ -451,54 +452,69 @@ def main():
             execution_details.extend(temp_execution_details)
 
         elif args.find_steady_state:
-            # Three separate contiguous windows — no phase-splitting, no idle gaps
-            print("\n--- Finding mixed steady-state window ---")
-            mixed_roots = find_steady_state_window(
-                working_roots,
-                num_steps=args.num_steps,
-                steady_state_regions=steady_state_regions,
-                mode="mixed",
-                CONC=args.CONC,
-                OSL=args.OSL,
-                R=args.R,
-            )
-            temp_execution_details = extract_and_save(
-                [mixed_roots],
-                *_extract_args,
-                output_label="mixed_steady_state",
-                root_tiles=root_tiles,
-            )
-            execution_details.extend(temp_execution_details)
+            if detection.method.startswith("annotation:"):
+                # Serving trace with parseable annotations — use concurrency
+                print("\n--- Finding mixed steady-state window ---")
+                mixed_roots = find_steady_state_annotations(
+                    working_roots,
+                    num_steps=args.num_steps,
+                    steady_state_regions=steady_state_regions,
+                    mode="mixed",
+                    CONC=args.CONC,
+                    OSL=args.OSL,
+                    R=args.R,
+                )
+                temp_execution_details = extract_and_save(
+                    [mixed_roots],
+                    *_extract_args,
+                    output_label="mixed_steady_state",
+                    root_tiles=root_tiles,
+                )
+                execution_details.extend(temp_execution_details)
 
-            print("\n--- Finding decode-only steady-state window ---")
-            do_roots = find_steady_state_window(
-                working_roots,
-                num_steps=args.num_steps,
-                steady_state_regions=steady_state_regions,
-                mode="decode_only",
-            )
-            temp_execution_details = extract_and_save(
-                [do_roots],
-                *_extract_args,
-                output_label="decode_only_steady_state",
-                root_tiles=root_tiles,
-            )
-            execution_details.extend(temp_execution_details)
+                print("\n--- Finding decode-only steady-state window ---")
+                do_roots = find_steady_state_annotations(
+                    working_roots,
+                    num_steps=args.num_steps,
+                    steady_state_regions=steady_state_regions,
+                    mode="decode_only",
+                )
+                temp_execution_details = extract_and_save(
+                    [do_roots],
+                    *_extract_args,
+                    output_label="decode_only_steady_state",
+                    root_tiles=root_tiles,
+                )
+                execution_details.extend(temp_execution_details)
 
-            print("\n--- Finding biggest prefill-decode steady-state window ---")
-            pd_roots = find_steady_state_window(
-                working_roots,
-                num_steps=args.num_steps,
-                steady_state_regions=steady_state_regions,
-                mode="max_prefilldecode",
-            )
-            temp_execution_details = extract_and_save(
-                [pd_roots],
-                *_extract_args,
-                output_label="prefilldecode_steady_state",
-                root_tiles=root_tiles,
-            )
-            execution_details.extend(temp_execution_details)
+                print("\n--- Finding biggest prefill-decode steady-state window ---")
+                pd_roots = find_steady_state_annotations(
+                    working_roots,
+                    num_steps=args.num_steps,
+                    steady_state_regions=steady_state_regions,
+                    mode="max_prefilldecode",
+                )
+                temp_execution_details = extract_and_save(
+                    [pd_roots],
+                    *_extract_args,
+                    output_label="prefilldecode_steady_state",
+                    root_tiles=root_tiles,
+                )
+                execution_details.extend(temp_execution_details)
+            else:
+                # Generic trace — use duration consistency
+                print("\n--- Finding steady-state window by duration ---")
+                ss_roots = find_steady_state_generic(
+                    working_roots,
+                    num_steps=args.num_steps,
+                )
+                temp_execution_details = extract_and_save(
+                    [ss_roots],
+                    *_extract_args,
+                    output_label="steady_state",
+                    root_tiles=root_tiles,
+                )
+                execution_details.extend(temp_execution_details)
 
     print(f"\nDone! Extracted {len(execution_details)} traces to {args.output_dir}")
     manifest.update(_conservation(events, per_iteration_details, args))
