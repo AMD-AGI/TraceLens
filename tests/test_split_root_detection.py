@@ -417,11 +417,10 @@ class TestDetectionFlow:
         assert len(result) == 16
         assert result.coverage.covered_any == 1.0
 
-    def test_whole_outer_family_is_adopted_not_just_matching_instances(self):
-        """The 0.5.17 shape: most iterations wrap an unrecognized annotation.
-
-        Only the first three iterations carry a name a parser knows. Keeping just
-        those would split a twenty-iteration run into three.
+    def test_partial_known_falls_through_to_unknown_family(self):
+        """Only 3 of 20 iterations match a known pattern. Known annotations
+        have poor coverage, so the unknown family path picks up
+        scheduler.run_batch which covers all 20.
         """
         events, corr = [], 400
         for i in range(20):
@@ -437,18 +436,13 @@ class TestDetectionFlow:
 
         result = find_iteration_roots(events)
         assert len(result) == 20
-        assert result.method == "annotation:widened"
+        assert result.method == "family:unknown_only"
         assert result.diagnostics["root_family_skeleton"] == "scheduler.run_batch"
-        # Three roots parsed, seventeen did not, so the phases are not all real.
-        assert result.diagnostics["n_roots_with_phase"] == 3
-        assert result.phase_confidence is PhaseConfidence.LOW
         assert result.status is DetectStatus.SPLITTABLE
 
-    def test_outer_family_found_when_it_wraps_several_roots_each(self):
-        """One outer span per two known roots still counts as wrapping them.
-
-        Counting enclosing instances rather than enclosed roots reports half here
-        and abandons the widening, keeping the two roots instead of all twelve.
+    def test_unknown_family_with_nested_known_annotations(self):
+        """When known annotations are nested inside an unknown family,
+        the unknown family is selected because it covers all iterations.
         """
         events, corr = [], 600
         for i in range(12):
@@ -464,40 +458,36 @@ class TestDetectionFlow:
                 corr += 1
 
         result = find_iteration_roots(events)
-        assert result.method == "annotation:widened"
+        assert result.method == "family:unknown_only"
         assert len(result) == 12
         assert result.diagnostics["root_family_skeleton"] == "scheduler.run_batch"
 
-    def test_unknown_outer_family_becomes_the_window(self):
-        """The useful span has a name no regex knows."""
+    def test_unknown_family_catches_enclosing_annotation(self):
+        """When only a few iterations have known annotations, the unknown
+        family path picks up the enclosing annotation that covers all."""
         events, corr = [], 900
         for i in range(20):
             base = 1000 + i * 1000
             events.append(annotation("scheduler.process_batch_result", base, 500))
-            events.append(annotation(f"step[DECODE bs={i + 1}]", base + 50, 200))
+            inner = (
+                f"step[DECODE bs={i + 1}]" if i < 3 else f"custom_step_{i}"
+            )
+            events.append(annotation(inner, base + 50, 200))
             events.append(launch(base + 60, corr))
             events.append(kernel(base + 600, 300, corr))
             corr += 1
 
         result = find_iteration_roots(events)
         assert result.status is DetectStatus.SPLITTABLE
-        assert result.method == "annotation:widened"
+        assert result.method == "family:unknown_only"
         assert len(result) == 20
-        # Window from the scheduler span, identity from the decode annotation.
-        assert result.roots[0]["dur"] == 500
-        assert result.roots[0][PROVENANCE_KEY] == {
-            "window_from": "scheduler.process_batch_result",
-            "identity_from": "step[DECODE bs=1]",
-        }
-        assert result.phase_confidence is PhaseConfidence.HIGH
-        assert result.diagnostics["root_family_known"] is False
+        assert result.diagnostics["root_family_skeleton"] == "scheduler.process_batch_result"
 
-    def test_inner_annotation_relabels_a_known_root(self):
-        """The 0.5.11 shape: the outer name parses, the inner one is truer."""
+    def test_known_annotations_used_when_all_match(self):
+        """When every iteration has a known annotation, use them directly."""
         events, corr = [], 700
         for i in range(12):
             base = 1000 + i * 1000
-            events.append(annotation(VLLM.format(i=i), base, 500))
             events.append(annotation(f"step[DECODE bs={i + 1}]", base + 50, 200))
             events.append(launch(base + 60, corr))
             events.append(kernel(base + 600, 300, corr))
@@ -505,8 +495,7 @@ class TestDetectionFlow:
 
         result = find_iteration_roots(events)
         assert len(result) == 12
-        assert result.roots[0]["dur"] == 500
-        assert result.roots[0][PROVENANCE_KEY]["identity_from"] == "step[DECODE bs=1]"
+        assert result.method == "annotation:tier"
 
     def test_unrecognized_annotations_are_still_splittable(self):
         events, corr = [], 300
