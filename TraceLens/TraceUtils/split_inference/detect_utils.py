@@ -20,7 +20,7 @@ from bisect import bisect_left
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from statistics import median
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..annotation_utils import PROVENANCE_KEY, name_skeleton
 

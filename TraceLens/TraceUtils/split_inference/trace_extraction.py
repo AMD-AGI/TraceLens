@@ -157,7 +157,6 @@ def extract_iteration(
             for r in iteration_roots
         ]
 
-    min_iter_ts = min(start for start, _ in windows)
     max_iter_end = max(end for _, end in windows)
     if root_tiles:
         max_iter_end = max(max_iter_end, max(end for _, end in root_tiles.values()))

@@ -485,7 +485,6 @@ def load_trace(path: str):
     gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
     print(f"Loaded {len(events)} events from {path}")
     # Detailed patterns take priority over the native patterns.
-    label = f"execution steps (iteration) [{os.path.basename(path)}]"
     iteration_roots = find_known_annotations(events)
     return {
         "trace_json": trace_json,
