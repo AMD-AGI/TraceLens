@@ -168,23 +168,19 @@ from .annotation_utils import (
 from .split_inference import (  # noqa: F401
     DetectStatus,
     build_root_tiles,
-    classify_workload,
     compute_reference_pd_ratio,
     divide_phases_and_save,
     extract_and_save,
     extract_iteration,
     extract_phases_and_save,
     find_iteration_roots,
-    find_max_pattern_window,
     find_steady_state_window,
     get_filename,
     identify_steady_state_regions,
     parse_range,
     preprocess_trace,
-    select_window,
 )
 from .split_inference.detect_utils import GPU_KERNEL_CATEGORIES
-from .split_inference.steady_state_window import WORKLOAD_SERVING
 
 MANIFEST_NAME = "split_manifest.json"
 
@@ -366,10 +362,6 @@ def main():
         )
         return
 
-    workload, window_info = classify_workload(iteration_roots)
-    manifest.update(window_info)
-    print(f"Workload class: {workload}")
-
     # Built over every root, not just a selected window: the last root of a
     # window still needs to know where the next one starts.
     root_tiles = None
@@ -423,12 +415,7 @@ def main():
             )
         else:
             working_roots = iteration_roots
-            # Request concurrency only means something for a serving trace. Asked
-            # about anything else it sees one request per step, calls every step a
-            # peak, and returns the first num_steps iterations -- warmup included.
-            if (args.find_steady_state or args.divide_phases) and (
-                workload == WORKLOAD_SERVING
-            ):
+            if args.find_steady_state or args.divide_phases:
                 _iter_details = iteration_details(working_roots)
                 steady_state_regions, _ = identify_steady_state_regions(
                     _iter_details, args.num_steps
@@ -459,23 +446,6 @@ def main():
                 flow_corr_map,
                 meta_events,
                 steady_state_regions=steady_state_regions or [(0, len(working_roots))],
-                root_tiles=root_tiles,
-            )
-            execution_details.extend(temp_execution_details)
-
-        elif args.find_steady_state and workload != WORKLOAD_SERVING:
-            # Prefill and decode do not exist here, so there is one window to
-            # find: the stretch that best matches the run's repeating shape.
-            print("\n--- Finding representative window by iteration pattern ---")
-            pattern_roots = find_max_pattern_window(
-                working_roots,
-                num_steps=args.num_steps,
-                steady_state_regions=steady_state_regions or None,
-            )
-            temp_execution_details = extract_and_save(
-                [pattern_roots],
-                *_extract_args,
-                output_label="pattern_steady_state",
                 root_tiles=root_tiles,
             )
             execution_details.extend(temp_execution_details)
