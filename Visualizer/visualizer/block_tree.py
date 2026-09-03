@@ -677,6 +677,9 @@ class BlockNode:
     forward_step_predecessors: dict[str, tuple[str, ...]] = field(
         default_factory=dict
     )
+    forward_step_predecessor_args: dict[str, dict[str, str]] = field(
+        default_factory=dict
+    )
 
 
 PortStyle = Literal["floating", "inline"]
@@ -2126,6 +2129,7 @@ def build_block_node(
         loop_carried=list(cls.loop_carried),
         multi_return_module=len(cls.forward_return_order) >= 2,
         forward_step_predecessors=dict(cls.forward_step_predecessors),
+        forward_step_predecessor_args=dict(cls.forward_step_predecessor_args),
     )
 
 

@@ -214,6 +214,7 @@ def _wire_all_predecessor_edges(
     # --- 1b. Module-call predecessor edges from forward_step_predecessors ---
     if root.forward_step_predecessors:
         steps_by_attr = _forward_steps_by_attr(root)
+        pred_arg_maps = root.forward_step_predecessor_args
         for step_attr, preds in root.forward_step_predecessors.items():
             step_node = steps_by_attr.get(step_attr)
             if step_node is None:
@@ -223,6 +224,8 @@ def _wire_all_predecessor_edges(
                 target_index = attr_last_index.get(step_attr)
             if target_index is None:
                 continue
+            arg_map = pred_arg_maps.get(step_attr, {})
+            multi = len(preds) >= 2
             for pred in preds:
                 if pred == FORWARD_METHOD_INPUT:
                     source_index = input_index
@@ -233,6 +236,14 @@ def _wire_all_predecessor_edges(
                 link = (source_index, target_index)
                 if link not in graph.links:
                     graph.links.append(link)
+                # Add port label from arg-name mapping when multi-input.
+                if multi and link not in graph.link_port_labels:
+                    port = next(
+                        (name for name, src in arg_map.items() if src == pred),
+                        None,
+                    )
+                    if port:
+                        graph.link_port_labels[link] = port
 
     # --- 2. Attention provenance edges ---
     if root.attention_inputs:
