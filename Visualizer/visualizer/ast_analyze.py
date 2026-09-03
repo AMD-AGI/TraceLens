@@ -1535,7 +1535,8 @@ class _ForwardOperationExtractor:
             return method_name
         target = _expr_name(func)
         if target and (
-            target in _SYNTHETIC_ATTENTION_NAMES or _is_kernel_merge_call(func)
+            target in _SYNTHETIC_ATTENTION_NAMES
+            or (isinstance(func, ast.Name) and _is_kernel_merge_call(func))
         ):
             return SYNTHETIC_ATTENTION
         if target and _is_positional_function_call(func, target):

@@ -153,14 +153,26 @@ def _rebuild_attr_last_index(graph: ComputationGraph) -> dict[str, int]:
     return attr_last_index
 
 
-def _wire_operation_predecessor_links(
+def _wire_all_predecessor_edges(
     graph: ComputationGraph,
     root: BlockNode,
     *,
     input_index: int | None = None,
+    skip_forward_links: bool = False,
 ) -> None:
-    """Attach operand edges for inline ops once every forward step has been materialized."""
+    """Uniform predecessor-based edge wiring for all node types.
+
+    Consolidates the four former post-hoc wiring passes into one entry point:
+      1. Inline-op predecessor edges  (was ``_wire_operation_predecessor_links``)
+      2. Attention provenance edges   (was ``_wire_attention_provenance_links``)
+      3. Loop frames                  (structural, interleaved for ordering)
+      4. Multi-input op forward links (was ``_wire_multi_input_op_forward_links``)
+      5. Loop-carried nodes           (structural, interleaved for ordering)
+      6. Inline-frame dangling outputs(was ``_wire_inline_frame_dangling_outputs``)
+    """
     attr_last_index = _rebuild_attr_last_index(graph)
+
+    # --- 1. Inline-op predecessor edges ---
     last_forward_order = max(
         (child.forward_order or 0 for child in root.children), default=0
     )
@@ -180,7 +192,6 @@ def _wire_operation_predecessor_links(
         multi_input = len(child.operation_predecessors) >= 2
         for pred in child.operation_predecessors:
             if pred == FORWARD_METHOD_INPUT:
-                # Reading the forward's own parameter means reading what enters the block.
                 source_index = input_index
             else:
                 source_index = attr_last_index.get(pred)
@@ -200,50 +211,179 @@ def _wire_operation_predecessor_links(
         if len(module_preds) >= 2 and (child.forward_order or 0) < last_forward_order:
             graph.excluded_output_indices.add(target_index)
 
-
-def _wire_attention_provenance_links(graph: ComputationGraph, root: BlockNode) -> None:
-    """Connect named q/k/v/g/beta producers to a sequential attention merge."""
-    if not root.attention_inputs:
-        return
-    attr_last_index = _rebuild_attr_last_index(graph)
-    targets = [
-        index
-        for index, spec in enumerate(graph.nodes)
-        if spec.block is not None and spec.block.attr_name == SYNTHETIC_ATTENTION
-    ]
-    for target_index in targets:
-        ports_by_source: dict[int, list[str]] = {}
-        for port, chain in root.attention_inputs.items():
-            preferred_label = (
-                "Split"
-                if port in {"q", "k", "v", "query", "key", "value"}
-                else "Sigmoid" if port == "beta" else None
-            )
-            preferred = [
-                index
-                for index, spec in enumerate(graph.nodes[:target_index])
-                if spec.label == preferred_label
-            ]
-            source_index = (
-                preferred[-1]
-                if preferred
-                else next(
-                    (
-                        attr_last_index[attr]
-                        for attr in reversed(chain)
-                        if attr in attr_last_index
-                    ),
-                    None,
-                )
-            )
-            if source_index is None or source_index == target_index:
+    # --- 1b. Module-call predecessor edges from forward_step_predecessors ---
+    if root.forward_step_predecessors:
+        steps_by_attr = _forward_steps_by_attr(root)
+        for step_attr, preds in root.forward_step_predecessors.items():
+            step_node = steps_by_attr.get(step_attr)
+            if step_node is None:
                 continue
-            ports_by_source.setdefault(source_index, []).append(port)
-        for source_index, ports in ports_by_source.items():
-            link = (source_index, target_index)
-            if link not in graph.links:
-                graph.links.append(link)
-            graph.link_port_labels[link] = "/".join(ports)
+            target_index = _first_graph_index_for_module(step_node, attr_last_index)
+            if target_index is None:
+                target_index = attr_last_index.get(step_attr)
+            if target_index is None:
+                continue
+            for pred in preds:
+                if pred == FORWARD_METHOD_INPUT:
+                    source_index = input_index
+                else:
+                    source_index = attr_last_index.get(pred)
+                if source_index is None:
+                    continue
+                link = (source_index, target_index)
+                if link not in graph.links:
+                    graph.links.append(link)
+
+    # --- 2. Attention provenance edges ---
+    if root.attention_inputs:
+        targets = [
+            index
+            for index, spec in enumerate(graph.nodes)
+            if spec.block is not None
+            and spec.block.attr_name == SYNTHETIC_ATTENTION
+        ]
+        for target_index in targets:
+            ports_by_source: dict[int, list[str]] = {}
+            for port, chain in root.attention_inputs.items():
+                preferred_label = (
+                    "Split"
+                    if port in {"q", "k", "v", "query", "key", "value"}
+                    else "Sigmoid" if port == "beta" else None
+                )
+                preferred = [
+                    index
+                    for index, spec in enumerate(graph.nodes[:target_index])
+                    if spec.label == preferred_label
+                ]
+                source_index = (
+                    preferred[-1]
+                    if preferred
+                    else next(
+                        (
+                            attr_last_index[attr]
+                            for attr in reversed(chain)
+                            if attr in attr_last_index
+                        ),
+                        None,
+                    )
+                )
+                if source_index is None or source_index == target_index:
+                    continue
+                ports_by_source.setdefault(source_index, []).append(port)
+            for source_index, ports in ports_by_source.items():
+                link = (source_index, target_index)
+                if link not in graph.links:
+                    graph.links.append(link)
+                graph.link_port_labels[link] = "/".join(ports)
+
+    # --- 3. Loop frames (structural pass, must precede forward links) ---
+    _add_loop_frames(graph)
+
+    # --- 4. Multi-input op forward links ---
+    if not skip_forward_links:
+        _wire_multi_input_op_forward_links(graph, root, attr_last_index)
+
+    # --- 5. Loop-carried nodes (must precede inline-frame pass) ---
+    _add_loop_carried_nodes(graph, root)
+
+    # --- 6. Inline-frame dangling outputs ---
+    if not skip_forward_links:
+        _wire_inline_frame_dangling_outputs(graph)
+
+
+def _wire_multi_input_op_forward_links(
+    graph: ComputationGraph,
+    root: BlockNode,
+    attr_last_index: dict[str, int],
+) -> None:
+    """Connect multi-input ops to the next forward step once all operands are wired."""
+    steps_by_attr = _forward_steps_by_attr(root)
+    ordered_steps = sorted(
+        root.children,
+        key=lambda step: (step.forward_order or 0, step.attr_name),
+    )
+
+    live_returns = root.referenced_return_producers
+    for step in ordered_steps:
+        if not step.operation_predecessors:
+            continue
+        if step.attr_name in live_returns:
+            continue
+        source_index = attr_last_index.get(step.attr_name)
+        if source_index is None or _node_has_outgoing_links(graph, source_index):
+            continue
+
+        pred_orders = [
+            steps_by_attr[pred].forward_order or 0
+            for pred in step.operation_predecessors
+            if pred in steps_by_attr
+        ]
+        if not pred_orders:
+            continue
+
+        min_consumer_order = max(pred_orders) + 1
+        consumer = next(
+            (
+                candidate
+                for candidate in ordered_steps
+                if (candidate.forward_order or 0) >= min_consumer_order
+                and candidate.attr_name != step.attr_name
+            ),
+            None,
+        )
+        if consumer is None:
+            continue
+        named = consumer.operation_predecessors
+        if named and step.attr_name not in named:
+            continue
+
+        target_index = _first_graph_index_for_module(consumer, attr_last_index)
+        if target_index is None:
+            target_index = attr_last_index.get(consumer.attr_name)
+        if target_index is not None and (source_index, target_index) not in graph.links:
+            graph.links.append((source_index, target_index))
+
+
+def _inline_frame_exit_index(
+    graph: ComputationGraph, member_indices: set[int]
+) -> int | None:
+    exit_candidates = [
+        source
+        for source, target in graph.links
+        if source in member_indices and target not in member_indices
+    ]
+    if exit_candidates:
+        return exit_candidates[-1]
+
+    sources_inside = {
+        source for source, _target in graph.links if source in member_indices
+    }
+    dangling = [index for index in member_indices if index not in sources_inside]
+    return dangling[-1] if dangling else None
+
+
+def _wire_inline_frame_dangling_outputs(graph: ComputationGraph) -> None:
+    """Connect dead-end steps inside an inline frame to that frame's outward exit."""
+    for frame in graph.inline_frames:
+        if frame.frame_id.startswith("loop:"):
+            continue
+        members = set(frame.node_indices)
+        if len(members) < 2:
+            continue
+        exit_index = _inline_frame_exit_index(graph, members)
+        if exit_index is None:
+            continue
+        sources_inside = {
+            source for source, _target in graph.links if source in members
+        }
+        for index in members:
+            if index in sources_inside or index == exit_index:
+                continue
+            block = graph.nodes[index].block
+            if block is not None and "loop iterator" in block.details:
+                continue
+            if (index, exit_index) not in graph.links:
+                graph.links.append((index, exit_index))
 
 
 def _operation_source_indices(
@@ -1118,103 +1258,6 @@ def _first_graph_index_for_module(
         return attr_last_index.get(module.attr_name)
     first = min(steps, key=lambda step: step.forward_order or 0)
     return attr_last_index.get(first.attr_name)
-
-
-def _wire_multi_input_op_forward_links(
-    graph: ComputationGraph, root: BlockNode
-) -> None:
-    """Connect multi-input ops to the next forward step once all operands are wired."""
-    attr_last_index = _rebuild_attr_last_index(graph)
-    steps_by_attr = _forward_steps_by_attr(root)
-    ordered_steps = sorted(
-        root.children,
-        key=lambda step: (step.forward_order or 0, step.attr_name),
-    )
-
-    live_returns = root.referenced_return_producers
-    for step in ordered_steps:
-        if not step.operation_predecessors:
-            continue
-        # A returned tensor such as mHC `comb` is an output, not the next op's operand.
-        if step.attr_name in live_returns:
-            continue
-        source_index = attr_last_index.get(step.attr_name)
-        if source_index is None or _node_has_outgoing_links(graph, source_index):
-            continue
-
-        pred_orders = [
-            steps_by_attr[pred].forward_order or 0
-            for pred in step.operation_predecessors
-            if pred in steps_by_attr
-        ]
-        if not pred_orders:
-            continue
-
-        min_consumer_order = max(pred_orders) + 1
-        consumer = next(
-            (
-                candidate
-                for candidate in ordered_steps
-                if (candidate.forward_order or 0) >= min_consumer_order
-                and candidate.attr_name != step.attr_name
-            ),
-            None,
-        )
-        if consumer is None:
-            continue
-        named = consumer.operation_predecessors
-        if named and step.attr_name not in named:
-            continue
-
-        target_index = _first_graph_index_for_module(consumer, attr_last_index)
-        if target_index is None:
-            target_index = attr_last_index.get(consumer.attr_name)
-        if target_index is not None and (source_index, target_index) not in graph.links:
-            graph.links.append((source_index, target_index))
-
-
-def _inline_frame_exit_index(
-    graph: ComputationGraph, member_indices: set[int]
-) -> int | None:
-    exit_candidates = [
-        source
-        for source, target in graph.links
-        if source in member_indices and target not in member_indices
-    ]
-    if exit_candidates:
-        return exit_candidates[-1]
-
-    sources_inside = {
-        source for source, _target in graph.links if source in member_indices
-    }
-    dangling = [index for index in member_indices if index not in sources_inside]
-    return dangling[-1] if dangling else None
-
-
-def _wire_inline_frame_dangling_outputs(graph: ComputationGraph) -> None:
-    """Connect dead-end steps inside an inline frame to that frame's outward exit."""
-    for frame in graph.inline_frames:
-        if frame.frame_id.startswith("loop:"):
-            continue
-        members = set(frame.node_indices)
-        if len(members) < 2:
-            continue
-        exit_index = _inline_frame_exit_index(graph, members)
-        if exit_index is None:
-            continue
-        sources_inside = {
-            source for source, _target in graph.links if source in members
-        }
-        for index in members:
-            if index in sources_inside or index == exit_index:
-                continue
-            block = graph.nodes[index].block
-            if block is not None and "loop iterator" in block.details:
-                # The iterable controls how often the frame executes; it is not a
-                # tensor operand of the frame's return value.
-                continue
-            if (index, exit_index) not in graph.links:
-                graph.links.append((index, exit_index))
 
 
 def _add_loop_frames(graph: ComputationGraph) -> None:
@@ -2301,13 +2344,8 @@ def build_computation_graph(
                     step,
                     key=f"seq:{segment_index}:{step.attr_name}",
                 )
-                _append_step_link(
-                    graph,
-                    input_index=input_index,
-                    last_index=last_index,
-                    step_index=step_index,
-                    fork_from_input=fork_from_input,
-                )
+                # Edge wiring deferred to _wire_all_predecessor_edges via
+                # forward_step_predecessors; only track the node index here.
                 last_index = step_index
                 _track_attr_index(attr_last_index, step.attr_name, step_index)
                 continue
@@ -2356,14 +2394,10 @@ def build_computation_graph(
                 _track_attr_index(attr_last_index, step.attr_name, last_index)
 
     graph.attr_output_indices.update(attr_last_index)
-    _wire_operation_predecessor_links(graph, root, input_index=input_index)
-    _wire_attention_provenance_links(graph, root)
-    _add_loop_frames(graph)
-    if not (strip_unused_return_branches and root.multi_return_module):
-        _wire_multi_input_op_forward_links(graph, root)
-    _add_loop_carried_nodes(graph, root)
-    if not (strip_unused_return_branches and root.multi_return_module):
-        _wire_inline_frame_dangling_outputs(graph)
+    skip_fwd = strip_unused_return_branches and root.multi_return_module
+    _wire_all_predecessor_edges(
+        graph, root, input_index=input_index, skip_forward_links=skip_fwd,
+    )
     if root.primary_output_step:
         for index, spec in enumerate(graph.nodes):
             if (

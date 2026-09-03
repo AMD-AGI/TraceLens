@@ -674,6 +674,9 @@ class BlockNode:
     referenced_return_producers: set[str] = field(default_factory=set)
     loop_carried: list[LoopCarriedSpec] = field(default_factory=list)
     multi_return_module: bool = False
+    forward_step_predecessors: dict[str, tuple[str, ...]] = field(
+        default_factory=dict
+    )
 
 
 PortStyle = Literal["floating", "inline"]
@@ -2122,6 +2125,7 @@ def build_block_node(
         referenced_return_producers=set(cls.referenced_return_producers),
         loop_carried=list(cls.loop_carried),
         multi_return_module=len(cls.forward_return_order) >= 2,
+        forward_step_predecessors=dict(cls.forward_step_predecessors),
     )
 
 
