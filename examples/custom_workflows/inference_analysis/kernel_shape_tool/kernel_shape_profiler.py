@@ -252,6 +252,11 @@ _KERNEL_ENTRY_POINTS = [
 # ---------------------------------------------------------------------------
 _AUTO_DISCOVER_PREFIXES: Tuple[str, ...] = (
     "flashinfer.",
+    # SGLang 0.5.18+ moved its Triton kernels out of sglang.srt.layers.* into
+    # this package, which is where most launchers now live. sglang.srt. is kept
+    # because quantization / MoE-runner launchers still sit there (and for
+    # older versions).
+    "sglang.kernels.ops.",
     "sglang.srt.",
     "aiter.ops.",
 )

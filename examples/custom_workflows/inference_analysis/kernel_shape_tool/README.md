@@ -70,10 +70,29 @@ pairs covering SGLang Triton attention, fused MoE, layernorm, FP8 quantization,
 LoRA, aiter ops and FlashInfer MoE.
 
 **Filtered auto-discovery** (`_discover_kernel_entry_points`) which force-imports
-everything under `sglang.srt.`, `aiter.ops.` and `flashinfer.`, then keeps only
-functions that look like kernel launchers — either they have a `Tensor`
-annotation, or (when unannotated) their source contains a launch pattern such as
-`[grid`, `torch.ops.` or `sgl_kernel.` (`_is_likely_kernel_launcher`).
+everything under `sglang.kernels.ops.`, `sglang.srt.`, `aiter.ops.` and
+`flashinfer.`, then keeps only functions that look like kernel launchers —
+either they have a `Tensor` annotation, or (when unannotated) their source
+contains a launch pattern such as `[grid`, `torch.ops.` or `sgl_kernel.`
+(`_is_likely_kernel_launcher`).
+
+`sglang.kernels.ops.` matters a lot on 0.5.18: that is where the Triton
+launchers moved to. Measured against the launchers that actually appear in
+DeepSeek-R1 traces, discovery finds 6 of 7 with the prefix and only 1 of 7
+without it (`concat_and_cast_mha_k_triton`, `set_mla_kv_buffer_triton`,
+`vocab_parallel_embedding`, `compute_position_triton` and `clamp_position_cuda`
+are all gained). The seventh,
+`create_flashinfer_kv_indices_triton`, is a `@triton.jit` kernel rather than a
+Python launcher, so it is deliberately never wrapped (see below); it is reached
+through its calling attention-backend method instead.
+
+The cost is breadth: candidates go from 1,186 to 2,012, and in a fully
+annotated package the "has a Tensor annotation" rule admits plain helpers such
+as `_assert_contiguous` and `_affine_supported`, which then show up in the trace
+as ops. Tightening the rule to *also* require a source launch pattern cuts
+candidates to 413 but drops real launchers (`compute_position_triton`,
+`clamp_position_cuda`, `write_cache_indices` among them), so the looser rule is
+kept on purpose. Expect trace noise and filter by name when analysing.
 
 Two things are deliberately excluded:
 - `@triton.jit` objects (`JITFunction` / `Autotuner`). Replacing them in module
