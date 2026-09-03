@@ -153,6 +153,70 @@ def _rebuild_attr_last_index(graph: ComputationGraph) -> dict[str, int]:
     return attr_last_index
 
 
+def _normalize_param_name(name: str) -> str:
+    """Normalize a parameter name for fuzzy matching.
+
+    Handles differences between call-site variable names (e.g. ``topk_indices``)
+    and forward-method parameter names (e.g. ``top_k_index``).
+    """
+    return name.replace("indices", "index").replace("_", "").rstrip("s")
+
+
+def _build_module_param_entries(
+    graph: ComputationGraph,
+) -> dict[str, dict[str, int]]:
+    """Map each expanded module to ``{param_name: first_graph_index}``.
+
+    Uses inline frames (keyed by module attr) and ``param_inputs`` on
+    individual pipeline steps to find arg-specific entry points.
+    """
+    result: dict[str, dict[str, int]] = {}
+    for frame in graph.inline_frames:
+        entries: dict[str, int] = {}
+        for index in frame.node_indices:
+            block = graph.nodes[index].block
+            if block is None:
+                continue
+            for param in block.param_inputs:
+                entries.setdefault(param, index)
+        if entries:
+            result[frame.frame_id] = entries
+    return result
+
+
+def _resolve_return_slot_source(
+    producer: "BlockNode",
+    arg_name: str,
+    attr_last_index: dict[str, int],
+    default: int,
+) -> int:
+    """When *producer* is multi-return, find the graph index of the specific
+    return slot that matches *arg_name* (with normalized fallback)."""
+    normalized = _normalize_param_name(arg_name)
+    for slot_name, producer_attr in producer.forward_return_slots.items():
+        if _normalize_param_name(slot_name) == normalized:
+            resolved = attr_last_index.get(producer_attr)
+            if resolved is not None:
+                return resolved
+    return default
+
+
+def _lookup_param_entry(
+    param_entries: dict[str, int],
+    arg_name: str,
+    default: int,
+) -> int:
+    """Look up an arg-specific pipeline entry, with fuzzy fallback."""
+    exact = param_entries.get(arg_name)
+    if exact is not None:
+        return exact
+    normalized = _normalize_param_name(arg_name)
+    for param, index in param_entries.items():
+        if _normalize_param_name(param) == normalized:
+            return index
+    return default
+
+
 def _wire_all_predecessor_edges(
     graph: ComputationGraph,
     root: BlockNode,
@@ -215,35 +279,68 @@ def _wire_all_predecessor_edges(
     if root.forward_step_predecessors:
         steps_by_attr = _forward_steps_by_attr(root)
         pred_arg_maps = root.forward_step_predecessor_args
+
+        # Build per-module param entry indices from inline frames so that
+        # side-fed arguments land on the correct expanded pipeline node.
+        module_param_entries = _build_module_param_entries(graph)
+
         for step_attr, preds in root.forward_step_predecessors.items():
             step_node = steps_by_attr.get(step_attr)
             if step_node is None:
                 continue
-            target_index = _first_graph_index_for_module(step_node, attr_last_index)
-            if target_index is None:
-                target_index = attr_last_index.get(step_attr)
-            if target_index is None:
+            default_target = _first_graph_index_for_module(
+                step_node, attr_last_index
+            )
+            if default_target is None:
+                default_target = attr_last_index.get(step_attr)
+            if default_target is None:
                 continue
             arg_map = pred_arg_maps.get(step_attr, {})
+            param_entries = module_param_entries.get(step_attr, {})
             multi = len(preds) >= 2
-            for pred in preds:
+
+            # Build (pred, arg_name) pairs.  When an arg_map is available,
+            # iterate over its entries so that two args from the same
+            # predecessor produce two separate edges (e.g. topk_indices and
+            # topk_weights both sourced from gate).
+            if arg_map:
+                pairs: list[tuple[str, str | None]] = [
+                    (src, name) for name, src in arg_map.items()
+                ]
+            else:
+                pairs = [(pred, None) for pred in preds]
+
+            for pred, arg_name in pairs:
                 if pred == FORWARD_METHOD_INPUT:
                     source_index = input_index
                 else:
                     source_index = attr_last_index.get(pred)
                 if source_index is None:
                     continue
+                # When the predecessor is a multi-return module, resolve the
+                # arg name to the specific return-slot producer so the edge
+                # starts from the correct pipeline node.
+                if arg_name and source_index is not None:
+                    pred_node = steps_by_attr.get(pred)
+                    if pred_node is not None and pred_node.forward_return_slots:
+                        source_index = _resolve_return_slot_source(
+                            pred_node,
+                            arg_name,
+                            attr_last_index,
+                            source_index,
+                        )
+                # Resolve arg-specific target when the predecessor maps to a
+                # named parameter with its own pipeline entry point.
+                target_index = (
+                    _lookup_param_entry(param_entries, arg_name, default_target)
+                    if arg_name
+                    else default_target
+                )
                 link = (source_index, target_index)
                 if link not in graph.links:
                     graph.links.append(link)
-                # Add port label from arg-name mapping when multi-input.
-                if multi and link not in graph.link_port_labels:
-                    port = next(
-                        (name for name, src in arg_map.items() if src == pred),
-                        None,
-                    )
-                    if port:
-                        graph.link_port_labels[link] = port
+                if multi and link not in graph.link_port_labels and arg_name:
+                    graph.link_port_labels[link] = arg_name
 
     # --- 2. Attention provenance edges ---
     if root.attention_inputs:
@@ -428,26 +525,6 @@ def _reads_only_a_side_parameter(step: BlockNode) -> bool:
         and bool(step.param_inputs)
         and not step.operation_predecessors
     )
-
-
-def _side_feed_param_indices(
-    graph: ComputationGraph,
-    chain_indices: list[int],
-) -> dict[str, int]:
-    """Map an expanded consumer's forward parameter names to the step that reads them.
-
-    A side-fed module that expands into visible steps has a real docking point for
-    each extra argument, so the feed can land on the step that consumes it instead
-    of on the chain head.
-    """
-    targets: dict[str, int] = {}
-    for index in chain_indices:
-        block = graph.nodes[index].block
-        if block is None:
-            continue
-        for param in block.param_inputs:
-            targets.setdefault(param, index)
-    return targets
 
 
 def _is_local_operation_port(spec: GraphNodeSpec) -> bool:
@@ -1056,15 +1133,6 @@ def _append_operand_link(
     link = (source_index, target_index)
     if link not in graph.links:
         graph.links.append(link)
-
-
-def _append_side_producer_link(
-    graph: ComputationGraph,
-    *,
-    source_index: int,
-    target_index: int,
-) -> None:
-    graph.links.append((source_index, target_index))
 
 
 def _add_side_producer_index(
@@ -2165,7 +2233,6 @@ def build_computation_graph(
             )
 
             entry_index: int | None = None
-            param_entry_indices: dict[str, int] = {}
             if is_method_wrapper(consumer):
                 consumer_index = _add_method_wrapper_node(
                     graph,
@@ -2196,7 +2263,6 @@ def build_computation_graph(
                     )
                     entry_index = chain_indices[0] if chain_indices else None
                     consumer_index = chain_tail
-                    param_entry_indices = _side_feed_param_indices(graph, chain_indices)
                 else:
                     consumer_index = _add_node(
                         graph,
@@ -2214,15 +2280,14 @@ def build_computation_graph(
                     graph.links.append((last_index, consumer_index))
                 elif input_index is not None:
                     graph.links.append((input_index, consumer_index))
+            # Materialize side-chain producer nodes so they exist in the
+            # graph for the generic predecessor pass to wire up.
             for side in segment.sides:
                 if side.source_kind == "forward_input":
-                    if input_index is not None and not forward_input_is_main:
-                        _link_forward_input(graph, input_index, entry_index)
                     continue
-                source_attr = side.source_chain[-1] if side.source_chain else None
-                if source_attr is None:
+                if not side.source_chain:
                     continue
-                source_index = _ensure_side_chain_tail_index(
+                _ensure_side_chain_tail_index(
                     graph,
                     segment,
                     side,
@@ -2231,37 +2296,6 @@ def build_computation_graph(
                     attr_last_index=attr_last_index,
                     root=root,
                     basic_ops=basic_ops,
-                )
-                if source_index is None:
-                    continue
-                producer = segment.side_producer_nodes.get(source_attr)
-                if producer is not None:
-                    normalized_arg = (
-                        side.arg_name.replace("indices", "index")
-                        .replace("_", "")
-                        .rstrip("s")
-                    )
-                    for (
-                        slot_name,
-                        producer_attr,
-                    ) in producer.forward_return_slots.items():
-                        normalized_slot = (
-                            slot_name.replace("indices", "index")
-                            .replace("_", "")
-                            .rstrip("s")
-                        )
-                        if normalized_slot != normalized_arg:
-                            continue
-                        source_index = attr_last_index.get(producer_attr, source_index)
-                        break
-                # A feed from the step right before the consumer is already the spine
-                # link; do not duplicate that operand edge.
-                if source_index == last_index and not forward_input_is_main:
-                    continue
-                _append_side_producer_link(
-                    graph,
-                    source_index=source_index,
-                    target_index=param_entry_indices.get(side.arg_name, entry_index),
                 )
             last_index = consumer_index
             _track_attr_index(attr_last_index, consumer.attr_name, consumer_index)
