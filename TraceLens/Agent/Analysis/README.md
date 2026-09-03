@@ -387,4 +387,19 @@ analysis_output/
     ├── <category>_metadata.json        # Platform specs, GPU utilization, config per category
     └── model_info.json                 # Model identification (model, architecture, scale, precision)
 ```
+
+---
+
+## Triage
+
+Once an `analysis_output/` directory has been produced, the triage toolkit
+verifies that the run is complete and well-formed. It runs a catalog of checks
+against one or more analysis output folders, records the findings per run, and
+can aggregate a batch into a summary report with reproducer packages. It is
+useful both for validating a single run and for auditing a large batch of runs
+for common failure modes.
+
+See the [Triage Toolkit README](triage/README.md) for the check catalog, the
+command-line and library interfaces, and the batch workflow.
+
 ---
