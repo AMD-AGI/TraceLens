@@ -668,5 +668,3 @@ class TestGapFreeExtraction:
             [roots[0]], events, trace, gpu_map, flow_map, meta, root_tiles=tiles
         )
         assert "whole_run" not in {e["name"] for e in out["traceEvents"]}
-
-
