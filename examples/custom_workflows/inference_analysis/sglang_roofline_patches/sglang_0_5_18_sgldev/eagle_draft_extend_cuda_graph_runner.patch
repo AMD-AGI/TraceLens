@@ -1,42 +1,30 @@
-diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-index 6f27a0594c..ade60816f0 100644
---- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-+++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-@@ -109,6 +109,7 @@ from sglang.srt.utils import (
+--- a/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py
++++ b/python/sglang/srt/speculative/eagle_draft_extend_cuda_graph_runner.py
+@@ -50,6 +50,7 @@
      require_mlp_tp_gather,
  )
  from sglang.srt.utils.device_timer import device_timer_ctx
-+from sglang.srt.utils.kernel_shape_profiler import disable, enable, is_enabled
- from sglang.srt.utils.profile_utils import (
-     export_cuda_graph_capture_trace,
-     graph_capture_profile_dir,
-@@ -247,6 +248,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
++from sglang.srt.utils.kernel_shape_profiler import enable, is_enabled
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.speculative.eagle_worker_v2 import EagleDraftWorker
+@@ -109,6 +110,9 @@
          self.enable_profile_cuda_graph = (
              model_runner.server_args.enable_profile_cuda_graph
          )
 +        self.enable_shape_discovery_for_cuda_graph_profile = (
 +            model_runner.server_args.enable_shape_discovery_for_cuda_graph_profile
 +        )
- 
-         # --- DSA dense-decode dual-graph -------------------------------
-         # Capture a "dense" (k-only, skip-indexer) and a "sparse" (full indexer)
-@@ -836,6 +840,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
-             tp_rank=get_parallel().tp_rank,
-         )
- 
-+        if self.enable_shape_discovery_for_cuda_graph_profile:
-+            disable()
-+
-     def capture_prepare(
-         self,
-         size: int,
-@@ -1212,11 +1219,25 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
-                     variant_label,
-                     dsa_variant,
-                 )
+         self.speculative_num_steps = (
+             get_spec().speculative_num_steps
+             if speculative_num_steps is None
+@@ -449,11 +453,25 @@
+             )
+             with canary_ctx:
+                 shape_key = self._make_graph_key(bs)
 -                post_warmup_hook = getattr(
 +                base_post_warmup_hook = getattr(
-                     self.model_runner.attn_backend,
+                     self.draft_extend_attn_backend,
                      "on_after_cuda_graph_warmup",
                      None,
                  )

@@ -1,8 +1,6 @@
-diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-index 6f27a0594c..ade60816f0 100644
 --- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
 +++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-@@ -109,6 +109,7 @@ from sglang.srt.utils import (
+@@ -114,6 +114,7 @@
      require_mlp_tp_gather,
  )
  from sglang.srt.utils.device_timer import device_timer_ctx
@@ -10,7 +8,7 @@ index 6f27a0594c..ade60816f0 100644
  from sglang.srt.utils.profile_utils import (
      export_cuda_graph_capture_trace,
      graph_capture_profile_dir,
-@@ -247,6 +248,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -252,6 +253,9 @@
          self.enable_profile_cuda_graph = (
              model_runner.server_args.enable_profile_cuda_graph
          )
@@ -20,7 +18,7 @@ index 6f27a0594c..ade60816f0 100644
  
          # --- DSA dense-decode dual-graph -------------------------------
          # Capture a "dense" (k-only, skip-indexer) and a "sparse" (full indexer)
-@@ -836,6 +840,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -841,6 +845,9 @@
              tp_rank=get_parallel().tp_rank,
          )
  
@@ -30,7 +28,7 @@ index 6f27a0594c..ade60816f0 100644
      def capture_prepare(
          self,
          size: int,
-@@ -1212,11 +1219,25 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -1217,11 +1224,25 @@
                      variant_label,
                      dsa_variant,
                  )

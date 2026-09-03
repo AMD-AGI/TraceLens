@@ -1,7 +1,4 @@
-diff --git a/python/sglang/srt/utils/kernel_shape_profiler.py b/python/sglang/srt/utils/kernel_shape_profiler.py
-new file mode 100644
-index 0000000000..5e8e3d32bb
---- /dev/null
+--- a/python/sglang/srt/utils/kernel_shape_profiler.py
 +++ b/python/sglang/srt/utils/kernel_shape_profiler.py
 @@ -0,0 +1,882 @@
 +"""

@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py b/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
-index 0db2c0e5e9..aaa70ec524 100644
+index 23e8cde..10d164f 100644
 --- a/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
 +++ b/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
 @@ -83,6 +83,7 @@ from sglang.srt.utils import (
@@ -20,7 +20,7 @@ index 0db2c0e5e9..aaa70ec524 100644
          self.attn_backend = self.eagle_worker.draft_extend_attn_backend_list[self.step]
          self.metadata_captured_in_graph = (
              self.attn_backend.draft_extend_metadata_captured_in_graph()
-@@ -441,9 +445,23 @@ class MultiLayerEagleDraftExtendCudaGraphRunner(DecodeCudaGraphRunner):
+@@ -444,9 +448,23 @@ class MultiLayerEagleDraftExtendCudaGraphRunner(DecodeCudaGraphRunner):
              attn_backend.init_forward_metadata_out_graph(forward_batch, in_capture=True)
              self.deepep_adapter.capture(is_extend_in_batch=True)
              shape_key = self._make_graph_key(bs)
