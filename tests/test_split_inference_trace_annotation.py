@@ -12,7 +12,7 @@ Covers:
 - Per-iteration splitting / time-window isolation (``extract_iteration``).
 - Annotation-name parsing of the names these fixtures generate.
 - Steady-state window finding (``identify_steady_state_regions`` and
-  ``find_steady_state_window``).
+  ``find_steady_state_annotations``).
 
 No trace files are written; everything operates on in-memory dicts.
 """
@@ -254,7 +254,7 @@ def test_identify_steady_state_regions_fallback():
     assert regions == [(4, 6)]
 
 
-def test_find_steady_state_window_returns_contiguous_slice():
+def test_find_steady_state_annotations_returns_contiguous_slice():
     roots = [
         {
             "name": SGLANG_DECODE_ANNOTATION.format(i=20),
@@ -264,7 +264,7 @@ def test_find_steady_state_window_returns_contiguous_slice():
         }
         for i in range(32)
     ]
-    window = split.find_steady_state_window(
+    window = split.find_steady_state_annotations(
         roots, num_steps=8, steady_state_regions=[(0, 32)], mode="decode_only"
     )
     assert len(window) == 8
@@ -376,7 +376,7 @@ def test_compute_reference_pd_ratio():
     assert 0.0 <= largest_ratio <= 1.0
 
 
-def test_find_steady_state_window_decode_only_mode():
+def test_find_steady_state_annotations_decode_only_mode():
     roots = [
         {
             "name": SGLANG_DECODE_ANNOTATION.format(i=20),
@@ -386,7 +386,7 @@ def test_find_steady_state_window_decode_only_mode():
         }
         for i in range(32)
     ]
-    window = split.find_steady_state_window(
+    window = split.find_steady_state_annotations(
         roots,
         num_steps=8,
         steady_state_regions=[(0, 32)],
@@ -658,14 +658,14 @@ def test_find_iteration_roots_no_annotation_trace():
     assert result.status.name == "NOT_SPLITTABLE"
 
 
-def test_find_steady_state_window_mixed_mode_with_conc_osl_r():
+def test_find_steady_state_annotations_mixed_mode_with_conc_osl_r():
     names = _mixed_phase_roots(48)
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
     regions, _ = split.identify_steady_state_regions(
         split.iteration_details(roots), num_steps=16
     )
-    window = split.find_steady_state_window(
+    window = split.find_steady_state_annotations(
         roots,
         num_steps=4,
         steady_state_regions=regions,
@@ -677,11 +677,11 @@ def test_find_steady_state_window_mixed_mode_with_conc_osl_r():
     assert len(window) >= 1
 
 
-def test_find_steady_state_window_mixed_no_pd_candidates(capsys):
+def test_find_steady_state_annotations_mixed_no_pd_candidates(capsys):
     names = [SGLANG_DECODE.format(i=20) for _ in range(24)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    window = split.find_steady_state_window(
+    window = split.find_steady_state_annotations(
         roots,
         num_steps=8,
         steady_state_regions=[(0, len(roots))],
@@ -691,11 +691,11 @@ def test_find_steady_state_window_mixed_no_pd_candidates(capsys):
     assert "falling back to the full candidate set" in captured or len(window) >= 1
 
 
-def test_find_steady_state_window_decode_only_no_pure_run():
+def test_find_steady_state_annotations_decode_only_no_pure_run():
     names = [SGLANG_EXTEND.format(t=800) for _ in range(16)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    window = split.find_steady_state_window(
+    window = split.find_steady_state_annotations(
         roots,
         num_steps=8,
         steady_state_regions=[(0, len(roots))],
@@ -704,7 +704,7 @@ def test_find_steady_state_window_decode_only_no_pure_run():
     assert window == []
 
 
-def test_find_steady_state_window_max_prefilldecode():
+def test_find_steady_state_annotations_max_prefilldecode():
     names = []
     for i in range(24):
         if i < 8:
@@ -713,7 +713,7 @@ def test_find_steady_state_window_max_prefilldecode():
             names.append(SGLANG_DECODE.format(i=20))
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    window = split.find_steady_state_window(
+    window = split.find_steady_state_annotations(
         roots,
         num_steps=8,
         steady_state_regions=[(0, len(roots))],
@@ -722,11 +722,11 @@ def test_find_steady_state_window_max_prefilldecode():
     assert len(window) >= 1
 
 
-def test_find_steady_state_window_max_prefilldecode_empty():
+def test_find_steady_state_annotations_max_prefilldecode_empty():
     names = [SGLANG_DECODE.format(i=20) for _ in range(16)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    window = split.find_steady_state_window(
+    window = split.find_steady_state_annotations(
         roots,
         num_steps=8,
         steady_state_regions=[(0, len(roots))],
@@ -735,21 +735,21 @@ def test_find_steady_state_window_max_prefilldecode_empty():
     assert window == []
 
 
-def test_find_steady_state_window_invalid_mode():
+def test_find_steady_state_annotations_invalid_mode():
     names = [VLLM_PRIMARY.format(i=i) for i in range(8)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
     with pytest.raises(ValueError, match="Unknown mode"):
-        split.find_steady_state_window(
+        split.find_steady_state_annotations(
             roots, num_steps=4, steady_state_regions=[(0, 8)], mode="invalid"
         )
 
 
-def test_find_steady_state_window_conc_mismatch_warning(capsys):
+def test_find_steady_state_annotations_conc_mismatch_warning(capsys):
     names = [SGLANG_DECODE.format(i=5) for _ in range(16)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    split.find_steady_state_window(
+    split.find_steady_state_annotations(
         roots,
         num_steps=8,
         steady_state_regions=[(0, len(roots))],

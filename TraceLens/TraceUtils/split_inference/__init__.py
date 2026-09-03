@@ -14,7 +14,8 @@ from .execution_roots import (
 )
 from .steady_state_window import (
     compute_reference_pd_ratio,
-    find_steady_state_window,
+    find_steady_state_annotations,
+    find_steady_state_generic,
     identify_steady_state_regions,
 )
 from .trace_extraction import (
@@ -39,7 +40,8 @@ __all__ = [
     "extract_iteration",
     "extract_phases_and_save",
     "find_iteration_roots",
-    "find_steady_state_window",
+    "find_steady_state_annotations",
+    "find_steady_state_generic",
     "get_filename",
     "identify_steady_state_regions",
     "parse_range",
