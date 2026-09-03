@@ -68,6 +68,24 @@ def suppress_native_hlo_logs():
         tmp.close()
 
 
+def merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """Merge a list of ``(start, end)`` intervals into a union of non-overlapping ones.
+
+    Intervals do not need to be pre-sorted.
+    """
+    if not intervals:
+        return []
+    intervals = sorted(intervals, key=lambda x: x[0])
+    merged = [intervals[0]]
+    for start, end in intervals[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 # generic data loader class for json, json.gz, or tensorboard pb files
 # tensorboard pb files are useful for Jax in particular because the json.gz traces produced by jax can have incorrect timestamps and missing information
 class DataLoader:

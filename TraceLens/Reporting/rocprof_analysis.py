@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from ..util import TraceEventUtils
+from ..util import TraceEventUtils, merge_intervals
 import pandas as pd
 import numpy as np
 from typing import List, Optional
@@ -62,41 +62,6 @@ class RocprofAnalyzer:
         self.api_events = api_events
         self.metadata = metadata
 
-    @staticmethod
-    def _merge_intervals(intervals: List[tuple]) -> List[tuple]:
-        """
-        Merge overlapping time intervals to calculate actual busy time.
-
-        Args:
-            intervals: List of (start, end) tuples representing time intervals
-
-        Returns:
-            List of merged non-overlapping intervals
-
-        Example:
-            >>> intervals = [(0, 10), (5, 15), (20, 30)]
-            >>> RocprofAnalyzer._merge_intervals(intervals)
-            [(0, 15), (20, 30)]
-        """
-        if not intervals:
-            return []
-
-        # Sort intervals by start time
-        intervals = sorted(intervals, key=lambda x: x[0])
-        merged = [intervals[0]]
-
-        for start, end in intervals[1:]:
-            last_start, last_end = merged[-1]
-            # Check if current interval overlaps with the last merged interval
-            if start <= last_end:
-                # Merge by extending the end time
-                merged[-1] = (last_start, max(last_end, end))
-            else:
-                # No overlap, add as new interval
-                merged.append((start, end))
-
-        return merged
-
     def _convert_timestamps_to_microseconds(self):
         """Convert all timestamps from nanoseconds to microseconds"""
         for event in self.kernel_events:
@@ -140,7 +105,7 @@ class RocprofAnalyzer:
         ]
 
         # Merge overlapping kernel intervals to get actual busy time
-        merged_kernel_intervals = self._merge_intervals(kernel_intervals)
+        merged_kernel_intervals = merge_intervals(kernel_intervals)
         kernel_time_us = sum(end - start for start, end in merged_kernel_intervals)
 
         # Create intervals for memory operations
@@ -150,12 +115,12 @@ class RocprofAnalyzer:
         ]
 
         # Merge overlapping memory intervals
-        merged_memory_intervals = self._merge_intervals(memory_intervals)
+        merged_memory_intervals = merge_intervals(memory_intervals)
         memory_time_us = sum(end - start for start, end in merged_memory_intervals)
 
         # Merge all GPU activity (kernels + memory) to calculate total busy time
         all_gpu_intervals = kernel_intervals + memory_intervals
-        merged_all_intervals = self._merge_intervals(all_gpu_intervals)
+        merged_all_intervals = merge_intervals(all_gpu_intervals)
         busy_time_us = sum(end - start for start, end in merged_all_intervals)
 
         # Calculate idle time

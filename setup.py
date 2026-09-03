@@ -99,6 +99,7 @@ setup(
             "TraceLens_generate_perf_report_genesis = TraceLens.Reporting.generate_perf_report_genesis:main",
             "TraceLens_split_inference_trace = TraceLens.TraceUtils.split_inference_trace_annotation:main",
             "TraceLens_resolve_kernel_source = TraceLens.TraceUtils.kernel_source.cli:main",
+            "TraceLens_trace_index = TraceLens.TraceIndex.cli:main",
         ],
     },
 )
