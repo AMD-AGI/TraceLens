@@ -1521,9 +1521,20 @@ def _add_loop_frames(graph: ComputationGraph) -> None:
     flush()
 
 
+def _collect_loop_carried(root: BlockNode) -> list:
+    """Gather loop_carried specs from root and all inlined children."""
+    from visualizer.ast_analyze import LoopCarriedSpec
+
+    specs: list[LoopCarriedSpec] = list(root.loop_carried)
+    for child in root.children:
+        specs.extend(child.loop_carried)
+    return specs
+
+
 def _add_loop_carried_nodes(graph: ComputationGraph, root: BlockNode) -> None:
     """Materialize acyclic loop-result boundaries for values updated by a loop."""
-    if not root.loop_carried:
+    all_carried = _collect_loop_carried(root)
+    if not all_carried:
         return
     attr_last_index = _rebuild_attr_last_index(graph)
     input_index = next(
@@ -1534,7 +1545,7 @@ def _add_loop_carried_nodes(graph: ComputationGraph, root: BlockNode) -> None:
         ),
         None,
     )
-    for carried in root.loop_carried:
+    for carried in all_carried:
         initial_index = (
             input_index
             if carried.initial_producer == FORWARD_METHOD_INPUT
@@ -1548,13 +1559,15 @@ def _add_loop_carried_nodes(graph: ComputationGraph, root: BlockNode) -> None:
             for index, spec in enumerate(graph.nodes)
             if spec.block is not None and spec.block.attr_name in carried.operation_ids
         }
-        loop_frame = next(
-            (
-                frame
-                for frame in graph.inline_frames
-                if member_indices and member_indices.issubset(set(frame.node_indices))
-            ),
-            None,
+        matching_frames = [
+            frame
+            for frame in graph.inline_frames
+            if member_indices and member_indices.issubset(set(frame.node_indices))
+        ]
+        loop_frame = (
+            min(matching_frames, key=lambda f: len(f.node_indices))
+            if matching_frames
+            else None
         )
         iter_sublabel = (
             f"{carried.variable} · {carried.iteration_count} iterations"
