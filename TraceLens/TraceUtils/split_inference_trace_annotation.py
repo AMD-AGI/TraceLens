@@ -250,12 +250,28 @@ def main():
             "output_dir/decode_only/. Each step is a separate trace file."
         ),
     )
+    parser.add_argument(
+        "--emit-gpu-op-uid",
+        action="store_true",
+        default=False,
+        help=(
+            "Tag each event with a 'gpu_op_uid' field equal to its index in "
+            "the original (unfiltered) traceEvents array before splitting, "
+            "so downstream consumers can recover each extracted event's "
+            "position in the source trace without re-loading it. Off by "
+            "default to keep existing output byte-for-byte unchanged."
+        ),
+    )
     args = parser.parse_args()
     execution_details = []
 
     # Load trace
     trace_json = DataLoader.load_data(get_filename(args.trace_path))
     events = trace_json.get("traceEvents", [])
+    if args.emit_gpu_op_uid:
+        for i, e in enumerate(events):
+            if isinstance(e, dict):
+                e["gpu_op_uid"] = i
     gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
     print(f"Loaded {len(events)} events")
 

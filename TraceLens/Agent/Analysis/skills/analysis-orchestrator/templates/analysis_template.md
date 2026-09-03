@@ -90,8 +90,10 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 <!-- === COMPARATIVE Executive Summary === -->
 [1 paragraph comparative overview: summarize which trace is faster overall, by how much, and the dominant gap categories]
 
-<!-- Top Bottleneck Category X% = top category's gpu_kernel_time_ms / (manifest.gpu_utilization.total_time_ms * manifest.gpu_utilization.computation_time_percent / 100)
-     Top Bottleneck Category Y% = top category's gpu_kernel_time_ms / (manifest.trace2_gpu_utilization.total_time_ms * manifest.trace2_gpu_utilization.computation_time_percent / 100)
+<!-- Top Bottleneck Category X% = top category's gpu_kernel_time_ms / manifest.gpu_utilization.total_time_ms
+     Top Bottleneck Category Y% = top category's matching manifest.trace2_ops_summary_by_category[] total_direct_kernel_time_ms (matched case-insensitively by op category; — if no match) / manifest.trace2_gpu_utilization.total_time_ms
+     Use total_time_ms (NOT compute-only time) as the denominator so communication-heavy categories are not reported above 100%.
+     Both X% and Y% must reference the SAME category (the trace1 top bottleneck) so the two columns are comparable.
      Difference = Trace 2 value − Trace 1 value -->
 | Metric | Trace 1 - (<Platform1>) | Trace 2 - (<Platform2>) | Difference |
 |--------|----------------------------|-------------------------------|------------|
@@ -144,6 +146,7 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 <!-- === COMPARATIVE Top Operations === -->
 `Trace 2 Time (ms)` = matching `manifest.trace2_ops_summary_by_category[]["total_direct_kernel_time_ms"]` where `"op category"` matches the row Category **case-insensitively**; use — if no match.
 `Difference (ms)` = Trace 2 Time − Trace 1 Time.
+Note: for communication categories (e.g. collectives), `% of Compute Time` can exceed 100% because the kernel time is not compute-bound — report the value as computed.
 <!-- impact-begin kind=top_ops -->
 | Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) | % of Compute Time | Ops | Difference (ms) |
 |------|----------|-------------------|-------------------|-------------------|-----|-----------------|
