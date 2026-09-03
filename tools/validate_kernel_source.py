@@ -31,8 +31,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import sys
-from pathlib import Path
 
 from TraceLens.TraceUtils.kernel_source import (
     discover_library_paths,
