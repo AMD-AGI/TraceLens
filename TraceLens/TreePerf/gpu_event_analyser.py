@@ -7,7 +7,7 @@
 import pandas as pd
 import tqdm
 
-from ..util import TraceEventUtils
+from ..util import TraceEventUtils, merge_intervals
 
 
 class GPUEventAnalyser:
@@ -16,23 +16,6 @@ class GPUEventAnalyser:
         Initialize with a list of event dictionaries.
         """
         self.events = events
-
-    @staticmethod
-    def merge_intervals(intervals):
-        """
-        Merge a list of intervals (each as a (start, end) tuple) into a union of non-overlapping intervals.
-        """
-        if not intervals:
-            return []
-        intervals = sorted(intervals, key=lambda x: x[0])
-        merged = [intervals[0]]
-        for start, end in intervals[1:]:
-            last_start, last_end = merged[-1]
-            if start <= last_end:
-                merged[-1] = (last_start, max(last_end, end))
-            else:
-                merged.append((start, end))
-        return merged
 
     @staticmethod
     def subtract_intervalsA_from_B(intervals_to_subtract, intervals):
@@ -231,10 +214,10 @@ class GPUEventAnalyser:
             dict_intervals[key] = [(event["ts"], event["t_end"]) for event in events]
 
         # Merge intervals within each category.
-        comp_union = GPUEventAnalyser.merge_intervals(dict_intervals["computation"])
-        comm_union = GPUEventAnalyser.merge_intervals(dict_intervals["communication"])
-        memcpy_union = GPUEventAnalyser.merge_intervals(dict_intervals["memcpy"])
-        all_intervals = GPUEventAnalyser.merge_intervals(dict_intervals["all_gpu"])
+        comp_union = merge_intervals(dict_intervals["computation"])
+        comm_union = merge_intervals(dict_intervals["communication"])
+        memcpy_union = merge_intervals(dict_intervals["memcpy"])
+        all_intervals = merge_intervals(dict_intervals["all_gpu"])
 
         # end of the last event - start of the first event
         total_time = all_intervals[-1][1] - all_intervals[0][0]

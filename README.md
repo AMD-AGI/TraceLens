@@ -31,6 +31,8 @@ TraceLens is a Python library for **automated performance analysis of training a
 
 **TraceLens Agent**: Receive a prioritized human-readable optimization report, derived through an agentic workflow, covering compute kernels, system bottlenecks, and kernel fusion opportunities with root-cause reasoning and concrete resolutions.
 
+**Trace corpus indexing**: Build a searchable SQLite catalog of TraceLens reports so you can find traces by op, category, or kernel name without reopening every raw file. Scanner and importer sit behind a storage interface; SQLite is the first backend.
+
 ---
 
 ## Quick Start
@@ -51,16 +53,6 @@ To try out TraceLens without collecting your own trace, use the [demo traces](te
 
 ### 3. Analyze your Workload
 
-## Supported Profile Formats
-
-| Format | Tool | Documentation |
-|--------|------|---------------|
-| **PyTorch** | `torch.profiler` | [docs/generate_perf_report.md](docs/generate_perf_report.md) |
-| **JAX** | XPlane protobuf | [docs/jax_analyses.md](docs/jax_analyses.md) |
-| **rocprofv3 JSON** | AMD ROCm rocprofiler-sdk | [docs/generate_perf_report_rocprof.md](docs/generate_perf_report_rocprof.md) |
-| **rocprofv3 pftrace** | Perfetto-style | [docs/generate_perf_report_rocprof_pftrace.md](docs/generate_perf_report_rocprof_pftrace.md) |
-| **Genesis / Taichi** | rocprofv3 + pftrace | [docs/generate_perf_report_genesis.md](docs/generate_perf_report_genesis.md) |
-
 Generate a performance analysis report from an eager execution PyTorch trace with a single command:
 
 ```bash
@@ -77,6 +69,16 @@ TraceLens_compare_perf_reports_pytorch \
     --names baseline candidate \
     --sheets all \
     -o comparison.xlsx
+```
+
+Index traces and existing TraceLens CSV reports (see [Index a corpus of traces](docs/how-to/trace-index.md)):
+
+```bash
+TraceLens_trace_index --db trace_index.sqlite append \
+    --trace-path /path/to/rank0_trace.json.gz \
+    --report-dir path/to/perf_report_csvs
+TraceLens_trace_index --db trace_index.sqlite build --traces-file traces.txt
+TraceLens_trace_index --db trace_index.sqlite search Cijk
 ```
 
 For multi-rank runs, generate a collective-communication report across ranks (see [Generate a collective-communication report](docs/how-to/collective-report.md)):
@@ -117,6 +119,7 @@ Analyze a workload autonomously using an agentic system that automates performan
 | **JAX**               | XPlane protobuf          | [docs/how-to/generate-perf-report-jax.md](docs/how-to/generate-perf-report-jax.md)                             |
 | **rocprofv3 JSON**    | AMD ROCm rocprofiler-sdk | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md)                     |
 | **rocprofv3 pftrace** | Perfetto-style           | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md)                     |
+| **Genesis / Taichi**  | rocprofv3 + pftrace      | [docs/how-to/generate-perf-report-genesis.md](docs/how-to/generate-perf-report-genesis.md)                     |
 
 Each format's linked doc covers its full CLI reference. For PyTorch report comparison and multi-rank collective analysis, see the corresponding docs in the [Documentation](#documentation) table.
 
@@ -127,18 +130,19 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 | Module                       | Doc                                                                                                                              |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | Trace2Tree                   | [docs/conceptual/trace2tree.md](docs/conceptual/trace2tree.md)                                                                   |
-| TreePerf                     | [docs/how-to/tree-perf-analysis.md](docs/how-to/tree-perf-analysis.md)                                                           |
+| TreePerf                     | [docs/how-to/sdk-analysis.md](docs/how-to/sdk-analysis.md)                                                                       |
 | NCCL Analyser                | [docs/how-to/nccl-analysis.md](docs/how-to/nccl-analysis.md)                                                                     |
 | TraceDiff                    | [docs/how-to/compare-traces.md](docs/how-to/compare-traces.md)                                                                   |
 | Event Replay                 | [docs/how-to/event-replay.md](docs/how-to/event-replay.md)                                                                       |
 | TraceFusion                  | [docs/how-to/trace-fusion.md](docs/how-to/trace-fusion.md)                                                                       |
-| GPU Event Analyser           | [docs/how-to/gpu-event-analysis.md](docs/how-to/gpu-event-analysis.md)                                                           |
+| GPU Event Analyser           | [docs/how-to/sdk-analysis.md](docs/how-to/sdk-analysis.md)                                                                       |
 | JAX Analyses                 | [docs/how-to/generate-perf-report-jax.md](docs/how-to/generate-perf-report-jax.md)                                               |
 | pftrace Reports              | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md)                                       |
 | Compare PyTorch Reports      | [docs/how-to/compare-perf-reports.md](docs/how-to/compare-perf-reports.md)                                                       |
 | Multi-Rank Collective Report | [docs/how-to/collective-report.md](docs/how-to/collective-report.md)                                                             |
 | Performance Report Columns   | [docs/reference/perf-report-columns.md](docs/reference/perf-report-columns.md)                                                   |
 | TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
+| TraceIndex                   | [docs/how-to/trace-index.md](docs/how-to/trace-index.md)                                                                         |
 
 ---
 
