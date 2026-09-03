@@ -4,28 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Resolve a native GPU kernel to its editable source (the "active finder").
-
-This is the core layer. Instead of trusting an absolute path captured once at
-build time, it locates a kernel's source in the *currently installed* framework
-tree by the kernel's stable identity:
-
-1. demangle the device symbol to its base name (:mod:`.demangle`);
-2. look the base name up in the live ``__global__`` index over the caller's
-   search paths (:mod:`.index`);
-3. rank the candidate definitions, verify the symbol really appears in the file,
-   and return the first editable, verified location.
-
-Two public entry points:
-
-* :func:`resolve_source_path` -- the simple "name + paths -> location" answer.
-* :func:`resolve` -- runs the cheap :mod:`.patchability` gate first, then
-  resolves, returning a richer :class:`~.datatypes.ResolveResult`.
-
-If ``search_paths`` is omitted/empty, both fall back to
-:func:`discovery.discover_library_paths` so a caller can use the resolver with
-zero configuration.
-"""
+"""Resolve a native GPU kernel to its editable source by demangling -> index lookup -> rank/verify (the "active finder")."""
 
 from __future__ import annotations
 
@@ -34,7 +13,7 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import discovery, index
+from . import index
 from .demangle import base_symbol
 from .editable import is_editable_source
 from .datatypes import ResolveResult, SourceLocation
@@ -58,12 +37,7 @@ def _framework_of(path: str) -> str:
 
 
 def _rank_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Rank candidate definition records: arch-tag match, then shorter path.
-
-    When a base name maps to more than one definition, prefer a file whose path
-    matches ``$TRACELENS_TARGET_ARCH`` (e.g. ``gfx942``) and then the shorter
-    path (the canonical location over a vendored copy).
-    """
+    """Rank candidate definition records: ``$TRACELENS_TARGET_ARCH`` match first, then shorter path."""
     arch = os.environ.get("TRACELENS_TARGET_ARCH", "").strip().lower()
 
     def score(rec: dict[str, object]) -> tuple[int, int]:
@@ -88,7 +62,7 @@ def _resolved_paths(search_paths: Sequence[str | Path] | None) -> list[Path]:
     """Return the caller's search paths, or discover defaults when omitted."""
     if search_paths:
         return [Path(p) for p in search_paths]
-    return discovery.discover_library_paths()
+    return index.discover_library_paths()
 
 
 def resolve_source_path(
@@ -97,19 +71,7 @@ def resolve_source_path(
     *,
     index_obj: index.SourceIndex | None = None,
 ) -> SourceLocation | None:
-    """Resolve a native kernel name to its editable source location.
-
-    Args:
-        kernel_name: Device kernel symbol from the trace (mangled or plain).
-        search_paths: Directories to search. When omitted/empty, defaults are
-            discovered via :func:`discovery.discover_library_paths`.
-        index_obj: Optional prebuilt index; built/cached from ``search_paths``
-            when omitted.
-
-    Returns:
-        A :class:`~.datatypes.SourceLocation` for the first editable, verified
-        definition, or ``None`` when nothing matches.
-    """
+    """Resolve a native kernel name to its editable source location, or ``None`` if unmatched."""
     base = base_symbol(kernel_name)
     if not base:
         return None
@@ -121,8 +83,7 @@ def resolve_source_path(
     )
     records = _rank_records(idx.lookup(base))
     if len(records) > 1:
-        # A bare base name mapping to >1 definition is disambiguated only by the
-        # ranking heuristic, so leave a breadcrumb for anyone auditing a rewrite.
+        # Multiple defs are disambiguated only by the ranking heuristic; leave a breadcrumb.
         log.debug(
             "active-finder: %d candidate records for base %r; ranking by heuristic",
             len(records),
@@ -154,23 +115,7 @@ def resolve(
     run_gate: bool = True,
     index_obj: index.SourceIndex | None = None,
 ) -> ResolveResult:
-    """Gate, then resolve a native kernel to its editable source.
-
-    Runs the cheap :func:`~.patchability.classify_patchability` gate first and
-    short-circuits non-patchable kernels (no filesystem work), then resolves
-    survivors via :func:`resolve_source_path`.
-
-    Args:
-        kernel_name: Device kernel symbol from the trace.
-        search_paths: Directories to search (discovered defaults when omitted).
-        op_name: Launching op name, used by the gate (e.g. MIOpen detection).
-        call_stack: Optional call-stack frames, used by the gate (inductor Triton).
-        run_gate: Set ``False`` to skip the gate and resolve directly.
-        index_obj: Optional prebuilt index.
-
-    Returns:
-        A :class:`~.datatypes.ResolveResult` with the outcome and method.
-    """
+    """Run the cheap patchability gate first, then resolve survivors via :func:`resolve_source_path`."""
     if run_gate:
         gate = classify_patchability(
             kernel_name, op_name=op_name, call_stack=call_stack

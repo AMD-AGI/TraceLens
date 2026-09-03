@@ -16,7 +16,7 @@ approach in one run:
 * Stage 4 -- the ``__global__`` source index: scan + cache (:mod:`.index`)
 * Stage 5 -- native resolution (:mod:`.resolver`)
 * Stage 6 -- Triton ``.py`` resolution (:mod:`.triton_pin`)
-* Stage 7 -- discovery of installed framework trees (:mod:`.discovery`)
+* Stage 7 -- discovery of installed framework trees (:mod:`.index`)
 * Stage 8 -- the on-disk audit contract (:mod:`.contract`)
 * Stage 9 -- a full trace-to-source walk that ties the stages together
 
@@ -79,7 +79,6 @@ resolve_source_path = _ks.resolve_source_path
 resolve_triton_source = _ks.resolve_triton_source
 triton_def_line = _ks.triton_def_line
 contract = importlib.import_module(_ks.__name__ + ".contract")
-discovery = importlib.import_module(_ks.__name__ + ".discovery")
 index_mod = importlib.import_module(_ks.__name__ + ".index")
 base_symbol = importlib.import_module(_ks.__name__ + ".demangle").base_symbol
 
@@ -179,6 +178,134 @@ class TestDemangle:
 
     def test_mangled_prefers_kernel_token(self):
         assert base_symbol("_Z18my_fused_op_kernelPfS_i") == "my_fused_op_kernel"
+
+    # -- Real, compiler-verified mangled names (g++ -c + nm on GPU-kernel-shaped
+    # C++: free function, anonymous namespace, template instantiations, operator()),
+    # so these aren't hand-crafted ABI guesses. Each passes with *both* demangler
+    # backends (itanium-demangler installed, and the c++filt fallback) -- see
+    # ``TRACELENS_FRAMEWORK_SOURCE_ROOTS``-style env isolation notes at file top.
+    def test_real_symbol_free_function_no_namespace(self):
+        assert base_symbol("_Z26free_function_no_ns_kernelPim") == (
+            "free_function_no_ns_kernel"
+        )
+
+    def test_real_symbol_anonymous_namespace(self):
+        sym = "_ZN4vllm12_GLOBAL__N_124reshape_and_cache_kernelEPfPKf"
+        assert base_symbol(sym) == "reshape_and_cache_kernel"
+
+    def test_real_symbol_template_instantiation_float(self):
+        sym = "_ZN4vllm9attention22paged_attention_kernelIfLi128EEEvPT_PKS2_S5_S5_i"
+        assert base_symbol(sym) == "paged_attention_kernel"
+
+    def test_real_symbol_template_instantiation_short(self):
+        sym = "_ZN4vllm9attention22paged_attention_kernelIsLi64EEEvPT_PKS2_S5_S5_i"
+        assert base_symbol(sym) == "paged_attention_kernel"
+
+    def test_real_symbol_operator_call_functor(self):
+        # Regression: naive arg-list stripping used to cut at operator()'s own
+        # parens, yielding "operator" instead of "operator()".
+        sym = "_ZNK4vllm10FusedMoeOpclIfEEvPT_PKS2_i"
+        assert base_symbol(sym) == "operator()"
+
+    def test_extern_c_name_passes_through_unmangled(self):
+        assert base_symbol("extern_c_kernel") == "extern_c_kernel"
+
+    # -- Extended, compiler-verified ABI-edge-case symbols (g++ -c + nm on a second
+    # probe file covering deep namespaces, enum/nested-template non-type args,
+    # substitution-heavy signatures, non-operator member functions, every common
+    # operator overload, a class-template + operator() combo, and a lambda closure).
+    def test_real_symbol_deep_namespace_plain_function(self):
+        sym = "_Z25launch_with_lambda_kernelv"
+        assert base_symbol(sym) == "launch_with_lambda_kernel"
+
+    def test_real_symbol_enum_nontype_template_arg(self):
+        sym = "_ZN3amd3gpu2ck12quant_kernelILNS1_8DataTypeE0EEEvPv"
+        assert base_symbol(sym) == "quant_kernel"
+
+    def test_real_symbol_multi_type_and_nontype_template_args(self):
+        sym = "_ZN3amd3gpu2ck17gemm_fused_kernelIfsLi64EEEvPT_PKT0_ii"
+        assert base_symbol(sym) == "gemm_fused_kernel"
+
+    def test_real_symbol_nested_template_argument(self):
+        sym = "_ZN3amd3gpu2ck22nested_template_kernelIfEEvPNS1_4Vec3IT_EEPKS5_"
+        assert base_symbol(sym) == "nested_template_kernel"
+
+    def test_real_symbol_heavy_substitution_compression(self):
+        # 6 repeated ``const float*`` params exercise Itanium substitution reuse (S_, S0_...).
+        sym = "_ZN3amd3gpu2ck25heavy_substitution_kernelEPfPKfS4_S4_S4_S4_i"
+        assert base_symbol(sym) == "heavy_substitution_kernel"
+
+    def test_real_symbol_const_member_function(self):
+        assert base_symbol("_ZNK13KernelFunctor3runEPf") == "run"
+
+    def test_real_symbol_rvalue_ref_qualified_member(self):
+        # Regression: itanium-demangler glues "&&" directly to the name with no space.
+        assert base_symbol("_ZNO13KernelFunctor10run_rvalueEPf") == "run_rvalue"
+
+    def test_real_symbol_conversion_operator(self):
+        assert base_symbol("_ZNK13KernelFunctorcvfEv") == "operator float"
+
+    def test_real_symbol_operator_equality(self):
+        assert base_symbol("_ZNK13KernelFunctoreqERKS_") == "operator=="
+
+    def test_real_symbol_operator_subscript(self):
+        assert base_symbol("_ZNK13KernelFunctorixEi") == "operator[]"
+
+    def test_real_symbol_operator_plus(self):
+        assert base_symbol("_ZNK13KernelFunctorplERKS_") == "operator+"
+
+    def test_real_symbol_class_template_operator_call(self):
+        # Regression: the class's own "<double>" sits *before* "::operator()" in the
+        # qualified name, so naively stripping from the first "<" used to eat the method
+        # name too, yielding "TemplatedFunctor" instead of "operator()".
+        sym = "_ZNK16TemplatedFunctorIdEclEPd"
+        assert base_symbol(sym) == "operator()"
+
+    def test_real_symbol_lambda_closure_operator_call(self):
+        # Regression: the lambda's enclosing-function "()" and "{lambda(...)#1}" scope
+        # notation used to be mistaken for the trailing arg list, eating the real
+        # "::operator()" suffix and yielding the enclosing function's name instead.
+        sym = "_ZZ25launch_with_lambda_kernelvENKUlPfE_clES_"
+        assert base_symbol(sym) == "operator()"
+
+    # -- Constructors / destructors: the itanium-demangler package prints these as
+    # placeholder tokens ("{ctor}", "{base ctor}", "{dtor}", "{deleting dtor}", ...)
+    # instead of the real name, so demangle() falls back to c++filt for them. These
+    # guard that a ctor resolves to the class name and a dtor to "~ClassName" -- never
+    # a bare "{ctor}"/"{dtor}" -- regardless of which real backend is active.
+    def test_real_symbol_constructor_resolves_to_class_name(self):
+        # C1 = complete-object ctor, C2 = base-object ctor.
+        assert base_symbol("_ZN14KernelLauncherC1EPf") == "KernelLauncher"
+        assert base_symbol("_ZN14KernelLauncherC2EPf") == "KernelLauncher"
+
+    def test_real_symbol_destructor_resolves_to_tilde_class_name(self):
+        # D1 = complete-object dtor, D2 = base-object dtor.
+        assert base_symbol("_ZN14KernelLauncherD1Ev") == "~KernelLauncher"
+        assert base_symbol("_ZN14KernelLauncherD2Ev") == "~KernelLauncher"
+
+    # -- Robustness: malformed/edge-case input must never raise, and must not silently
+    # produce a wrong-but-plausible-looking name.
+    def test_malformed_mangled_prefix_does_not_raise(self):
+        assert base_symbol("_Z") == ""
+        # Garbage after "_Z" must degrade gracefully (str result), never raise.
+        assert isinstance(base_symbol("_Zgarbage!!!not_valid(("), str)
+
+    def test_whitespace_padded_input_is_stripped(self):
+        assert base_symbol("  paged_attention_kernel  ") == "paged_attention_kernel"
+
+    def test_unbalanced_brackets_left_unchanged_not_corrupted(self):
+        # _rstrip_balanced must leave a string with no matching open bracket alone,
+        # rather than guessing and truncating a legitimate name.
+        assert base_symbol("ns::weird_kernel(int") == "weird_kernel(int"
+
+    def test_repeated_calls_do_not_cross_contaminate_cache(self):
+        # Two symbols sharing a long common prefix must not leak a cached result
+        # from one into the other (guards the functools.lru_cache on base_symbol).
+        a = base_symbol("_ZN4vllm9attention22paged_attention_kernelIfLi128EEEvPT_PKS2_S5_S5_i")
+        b = base_symbol("_ZN4vllm9attention22paged_attention_kernelIsLi64EEEvPT_PKS2_S5_S5_i")
+        assert a == "paged_attention_kernel"
+        assert b == "paged_attention_kernel"
+        assert base_symbol("_ZN2ns6kernelEPf") == "kernel"
 
 
 # ===========================================================================
@@ -479,7 +606,7 @@ class TestDiscovery:
         )
         monkeypatch.setenv("TRACELENS_FRAMEWORK_SOURCE_ROOTS", f"vllm={pkg}")
         monkeypatch.setenv("TRACELENS_DISCOVER_ONLY", "vllm")
-        paths = discovery.discover_library_paths(("vllm",))
+        paths = index_mod.discover_library_paths(("vllm",))
         assert any(str(csrc) == str(p) for p in paths)
 
     def test_discover_only_allowlist_excludes_others(self, tmp_path, monkeypatch):
@@ -492,7 +619,7 @@ class TestDiscovery:
         monkeypatch.setenv("TRACELENS_FRAMEWORK_SOURCE_ROOTS", f"vllm={pkg}")
         monkeypatch.setenv("TRACELENS_DISCOVER_ONLY", "sglang")
         # Allowlist names only sglang, so the vllm root must not appear.
-        paths = discovery.discover_library_paths(("vllm", "sglang"))
+        paths = index_mod.discover_library_paths(("vllm", "sglang"))
         assert all("vllm" not in str(p) for p in paths)
 
 

@@ -42,6 +42,13 @@ __all__ = ["base_symbol", "demangle"]
 # A plain C/C++ identifier (used by the length-prefix fallback parser).
 _IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 
+# The itanium-demangler package prints constructors/destructors as placeholder
+# tokens (``{ctor}``, ``{base ctor}``, ``{dtor}``, ``{deleting dtor}``, ...)
+# instead of the real ``ClassName`` / ``~ClassName``. c++filt spells them out, so
+# when we see such a placeholder we fall back to c++filt. (Note: a lambda's
+# ``{lambda(...)#1}`` is *not* matched here -- it has no ``ctor``/``dtor`` word.)
+_ITANIUM_CTOR_DTOR_RE = re.compile(r"\{[^{}]*\b(?:c|d)tor\}")
+
 
 @functools.lru_cache(maxsize=8192)
 def _cxxfilt_base(mangled: str) -> str:
@@ -85,31 +92,65 @@ def demangle(mangled: str) -> str:
     try:
         node = _itanium_parse(mangled)
         if node is not None:
-            return str(node)
+            decoded = str(node)
+            # itanium prints ctors/dtors as ``{ctor}``/``{dtor}`` placeholders;
+            # c++filt spells out the real name, so prefer it in that one case.
+            if _ITANIUM_CTOR_DTOR_RE.search(decoded):
+                return _cxxfilt_base(mangled) or decoded
+            return decoded
     except Exception as exc:  # noqa: BLE001 - malformed symbols must not propagate.
         log.debug("itanium demangle failed for %r: %s", mangled, exc)
     # itanium returned nothing / raised: try c++filt before giving up.
     return _cxxfilt_base(mangled)
 
 
-def _base_from_demangled(name: str) -> str:
-    """Pull the bare kernel name out of a readable C++ signature.
+def _strip_trailing_qualifiers(s: str) -> str:
+    """Strip trailing cv/ref qualifiers (``const``/``volatile``/``&``/``&&``) after the arg list.
 
-    Strips the return type, namespaces, template ``<...>``, and arguments ``(...)``.
-    ``(anonymous namespace)::`` is removed first so such names don't wrongly
-    collapse to ``void``.
-
-    Example:
-        ``void ns::sub::my_kernel<float>(float*, int)`` -> ``my_kernel``
+    ``&``/``&&`` are stripped even with no leading space (some demanglers glue them to the
+    name, e.g. ``run_rvalue&&``) since those characters can never be part of a real identifier.
+    ``const``/``volatile`` require a leading space since they could otherwise (in principle)
+    be a substring of a legitimate name.
     """
+    while True:
+        for suf in (" const", " volatile", " &&", "&&", " &", "&"):
+            if s.endswith(suf):
+                s = s[: -len(suf)]
+                break
+        else:
+            return s
+
+
+def _rstrip_balanced(s: str, open_ch: str, close_ch: str) -> str:
+    """Drop a trailing ``open_ch...close_ch`` group matched from the end (unchanged if unbalanced)."""
+    if not s.endswith(close_ch):
+        return s
+    depth = 0
+    for i in range(len(s) - 1, -1, -1):
+        if s[i] == close_ch:
+            depth += 1
+        elif s[i] == open_ch:
+            depth -= 1
+            if depth == 0:
+                return s[:i]
+    return s
+
+
+def _base_from_demangled(name: str) -> str:
+    """Pull the bare kernel name out of a readable C++ signature (e.g. ``void ns::my_kernel<float>(float*, int)`` -> ``my_kernel``)."""
     n = (name or "").strip()
     if not n:
         return ""
     if n.startswith("void "):
         n = n[len("void ") :].strip()
     n = n.replace("(anonymous namespace)::", "")
-    n = re.sub(r"<.*$", "", n)
-    n = re.sub(r"\(.*$", "", n)
+    # Trailing groups are stripped by matching from the *end* (not the first "(" / "<" found),
+    # so an operator's own "()", a lambda's "{lambda(...)...}" scope, or a class template's
+    # "<...>" earlier in the qualified name isn't mistaken for the true trailing arg list.
+    n = _strip_trailing_qualifiers(n)
+    n = _rstrip_balanced(n, "(", ")")
+    n = _strip_trailing_qualifiers(n)
+    n = _rstrip_balanced(n, "<", ">")
     n = n.strip()
     if "::" in n:
         n = n.rsplit("::", 1)[-1]

@@ -40,6 +40,14 @@ def test_editable_repo_python():
     assert is_editable_source("/workspace/repo/moe.py") is True
 
 
+def test_editable_extra_exts_extends_native_set():
+    # A ".cc" file isn't editable by default, but callers can opt it in via
+    # extra_exts (with or without a leading dot, any case).
+    assert is_editable_source("/pkg/kernel.cc") is False
+    assert is_editable_source("/pkg/kernel.cc", extra_exts=(".cc",)) is True
+    assert is_editable_source("/pkg/kernel.CXX", extra_exts=("cxx",)) is True
+
+
 def test_not_editable_generated_python():
     assert is_editable_source("/tmp/torchinductor_u/xx.py") is False
     assert is_editable_source("/root/.cache/torchinductor/abc.py") is False
