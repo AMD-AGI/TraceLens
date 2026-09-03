@@ -22,12 +22,9 @@ from TraceLens.TraceUtils.split_inference import (
     DetectStatus,
     PhaseConfidence,
     build_root_tiles,
-    classify_workload,
     extract_iteration,
     find_iteration_roots,
-    find_max_pattern_window,
     preprocess_trace,
-    select_window,
 )
 from TraceLens.TraceUtils.split_inference.detect_utils import (
     COVERAGE_GATE,
@@ -672,67 +669,3 @@ class TestGapFreeExtraction:
         assert "whole_run" not in {e["name"] for e in out["traceEvents"]}
 
 
-# --------------------------------------------------------------------------- #
-# Stage 2: workload classification and window choice
-# --------------------------------------------------------------------------- #
-class TestWorkloadClassification:
-    def test_serving_recognized(self):
-        roots = collect_annotations(serving_trace(8))
-        workload, info = classify_workload(roots)
-        assert workload == "serving"
-        assert info["n_recognized_roots"] == 8
-
-    def test_unrecognized_names_are_generic_not_decode_only(self):
-        """Classification must not be fooled by the fabricated detail dict."""
-        roots = [annotation("denoise_step", 1000 + i * 100, 50) for i in range(8)]
-        workload, info = classify_workload(roots)
-        assert workload == "generic"
-        assert info["n_recognized_roots"] == 0
-        assert info["annotation_kinds"] == {}
-
-    def test_a_recognized_minority_does_not_make_it_serving(self):
-        """Most steps unparsed means most request counts are invented."""
-        roots = [
-            annotation("scheduler.run_batch", 1000 + i * 100, 50) for i in range(40)
-        ]
-        roots += [
-            annotation(f"step[DECODE bs={i}]", 9000 + i * 100, 50) for i in range(3)
-        ]
-        workload, info = classify_workload(roots)
-        assert workload == "generic"
-        assert info["n_recognized_roots"] == 3
-
-    def test_pattern_window_skips_erratic_warmup(self):
-        """Same shape throughout, so duration steadiness decides."""
-        roots = []
-        for i in range(4):  # warmup: same name, wildly uneven durations
-            roots.append(annotation("denoise_step", 1000 + i * 5000, 4000 - i * 900))
-        for i in range(8):  # steady state
-            roots.append(annotation("denoise_step", 30000 + i * 1000, 900))
-
-        window = find_max_pattern_window(roots, num_steps=4)
-        assert len(window) == 4
-        assert all(r["ts"] >= 30000 for r in window)
-
-    def test_pattern_window_prefers_the_dominant_shape(self):
-        roots = [annotation("odd_step", 1000 + i * 100, 50) for i in range(3)]
-        roots += [annotation("denoise_step", 2000 + i * 100, 50) for i in range(9)]
-        window = find_max_pattern_window(roots, num_steps=4)
-        assert {r["name"] for r in window} == {"denoise_step"}
-
-    def test_pattern_window_handles_a_short_run(self):
-        roots = [annotation("denoise_step", 1000 + i * 100, 50) for i in range(2)]
-        assert len(find_max_pattern_window(roots, num_steps=8)) == 2
-
-    def test_pattern_window_of_nothing(self):
-        assert find_max_pattern_window([], num_steps=4) == []
-
-    def test_dispatch_records_the_strategy_used(self):
-        serving = collect_annotations(serving_trace(24))
-        _, info = select_window(serving, num_steps=4, steady_state_regions=[(0, 24)])
-        assert info["window_strategy"].startswith("steady_state:")
-
-        generic = [annotation("denoise_step", 1000 + i * 100, 50) for i in range(12)]
-        window, info = select_window(generic, num_steps=4)
-        assert info["window_strategy"] == "max_pattern_coverage"
-        assert info["n_window_roots"] == len(window) == 4

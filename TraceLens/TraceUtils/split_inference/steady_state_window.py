@@ -4,15 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Stage 2: steady-state region detection and window selection.
-
-Which window is "best" depends on what the workload is. Request concurrency is
-the right signal for a serving trace and meaningless for a diffusion or training
-one, so the workload is classified first and the objective chosen to match.
-"""
+"""Stage 2: steady-state region detection and window selection."""
 
 import math
-from collections import Counter
 from statistics import mean
 
 from ..annotation_utils import (
@@ -20,18 +14,7 @@ from ..annotation_utils import (
     is_decode_only,
     is_mixed,
     iteration_details,
-    name_skeleton,
-    parse_annotation,
 )
-
-WORKLOAD_SERVING = "serving"
-WORKLOAD_DIFFUSION = "diffusion"
-WORKLOAD_GENERIC = "generic"
-
-DIFFUSION_KINDS = ("diffusion_native",)
-
-# Share of roots a workload's annotations must account for to pick its objective.
-CLASSIFICATION_MAJORITY = 0.5
 
 
 def identify_steady_state_regions(
@@ -211,7 +194,7 @@ def find_steady_state_window(
 
         min_steps_for_ratio = math.ceil(1.0 / ideal_pd_ratio)
         if num_steps < min_steps_for_ratio:
-            print( 
+            print(
                 f"Warning: --num-steps={num_steps} is too small to capture the true "
                 f"decode_only/prefilldecodemix distribution. At prefilldecodemix_to_totalsteps_ratio={ideal_pd_ratio:.4f} you need at "
                 f"least {min_steps_for_ratio} steps to see a representative mix. "
@@ -379,145 +362,3 @@ def find_steady_state_window(
         )
 
     return iteration_roots[best["start"] : best["end"]]
-
-
-# --- workload classification ------------------------------------------------
-def classify_workload(iteration_roots: list[dict]) -> tuple[str, dict]:
-    """Decide which window objective applies, from what the parsers recognized.
-
-    Reads ``kind``, never the detail dict: an unrecognized name still yields a
-    full but fabricated detail dict reporting one decode-equivalent request, so
-    a detail-based test sees a flawless serving trace on any workload.
-    """
-    kinds = Counter(parse_annotation(r.get("name", "")).kind for r in iteration_roots)
-    diffusion = sum(n for kind, n in kinds.items() if kind in DIFFUSION_KINDS)
-    serving = sum(
-        n for kind, n in kinds.items() if kind and kind not in DIFFUSION_KINDS
-    )
-
-    # A majority, not merely one match. Where fifteen of five hundred roots parse,
-    # the request counts driving the serving heuristic are fabricated for the rest,
-    # and a concurrency curve built from them describes nothing.
-    majority = CLASSIFICATION_MAJORITY * len(iteration_roots)
-    if serving > majority:
-        workload = WORKLOAD_SERVING
-    elif diffusion > majority:
-        workload = WORKLOAD_DIFFUSION
-    else:
-        workload = WORKLOAD_GENERIC
-    return workload, {
-        "workload_class": workload,
-        "n_recognized_roots": serving + diffusion,
-        "annotation_kinds": {k: n for k, n in kinds.items() if k},
-    }
-
-
-def _pattern_key(root: dict) -> tuple:
-    """What makes two iterations "the same shape".
-
-    Diffusion steps at different resolutions are different work under one name,
-    so resolution joins the key when known.
-    """
-    annotation = parse_annotation(root.get("name", ""))
-    resolution = annotation.resolution if annotation.kind in DIFFUSION_KINDS else None
-    return (name_skeleton(root.get("name", "")), resolution)
-
-
-def _prefix_sums(values: list[float]) -> tuple[list[float], list[float]]:
-    """Running sums of ``values`` and of their squares."""
-    totals, squares = [0.0], [0.0]
-    for value in values:
-        totals.append(totals[-1] + value)
-        squares.append(squares[-1] + value * value)
-    return totals, squares
-
-
-def find_max_pattern_window(
-    iteration_roots: list[dict],
-    num_steps: int,
-    steady_state_regions: list[tuple[int, int]] | None = None,
-) -> list[dict]:
-    """Pick the window that best matches the run's dominant iteration shape.
-
-    With no request concurrency to track, "steady state" means the stretch that
-    looks most like the repeating pattern and runs most evenly. Ties break toward
-    the steadiest durations, which is what skips warmup: the same shape, but
-    slower and more erratic while caches fill and autotuning settles.
-
-    The serving heuristic cannot answer this. Given fabricated request counts it
-    sees one request per step, so every step is "at peak", the region never
-    closes, and the result collapses to the first ``num_steps`` iterations.
-    """
-    total = len(iteration_roots)
-    if not total:
-        return []
-
-    keys = [_pattern_key(r) for r in iteration_roots]
-    dominant, dominant_count = Counter(keys).most_common(1)[0]
-    matches, squares = _prefix_sums([1.0 if k == dominant else 0.0 for k in keys])
-    durations, duration_squares = _prefix_sums(
-        [float(r.get("dur", 0)) for r in iteration_roots]
-    )
-
-    size = min(num_steps, total)
-    windows = []
-    for start, end in steady_state_regions or [(0, total)]:
-        end = min(end, total)
-        if end - start < size:
-            if end > start:
-                windows.append((start, end))
-            continue
-        windows.extend((s, s + size) for s in range(start, end - size + 1))
-    if not windows:
-        windows = [(0, size)]
-
-    def score(window: tuple[int, int]) -> tuple:
-        start, end = window
-        count = end - start
-        coverage = (matches[end] - matches[start]) / count
-        mean_dur = (durations[end] - durations[start]) / count
-        variance = (duration_squares[end] - duration_squares[start]) / count - (
-            mean_dur * mean_dur
-        )
-        cv = (max(variance, 0.0) ** 0.5 / mean_dur) if mean_dur else 0.0
-        return (coverage, -cv)
-
-    best = max(windows, key=score)
-    coverage, negative_cv = score(best)
-    print(
-        f"[pattern] Dominant iteration shape {dominant[0]!r} covers "
-        f"{dominant_count}/{total} roots. Selected [{best[0]}, {best[1]}): "
-        f"pattern_coverage={coverage:.3f}, duration_cv={-negative_cv:.3f}"
-    )
-    return iteration_roots[best[0] : best[1]]
-
-
-def select_window(
-    iteration_roots: list[dict],
-    num_steps: int,
-    steady_state_regions: list[tuple[int, int]] | None = None,
-    mode: str = "mixed",
-    **kwargs,
-) -> tuple[list[dict], dict]:
-    """Choose a window with whichever objective the workload supports.
-
-    Returns the window and a record of how it was chosen.
-    """
-    workload, info = classify_workload(iteration_roots)
-    if workload == WORKLOAD_SERVING:
-        regions = steady_state_regions
-        if regions is None:
-            regions, _ = identify_steady_state_regions(
-                iteration_details(iteration_roots), num_steps
-            )
-        window = find_steady_state_window(
-            iteration_roots, num_steps, regions, mode=mode, **kwargs
-        )
-        info["window_strategy"] = f"steady_state:{mode}"
-    else:
-        window = find_max_pattern_window(
-            iteration_roots, num_steps, steady_state_regions
-        )
-        info["window_strategy"] = "max_pattern_coverage"
-    info["n_window_roots"] = len(window)
-    return window, info
