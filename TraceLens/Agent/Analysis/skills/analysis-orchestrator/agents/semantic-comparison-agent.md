@@ -83,49 +83,26 @@ run_breakdown() {
     # Extract (auto-splits vLLM traces into region subdirs)
     python $SCRIPTS/extract_trace_data.py $TRACE -o $DIR/
 
-    # Check whether extraction produced region subdirs or a flat file
+    # Check whether extraction produced region subdirs or a flat file.
+    # gpu_op_uid is stamped by extract_trace_data.py (raw-index UID aligned
+    # with the perf report); no trace-tree build is needed.
     if ls $DIR/*/extracted.json >/dev/null 2>&1; then
-        # Multi-region graph-mode: skip extract_tree_context.py (gpu_op_uid already populated per-region, no tree build needed).
-        FIRST_REGION=$(ls -d $DIR/*/ | head -1)
-        IS_GRAPH_MODE=$(python -c "import json; print(json.load(open('${FIRST_REGION}extracted.json'))['metadata']['is_graph_mode'])")
         for REGION in $DIR/*/; do
             python $SCRIPTS/pattern_finder.py $REGION/extracted.json -o $REGION/pattern.json &
             python $CLASSIFY $REGION/extracted.json -o $REGION/classified.json &
         done
-        if [ "$IS_GRAPH_MODE" != "True" ]; then
-            python $SCRIPTS/extract_tree_context.py $TRACE --regions-dir $DIR/
-        fi
         wait
         for REGION in $DIR/*/; do
-            TREE_ARGS=""
-            if [ -f "$REGION/tree_context.json" ]; then
-                TREE_ARGS="--tree-context $REGION/tree_context.json"
-            fi
             python $SCRIPTS/build_semantic_labels.py \
                 $REGION/extracted.json $REGION/classified.json $REGION/pattern.json \
-                $TREE_ARGS \
                 -o $REGION/semantic_labels.json
         done
     else
-        # Single-trace. Skip extract_tree_context.py entirely for
-        # graph-mode traces: kernels sit directly under cudaGraphLaunch, so
-        # cpu_op/nn_module ancestry is always empty there anyway, and
-        # gpu_op_uid is already populated by extract_trace_data.py itself
-        # (a plain raw-index lookup, no tree build needed). Only build the
-        # tree when non-graph-mode.
-        IS_GRAPH_MODE=$(python -c "import json; print(json.load(open('$DIR/extracted.json'))['metadata']['is_graph_mode'])")
         python $SCRIPTS/pattern_finder.py $DIR/extracted.json -o $DIR/pattern.json &
         python $CLASSIFY $DIR/extracted.json -o $DIR/classified.json &
-
-        TREE_ARGS=""
-        if [ "$IS_GRAPH_MODE" != "True" ]; then
-            python $SCRIPTS/extract_tree_context.py $TRACE $DIR/extracted.json -o $DIR/tree_context.json
-            TREE_ARGS="--tree-context $DIR/tree_context.json"
-        fi
         wait
         python $SCRIPTS/build_semantic_labels.py \
             $DIR/extracted.json $DIR/classified.json $DIR/pattern.json \
-            $TREE_ARGS \
             -o $DIR/semantic_labels.json
     fi
 }

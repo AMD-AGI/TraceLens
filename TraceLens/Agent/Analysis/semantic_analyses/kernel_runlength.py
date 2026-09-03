@@ -19,8 +19,6 @@ Terminology:
     one-sided  -- a symbol present in only one trace's condensed set.
 """
 
-import json
-
 from _helpers import load_json
 
 

@@ -22,22 +22,6 @@ import build_semantic_labels
 
 
 # --------------------------------------------------------------------------- #
-# _deepest_module
-# --------------------------------------------------------------------------- #
-def test_deepest_module_empty():
-    assert build_semantic_labels._deepest_module([]) == ""
-
-
-def test_deepest_module_strips_prefix_and_takes_deepest():
-    stack = ["nn.Module: WanTransformer3DModel > nn.Module: WanTransformerBlock"]
-    assert build_semantic_labels._deepest_module(stack) == "WanTransformerBlock"
-
-
-def test_deepest_module_without_prefix():
-    assert build_semantic_labels._deepest_module(["PlainName"]) == "PlainName"
-
-
-# --------------------------------------------------------------------------- #
 # _build_cycle_names
 # --------------------------------------------------------------------------- #
 def test_build_cycle_names_nonpositive_period():
@@ -125,29 +109,7 @@ def test_build_labels_positional_labels_and_layers():
         "epilogue_indices": [14, 15],
         "secondary_stream_indices": [16],
     }
-    tree_context = {
-        "kernels": [
-            {
-                "index": 2,
-                "gpu_op_uid": "tree2",
-                "nn_module_stack": ["nn.Module: Model > nn.Module: Block"],
-                "cpu_op_name": "aten::mm",
-                "input_dims": [[1, 2]],
-            },
-            {
-                # tree entry present but no UID -> falls back to raw uid
-                "index": 4,
-                "gpu_op_uid": None,
-                "nn_module_stack": ["Solo"],
-                "cpu_op_name": "",
-                "input_dims": [],
-            },
-        ]
-    }
-
-    result = build_semantic_labels.build_labels(
-        extracted, classified, pattern, tree_context
-    )
+    result = build_semantic_labels.build_labels(extracted, classified, pattern)
 
     info = result["model_info"]
     assert info["period"] == 3
@@ -182,19 +144,20 @@ def test_build_labels_positional_labels_and_layers():
     assert kernels[16]["region"] == "secondary"
     assert kernels[16]["semantic_block"] == "GEMM_2"
 
-    # tree_context enrichment + gpu_op_uid preference / fallback.
-    assert kernels[2]["nn_module"] == "Block"
-    assert kernels[2]["cpu_op"] == "aten::mm"
-    assert kernels[2]["gpu_op_uid"] == "tree2"
-    assert kernels[4]["nn_module"] == "Solo"
-    assert kernels[4]["gpu_op_uid"] == "raw4"  # tree uid was None -> raw fallback
-    # Kernel with no tree entry -> empty enrichment, raw uid.
+    # Enrichment fields are always empty (no trace-tree build); gpu_op_uid
+    # comes straight from the raw-index UID stamped by extract_trace_data.
+    assert kernels[2]["nn_module"] == ""
+    assert kernels[2]["cpu_op"] == ""
+    assert kernels[2]["input_dims"] == []
+    assert kernels[2]["gpu_op_uid"] == "raw2"
+    assert kernels[4]["nn_module"] == ""
+    assert kernels[4]["gpu_op_uid"] == "raw4"
     assert kernels[3]["nn_module"] == ""
     assert kernels[3]["cpu_op"] == ""
     assert kernels[3]["gpu_op_uid"] == "raw3"
 
 
-def test_build_labels_no_body_period_zero_and_no_tree_context():
+def test_build_labels_no_body_period_zero():
     cats = ["GEMM", "GEMM", "Normalization"]
     extracted = {"kernels": [{"name": f"k{i}", "dur": 1.0} for i in range(3)]}
     classified = _classified(cats)
@@ -204,9 +167,7 @@ def test_build_labels_no_body_period_zero_and_no_tree_context():
         "secondary_stream_indices": [],
     }
 
-    result = build_semantic_labels.build_labels(
-        extracted, classified, pattern, tree_context=None
-    )
+    result = build_semantic_labels.build_labels(extracted, classified, pattern)
 
     info = result["model_info"]
     assert info["period"] == 0

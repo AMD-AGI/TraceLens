@@ -8,7 +8,7 @@
 """
 Build semantic_labels.json deterministically from breakdown artifacts.
 
-Combines extracted.json + classified.json + pattern.json + tree_context.json
+Combines extracted.json + classified.json + pattern.json
 into the labeled kernel format consumed by the comparison pipeline.
 
 Each kernel gets a positionally-indexed ``semantic_block`` name (e.g.
@@ -24,7 +24,7 @@ Per-kernel output fields:
 
 Usage:
     python build_semantic_labels.py extracted.json classified.json pattern.json \
-        --tree-context tree_context.json [-o semantic_labels.json]
+        [-o semantic_labels.json]
 """
 
 import argparse
@@ -32,22 +32,6 @@ import json
 import sys
 
 from _helpers import build_rle, detect_period
-
-
-def _deepest_module(nn_module_stack):
-    """Extract the deepest nn.Module name from the stack list.
-
-    Input like: ["nn.Module: WanTransformer3DModel > nn.Module: WanTransformerBlock"]
-    Returns: "WanTransformerBlock"
-    """
-    if not nn_module_stack:
-        return ""
-    last_entry = nn_module_stack[-1]
-    parts = last_entry.split(" > ")
-    deepest = parts[-1]
-    if deepest.startswith("nn.Module: "):
-        deepest = deepest[len("nn.Module: ") :]
-    return deepest
 
 
 def _build_cycle_names(body_rle, period, cat_counter):
@@ -100,15 +84,12 @@ def _build_region_block_names(index_set, cls_by_idx, cat_counter):
     return result
 
 
-def build_labels(extracted, classified, pattern, tree_context=None):
+def build_labels(extracted, classified, pattern):
     """Build semantic_labels.json from breakdown artifacts."""
     kernels = extracted["kernels"]
     total_kernels = len(kernels)
 
     cls_by_idx = {c["index"]: c for c in classified["classified_kernels"]}
-    tree_by_idx = {}
-    if tree_context:
-        tree_by_idx = {k["index"]: k for k in tree_context["kernels"]}
 
     preamble_set = set(pattern.get("preamble_indices", []))
     epilogue_set = set(pattern.get("epilogue_indices", []))
@@ -139,22 +120,21 @@ def build_labels(extracted, classified, pattern, tree_context=None):
     for i in range(total_kernels):
         k = kernels[i]
         c = cls_by_idx.get(i, {})
-        tc = tree_by_idx.get(i, {})
 
-        tree_uid = tc.get("gpu_op_uid")
         entry = {
             "index": i,
             "name": k["name"],
             "dur": k["dur"],
-            # Prefer the tree-built UID when tree-context ran (e.g.
-            # capture-augmented); fall back to the raw-index UID
-            # extract_trace_data.py already stamps on single-trace kernels
-            # when tree-context was skipped entirely (no-capture graph mode).
-            "gpu_op_uid": tree_uid if tree_uid is not None else k.get("gpu_op_uid"),
+            # Raw-index UID stamped by extract_trace_data.py; aligns with
+            # the perf report's kernel_details gpu_op_uid.
+            "gpu_op_uid": k.get("gpu_op_uid"),
             "perf_category": c.get("perf_category", "Others"),
-            "nn_module": _deepest_module(tc.get("nn_module_stack", [])),
-            "cpu_op": tc.get("cpu_op_name", ""),
-            "input_dims": tc.get("input_dims", []),
+            # nn_module / cpu_op / input_dims need cpu_op ancestry from a
+            # trace tree, unavailable for graph-mode / no-capture traces.
+            # Left empty; downstream falls back to semantic_block.
+            "nn_module": "",
+            "cpu_op": "",
+            "input_dims": [],
         }
 
         if i in body_index_to_rle_group:
@@ -203,10 +183,6 @@ def main():  # pragma: no cover
     parser.add_argument("extracted_json", help="Path to extracted.json")
     parser.add_argument("classified_json", help="Path to classified.json")
     parser.add_argument("pattern_json", help="Path to pattern.json")
-    parser.add_argument(
-        "--tree-context",
-        help="Path to tree_context.json (optional, enriches nn_module and cpu_op)",
-    )
     parser.add_argument("-o", "--output", help="Output JSON path (default: stdout)")
     args = parser.parse_args()
 
@@ -217,12 +193,7 @@ def main():  # pragma: no cover
     with open(args.pattern_json) as f:
         pattern = json.load(f)
 
-    tree_context = None
-    if args.tree_context:
-        with open(args.tree_context) as f:
-            tree_context = json.load(f)
-
-    result = build_labels(extracted, classified, pattern, tree_context)
+    result = build_labels(extracted, classified, pattern)
 
     output = json.dumps(result, indent=2)
     if args.output:
