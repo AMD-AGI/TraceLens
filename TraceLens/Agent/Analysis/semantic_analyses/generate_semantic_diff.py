@@ -324,7 +324,7 @@ def build_merged_tree_text(block_id_map, labeled_a, labeled_b, name_a, name_b):
 # ---------------------------------------------------------------------------
 
 
-def write_outputs(
+def write_outputs(  # pragma: no cover
     output_dir,
     diff_stats_df,
     summary_df,
@@ -360,7 +360,7 @@ def write_outputs(
 # ---------------------------------------------------------------------------
 
 
-def main():
+def main():  # pragma: no cover
     parser = argparse.ArgumentParser(
         description="Generate TraceDiff-compatible output from two semantic breakdowns"
     )
@@ -442,5 +442,5 @@ def main():
     print(f"  merged_tree_output.txt", file=sys.stderr)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

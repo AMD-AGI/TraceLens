@@ -176,7 +176,7 @@ def build_labels(extracted, classified, pattern, tree_context=None):
             entry["region"] = "secondary"
             entry["layer"] = None
             entry["semantic_block"] = secondary_blocks[i]
-        else:
+        else:  # pragma: no cover - defensive: every index is body/pre/post/secondary
             entry["region"] = "body"
             entry["layer"] = None
             entry["semantic_block"] = c.get("perf_category", "Others") + "_0"
@@ -198,7 +198,7 @@ def build_labels(extracted, classified, pattern, tree_context=None):
     return result
 
 
-def main():
+def main():  # pragma: no cover
     parser = argparse.ArgumentParser(
         description="Build semantic_labels.json deterministically from breakdown artifacts"
     )

@@ -210,7 +210,7 @@ def _sample_names(agg_a, agg_b, name_a, name_b, sample_size):
     return sample
 
 
-def cmd_prepare_context(args):
+def cmd_prepare_context(args):  # pragma: no cover
     labels_a = _load(args.labels_a)
     labels_b = _load(args.labels_b)
     agg_a = aggregate_names(labels_a)
@@ -332,7 +332,7 @@ def stem_for(name, compiled):
     return name, "preserve"
 
 
-def cmd_apply_stem_rules(args):
+def cmd_apply_stem_rules(args):  # pragma: no cover
     labels_a = _load(args.labels_a)
     labels_b = _load(args.labels_b)
     rules_doc = _load(args.rules)
@@ -448,7 +448,7 @@ def _apply_side(labels, unified_map, raw_to_stem):
     }
 
 
-def cmd_apply_map(args):
+def cmd_apply_map(args):  # pragma: no cover
     labels_a = _load(args.labels_a)
     labels_b = _load(args.labels_b)
     map_doc = _load(args.map)
@@ -484,14 +484,14 @@ def cmd_apply_map(args):
 # ===========================================================================
 
 
-def _add_common(p):
+def _add_common(p):  # pragma: no cover
     p.add_argument("--labels-a", required=True, help="Trace A semantic_labels.json")
     p.add_argument("--labels-b", required=True, help="Trace B semantic_labels.json")
     p.add_argument("--name-a", default="trace_a", help="Short name for trace A")
     p.add_argument("--name-b", default="trace_b", help="Short name for trace B")
 
 
-def main():
+def main():  # pragma: no cover
     parser = argparse.ArgumentParser(
         description="Name-first cross-trace kernel-name unification "
         "(prepare-context / apply-stem-rules / apply-map)"

@@ -166,12 +166,10 @@ Do NOT proceed to Step 1 until validation passes.
 
 For `standalone`, skip this step.
 
-For `comparative`, set `<comparison_method>` directly from what was already collected in Step 0 — no trace inspection or classification:
+For `comparative`, set `<comparison_method>` directly from what was already collected in Step 0:
 
-- If a graph-replay trace is involved (`<inference_exec_mode>` = `graph_capture`) but capture folders were **not** collected for it in Step 0, set `<comparison_method>` = `semantic` (graph traces have no alignable CPU-op tree to diff, so the name-first semantic comparison is used).
+- If a graph-replay trace is involved (`<inference_exec_mode>` = `graph_capture`) but capture folders were **not** collected for it in Step 0, set `<comparison_method>` = `semantic`.
 - Otherwise set `<comparison_method>` = `tracediff`.
-
-> v1 scope: semantic is used only for graph+graph comparisons without capture. Cross-framework routing to semantic is deferred to a follow-up.
 
 ---
 
@@ -274,7 +272,7 @@ All commands below append `<suffix_1>` and `<suffix_2>`, resolved by `<compariso
 
 When `<comparison_scope>` = `comparative` and `<comparison_method>` = `semantic`, run Step 1 in this order:
 
-1. **Trace2 report** — run the analysis-mode CLI above for trace2 using the `comparative` trace2 `<suffix_1>` and empty `<suffix_2>` (identical to the TraceDiff path). For graph mode add `--capture_folder <capture_folder_path_2>`.
+1. **Trace2 report** — run the analysis-mode CLI above for trace2 using the `comparative` trace2 `<suffix_1>` and empty `<suffix_2>` (identical to the TraceDiff path).
 
 2. **Semantic diff (subagent)** — launch a Task subagent that reads and follows the FULL instructions in `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/semantic-comparison-agent.md`. Prompt context:
 
@@ -295,7 +293,7 @@ Run the full semantic comparison through "Generate TraceDiff Output" so that
 
    Verify `<output_dir>/_semantic/tracediff_output/diff_stats.csv` exists before continuing. If it is missing, retry the subagent once; if it still fails, stop and report.
 
-3. **Trace1 report** — run the analysis-mode CLI for trace1 with the `comparative` trace1 `<suffix_1>` and `<suffix_2>` = `--precomputed_diff_stats_csv <output_dir>/_semantic/tracediff_output/diff_stats.csv`. For graph mode also add `--capture_folder <capture_folder_path_1>`.
+3. **Trace1 report** — run the analysis-mode CLI for trace1 with the `comparative` trace1 `<suffix_1>` and `<suffix_2>` = `--precomputed_diff_stats_csv <output_dir>/_semantic/tracediff_output/diff_stats.csv`.
 
 4. **Confirm** `<output_dir>/perf_report_trace1_csvs/diff_stats.csv` exists (written by the report script). If absent, copy `<output_dir>/_semantic/tracediff_output/diff_stats.csv` to that path so the comparative fusion step (Steps 2-5) can read it.
 

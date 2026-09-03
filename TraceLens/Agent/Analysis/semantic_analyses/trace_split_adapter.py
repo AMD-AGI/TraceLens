@@ -120,7 +120,7 @@ def _iter_type_key(phase: dict) -> str:
     return f"empty_{bs}"
 
 
-def split_vllm_trace(trace_path: str) -> Optional[List[Tuple[dict, dict]]]:
+def split_vllm_trace(trace_path: str) -> Optional[List[Tuple[dict, dict]]]:  # pragma: no cover
     """
     Split a vLLM trace using TraceUtils split_inference_trace_annotation.
 

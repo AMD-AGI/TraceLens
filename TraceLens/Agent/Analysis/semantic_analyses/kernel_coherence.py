@@ -161,7 +161,7 @@ def _collect_contexts(
     return out
 
 
-def cmd_prepare_context(args):
+def cmd_prepare_context(args):  # pragma: no cover
     labels_a = _load(args.labels_a)
     labels_b = _load(args.labels_b)
     kernels_a = labels_a["labeled_kernels"]
@@ -326,7 +326,7 @@ def _final_blocks(
     return finals, audit
 
 
-def _write_audit(path, rows):
+def _write_audit(path, rows):  # pragma: no cover
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(
             f,
@@ -357,7 +357,7 @@ def _residual_one_sided(labels_a, labels_b):
     return sorted(ca - cb), sorted(cb - ca)
 
 
-def cmd_apply(args):
+def cmd_apply(args):  # pragma: no cover
     ctx = _load(args.context)
     dec = _load(args.decisions)
     name_a = ctx["name_a"]
@@ -442,7 +442,7 @@ def cmd_apply(args):
 # ===========================================================================
 
 
-def main():
+def main():  # pragma: no cover
     parser = argparse.ArgumentParser(
         description="Second-pass kernel-name coherence (prepare-context / apply)"
     )

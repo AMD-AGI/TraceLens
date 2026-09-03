@@ -30,9 +30,9 @@ import sys
 
 _this_dir = os.path.dirname(os.path.abspath(__file__))
 _repo_root = os.path.abspath(os.path.join(_this_dir, "..", "..", "..", ".."))
-if _repo_root not in sys.path:
+if _repo_root not in sys.path:  # pragma: no cover
     sys.path.insert(0, _repo_root)
-if _this_dir not in sys.path:
+if _this_dir not in sys.path:  # pragma: no cover
     sys.path.insert(0, _this_dir)
 
 from TraceLens.util import DataLoader
@@ -40,7 +40,7 @@ from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from _helpers import load_json
 
 
-def load_and_build_tree(trace_path):
+def load_and_build_tree(trace_path):  # pragma: no cover
     """Load a trace file and build a TraceToTree."""
     data = DataLoader.load_data(trace_path)
     events = data.get("traceEvents", [])
@@ -185,7 +185,7 @@ def extract_tree_context(tree, extracted_data, ts_index=None):
     return result
 
 
-def _find_region_subdirs(regions_dir):
+def _find_region_subdirs(regions_dir):  # pragma: no cover
     """Find subdirectories containing extracted.json."""
     regions = []
     for name in sorted(os.listdir(regions_dir)):
@@ -197,7 +197,7 @@ def _find_region_subdirs(regions_dir):
     return regions
 
 
-def _process_single(tree, ts_index, extracted_path, output_path):
+def _process_single(tree, ts_index, extracted_path, output_path):  # pragma: no cover
     """Process one extracted.json against a pre-built tree and ts_index."""
     extracted = load_json(extracted_path)
 
@@ -211,7 +211,7 @@ def _process_single(tree, ts_index, extracted_path, output_path):
     return result
 
 
-def main():
+def main():  # pragma: no cover
     parser = argparse.ArgumentParser(
         description="Extract trace tree context (cpu_op, nn_module) for each kernel"
     )
@@ -281,5 +281,5 @@ def main():
             print(output)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

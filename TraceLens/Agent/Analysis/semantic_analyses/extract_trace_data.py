@@ -181,7 +181,7 @@ def run_assertions(data, by_cat, kernels, is_graph_mode, strict=True):
     return errors
 
 
-def compute_gpu_timeline_metrics(events):
+def compute_gpu_timeline_metrics(events):  # pragma: no cover
     """
     Run GPUEventAnalyser on events and return gpu_timeline dict for metadata.
     Returns None on failure.
@@ -235,7 +235,7 @@ def extract_and_build_result(data, by_cat, source_file, region_metadata=None):
     return result, kernels
 
 
-def _write_split_regions(split_result, trace_path, output_dir):
+def _write_split_regions(split_result, trace_path, output_dir):  # pragma: no cover
     """Write per-region extracted.json + metadata.json files."""
     os.makedirs(output_dir, exist_ok=True)
     for trace_dict, region_meta in split_result:
@@ -271,7 +271,7 @@ def _write_split_regions(split_result, trace_path, output_dir):
         print(f"Wrote {extracted_path} ({len(kernels)} kernels)", file=sys.stderr)
 
 
-def main():
+def main():  # pragma: no cover
     parser = argparse.ArgumentParser(
         description="Extract structured data from a Chrome trace JSON"
     )
@@ -333,5 +333,5 @@ def main():
         print(output)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

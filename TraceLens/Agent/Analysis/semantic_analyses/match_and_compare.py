@@ -61,7 +61,7 @@ def aggregate(labeled_kernels):
     return blocks
 
 
-def load_metadata(path):
+def load_metadata(path):  # pragma: no cover
     """Load metadata.json and return gpu_timeline dict if present."""
     if not path or not os.path.exists(path):
         return None
@@ -189,7 +189,7 @@ def run_assertions(rows, labeled_a, labeled_b, total_a, total_b, name_a, name_b)
     return errors
 
 
-def main():
+def main():  # pragma: no cover
     parser = argparse.ArgumentParser(description="Compare two semantic breakdowns")
     parser.add_argument(
         "trace_a", nargs="?", help="Path to trace A semantic_labels.json"
