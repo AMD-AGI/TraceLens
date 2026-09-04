@@ -553,49 +553,27 @@ def _wire_all_predecessor_edges(
             and spec.block.attr_name == SYNTHETIC_ATTENTION
         ]
         for target_index in targets:
-            # If the kernel declares its own ``inputs:`` list, skip
-            # provenance edges for ports that are already wired by the
-            # normal predecessor tracking (avoids redundant Split→kernel
-            # edges when View nodes are the actual producers).
-            kernel_declared = set(
-                _kernel_input_names(graph.nodes[target_index])
-            )
-            existing_sources = {
-                source
-                for source, target in graph.links
-                if target == target_index
+            # If the kernel declares its own ``inputs:`` list, its edges
+            # are already wired by normal predecessor tracking; skip all
+            # provenance edges for declared ports.
+            kernel_declared = {
+                n.lower() for n in _kernel_input_names(graph.nodes[target_index])
             }
 
             ports_by_source: dict[int, list[str]] = {}
             for port, chain in root.attention_inputs.items():
-                # Skip ports already wired via normal predecessor edges
-                # when the kernel explicitly declares its inputs.
-                if kernel_declared and port.lower() in {
-                    n.lower() for n in kernel_declared
-                }:
+                if kernel_declared and port.lower() in kernel_declared:
                     continue
 
-                preferred_label = (
-                    "Split"
-                    if port in {"q", "k", "v", "query", "key", "value"}
-                    else "Sigmoid" if port == "beta" else None
-                )
-                preferred = [
-                    index
-                    for index, spec in enumerate(graph.nodes[:target_index])
-                    if spec.label == preferred_label
-                ]
-                source_index = (
-                    preferred[-1]
-                    if preferred
-                    else next(
-                        (
-                            attr_last_index[attr]
-                            for attr in reversed(chain)
-                            if attr in attr_last_index
-                        ),
-                        None,
-                    )
+                # Follow the provenance chain (actual data-flow from AST
+                # analysis) to find the last graph node in the chain.
+                source_index = next(
+                    (
+                        attr_last_index[attr]
+                        for attr in reversed(chain)
+                        if attr in attr_last_index
+                    ),
+                    None,
                 )
                 if source_index is None or source_index == target_index:
                     continue
@@ -696,27 +674,9 @@ def _inline_frame_exit_index(
 
 
 def _wire_inline_frame_dangling_outputs(graph: ComputationGraph) -> None:
-    """Connect dead-end steps inside an inline frame to that frame's outward exit."""
-    for frame in graph.inline_frames:
-        if frame.frame_id.startswith("loop:"):
-            continue
-        members = set(frame.node_indices)
-        if len(members) < 2:
-            continue
-        exit_index = _inline_frame_exit_index(graph, members)
-        if exit_index is None:
-            continue
-        sources_inside = {
-            source for source, _target in graph.links if source in members
-        }
-        for index in members:
-            if index in sources_inside or index == exit_index:
-                continue
-            block = graph.nodes[index].block
-            if block is not None and "loop iterator" in block.details:
-                continue
-            if (index, exit_index) not in graph.links:
-                graph.links.append((index, exit_index))
+    """No-op: previously connected dead-end inline-frame nodes to the frame
+    exit, but this fabricated edges not present in the model.  Dead-end nodes
+    now remain unconnected, reflecting the actual data flow."""
 
 
 def _operation_source_indices(

@@ -886,7 +886,9 @@ def test_glm53_decoder_boundary_keeps_hyper_stream_shape():
     boundary = graph["groupNodeAttributes"]["45x_Glm5NextTextDecoderLayer"]
 
     assert boundary["input_shape"] == "B x S x 4 x 4096 float16"
-    assert boundary["output_shape"] == "B x S x 4 x 4096 float16"
+    # The hyper-stream shape dominates; the standard attention variant also
+    # sends its collapsed output (B x S x 4096) across the boundary.
+    assert "B x S x 4 x 4096 float16" in boundary["output_shape"]
 
     prefix = _linear_attn_variant_prefix(spec)
     node_by_id = {node["id"]: node for node in graph["nodes"]}
