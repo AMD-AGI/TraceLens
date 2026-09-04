@@ -166,18 +166,76 @@ from .annotation_utils import (
 
 # Re-exports for tests and downstream callers.
 from .split_inference import (  # noqa: F401
+    DetectStatus,
+    build_root_tiles,
+    classify_workload,
     compute_reference_pd_ratio,
     divide_phases_and_save,
     extract_and_save,
     extract_iteration,
     extract_phases_and_save,
     find_iteration_roots,
+    find_iteration_roots_ex,
+    find_max_pattern_window,
     find_steady_state_window,
     get_filename,
     identify_steady_state_regions,
     parse_range,
     preprocess_trace,
+    select_window,
 )
+from .split_inference.detect_utils import GPU_KERNEL_CATEGORIES
+from .split_inference.steady_state_window import WORKLOAD_SERVING
+
+MANIFEST_NAME = "split_manifest.json"
+
+
+def _write_manifest(output_dir: str, manifest: dict) -> None:
+    """Record how the split was decided, next to the slices it produced.
+
+    A split is only trustworthy if its quality is written down, so this is
+    emitted even when nothing was extracted.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, MANIFEST_NAME)
+    with open(path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"Wrote split manifest to {path}")
+
+
+def _conservation(events: list, per_iteration_details: list | None, args) -> dict:
+    """Check that slicing did not lose or duplicate GPU events.
+
+    Only the one-file-per-iteration pass can be checked this way, and only over
+    the whole trace: those windows partition the timeline, so every kernel should
+    land in exactly one slice. Steady-state windows deliberately re-extract the
+    same kernels, so counting them too would compare a total against itself plus
+    overlap.
+
+    The tiles span the iterations, not the capture, so a healthy trace still
+    leaves kernels unclaimed: warmup launched before the first root and teardown
+    after the last one. Those are excluded on purpose, which is why the failure
+    this reports is duplication rather than a shortfall -- extracting more than
+    exists means some kernel was counted under two iterations, and that is a bug.
+    The shortfall is reported as a quantity instead, since only its size is
+    interesting.
+    """
+    kernels_in_trace = sum(1 for e in events if e.get("cat") in GPU_KERNEL_CATEGORIES)
+    report = {"n_gpu_events_in_trace": kernels_in_trace}
+    partitioned = (
+        per_iteration_details is not None
+        and args.iterations == "all"
+        and not args.no_gap_fill
+    )
+    if not (partitioned and kernels_in_trace):
+        return report
+
+    extracted = sum(entry.get("num_gpu_events", 0) for entry in per_iteration_details)
+    report["n_gpu_events_extracted"] = extracted
+    report["n_gpu_events_outside_iterations"] = kernels_in_trace - extracted
+    report["gpu_events_duplicated"] = extracted > kernels_in_trace
+    report["gpu_event_retention"] = round(extracted / kernels_in_trace, 4)
+    return report
 
 
 def main():
@@ -250,8 +308,29 @@ def main():
             "output_dir/decode_only/. Each step is a separate trace file."
         ),
     )
+    parser.add_argument(
+        "--no-gap-fill",
+        action="store_true",
+        default=False,
+        help=(
+            "Score each iteration by its own annotation span instead of extending "
+            "it to the next root. Work between two roots is then dropped, as it "
+            "was before gap-free extraction; use this only to reproduce old output."
+        ),
+    )
+    parser.add_argument(
+        "--allow-degraded",
+        action="store_true",
+        default=False,
+        help=(
+            "Continue even when the detected roots do not account for enough GPU "
+            "time. The manifest records the shortfall either way."
+        ),
+    )
     args = parser.parse_args()
     execution_details = []
+    # Only the partitioning pass can be checked for kernel conservation.
+    per_iteration_details: list | None = None
 
     # Load trace
     trace_json = DataLoader.load_data(get_filename(args.trace_path))
@@ -259,10 +338,53 @@ def main():
     gpu_corr_map, flow_corr_map, meta_events = preprocess_trace(events)
     print(f"Loaded {len(events)} events")
 
-    iteration_roots = find_iteration_roots(events)
+    detection = find_iteration_roots_ex(events)
+    iteration_roots = detection.roots
+    manifest = detection.to_manifest()
+    print(
+        f"\nDetection: {detection.method} -> {len(iteration_roots)} roots, "
+        f"status={detection.status.name}, phase_confidence="
+        f"{detection.phase_confidence.value}"
+    )
+    if detection.coverage:
+        print(
+            f"GPU coverage ({detection.coverage.strategy}): "
+            f"{detection.coverage.covered_any:.1%} by any annotation, "
+            f"{detection.coverage.covered_selected:.1%} by the selected roots"
+        )
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+
+    if detection.status is DetectStatus.NOT_SPLITTABLE and not args.allow_degraded:
+        manifest["aborted"] = True
+        _write_manifest(args.output_dir, manifest)
+        print(
+            "\nRefusing to split: the detected roots do not account for enough of "
+            "the GPU's work, so per-iteration slices would be misleading. "
+            f"See {MANIFEST_NAME} for the coverage breakdown, or pass "
+            "--allow-degraded to continue anyway."
+        )
+        return
+
+    workload, window_info = classify_workload(iteration_roots)
+    manifest.update(window_info)
+    print(f"Workload class: {workload}")
+
+    # Built over every root, not just a selected window: the last root of a
+    # window still needs to know where the next one starts.
+    root_tiles = None
+    if not args.no_gap_fill and iteration_roots:
+        root_tiles, overlaps = build_root_tiles(iteration_roots)
+        manifest["gap_fill"] = True
+        manifest["n_overlapping_roots"] = overlaps
+        if overlaps:
+            print(
+                f"Warning: {overlaps} roots overlap their successor and keep their "
+                "own span; their windows are not gap-free."
+            )
+    else:
+        manifest["gap_fill"] = False
     base_name = os.path.basename(args.trace_path)
     base_name = (
         base_name.replace(".pt.trace", "").replace(".json.gz", "").replace(".json", "")
@@ -286,7 +408,9 @@ def main():
                 gpu_corr_map,
                 flow_corr_map,
                 meta_events,
+                root_tiles=root_tiles,
             )
+            per_iteration_details = temp_execution_details
             execution_details.extend(temp_execution_details)
 
         # Determine the working set and compute steady-state regions once,
@@ -300,7 +424,12 @@ def main():
             )
         else:
             working_roots = iteration_roots
-            if args.find_steady_state or args.divide_phases:
+            # Request concurrency only means something for a serving trace. Asked
+            # about anything else it sees one request per step, calls every step a
+            # peak, and returns the first num_steps iterations -- warmup included.
+            if (args.find_steady_state or args.divide_phases) and (
+                workload == WORKLOAD_SERVING
+            ):
                 _iter_details = iteration_details(working_roots)
                 steady_state_regions, _ = identify_steady_state_regions(
                     _iter_details, args.num_steps
@@ -330,7 +459,25 @@ def main():
                 gpu_corr_map,
                 flow_corr_map,
                 meta_events,
-                steady_state_regions=steady_state_regions,
+                steady_state_regions=steady_state_regions or [(0, len(working_roots))],
+                root_tiles=root_tiles,
+            )
+            execution_details.extend(temp_execution_details)
+
+        elif args.find_steady_state and workload != WORKLOAD_SERVING:
+            # Prefill and decode do not exist here, so there is one window to
+            # find: the stretch that best matches the run's repeating shape.
+            print("\n--- Finding representative window by iteration pattern ---")
+            pattern_roots = find_max_pattern_window(
+                working_roots,
+                num_steps=args.num_steps,
+                steady_state_regions=steady_state_regions or None,
+            )
+            temp_execution_details = extract_and_save(
+                [pattern_roots],
+                *_extract_args,
+                output_label="pattern_steady_state",
+                root_tiles=root_tiles,
             )
             execution_details.extend(temp_execution_details)
 
@@ -347,7 +494,10 @@ def main():
                 R=args.R,
             )
             temp_execution_details = extract_and_save(
-                [mixed_roots], *_extract_args, output_label="mixed_steady_state"
+                [mixed_roots],
+                *_extract_args,
+                output_label="mixed_steady_state",
+                root_tiles=root_tiles,
             )
             execution_details.extend(temp_execution_details)
 
@@ -359,7 +509,10 @@ def main():
                 mode="decode_only",
             )
             temp_execution_details = extract_and_save(
-                [do_roots], *_extract_args, output_label="decode_only_steady_state"
+                [do_roots],
+                *_extract_args,
+                output_label="decode_only_steady_state",
+                root_tiles=root_tiles,
             )
             execution_details.extend(temp_execution_details)
 
@@ -371,11 +524,16 @@ def main():
                 mode="max_prefilldecode",
             )
             temp_execution_details = extract_and_save(
-                [pd_roots], *_extract_args, output_label="prefilldecode_steady_state"
+                [pd_roots],
+                *_extract_args,
+                output_label="prefilldecode_steady_state",
+                root_tiles=root_tiles,
             )
             execution_details.extend(temp_execution_details)
 
     print(f"\nDone! Extracted {len(execution_details)} traces to {args.output_dir}")
+    manifest.update(_conservation(events, per_iteration_details, args))
+    _write_manifest(args.output_dir, manifest)
     if len(execution_details) > 0:
         json_path = os.path.join(args.output_dir, "execution_details.json")
         with open(json_path, "w") as f:
