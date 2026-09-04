@@ -31,6 +31,8 @@ TraceLens is a Python library for **automated performance analysis of training a
 
 **TraceLens Agent**: Receive a prioritized human-readable optimization report, derived through an agentic workflow, covering compute kernels, system bottlenecks, and kernel fusion opportunities with root-cause reasoning and concrete resolutions.
 
+**Trace corpus indexing**: Build a searchable SQLite catalog of TraceLens reports so you can find traces by op, category, or kernel name without reopening every raw file. Scanner and importer sit behind a storage interface; SQLite is the first backend.
+
 ---
 
 ## Quick Start
@@ -67,6 +69,16 @@ TraceLens_compare_perf_reports_pytorch \
     --names baseline candidate \
     --sheets all \
     -o comparison.xlsx
+```
+
+Index traces and existing TraceLens CSV reports (see [Index a corpus of traces](docs/how-to/trace-index.md)):
+
+```bash
+TraceLens_trace_index --db trace_index.sqlite append \
+    --trace-path /path/to/rank0_trace.json.gz \
+    --report-dir path/to/perf_report_csvs
+TraceLens_trace_index --db trace_index.sqlite build --traces-file traces.txt
+TraceLens_trace_index --db trace_index.sqlite search Cijk
 ```
 
 For multi-rank runs, generate a collective-communication report across ranks (see [Generate a collective-communication report](docs/how-to/collective-report.md)):
@@ -130,6 +142,7 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 | Multi-Rank Collective Report | [docs/how-to/collective-report.md](docs/how-to/collective-report.md)                                                             |
 | Performance Report Columns   | [docs/reference/perf-report-columns.md](docs/reference/perf-report-columns.md)                                                   |
 | TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
+| TraceIndex                   | [docs/how-to/trace-index.md](docs/how-to/trace-index.md)                                                                         |
 
 ---
 
