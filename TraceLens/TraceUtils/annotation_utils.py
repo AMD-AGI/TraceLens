@@ -13,7 +13,8 @@ and populates its fields from whichever registered pattern matches:
 """
 
 import re
-from typing import Callable, List, Optional
+from functools import lru_cache
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 # --- patterns --------------------------------------------------------------
 # Each block lists matching annotations, prefill/decode/mixed where the format
@@ -38,13 +39,16 @@ VLLM_NATIVE_PATTERN = re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d
 # step[DECODE bs=64 g_sq=128 g_sqsq=256 g_sqsk=262144 g_sk=131072]  <- MTP: g_sq > bs
 # step[MIXED bs=2 c=1 g=1 c_sq=5 c_sk=8 c_sqsq=25 c_sqsk=40
 #     g_sq=1 g_sk=12 g_sqsq=1 g_sqsk=12]
+# Case-insensitive: some builds emit lowercase phases (``step[decode bs=1]``).
 SGLANG_DETAILED_PATTERN = re.compile(
-    r"step\[(?:EXTEND|DECODE|MIXED)\b[^\]]*sqsq=\d+[^\]]*\]"
+    r"step\[(?:EXTEND|DECODE|MIXED)\b[^\]]*sqsq=\d+[^\]]*\]", re.IGNORECASE
 )
 # step[EXTEND bs=2 toks=14721]
 # step[DECODE bs=64]
 # step[MIXED bs=2]  <- neither toks nor sq/sk, so bs is the only count
-SGLANG_NATIVE_PATTERN = re.compile(r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]")
+SGLANG_NATIVE_PATTERN = re.compile(
+    r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]", re.IGNORECASE
+)
 
 # prefill[bs=2 tok=14721 ctx=[7803, 6918]]
 # prefill[bs=6 tok=17408 ctx=[4096, 4096, 4096]...+3]  <- ctx truncated past 5
@@ -130,7 +134,7 @@ def _fill_sglang_native(ann, name):
     m = re.match(r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]", name)
     if not m:
         return False
-    kind_word, bs = m.group(1), int(m.group(2))
+    kind_word, bs = m.group(1).upper(), int(m.group(2))
     toks = int(m.group(3) or 0)
     if kind_word == "DECODE":
         ann.generation_requests = ann.generation_sum = ann.g_sq = bs
@@ -147,7 +151,7 @@ def _fill_sglang_detailed(ann, name):
     if not m:
         return False
     body = name[name.index("[") + 1 : name.rindex("]")]
-    mode = body.split()[0]
+    mode = body.split()[0].upper()
     kv = dict(re.findall(r"(\w+)=(\d+)", body))
     bs, toks = _safe_int(kv.get("bs", 0)), _safe_int(kv.get("toks", 0))
     ann.c_sq, ann.c_sk = _safe_int(kv.get("c_sq", 0)), _safe_int(kv.get("c_sk", 0))
@@ -248,6 +252,8 @@ class IterationAnnotation:
         self.c_sq = self.c_sk = self.c_sqsq = self.c_sqsk = 0
         self.g_sq = self.g_sk = self.g_sqsq = self.g_sqsk = 0
         self.has_sqsk = False
+        # Only _fill_diffusion sets this; declared here so every instance has it.
+        self.resolution = None
         self.meta = {}
         for kind, pattern, parser in self.FORMATS:
             if pattern.match(annotation) and parser(self, annotation) is not False:
@@ -392,25 +398,104 @@ def find_events_by_patterns(
     return matches
 
 
-def find_iteration_roots_by_priority(
+def find_known_annotations(
     events: List[dict],
-    pattern_tiers: Optional[List[List["re.Pattern"]]] = None,
-    label: Optional[str] = None,
     cat: Optional[str] = ANNOTATION_CAT,
-    verbose: bool = False,
 ) -> List[dict]:
-    """Roots from the first pattern tier that matches anything.
-    Defaults to the detailed tier followed by the native tier
+    """Annotations matching a recognized iteration pattern, sorted by timestamp.
+
+    Tries the detailed tier first, then the native/backup tier, returning the
+    first tier that produces any matches.
     """
-    if pattern_tiers is None:
-        pattern_tiers = (ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS)
-    for patterns in pattern_tiers:
-        roots = find_events_by_patterns(
-            events, patterns, cat=cat, label=label, verbose=verbose
-        )
-        if len(roots) > 0:
-            return roots
+    for patterns in (ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS):
+        matches = find_events_by_patterns(events, patterns, cat=cat)
+        if matches:
+            return matches
     return []
+
+
+# --- family keys ------------------------------------------------------------
+_DIGIT_RUN = re.compile(r"\d+")
+SKELETON_PLACEHOLDER = "#"
+
+
+@lru_cache(maxsize=None)
+def name_skeleton(name: str) -> str:
+    """Canonical family key for an event name.
+
+    Collapses every run of digits so that instances of one logical operation
+    share a key regardless of the batch sizes and sequence lengths baked into
+    their names::
+
+        execute_1_context_3(sq8sk8) -> execute_#_context_#(sq#sk#)
+        execute_7_context_2(sq4sk4) -> execute_#_context_#(sq#sk#)
+
+    Keying on structure rather than on a fixed-length prefix matters both ways:
+    a prefix merges families that diverge after the cutoff and splits families
+    that differ only in a numeric tail.
+    """
+    return _DIGIT_RUN.sub(SKELETON_PLACEHOLDER, name)
+
+
+def cluster_by_skeleton(names: Iterable[str]) -> Dict[str, List[str]]:
+    """Group names by skeleton, keeping first-seen order for stable output."""
+    groups: Dict[str, List[str]] = {}
+    for name in names:
+        groups.setdefault(name_skeleton(name), []).append(name)
+    return groups
+
+
+def dominant_cluster(groups: Dict[str, List[str]]) -> Tuple[Optional[str], float]:
+    """Largest group's skeleton and its share of every clustered name."""
+    if not groups:
+        return None, 0.0
+    total = sum(len(v) for v in groups.values())
+    skeleton = max(groups, key=lambda k: len(groups[k]))
+    return skeleton, len(groups[skeleton]) / total
+
+
+# --- cached identity and inheritance ----------------------------------------
+# Stamped onto roots whose window and identity come from different annotations.
+PROVENANCE_KEY = "split_provenance"
+
+
+@lru_cache(maxsize=None)
+def parse_annotation(name: str) -> IterationAnnotation:
+    """Memoized parse. Treat the result as read-only; instances are shared.
+
+    Construction runs up to seven regex matches, and detection parses the same
+    few hundred distinct names across hundreds of thousands of instances.
+    """
+    return IterationAnnotation(name)
+
+
+def is_parseable(name: str) -> bool:
+    """True when a parser recognized the name, so its metadata is real.
+
+    The distinction matters because unparseable names still yield a full detail
+    dict, just a fabricated one (one decode-equivalent request), so callers that
+    test the numbers instead of this predicate cannot tell the two apart.
+    """
+    return parse_annotation(name).matched
+
+
+def inherit_identity(target: dict, source: dict) -> dict:
+    """Copy of ``target`` that parses as ``source``.
+
+    Timestamps, process and thread stay with ``target``: the outer span decides
+    the extraction window while the inner annotation supplies phase and batch
+    size. Both names are recorded so the two-level choice stays auditable.
+    """
+    prior = target.get(PROVENANCE_KEY) or {}
+    out = dict(target)
+    out["name"] = source.get("name", "")
+    out[PROVENANCE_KEY] = {
+        # Keep the original window owner when a root is relabelled more than
+        # once, otherwise the second pass erases where the span came from.
+        "window_from": prior.get("window_from") or target.get("name", ""),
+        "identity_from": source.get("name", ""),
+    }
+    return out
 
 
 def has_context(detail: dict) -> bool:
@@ -450,7 +535,7 @@ def classify_phase(detail: dict) -> Optional[str]:
 # --- per-window aggregation -------------------------------------------------
 def iteration_details(roots: List[dict], full: bool = False) -> List[dict]:
     """Parse iteration-root events into one detail dict per step."""
-    annotations = (IterationAnnotation(r.get("name", "")) for r in roots)
+    annotations = (parse_annotation(r.get("name", "")) for r in roots)
     if full:
         return [a.full_details() for a in annotations]
     return [a.iter_details() for a in annotations]
