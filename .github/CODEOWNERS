@@ -22,7 +22,7 @@
 /TraceLens/Trace2Tree/trace_capture_merge_experimental.py @devalshahamd
 
 # Inference reporting, docs, tests, and workflows require Deval review
-/TraceLens/Reporting/generate_perf_report_pytorch_inference.py @devalshahamd
+/TraceLens/Reporting/generate_perf_report_pytorch.py @devalshahamd
 /TraceLens/TraceUtils/split_inference_trace_annotation.py      @devalshahamd
 /examples/custom_workflows/inference_analysis/               @devalshahamd
 /docs/how-to/generate-perf-report-pytorch-inference.md      @devalshahamd

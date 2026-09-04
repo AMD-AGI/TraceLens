@@ -38,7 +38,7 @@ from TraceLens.Trace2Tree.extensions.moe_aiter_pseudo_ops import (
 )
 from tests.fixtures.traces import NORM_TRACE, TRACES_ROOT
 from tests.fixtures.treeperf import _make_gpu_event, _mk_ac2g
-from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch as generate_inference_report,
 )
 from tests.fixtures.reporting import _mk_ac2g, _mk_event

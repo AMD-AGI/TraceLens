@@ -50,20 +50,15 @@ Generate a multi-sheet Excel report from a PyTorch (`torch.profiler`) trace.
 **Output:** an `.xlsx` workbook with the GPU-timeline, operator-category,
 operator, unique-argument, and roofline sheets.
 
-### TraceLens_generate_perf_report_pytorch_inference
-
-Inference-oriented variant of the PyTorch report.
+For inference traces (vLLM/SGLang/ATOM/xDiT), additional flags are available:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--profile_json_path` | required | Path to the trace. |
 | `--group_by_parent_module` | off | Group kernel-launcher summaries by parent `nn.Module`. |
-| `--capture_folder` | None | Path to the capture-trace folder. |
-| `--include_overlap_info` | off | Add `*_kl_overlap` sheets when data exists. |
+| `--capture_folder` | None | Path to the graph-capture-trace folder (merges capture metadata into the replay tree). |
+| `--comparison_capture_folder` | None | Capture folder for the comparison trace. |
 
-Shares most options with `TraceLens_generate_perf_report_pytorch` (output
-paths, short-kernel study, roofline/Origami, comparison, call stack). Run with
-`--help` for the full list.
+Run with `--help` for the full list.
 
 ### TraceLens_generate_perf_report_jax
 
