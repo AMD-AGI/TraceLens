@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
-index 5c4f3ff44a..7e7702a2e3 100644
+index 1866495..5588801 100644
 --- a/python/sglang/srt/server_args.py
 +++ b/python/sglang/srt/server_args.py
-@@ -1920,6 +1920,11 @@ class ServerArgs:
+@@ -1864,6 +1864,11 @@ class ServerArgs:
      enable_profile_cuda_graph: A[
          bool, "Enable profiling of cuda graph capture.", NS("exec.graph")
      ] = False

@@ -1,16 +1,15 @@
 diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-index 6f27a0594c..ade60816f0 100644
 --- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
 +++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
-@@ -109,6 +109,7 @@ from sglang.srt.utils import (
-     require_mlp_tp_gather,
- )
- from sglang.srt.utils.device_timer import device_timer_ctx
-+from sglang.srt.utils.kernel_shape_profiler import disable, enable, is_enabled
- from sglang.srt.utils.profile_utils import (
+@@ -107,6 +107,7 @@
      export_cuda_graph_capture_trace,
      graph_capture_profile_dir,
-@@ -247,6 +248,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+ )
++from sglang.srt.utils.kernel_shape_profiler import disable, enable, is_enabled
+ 
+ try:
+     from kt_kernel import KTMoEWrapper
+@@ -238,6 +239,9 @@
          self.enable_profile_cuda_graph = (
              model_runner.server_args.enable_profile_cuda_graph
          )
@@ -18,21 +17,20 @@ index 6f27a0594c..ade60816f0 100644
 +            model_runner.server_args.enable_shape_discovery_for_cuda_graph_profile
 +        )
  
-         # --- DSA dense-decode dual-graph -------------------------------
-         # Capture a "dense" (k-only, skip-indexer) and a "sparse" (full indexer)
-@@ -836,6 +840,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+         self.attn_tp_size = get_parallel().attn_tp_size
+         self.attn_tp_rank = get_parallel().attn_tp_rank
+@@ -770,6 +774,8 @@
+             runner_name=type(self).__name__,
              tp_rank=get_parallel().tp_rank,
          )
- 
 +        if self.enable_shape_discovery_for_cuda_graph_profile:
 +            disable()
-+
+ 
      def capture_prepare(
          self,
-         size: int,
-@@ -1212,11 +1219,25 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+@@ -1124,11 +1130,25 @@
+                     stream_idx,
                      variant_label,
-                     dsa_variant,
                  )
 -                post_warmup_hook = getattr(
 +                base_post_warmup_hook = getattr(
