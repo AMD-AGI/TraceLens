@@ -273,6 +273,17 @@ SYNTHETIC_KERNEL_PORT_IN = "@kernel_port_in"
 SYNTHETIC_KERNEL_PORT_OUT = "@kernel_port_out"
 
 
+def _kernel_input_names(spec: NodeSpec) -> list[str]:
+    """Extract declared input names from a kernel block's ``inputs:`` detail."""
+    if spec.block is None:
+        return []
+    for detail in spec.block.details:
+        if detail.startswith("inputs:"):
+            raw = detail.split(":", 1)[1].strip()
+            return [name.strip() for name in raw.split(",") if name.strip()]
+    return []
+
+
 def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
     """Insert port nodes for every input on kernel tiles.
 
@@ -280,8 +291,9 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
     incoming edge and rewire:
     ``source → kernel`` becomes ``source → port_node(label) → kernel``.
 
-    Labeled edges use their label; unlabeled edges derive a name from the
-    source node's label.
+    Labeled edges use their explicit label.  Unlabeled edges are matched
+    against the kernel's declared ``inputs:`` list: any input name not
+    already claimed by a labeled edge is assigned in order.
     """
     kernel_indices = [
         index
@@ -290,13 +302,48 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
         and spec.block.class_name in _KERNEL_CLASS_NAMES
     ]
     for kernel_index in kernel_indices:
-        all_inputs: list[tuple[int, str]] = []
-        seen_labels: dict[str, int] = {}
+        kernel_spec = graph.nodes[kernel_index]
+        declared_names = _kernel_input_names(kernel_spec)
+
+        # First pass: collect labeled and unlabeled edges.
+        labeled: list[tuple[int, str]] = []
+        unlabeled_sources: list[int] = []
         for source, target in graph.links:
             if target != kernel_index:
                 continue
             label = graph.link_port_labels.get((source, target))
-            if not label:
+            if label:
+                labeled.append((source, label))
+            else:
+                unlabeled_sources.append(source)
+
+        # Determine which declared names are already used by labeled edges.
+        # Compound labels like "query/key/value" represent a bundled tensor
+        # and do NOT claim the individual names (those go to separate inputs).
+        used_names: set[str] = set()
+        for _, lbl in labeled:
+            if "/" not in lbl:
+                used_names.add(lbl.strip().lower())
+
+        # Remaining declared names, in declaration order, for unlabeled edges.
+        remaining = [
+            name for name in declared_names if name.lower() not in used_names
+        ]
+
+        all_inputs: list[tuple[int, str]] = []
+        seen_labels: dict[str, int] = {}
+
+        for source, label in labeled:
+            count = seen_labels.get(label, 0)
+            seen_labels[label] = count + 1
+            if count > 0:
+                label = f"{label}_{count + 1}"
+            all_inputs.append((source, label))
+
+        for idx, source in enumerate(unlabeled_sources):
+            if idx < len(remaining):
+                label = remaining[idx]
+            else:
                 src_spec = graph.nodes[source]
                 label = src_spec.label or f"input_{len(all_inputs)}"
             count = seen_labels.get(label, 0)
