@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 # GPU Microbenchmarking Suite
 
-This suite measures a GPU's **performance baseline driven by benchmarks** — matrix (MFMA / tensor-core) TFLOPS across dtypes, vector (SIMD) TFLOPS, and HBM bandwidth — and writes it as a GPU-arch JSON in the exact shape TraceLens uses for roofline analysis (see [`Agent/Analysis/utils/arch/`](../../Agent/Analysis/utils/arch/) and [`examples/gpu_arch_example.md`](../../../examples/gpu_arch_example.md)).
+This suite measures a GPU's **performance baseline driven by benchmarks** — matrix (MFMA / tensor-core) TFLOPS across dtypes, vector (SIMD) TFLOPS, HBM bandwidth, and **HBM access latency** (`mem_latency_us` via a dependent-load pointer chase) — and writes it as a GPU-arch JSON in the exact shape TraceLens uses for roofline analysis (see [`Agent/Analysis/utils/arch/`](../../Agent/Analysis/utils/arch/) and [`examples/gpu_arch_example.md`](../../../examples/gpu_arch_example.md)).
 
 Run it once per platform to produce a `<platform>.json` arch file. Roofline-based analysis (including the [TraceLens Agent](../../Agent/Analysis/README.md)) compares each measured kernel against these values to estimate optimization headroom, so an accurate, hardware-specific baseline directly improves the quality of the analysis.
 
@@ -16,7 +16,7 @@ Run it once per platform to produce a `<platform>.json` arch file. Roofline-base
 
 | File | Purpose |
 |------|---------|
-| `microbench.py` | Main suite: matrix/vector TFLOPS + HBM bandwidth; writes the arch JSON. |
+| `microbench.py` | Main suite: matrix/vector TFLOPS, HBM bandwidth, HBM latency; writes the arch JSON. |
 | `microbench_rocprof.py` | Validation: cross-checks measured GEMM TFLOPS against `rocprofv3` MFMA hardware counters (AMD only). |
 | `fp4fp6_helpers.py` | Triton `dot_scaled` + aiter/CK block-scaled MXFP4 / MXFP6 / INT8 GEMM helpers. |
 | `microbench_utils.py` | Device resolution and the pre-flight GPU-idle check (`amdsmi` / `nvidia-smi`). |
@@ -29,6 +29,7 @@ Run it once per platform to produce a `<platform>.json` arch file. Roofline-base
 - Matrix TFLOPS and INT8 use `2·M·N·K` FLOPs per GEMM. FP8 runs through `torch._scaled_mm` (dtype auto-selected per stack); INT8 through `torch._int_mm` and, when available, aiter CK `gemm_a8w8` (max is kept). MXFP4/MXFP6 use Triton `tl.dot_scaled` and, on gfx950, aiter CK `gemm_a4w4`.
 - Vector TFLOPS use a compute-bound Triton FMA dependency chain (not PyTorch elementwise) to saturate the SIMD units.
 - HBM bandwidth is measured via device-to-device copy (read = `2·bytes`) and fill (write).
+- HBM access latency (`mem_latency_us`) is measured with a Triton **pointer chase** over a 64 MiB index table (working set ≫ L2), reporting median µs per dependent load. Enables roofline `LATENCY_BOUND` when merged into the arch JSON.
 
 ## Prerequisites
 
@@ -69,7 +70,8 @@ The output filename is used as the arch `name` heuristically (memory tier → `M
 | `--device <int>` | Logical torch device index (default `0`). |
 | `--output <path>` | Output JSON path (parent dirs auto-created; default `gpu_microbench_results.json`). |
 | `--warmup` / `--rep` | Override `do_bench` warmup / timing iterations (default `30` / `200`). |
-| `--skip-vector` / `--skip-bandwidth` | Skip the vector-TFLOPS or HBM-bandwidth sections. |
+| `--skip-vector` / `--skip-bandwidth` / `--skip-latency` | Skip vector TFLOPS, HBM bandwidth, or latency sections. |
+| `--latency-only` | Only run the pointer-chase latency benchmark (fast smoke test). |
 | `--allow-busy` | Skip the pre-flight idle check and run anyway. |
 | `--idle-util-threshold <pct>` | Max GPU utilization considered idle (default `5`). |
 | `--shape-sweep` | Sweep large + tile-304 GEMM shapes and multi-GB HBM sizes; writes a comparison JSON/CSV. |
@@ -82,6 +84,7 @@ The output filename is used as the arch `name` heuristically (memory tier → `M
 {
     "name": "GPU_NAME",
     "mem_bw_gbps": 0,
+    "mem_latency_us": 0.0,
     "memory_gb": 0,
     "max_achievable_tflops": {
         "matrix_fp16": 0, "matrix_bf16": 0, "matrix_fp32": 0, "matrix_fp64": 0,

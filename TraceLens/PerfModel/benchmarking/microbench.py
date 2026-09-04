@@ -7,9 +7,10 @@
 
 """GPU Microbenchmarking Suite.
 
-Measures matrix TFLOPS (PyTorch GEMM), vector TFLOPS (Triton FMA chain), and
-HBM bandwidth. Writes JSON in the ``results/MI300X.json`` shape. Methodology:
-do_bench, L2 clear, warmup=30 rep=200, normal-distributed inputs, median ms.
+Measures matrix TFLOPS (PyTorch GEMM), vector TFLOPS (Triton FMA chain),
+HBM bandwidth, and HBM access latency (Triton pointer chase). Writes JSON in
+the ``results/MI300X.json`` shape. Methodology: do_bench, L2 clear,
+warmup=30 rep=200, normal-distributed inputs, median ms.
 
 Examples:
     # Default run on device 0; writes gpu_microbench_results.json
@@ -26,9 +27,13 @@ Examples:
     # Faster smoke test (lower warmup/rep)
     python -m TraceLens.PerfModel.benchmarking.microbench --device 0 --warmup 5 --rep 20
 
-    # Skip vector / bandwidth sections
+    # Skip vector / bandwidth / latency sections
     python -m TraceLens.PerfModel.benchmarking.microbench --device 0 \\
         --skip-vector --skip-bandwidth
+
+    # Latency-only smoke test (pointer chase → mem_latency_us)
+    python -m TraceLens.PerfModel.benchmarking.microbench --device 0 \\
+        --latency-only --warmup 5 --rep 20 --output results/latency_only.json
 
     # Override idle check (run even if the GPU shows activity)
     python -m TraceLens.PerfModel.benchmarking.microbench --device 0 --allow-busy
@@ -60,32 +65,48 @@ except Exception:  # pragma: no cover
     triton = None
     tl = None
 
-try:
-    from .fp4fp6_helpers import (
-        MX_BLOCK,
-        bench_int8_ck_gemm,
-        bench_mxfp4_ck_gemm,
-        bench_mxfp4_gemm,
-        bench_mxfp6_gemm,
-        mx_available,
-    )
-except Exception:  # pragma: no cover
-    MX_BLOCK = 32
+MX_BLOCK = 32
+_FP4FP6_HELPERS = None
 
-    def mx_available() -> bool:
-        return False
 
-    def bench_mxfp4_gemm(*_a, **_k):
-        return 0.0
+def _load_fp4fp6_helpers():
+    """Import fp4fp6_helpers on demand (Triton JIT can abort on older gfx)."""
+    global _FP4FP6_HELPERS
+    if _FP4FP6_HELPERS is not None:
+        return _FP4FP6_HELPERS
 
-    def bench_mxfp4_ck_gemm(*_a, **_k):
-        return 0.0
+    try:
+        from . import fp4fp6_helpers as helpers
+    except Exception as exc:  # pragma: no cover
+        logger.debug("fp4fp6_helpers unavailable: %s", exc)
 
-    def bench_mxfp6_gemm(*_a, **_k):
-        return 0.0
+        class _Stub:
+            MX_BLOCK = 32
 
-    def bench_int8_ck_gemm(*_a, **_k):
-        return 0.0
+            @staticmethod
+            def mx_available() -> bool:
+                return False
+
+            @staticmethod
+            def bench_mxfp4_gemm(*_a, **_k):
+                return 0.0
+
+            @staticmethod
+            def bench_mxfp4_ck_gemm(*_a, **_k):
+                return 0.0
+
+            @staticmethod
+            def bench_mxfp6_gemm(*_a, **_k):
+                return 0.0
+
+            @staticmethod
+            def bench_int8_ck_gemm(*_a, **_k):
+                return 0.0
+
+        helpers = _Stub()
+
+    _FP4FP6_HELPERS = helpers
+    return helpers
 
 
 WARMUP = 30
@@ -162,6 +183,10 @@ BW_SIZES_SWEEP_LARGE: List[int] = [
     32 * 1024 * 1024 * 1024,
 ]
 
+# HBM latency: dependent-load pointer chase (working set >> L2).
+LATENCY_CHASE_INDEX_ELEMS = 8 * 1024 * 1024  # int64 indices → 64 MiB table
+LATENCY_CHASE_STEPS = 1024
+
 
 def _bpe(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
@@ -185,10 +210,12 @@ def _build_measured_arch_json(
     read_bw_gbps: float,
     matrix_results: Dict[str, float],
     vector_results: Dict[str, float],
+    mem_latency_us: Optional[float] = None,
 ) -> Dict:
     """
-    One object shaped like `MI300X.json`: only `name`, `mem_bw_gbps`, `memory_gb`,
-    and `max_achievable_tflops` with the canonical TFLOPS keys (no extras).
+    One object shaped like `MI300X.json`: `name`, `mem_bw_gbps`, optional
+    `mem_latency_us`, `memory_gb`, and `max_achievable_tflops` with the
+    canonical TFLOPS keys (no extras).
     """
     maf: Dict[str, float] = {}
     for key in ARCH_TLOPS_KEYS:
@@ -196,13 +223,16 @@ def _build_measured_arch_json(
             maf[key] = int(round(float(matrix_results.get(key, 0.0))))
         else:
             maf[key] = int(round(float(vector_results.get(key, 0.0))))
-    return {
+    payload: Dict[str, object] = {
         "name": _arch_product_name(gpu_name, mem_gb),
         "mem_bw_gbps": int(round(float(read_bw_gbps))),
         "memory_gb": int(round(mem_gb)),
         "max_achievable_tflops": maf,
         "source": "These are benchmark derived peak flops and bw",
     }
+    if mem_latency_us is not None and mem_latency_us > 0:
+        payload["mem_latency_us"] = round(float(mem_latency_us), 2)
+    return payload
 
 
 # ── Matrix TFLOPS benchmarks ─────────────────────────────────────────
@@ -325,14 +355,17 @@ def _bench_mx_matrix_peak(
     device: int,
     shapes: List[Tuple[int, int, int]],
 ) -> float:
-    print(f"\n  [{label}]  (Triton MX block-scaled GEMM; K divisible by {MX_BLOCK})")
-    if not mx_available():
+    fp = _load_fp4fp6_helpers()
+    print(
+        f"\n  [{label}]  (Triton MX block-scaled GEMM; K divisible by {fp.MX_BLOCK})"
+    )
+    if not fp.mx_available():
         print("    Not measured (Triton unavailable).")
         return 0.0
     best = 0.0
     measured = False
     for M, N, K in shapes:
-        if K % MX_BLOCK != 0 or ("mxfp4" in label and K % 2 != 0):
+        if K % fp.MX_BLOCK != 0 or ("mxfp4" in label and K % 2 != 0):
             print(f"    ({M:>5},{N:>5},{K:>5}) → skipped (K alignment)")
             continue
         try:
@@ -353,6 +386,7 @@ def _bench_mx_matrix_peak(
 
 def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
     """Benchmark matrix (tensor core) TFLOPS across dtypes."""
+    fp = _load_fp4fp6_helpers()
     results = {}
 
     dtype_map = {
@@ -386,10 +420,16 @@ def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
     print(f"    Best: {best:.1f}")
 
     triton_mxfp4 = _bench_mx_matrix_peak(
-        "matrix_fp4 (triton dot_scaled)", bench_mxfp4_gemm, device, GEMM_SHAPES
+        "matrix_fp4 (triton dot_scaled)",
+        fp.bench_mxfp4_gemm,
+        device,
+        GEMM_SHAPES,
     )
     ck_mxfp4 = _bench_mx_matrix_peak(
-        "matrix_fp4 (aiter CK gemm_a4w4)", bench_mxfp4_ck_gemm, device, GEMM_SHAPES
+        "matrix_fp4 (aiter CK gemm_a4w4)",
+        fp.bench_mxfp4_ck_gemm,
+        device,
+        GEMM_SHAPES,
     )
     results["matrix_fp4"] = round(max(triton_mxfp4, ck_mxfp4), 1)
     results["matrix_fp4_triton"] = triton_mxfp4
@@ -412,7 +452,7 @@ def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
     elif _mxfp6_kind == "native":
         mxfp6_label = f"matrix_fp6 (triton dot_scaled, native {_mxfp6_dt})"
     results["matrix_fp6"] = _bench_mx_matrix_peak(
-        mxfp6_label, bench_mxfp6_gemm, device, GEMM_SHAPES
+        mxfp6_label, fp.bench_mxfp6_gemm, device, GEMM_SHAPES
     )
 
     # INT8: torch._int_mm + aiter CK gemm_a8w8; take max.
@@ -428,7 +468,7 @@ def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
     print("\n  [matrix_int8]  (aiter CK gemm_a8w8 → bf16 out)")
     ck_results = []
     for M, N, K in GEMM_SHAPES:
-        tflops = bench_int8_ck_gemm(
+        tflops = fp.bench_int8_ck_gemm(
             M, N, K, device, warmup=WARMUP, rep=REP, do_bench_fn=do_bench
         )
         print(f"    ({M:>5},{N:>5},{K:>5}) → {tflops:8.1f} TFLOPS")
@@ -789,18 +829,20 @@ def _sweep_gemm_at_shape(
 
     try:
         torch.cuda.empty_cache()
+        fp = _load_fp4fp6_helpers()
         tflops_torch = bench_gemm_int8(M, N, K, device)
-        tflops_ck = bench_int8_ck_gemm(
+        tflops_ck = fp.bench_int8_ck_gemm(
             M, N, K, device, warmup=WARMUP, rep=REP, do_bench_fn=do_bench
         )
         rows.append(row("matrix_int8", max(tflops_torch, tflops_ck)))
     except RuntimeError as e:
         rows.append(row("matrix_int8", 0.0, "oom" if _is_oom(e) else str(e)))
 
-    if mx_available() and K % MX_BLOCK == 0 and K % 2 == 0:
+    fp = _load_fp4fp6_helpers()
+    if fp.mx_available() and K % fp.MX_BLOCK == 0 and K % 2 == 0:
         for label, fn in (
-            ("matrix_fp4", bench_mxfp4_gemm),
-            ("matrix_fp6", bench_mxfp6_gemm),
+            ("matrix_fp4", fp.bench_mxfp4_gemm),
+            ("matrix_fp6", fp.bench_mxfp6_gemm),
         ):
             try:
                 torch.cuda.empty_cache()
@@ -1080,6 +1122,57 @@ def run_shape_sweep(
     return payload
 
 
+# ── HBM access latency (pointer chase) ───────────────────────────────
+
+
+if triton is None or tl is None:
+
+    def bench_mem_latency_us(device: int = 0) -> float:
+        print("\n── HBM Access Latency (pointer chase) ──")
+        print("  Triton is not available; mem_latency_us not measured.")
+        return 0.0
+
+else:
+
+    @triton.jit
+    def _hbm_latency_chase_kernel(
+        indices_ptr,
+        out_ptr,
+        N_STEPS: tl.constexpr,
+    ):
+        idx = tl.zeros([], dtype=tl.int64)
+        for _ in tl.static_range(N_STEPS):
+            idx = tl.load(indices_ptr + idx)
+        tl.store(out_ptr, idx)
+
+    def bench_mem_latency_us(device: int = 0) -> float:
+        """Estimate global HBM access latency (µs) via dependent pointer chase."""
+        dev = f"cuda:{device}"
+        n = LATENCY_CHASE_INDEX_ELEMS
+        print("\n── HBM Access Latency (pointer chase) ──")
+        print(
+            f"  Index table: {n:,} int64 entries "
+            f"({n * 8 / (1024 * 1024):.0f} MiB), "
+            f"{LATENCY_CHASE_STEPS} dependent loads / launch"
+        )
+
+        indices = torch.randperm(n, device=dev, dtype=torch.int64)
+        out = torch.zeros(1, dtype=torch.int64, device=dev)
+
+        def _run_chase():
+            _hbm_latency_chase_kernel[(1,)](indices, out, LATENCY_CHASE_STEPS)
+
+        for _ in range(3):
+            _run_chase()
+        torch.cuda.synchronize()
+
+        ms = do_bench(_run_chase, warmup=max(5, WARMUP // 6), rep=max(20, REP // 10))
+        latency_us = (ms * 1e-3 / LATENCY_CHASE_STEPS) * 1e6
+        print(f"  Median launch: {ms:.4f} ms")
+        print(f"  Per dependent load: {latency_us:.3f} µs")
+        return round(latency_us, 3)
+
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 
@@ -1113,6 +1206,16 @@ def main():
     )
     parser.add_argument(
         "--skip-bandwidth", action="store_true", help="Skip HBM bandwidth benchmarks"
+    )
+    parser.add_argument(
+        "--skip-latency",
+        action="store_true",
+        help="Skip HBM access latency (pointer chase) benchmark",
+    )
+    parser.add_argument(
+        "--latency-only",
+        action="store_true",
+        help="Only measure mem_latency_us (skip matrix/vector/bandwidth)",
     )
     parser.add_argument(
         "--warmup",
@@ -1212,32 +1315,46 @@ def main():
         )
         return
 
-    # Matrix TFLOPS
-    print("\n── Matrix TFLOPS (MFMA Units & Tensor Cores) ──")
-    matrix_results = bench_matrix_tflops(device)
+    matrix_results: Dict[str, float] = {}
+    vector_results: Dict[str, float] = {}
+    bw_results: Dict[str, float] = {}
+    mem_latency_us: Optional[float] = None
 
-    # Vector TFLOPS (Triton)
-    if not args.skip_vector:
-        vector_results = bench_vector_tflops(
-            device,
-            repeat=args.triton_repeat,
-            mem_every=args.triton_mem_every,
-        )
+    if args.latency_only:
+        if args.skip_latency:
+            raise SystemExit("--latency-only conflicts with --skip-latency")
+        mem_latency_us = bench_mem_latency_us(device)
     else:
-        vector_results = {}
+        # Matrix TFLOPS
+        print("\n── Matrix TFLOPS (MFMA Units & Tensor Cores) ──")
+        matrix_results = bench_matrix_tflops(device)
 
-    # HBM Bandwidth
-    if not args.skip_bandwidth:
-        print("\n── HBM Bandwidth ──")
-        bw_results = bench_hbm_bandwidth(device)
-    else:
-        bw_results = {}
+        # Vector TFLOPS (Triton)
+        if not args.skip_vector:
+            vector_results = bench_vector_tflops(
+                device,
+                repeat=args.triton_repeat,
+                mem_every=args.triton_mem_every,
+            )
+
+        # HBM Bandwidth
+        if not args.skip_bandwidth:
+            print("\n── HBM Bandwidth ──")
+            bw_results = bench_hbm_bandwidth(device)
+
+        if not args.skip_latency:
+            mem_latency_us = bench_mem_latency_us(device)
 
     read_bw = float(bw_results.get("read_bw_gbps", 0.0))
     write_bw = float(bw_results.get("write_bw_gbps", 0.0))
     mem_bw = max(read_bw, write_bw)
     arch_json = _build_measured_arch_json(
-        gpu_name, mem_gb, mem_bw, matrix_results, vector_results
+        gpu_name,
+        mem_gb,
+        mem_bw,
+        matrix_results,
+        vector_results,
+        mem_latency_us=mem_latency_us,
     )
 
     # JSON: same shape as `results/MI300X.json`.
@@ -1259,6 +1376,8 @@ def main():
         print(f"{k:<20} {v:>12.1f} {'TFLOPS':>8}")
     for k, v in bw_results.items():
         print(f"{k:<20} {v:>12.1f} {'GB/s':>8}")
+    if mem_latency_us is not None and mem_latency_us > 0:
+        print(f"{'mem_latency_us':<20} {mem_latency_us:>12.3f} {'µs':>8}")
     print("=" * 60)
 
 
