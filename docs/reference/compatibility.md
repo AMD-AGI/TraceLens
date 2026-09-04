@@ -83,7 +83,7 @@ TraceLens supports the following trace formats:
 | Format | Producing tool |
 |--------|----------------|
 | PyTorch Chrome trace (`.json`, `.json.gz`, `.zip`) | `torch.profiler` |
-| JAX XPlane protobuf (`.pb`) | JAX profiler / `xprof` | 
+| JAX XPlane protobuf (`.pb`) | JAX profiler or `xprof` | 
 | rocprofv3 JSON (`*_results.json`) | AMD ROCm ROCprofiler-SDK | 
 | rocprofv3 pftrace / Perfetto-style | `rocprofv3 --output-format pftrace` | 
 

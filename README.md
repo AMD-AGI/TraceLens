@@ -31,6 +31,8 @@ TraceLens is a Python library for **automated performance analysis of training a
 
 **TraceLens Agent**: Receive a prioritized human-readable optimization report, derived through an agentic workflow, covering compute kernels, system bottlenecks, and kernel fusion opportunities with root-cause reasoning and concrete resolutions.
 
+**Trace corpus indexing**: Build a searchable SQLite catalog of TraceLens reports so you can find traces by op, category, or kernel name without reopening every raw file. Scanner and importer sit behind a storage interface; SQLite is the first backend.
+
 ---
 
 ## Quick Start
@@ -44,22 +46,12 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 ### 2. Collect Traces
 
 TraceLens analyses profiler traces from PyTorch, JAX, and AMD rocprofv3; see [Supported Profile Formats](#supported-profile-formats) for the full list. The instructions below cover collecting a PyTorch trace:
-- **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling walkthrough](docs/tutorials/torch-profiling.ipynb) walks through this end to end.
+- **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling walkthrough](notebooks/torch-profiling.ipynb) walks through this end to end.
 - **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](TraceLens/Agent/Profiling/README.md) automates vLLM/SGLang/ATOM benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces.
 
 To try out TraceLens without collecting your own trace, use the [demo traces](tests/traces) bundled in the repository.
 
 ### 3. Analyze your Workload
-
-## Supported Profile Formats
-
-| Format | Tool | Documentation |
-|--------|------|---------------|
-| **PyTorch** | `torch.profiler` | [docs/generate_perf_report.md](docs/generate_perf_report.md) |
-| **JAX** | XPlane protobuf | [docs/jax_analyses.md](docs/jax_analyses.md) |
-| **rocprofv3 JSON** | AMD ROCm rocprofiler-sdk | [docs/generate_perf_report_rocprof.md](docs/generate_perf_report_rocprof.md) |
-| **rocprofv3 pftrace** | Perfetto-style | [docs/generate_perf_report_rocprof_pftrace.md](docs/generate_perf_report_rocprof_pftrace.md) |
-| **Genesis / Taichi** | rocprofv3 + pftrace | [docs/generate_perf_report_genesis.md](docs/generate_perf_report_genesis.md) |
 
 Generate a performance analysis report from an eager execution PyTorch trace with a single command:
 
@@ -77,6 +69,16 @@ TraceLens_compare_perf_reports_pytorch \
     --names baseline candidate \
     --sheets all \
     -o comparison.xlsx
+```
+
+Index traces and existing TraceLens CSV reports (see [Index a corpus of traces](docs/how-to/trace-index.md)):
+
+```bash
+TraceLens_trace_index --db trace_index.sqlite append \
+    --trace-path /path/to/rank0_trace.json.gz \
+    --report-dir path/to/perf_report_csvs
+TraceLens_trace_index --db trace_index.sqlite build --traces-file traces.txt
+TraceLens_trace_index --db trace_index.sqlite search Cijk
 ```
 
 For multi-rank runs, generate a collective-communication report across ranks (see [Generate a collective-communication report](docs/how-to/collective-report.md)):
@@ -117,6 +119,7 @@ Analyze a workload autonomously using an agentic system that automates performan
 | **JAX**               | XPlane protobuf          | [docs/how-to/generate-perf-report-jax.md](docs/how-to/generate-perf-report-jax.md)                             |
 | **rocprofv3 JSON**    | AMD ROCm rocprofiler-sdk | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md)                     |
 | **rocprofv3 pftrace** | Perfetto-style           | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md)                     |
+| **Genesis / Taichi**  | rocprofv3 + pftrace      | [docs/how-to/generate-perf-report-genesis.md](docs/how-to/generate-perf-report-genesis.md)                     |
 
 Each format's linked doc covers its full CLI reference. For PyTorch report comparison and multi-rank collective analysis, see the corresponding docs in the [Documentation](#documentation) table.
 
@@ -127,18 +130,19 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 | Module                       | Doc                                                                                                                              |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | Trace2Tree                   | [docs/conceptual/trace2tree.md](docs/conceptual/trace2tree.md)                                                                   |
-| TreePerf                     | [docs/how-to/tree-perf-analysis.md](docs/how-to/tree-perf-analysis.md)                                                           |
+| TreePerf                     | [docs/how-to/sdk-analysis.md](docs/how-to/sdk-analysis.md)                                                                       |
 | NCCL Analyser                | [docs/how-to/nccl-analysis.md](docs/how-to/nccl-analysis.md)                                                                     |
 | TraceDiff                    | [docs/how-to/compare-traces.md](docs/how-to/compare-traces.md)                                                                   |
 | Event Replay                 | [docs/how-to/event-replay.md](docs/how-to/event-replay.md)                                                                       |
 | TraceFusion                  | [docs/how-to/trace-fusion.md](docs/how-to/trace-fusion.md)                                                                       |
-| GPU Event Analyser           | [docs/how-to/gpu-event-analysis.md](docs/how-to/gpu-event-analysis.md)                                                           |
+| GPU Event Analyser           | [docs/how-to/sdk-analysis.md](docs/how-to/sdk-analysis.md)                                                                       |
 | JAX Analyses                 | [docs/how-to/generate-perf-report-jax.md](docs/how-to/generate-perf-report-jax.md)                                               |
 | pftrace Reports              | [docs/how-to/generate-perf-report-rocprof.md](docs/how-to/generate-perf-report-rocprof.md)                                       |
 | Compare PyTorch Reports      | [docs/how-to/compare-perf-reports.md](docs/how-to/compare-perf-reports.md)                                                       |
 | Multi-Rank Collective Report | [docs/how-to/collective-report.md](docs/how-to/collective-report.md)                                                             |
 | Performance Report Columns   | [docs/reference/perf-report-columns.md](docs/reference/perf-report-columns.md)                                                   |
 | TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
+| TraceIndex                   | [docs/how-to/trace-index.md](docs/how-to/trace-index.md)                                                                         |
 
 ---
 
@@ -164,4 +168,4 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on branching, commi
 
 - [GEMM analysis in TraceLens](docs/conceptual/gemm-analysis.md)
 - [The Trace2Tree data model](docs/conceptual/trace2tree.md)
-- [PyTorch profiling walkthrough](docs/tutorials/torch-profiling.ipynb)
+- [PyTorch profiling walkthrough](notebooks/torch-profiling.ipynb)

@@ -60,7 +60,7 @@ pip install -e .
 
 The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json.gz`). Collection is workload-specific:
 
-- **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling walkthrough](../../../docs/tutorials/torch-profiling.ipynb) walks through this end to end.
+- **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling walkthrough](../../../notebooks/torch-profiling.ipynb) walks through this end to end.
 - **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](../../../docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](../Profiling/README.md) automates vLLM/SGLang/ATOM benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces. For graph-mode workloads you produce two artifacts: a graph-replay trace and a graph-capture folder. In inference mode with execution mode `graph replay + capture`, TraceLens merges call-stack and shape information from the capture folder into the replay tree before analysis.
 
 ### 3. Establish a hardware performance baseline
@@ -387,4 +387,19 @@ analysis_output/
     ├── <category>_metadata.json        # Platform specs, GPU utilization, config per category
     └── model_info.json                 # Model identification (model, architecture, scale, precision)
 ```
+
+---
+
+## Triage
+
+Once an `analysis_output/` directory has been produced, the triage toolkit
+verifies that the run is complete and well-formed. It runs a catalog of checks
+against one or more analysis output folders, records the findings per run, and
+can aggregate a batch into a summary report with reproducer packages. It is
+useful both for validating a single run and for auditing a large batch of runs
+for common failure modes.
+
+See the [Triage Toolkit README](triage/README.md) for the check catalog, the
+command-line and library interfaces, and the batch workflow.
+
 ---

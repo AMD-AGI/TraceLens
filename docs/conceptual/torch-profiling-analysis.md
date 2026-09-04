@@ -4,7 +4,7 @@ Copyright (c) 2025 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
-# Understanding PyTorch traces
+# PyTorch traces in TraceLens
 ```{meta}
 :description: A conceptual walkthrough of how PyTorch traces capture host and GPU execution, how a single Python operation expands into GPU kernels, and how to read a single-GPU trace in Perfetto.
 :keywords: PyTorch profiler, trace analysis, Perfetto, GPU kernels, ATen, MIOpen, cuDNN, host device execution, tensor shapes, autograd, memory copy, TraceLens
@@ -16,9 +16,12 @@ When you run a PyTorch model on a GPU, there's a hidden interplay between the CP
 
 ## The execution model: host, GPU, and asynchronous launches
 
-![Async execution example](../images/profiling_analysis_fig1.png)
+```{figure} ../images/profiling_analysis_fig1.png
+:alt: Asynchronous execution example showing host queuing GPU commands while the CPU continues execution.
+:align: center
 
-*Figure 1: Asynchronous execution example.*
+Figure 1: Asynchronous execution example.
+```
 
 To understand profiling, you need a mental model of how PyTorch — or any application — runs code across the CPU and GPU.
 
@@ -34,9 +37,12 @@ A kernel itself is just a GPU function that runs across thousands of lightweight
 
 To dig deeper into what a trace shows, consider the snippet below.
 
-![Perfetto trace showing idle time between kernels](../images/profiling_analysis_fig2.png)
+```{figure} ../images/profiling_analysis_fig2.png
+:alt: Perfetto trace showing a red dashed region of GPU idle time between convolution and batch normalization kernels.
+:align: center
 
-*Figure 2: Perfetto trace highlighting idle time between convolution and batch normalization kernels.*
+Figure 2: Perfetto trace highlighting idle time between convolution and batch normalization kernels.
+```
 
 The red dashed region marks idle time: the GPU is waiting for the host to issue the next command. This happens when the CPU frontend can't keep up with the GPU's execution speed. Reducing such idle gaps is an important optimization goal. To see why these gaps occur, follow the path from a high-level PyTorch call down to the GPU kernels that actually run.
 
@@ -49,9 +55,9 @@ y = nn.Conv2d(3, 64, kernel_size=3)(x)
 At the Python level, this looks like a single operation. In the trace, however, it expands into several layers:
 
 - **Python frontend**: `nn.Conv2d` in `torch.nn`.
-- **ATen**: the call lowers into PyTorch's tensor library, [ATen](https://docs.pytorch.org/cppdocs/#aten), and shows up as `aten::conv2d` in the trace.
+- **ATen**: The call lowers into PyTorch's tensor library, [ATen](https://docs.pytorch.org/cppdocs/#aten), and shows up as `aten::conv2d` in the trace.
 - **Backend wrapper**: ATen provides wrappers that call into vendor libraries. On AMD GPUs, you'll see `aten::miopen_convolution`, which wraps [MIOpen](https://rocm.docs.amd.com/projects/MIOpen/en/latest/) commands. On NVIDIA GPUs, the equivalent is `aten::cudnn_convolution`, which wraps [cuDNN](https://developer.nvidia.com/cudnn) calls.
-- **GPU kernels**: the backend library enqueues device kernels such as `igemm_fwd_gtcx2_nhwc` that perform the actual convolution on the GPU.
+- **GPU kernels**: The backend library enqueues device kernels such as `igemm_fwd_gtcx2_nhwc` that perform the actual convolution on the GPU.
 
 This gives a clear understanding of how high-level code is translated into GPU execution.
 
@@ -61,38 +67,47 @@ Another important detail is tensor metadata. Python-level operations in the trac
 
 For example, in the figure below the first tensor is the activation (`[5, 64, 56, 56]`) and the second tensor is the convolution filter (`[64, 64, 3, 3]`).
 
-![Perfetto trace showing recorded input shapes](../images/profiling_analysis_fig3.png)
+```{figure} ../images/profiling_analysis_fig3.png
+:alt: Perfetto Current Selection panel showing Input Dims and Input type fields on an aten::convolution cpu_op event.
+:align: center
 
-*Figure 3: Shapes recorded on the backend op when `record_shapes=True`.*
+Figure 3: Shapes recorded on the backend op when `record_shapes=True`.
+```
 
 This metadata becomes very useful for deeper analysis and debugging — for example, when matching trace events to model architecture, analyzing kernel efficiency, or spotting unusual stride or dtype patterns.
 
 That's all you need for a clean first pass: know what the host and GPU are doing, read the timeline, and use recorded shapes to ground what you see. Perfetto gives you the raw signals; turning them into insight is a skill you build with practice, and TraceLens helps accelerate that process.
 
-The appendix below covers UI shortcuts, how memory copies show up, and the structure of the raw trace file.
-
 ## Perfetto tips and trace internals
+
+This section covers Perfetto UI navigation shortcuts, how memory copies appear in traces, the raw JSON event format, and how autograd introduces a second thread in the timeline.
 
 ### Perfetto UI tips
 
 Perfetto is a powerful trace viewer, but it takes some practice to navigate effectively. A few basics:
 
-- **Zoom and pan** with `Ctrl + scroll` to zoom in and out; click and drag to pan.
-- **Event details**: click any event to open the *Current Selection* panel below. This shows start time, duration, and arguments. With `record_shapes=True`, backend ops (in the `cpu_op` category) also show tensor shapes, dtypes, and strides.
+- Zoom and pan by holding **Ctrl** and scrolling to zoom in and out; click and drag to pan.
+- Click any event to open the **Current Selection** panel. This shows start time, duration, and arguments. With `record_shapes=True`, backend ops (in the `cpu_op` category) also show tensor shapes, dtypes, and strides.
 
 Perfetto also links host launches and GPU execution with arrows called *flows*. These are crucial for connecting what you see on the CPU timeline with what actually runs on the GPU.
 
 When you select a runtime launch event such as `hipExtModuleLaunchKernel`, the *Following Flow* jumps you forward to the GPU kernel it triggered:
 
-![Following flow from host launch to GPU kernel](../images/profiling_analysis_fig4.png)
+```{figure} ../images/profiling_analysis_fig4.png
+:alt: Perfetto trace with a Following Flow arrow connecting a hipExtModuleLaunchKernel host event to its GPU kernel event.
+:align: center
 
-*Figure 4: Following flow from a host launch (`hipExtModuleLaunchKernel`) to the corresponding GPU kernel event.*
+Figure 4: Following flow from a host launch (`hipExtModuleLaunchKernel`) to the corresponding GPU kernel event.
+```
 
 Conversely, when you select a GPU kernel event, the *Preceding Flow* takes you back to the runtime call on the host that launched it:
 
-![Preceding flow from GPU kernel back to host launch](../images/profiling_analysis_fig5.png)
+```{figure} ../images/profiling_analysis_fig5.png
+:alt: Perfetto trace with a Preceding Flow arrow tracing a SubTensorOpWithScalar1d GPU kernel back to its host launch event.
+:align: center
 
-*Figure 5: Preceding flow from a GPU kernel (`SubTensorOpWithScalar1d`) back to its launch on the host.*
+Figure 5: Preceding flow from a GPU kernel (`SubTensorOpWithScalar1d`) back to its launch on the host.
+```
 
 These flows are the bridge between the Python-level trace and the GPU execution timeline. They let you answer both:
 
@@ -103,9 +118,9 @@ These flows are the bridge between the Python-level trace and the GPU execution 
 
 Not all GPU activity is compute. Profiling traces also show memory transfers:
 
-- **H2D (host to device)**: copies data from CPU to GPU, usually synchronous and PCIe bandwidth-limited.
-- **D2H (device to host)**: copies results back to CPU, also synchronous and PCIe bandwidth-limited.
-- **D2D (device to device)**: moves data between GPU buffers, asynchronous and limited by HBM bandwidth.
+- **H2D (host to device)**: Copies data from CPU to GPU, usually synchronous and PCIe bandwidth-limited.
+- **D2H (device to host)**: Copies results back to CPU, also synchronous and PCIe bandwidth-limited.
+- **D2D (device to device)**: Moves data between GPU buffers, asynchronous and limited by HBM bandwidth.
 
 Recent versions even record measured bandwidth for these events in the trace arguments. Importantly, memory copy events use the GPU's DMA engines, not compute cores, so they don't directly compete with kernel execution.
 
@@ -115,10 +130,10 @@ Behind the Perfetto UI, the PyTorch profiler saves traces as JSON. Each entry is
 
 - **Timestamps**: `ts` (start) and `dur` (duration).
 - **Process and thread IDs**: `pid` and `tid`. CPU events use real PIDs and TIDs; GPU events use pseudo-PIDs for devices and TIDs for streams.
-- **Category**: for example, `python_function`, `cpu_op`, `cuda_runtime`, `kernel`, or `gpu_memcpy`.
-- **Args**: extra information such as shapes, dtypes, strides, or bandwidth.
+- **Category**: For example, `python_function`, `cpu_op`, `cuda_runtime`, `kernel`, or `gpu_memcpy`.
+- **Args**: Extra information such as shapes, dtypes, strides, or bandwidth.
 
-The JSON format makes traces scriptable: you can parse them to build custom reports or run automated analysis outside Perfetto. This is exactly what TraceLens does.
+The JSON format makes traces scriptable: you can parse them to build custom reports or run automated analysis outside Perfetto. 
 
 ### Autograd in the trace
 
@@ -129,9 +144,12 @@ Autograd introduces another dimension to the trace: the forward and backward pas
 
 These are linked at the `aten::convolution` layer of the call stack. Perfetto uses flows to connect the forward convolution op to its corresponding backward node.
 
-![Forward and backward convolution linked in the trace](../images/profiling_analysis_fig6.png)
+```{figure} ../images/profiling_analysis_fig6.png
+:alt: Perfetto trace showing flow arrows linking an aten::convolution forward op on the main thread to its ConvolutionBackward0 node on the autograd thread.
+:align: center
 
-*Figure 6: Example of `aten::convolution` (forward) linked to `ConvolutionBackward0` (backward) through flows.*
+Figure 6: `aten::convolution` (forward) linked to `ConvolutionBackward0` (backward) through flows.
+```
 
 Key points:
 

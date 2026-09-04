@@ -19,6 +19,8 @@ from typing import Tuple
 
 import torch
 
+from ..utils import gemm_tflops
+
 try:
     import triton
     import triton.language as tl
@@ -313,7 +315,7 @@ def bench_mxfp4_gemm(
         _launch_scaled_gemm(a, b, sa, sb, c, "e2m1", "e2m1", pack=2)
 
     ms = do_bench_fn(_run, warmup=warmup, rep=rep)
-    return (2 * m * n * k) / (ms * 1e-3) / 1e12
+    return gemm_tflops(m, n, k, ms)
 
 
 _AITER_MXFP4_CACHE: dict = {
@@ -386,7 +388,7 @@ def bench_mxfp4_ck_gemm(
         ms = do_bench_fn(_run, warmup=warmup, rep=rep)
     except Exception:
         return 0.0
-    return (2 * m * n * k) / (ms * 1e-3) / 1e12
+    return gemm_tflops(m, n, k, ms)
 
 
 def _aiter_int8_ready() -> bool:
@@ -457,7 +459,7 @@ def bench_int8_ck_gemm(
             flush=True,
         )
         return 0.0
-    return (2 * m * n * k) / (ms * 1e-3) / 1e12
+    return gemm_tflops(m, n, k, ms)
 
 
 def bench_mxfp6_gemm(
@@ -488,4 +490,4 @@ def bench_mxfp6_gemm(
         )
 
     ms = do_bench_fn(_run, warmup=warmup, rep=rep)
-    return (2 * m * n * k) / (ms * 1e-3) / 1e12
+    return gemm_tflops(m, n, k, ms)

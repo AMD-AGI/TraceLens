@@ -12,7 +12,7 @@ from itertools import chain
 import pandas as pd
 
 from ..PerfModel import perf_model
-from ..PerfModel.utils import add_simulation_time_columns
+from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 
@@ -553,28 +553,10 @@ class JaxAnalyses:
         gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
         time = event[TraceEventUtils.TraceKeys.Duration]
 
-        tflops_per_s = (gflops / 1e3) / (time / 1e6) if time > 0 else float("nan")
-
         bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
 
         # Return metrics
-        dict_metrics = {
-            "GFLOPS": gflops,
-            "Kernel Time (µs)": time,
-            "TFLOPS/s": tflops_per_s,
-        }
-        if bytes_moved is not None:
-            dict_metrics["Data Moved (MB)"] = bytes_moved / (1024 * 1024)
-            dict_metrics["FLOPS/Byte"] = (
-                (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float("nan")
-            )
-            dict_metrics["TB/s"] = (
-                (bytes_moved / 1e12) / (time / 1e6) if time > 0 else float("nan")
-            )
-        else:
-            dict_metrics["Data Moved (MB)"] = float("nan")
-            dict_metrics["FLOPS/Byte"] = float("nan")
-            dict_metrics["TB/s"] = float("nan")
+        dict_metrics = build_perf_metrics_dict(gflops, bytes_moved, time)
 
         if hasattr(perf_model, "get_simulation_time"):
             add_simulation_time_columns(

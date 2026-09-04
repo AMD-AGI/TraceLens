@@ -48,6 +48,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from triton.testing import do_bench
 
+from ..utils import gemm_tflops
 from .microbench_utils import check_gpu_idle
 
 logger = logging.getLogger(__name__)
@@ -218,7 +219,7 @@ def bench_gemm(M: int, N: int, K: int, dtype: torch.dtype, device: int = 0) -> f
     B = torch.randn(K, N, dtype=dtype, device=dev)
 
     ms = do_bench(lambda: torch.matmul(A, B), warmup=WARMUP, rep=REP)
-    tflops = _gemm_flops(M, N, K) / (ms * 1e-3) / 1e12
+    tflops = gemm_tflops(M, N, K, ms)
     return tflops
 
 
@@ -293,7 +294,7 @@ def bench_gemm_fp8(M: int, N: int, K: int, device: int = 0) -> float:
         print(f"    FP8 scaled_mm failed ({e})")
         return 0.0
 
-    return _gemm_flops(M, N, K) / (ms * 1e-3) / 1e12
+    return gemm_tflops(M, N, K, ms)
 
 
 def bench_gemm_int8(M: int, N: int, K: int, device: int = 0) -> float:
@@ -315,7 +316,7 @@ def bench_gemm_int8(M: int, N: int, K: int, device: int = 0) -> float:
         print(f"    INT8 _int_mm failed: {e}")
         return 0.0
 
-    return _gemm_flops(M, N, K) / (ms * 1e-3) / 1e12
+    return gemm_tflops(M, N, K, ms)
 
 
 def _bench_mx_matrix_peak(

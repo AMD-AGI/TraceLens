@@ -23,7 +23,6 @@ import pytest
 
 from TraceLens.Reporting.genesis_analysis import (
     _gpu_timeline_from_intervals,
-    _merge_intervals,
     apply_genesis_categories_to_rocprof,
     categorize_kernel,
     compute_genesis_category_summary,
@@ -193,41 +192,6 @@ class TestCategorizeKernel:
 
     def test_empty_string(self):
         assert categorize_kernel("") == "Other"
-
-
-###############################################################################
-# genesis_analysis — _merge_intervals
-###############################################################################
-
-
-class TestMergeIntervals:
-    """Validate interval merging for GPU busy time computation."""
-
-    def test_non_overlapping(self):
-        intervals = [(0, 10), (20, 30), (40, 50)]
-        assert _merge_intervals(intervals) == [(0, 10), (20, 30), (40, 50)]
-
-    def test_overlapping(self):
-        intervals = [(0, 15), (10, 25), (20, 30)]
-        assert _merge_intervals(intervals) == [(0, 30)]
-
-    def test_adjacent(self):
-        intervals = [(0, 10), (10, 20)]
-        assert _merge_intervals(intervals) == [(0, 20)]
-
-    def test_unsorted_input(self):
-        intervals = [(40, 50), (0, 10), (5, 15)]
-        assert _merge_intervals(intervals) == [(0, 15), (40, 50)]
-
-    def test_empty_list(self):
-        assert _merge_intervals([]) == []
-
-    def test_single_interval(self):
-        assert _merge_intervals([(100, 200)]) == [(100, 200)]
-
-    def test_fully_nested(self):
-        intervals = [(0, 100), (10, 50), (20, 30)]
-        assert _merge_intervals(intervals) == [(0, 100)]
 
 
 ###############################################################################
