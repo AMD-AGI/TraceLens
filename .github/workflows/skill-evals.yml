@@ -1,0 +1,33 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+# Run skillscope on evals.json (same intake criteria as amd/skills)
+
+name: AMD Skills Checks
+
+on:
+  pull_request:
+    paths:
+      - "TraceLens/Agent/Analysis/skills/**"
+      - ".github/workflows/skill-evals.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    name: AMD Skills Checks
+    uses: amd/skillscope/.github/workflows/reusable.yml@main
+    secrets:
+      api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+    with:
+      skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
+      # Each step can be set to `required`, `optional`, or `off`.
+      # On amd/skills, all steps are required.
+      structural: required
+      routing: required
+      behavioral: required

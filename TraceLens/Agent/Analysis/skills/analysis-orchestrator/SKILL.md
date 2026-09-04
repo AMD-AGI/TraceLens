@@ -1,5 +1,5 @@
 ---
-name: tracelens-analysis-orchestrator
+name: analysis-orchestrator
 description: >-
   Orchestrates modular PyTorch profiler trace analysis with TraceLens: generates perf
   reports, prepares category data, runs system-level and compute-kernel subagents in
