@@ -553,8 +553,28 @@ def _wire_all_predecessor_edges(
             and spec.block.attr_name == SYNTHETIC_ATTENTION
         ]
         for target_index in targets:
+            # If the kernel declares its own ``inputs:`` list, skip
+            # provenance edges for ports that are already wired by the
+            # normal predecessor tracking (avoids redundant Split→kernel
+            # edges when View nodes are the actual producers).
+            kernel_declared = set(
+                _kernel_input_names(graph.nodes[target_index])
+            )
+            existing_sources = {
+                source
+                for source, target in graph.links
+                if target == target_index
+            }
+
             ports_by_source: dict[int, list[str]] = {}
             for port, chain in root.attention_inputs.items():
+                # Skip ports already wired via normal predecessor edges
+                # when the kernel explicitly declares its inputs.
+                if kernel_declared and port.lower() in {
+                    n.lower() for n in kernel_declared
+                }:
+                    continue
+
                 preferred_label = (
                     "Split"
                     if port in {"q", "k", "v", "query", "key", "value"}
