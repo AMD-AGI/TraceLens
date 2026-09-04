@@ -57,6 +57,26 @@ from torch.library import Library
 logger = logging.getLogger(__name__)
 
 
+def _active_default_device_override():
+    """Return the active ``torch.set_default_device`` override, or ``None`` if unset.
+
+    Unlike ``torch.get_default_device()`` — which always resolves to a concrete
+    device (``cpu`` when no override is installed) — this reads the raw
+    ``torch.utils._device.CURRENT_DEVICE`` sentinel, which is ``None`` when no
+    override is active. That distinction matters for restoration: passing the
+    concrete ``cpu`` back into ``torch.set_default_device`` *installs* a device
+    mode, whereas passing ``None`` truly clears any mode a module leaked at
+    import time.
+    """
+    device_mod = sys.modules.get("torch.utils._device")
+    if device_mod is None:
+        try:
+            import torch.utils._device as device_mod
+        except Exception:
+            return None
+    return getattr(device_mod, "CURRENT_DEVICE", None)
+
+
 @contextlib.contextmanager
 def _preserve_global_torch_state():
     """Snapshot and restore process-global torch defaults.
@@ -78,17 +98,15 @@ def _preserve_global_torch_state():
     keeps these side effects from escaping into the serving path. In the
     healthy case (nothing mutates the defaults) this is a no-op.
     """
-    get_default_device = getattr(torch, "get_default_device", None)
-    saved_device = get_default_device() if get_default_device is not None else None
+    saved_device = _active_default_device_override()
     saved_dtype = torch.get_default_dtype()
     try:
         yield
     finally:
-        if saved_device is not None:
-            try:
-                torch.set_default_device(saved_device)
-            except Exception:
-                pass
+        try:
+            torch.set_default_device(saved_device)
+        except Exception:
+            pass
         try:
             torch.set_default_dtype(saved_dtype)
         except Exception:
@@ -670,16 +688,14 @@ def _force_import_submodules(prefix: str) -> None:
     # into the serving path). The leaf-name skip list below catches the known
     # offenders, but this restore makes the discovery robust to any other
     # module with the same import-time side effect.
-    get_default_device = getattr(torch, "get_default_device", None)
-    saved_device = get_default_device() if get_default_device is not None else None
+    saved_device = _active_default_device_override()
     saved_dtype = torch.get_default_dtype()
 
     def _restore_defaults():
-        if saved_device is not None:
-            try:
-                torch.set_default_device(saved_device)
-            except Exception:
-                pass
+        try:
+            torch.set_default_device(saved_device)
+        except Exception:
+            pass
         try:
             torch.set_default_dtype(saved_dtype)
         except Exception:
