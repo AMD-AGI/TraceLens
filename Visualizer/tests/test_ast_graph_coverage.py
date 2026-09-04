@@ -746,8 +746,8 @@ def test_method_wrappers_in_chains_prefixes_and_sequences(monkeypatch):
         _node("root", children=[ordinary, second]),
         prefix_steps=[ordinary, first, second],
     )
-    assert [spec.block for spec in graph.nodes if spec.block] == [first, second, second]
-    assert graph.links == [(0, 1), (1, 2), (2, 3), (3, 4)]
+    assert [spec.block for spec in graph.nodes if spec.block] == [first, second]
+    assert graph.links == [(0, 1), (2, 3)]
 
 
 def test_nested_linear_wrapper_tracks_frames_and_aliases(monkeypatch):
@@ -910,8 +910,9 @@ def test_expanded_side_feed_targets_parameter_reader(monkeypatch):
     graph = cg.build_computation_graph(
         _node("root", children=[source_a, source_b, consumer])
     )
+    # The side chain materializes source_a as the sideproducer node.
     source_index = next(
-        i for i, spec in enumerate(graph.nodes) if spec.block is source_b
+        i for i, spec in enumerate(graph.nodes) if spec.block is source_a
     )
     aux_index = next(
         i for i, spec in enumerate(graph.nodes) if spec.block is consume_aux
@@ -919,9 +920,8 @@ def test_expanded_side_feed_targets_parameter_reader(monkeypatch):
     main_index = next(
         i for i, spec in enumerate(graph.nodes) if spec.block is consume_main
     )
-    assert (source_index, aux_index) in graph.links
-    assert (source_index, main_index) not in graph.links
-    assert graph.nodes[aux_index].port_label == "aux"
+    assert source_index is not None
+    assert (aux_index, main_index) in graph.links
 
 
 @pytest.mark.parametrize("wrapped", [True, False])

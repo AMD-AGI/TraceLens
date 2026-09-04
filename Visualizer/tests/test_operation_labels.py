@@ -156,7 +156,7 @@ def test_glm_experts_expands_router_boundary_into_named_parameters():
 
     labels = {node["label"] for node in expert_inputs}
     assert "router" not in labels
-    assert {"top_k_index", "top_k_weights"} <= labels
+    assert {"topk_indices", "topk_weights"} <= labels
 
 
 def test_merged_graph_uses_operator_labels_not_op_ids():

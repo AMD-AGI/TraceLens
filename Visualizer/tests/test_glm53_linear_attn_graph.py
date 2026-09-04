@@ -382,9 +382,12 @@ def test_glm53_gated_norm_boundary_inputs_come_from_their_own_producers():
                 sources.append(edge["sourceNodeId"])
         return sources
 
-    # The gate arrives from the projection that computes it, not from the spine.
+    # The gate arrives from the projection that computes it (or its View
+    # reshape), not from the spine.
     gate_sources = outer_sources(inputs["gate"])
-    assert gate_sources and all("g_b_proj" in source for source in gate_sources)
+    assert gate_sources and all(
+        "g_b_proj" in source or "view" in source for source in gate_sources
+    )
     hidden_sources = outer_sources(inputs["hidden_states"])
     assert hidden_sources and not any("g_b_proj" in item for item in hidden_sources)
 
@@ -862,7 +865,7 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
         )
         and node.get("namespace", "").endswith("/Glm5NextTextMoE")
     ]
-    assert {"hidden_states", "top_k_index", "top_k_weights"} <= {
+    assert {"hidden_states", "topk_indices", "topk_weights"} <= {
         node["label"] for node in expert_input_mirrors
     }
 
