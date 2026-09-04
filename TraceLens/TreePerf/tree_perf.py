@@ -130,6 +130,69 @@ def get_max_achievable_tflops(perf_model, arch):
     return maf_specs.get(compute_spec)
 
 
+_MEM_LATENCY_MISSING_WARNED = False
+
+
+def get_mem_latency_us(arch):
+    """Return global memory latency floor from arch JSON, or None if unset."""
+    if arch is None:
+        return None
+    mem_latency_us = arch.get("mem_latency_us")
+    if mem_latency_us is None:
+        return None
+    return float(mem_latency_us)
+
+
+def warn_if_missing_mem_latency(arch):
+    """
+    Warn once when roofline arch has bandwidth but no memory latency floor.
+
+    Without mem_latency_us, roofline classification falls back to the legacy
+    bandwidth-only model (COMPUTE_BOUND / MEMORY_BOUND only).
+    """
+    global _MEM_LATENCY_MISSING_WARNED
+    if arch is None or _MEM_LATENCY_MISSING_WARNED:
+        return
+    if arch.get("mem_bw_gbps") is not None and arch.get("mem_latency_us") is None:
+        warnings.warn(
+            "GPU arch JSON has mem_bw_gbps but no mem_latency_us; roofline memory "
+            "leg uses bandwidth-only classification (COMPUTE_BOUND / MEMORY_BOUND). "
+            "Add mem_latency_us (global HBM access latency in microseconds) to enable "
+            "LATENCY_BOUND for small global-memory transfers.",
+            UserWarning,
+            stacklevel=2,
+        )
+        _MEM_LATENCY_MISSING_WARNED = True
+
+
+def compute_roofline_bound(
+    compute_time_us, bytes_moved, mem_bw_gbps, mem_latency_us=None
+):
+    """
+    Classify roofline bound using compute vs global-memory limits.
+
+    When mem_latency_us is provided, memory time is max(latency floor, bytes/bw).
+    Otherwise falls back to bytes/bw only (legacy behavior).
+    """
+    transfer_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
+    if mem_latency_us is not None:
+        memory_time_us = max(mem_latency_us, transfer_time_us)
+        if compute_time_us >= memory_time_us:
+            roofline_bound = "COMPUTE_BOUND"
+        elif transfer_time_us >= mem_latency_us:
+            roofline_bound = "MEMORY_BOUND"
+        else:
+            roofline_bound = "LATENCY_BOUND"
+    else:
+        memory_time_us = transfer_time_us
+        if compute_time_us >= memory_time_us:
+            roofline_bound = "COMPUTE_BOUND"
+        else:
+            roofline_bound = "MEMORY_BOUND"
+    roofline_time_us = max(compute_time_us, memory_time_us)
+    return roofline_time_us, roofline_bound
+
+
 def _perf_model_init_kwargs(
     perf_model_class, event, arch, python_path, enable_origami, inductor_cache_dir=None
 ):
@@ -275,6 +338,7 @@ class TreePerfAnalyzer:
             add_python_func = True
         self.add_python_func = add_python_func
         self.arch = arch
+        warn_if_missing_mem_latency(arch)
         self.python_path = python_path
         self.enable_origami = enable_origami
         self.inductor_cache_dir = inductor_cache_dir
@@ -468,13 +532,13 @@ class TreePerfAnalyzer:
             ):
                 # Compute time: flops / (peak_tflops * 1e12) gives seconds, convert to µs
                 compute_time_us = (gflops * 1e9 / (peak_tflops * 1e12)) * 1e6
-                # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
-                memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
-                roofline_time_us = max(compute_time_us, memory_time_us)
-                if compute_time_us >= memory_time_us:
-                    roofline_bound = "COMPUTE_BOUND"
-                else:
-                    roofline_bound = "MEMORY_BOUND"
+                mem_latency_us = get_mem_latency_us(self.arch)
+                roofline_time_us, roofline_bound = compute_roofline_bound(
+                    compute_time_us,
+                    bytes_moved,
+                    mem_bw_gbps,
+                    mem_latency_us=mem_latency_us,
+                )
                 dict_metrics["Roofline Time (µs)"] = roofline_time_us
                 dict_metrics["Roofline Bound"] = roofline_bound
                 dict_metrics["Pct Roofline"] = (
