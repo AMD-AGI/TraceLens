@@ -534,26 +534,78 @@ class mha_varlen_fwd(InferenceAttention):
 
 class aiter_fmha_v3_varlen_fwd(InferenceAttention):
     """
-    Performance model for ``aiter::fmha_v3_varlen_fwd`` (inference: sglang / vLLM).
+    Annotation-aware perf model for ``aiter::fmha_v3_varlen_fwd`` (inference:
+    sglang / vLLM).
 
     Uses the same chunk statistics as :class:`InferenceAttention` (``annotation``
     on the event). Sets ``d_h_v`` from the **v** tensor (``Input Dims[2]``) so MLA
     shapes with differing Q/K vs V head dims are modeled correctly.
 
-    Unparseable annotation yields :meth:`InferenceAttention.no_perf_param_details`
-    (see base class); no packed-tensor fallback.
+    If annotation parsing fails, this class falls back to the core shape-based
+    SDPA model so regular training traces still get FLOPs/bytes coverage while
+    annotated inference traces use the more accurate per-request sequence stats.
     """
+
+    category = "SDPA_fwd"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
+        self.enable_origami = enable_origami
+        super().__init__(event, arch, python_path)
+
+    @staticmethod
+    def _core_param_details(event):
+        from TraceLens.PerfModel import perf_model
+
+        params = perf_model.aiter__fmha_v3_varlen_fwd.get_param_details(event).copy()
+        params["_fallback_core"] = True
+        return params
+
+    def _core_model(self):
+        from TraceLens.PerfModel import perf_model
+
+        return perf_model.aiter__fmha_v3_varlen_fwd(
+            self.event,
+            self.arch,
+            self.python_path,
+            enable_origami=self.enable_origami,
+        )
 
     @staticmethod
     def get_param_details(event):
         params = InferenceAttention.get_param_details(event)
         if params.get("_no_perf"):
-            return params
+            try:
+                return aiter_fmha_v3_varlen_fwd._core_param_details(event)
+            except (ValueError, IndexError, KeyError, TypeError):
+                return params
         args = event.get("args") or {}
         dims = args.get("Input Dims") or []
         if len(dims) > 2 and len(dims[2]) >= 1:
             params["d_h_v"] = dims[2][-1]
         return params
+
+    def flops(self):
+        if self.param_details.get("_fallback_core"):
+            return self._core_model().flops()
+        return super().flops()
+
+    def bytes(self, bytes_per_element=None):
+        if self.param_details.get("_fallback_core"):
+            if bytes_per_element is None:
+                return self._core_model().bytes()
+            return self._core_model().bytes(bytes_per_element)
+        return super().bytes(bytes_per_element)
+
+    def get_compute_precision(self):
+        if self.param_details.get("_fallback_core"):
+            return self._core_model().get_compute_precision()
+        return super().get_compute_precision()
+
+    def get_simulation_time(self):
+        if self.param_details.get("_fallback_core"):
+            return self._core_model().get_simulation_time()
+        return None
 
 
 class aiter_paged_attention_ragged(InferenceAttention):
