@@ -280,6 +280,20 @@ class TestJaxComparePhase13:
         assert d_model == 4096
 
 
+def test_jax_report_default_output_path(tmp_path):
+    """No output_csvs_dir/output_xlsx_path given -> auto-derive next to the
+    input trace, replacing the '.xplane.pb' suffix."""
+    src = os.path.join(
+        os.path.dirname(__file__),
+        "traces/mi300/jax_conv_minimal_legacy/chi-mi300x-013.ord.vultr.cpe.ice.amd.com.xplane.pb",
+    )
+    trace = shutil.copy(src, tmp_path)
+    dict_name2df = generate_perf_report_jax(profile_path=trace)
+    expected_xlsx = trace.rsplit(".xplane.pb", 1)[0] + "_perf_report.xlsx"
+    assert os.path.exists(expected_xlsx)
+    assert isinstance(dict_name2df, dict)
+
+
 def test_jax_report_main(tmp_path):
     trace = os.path.join(
         os.path.dirname(__file__),
