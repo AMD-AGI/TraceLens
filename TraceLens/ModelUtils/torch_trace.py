@@ -877,7 +877,11 @@ def build_graph(
         "model_type": model_type,
         "source": "tracelens-torch-trace",
         "tracelensViewer": {
-            "factSheet": fact_sheet,
+            "factSheet": {
+                "title": model_name,
+                "body": fact_sheet,
+                "bodyHtml": fact_sheet.replace("  ", "&nbsp;&nbsp;").replace("\n", "<br>\n"),
+            },
             "dtype": dtype,
         },
         "graphCollections": [
