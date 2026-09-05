@@ -961,8 +961,7 @@ def build_graph(
                 "attrs": [{"key": "operation", "value": "tensor_op"}],
                 "style": _STYLE_OP,
             }
-            if incoming:
-                op_node["incomingEdges"] = incoming
+            op_node["incomingEdges"] = incoming
             op_nodes.append(op_node)
 
         if op_nodes:
@@ -1067,8 +1066,7 @@ def build_graph(
                 "attrs": [{"key": "operation", "value": "tensor_op"}],
                 "style": _STYLE_OP,
             }
-            if incoming:
-                op_node["incomingEdges"] = incoming
+            op_node["incomingEdges"] = incoming
             op_nodes.append(op_node)
 
         if op_nodes:
@@ -1307,18 +1305,25 @@ def build_graph(
             fx_leaf_predecessor[path] = pred
 
     # For modules without a resolved predecessor, find the last node
-    # BEFORE the first FX op in the ordered node list that's outside
-    # this module's namespace.
+    # BEFORE the first FX op in the ordered node list that's within
+    # the same parent module's namespace.
     for path, first_id in fx_leaf_first.items():
         if path in fx_leaf_predecessor:
             continue
         prefix = _node_id(path) + "/"
+        # Scope to the parent module's namespace
+        parent_path = path.rsplit(".", 1)[0] if "." in path else ""
+        parent_prefix = _node_id(parent_path) + "/" if parent_path else ""
         prev_id = None
         for n in nodes:
             if n["id"] == first_id:
                 break
-            if not n["id"].startswith(prefix):
-                prev_id = n["id"]
+            nid = n["id"]
+            # Only consider nodes in the same parent scope
+            if parent_prefix and not nid.startswith(parent_prefix):
+                continue
+            if not nid.startswith(prefix):
+                prev_id = nid
         if prev_id and prev_id in node_by_id:
             fx_leaf_predecessor[path] = prev_id
 
