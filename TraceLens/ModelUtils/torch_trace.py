@@ -1405,10 +1405,6 @@ def build_graph(
     for comp_path in sorted(composite_modules):
         if _should_skip(comp_path):
             continue
-        # Skip top-level modules (direct children of root) — they are
-        # structural wrappers, not meaningful submodule boundaries.
-        if "." not in comp_path:
-            continue
 
         mod = module_map.get(comp_path)
         if not mod:
@@ -1431,6 +1427,18 @@ def build_graph(
         child_nodes = [n for n in nodes if n["id"].startswith(child_prefix)]
         if not child_nodes:
             continue
+
+        # Determine the namespace where children actually live.
+        # For layer-indexed modules (e.g. layers.0), children are in the
+        # layer group namespace, not inside module_ns.  Detect this by
+        # checking the first child's namespace.
+        children_ns = module_ns
+        for cn in child_nodes:
+            cn_ns = cn.get("namespace", "")
+            if cn_ns and not cn_ns.startswith(module_ns):
+                # Children are NOT inside module_ns — use comp_ns instead
+                children_ns = comp_ns
+                break
 
         # ── Determine input children ──────────────────────────────────
         # Children whose incoming edges come from OUTSIDE this module
@@ -1485,7 +1493,7 @@ def build_graph(
             input_node = {
                 "id": input_id,
                 "label": "Input",
-                "namespace": module_ns,
+                "namespace": children_ns,
                 "attrs": [{"key": "synthetic", "value": "input"}],
                 "style": _STYLE_INPUT,
                 "incomingEdges": [],
@@ -1539,7 +1547,7 @@ def build_graph(
             output_node = {
                 "id": output_id,
                 "label": "Output",
-                "namespace": module_ns,
+                "namespace": children_ns,
                 "attrs": [{"key": "synthetic", "value": "output"}],
                 "style": _STYLE_OUTPUT,
                 "incomingEdges": [{"sourceNodeId": oid} for oid in output_child_ids],
