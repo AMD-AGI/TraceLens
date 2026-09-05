@@ -556,19 +556,25 @@ def build_graph(
     })
 
     # ── Build skip set from repeated layer groups ────────────────────────
-    # Keep only layer 0 as the representative for each ModuleList.
-    # All layer type variants are documented in the fact sheet.
+    # Keep one representative per *distinct layer type* in each ModuleList.
+    # When there are multiple types (e.g. LinearAttn vs SparseAttn), show
+    # them as parallel branches so the viewer renders them side-by-side.
     skip_layers: set[str] = set()
     layer_group_map: dict[str, list[LayerGroup]] = repeats
-    # Total count per container (all groups combined)
     container_total: dict[str, int] = {}
+    # Set of representative layer paths to keep
+    representative_paths: set[str] = set()
 
     for container_path, groups in layer_group_map.items():
         total = sum(g.count for g in groups)
         container_total[container_path] = total
-        # Skip all layers except index 0
-        for i in range(1, total):
-            skip_layers.add(f"{container_path}.{i}")
+        for group in groups:
+            representative_paths.add(f"{container_path}.{group.representative}")
+        # Skip all layers that aren't a representative
+        for i in range(total):
+            path = f"{container_path}.{i}"
+            if path not in representative_paths:
+                skip_layers.add(path)
 
     # ── Collect module info (preserving registration order) ──────────────
     module_children: dict[str, list[str]] = defaultdict(list)
@@ -604,6 +610,30 @@ def build_graph(
     # ── Build namespace labels using attr names + layer group labels ─────
     container_set: set[str] = set(container_total.keys())
 
+    # Map each representative path → its group label (e.g. "3x LinearAttn+MLP")
+    rep_group_label: dict[str, str] = {}
+    for container_path, groups in layer_group_map.items():
+        for group in groups:
+            rep_path = f"{container_path}.{group.representative}"
+            # Build a descriptive label for this layer type
+            rep_mod = module_map.get(rep_path)
+            if rep_mod:
+                attn_type = ""
+                mlp_type = ""
+                for cname, cmod in rep_mod.named_children():
+                    if "attn" in cname and not attn_type:
+                        attn_type = type(cmod).__name__
+                    if "mlp" in cname and not mlp_type:
+                        mlp_type = type(cmod).__name__
+                parts_label = attn_type
+                if mlp_type:
+                    parts_label += f" + {mlp_type}"
+                rep_group_label[rep_path] = (
+                    f"{group.count}x {group.class_name} ({parts_label})"
+                )
+            else:
+                rep_group_label[rep_path] = f"{group.count}x {group.class_name}"
+
     def _namespace_for(path: str) -> str:
         """Build a namespace using attr names, with layer group labels."""
         parts = path.split(".")
@@ -616,12 +646,18 @@ def build_graph(
 
             if prefix in container_set:
                 # ModuleList — next part is the layer index
-                total = container_total[prefix]
                 if i + 1 < len(parts) - 1:
                     layer_prefix = ".".join(parts[: i + 2])
-                    mod = module_map.get(layer_prefix)
-                    cls_name = type(mod).__name__ if mod else "Layer"
-                    ns_parts.append(f"{total}x {cls_name}")
+                    # Use per-group label if this is a representative
+                    label = rep_group_label.get(layer_prefix)
+                    if label:
+                        ns_parts.append(label)
+                    else:
+                        # Fallback: total count
+                        total = container_total[prefix]
+                        mod = module_map.get(layer_prefix)
+                        cls_name = type(mod).__name__ if mod else "Layer"
+                        ns_parts.append(f"{total}x {cls_name}")
                     i += 2  # skip container + index
                     continue
                 i += 1
