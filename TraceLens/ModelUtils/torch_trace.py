@@ -278,14 +278,8 @@ def _fx_op_label(node: torch.fx.Node) -> str:
 
 
 def _is_interesting_op(node: torch.fx.Node) -> bool:
-    """Filter out housekeeping ops, keeping only meaningful tensor operations."""
+    """Keep all tensor operations (fully expanded view)."""
     if node.op in ("placeholder", "output"):
-        return False
-    if node.op == "call_module":
-        return True
-    name = re.sub(r"_\d+$", "", node.name)
-    # Skip pure indexing/accessor ops
-    if name in ("getitem",):
         return False
     return True
 
