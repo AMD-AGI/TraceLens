@@ -255,6 +255,142 @@ def _infer_shapes_from_weights(
     return shapes
 
 
+# ── Call-graph capture via forward hooks ─────────────────────────────────────
+
+def _tensor_ids(x: Any) -> list[int]:
+    """Extract Python id()s of all tensors in a nested structure."""
+    if isinstance(x, torch.Tensor):
+        return [id(x)]
+    if isinstance(x, (tuple, list)):
+        ids = []
+        for item in x:
+            ids.extend(_tensor_ids(item))
+        return ids
+    if isinstance(x, dict):
+        ids = []
+        for v in x.values():
+            ids.extend(_tensor_ids(v))
+        return ids
+    return []
+
+
+def _capture_call_graph(
+    model: torch.nn.Module,
+    composite_modules: set[str],
+    *,
+    seq_len: int = 128,
+    batch_size: int = 1,
+) -> dict[str, list[tuple[str, str]]]:
+    """Capture dataflow edges between child modules of each composite.
+
+    Runs a forward pass, tracking which tensor objects flow between
+    children of each composite module. Returns a dict mapping composite
+    module path → list of (source_child, target_child) edges.
+
+    Children that receive the composite's own input (not a sibling's
+    output) are marked as receiving from a virtual "@input" source.
+    """
+    # For each module, record pre-hook input tensor IDs and post-hook output IDs
+    pre_inputs: dict[str, list[int]] = {}   # module path → input tensor IDs
+    post_outputs: dict[str, list[int]] = {}  # module path → output tensor IDs
+    call_order: dict[str, int] = {}  # module path → call order
+    counter = [0]
+
+    def _pre_hook(name: str):
+        def hook(_mod, args, kwargs):
+            pre_inputs[name] = _tensor_ids(args) + _tensor_ids(kwargs)
+            call_order[name] = counter[0]
+            counter[0] += 1
+        return hook
+
+    def _post_hook(name: str):
+        def hook(_mod, _inp, output):
+            post_outputs[name] = _tensor_ids(output)
+        return hook
+
+    handles = []
+    for name, mod in model.named_modules():
+        if not name:
+            continue
+        handles.append(mod.register_forward_pre_hook(_pre_hook(name), with_kwargs=True))
+        handles.append(mod.register_forward_hook(_post_hook(name)))
+
+    dummy = torch.zeros(batch_size, seq_len, dtype=torch.long, device="meta")
+    try:
+        with torch.no_grad():
+            model(dummy, use_cache=False)
+    except Exception:
+        pass
+    finally:
+        for h in handles:
+            h.remove()
+
+    # Build per-composite edge lists.
+    edges: dict[str, list[tuple[str, str]]] = {}
+    for comp_path in composite_modules:
+        # Collect direct children
+        children: list[str] = []
+        for name in pre_inputs:
+            if name.startswith(comp_path + "."):
+                suffix = name[len(comp_path) + 1:]
+                if "." not in suffix:
+                    children.append(name)
+
+        if len(children) < 2:
+            continue
+
+        children.sort(key=lambda c: call_order.get(c, 0))
+
+        # Map tensor id → producing child (or "@input" for composite's own input)
+        producer: dict[int, str] = {}
+        # The composite's own input tensors are the "root" source
+        comp_inputs = set(pre_inputs.get(comp_path, []))
+        for tid in comp_inputs:
+            producer[tid] = "@input"
+
+        child_edges: list[tuple[str, str]] = []
+        # Track untracked tensor IDs shared by multiple children
+        untracked_consumers: dict[int, list[str]] = defaultdict(list)
+
+        for child in children:
+            # Check which producer this child's inputs come from
+            sources: set[str] = set()
+            for tid in pre_inputs.get(child, []):
+                if tid in producer:
+                    sources.add(producer[tid])
+                else:
+                    # Untracked tensor — record for shared-input detection
+                    untracked_consumers[tid].append(child)
+            for src in sorted(sources):
+                if src != child:
+                    child_edges.append((src, child))
+            # Register this child's outputs
+            for tid in post_outputs.get(child, []):
+                producer[tid] = child
+
+        # Children sharing the same untracked input tensor are parallel.
+        # Treat them as all coming from "@input".
+        children_with_edges = {tgt for _, tgt in child_edges}
+        for _tid, consumers in untracked_consumers.items():
+            if len(consumers) > 1:
+                for child in consumers:
+                    if child not in children_with_edges:
+                        child_edges.append(("@input", child))
+                        children_with_edges.add(child)
+
+        if child_edges:
+            # Deduplicate
+            seen: set[tuple[str, str]] = set()
+            unique = []
+            for e in child_edges:
+                if e not in seen:
+                    seen.add(e)
+                    unique.append(e)
+            edges[comp_path] = unique
+
+    return edges
+
+
 def _symbolise(
     shape: tuple[int, ...], *, batch_size: int = 1, seq_len: int = 128
 ) -> str:
@@ -684,6 +820,11 @@ def build_graph(
         if name and list(mod.children()):
             composite_modules.add(name)
 
+    # ── Capture call graph for dataflow-aware edge wiring ────────────────
+    call_graph = _capture_call_graph(
+        model, composite_modules, seq_len=seq_len, batch_size=batch_size
+    )
+
     def _should_skip(path: str) -> bool:
         for skip in skip_layers:
             if path == skip or path.startswith(skip + "."):
@@ -918,6 +1059,7 @@ def build_graph(
     _wire_sequential_edges(
         nodes, model, module_map, shapes, {}, skip_layers,
         parallel_ns_groups=parallel_ns_groups,
+        call_graph=call_graph,
     )
 
     # ── Add layer group attributes ───────────────────────────────────────
@@ -1004,16 +1146,56 @@ def _wire_sequential_edges(
     skip_layers: set[str],
     *,
     parallel_ns_groups: list[set[str]] | None = None,
+    call_graph: dict[str, list[tuple[str, str]]] | None = None,
 ) -> None:
     """Wire edges between nodes that don't already have incoming edges.
 
+    Uses call_graph (captured during forward pass) to wire dataflow-aware
+    edges between child modules of composite modules, falling back to
+    sequential wiring when call_graph data is unavailable.
+
     For parallel branches (multiple layer types in the same container),
     all branches fan out from the same predecessor instead of being
+    chained sequentially.
     chained sequentially.
     """
     node_ids = {n["id"] for n in nodes}
     node_by_id: dict[str, dict] = {n["id"]: n for n in nodes}
     parallel_ns_groups = parallel_ns_groups or []
+    call_graph = call_graph or {}
+
+    # Build call-graph predecessor lookup at the node-ID level.
+    # call_graph has paths like "a.b.c" → [("a.b.c.child1", "a.b.c.child2")].
+    # We need to map node IDs (which use "/" and may be deeper) to their
+    # dataflow predecessors.
+    #
+    # Strategy: for each composite's child-level edge (src_child → tgt_child),
+    # find all nodes that belong to tgt_child (or are tgt_child itself),
+    # and that are the FIRST node in tgt_child's subtree. Those should
+    # have edges from the LAST node in src_child's subtree.
+    #
+    # We'll build this as: node_id → set of source child paths, and resolve
+    # actual source node IDs during wiring.
+
+    # Map: dotted child path → node ID prefix (using "/")
+    def _path_to_id_prefix(dotted: str) -> str:
+        return dotted.replace(".", "/")
+
+    # For each composite, build set of children that have dataflow sources
+    # (children that appear as targets in call_graph edges)
+    cg_sources: dict[str, list[str]] = {}  # child_path → [source_child_paths]
+    cg_children_with_no_sources: dict[str, set[str]] = {}  # comp → children with no incoming
+    for comp_path, edges in call_graph.items():
+        targets_seen: dict[str, list[str]] = defaultdict(list)
+        all_children: set[str] = set()
+        for src, tgt in edges:
+            targets_seen[tgt].append(src)
+            all_children.add(src)
+            all_children.add(tgt)
+        for tgt, srcs in targets_seen.items():
+            cg_sources[tgt] = srcs
+        # Children that only produce (never consume from a sibling)
+        cg_children_with_no_sources[comp_path] = all_children - set(targets_seen.keys())
 
     # Build a lookup: namespace → set of sibling namespaces in parallel
     parallel_siblings: dict[str, set[str]] = {}
@@ -1058,6 +1240,66 @@ def _wire_sequential_edges(
     # Track last node of each parallel branch for fan-in after branches
     branch_last_node: dict[str, str] = {}  # branch_ns → last node id
 
+    # Track last node emitted per dotted module path (for call-graph wiring)
+    last_node_for_path: dict[str, str] = {}
+    # For @input call-graph sources, track the entry point of each composite
+    composite_entry: dict[str, str] = {}  # comp_path → predecessor node ID
+
+    def _node_id_to_path(nid: str) -> str:
+        return nid.replace("/", ".")
+
+    def _cg_find_sources(node_id: str, fallback_source: str | None) -> list[str] | None:
+        """Check if this node is the first node of a child module that has
+        call-graph predecessors. Returns list of source node IDs or None.
+
+        ``fallback_source`` is the sequential predecessor — used when a
+        call-graph edge points to "@input" (composite's own input).
+        """
+        path = _node_id_to_path(node_id)
+        # Walk up the path to find a child that has call-graph sources
+        parts = path.split(".")
+        for depth in range(len(parts), 0, -1):
+            child_path = ".".join(parts[:depth])
+            if child_path in cg_sources:
+                # Only apply to the FIRST node in this child's subtree
+                if child_path in last_node_for_path:
+                    return None  # already wired a node in this child
+
+                # Determine the @input fallback: use the saved composite
+                # entry point (predecessor before the composite started)
+                comp_path = child_path.rsplit(".", 1)[0]
+                input_source = composite_entry.get(comp_path, fallback_source)
+
+                # Find the last node of each source child
+                src_ids = []
+                for src_path in cg_sources[child_path]:
+                    if src_path == "@input":
+                        if input_source:
+                            src_ids.append(input_source)
+                    else:
+                        if src_path in last_node_for_path:
+                            src_ids.append(last_node_for_path[src_path])
+                # Deduplicate while preserving order
+                seen: set[str] = set()
+                unique = []
+                for s in src_ids:
+                    if s not in seen:
+                        seen.add(s)
+                        unique.append(s)
+                return unique if unique else None
+        return None
+
+    def _record_composite_entry(node_id: str, source_id: str | None) -> None:
+        """Record the entry point for composites containing this node."""
+        if not source_id:
+            return
+        path = _node_id_to_path(node_id)
+        parts = path.split(".")
+        for depth in range(len(parts) - 1, 0, -1):
+            comp_path = ".".join(parts[:depth])
+            if comp_path in call_graph and comp_path not in composite_entry:
+                composite_entry[comp_path] = source_id
+
     for node in nodes:
         if node["id"] == "@input":
             _update_last("", "@input")
@@ -1067,6 +1309,11 @@ def _wire_sequential_edges(
             branch_ns = _find_branch_ns(ns)
             if branch_ns is not None:
                 branch_last_node[branch_ns] = node["id"]
+            # Track for call-graph
+            path = _node_id_to_path(node["id"])
+            parts = path.split(".")
+            for depth in range(1, len(parts) + 1):
+                last_node_for_path[".".join(parts[:depth])] = node["id"]
             _update_last(ns, node["id"])
             continue
 
@@ -1160,6 +1407,32 @@ def _wire_sequential_edges(
         if branch_ns is not None:
             branch_last_node[branch_ns] = node["id"]
 
+        # ── Call-graph-aware wiring: override source_id if we have
+        #    dataflow information for this node's parent composite ────────
+        _record_composite_entry(node["id"], source_id)
+        cg_srcs = _cg_find_sources(node["id"], source_id)
+        if cg_srcs is not None:
+            if len(cg_srcs) == 1:
+                source_id = cg_srcs[0]
+            elif len(cg_srcs) > 1:
+                # Multiple dataflow predecessors
+                node["incomingEdges"] = [
+                    {
+                        "sourceNodeId": src,
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": str(i),
+                    }
+                    for i, src in enumerate(cg_srcs)
+                    if src in node_by_id
+                ]
+                # Update tracking and continue
+                path = _node_id_to_path(node["id"])
+                parts = path.split(".")
+                for depth in range(1, len(parts) + 1):
+                    last_node_for_path[".".join(parts[:depth])] = node["id"]
+                _update_last(ns, node["id"])
+                continue
+
         if source_id and source_id in node_by_id:
             node["incomingEdges"] = [
                 {
@@ -1168,4 +1441,11 @@ def _wire_sequential_edges(
                     "targetNodeInputId": "0",
                 }
             ]
+
+        # Update last_node_for_path for call-graph tracking
+        path = _node_id_to_path(node["id"])
+        parts = path.split(".")
+        for depth in range(1, len(parts) + 1):
+            last_node_for_path[".".join(parts[:depth])] = node["id"]
+
         _update_last(ns, node["id"])
