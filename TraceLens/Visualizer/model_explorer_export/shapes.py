@@ -341,11 +341,15 @@ def fill_missing_node_shapes(
             seeded = tokens
         elif label == "logits" or node_id.split("/")[-1] in {"lm_head", "output"}:
             seeded = logits
-        elif "embedding" in label or "embed_tokens" in node_id:
+        elif "embedding" in label or "embed" in node_id:
             # Embeddings widen token ids, so they must not inherit the (B, S) input shape.
             seeded = activation
         elif "norm" in label:
             # Spine norms sit on the residual stream whatever the preceding tile computed.
+            seeded = activation
+        elif "attention" in node_id.rsplit("/", 1)[-1].lower():
+            # Attention modules (core_attention, sdpa_attention, etc.) produce
+            # (B, S, H) regardless of internal Q/K/V reshaping.
             seeded = activation
         if seeded is not None:
             known[(node_id, "0")] = seeded

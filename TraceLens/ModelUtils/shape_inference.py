@@ -213,23 +213,79 @@ class ModuleDimRegistry:
             if init_func is None:
                 continue
             local_vars: dict[str, DimExpr] = {}
-            for node in ast.walk(init_func):
-                if isinstance(node, ast.Assign):
-                    targets = list(node.targets)
-                elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                    targets = [node.target]
-                else:
-                    continue
-                for target in targets:
-                    registry._record_assignment(
-                        class_name,
-                        target,
-                        node.value,
-                        config=config,
-                        local_vars=local_vars,
-                        context=context,
-                    )
+            registry._walk_init_body(
+                init_func.body,
+                class_name=class_name,
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
         return registry
+
+    def _walk_init_body(
+        self,
+        stmts: list[ast.stmt],
+        *,
+        class_name: str,
+        config: dict[str, Any],
+        local_vars: dict[str, DimExpr],
+        context: ShapeContext,
+    ) -> None:
+        """Walk __init__ body in statement order, evaluating ``if`` conditions
+        against the model config so conditional assignments are resolved correctly.
+
+        This replaces the previous ``ast.walk`` approach which processed
+        assignments in BFS order, causing later-executed conditional
+        overrides to be visited *after* constructor calls that depend on them.
+        """
+        for stmt in stmts:
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    self._record_assignment(
+                        class_name, target, stmt.value,
+                        config=config, local_vars=local_vars, context=context,
+                    )
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                self._record_assignment(
+                    class_name, stmt.target, stmt.value,
+                    config=config, local_vars=local_vars, context=context,
+                )
+            elif isinstance(stmt, ast.If):
+                # Evaluate the condition against config and local_vars.
+                branch = _eval_config_condition(
+                    stmt.test, config=config, local_vars=local_vars
+                )
+                if branch is True:
+                    self._walk_init_body(
+                        stmt.body, class_name=class_name,
+                        config=config, local_vars=local_vars, context=context,
+                    )
+                elif branch is False:
+                    self._walk_init_body(
+                        stmt.orelse, class_name=class_name,
+                        config=config, local_vars=local_vars, context=context,
+                    )
+                else:
+                    # Cannot evaluate condition — process both branches so
+                    # we don't miss assignments.  Later branch wins.
+                    self._walk_init_body(
+                        stmt.body, class_name=class_name,
+                        config=config, local_vars=local_vars, context=context,
+                    )
+                    self._walk_init_body(
+                        stmt.orelse, class_name=class_name,
+                        config=config, local_vars=local_vars, context=context,
+                    )
+            elif isinstance(stmt, (ast.For, ast.While, ast.With)):
+                self._walk_init_body(
+                    stmt.body, class_name=class_name,
+                    config=config, local_vars=local_vars, context=context,
+                )
+            elif isinstance(stmt, ast.Try):
+                self._walk_init_body(
+                    stmt.body, class_name=class_name,
+                    config=config, local_vars=local_vars, context=context,
+                )
 
     def _record_assignment(
         self,
@@ -1178,6 +1234,16 @@ class ShapeInferencer:
         if introspected is not None:
             return introspected
 
+        # Fallback: attention modules produce (B, S, H) — derive from config.
+        node_name = (
+            node.metadata.get("attr_name") or node.id.rsplit(":", 1)[-1] or ""
+        ).lower()
+        if "attention" in node_name:
+            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+            return TensorSpec(
+                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
+            )
+
         if inputs:
             _log.warning(
                 "No shape inference rule for %s (label=%r, class=%r, kind=%s); "
@@ -1266,9 +1332,22 @@ class ShapeInferencer:
         # the registry (e.g. "core_attention" → "CoreAttention").
         structure = self._fuzzy_registry_lookup(class_name)
         if structure is not None:
-            return self._simulate_forward_ops(
+            # Attention modules use complex runtime reshapes (.size() calls,
+            # multi-head view/transpose) that AST simulation cannot resolve.
+            # Derive output from config: attention always produces (B, S, H).
+            if "attention" in (structure.name or "").lower():
+                hidden = self.context.dims.get(
+                    Symbol.HIDDEN.value, Symbol.HIDDEN.value
+                )
+                return TensorSpec(
+                    shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden),
+                    dtype=self.context.dtype,
+                )
+            result = self._simulate_forward_ops(
                 structure, inputs, root=root, guard_name=class_name
             )
+            if result is not None and _looks_valid(result, inputs):
+                return result
 
         # Try introspecting inline function definitions in parent classes'
         # __init__ (e.g. ``self.activation_func = swiglu`` where swiglu is
@@ -1794,6 +1873,33 @@ def _resolve_view_shape(
     return tuple(resolved) if resolved else None
 
 
+def _looks_valid(result: TensorSpec, inputs: list[TensorSpec]) -> bool:
+    """Sanity-check an introspection result against its inputs.
+
+    Returns *False* when the result looks like a simulation artifact — e.g. the
+    batch/seq dimensions are in wrong positions or the output rank shrank
+    suspiciously (indicating the AST simulation hit runtime-dependent reshapes
+    it couldn't resolve).
+    """
+    if not result.shape:
+        return False
+    if not inputs:
+        return True
+    # If any input had symbolic B or S and the result lost them, likely wrong.
+    has_batch = Symbol.BATCH.value in result.shape or any(
+        isinstance(d, str) and "B" in str(d) for d in result.shape
+    )
+    input_has_batch = any(
+        Symbol.BATCH.value in inp.shape or any(
+            isinstance(d, str) and "B" in str(d) for d in inp.shape
+        )
+        for inp in inputs
+    )
+    if input_has_batch and not has_batch:
+        return False
+    return True
+
+
 def _default_hidden_shape(context: ShapeContext) -> tuple[DimExpr, ...]:
     hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
     return (Symbol.BATCH.value, Symbol.SEQ.value, hidden)
@@ -1906,6 +2012,54 @@ def _call_class_name(node: ast.Call) -> str | None:
         return func.attr
     if isinstance(func, ast.Name):
         return func.id
+    return None
+
+
+def _eval_config_condition(
+    test: ast.AST,
+    *,
+    config: dict[str, Any],
+    local_vars: dict[str, Any],
+) -> bool | None:
+    """Try to evaluate an ``if`` condition against *config* and *local_vars*.
+
+    Returns ``True``/``False`` when the condition can be statically resolved,
+    or ``None`` when it cannot.
+    """
+    # self.<attr> — look up in local_vars or config
+    if isinstance(test, ast.Attribute) and _is_self_attr(test):
+        val = local_vars.get(test.attr)
+        if val is None:
+            val = config.get(test.attr)
+        if val is not None:
+            return bool(val)
+    # config.<attr>
+    if (
+        isinstance(test, ast.Attribute)
+        and isinstance(test.value, ast.Name)
+        and test.value.id == "config"
+    ):
+        val = config.get(test.attr)
+        if val is not None:
+            return bool(val)
+    # not <expr>
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _eval_config_condition(
+            test.operand, config=config, local_vars=local_vars
+        )
+        if inner is not None:
+            return not inner
+    # <a> is not None
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.IsNot)
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value is None
+    ):
+        return _eval_config_condition(
+            test.left, config=config, local_vars=local_vars
+        )
     return None
 
 
@@ -2309,7 +2463,11 @@ def _low_level_computation(node: ModelGraphNode) -> str:
 
 
 def _is_embedding(class_name: str, node: ModelGraphNode) -> bool:
-    return bool(re.search(r"(?i)^Embedding$", class_name)) or node.label == "Embedding"
+    if bool(re.search(r"(?i)^Embedding$", class_name)) or node.label == "Embedding":
+        return True
+    # Some models wrap the embedding in a factory function (e.g. ``init_method``).
+    # Fall back to the ``role`` metadata assigned by the block tree.
+    return node.metadata.get("role") == "embedding"
 
 
 def _is_norm(class_name: str, node: ModelGraphNode) -> bool:
