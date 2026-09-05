@@ -120,5 +120,3 @@ cmake-build-*/
 *.dll
 *.dylib
 .claude/settings.json
-# Generated standalone viewer HTML files (repo root only)
-/*.html
