@@ -365,13 +365,88 @@ def _style_for(category: str) -> dict[str, str]:
     }.get(category, _STYLE_DEFAULT)
 
 
-def _module_label(mod: torch.nn.Module) -> str:
+def _introspect_module_label(mod: torch.nn.Module) -> str | None:
+    """Identify the canonical operation of a custom module by introspection.
+
+    Returns a clean label like 'RMSNorm' or None if the module can't be
+    classified.
+    """
+    cls = type(mod)
+    if cls.__module__ and cls.__module__.startswith("torch."):
+        return None  # standard torch module, handled elsewhere
+
+    params = dict(mod.named_parameters(recurse=False))
+    buffers = dict(mod.named_buffers(recurse=False))
+    param_names = set(params.keys())
+    buffer_names = set(buffers.keys())
+
+    # RMSNorm variants: 1-D weight, uses rsqrt in forward
+    if param_names == {"weight"} and params["weight"].dim() == 1:
+        import inspect
+        try:
+            src = inspect.getsource(cls.forward)
+        except (TypeError, OSError):
+            src = ""
+        if "rsqrt" in src or "rms" in cls.__name__.lower():
+            # Check for gating (splits input or has special structure)
+            if "chunk" in src or "gate" in cls.__name__.lower():
+                return "RMSNorm (gated)"
+            return "RMSNorm"
+        if "var" in src or "mean" in src:
+            return "LayerNorm"
+
+    # Unweighted RMSNorm: no params, uses rsqrt
+    if not params and not buffers:
+        import inspect
+        try:
+            src = inspect.getsource(cls.forward)
+        except (TypeError, OSError):
+            src = ""
+        if "rsqrt" in src:
+            return "RMSNorm (unweighted)"
+        # Identity-like or simple reduction (e.g. HyperHead doing mean)
+        lines = [l.strip() for l in src.split("\n") if l.strip() and not l.strip().startswith(("#", "def", '"""', "return"))]
+        if len(lines) <= 2 and "mean" in src:
+            return "Mean"
+
+    # Rotary embedding: has inv_freq buffer
+    if "inv_freq" in buffer_names:
+        return "RotaryEmbedding"
+
+    # MoE experts: 3-D weight tensors (num_experts, in, out)
+    if any(p.dim() == 3 for p in params.values()):
+        expert_params = [k for k, v in params.items() if v.dim() == 3]
+        if expert_params:
+            num_experts = next(
+                params[k].shape[0] for k in expert_params
+            )
+            return f"Experts({num_experts})"
+
+    # Top-k router: 2-D weight + sigmoid/softmax in forward
+    if "weight" in param_names and params["weight"].dim() == 2:
+        import inspect
+        try:
+            src = inspect.getsource(cls.forward)
+        except (TypeError, OSError):
+            src = ""
+        if "sigmoid" in src or "softmax" in src or "topk" in src:
+            k = params["weight"].shape[0]
+            return f"TopKRouter({k})"
+
+    return None
+
+
+def _module_label(mod: torch.nn.Module, vendor_prefixes: list[str] | None = None) -> str:
     """Friendly label for a module."""
     cls = type(mod).__name__
     if isinstance(mod, torch.nn.Linear):
         return f"Linear({mod.in_features}, {mod.out_features})"
     if isinstance(mod, torch.nn.Embedding):
         return f"Embedding({mod.num_embeddings}, {mod.embedding_dim})"
+    # Try introspection for custom (vendor) modules
+    introspected = _introspect_module_label(mod)
+    if introspected:
+        return introspected
     return cls
 
 
