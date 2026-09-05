@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Build Model Explorer payloads from TraceLens architecture specs."""
+"""Build Model Explorer payloads from PyTorch model tracing."""
 
 from __future__ import annotations
 
@@ -12,75 +12,23 @@ import json
 from pathlib import Path
 from typing import Any
 
-from TraceLens.ModelUtils.basic_ops import BasicOpFilter
-from TraceLens.ModelUtils.extract import ArchitectureSpec
-from TraceLens.ModelUtils.shape_inference import (
-    ShapeInferencer,
-    build_operator_export,
-    serialize_dim,
-)
-
-from TraceLens.Visualizer.model_explorer_export.fact_sheet import build_fact_sheet_viewer
-from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_graph
-
-
-def _export_basic_ops(basic_ops: BasicOpFilter) -> BasicOpFilter:
-    """Keep full kernel inline substeps in Model Explorer (not basic-only tails)."""
-    return BasicOpFilter(basic_ops.patterns, basic_only=False)
+from TraceLens.ModelUtils.torch_trace import build_graph
 
 
 def build_model_explorer_payload(
-    spec: ArchitectureSpec,
+    checkpoint: str | Path,
     *,
-    basic_ops: BasicOpFilter | None = None,
-    collection_label: str | None = None,
-    include_shapes: bool = True,
-    include_operator_export: bool = False,
-    inline_expansion: bool = True,
-    meta_shapes_checkpoint: str | None = None,
+    seq_len: int = 128,
+    batch_size: int = 1,
+    title: str | None = None,
 ) -> dict[str, Any]:
-    """Build a single merged Model Explorer graph with in-place namespace expansion."""
-    resolved_basic_ops = basic_ops or spec.basic_ops
-    inferencer = (
-        ShapeInferencer(spec) if include_shapes or include_operator_export else None
+    """Build a Model Explorer payload via PyTorch tracing."""
+    return build_graph(
+        checkpoint,
+        seq_len=seq_len,
+        batch_size=batch_size,
+        title=title,
     )
-    if inferencer is not None and meta_shapes_checkpoint is not None:
-        inferencer.load_meta_shapes(meta_shapes_checkpoint)
-    graph = build_merged_model_graph(
-        spec,
-        basic_ops=_export_basic_ops(resolved_basic_ops),
-        shape_inferencer=inferencer,
-        inline_expansion=inline_expansion,
-    )
-
-    viewer_meta: dict[str, Any] = {
-        "factSheet": build_fact_sheet_viewer(spec),
-    }
-    if inferencer is not None:
-        viewer_meta["dimensions"] = {
-            key: serialize_dim(value) for key, value in inferencer.context.dims.items()
-        }
-        viewer_meta["dtype"] = inferencer.context.dtype
-    if include_operator_export and inferencer is not None:
-        viewer_meta["operatorExport"] = inferencer.export_architecture()
-
-    return {
-        "name": spec.name,
-        "model_type": spec.model_type,
-        "source": "tracelens-computation-graph",
-        "tracelensViewer": viewer_meta,
-        "graphCollections": [
-            {
-                "label": collection_label or spec.name,
-                "graphs": [graph],
-            }
-        ],
-    }
-
-
-def build_operator_export_payload(spec: ArchitectureSpec) -> dict[str, Any]:
-    """Build the flat operator/shape JSON used by tooling and tests."""
-    return build_operator_export(spec)
 
 
 def save_model_explorer_payload(payload: dict[str, Any], path: Path | str) -> Path:
