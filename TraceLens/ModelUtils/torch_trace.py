@@ -822,8 +822,28 @@ def build_graph(
                 op_node["namespace"] = parent_ns
             nodes.append(op_node)
 
+    # ── Build parallel branch info for edge wiring ─────────────────────
+    # For containers with multiple layer types, collect the namespace
+    # prefixes of each parallel branch so the wiring can fan them out
+    # from the same predecessor instead of chaining them sequentially.
+    parallel_ns_groups: list[set[str]] = []
+    for container_path, groups in layer_group_map.items():
+        if len(groups) <= 1:
+            continue
+        branch_namespaces = set()
+        for group in groups:
+            rep_path = f"{container_path}.{group.representative}"
+            # _namespace_for(rep_path + ".dummy") gives the branch NS
+            # because ".dummy" is the leaf (excluded from namespace)
+            branch_ns = _namespace_for(rep_path + ".dummy")
+            branch_namespaces.add(branch_ns)
+        parallel_ns_groups.append(branch_namespaces)
+
     # ── Wire edges ───────────────────────────────────────────────────────
-    _wire_sequential_edges(nodes, model, module_map, shapes, {}, skip_layers)
+    _wire_sequential_edges(
+        nodes, model, module_map, shapes, {}, skip_layers,
+        parallel_ns_groups=parallel_ns_groups,
+    )
 
     # ── Add layer group attributes ───────────────────────────────────────
     for container_path, groups in layer_group_map.items():
@@ -907,54 +927,109 @@ def _wire_sequential_edges(
     shapes: dict[str, str],
     layer_containers: dict,
     skip_layers: set[str],
+    *,
+    parallel_ns_groups: list[set[str]] | None = None,
 ) -> None:
     """Wire edges between nodes that don't already have incoming edges.
 
-    Strategy: process nodes in insertion order (which matches forward
-    execution order from named_modules). Track the last node emitted
-    globally and per namespace level. A node without edges connects to
-    the previous node in the same namespace, or (for the first node in
-    a namespace) to the most recent node overall that shares a common
-    ancestor namespace.
+    For parallel branches (multiple layer types in the same container),
+    all branches fan out from the same predecessor instead of being
+    chained sequentially.
     """
     node_ids = {n["id"] for n in nodes}
     node_by_id: dict[str, dict] = {n["id"]: n for n in nodes}
+    parallel_ns_groups = parallel_ns_groups or []
+
+    # Build a lookup: namespace → set of sibling namespaces in parallel
+    parallel_siblings: dict[str, set[str]] = {}
+    for group in parallel_ns_groups:
+        for ns in group:
+            parallel_siblings[ns] = group
 
     # Track the last node seen at each namespace level.
-    # When a node in ns="A/B/C" is emitted, we update last_in_ns for
-    # "A/B/C", "A/B", "A", and "".
     last_in_ns: dict[str, str] = {}
-    prev_in_ns: dict[str, str] = {}  # last node in *exactly* that ns
 
-    def _update_last(ns: str, node_id: str) -> None:
-        prev_in_ns[ns] = node_id
-        # Bubble up to all ancestor namespaces
+    # For parallel branches, snapshot the predecessor before the first
+    # branch starts so all branches can connect from it.
+    parallel_entry_point: dict[str, str] = {}  # branch_ns → predecessor_id
+    parallel_entered: set[str] = set()  # branch namespaces we've seen
+
+    def _update_last(ns: str, node_id: str, *, bubble: bool = True) -> None:
+        if not bubble:
+            last_in_ns[ns] = node_id
+            return
         parts = ns.split("/") if ns else []
         while True:
             key = "/".join(parts)
+            # Don't bubble up past a parallel branch boundary into sibling
+            # territory — otherwise later parallel branches would see the
+            # last node of a prior branch as their predecessor.
+            if key in parallel_siblings and key != ns:
+                # Only update this level, don't bubble further
+                last_in_ns[key] = node_id
+                break
             last_in_ns[key] = node_id
             if not parts:
                 break
             parts.pop()
+
+    def _find_branch_ns(ns: str) -> str | None:
+        """Check if this namespace is inside a parallel branch."""
+        for branch_ns in parallel_siblings:
+            if ns == branch_ns or ns.startswith(branch_ns + "/"):
+                return branch_ns
+        return None
+
+    # Track last node of each parallel branch for fan-in after branches
+    branch_last_node: dict[str, str] = {}  # branch_ns → last node id
 
     for node in nodes:
         if node["id"] == "@input":
             _update_last("", "@input")
             continue
         if "incomingEdges" in node:
-            _update_last(node.get("namespace", ""), node["id"])
+            ns = node.get("namespace", "")
+            branch_ns = _find_branch_ns(ns)
+            if branch_ns is not None:
+                branch_last_node[branch_ns] = node["id"]
+            _update_last(ns, node["id"])
             continue
 
         ns = node.get("namespace", "")
         source_id = None
 
-        # Check if there's a preceding node visible at this namespace level
-        # (includes nodes from child namespaces, via bubble-up)
-        if ns in last_in_ns:
+        # Check if this node is in a parallel branch
+        branch_ns = _find_branch_ns(ns)
+
+        if branch_ns is not None and branch_ns not in parallel_entered:
+            # First time entering this parallel branch.
+            # If this is the first branch in the group, snapshot the
+            # current predecessor. For subsequent branches, reuse it.
+            siblings = parallel_siblings[branch_ns]
+            if not any(s in parallel_entered for s in siblings):
+                # First branch in the group — find predecessor normally
+                parts = ns.split("/") if ns else []
+                while parts:
+                    parts.pop()
+                    parent = "/".join(parts)
+                    if parent in last_in_ns:
+                        source_id = last_in_ns[parent]
+                        break
+                if source_id is None:
+                    source_id = last_in_ns.get("", "@input")
+                # Save this as the entry point for all sibling branches
+                for s in siblings:
+                    parallel_entry_point[s] = source_id
+            else:
+                # Subsequent branch — use the saved entry point
+                source_id = parallel_entry_point.get(branch_ns)
+            parallel_entered.add(branch_ns)
+        elif branch_ns is not None and ns in last_in_ns:
+            # Inside an already-entered parallel branch — wire sequentially
             source_id = last_in_ns[ns]
-        else:
-            # First node in this namespace — find predecessor by walking
-            # up the namespace hierarchy
+        elif branch_ns is not None:
+            # Inside an already-entered branch, but first node in a new
+            # sub-namespace — walk up to find predecessor within the branch
             parts = ns.split("/") if ns else []
             while parts:
                 parts.pop()
@@ -964,6 +1039,51 @@ def _wire_sequential_edges(
                     break
             if source_id is None:
                 source_id = last_in_ns.get("", "@input")
+        else:
+            # Not in a parallel branch. Check if we just left one —
+            # if so, fan in from all branches.
+            fan_in_sources = []
+            for group in parallel_ns_groups:
+                # Check: all branches entered AND this node is past them
+                if group <= parallel_entered:
+                    for sibling_ns in group:
+                        if sibling_ns in branch_last_node:
+                            fan_in_sources.append(branch_last_node[sibling_ns])
+            if fan_in_sources:
+                # Wire from all branch endpoints
+                node["incomingEdges"] = [
+                    {
+                        "sourceNodeId": src,
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": "0",
+                    }
+                    for src in fan_in_sources
+                    if src in node_by_id
+                ]
+                # Clear the groups so we don't fan-in again for next node
+                for group in parallel_ns_groups:
+                    if group <= parallel_entered:
+                        for sibling_ns in group:
+                            branch_last_node.pop(sibling_ns, None)
+                _update_last(ns, node["id"])
+                continue
+
+            if ns in last_in_ns:
+                source_id = last_in_ns[ns]
+            else:
+                # First node in this namespace — walk up
+                parts = ns.split("/") if ns else []
+                while parts:
+                    parts.pop()
+                    parent = "/".join(parts)
+                    if parent in last_in_ns:
+                        source_id = last_in_ns[parent]
+                        break
+                if source_id is None:
+                    source_id = last_in_ns.get("", "@input")
+
+        if branch_ns is not None:
+            branch_last_node[branch_ns] = node["id"]
 
         if source_id and source_id in node_by_id:
             node["incomingEdges"] = [
