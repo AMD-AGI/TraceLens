@@ -27,7 +27,8 @@ from typing import Any
 
 import torch
 import torch.fx
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
+import transformers
+from transformers import AutoConfig
 
 _log = logging.getLogger(__name__)
 
@@ -61,21 +62,79 @@ def _patch_config(config) -> None:
 
 # ── Meta-device model instantiation ──────────────────────────────────────────
 
+def _resolve_auto_classes(config) -> list[type]:
+    """Return a ranked list of Auto classes to try, based on model card metadata.
+
+    Checks ``config.auto_map`` first (explicit mapping from the repo),
+    then falls back to the ``config.architectures`` class-name suffix.
+    """
+    # 1. auto_map: explicit mapping in the repo's config.json
+    auto_map = getattr(config, "auto_map", None) or {}
+    _PREFERRED_ORDER = [
+        "AutoModelForCausalLM",
+        "AutoModelForSeq2SeqLM",
+        "AutoModelForConditionalGeneration",
+        "AutoModel",
+    ]
+    for cls_name in _PREFERRED_ORDER:
+        if cls_name in auto_map:
+            return [getattr(transformers, cls_name)]
+
+    # 2. architectures: infer candidates from class name suffix
+    architectures = getattr(config, "architectures", None) or []
+    if architectures:
+        arch = architectures[0]
+        _SUFFIX_CANDIDATES: dict[str, list[str]] = {
+            "ForCausalLM": [
+                "AutoModelForCausalLM",
+            ],
+            "ForConditionalGeneration": [
+                "AutoModelForCausalLM",
+                "AutoModelForSeq2SeqLM",
+                "AutoModel",
+            ],
+            "ForSeq2SeqLM": [
+                "AutoModelForSeq2SeqLM",
+            ],
+        }
+        for suffix, candidates in _SUFFIX_CANDIDATES.items():
+            if arch.endswith(suffix):
+                return [getattr(transformers, c) for c in candidates]
+
+    # 3. Last resort
+    return [transformers.AutoModel]
+
+
 def _instantiate_meta(checkpoint: str | Path) -> tuple[Any, Any]:
     """Load config and instantiate model on meta device.
+
+    Inspects the model card (``auto_map`` / ``architectures``) to pick
+    the correct Auto class, then instantiates on the meta device.
 
     Returns (model, config).
     """
     config = AutoConfig.from_pretrained(str(checkpoint), trust_remote_code=True)
     _patch_config(config)
 
-    with torch.device("meta"):
+    auto_classes = _resolve_auto_classes(config)
+    last_err: Exception | None = None
+
+    for auto_cls in auto_classes:
         try:
-            model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
-        except ValueError:
-            model = AutoModel.from_config(config, trust_remote_code=True)
-    model.eval()
-    return model, config
+            _log.info("Trying %s for %s", auto_cls.__name__, checkpoint)
+            with torch.device("meta"):
+                model = auto_cls.from_config(config, trust_remote_code=True)
+            model.eval()
+            _log.info("Instantiated with %s", auto_cls.__name__)
+            return model, config
+        except (ValueError, KeyError) as exc:
+            last_err = exc
+            continue
+
+    raise ValueError(
+        f"Could not instantiate {checkpoint} with any Auto class "
+        f"({', '.join(c.__name__ for c in auto_classes)}): {last_err}"
+    )
 
 
 # ── Rotary embedding patching ────────────────────────────────────────────────
