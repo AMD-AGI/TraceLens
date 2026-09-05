@@ -114,28 +114,36 @@ def _instantiate_meta(checkpoint: str | Path) -> tuple[Any, Any]:
 
     Returns (model, config).
     """
-    config = AutoConfig.from_pretrained(str(checkpoint), trust_remote_code=True)
-    _patch_config(config)
+    # Suppress the "torch_dtype is deprecated" warning from transformers
+    _tf_logger = logging.getLogger("transformers.configuration_utils")
+    _prev_level = _tf_logger.level
+    _tf_logger.setLevel(logging.ERROR)
 
-    auto_classes = _resolve_auto_classes(config)
-    last_err: Exception | None = None
+    try:
+        config = AutoConfig.from_pretrained(str(checkpoint), trust_remote_code=True)
+        _patch_config(config)
 
-    for auto_cls in auto_classes:
-        try:
-            _log.info("Trying %s for %s", auto_cls.__name__, checkpoint)
-            with torch.device("meta"):
-                model = auto_cls.from_config(config, trust_remote_code=True)
-            model.eval()
-            _log.info("Instantiated with %s", auto_cls.__name__)
-            return model, config
-        except (ValueError, KeyError) as exc:
-            last_err = exc
-            continue
+        auto_classes = _resolve_auto_classes(config)
+        last_err: Exception | None = None
 
-    raise ValueError(
-        f"Could not instantiate {checkpoint} with any Auto class "
-        f"({', '.join(c.__name__ for c in auto_classes)}): {last_err}"
-    )
+        for auto_cls in auto_classes:
+            try:
+                _log.info("Trying %s for %s", auto_cls.__name__, checkpoint)
+                with torch.device("meta"):
+                    model = auto_cls.from_config(config, trust_remote_code=True)
+                model.eval()
+                _log.info("Instantiated with %s", auto_cls.__name__)
+                return model, config
+            except (ValueError, KeyError) as exc:
+                last_err = exc
+                continue
+
+        raise ValueError(
+            f"Could not instantiate {checkpoint} with any Auto class "
+            f"({', '.join(c.__name__ for c in auto_classes)}): {last_err}"
+        )
+    finally:
+        _tf_logger.setLevel(_prev_level)
 
 
 # ── Rotary embedding patching ────────────────────────────────────────────────
@@ -465,7 +473,7 @@ def _build_fact_sheet(model_name: str, config) -> str:
         "model_type", "hidden_size", "num_hidden_layers",
         "num_attention_heads", "num_key_value_heads",
         "intermediate_size", "vocab_size", "max_position_embeddings",
-        "torch_dtype", "num_local_experts", "num_experts_per_tok",
+        "dtype", "num_local_experts", "num_experts_per_tok",
         "moe_intermediate_size",
     ]
 
@@ -479,7 +487,7 @@ def _build_fact_sheet(model_name: str, config) -> str:
     if sub_configs:
         # Multi-modal: show sub-configs with headers
         # Top-level keys first
-        for key in ("model_type", "torch_dtype"):
+        for key in ("model_type", "dtype"):
             val = top.get(key)
             if val is not None:
                 lines.append(f"  {key}: {val}")
@@ -521,13 +529,13 @@ def build_graph(
     repeats = _detect_repeated_layers(model)
 
     # ── Determine dtype ──────────────────────────────────────────────────
-    dtype = getattr(config, "torch_dtype", None)
+    dtype = getattr(config, "dtype", None)
     # Search sub-configs if top-level is None
     if dtype is None:
         for attr in ("text_config", "language_config", "decoder_config"):
             sub = getattr(config, attr, None)
             if sub is not None:
-                dtype = getattr(sub, "torch_dtype", None) or getattr(sub, "dtype", None)
+                dtype = getattr(sub, "dtype", None)
                 if dtype is not None:
                     break
     dtype = str(dtype or "bfloat16").replace("torch.", "")
