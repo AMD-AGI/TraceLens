@@ -387,6 +387,9 @@ _POINTWISE_LABELS = frozenset(
         "view as complex",
         "view as real",
         "repeat interleave",
+        "activation func",
+        "activation function",
+        "activation",
     }
 )
 
@@ -1177,6 +1180,17 @@ class ShapeInferencer:
         )
         if introspected is not None:
             return introspected
+
+        # Heuristic: nodes whose name contains "attention" (e.g. core_attention,
+        # sdpa_attention) are attention functions whose output is (B, S, H).
+        node_name = (
+            node.metadata.get("attr_name") or node.id.rsplit(":", 1)[-1] or ""
+        ).lower()
+        if "attention" in node_name:
+            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+            return TensorSpec(
+                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
+            )
 
         if inputs:
             _log.warning(
