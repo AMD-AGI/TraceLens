@@ -209,6 +209,44 @@ def _capture_shapes(
     return shapes
 
 
+def _infer_shapes_from_weights(
+    model: torch.nn.Module,
+    captured: dict[str, tuple[int, ...]],
+    *,
+    batch_size: int = 1,
+    seq_len: int = 128,
+) -> dict[str, tuple[int, ...]]:
+    """Infer output shapes from module weight dimensions for modules
+    that didn't get shapes from the forward pass (e.g. vision encoder)."""
+    shapes = dict(captured)
+    for name, mod in model.named_modules():
+        if name in shapes or not name:
+            continue
+        if isinstance(mod, torch.nn.Linear):
+            shapes[name] = (batch_size, seq_len, mod.out_features)
+        elif isinstance(mod, torch.nn.Embedding):
+            shapes[name] = (batch_size, seq_len, mod.embedding_dim)
+        elif isinstance(mod, (torch.nn.LayerNorm, torch.nn.RMSNorm)):
+            ns = getattr(mod, "normalized_shape", None)
+            if ns:
+                shapes[name] = (batch_size, seq_len, *ns)
+        elif isinstance(mod, torch.nn.Conv2d):
+            shapes[name] = (batch_size, mod.out_channels, seq_len, seq_len)
+        elif isinstance(mod, torch.nn.Conv1d):
+            shapes[name] = (batch_size, mod.out_channels, seq_len)
+        elif isinstance(mod, torch.nn.Conv3d):
+            shapes[name] = (batch_size, mod.out_channels, seq_len, seq_len, seq_len)
+        elif hasattr(mod, "weight") and hasattr(mod.weight, "shape"):
+            # Generic: use last dim of weight as output feature dim
+            w_shape = mod.weight.shape
+            if len(w_shape) >= 1:
+                shapes[name] = (batch_size, seq_len, w_shape[0])
+        # For norm-like modules, try to infer from the hidden_size attr
+        elif hasattr(mod, "hidden_size"):
+            shapes[name] = (batch_size, seq_len, mod.hidden_size)
+    return shapes
+
+
 def _symbolise(
     shape: tuple[int, ...], *, batch_size: int = 1, seq_len: int = 128
 ) -> str:
@@ -471,7 +509,10 @@ def build_graph(
     _patch_rotary_embeddings(model)
 
     # ── Capture shapes ───────────────────────────────────────────────────
-    raw_shapes = _capture_shapes(model, seq_len=seq_len, batch_size=batch_size)
+    hook_shapes = _capture_shapes(model, seq_len=seq_len, batch_size=batch_size)
+    raw_shapes = _infer_shapes_from_weights(
+        model, hook_shapes, batch_size=batch_size, seq_len=seq_len
+    )
     shapes: dict[str, str] = {}
     for path, shape in raw_shapes.items():
         shapes[path] = _symbolise(shape, batch_size=batch_size, seq_len=seq_len)
@@ -480,7 +521,16 @@ def build_graph(
     repeats = _detect_repeated_layers(model)
 
     # ── Determine dtype ──────────────────────────────────────────────────
-    dtype = str(getattr(config, "torch_dtype", "bfloat16")).replace("torch.", "")
+    dtype = getattr(config, "torch_dtype", None)
+    # Search sub-configs if top-level is None
+    if dtype is None:
+        for attr in ("text_config", "language_config", "decoder_config"):
+            sub = getattr(config, attr, None)
+            if sub is not None:
+                dtype = getattr(sub, "torch_dtype", None) or getattr(sub, "dtype", None)
+                if dtype is not None:
+                    break
+    dtype = str(dtype or "bfloat16").replace("torch.", "")
 
     # ── Build model name ─────────────────────────────────────────────────
     model_name = title or getattr(config, "_name_or_path", str(checkpoint))
@@ -506,16 +556,19 @@ def build_graph(
     })
 
     # ── Build skip set from repeated layer groups ────────────────────────
+    # Keep only layer 0 as the representative for each ModuleList.
+    # All layer type variants are documented in the fact sheet.
     skip_layers: set[str] = set()
-    # container_path → list of LayerGroups
     layer_group_map: dict[str, list[LayerGroup]] = repeats
+    # Total count per container (all groups combined)
+    container_total: dict[str, int] = {}
 
     for container_path, groups in layer_group_map.items():
-        for group in groups:
-            # Keep only the representative, skip the rest
-            for idx in group.indices:
-                if idx != group.representative:
-                    skip_layers.add(f"{container_path}.{idx}")
+        total = sum(g.count for g in groups)
+        container_total[container_path] = total
+        # Skip all layers except index 0
+        for i in range(1, total):
+            skip_layers.add(f"{container_path}.{i}")
 
     # ── Collect module info (preserving registration order) ──────────────
     module_children: dict[str, list[str]] = defaultdict(list)
@@ -549,15 +602,7 @@ def build_graph(
         return False
 
     # ── Build namespace labels using attr names + layer group labels ─────
-    # Build a map: container_path.representative_idx → group label
-    group_labels: dict[str, str] = {}  # path prefix → "Nx_ClassName"
-    container_set: set[str] = set()    # container paths (ModuleLists)
-
-    for container_path, groups in layer_group_map.items():
-        container_set.add(container_path)
-        for group in groups:
-            rep_path = f"{container_path}.{group.representative}"
-            group_labels[rep_path] = f"{group.count}x {group.class_name}"
+    container_set: set[str] = set(container_total.keys())
 
     def _namespace_for(path: str) -> str:
         """Build a namespace using attr names, with layer group labels."""
@@ -570,19 +615,13 @@ def build_graph(
             prefix = ".".join(parts[: i + 1])
 
             if prefix in container_set:
-                # This is a ModuleList — next part is the layer index
-                # Find which group this layer belongs to
+                # ModuleList — next part is the layer index
+                total = container_total[prefix]
                 if i + 1 < len(parts) - 1:
                     layer_prefix = ".".join(parts[: i + 2])
-                    label = group_labels.get(layer_prefix)
-                    if label:
-                        ns_parts.append(label)
-                    else:
-                        # This layer index is the representative
-                        # Find its group label by checking what rep it maps to
-                        mod = module_map.get(layer_prefix)
-                        if mod:
-                            ns_parts.append(type(mod).__name__)
+                    mod = module_map.get(layer_prefix)
+                    cls_name = type(mod).__name__ if mod else "Layer"
+                    ns_parts.append(f"{total}x {cls_name}")
                     i += 2  # skip container + index
                     continue
                 i += 1
@@ -744,22 +783,24 @@ def build_graph(
 
     # ── Add layer group attributes ───────────────────────────────────────
     for container_path, groups in layer_group_map.items():
-        for group in groups:
-            rep_path = f"{container_path}.{group.representative}"
-            ns = _namespace_for(rep_path + ".dummy").rsplit("/", 1)[0] if "." in rep_path else ""
-            label = f"{group.count}x {group.class_name}"
-            if ns:
-                group_id = ns
-            else:
-                group_id = label
-            group_attrs.append({
-                "nodeId": group_id,
-                "attrs": [
-                    {"key": "class", "value": group.class_name},
-                    {"key": "count", "value": str(group.count)},
-                    {"key": "layer_indices", "value": str(group.indices)},
-                ],
-            })
+        total = container_total[container_path]
+        rep_path = f"{container_path}.0"
+        mod_0 = module_map.get(rep_path)
+        cls_name = type(mod_0).__name__ if mod_0 else "Layer"
+        ns = _namespace_for(rep_path + ".dummy").rsplit("/", 1)[0] if "." in rep_path else ""
+        group_id = ns if ns else f"{total}x {cls_name}"
+        # Summarize layer types
+        type_summary = ", ".join(
+            f"{g.count}x {g.class_name}" for g in groups
+        ) if len(groups) > 1 else f"{total}x {cls_name}"
+        group_attrs.append({
+            "nodeId": group_id,
+            "attrs": [
+                {"key": "class", "value": cls_name},
+                {"key": "count", "value": str(total)},
+                {"key": "layer_types", "value": type_summary},
+            ],
+        })
 
     # ── Build fact sheet ─────────────────────────────────────────────────
     fact_sheet = _build_fact_sheet(model_name, config)
