@@ -1405,6 +1405,10 @@ def build_graph(
     for comp_path in sorted(composite_modules):
         if _should_skip(comp_path):
             continue
+        # Skip top-level modules (direct children of root) — they are
+        # structural wrappers, not meaningful submodule boundaries.
+        if "." not in comp_path:
+            continue
 
         mod = module_map.get(comp_path)
         if not mod:
