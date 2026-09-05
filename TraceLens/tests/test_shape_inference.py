@@ -654,3 +654,74 @@ def test_matmul_shape_inference():
     node = _node("MatMul")
     result = inf._infer_node_output(node, [a, b], root=None)
     assert result.shape == ("B", "S", 1024)
+
+
+def test_einsum_shape_inference():
+    inf = _make_inferencer()
+    a = TensorSpec(shape=("B", "S", 32, 128), dtype="float16")
+    b = TensorSpec(shape=("B", 32, 128, "S"), dtype="float16")
+    node = _node("Einsum", details=["equation: bshd,bhds->bshs"])
+    result = inf._infer_node_output(node, [a, b], root=None)
+    assert result.shape == ("B", "S", 32, "S")
+
+
+def test_synthetic_kernel_port_passthrough_no_warning(caplog):
+    """Synthetic kernel port nodes should pass through silently (no warning)."""
+    import logging
+
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 4096), dtype="float16")
+    node = ModelGraphNode(
+        id="@kernel_in:1:query", kind=NodeKind.LEAF, label="query",
+        operation=OperationKind.SYNTHETIC,
+        metadata={"synthetic": "@kernel_port_in"},
+    )
+    with caplog.at_level(logging.WARNING, logger="TraceLens.ModelUtils.shape_inference"):
+        result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S", 4096)
+    assert "No shape inference" not in caplog.text
+
+
+def test_introspect_forward_shape_simulates_ops():
+    """_introspect_forward_shape walks forward_operations to infer shape."""
+    from TraceLens.ModelUtils.ast_analyze import ClassStructure, ForwardOperation
+    import ast
+
+    # Build a minimal ClassStructure with two ops: view then linear.
+    dummy_class = ast.parse("class Dummy:\n  pass\n").body[0]
+    structure = ClassStructure(
+        name="Dummy",
+        node=dummy_class,
+        init_assignments={},
+        init_details={},
+        forward_calls=[],
+        norm_before=[],
+        forward_input_name="x",
+        forward_operations={
+            "@op_view": ForwardOperation(
+                attr_name="@op_view",
+                label="View",
+                class_name="View",
+                predecessors=("x",),
+                details=("shape: -1, self.hidden_size",),
+            ),
+        },
+        primary_return_slot="@op_view",
+    )
+
+    spec = ArchitectureSpec(
+        name="Test", model_type="test", hidden_size=4096,
+        raw_config={"hidden_size": 4096},
+        class_registry={"Dummy": structure},
+    )
+    inf = ShapeInferencer(spec)
+    node = ModelGraphNode(
+        id="test", kind=NodeKind.LEAF, label="Dummy",
+        operation=OperationKind.NN_MODULE,
+        metadata={"class_name": "Dummy"},
+    )
+    inp = TensorSpec(shape=("B", "S", 4096), dtype="float16")
+    result = inf._introspect_forward_shape(node, [inp], root=None)
+    assert result is not None
+    # The view should pass through since shape resolves to same dims
+    assert len(result.shape) >= 2

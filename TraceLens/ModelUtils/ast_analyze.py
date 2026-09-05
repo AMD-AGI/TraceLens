@@ -1754,6 +1754,9 @@ class _ForwardOperationExtractor:
             if len(node.args) > arg_start + 1:
                 details.append(f"dim0: {ast.unparse(node.args[arg_start])}")
                 details.append(f"dim1: {ast.unparse(node.args[arg_start + 1])}")
+        if call_name == "einsum":
+            if node.args and isinstance(node.args[0], ast.Constant):
+                details.append(f"equation: {node.args[0].value}")
         if call_name in _DIM_DETAIL_METHODS:
             if node.args:
                 details.append(f"dim: {ast.unparse(node.args[0])}")

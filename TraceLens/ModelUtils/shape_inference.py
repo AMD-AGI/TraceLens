@@ -19,7 +19,12 @@ from collections.abc import Sequence
 from typing import Any, TYPE_CHECKING
 
 from TraceLens.ModelUtils.extract import architecture_section_trees
-from TraceLens.ModelUtils.ast_analyze import is_forward_operation, operation_display_label
+from TraceLens.ModelUtils.ast_analyze import (
+    analyze_source,
+    is_forward_operation,
+    operation_display_label,
+)
+from TraceLens.ModelUtils.kernel_pipeline import parse_kernel_import, _find_symbol_definition
 from TraceLens.ModelUtils.model_graph import (
     ModelGraph,
     ModelGraphNode,
@@ -362,7 +367,26 @@ _POINTWISE_LABELS = frozenset(
         "where",
         "cumulative sum",
         "masked fill",
+        "masked scatter",
         "scatter",
+        "cosine",
+        "sine",
+        "index add",
+        "roll",
+        "flip",
+        "lower triangle",
+        "upper triangle",
+        "zeros like",
+        "ones like",
+        "full like",
+        "clone",
+        "detach",
+        "pad",
+        "outer product",
+        "polar",
+        "view as complex",
+        "view as real",
+        "repeat interleave",
     }
 )
 
@@ -389,6 +413,8 @@ class ShapeInferencer:
         self._owner_classes: dict[int, dict[str, str]] = {}
         # Specs carrying the activation a block's forward receives.
         self._forward_input_specs: set[int] = set()
+        # Guard against infinite recursion during forward introspection.
+        self._introspecting: set[str] = set()
 
     def infer_model_graph(
         self, graph: ModelGraph, *, root: BlockNode | None = None
@@ -700,6 +726,16 @@ class ShapeInferencer:
                 shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
             )
 
+        # Catch-all for any remaining synthetic wiring nodes (kernel ports,
+        # hidden_states, etc.) — silent passthrough, no warning.
+        if synthetic is not None and synthetic.startswith("@"):
+            if inputs:
+                return inputs[0]
+            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+            return TensorSpec(
+                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
+            )
+
         operation_label = (node.label or class_name).strip().lower()
         details = [str(item) for item in node.metadata.get("details", [])]
         external_inputs = [
@@ -852,6 +888,44 @@ class ShapeInferencer:
                 if a.shape and b.shape:
                     out_shape = (*a.shape[:-1], b.shape[-1])
                     return TensorSpec(shape=out_shape, dtype=a.dtype)
+            if inputs:
+                return inputs[0]
+            return TensorSpec(_default_hidden_shape(self.context), dtype)
+
+        if operation_label == "einsum":
+            equation = _detail_value(details, "equation")
+            if equation and "->" in equation and inputs:
+                out_shape = _infer_einsum_shape(equation, inputs)
+                if out_shape is not None:
+                    return TensorSpec(shape=out_shape, dtype=inputs[0].dtype)
+            if inputs:
+                return inputs[0]
+            return TensorSpec(_default_hidden_shape(self.context), dtype)
+
+        if operation_label == "nonzero":
+            source = (
+                inputs[0]
+                if inputs
+                else TensorSpec(_default_hidden_shape(self.context), dtype)
+            )
+            ndim = len(source.shape) if source.shape else 1
+            return TensorSpec(shape=("nnz", ndim), dtype="int64")
+
+        if operation_label == "one hot":
+            source = (
+                inputs[0]
+                if inputs
+                else TensorSpec(_default_hidden_shape(self.context), dtype)
+            )
+            num_classes = self.context.dims.get(
+                Symbol.EXPERTS.value, Symbol.EXPERTS.value
+            )
+            return TensorSpec(shape=(*source.shape, num_classes), dtype="int64")
+
+        if operation_label in {
+            "causal conv1d",
+            "causal conv1d update",
+        }:
             if inputs:
                 return inputs[0]
             return TensorSpec(_default_hidden_shape(self.context), dtype)
@@ -1013,6 +1087,11 @@ class ShapeInferencer:
             "KernelOutput",
             "AttentionMerge",
         }:
+            introspected = self._introspect_forward_shape(
+                node, inputs, root=root
+            )
+            if introspected is not None:
+                return introspected
             hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
             return TensorSpec(
                 shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
@@ -1026,6 +1105,11 @@ class ShapeInferencer:
             return TensorSpec(shape=_replace_last_dim(in_shape, experts), dtype=dtype)
 
         if node.operation == OperationKind.TORCH_FUNCTIONAL:
+            introspected = self._introspect_forward_shape(
+                node, inputs, root=root
+            )
+            if introspected is not None:
+                return introspected
             _log.warning(
                 "No shape inference rule for %s (label=%r, class=%r); "
                 "passing through input shape",
@@ -1051,6 +1135,12 @@ class ShapeInferencer:
                 shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
             )
 
+        introspected = self._introspect_forward_shape(
+            node, inputs, root=root
+        )
+        if introspected is not None:
+            return introspected
+
         if inputs:
             _log.warning(
                 "No shape inference rule for %s (label=%r, class=%r, kind=%s); "
@@ -1074,6 +1164,235 @@ class ShapeInferencer:
         return TensorSpec(
             shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
         )
+
+    # ------------------------------------------------------------------
+    # Forward introspection: simulate shape flow through forward_operations
+    # ------------------------------------------------------------------
+
+    def _introspect_forward_shape(
+        self,
+        node: ModelGraphNode,
+        inputs: list[TensorSpec],
+        *,
+        root: BlockNode | None,
+    ) -> TensorSpec | None:
+        """Try to infer the output shape by simulating the module's ``forward()``."""
+        # class_name may be absent when it equals the label (optimised away
+        # by _minimal_metadata).  Try several sources.
+        candidates = [
+            node.metadata.get("class_name"),
+            node.metadata.get("attr_name"),
+        ]
+        # Recover the original attr from the node id (``seq:9:get_pooled_states``).
+        raw_id = node.id.rsplit("/", 1)[-1]
+        id_parts = raw_id.split(":")
+        if len(id_parts) >= 3:
+            candidates.append(id_parts[2])
+        # Also try the label with underscores restored.
+        if node.label:
+            candidates.append(node.label.replace(" ", "_"))
+
+        class_name = ""
+        for c in candidates:
+            if c and c not in self._introspecting:
+                class_name = c
+                break
+        if not class_name:
+            return None
+
+        structure = self.spec.class_registry.get(class_name)
+        if structure is not None:
+            return self._simulate_forward_ops(
+                structure, inputs, root=root, guard_name=class_name
+            )
+
+        # class_name may be a method name (e.g. "get_pooled_states") rather
+        # than a class.  Search the registry for a class that owns this method
+        # and parse the method body for shape-bearing operations.
+        method_result = self._introspect_method_shape(
+            class_name, inputs, root=root
+        )
+        if method_result is not None:
+            return method_result
+
+        # For GPU kernels, try resolving the kernel source.
+        details = [str(d) for d in node.metadata.get("details", [])]
+        kernel_import = parse_kernel_import(details)
+        if kernel_import is not None:
+            return self._introspect_kernel_source(
+                kernel_import, inputs, root=root
+            )
+        return None
+
+    def _introspect_method_shape(
+        self,
+        method_name: str,
+        inputs: list[TensorSpec],
+        *,
+        root: BlockNode | None,
+    ) -> TensorSpec | None:
+        """Find *method_name* on a registry class and parse its body for shapes."""
+        from TraceLens.ModelUtils.ast_analyze import (
+            _ForwardOperationExtractor,
+            _extract_forward_return_metadata,
+        )
+        guard = f"method:{method_name}"
+        if guard in self._introspecting:
+            return None
+        for _cls_name, structure in self.spec.class_registry.items():
+            method_func = _find_method(structure.node, method_name)
+            if method_func is None:
+                continue
+            # Determine the first parameter after self.
+            input_name = (
+                method_func.args.args[1].arg
+                if len(method_func.args.args) >= 2
+                else None
+            )
+            extractor = _ForwardOperationExtractor(
+                self_values=structure.init_assignments,
+                all_tensor_ops=True,
+            )
+            if input_name:
+                extractor.var_producer[input_name] = input_name
+            extractor.statements(method_func.body)
+            if not extractor.operations:
+                return None
+            fwd_ops = {op.attr_name: op for op in extractor.operations}
+            _slots, _order, primary = _extract_forward_return_metadata(
+                method_func, extractor.var_producer
+            )
+
+            class _MethodProxy:
+                forward_operations = fwd_ops
+                forward_input_name = input_name
+                primary_return_slot = (
+                    extractor.var_producer.get(primary) if primary else None
+                )
+
+            return self._simulate_forward_ops(
+                _MethodProxy(),  # type: ignore[arg-type]
+                inputs,
+                root=root,
+                guard_name=guard,
+            )
+        return None
+
+    def _simulate_forward_ops(
+        self,
+        structure: "ClassStructure",
+        inputs: list[TensorSpec],
+        *,
+        root: BlockNode | None,
+        guard_name: str,
+    ) -> TensorSpec | None:
+        """Walk ``forward_operations`` and propagate shapes op-by-op."""
+        fwd_ops = structure.forward_operations
+        if not fwd_ops:
+            return None
+
+        self._introspecting.add(guard_name)
+        try:
+            dtype = self.context.dtype
+            input_spec = inputs[0] if inputs else TensorSpec(
+                _default_hidden_shape(self.context), dtype
+            )
+            op_shapes: dict[str, TensorSpec] = {}
+            input_name = structure.forward_input_name
+
+            for op_id, op in fwd_ops.items():
+                pred_specs: list[TensorSpec] = []
+                for pred in op.predecessors:
+                    if pred in op_shapes:
+                        pred_specs.append(op_shapes[pred])
+                    elif pred == input_name:
+                        pred_specs.append(input_spec)
+                if not pred_specs:
+                    pred_specs = [input_spec]
+
+                temp_node = ModelGraphNode(
+                    id=op_id,
+                    kind=NodeKind.LEAF,
+                    label=op.label,
+                    operation=OperationKind.TORCH_FUNCTIONAL,
+                    metadata={
+                        "class_name": op.class_name,
+                        "details": list(op.details),
+                        "external_inputs": list(op.external_inputs),
+                    },
+                )
+                op_shapes[op_id] = self._infer_node_output(
+                    temp_node, pred_specs, root=root
+                )
+
+            # Return the primary return producer's shape, or the last op.
+            ret_slot = structure.primary_return_slot
+            if ret_slot and ret_slot in op_shapes:
+                return op_shapes[ret_slot]
+            if op_shapes:
+                return list(op_shapes.values())[-1]
+        finally:
+            self._introspecting.discard(guard_name)
+        return None
+
+    def _introspect_kernel_source(
+        self,
+        kernel_import: tuple[str, str],
+        inputs: list[TensorSpec],
+        *,
+        root: BlockNode | None,
+    ) -> TensorSpec | None:
+        """Resolve a kernel's source, parse it, and simulate its forward ops."""
+        module, symbol = kernel_import
+        guard = f"{module}#{symbol}"
+        if guard in self._introspecting:
+            return None
+
+        # Try the kernel's own class first.
+        definition = _find_symbol_definition(module, symbol)
+        if definition is not None:
+            source, qualname, owning_module = definition
+            analysis = analyze_source(source, filename=owning_module)
+            # Look for the kernel class in the analysis registry.
+            for cls_name, structure in analysis.class_registry.items():
+                if qualname.startswith(cls_name) and structure.forward_operations:
+                    result = self._simulate_forward_ops(
+                        structure, inputs, root=root, guard_name=guard
+                    )
+                    if result is not None:
+                        return result
+
+        # Level 2: look for an eager/pure-torch fallback in the same module.
+        eager_candidates = [
+            f"eager_{symbol.lower()}",
+            f"eager_attention_forward",
+            symbol.replace("flash_", "eager_").replace("sdpa_", "eager_"),
+        ]
+        seen: set[str] = set()
+        for candidate in eager_candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            eager_def = _find_symbol_definition(module, candidate)
+            if eager_def is None:
+                continue
+            source, qualname, owning_module = eager_def
+            analysis = analyze_source(
+                source, filename=owning_module, all_tensor_ops=True
+            )
+            for cls_name, structure in analysis.class_registry.items():
+                if structure.forward_operations:
+                    result = self._simulate_forward_ops(
+                        structure, inputs, root=root, guard_name=guard
+                    )
+                    if result is not None:
+                        return result
+            # Also check if it's a standalone function (not a class).
+            # analyze_source treats top-level forward-like functions as class entries
+            # only if they're in a class; for standalone functions we won't find them
+            # in class_registry. This is a future enhancement.
+
+        return None
 
     def _lookup_linear_spec(
         self, node: ModelGraphNode, *, root: BlockNode | None
@@ -1331,6 +1650,37 @@ def _parse_split_sizes(
     return None
 
 
+def _infer_einsum_shape(
+    equation: str, inputs: list[TensorSpec]
+) -> tuple[DimExpr, ...] | None:
+    """Resolve output shape from an einsum equation and concrete input shapes.
+
+    Supports the explicit ``"ij,jk->ik"`` form.  Each letter in the output
+    subscript is mapped to the size it has in one of the input tensors.
+    """
+    parts = equation.replace(" ", "").split("->")
+    if len(parts) != 2:
+        return None
+    input_subs = parts[0].split(",")
+    output_sub = parts[1]
+    if len(input_subs) != len(inputs):
+        return None
+
+    # Build letter → dimension size mapping from the inputs.
+    letter_dim: dict[str, DimExpr] = {}
+    for sub, spec in zip(input_subs, inputs):
+        if len(sub) != len(spec.shape):
+            return None
+        for letter, dim_val in zip(sub, spec.shape):
+            if letter not in letter_dim:
+                letter_dim[letter] = dim_val
+
+    out_shape = tuple(letter_dim.get(letter) for letter in output_sub)
+    if any(d is None for d in out_shape):
+        return None
+    return out_shape  # type: ignore[return-value]
+
+
 def _config_dtype(config: dict[str, Any]) -> str:
     raw = config.get("torch_dtype")
     if isinstance(raw, str):
@@ -1345,6 +1695,14 @@ def _is_self_attr(target: ast.Attribute) -> bool:
 def _find_init_function(class_node: ast.ClassDef) -> ast.FunctionDef | None:
     for item in class_node.body:
         if isinstance(item, ast.FunctionDef) and item.name == "__init__":
+            return item
+    return None
+
+
+def _find_method(class_node: ast.ClassDef, name: str) -> ast.FunctionDef | None:
+    """Find a method by *name* on *class_node*."""
+    for item in class_node.body:
+        if isinstance(item, ast.FunctionDef) and item.name == name:
             return item
     return None
 
