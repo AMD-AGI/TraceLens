@@ -1392,6 +1392,189 @@ def build_graph(
                         )
                         all_sources_post.add(last_id)
 
+    # ── Add synthetic I/O nodes for composite modules ────────────────────
+    # Rebuild node lookup after all wiring fixups
+    node_by_id = {n["id"]: n for n in nodes}
+
+    # Collect all edges that target each node (for output rewiring)
+    consumers_of: dict[str, list[tuple[dict, dict]]] = {}  # src_id → [(node, edge)]
+    for n in nodes:
+        for e in n.get("incomingEdges", []):
+            consumers_of.setdefault(e["sourceNodeId"], []).append((n, e))
+
+    for comp_path in sorted(composite_modules):
+        if _should_skip(comp_path):
+            continue
+
+        mod = module_map.get(comp_path)
+        if not mod:
+            continue
+
+        comp_id = _node_id(comp_path)
+        comp_ns = _namespace_for(comp_path + ".dummy")
+        attr = attr_names.get(comp_path, type(mod).__name__)
+        cls_name = type(mod).__name__
+
+        # The module's own namespace (where internal nodes go)
+        module_ns = (
+            comp_ns + f"/{attr} ({cls_name})"
+            if comp_ns
+            else f"{attr} ({cls_name})"
+        )
+
+        # Find child node IDs inside this module
+        child_prefix = comp_id + "/"
+        child_nodes = [n for n in nodes if n["id"].startswith(child_prefix)]
+        if not child_nodes:
+            continue
+
+        # ── Determine input children ──────────────────────────────────
+        # Children whose incoming edges come from OUTSIDE this module
+        input_child_ids: list[str] = []
+        external_sources: dict[str, list[str]] = {}  # child_id → [external_src_ids]
+        for cn in child_nodes:
+            ext_srcs = []
+            for e in cn.get("incomingEdges", []):
+                src = e["sourceNodeId"]
+                if not src.startswith(child_prefix):
+                    ext_srcs.append(src)
+            if ext_srcs:
+                input_child_ids.append(cn["id"])
+                external_sources[cn["id"]] = ext_srcs
+
+        # Deduplicate: unique external source sets define distinct inputs
+        unique_ext_src_sets: list[set[str]] = []
+        for cid in input_child_ids:
+            s = set(external_sources[cid])
+            if s not in unique_ext_src_sets:
+                unique_ext_src_sets.append(s)
+
+        n_inputs = len(unique_ext_src_sets)
+
+        # ── Determine output children ─────────────────────────────────
+        # Children whose output is consumed by nodes OUTSIDE this module
+        output_child_ids: list[str] = []
+        for cn in child_nodes:
+            cid = cn["id"]
+            if cid in consumers_of:
+                for consumer_node, _ in consumers_of[cid]:
+                    if not consumer_node["id"].startswith(child_prefix):
+                        if cid not in output_child_ids:
+                            output_child_ids.append(cid)
+                        break
+
+        # Also check FX leaf aliases: if an alias maps to a child node
+        for alias_id, target_id in _fx_leaf_aliases.items():
+            if target_id.startswith(child_prefix) and alias_id in consumers_of:
+                for consumer_node, _ in consumers_of[alias_id]:
+                    if not consumer_node["id"].startswith(child_prefix):
+                        if target_id not in output_child_ids:
+                            output_child_ids.append(target_id)
+                        break
+
+        n_outputs = len(output_child_ids)
+
+        # ── Create Input node(s) ──────────────────────────────────────
+        if n_inputs >= 1:
+            # Always create an internal input node inside the module
+            input_id = comp_id + "/@input"
+            input_node = {
+                "id": input_id,
+                "label": "Input",
+                "namespace": module_ns,
+                "attrs": [{"key": "synthetic", "value": "input"}],
+                "style": _STYLE_INPUT,
+                "incomingEdges": [],
+            }
+
+            # Collect all unique external sources
+            all_ext_srcs: list[str] = []
+            seen_srcs: set[str] = set()
+            for cid in input_child_ids:
+                for src in external_sources[cid]:
+                    if src not in seen_srcs:
+                        seen_srcs.add(src)
+                        all_ext_srcs.append(src)
+
+            if n_inputs > 1:
+                # Multiple inputs: external node in parent ns that fans in,
+                # then wires to the internal input node
+                ext_input_id = comp_id + "/@ext_input"
+                ext_input_node = {
+                    "id": ext_input_id,
+                    "label": f"{attr} Input",
+                    "namespace": comp_ns if comp_ns else "",
+                    "attrs": [{"key": "synthetic", "value": "input"}],
+                    "style": _STYLE_INPUT,
+                    "incomingEdges": [{"sourceNodeId": s} for s in all_ext_srcs],
+                }
+                nodes.append(ext_input_node)
+                node_by_id[ext_input_id] = ext_input_node
+                input_node["incomingEdges"] = [{"sourceNodeId": ext_input_id}]
+            else:
+                # Single input: internal node gets the external sources
+                input_node["incomingEdges"] = [
+                    {"sourceNodeId": s} for s in all_ext_srcs
+                ]
+
+            nodes.append(input_node)
+            node_by_id[input_id] = input_node
+
+            # Rewire input children: replace external sources with input_id
+            for cid in input_child_ids:
+                cn = node_by_id.get(cid)
+                if cn and "incomingEdges" in cn:
+                    for e in cn["incomingEdges"]:
+                        if not e["sourceNodeId"].startswith(child_prefix):
+                            e["sourceNodeId"] = input_id
+
+        # ── Create Output node(s) ─────────────────────────────────────
+        if n_outputs >= 1:
+            # Always create an internal output node inside the module
+            output_id = comp_id + "/@output"
+            output_node = {
+                "id": output_id,
+                "label": "Output",
+                "namespace": module_ns,
+                "attrs": [{"key": "synthetic", "value": "output"}],
+                "style": _STYLE_OUTPUT,
+                "incomingEdges": [{"sourceNodeId": oid} for oid in output_child_ids],
+            }
+            nodes.append(output_node)
+            node_by_id[output_id] = output_node
+
+            if n_outputs > 1:
+                # Multiple outputs: external node in parent ns
+                ext_output_id = comp_id + "/@ext_output"
+                ext_output_node = {
+                    "id": ext_output_id,
+                    "label": f"{attr} Output",
+                    "namespace": comp_ns if comp_ns else "",
+                    "attrs": [{"key": "synthetic", "value": "output"}],
+                    "style": _STYLE_OUTPUT,
+                    "incomingEdges": [{"sourceNodeId": output_id}],
+                }
+                nodes.append(ext_output_node)
+                node_by_id[ext_output_id] = ext_output_node
+                # Rewire external consumers to use ext_output_id
+                wire_output_id = ext_output_id
+            else:
+                wire_output_id = output_id
+
+            # Rewire consumers: nodes outside this module that consumed
+            # any output child should now consume the (ext) output node
+            for oid in output_child_ids:
+                if oid in consumers_of:
+                    for consumer_node, edge in consumers_of[oid]:
+                        if not consumer_node["id"].startswith(child_prefix):
+                            edge["sourceNodeId"] = wire_output_id
+                # Also check alias consumers
+                for alias_id, target_id in _fx_leaf_aliases.items():
+                    if target_id == oid and alias_id in consumers_of:
+                        for consumer_node, edge in consumers_of[alias_id]:
+                            if not consumer_node["id"].startswith(child_prefix):
+                                edge["sourceNodeId"] = wire_output_id
+
     # ── Add layer group attributes ───────────────────────────────────────
     for container_path, groups in layer_group_map.items():
         total = container_total[container_path]
