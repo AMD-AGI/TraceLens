@@ -22,6 +22,7 @@ import re
 import sys
 import types
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -330,18 +331,57 @@ def _module_label(mod: torch.nn.Module) -> str:
 
 # ── Layer deduplication ──────────────────────────────────────────────────────
 
-def _detect_repeated_layers(model: torch.nn.Module) -> dict[str, int]:
-    """Find repeated layer blocks (e.g. 40 identical GLMBlock layers).
+@dataclass
+class LayerGroup:
+    """A group of structurally identical layers inside a ModuleList."""
+    class_name: str
+    indices: list[int]
+    representative: int  # index to keep
 
-    Returns dict mapping the container path to repeat count.
+    @property
+    def count(self) -> int:
+        return len(self.indices)
+
+
+def _detect_repeated_layers(
+    model: torch.nn.Module,
+) -> dict[str, list[LayerGroup]]:
+    """Find repeated layer blocks, grouping by structural type.
+
+    For heterogeneous ModuleLists (e.g. 34 linear-attn + 11 sparse-attn
+    layers), creates separate groups for each distinct layer type.
+
+    Returns dict mapping container path to list of LayerGroups.
     """
-    repeats: dict[str, int] = {}
+    repeats: dict[str, list[LayerGroup]] = {}
     for name, mod in model.named_modules():
-        if isinstance(mod, torch.nn.ModuleList) and len(mod) > 1:
-            # Check if all children have the same class
-            classes = {type(child).__name__ for child in mod}
-            if len(classes) == 1:
-                repeats[name] = len(mod)
+        if not isinstance(mod, torch.nn.ModuleList) or len(mod) <= 1:
+            continue
+
+        # Group children by their structural signature (class + child names)
+        groups: dict[str, list[int]] = defaultdict(list)
+        for i, child in enumerate(mod):
+            # Signature = class name + sorted child module class names
+            child_sig = type(child).__name__
+            child_structure = tuple(
+                (cname, type(cmod).__name__)
+                for cname, cmod in child.named_children()
+            )
+            sig = f"{child_sig}:{child_structure}"
+            groups[sig].append(i)
+
+        layer_groups = []
+        for _sig, indices in groups.items():
+            cls_name = type(mod[indices[0]]).__name__
+            layer_groups.append(LayerGroup(
+                class_name=cls_name,
+                indices=indices,
+                representative=indices[0],
+            ))
+
+        if any(g.count > 1 for g in layer_groups):
+            repeats[name] = layer_groups
+
     return repeats
 
 
@@ -368,6 +408,52 @@ def _output_metadata(shape_str: str, dtype: str = "bfloat16") -> list[dict]:
             ],
         }
     ]
+
+
+def _build_fact_sheet(model_name: str, config) -> str:
+    """Build an HTML fact sheet from the config, including sub-configs."""
+    lines = [f"<b>{model_name}</b>"]
+
+    # Collect all config dicts (top-level + sub-configs like text_config)
+    top = config.to_dict()
+    sub_configs: dict[str, dict] = {}
+    for key, val in top.items():
+        if isinstance(val, dict) and any(
+            k in val for k in ("hidden_size", "num_hidden_layers", "vocab_size")
+        ):
+            sub_configs[key] = val
+
+    _FACT_KEYS = [
+        "model_type", "hidden_size", "num_hidden_layers",
+        "num_attention_heads", "num_key_value_heads",
+        "intermediate_size", "vocab_size", "max_position_embeddings",
+        "torch_dtype", "num_local_experts", "num_experts_per_tok",
+        "moe_intermediate_size",
+    ]
+
+    def _emit(d: dict, prefix: str = "") -> None:
+        for key in _FACT_KEYS:
+            val = d.get(key)
+            if val is not None:
+                label = f"{prefix}{key}" if prefix else key
+                lines.append(f"  {label}: {val}")
+
+    if sub_configs:
+        # Multi-modal: show sub-configs with headers
+        # Top-level keys first
+        for key in ("model_type", "torch_dtype"):
+            val = top.get(key)
+            if val is not None:
+                lines.append(f"  {key}: {val}")
+        for section, d in sub_configs.items():
+            section_label = section.replace("_config", "").replace("_", " ").title()
+            lines.append(f"\n<b>{section_label}</b>")
+            _emit(d)
+    else:
+        _emit(top)
+
+    # Layer type breakdown
+    return "\n".join(lines)
 
 
 def build_graph(
@@ -413,29 +499,37 @@ def build_graph(
         "namespace": "",
         "attrs": [
             {"key": "synthetic", "value": "@input"},
-            *_shape_attrs(f"B x S", "int64"),
+            *_shape_attrs("B x S", "int64"),
         ],
         "style": _STYLE_INPUT,
         "outputsMetadata": _output_metadata("B x S", "int64"),
     })
 
-    # Track which ModuleLists are repeated and which layer index to show
-    skip_layers: set[str] = set()  # paths to skip (layers 1..N-1)
-    layer_containers: dict[str, int] = {}  # container path → count
-    for container_path, count in repeats.items():
-        layer_containers[container_path] = count
-        # Skip all but layer 0
-        for i in range(1, count):
-            skip_layers.add(f"{container_path}.{i}")
+    # ── Build skip set from repeated layer groups ────────────────────────
+    skip_layers: set[str] = set()
+    # container_path → list of LayerGroups
+    layer_group_map: dict[str, list[LayerGroup]] = repeats
 
-    # Collect all module paths and their children (preserving registration order)
+    for container_path, groups in layer_group_map.items():
+        for group in groups:
+            # Keep only the representative, skip the rest
+            for idx in group.indices:
+                if idx != group.representative:
+                    skip_layers.add(f"{container_path}.{idx}")
+
+    # ── Collect module info (preserving registration order) ──────────────
     module_children: dict[str, list[str]] = defaultdict(list)
     module_map: dict[str, torch.nn.Module] = {}
-    module_order: list[str] = []  # preserve named_modules() order
+    module_order: list[str] = []
+    # Also build attr_name map: path → attribute name used in parent
+    attr_names: dict[str, str] = {}
+
     for name, mod in model.named_modules():
         module_map[name] = mod
         if name:
             module_order.append(name)
+            # The last part of the dot-path is the attr name
+            attr_names[name] = name.rsplit(".", 1)[-1]
         if "." in name:
             parent = name.rsplit(".", 1)[0]
             module_children[parent].append(name)
@@ -443,56 +537,75 @@ def build_graph(
             module_children[""].append(name)
 
     # Identify leaf vs composite modules
-    leaf_modules: set[str] = set()
     composite_modules: set[str] = set()
     for name, mod in model.named_modules():
-        if not name:
-            continue
-        children = list(mod.children())
-        if children:
+        if name and list(mod.children()):
             composite_modules.add(name)
-        else:
-            leaf_modules.add(name)
 
     def _should_skip(path: str) -> bool:
-        """Check if this path is in a skipped repeated layer."""
         for skip in skip_layers:
             if path == skip or path.startswith(skip + "."):
                 return True
         return False
 
+    # ── Build namespace labels using attr names + layer group labels ─────
+    # Build a map: container_path.representative_idx → group label
+    group_labels: dict[str, str] = {}  # path prefix → "Nx_ClassName"
+    container_set: set[str] = set()    # container paths (ModuleLists)
+
+    for container_path, groups in layer_group_map.items():
+        container_set.add(container_path)
+        for group in groups:
+            rep_path = f"{container_path}.{group.representative}"
+            group_labels[rep_path] = f"{group.count}x {group.class_name}"
+
     def _namespace_for(path: str) -> str:
-        """Compute the Model Explorer namespace (parent group) for a path."""
+        """Build a namespace using attr names, with layer group labels."""
         parts = path.split(".")
         if len(parts) <= 1:
             return ""
-        # Build namespace, collapsing repeated layers
         ns_parts = []
-        for i, part in enumerate(parts[:-1]):
+        i = 0
+        while i < len(parts) - 1:
             prefix = ".".join(parts[: i + 1])
-            if prefix in layer_containers:
-                count = layer_containers[prefix]
-                mod = module_map.get(f"{prefix}.0")
-                cls_name = type(mod).__name__ if mod else part
-                ns_parts.append(f"{count}x_{cls_name}")
-                # Skip the layer index part
+
+            if prefix in container_set:
+                # This is a ModuleList — next part is the layer index
+                # Find which group this layer belongs to
+                if i + 1 < len(parts) - 1:
+                    layer_prefix = ".".join(parts[: i + 2])
+                    label = group_labels.get(layer_prefix)
+                    if label:
+                        ns_parts.append(label)
+                    else:
+                        # This layer index is the representative
+                        # Find its group label by checking what rep it maps to
+                        mod = module_map.get(layer_prefix)
+                        if mod:
+                            ns_parts.append(type(mod).__name__)
+                    i += 2  # skip container + index
+                    continue
+                i += 1
                 continue
-            # If this part is a digit (layer index), skip it
-            if part.isdigit():
-                continue
-            mod = module_map.get(prefix)
-            if mod and prefix in composite_modules:
-                ns_parts.append(type(mod).__name__)
-            else:
-                ns_parts.append(part)
+
+            # Use attr name for composites, class name for clarity
+            if prefix in composite_modules:
+                attr = attr_names.get(prefix, parts[i])
+                mod = module_map.get(prefix)
+                cls_name = type(mod).__name__ if mod else attr
+                # Use attr name if it's informative, class name otherwise
+                if attr.isdigit():
+                    ns_parts.append(cls_name)
+                else:
+                    ns_parts.append(f"{attr} ({cls_name})")
+            i += 1
         return "/".join(ns_parts)
 
     def _node_id(path: str) -> str:
-        """Build a node id, replacing layer indices with representative."""
         return path.replace(".", "/")
 
     # ── Try torch.fx on composite modules to get internal ops ────────────
-    fx_graphs: dict[str, list[dict]] = {}  # module_path → list of op nodes
+    fx_graphs: dict[str, list[dict]] = {}
 
     for path in module_order:
         if path not in composite_modules:
@@ -500,11 +613,7 @@ def build_graph(
         if _should_skip(path):
             continue
         mod = module_map[path]
-        # Only trace modules that have at least one leaf child
-        has_leaf = any(
-            not list(child.children())
-            for child in mod.children()
-        )
+        has_leaf = any(not list(c.children()) for c in mod.children())
         if not has_leaf:
             continue
 
@@ -512,33 +621,26 @@ def build_graph(
         if graph is None:
             continue
 
-        # Convert FX graph nodes to Model Explorer nodes
         namespace = _namespace_for(path) or type(mod).__name__
-        # If this is inside a repeated layer, adjust namespace
         op_nodes = []
-        prev_id = None
-        node_map: dict[str, str] = {}  # fx node name → our node id
+        node_map: dict[str, str] = {}
 
         for fx_node in graph.nodes:
             if not _is_interesting_op(fx_node):
-                # Track placeholders for edge wiring
                 if fx_node.op == "placeholder":
                     node_map[fx_node.name] = "@input"
                 continue
 
             if fx_node.op == "call_module":
-                # This is a child module — will be added as a regular node
                 target = str(fx_node.target)
                 child_path = f"{path}.{target}"
                 node_map[fx_node.name] = _node_id(child_path)
                 continue
 
-            # This is a tensor op (call_function, call_method)
             label = _fx_op_label(fx_node)
             op_id = f"{_node_id(path)}/{fx_node.name}"
             node_map[fx_node.name] = op_id
 
-            # Build incoming edges from predecessors
             incoming = []
             for arg in fx_node.args:
                 if isinstance(arg, torch.fx.Node) and arg.name in node_map:
@@ -571,9 +673,6 @@ def build_graph(
             fx_graphs[path] = op_nodes
 
     # ── Add module nodes ─────────────────────────────────────────────────
-    # Process in registration order (named_modules() order = forward order)
-    prev_top_level_id = "@input"
-
     for path in module_order:
         if not path:
             continue
@@ -587,17 +686,12 @@ def build_graph(
         label = _module_label(mod)
         style = _style_for(category)
 
-        # For composite modules that were fx-traced, they become namespaces
         if path in composite_modules and path not in fx_graphs:
-            # Just a group — add group attributes
-            group_label = type(mod).__name__
-            # Check if this is a repeated layer container
-            if path in layer_containers:
+            if path in container_set:
                 continue  # ModuleList itself is not a node
-            # Add namespace label
             if namespace:
                 group_attrs.append({
-                    "nodeId": namespace + "/" + type(mod).__name__,
+                    "nodeId": namespace + "/" + f"{attr_names.get(path, '')} ({type(mod).__name__})",
                     "attrs": [
                         {"key": "class", "value": type(mod).__name__},
                     ],
@@ -605,13 +699,12 @@ def build_graph(
             continue
 
         if path in composite_modules and path in fx_graphs:
-            # This composite was traced — its children + ops are in the graph
-            # Add group attributes
             continue
 
         # Leaf module — add as a node
         attrs = [
             {"key": "class", "value": type(mod).__name__},
+            {"key": "attr_name", "value": attr_names.get(path, "")},
         ]
         shape_str = shapes.get(path)
         if shape_str:
@@ -634,50 +727,72 @@ def build_graph(
     for path, op_nodes in fx_graphs.items():
         namespace = _namespace_for(path)
         mod = module_map[path]
-        parent_ns = namespace + "/" + type(mod).__name__ if namespace else type(mod).__name__
+        attr = attr_names.get(path, type(mod).__name__)
+        parent_ns = (
+            namespace + f"/{attr} ({type(mod).__name__})"
+            if namespace
+            else f"{attr} ({type(mod).__name__})"
+        )
 
         for op_node in op_nodes:
-            # Adjust namespace to be under the parent module
             if not op_node["namespace"].startswith(parent_ns):
                 op_node["namespace"] = parent_ns
             nodes.append(op_node)
 
-    # ── Wire edges between sequential modules ────────────────────────────
-    # For modules without fx-traced edges, wire sequentially based on
-    # forward_calls order (which is the order they appear in named_modules)
-    _wire_sequential_edges(nodes, model, module_map, shapes, layer_containers, skip_layers)
+    # ── Wire edges ───────────────────────────────────────────────────────
+    _wire_sequential_edges(nodes, model, module_map, shapes, {}, skip_layers)
 
-    # ── Add repeated layer group configs ─────────────────────────────────
-    for container_path, count in layer_containers.items():
-        mod_0 = module_map.get(f"{container_path}.0")
-        if mod_0:
-            cls_name = type(mod_0).__name__
-            ns = _namespace_for(f"{container_path}.0")
-            group_id = ns + f"/{count}x_{cls_name}" if ns else f"{count}x_{cls_name}"
+    # ── Add layer group attributes ───────────────────────────────────────
+    for container_path, groups in layer_group_map.items():
+        for group in groups:
+            rep_path = f"{container_path}.{group.representative}"
+            ns = _namespace_for(rep_path + ".dummy").rsplit("/", 1)[0] if "." in rep_path else ""
+            label = f"{group.count}x {group.class_name}"
+            if ns:
+                group_id = ns
+            else:
+                group_id = label
             group_attrs.append({
                 "nodeId": group_id,
                 "attrs": [
-                    {"key": "class", "value": cls_name},
-                    {"key": "count", "value": str(count)},
+                    {"key": "class", "value": group.class_name},
+                    {"key": "count", "value": str(group.count)},
+                    {"key": "layer_indices", "value": str(group.indices)},
                 ],
             })
 
     # ── Build fact sheet ─────────────────────────────────────────────────
-    raw_config = config.to_dict()
-    fact_lines = [f"<b>{model_name}</b>"]
-    for key in ("hidden_size", "num_hidden_layers", "num_attention_heads",
-                "intermediate_size", "vocab_size", "max_position_embeddings",
-                "model_type", "torch_dtype"):
-        val = raw_config.get(key)
-        if val is not None:
-            fact_lines.append(f"  {key}: {val}")
+    fact_sheet = _build_fact_sheet(model_name, config)
+
+    # Add layer type breakdown
+    for container_path, groups in layer_group_map.items():
+        if len(groups) > 1:
+            fact_sheet += "\n\n<b>Layer Types</b>"
+            for group in groups:
+                rep = module_map.get(f"{container_path}.{group.representative}")
+                if rep:
+                    attn_type = ""
+                    for cname, cmod in rep.named_children():
+                        if "attn" in cname:
+                            attn_type = type(cmod).__name__
+                            break
+                    mlp_type = ""
+                    for cname, cmod in rep.named_children():
+                        if "mlp" in cname:
+                            mlp_type = type(cmod).__name__
+                            break
+                    desc = f"{attn_type}"
+                    if mlp_type:
+                        desc += f" + {mlp_type}"
+                    fact_sheet += f"\n  {group.count}x {group.class_name}: {desc}"
+                    fact_sheet += f"\n    layers: {group.indices}"
 
     return {
         "name": model_name,
         "model_type": model_type,
         "source": "tracelens-torch-trace",
         "tracelensViewer": {
-            "factSheet": "\n".join(fact_lines),
+            "factSheet": fact_sheet,
             "dtype": dtype,
         },
         "graphCollections": [
@@ -701,7 +816,7 @@ def _wire_sequential_edges(
     model: torch.nn.Module,
     module_map: dict[str, torch.nn.Module],
     shapes: dict[str, str],
-    layer_containers: dict[str, int],
+    layer_containers: dict,
     skip_layers: set[str],
 ) -> None:
     """Wire edges between nodes that don't already have incoming edges.
