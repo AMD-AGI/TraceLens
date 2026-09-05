@@ -2,4 +2,4 @@ recursive-include TraceLens/Agent *.md
 recursive-include TraceLens/Agent/Analysis/skills *
 recursive-include TraceLens/Agent/Profiling/skills *
 recursive-include TraceLens/Agent/Analysis/utils/arch *.json
-recursive-include Visualizer/model_explorer_export/viewer *
+recursive-include TraceLens/Visualizer/model_explorer_export/viewer *

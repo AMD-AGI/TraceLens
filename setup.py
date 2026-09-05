@@ -40,20 +40,14 @@ def _read_requirements(path: Path) -> list[str]:
     ]
 
 
-_VISUALIZER_PACKAGES = find_packages(where="Visualizer")
-_VISUALIZER_PACKAGE_DIR = {
-    package: f"Visualizer/{package.replace('.', '/')}"
-    for package in _VISUALIZER_PACKAGES
-}
-
 with open("README.md", encoding="utf-8") as _readme:
     _LONG_DESCRIPTION = _readme.read()
 
 setup(
     name="TraceLens",
     version=_wheel_version(),
-    packages=find_packages(where=".") + _VISUALIZER_PACKAGES,
-    package_dir={"": ".", **_VISUALIZER_PACKAGE_DIR},
+    packages=find_packages(where="."),
+    package_dir={"": "."},
     include_package_data=True,
     package_data={
         "TraceLens": [
@@ -61,7 +55,7 @@ setup(
             "Agent/**/skills/**/*",
             "Agent/Analysis/utils/arch/*.json",
         ],
-        "model_explorer_export": [
+        "TraceLens.Visualizer.model_explorer_export": [
             "viewer/*.html",
             "viewer/*.js",
         ],
@@ -87,7 +81,7 @@ setup(
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
         ],
-        "Visualizer": _read_requirements(_ROOT / "Visualizer" / "requirements.txt"),
+        "Visualizer": _read_requirements(_ROOT / "TraceLens" / "Visualizer" / "requirements.txt"),
         "dev": [
             "pytest",
             "black==26.3.1",
@@ -116,8 +110,8 @@ setup(
             "TraceLens_generate_perf_report_pftrace_memory_copy = TraceLens.Reporting.generate_perf_report_pftrace_memory_copy:main",
             "TraceLens_generate_perf_report_genesis = TraceLens.Reporting.generate_perf_report_genesis:main",
             "TraceLens_split_inference_trace = TraceLens.TraceUtils.split_inference_trace_annotation:main",
-            "TraceLens_visualize_model_in_explorer = model_explorer_export.cli:main",
-            "visualize_model_in_explorer = model_explorer_export.cli:main",
+            "TraceLens_visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main",
+            "visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main",
         ],
     },
 )
