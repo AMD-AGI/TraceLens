@@ -39,6 +39,7 @@ _DARK_TEXT = "#1a1a1a"
 _WHITE_TEXT = "#ffffff"
 
 _STYLE_INPUT = {"backgroundColor": "#d9e8f5", "textColor": _DARK_TEXT}
+_STYLE_OUTPUT = {"backgroundColor": "#d5f5d9", "textColor": _DARK_TEXT}
 _STYLE_EMBEDDING = {"backgroundColor": "#27ae60", "textColor": _WHITE_TEXT}
 _STYLE_LINEAR = {"backgroundColor": "#bdc3c7", "textColor": _DARK_TEXT}
 _STYLE_NORM = {"backgroundColor": "#f0e68c", "textColor": _DARK_TEXT}
@@ -1077,6 +1078,31 @@ def build_graph(
             branch_ns = _namespace_for(rep_path + ".dummy")
             branch_namespaces.add(branch_ns)
         parallel_ns_groups.append(branch_namespaces)
+
+    # ── Output node ──────────────────────────────────────────────────────
+    # Determine output shape from the model's last module
+    output_shape = "B x S x V"
+    # Check for lm_head or tied embeddings to get vocab size
+    if hasattr(model, "lm_head") and isinstance(model.lm_head, torch.nn.Linear):
+        output_shape = f"B x S x {model.lm_head.out_features}"
+    elif hasattr(model, "language_model") and hasattr(model.language_model, "embed_tokens"):
+        vocab = model.language_model.embed_tokens.num_embeddings
+        output_shape = f"B x S x {vocab}"
+    elif hasattr(model, "embed_tokens"):
+        vocab = model.embed_tokens.num_embeddings
+        output_shape = f"B x S x {vocab}"
+
+    nodes.append({
+        "id": "@output",
+        "label": "Logits",
+        "namespace": "",
+        "attrs": [
+            {"key": "synthetic", "value": "@output"},
+            *_shape_attrs(output_shape, dtype),
+        ],
+        "style": _STYLE_OUTPUT,
+        "outputsMetadata": _output_metadata(output_shape, dtype),
+    })
 
     # ── Wire edges ───────────────────────────────────────────────────────
     _wire_sequential_edges(
