@@ -501,88 +501,25 @@ def _style_for(category: str) -> dict[str, str]:
     }.get(category, _STYLE_DEFAULT)
 
 
-def _introspect_module_label(mod: torch.nn.Module) -> str | None:
-    """Identify the canonical operation of a custom module by introspection.
-
-    Returns a clean label like 'RMSNorm' or None if the module can't be
-    classified.
-    """
-    cls = type(mod)
-    if cls.__module__ and cls.__module__.startswith("torch."):
-        return None  # standard torch module, handled elsewhere
-
-    params = dict(mod.named_parameters(recurse=False))
-    buffers = dict(mod.named_buffers(recurse=False))
-    param_names = set(params.keys())
-    buffer_names = set(buffers.keys())
-
-    # RMSNorm variants: 1-D weight, uses rsqrt in forward
-    if param_names == {"weight"} and params["weight"].dim() == 1:
-        import inspect
-        try:
-            src = inspect.getsource(cls.forward)
-        except (TypeError, OSError):
-            src = ""
-        if "rsqrt" in src or "rms" in cls.__name__.lower():
-            # Check for gating (splits input or has special structure)
-            if "chunk" in src or "gate" in cls.__name__.lower():
-                return "RMSNorm (gated)"
-            return "RMSNorm"
-        if "var" in src or "mean" in src:
-            return "LayerNorm"
-
-    # Unweighted RMSNorm: no params, uses rsqrt
-    if not params and not buffers:
-        import inspect
-        try:
-            src = inspect.getsource(cls.forward)
-        except (TypeError, OSError):
-            src = ""
-        if "rsqrt" in src:
-            return "RMSNorm (unweighted)"
-        # Identity-like or simple reduction (e.g. HyperHead doing mean)
-        lines = [l.strip() for l in src.split("\n") if l.strip() and not l.strip().startswith(("#", "def", '"""', "return"))]
-        if len(lines) <= 2 and "mean" in src:
-            return "Mean"
-
-    # Rotary embedding: has inv_freq buffer
-    if "inv_freq" in buffer_names:
-        return "RotaryEmbedding"
-
-    # MoE experts: 3-D weight tensors (num_experts, in, out)
-    if any(p.dim() == 3 for p in params.values()):
-        expert_params = [k for k, v in params.items() if v.dim() == 3]
-        if expert_params:
-            num_experts = next(
-                params[k].shape[0] for k in expert_params
-            )
-            return f"Experts({num_experts})"
-
-    # Top-k router: 2-D weight + sigmoid/softmax in forward
-    if "weight" in param_names and params["weight"].dim() == 2:
-        import inspect
-        try:
-            src = inspect.getsource(cls.forward)
-        except (TypeError, OSError):
-            src = ""
-        if "sigmoid" in src or "softmax" in src or "topk" in src:
-            k = params["weight"].shape[0]
-            return f"TopKRouter({k})"
-
-    return None
-
-
-def _module_label(mod: torch.nn.Module, vendor_prefixes: list[str] | None = None) -> str:
+def _module_label(mod: torch.nn.Module) -> str:
     """Friendly label for a module."""
     cls = type(mod).__name__
     if isinstance(mod, torch.nn.Linear):
-        return f"Linear({mod.in_features}, {mod.out_features})"
+        return "Linear"
     if isinstance(mod, torch.nn.Embedding):
-        return f"Embedding({mod.num_embeddings}, {mod.embedding_dim})"
-    # Try introspection for custom (vendor) modules
-    introspected = _introspect_module_label(mod)
-    if introspected:
-        return introspected
+        return "Embedding"
+    # For trivial activation wrappers (e.g. transformers SiLUActivation),
+    # try FX tracing to get the real op name
+    if not list(mod.children()):
+        cls_mod = type(mod).__module__ or ""
+        if not cls_mod.startswith("torch."):
+            try:
+                graph = torch.fx.symbolic_trace(mod).graph
+                ops = [n for n in graph.nodes if n.op not in ("placeholder", "output")]
+                if len(ops) == 1:
+                    return _fx_op_label(ops[0])
+            except Exception:
+                pass
     return cls
 
 
@@ -971,6 +908,88 @@ def build_graph(
         if op_nodes:
             fx_graphs[path] = op_nodes
 
+    # ── Try torch.fx on custom leaf modules to expand their ops ──────────
+    for path in module_order:
+        if path in composite_modules or path in fx_graphs:
+            continue
+        if _should_skip(path):
+            continue
+        # Skip if parent composite already has an FX graph (this leaf is
+        # already referenced via call_module in the parent's graph)
+        parent = path.rsplit(".", 1)[0] if "." in path else ""
+        if parent in fx_graphs:
+            continue
+        mod = module_map[path]
+        cls = type(mod)
+        # Only expand non-standard modules (not torch.nn builtins)
+        if cls.__module__ and cls.__module__.startswith("torch."):
+            continue
+        if list(mod.children()):
+            continue  # has children — handled as composite
+
+        graph = _fx_trace_module(mod)
+        if graph is None:
+            continue
+
+        namespace = _namespace_for(path)
+        # Build a parent namespace for the expanded ops
+        attr = attr_names.get(path, cls.__name__)
+        parent_ns = (
+            namespace + f"/{attr} ({cls.__name__})"
+            if namespace
+            else f"{attr} ({cls.__name__})"
+        )
+
+        op_nodes = []
+        node_map: dict[str, str] = {}
+
+        for fx_node in graph.nodes:
+            if not _is_interesting_op(fx_node):
+                if fx_node.op == "placeholder":
+                    node_map[fx_node.name] = "@input"
+                continue
+
+            if fx_node.op == "call_module":
+                target = str(fx_node.target)
+                child_path = f"{path}.{target}"
+                node_map[fx_node.name] = _node_id(child_path)
+                continue
+
+            label = _fx_op_label(fx_node)
+            op_id = f"{_node_id(path)}/{fx_node.name}"
+            node_map[fx_node.name] = op_id
+
+            incoming = []
+            for arg in fx_node.args:
+                if isinstance(arg, torch.fx.Node) and arg.name in node_map:
+                    incoming.append({
+                        "sourceNodeId": node_map[arg.name],
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": str(len(incoming)),
+                    })
+                elif isinstance(arg, (tuple, list)):
+                    for item in arg:
+                        if isinstance(item, torch.fx.Node) and item.name in node_map:
+                            incoming.append({
+                                "sourceNodeId": node_map[item.name],
+                                "sourceNodeOutputId": "0",
+                                "targetNodeInputId": str(len(incoming)),
+                            })
+
+            op_node = {
+                "id": op_id,
+                "label": label,
+                "namespace": parent_ns,
+                "attrs": [{"key": "operation", "value": "tensor_op"}],
+                "style": _STYLE_OP,
+            }
+            if incoming:
+                op_node["incomingEdges"] = incoming
+            op_nodes.append(op_node)
+
+        if op_nodes:
+            fx_graphs[path] = op_nodes
+
     # ── Add module nodes ─────────────────────────────────────────────────
     for path in module_order:
         if not path:
@@ -998,6 +1017,10 @@ def build_graph(
             continue
 
         if path in composite_modules and path in fx_graphs:
+            continue
+
+        # Custom leaf module that was FX-expanded — skip the single node
+        if path in fx_graphs:
             continue
 
         # Leaf module — add as a node
