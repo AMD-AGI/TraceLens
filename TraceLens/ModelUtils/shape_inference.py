@@ -387,9 +387,6 @@ _POINTWISE_LABELS = frozenset(
         "view as complex",
         "view as real",
         "repeat interleave",
-        "activation func",
-        "activation function",
-        "activation",
     }
 )
 
@@ -1181,17 +1178,6 @@ class ShapeInferencer:
         if introspected is not None:
             return introspected
 
-        # Heuristic: nodes whose name contains "attention" (e.g. core_attention,
-        # sdpa_attention) are attention functions whose output is (B, S, H).
-        node_name = (
-            node.metadata.get("attr_name") or node.id.rsplit(":", 1)[-1] or ""
-        ).lower()
-        if "attention" in node_name:
-            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            return TensorSpec(
-                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
-            )
-
         if inputs:
             _log.warning(
                 "No shape inference rule for %s (label=%r, class=%r, kind=%s); "
@@ -1276,6 +1262,23 @@ class ShapeInferencer:
                 structure, inputs, root=root, guard_name=class_name
             )
 
+        # Fuzzy match: convert snake_case attr name to CamelCase and search
+        # the registry (e.g. "core_attention" → "CoreAttention").
+        structure = self._fuzzy_registry_lookup(class_name)
+        if structure is not None:
+            return self._simulate_forward_ops(
+                structure, inputs, root=root, guard_name=class_name
+            )
+
+        # Try introspecting inline function definitions in parent classes'
+        # __init__ (e.g. ``self.activation_func = swiglu`` where swiglu is
+        # defined as a nested function).
+        inline_result = self._introspect_inline_function(
+            class_name, inputs, root=root
+        )
+        if inline_result is not None:
+            return inline_result
+
         # class_name may be a method name (e.g. "get_pooled_states") rather
         # than a class.  Search the registry for a class that owns this method
         # and parse the method body for shape-bearing operations.
@@ -1292,6 +1295,126 @@ class ShapeInferencer:
             return self._introspect_kernel_source(
                 kernel_import, inputs, root=root
             )
+        return None
+
+    def _fuzzy_registry_lookup(self, name: str):
+        """Try to match *name* against registry classes using common transforms.
+
+        Handles snake_case → CamelCase (``core_attention`` → ``CoreAttention``)
+        and partial suffix matches (``attention_func`` → ``CoreAttention``).
+        """
+        # snake_case → CamelCase
+        camel = "".join(part.capitalize() for part in name.split("_"))
+        structure = self.spec.class_registry.get(camel)
+        if structure is not None:
+            return structure
+        # Try suffix match: find classes whose name ends with the camel form.
+        for cls_name, structure in self.spec.class_registry.items():
+            if cls_name.lower() == name.replace("_", "").lower():
+                return structure
+        return None
+
+    def _introspect_inline_function(
+        self,
+        attr_name: str,
+        inputs: list[TensorSpec],
+        *,
+        root: BlockNode | None,
+    ) -> TensorSpec | None:
+        """Introspect inline functions assigned in a parent class's ``__init__``.
+
+        Handles patterns like::
+
+            def swiglu(x):
+                x = torch.chunk(x, 2, dim=-1)
+                return F.silu(x[0]) * x[1]
+            self.activation_func = swiglu
+        """
+        from TraceLens.ModelUtils.ast_analyze import (
+            _ForwardOperationExtractor,
+            _extract_forward_return_metadata,
+        )
+        guard = f"inline:{attr_name}"
+        if guard in self._introspecting:
+            return None
+
+        for _cls_name, structure in self.spec.class_registry.items():
+            func_node = self._find_init_inline_function(
+                structure.node, attr_name
+            )
+            if func_node is None:
+                continue
+            # Parse the inline function body using the same approach as
+            # _introspect_method_shape.
+            try:
+                input_name = (
+                    func_node.args.args[0].arg
+                    if func_node.args.args
+                    else "x"
+                )
+                extractor = _ForwardOperationExtractor(
+                    self_values=structure.init_assignments,
+                    all_tensor_ops=True,
+                )
+                extractor.var_producer[input_name] = input_name
+                extractor.statements(func_node.body)
+                if not extractor.operations:
+                    continue
+                fwd_ops = {op.attr_name: op for op in extractor.operations}
+                _slots, _order, primary = _extract_forward_return_metadata(
+                    func_node, extractor.var_producer
+                )
+
+                class _InlineProxy:
+                    forward_operations = fwd_ops
+                    forward_input_name = input_name
+                    primary_return_slot = (
+                        extractor.var_producer.get(primary) if primary else None
+                    )
+
+                self._introspecting.add(guard)
+                try:
+                    result = self._simulate_forward_ops(
+                        _InlineProxy(),  # type: ignore[arg-type]
+                        inputs,
+                        root=root,
+                        guard_name=guard,
+                    )
+                finally:
+                    self._introspecting.discard(guard)
+                if result is not None:
+                    return result
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _find_init_inline_function(
+        class_node: ast.ClassDef, attr_name: str
+    ) -> ast.FunctionDef | None:
+        """Find an inline function assigned to ``self.<attr_name>`` in ``__init__``."""
+        init_func = _find_method(class_node, "__init__")
+        if init_func is None:
+            return None
+        # Collect nested function definitions in __init__.
+        nested_funcs: dict[str, ast.FunctionDef] = {}
+        for stmt in ast.walk(init_func):
+            if isinstance(stmt, ast.FunctionDef):
+                nested_funcs[stmt.name] = stmt
+        # Find ``self.<attr_name> = <func_name>`` assignments.
+        for stmt in ast.walk(init_func):
+            if not isinstance(stmt, ast.Assign):
+                continue
+            for target in stmt.targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                    and target.attr == attr_name
+                    and isinstance(stmt.value, ast.Name)
+                    and stmt.value.id in nested_funcs
+                ):
+                    return nested_funcs[stmt.value.id]
         return None
 
     def _introspect_method_shape(
