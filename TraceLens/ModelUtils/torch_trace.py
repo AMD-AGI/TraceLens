@@ -415,6 +415,65 @@ def _fx_trace_module(mod: torch.nn.Module) -> torch.fx.Graph | None:
         traced = torch.fx.symbolic_trace(mod)
         return traced.graph
     except Exception:
+        pass
+
+    # Handle modules with unregistered nn.Module activations from dicts
+    # like ACT2FN[self.activation] — build a mirror class with the
+    # activation registered as a proper submodule.
+    try:
+        import inspect, re, types as _types
+
+        cls = type(mod)
+        src = inspect.getsource(cls.forward)
+        if "ACT2FN" not in src:
+            return None
+
+        act_name = getattr(mod, "activation", None)
+        if not isinstance(act_name, str):
+            return None
+
+        from transformers.activations import ACT2FN
+        act_mod = ACT2FN.get(act_name)
+        if act_mod is None:
+            return None
+        # ACT2FN may return a class or an instance
+        if isinstance(act_mod, type) and issubclass(act_mod, torch.nn.Module):
+            act_mod = act_mod()
+        if not isinstance(act_mod, torch.nn.Module):
+            return None
+
+        # Determine hidden_size from weight parameter
+        w = getattr(mod, "weight", None)
+        hidden_size = w.shape[0] if w is not None else 8
+        eps = getattr(mod, "variance_epsilon", getattr(mod, "eps", 1e-6))
+
+        # Build a mirror class with act_fn registered
+        class _Mirror(torch.nn.Module):
+            def __init__(self_):
+                super().__init__()
+                self_.weight = torch.nn.Parameter(
+                    torch.ones(hidden_size, device="meta")
+                )
+                self_.variance_epsilon = eps
+                self_.act_fn = act_mod
+
+        # Patch forward source: replace ACT2FN[self.activation] → self.act_fn
+        new_src = re.sub(r"ACT2FN\[self\.activation\]", "self.act_fn", src)
+        lines = new_src.split("\n")
+        start = next(i for i, l in enumerate(lines) if "def forward" in l)
+        lines = lines[start:]
+        indent = len(lines[0]) - len(lines[0].lstrip())
+        lines = [l[indent:] if len(l) > indent else l for l in lines]
+        new_src = "\n".join(lines)
+
+        ns: dict = {"torch": torch}
+        exec(compile(new_src, "<mirror>", "exec"), ns)  # noqa: S102
+        _Mirror.forward = ns["forward"]
+
+        mirror = _Mirror()
+        traced = torch.fx.symbolic_trace(mirror)
+        return traced.graph
+    except Exception:
         return None
 
 
@@ -953,7 +1012,31 @@ def build_graph(
             if fx_node.op == "call_module":
                 target = str(fx_node.target)
                 child_path = f"{path}.{target}"
-                node_map[fx_node.name] = _node_id(child_path)
+                if child_path in module_map:
+                    node_map[fx_node.name] = _node_id(child_path)
+                    continue
+                # Synthetic submodule (e.g. act_fn from mirror tracing)
+                node_id = _node_id(child_path)
+                node_map[fx_node.name] = node_id
+                label = target.replace("_", " ").title()
+                try:
+                    owner = getattr(graph, "owning_module", None)
+                    if owner:
+                        sub = dict(owner.named_modules()).get(target)
+                        if sub:
+                            label = type(sub).__name__
+                except Exception:
+                    pass
+                incoming = []
+                for arg_node in fx_node.all_input_nodes:
+                    src = node_map.get(arg_node.name, "@input")
+                    incoming.append({"sourceNodeId": src})
+                op_nodes.append({
+                    "id": node_id,
+                    "label": label,
+                    "namespace": parent_ns,
+                    "incomingEdges": incoming,
+                })
                 continue
 
             label = _fx_op_label(fx_node)
@@ -1105,11 +1188,204 @@ def build_graph(
     })
 
     # ── Wire edges ───────────────────────────────────────────────────────
+    # Pre-compute alias mapping for FX-expanded leaf modules:
+    # maps original module node_id → last FX op node_id
+    _fx_leaf_aliases: dict[str, str] = {}
+    _fx_leaf_first_map: dict[str, str] = {}
+    for path in fx_graphs:
+        if path in composite_modules:
+            continue
+        prefix = _node_id(path) + "/"
+        first_op = last_op = None
+        for n in nodes:
+            if n["id"].startswith(prefix):
+                if first_op is None:
+                    first_op = n["id"]
+                last_op = n["id"]
+        if last_op:
+            _fx_leaf_aliases[_node_id(path)] = last_op
+        if first_op:
+            _fx_leaf_first_map[path] = first_op
+
     _wire_sequential_edges(
         nodes, model, module_map, shapes, {}, skip_layers,
         parallel_ns_groups=parallel_ns_groups,
         call_graph=call_graph,
+        fx_leaf_aliases=_fx_leaf_aliases,
     )
+
+    # ── Fix up FX-expanded leaf module wiring ────────────────────────────
+    # The _wire_sequential_edges pass uses aliases so downstream modules
+    # connect from the original module id (which maps to the last FX op).
+    # Now fix the FX ops themselves: resolve @input placeholders to the
+    # actual predecessor.
+    node_by_id = {n["id"]: n for n in nodes}
+
+    # Also include the aliases so _find_last_node_for works
+    for alias_id, target_id in _fx_leaf_aliases.items():
+        if alias_id not in node_by_id and target_id in node_by_id:
+            node_by_id[alias_id] = node_by_id[target_id]
+
+    fx_leaf_first = _fx_leaf_first_map
+    fx_leaf_last = {p: _fx_leaf_aliases[_node_id(p)]
+                    for p in _fx_leaf_first_map if _node_id(p) in _fx_leaf_aliases}
+
+    # Find predecessor for each expanded leaf module.
+    # Walk up the module hierarchy to find call_graph edges that tell us
+    # what feeds into each expanded module.
+    leaf_sources: dict[str, list[str]] = {}
+    for comp_path, edges in call_graph.items():
+        for src, tgt in edges:
+            if tgt not in leaf_sources:
+                leaf_sources[tgt] = []
+            leaf_sources[tgt].append(src)
+
+    # For single-child composites (not in call_graph), propagate: if a
+    # composite is a target in leaf_sources, its only child inherits
+    # the same source.
+    for comp_path in sorted(composite_modules):
+        if comp_path in call_graph:
+            continue  # already handled
+        mod = module_map.get(comp_path)
+        if not mod:
+            continue
+        children = list(mod.named_children())
+        if len(children) == 1:
+            child_path = f"{comp_path}.{children[0][0]}"
+            if comp_path in leaf_sources and child_path not in leaf_sources:
+                leaf_sources[child_path] = leaf_sources[comp_path]
+
+    def _find_last_node_for(mod_path: str) -> str | None:
+        """Find the last node ID belonging to this module or its descendants."""
+        # Check FX-expanded leaf
+        if mod_path in fx_leaf_last:
+            return fx_leaf_last[mod_path]
+        # Check direct node
+        candidate = mod_path.replace(".", "/")
+        if candidate in node_by_id:
+            return candidate
+        # Check descendants (composite module)
+        prefix = mod_path.replace(".", "/") + "/"
+        last = None
+        for n in nodes:
+            if n["id"].startswith(prefix):
+                last = n["id"]
+        return last
+
+    def _resolve_predecessor(mod_path: str, depth: int = 0) -> str | None:
+        """Find the actual node ID that should feed into this module."""
+        if depth > 10:
+            return None  # prevent infinite recursion
+        if mod_path in leaf_sources:
+            for src_path in leaf_sources[mod_path]:
+                if src_path == "@input":
+                    # Composite's own input — resolve from parent
+                    parent = mod_path.rsplit(".", 1)[0] if "." in mod_path else ""
+                    if parent:
+                        return _resolve_predecessor(parent, depth + 1)
+                    return None
+                else:
+                    result = _find_last_node_for(src_path)
+                    if result:
+                        return result
+        # Not in leaf_sources — this module might be a composite whose
+        # predecessor is determined by sequential wiring. Check if any
+        # node inside this module was wired from something outside.
+        prefix = mod_path.replace(".", "/") + "/"
+        for n in nodes:
+            if n["id"].startswith(prefix) and "incomingEdges" in n:
+                for edge in n["incomingEdges"]:
+                    src = edge["sourceNodeId"]
+                    if not src.startswith(prefix) and src != "@input" and src in node_by_id:
+                        return src
+        return None
+
+    fx_leaf_predecessor: dict[str, str] = {}
+    for path in fx_leaf_first:
+        pred = _resolve_predecessor(path)
+        if pred:
+            fx_leaf_predecessor[path] = pred
+
+    # For modules without a resolved predecessor, find the last node
+    # BEFORE the first FX op in the ordered node list that's outside
+    # this module's namespace.
+    for path, first_id in fx_leaf_first.items():
+        if path in fx_leaf_predecessor:
+            continue
+        prefix = _node_id(path) + "/"
+        prev_id = None
+        for n in nodes:
+            if n["id"] == first_id:
+                break
+            if not n["id"].startswith(prefix):
+                prev_id = n["id"]
+        if prev_id and prev_id in node_by_id:
+            fx_leaf_predecessor[path] = prev_id
+
+    # 1. Resolve @input references in FX ops to actual predecessors
+    for path, pred_id in fx_leaf_predecessor.items():
+        prefix = _node_id(path) + "/"
+        for n in nodes:
+            if n["id"].startswith(prefix) and "incomingEdges" in n:
+                for edge in n["incomingEdges"]:
+                    if edge["sourceNodeId"] == "@input":
+                        edge["sourceNodeId"] = pred_id
+
+    # 2. Rewire downstream edges: replace alias references with actual
+    #    last FX op node IDs so the viewer can find real nodes.
+    for n in nodes:
+        if "incomingEdges" in n:
+            for edge in n["incomingEdges"]:
+                if edge["sourceNodeId"] in _fx_leaf_aliases:
+                    edge["sourceNodeId"] = _fx_leaf_aliases[edge["sourceNodeId"]]
+
+    # 3. Wire missing consumers: if an FX-expanded leaf's last op has
+    #    no consumer, find what should consume it from the call_graph
+    #    and add the edge.
+    all_sources_post = set()
+    for n in nodes:
+        for e in n.get("incomingEdges", []):
+            all_sources_post.add(e["sourceNodeId"])
+
+    def _find_entry_nodes(mod_path: str) -> list[dict]:
+        """Find entry-point nodes for a module (first children receiving @input)."""
+        mod_id = _node_id(mod_path)
+        # Direct node?
+        if mod_id in node_by_id and mod_id not in _fx_leaf_aliases:
+            return [node_by_id[mod_id]]
+        # FX-expanded leaf?
+        if mod_path in fx_leaf_first:
+            n = node_by_id.get(fx_leaf_first[mod_path])
+            return [n] if n else []
+        # Composite: find children that receive @input from call_graph
+        if mod_path in call_graph:
+            entries = []
+            for src, tgt in call_graph[mod_path]:
+                if src == "@input":
+                    entries.extend(_find_entry_nodes(tgt))
+            if entries:
+                return entries
+        # Fallback: first node inside this namespace
+        prefix = mod_id + "/"
+        for n in nodes:
+            if n["id"].startswith(prefix):
+                return [n]
+        return []
+
+    for path, last_id in fx_leaf_last.items():
+        if last_id in all_sources_post:
+            continue
+        # Find downstream from call_graph
+        for comp_path, edges in call_graph.items():
+            for src, tgt in edges:
+                if src == path:
+                    for target_node in _find_entry_nodes(tgt):
+                        if "incomingEdges" not in target_node:
+                            target_node["incomingEdges"] = []
+                        target_node["incomingEdges"].append(
+                            {"sourceNodeId": last_id}
+                        )
+                        all_sources_post.add(last_id)
 
     # ── Add layer group attributes ───────────────────────────────────────
     for container_path, groups in layer_group_map.items():
@@ -1196,6 +1472,7 @@ def _wire_sequential_edges(
     *,
     parallel_ns_groups: list[set[str]] | None = None,
     call_graph: dict[str, list[tuple[str, str]]] | None = None,
+    fx_leaf_aliases: dict[str, str] | None = None,
 ) -> None:
     """Wire edges between nodes that don't already have incoming edges.
 
@@ -1212,6 +1489,14 @@ def _wire_sequential_edges(
     node_by_id: dict[str, dict] = {n["id"]: n for n in nodes}
     parallel_ns_groups = parallel_ns_groups or []
     call_graph = call_graph or {}
+    fx_leaf_aliases = fx_leaf_aliases or {}
+
+    # Add FX-expanded leaf module aliases so _cg_find_sources can resolve
+    # them.  The alias maps orig_module_id → last_fx_op_id.
+    for alias_id, target_id in fx_leaf_aliases.items():
+        if alias_id not in node_by_id and target_id in node_by_id:
+            node_ids.add(alias_id)
+            node_by_id[alias_id] = node_by_id[target_id]
 
     # Build call-graph predecessor lookup at the node-ID level.
     # call_graph has paths like "a.b.c" → [("a.b.c.child1", "a.b.c.child2")].
