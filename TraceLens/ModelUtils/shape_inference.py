@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from TraceLens.ModelUtils.block_tree import BlockNode
     from TraceLens.ModelUtils.extract import ArchitectureSpec
 
+_log = logging.getLogger(__name__)
 
 DimExpr = int | str
 
@@ -751,6 +753,109 @@ class ShapeInferencer:
             source = inputs[0] if inputs else external_spec() or TensorSpec((), dtype)
             return TensorSpec(shape=(1, *source.shape), dtype=source.dtype)
 
+        if operation_label in {"split", "chunk", "unbind"}:
+            source = (
+                inputs[0]
+                if inputs
+                else TensorSpec(_default_hidden_shape(self.context), dtype)
+            )
+            dim_str = _detail_value(details, "dim")
+            dim = _int_dim(dim_str) if dim_str is not None else -1
+            if dim is None:
+                dim = -1
+            split_size = _detail_value(details, "split_size")
+            resolved_dim = dim % len(source.shape) if source.shape else 0
+            dim_val = source.shape[resolved_dim] if source.shape else None
+            if isinstance(dim_val, int):
+                if split_size is not None:
+                    if operation_label == "chunk":
+                        # For chunk, the recorded value is the number of chunks.
+                        try:
+                            n = int(split_size)
+                            if n > 0:
+                                return TensorSpec(
+                                    shape=_replace_dim(
+                                        source.shape, resolved_dim, dim_val // n
+                                    ),
+                                    dtype=source.dtype,
+                                )
+                        except (ValueError, TypeError):
+                            pass
+                    else:
+                        sizes = _parse_split_sizes(split_size, self.context.dims)
+                        if sizes:
+                            out_size = sizes[0]
+                            return TensorSpec(
+                                shape=_replace_dim(
+                                    source.shape, resolved_dim, out_size
+                                ),
+                                dtype=source.dtype,
+                            )
+                # Fallback: look at external_inputs for the split size name
+                for ext in external_inputs:
+                    resolved = _resolve_dim_name(ext, self.context.dims)
+                    if resolved is not None and isinstance(resolved, int):
+                        return TensorSpec(
+                            shape=_replace_dim(source.shape, resolved_dim, resolved),
+                            dtype=source.dtype,
+                        )
+            return source
+
+        if operation_label in {"concat", "stack"}:
+            if not inputs:
+                return TensorSpec(_default_hidden_shape(self.context), dtype)
+            if operation_label == "stack":
+                base = inputs[0]
+                return TensorSpec(shape=(len(inputs), *base.shape), dtype=base.dtype)
+            # Concat: sum the last dim when all inputs have the same rank
+            dim_str = _detail_value(details, "dim")
+            dim = _int_dim(dim_str) if dim_str is not None else -1
+            if dim is None:
+                dim = -1
+            base = max(inputs, key=_broadcast_rank)
+            resolved_dim = dim % len(base.shape) if base.shape else 0
+            concat_sizes = []
+            for inp in inputs:
+                if inp.shape and len(inp.shape) > resolved_dim:
+                    concat_sizes.append(inp.shape[resolved_dim])
+            if concat_sizes and all(isinstance(s, int) for s in concat_sizes):
+                total = sum(concat_sizes)
+                return TensorSpec(
+                    shape=_replace_dim(base.shape, resolved_dim, total),
+                    dtype=base.dtype,
+                )
+            return base
+
+        if operation_label in {"transpose", "permute"}:
+            source = (
+                inputs[0]
+                if inputs
+                else TensorSpec(_default_hidden_shape(self.context), dtype)
+            )
+            if operation_label == "transpose" and len(source.shape) >= 2:
+                dim0_str = _detail_value(details, "dim0")
+                dim1_str = _detail_value(details, "dim1")
+                dim0 = _int_dim(dim0_str) if dim0_str is not None else -2
+                dim1 = _int_dim(dim1_str) if dim1_str is not None else -1
+                if dim0 is not None and dim1 is not None:
+                    n = len(source.shape)
+                    dim0 = dim0 % n
+                    dim1 = dim1 % n
+                    shape = list(source.shape)
+                    shape[dim0], shape[dim1] = shape[dim1], shape[dim0]
+                    return TensorSpec(shape=tuple(shape), dtype=source.dtype)
+            return source
+
+        if operation_label in {"matmul", "batchmatmul", "mm", "bmm"}:
+            if len(inputs) >= 2:
+                a, b = inputs[0], inputs[1]
+                if a.shape and b.shape:
+                    out_shape = (*a.shape[:-1], b.shape[-1])
+                    return TensorSpec(shape=out_shape, dtype=a.dtype)
+            if inputs:
+                return inputs[0]
+            return TensorSpec(_default_hidden_shape(self.context), dtype)
+
         if operation_label in {"cast", "contiguous", "squeeze", "expand"}:
             source = (
                 inputs[0]
@@ -921,6 +1026,13 @@ class ShapeInferencer:
             return TensorSpec(shape=_replace_last_dim(in_shape, experts), dtype=dtype)
 
         if node.operation == OperationKind.TORCH_FUNCTIONAL:
+            _log.warning(
+                "No shape inference rule for %s (label=%r, class=%r); "
+                "passing through input shape",
+                node.id,
+                node.label,
+                node.metadata.get("class_name"),
+            )
             if inputs:
                 return inputs[0]
             hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
@@ -940,8 +1052,24 @@ class ShapeInferencer:
             )
 
         if inputs:
+            _log.warning(
+                "No shape inference rule for %s (label=%r, class=%r, kind=%s); "
+                "passing through input shape",
+                node.id,
+                node.label,
+                node.metadata.get("class_name"),
+                node.operation,
+            )
             return inputs[0]
 
+        _log.warning(
+            "No shape inference rule for %s (label=%r, class=%r, kind=%s); "
+            "defaulting to (B, S, H)",
+            node.id,
+            node.label,
+            node.metadata.get("class_name"),
+            node.operation,
+        )
         hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
         return TensorSpec(
             shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
@@ -1163,6 +1291,44 @@ def _replace_last_dim(shape: tuple[DimExpr, ...], last: DimExpr) -> tuple[DimExp
     if not shape:
         return (Symbol.BATCH.value, Symbol.SEQ.value, last)
     return (*shape[:-1], last)
+
+
+def _replace_dim(
+    shape: tuple[DimExpr, ...], dim: int, value: DimExpr
+) -> tuple[DimExpr, ...]:
+    """Return *shape* with position *dim* replaced by *value*."""
+    lst = list(shape)
+    if 0 <= dim < len(lst):
+        lst[dim] = value
+    return tuple(lst)
+
+
+def _parse_split_sizes(
+    text: str, dims: dict[str, DimExpr]
+) -> list[DimExpr] | None:
+    """Parse a split_size_or_sections detail like ``[qkv_dim] * 3`` or ``2048``."""
+    text = text.strip()
+    # "[name] * N" pattern
+    m = re.match(r"\[(\w+)\]\s*\*\s*(\d+)", text)
+    if m:
+        name, count = m.group(1), int(m.group(2))
+        resolved = _resolve_dim_name(name, dims)
+        if resolved is not None:
+            return [resolved] * count
+        return None
+    # Plain integer
+    try:
+        return [int(text)]
+    except (ValueError, TypeError):
+        pass
+    # Comma-separated integers
+    parts = text.split(",")
+    if len(parts) > 1:
+        try:
+            return [int(p.strip()) for p in parts]
+        except (ValueError, TypeError):
+            pass
+    return None
 
 
 def _config_dtype(config: dict[str, Any]) -> str:

@@ -1729,6 +1729,31 @@ class _ForwardOperationExtractor:
             details.append("dtype: torch.float32")
         if call_name in {"view", "reshape", "expand"}:
             details.append("shape: " + ", ".join(ast.unparse(arg) for arg in node.args))
+        if call_name in {"split", "chunk"}:
+            # For torch.split(tensor, split_size, dim) the tensor is arg0;
+            # for tensor.split(split_size, dim) there is no tensor arg.
+            is_method = isinstance(node.func, ast.Attribute) and not (
+                isinstance(node.func.value, ast.Name) and node.func.value.id == "torch"
+            )
+            size_idx = 0 if is_method else 1
+            dim_idx = size_idx + 1
+            if len(node.args) > size_idx:
+                details.append(f"split_size: {ast.unparse(node.args[size_idx])}")
+            if len(node.args) > dim_idx:
+                details.append(f"dim: {ast.unparse(node.args[dim_idx])}")
+            for keyword in node.keywords:
+                if keyword.arg == "dim":
+                    details.append(f"dim: {ast.unparse(keyword.value)}")
+                elif keyword.arg in {"split_size_or_sections", "chunks"}:
+                    details.append(f"split_size: {ast.unparse(keyword.value)}")
+        if call_name == "transpose":
+            is_method = isinstance(node.func, ast.Attribute) and not (
+                isinstance(node.func.value, ast.Name) and node.func.value.id == "torch"
+            )
+            arg_start = 0 if is_method else 1
+            if len(node.args) > arg_start + 1:
+                details.append(f"dim0: {ast.unparse(node.args[arg_start])}")
+                details.append(f"dim1: {ast.unparse(node.args[arg_start + 1])}")
         if call_name in _DIM_DETAIL_METHODS:
             if node.args:
                 details.append(f"dim: {ast.unparse(node.args[0])}")

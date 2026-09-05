@@ -568,3 +568,89 @@ def test_kimi_router_export_uses_real_ops_and_topk_shapes():
         for item in operators
         if item["name"].startswith("@op_")
     )
+
+
+# ---------------------------------------------------------------------------
+# Direct shape inference tests for newly added operation handlers
+# ---------------------------------------------------------------------------
+
+from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+from TraceLens.ModelUtils.shape_inference import TensorSpec
+
+
+def _make_inferencer(**dims: int) -> ShapeInferencer:
+    """Create a minimal ShapeInferencer with custom dims."""
+    spec = ArchitectureSpec(
+        name="Test",
+        model_type="test",
+        hidden_size=dims.get("hidden_size", 4096),
+        raw_config={"hidden_size": dims.get("hidden_size", 4096)},
+    )
+    ctx = ShapeContext.from_spec(spec)
+    for key, val in dims.items():
+        ctx.dims[key] = val
+    return ShapeInferencer(spec, context=ctx)
+
+
+def _node(label: str, *, details: list[str] | None = None,
+          external_inputs: list[str] | None = None,
+          operation: OperationKind = OperationKind.TORCH_FUNCTIONAL) -> ModelGraphNode:
+    meta: dict = {"class_name": label}
+    if details:
+        meta["details"] = details
+    if external_inputs:
+        meta["external_inputs"] = external_inputs
+    return ModelGraphNode(id="n1", kind=NodeKind.LEAF, label=label,
+                          operation=operation, metadata=meta)
+
+
+def test_split_shape_inference_with_split_size():
+    inf = _make_inferencer(qkv_dim=2730)
+    inp = TensorSpec(shape=("B", "S", 8192), dtype="float16")
+    node = _node("Split", details=["split_size: [self.qkv_dim] * 3", "dim: -1"],
+                 external_inputs=["qkv_dim"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S", 2730)
+
+
+def test_split_shape_inference_fallback_to_external_inputs():
+    inf = _make_inferencer(qkv_dim=2730)
+    inp = TensorSpec(shape=("B", "S", 8192), dtype="float16")
+    node = _node("Split", details=["dim: -1"], external_inputs=["qkv_dim"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S", 2730)
+
+
+def test_chunk_shape_inference():
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 4096), dtype="float16")
+    node = _node("Chunk", details=["split_size: 2", "dim: -1"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    # chunk(chunks=2, dim=-1) divides last dim: 4096 / 2 = 2048
+    assert result.shape == ("B", "S", 2048)
+
+
+def test_concat_shape_inference():
+    inf = _make_inferencer()
+    a = TensorSpec(shape=("B", "S", 1024), dtype="float16")
+    b = TensorSpec(shape=("B", "S", 2048), dtype="float16")
+    node = _node("Concat", details=["dim: -1"])
+    result = inf._infer_node_output(node, [a, b], root=None)
+    assert result.shape == ("B", "S", 3072)
+
+
+def test_transpose_shape_inference():
+    inf = _make_inferencer()
+    inp = TensorSpec(shape=("B", "S", 32, 128), dtype="float16")
+    node = _node("Transpose", details=["dim0: 1", "dim1: 2"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", 32, "S", 128)
+
+
+def test_matmul_shape_inference():
+    inf = _make_inferencer()
+    a = TensorSpec(shape=("B", "S", 4096), dtype="float16")
+    b = TensorSpec(shape=(4096, 1024), dtype="float16")
+    node = _node("MatMul")
+    result = inf._infer_node_output(node, [a, b], root=None)
+    assert result.shape == ("B", "S", 1024)
