@@ -120,3 +120,4 @@ cmake-build-*/
 *.dll
 *.dylib
 .claude/settings.json
+*.html
