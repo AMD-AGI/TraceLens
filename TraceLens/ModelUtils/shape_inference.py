@@ -415,6 +415,38 @@ class ShapeInferencer:
         self._forward_input_specs: set[int] = set()
         # Guard against infinite recursion during forward introspection.
         self._introspecting: set[str] = set()
+        # Meta-device traced shapes (module path -> symbolic shape).
+        self._meta_shapes: dict[str, TensorSpec] = {}
+
+    def load_meta_shapes(
+        self,
+        checkpoint: str | Path,
+        *,
+        seq_len: int = 128,
+        batch_size: int = 1,
+    ) -> bool:
+        """Run a meta-device forward pass and store per-module shapes.
+
+        Returns *True* when shapes were successfully captured.
+        """
+        from TraceLens.ModelUtils.meta_trace import trace_meta_shapes, symbolise_meta_shape
+
+        raw = trace_meta_shapes(
+            checkpoint,
+            config=self.spec.raw_config,
+            seq_len=seq_len,
+            batch_size=batch_size,
+        )
+        if raw is None:
+            return False
+        for module_path, shape in raw.items():
+            sym = symbolise_meta_shape(
+                shape, batch_size=batch_size, seq_len=seq_len
+            )
+            self._meta_shapes[module_path] = TensorSpec(
+                shape=sym, dtype=self.context.dtype
+            )
+        return bool(self._meta_shapes)
 
     def infer_model_graph(
         self, graph: ModelGraph, *, root: BlockNode | None = None
@@ -735,6 +767,11 @@ class ShapeInferencer:
             return TensorSpec(
                 shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
             )
+
+        # Meta-device ground-truth shapes (highest priority for real modules).
+        meta_spec = self._lookup_meta_shape(node)
+        if meta_spec is not None:
+            return meta_spec
 
         operation_label = (node.label or class_name).strip().lower()
         details = [str(item) for item in node.metadata.get("details", [])]
@@ -1164,6 +1201,25 @@ class ShapeInferencer:
         return TensorSpec(
             shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
         )
+
+    # ------------------------------------------------------------------
+    # Meta-device shape lookup
+    # ------------------------------------------------------------------
+
+    def _lookup_meta_shape(
+        self, node: ModelGraphNode
+    ) -> TensorSpec | None:
+        """Return meta-traced shape if available for this node's module."""
+        if not self._meta_shapes:
+            return None
+        attr = node.metadata.get("attr_name") or ""
+        if attr and attr in self._meta_shapes:
+            return self._meta_shapes[attr]
+        # Try matching via class_name + layer index patterns.
+        for part in node.id.split(":"):
+            if part in self._meta_shapes:
+                return self._meta_shapes[part]
+        return None
 
     # ------------------------------------------------------------------
     # Forward introspection: simulate shape flow through forward_operations

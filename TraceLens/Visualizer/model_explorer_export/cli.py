@@ -158,6 +158,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Also write flat operator export JSON with inferred tensor shapes",
     )
+    parser.add_argument(
+        "--meta-shapes",
+        action="store_true",
+        help=(
+            "Run a meta-device forward pass (requires torch + transformers) "
+            "to capture ground-truth output shapes for nn.Module layers"
+        ),
+    )
     return parser
 
 
@@ -241,6 +249,9 @@ def main(argv: list[str] | None = None) -> int:
             include_shapes=args.shapes,
             include_operator_export=args.operators_json is not None,
             inline_expansion=args.inline_expansion,
+            meta_shapes_checkpoint=(
+                str(checkpoint) if args.meta_shapes else None
+            ),
         )
         if not payload["graphCollections"][0]["graphs"]:
             raise ValueError(

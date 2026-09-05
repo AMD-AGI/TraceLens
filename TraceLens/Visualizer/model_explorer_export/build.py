@@ -37,12 +37,15 @@ def build_model_explorer_payload(
     include_shapes: bool = True,
     include_operator_export: bool = False,
     inline_expansion: bool = True,
+    meta_shapes_checkpoint: str | None = None,
 ) -> dict[str, Any]:
     """Build a single merged Model Explorer graph with in-place namespace expansion."""
     resolved_basic_ops = basic_ops or spec.basic_ops
     inferencer = (
         ShapeInferencer(spec) if include_shapes or include_operator_export else None
     )
+    if inferencer is not None and meta_shapes_checkpoint is not None:
+        inferencer.load_meta_shapes(meta_shapes_checkpoint)
     graph = build_merged_model_graph(
         spec,
         basic_ops=_export_basic_ops(resolved_basic_ops),

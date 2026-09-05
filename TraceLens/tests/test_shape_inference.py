@@ -21,8 +21,10 @@ from TraceLens.ModelUtils.shape_inference import (
     ModuleDimRegistry,
     ShapeContext,
     ShapeInferencer,
+    TensorSpec,
     build_operator_export,
 )
+from TraceLens.ModelUtils.meta_trace import symbolise_meta_shape
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -725,3 +727,40 @@ def test_introspect_forward_shape_simulates_ops():
     assert result is not None
     # The view should pass through since shape resolves to same dims
     assert len(result.shape) >= 2
+
+
+# ── Meta-device shape utilities ──────────────────────────────────────────────
+
+def test_symbolise_meta_shape_replaces_batch_and_seq():
+    shape = (1, 128, 4096)
+    sym = symbolise_meta_shape(shape, batch_size=1, seq_len=128)
+    assert sym == ("B", "S", 4096)
+
+
+def test_symbolise_meta_shape_no_match():
+    shape = (4096, 1024)
+    sym = symbolise_meta_shape(shape, batch_size=1, seq_len=128)
+    # 1024 is neither batch nor seq; 4096 is neither
+    assert sym == (4096, 1024)
+
+
+def test_meta_shape_lookup_uses_attr_name():
+    """_lookup_meta_shape should find shapes by node attr_name."""
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+
+    spec = ArchitectureSpec(
+        name="Test", model_type="test", hidden_size=4096,
+        raw_config={"hidden_size": 4096},
+    )
+    inf = ShapeInferencer(spec)
+    inf._meta_shapes["model.layers.0.self_attn.q_proj"] = TensorSpec(
+        shape=("B", "S", 512), dtype="float16"
+    )
+    node = ModelGraphNode(
+        id="test:q", kind=NodeKind.LEAF, label="Linear",
+        operation=OperationKind.NN_MODULE,
+        metadata={"attr_name": "model.layers.0.self_attn.q_proj"},
+    )
+    result = inf._lookup_meta_shape(node)
+    assert result is not None
+    assert result.shape == ("B", "S", 512)
