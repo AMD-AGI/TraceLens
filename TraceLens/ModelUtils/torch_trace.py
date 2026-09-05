@@ -27,7 +27,7 @@ from typing import Any
 
 import torch
 import torch.fx
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 
 _log = logging.getLogger(__name__)
 
@@ -70,7 +70,10 @@ def _instantiate_meta(checkpoint: str | Path) -> tuple[Any, Any]:
     _patch_config(config)
 
     with torch.device("meta"):
-        model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+        try:
+            model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+        except ValueError:
+            model = AutoModel.from_config(config, trust_remote_code=True)
     model.eval()
     return model, config
 
