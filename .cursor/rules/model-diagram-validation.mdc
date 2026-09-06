@@ -1,0 +1,38 @@
+---
+description: Validation checklist for generated model architecture diagrams
+globs: TraceLens/ModelUtils/torch_trace.py
+alwaysApply: false
+---
+
+# Model Diagram Validation
+
+When generating or modifying model diagrams, validate every node and edge:
+
+## Input Nodes
+- Every synthetic input node must connect to ALL consumers (children that receive external input)
+- If a module has >1 input port, create labeled synthetic input nodes using the port names from the module's forward() signature
+- Input nodes must have shape annotations when the module contains subgraphs
+
+## Output Nodes
+- Every synthetic output node must connect from exactly one operation or synthetic node
+- If a module has >1 output, create labeled synthetic output nodes
+- Output nodes must have shape annotations when the module contains subgraphs
+
+## Expanded Modules
+- Custom (non-torch.nn) leaf modules must be FX-expanded into their actual tensor operations
+- Weight access (get_attr) and dtype access (getattr) nodes must be hidden
+- Child modules not referenced by a parent's FX graph (inlined by FX) must be skipped
+- FX-expanded modules must have synthetic @input and @output nodes inside their namespace
+
+## Edge Validation
+- Every edge must correspond to actual dataflow in the source code or model graph
+- No cross-boundary edges between unrelated modules (e.g. vision ↔ language model loops)
+- No broken edges (source node ID must exist in the graph)
+- FX-derived edges override call-graph/sequential wiring for composite children
+- When a composite's output rewiring runs, only rewire edges that still point to the original source
+
+## Structural Rules
+- ModuleList/Sequential containers do not get synthetic I/O nodes
+- Top-level wrapper modules (language_model, visual) DO get I/O nodes
+- I/O nodes use the namespace where children actually live, not a deeper sub-namespace
+- Parallel layer groups (e.g. 3 types of decoder blocks) display as parallel branches, not sequential

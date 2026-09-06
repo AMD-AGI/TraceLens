@@ -1438,15 +1438,16 @@ def build_graph(
     # Rebuild node lookup after all wiring fixups
     node_by_id = {n["id"]: n for n in nodes}
 
-    # Collect all edges that target each node (for output rewiring)
-    consumers_of: dict[str, list[tuple[dict, dict]]] = {}  # src_id → [(node, edge)]
-    for n in nodes:
-        for e in n.get("incomingEdges", []):
-            consumers_of.setdefault(e["sourceNodeId"], []).append((n, e))
-
-    for comp_path in sorted(composite_modules):
+    for comp_path in sorted(composite_modules, key=lambda p: (-p.count('.'), p)):
         if _should_skip(comp_path):
             continue
+
+        # Rebuild consumers_of each iteration so child I/O nodes
+        # created in prior iterations are visible to parent composites
+        consumers_of = {}
+        for n in nodes:
+            for e in n.get("incomingEdges", []):
+                consumers_of.setdefault(e["sourceNodeId"], []).append((n, e))
         # Skip ModuleList/Sequential containers — they are structural,
         # not meaningful submodule boundaries for I/O.
         if comp_path in container_set:
@@ -1510,34 +1511,65 @@ def build_graph(
         n_inputs = len(unique_ext_src_sets)
 
         # ── Determine output children ─────────────────────────────────
-        # Children whose output is consumed by nodes OUTSIDE this module
+        # Prefer FX graph output nodes (ground truth from tracing)
         output_child_ids: list[str] = []
-        for cn in child_nodes:
-            cid = cn["id"]
-            if cid in consumers_of:
-                for consumer_node, _ in consumers_of[cid]:
-                    if not consumer_node["id"].startswith(child_prefix):
-                        if cid not in output_child_ids:
-                            output_child_ids.append(cid)
-                        break
+        if comp_path in fx_output_ids:
+            for out_id in fx_output_ids[comp_path]:
+                if out_id in node_by_id and out_id not in output_child_ids:
+                    output_child_ids.append(out_id)
 
-        # Also check FX leaf aliases: if an alias maps to a child node
-        for alias_id, target_id in _fx_leaf_aliases.items():
-            if target_id.startswith(child_prefix) and alias_id in consumers_of:
-                for consumer_node, _ in consumers_of[alias_id]:
-                    if not consumer_node["id"].startswith(child_prefix):
-                        if target_id not in output_child_ids:
-                            output_child_ids.append(target_id)
-                        break
+        # Otherwise, find children consumed by nodes OUTSIDE this module
+        if not output_child_ids:
+            for cn in child_nodes:
+                cid = cn["id"]
+                if cid in consumers_of:
+                    for consumer_node, edge in consumers_of[cid]:
+                        # Guard: only count if edge still points to this node
+                        # (a parent composite's output rewiring may have changed it)
+                        if (edge["sourceNodeId"] == cid
+                                and not consumer_node["id"].startswith(child_prefix)):
+                            if cid not in output_child_ids:
+                                output_child_ids.append(cid)
+                            break
+
+            # Also check FX leaf aliases: if an alias maps to a child node
+            for alias_id, target_id in _fx_leaf_aliases.items():
+                if target_id.startswith(child_prefix) and alias_id in consumers_of:
+                    for consumer_node, edge in consumers_of[alias_id]:
+                        if (edge["sourceNodeId"] == alias_id
+                                and not consumer_node["id"].startswith(child_prefix)):
+                            if target_id not in output_child_ids:
+                                output_child_ids.append(target_id)
+                            break
 
         n_outputs = len(output_child_ids)
 
-        # If no output children found via external consumers, use the
-        # FX graph's output nodes (these are the actual computation output)
-        if n_outputs == 0 and comp_path in fx_output_ids:
-            for out_id in fx_output_ids[comp_path]:
-                if out_id not in output_child_ids:
-                    output_child_ids.append(out_id)
+        # If still no output children, use call-graph terminal nodes
+        # (nodes that are targets but never sources within the composite)
+        if n_outputs == 0 and comp_path in call_graph:
+            targets = {t for _, t in call_graph[comp_path]}
+            sources = {s for s, _ in call_graph[comp_path]}
+            terminals = targets - sources
+            for term_path in terminals:
+                term_id = _node_id(term_path)
+                if term_id in node_by_id and term_id not in output_child_ids:
+                    output_child_ids.append(term_id)
+            n_outputs = len(output_child_ids)
+
+        # Last resort: use child nodes that have no consumers as outputs
+        if n_outputs == 0 and child_nodes:
+            for cn in reversed(child_nodes):
+                cid = cn["id"]
+                attrs = {a["key"]: a["value"] for a in cn.get("attrs", [])}
+                if attrs.get("synthetic"):
+                    continue
+                has_consumer = any(
+                    e["sourceNodeId"] == cid
+                    for n2 in nodes for e in n2.get("incomingEdges", [])
+                    if n2["id"] != cid
+                )
+                if not has_consumer and cid not in output_child_ids:
+                    output_child_ids.append(cid)
             n_outputs = len(output_child_ids)
 
         # ── Create Input node(s) ──────────────────────────────────────
@@ -1605,6 +1637,15 @@ def build_graph(
                     for e in cn["incomingEdges"]:
                         if not e["sourceNodeId"].startswith(child_prefix):
                             e["sourceNodeId"] = input_id
+                    # Deduplicate edges after rewiring (multiple distinct
+                    # external sources may collapse to the same @input)
+                    seen_srcs: set[str] = set()
+                    deduped: list[dict] = []
+                    for e in cn["incomingEdges"]:
+                        if e["sourceNodeId"] not in seen_srcs:
+                            seen_srcs.add(e["sourceNodeId"])
+                            deduped.append(e)
+                    cn["incomingEdges"] = deduped
 
         # ── Create Output node(s) ─────────────────────────────────────
         if n_outputs >= 1:
@@ -1788,6 +1829,20 @@ def build_graph(
                         desc += f" + {mlp_type}"
                     fact_sheet += f"\n  {group.count}x {group.class_name}: {desc}"
                     fact_sheet += f"\n    layers: {group.indices}"
+
+    # ── Final edge deduplication ────────────────────────────────────────
+    for n in nodes:
+        edges = n.get("incomingEdges")
+        if edges and len(edges) > 1:
+            seen_e: set[str] = set()
+            deduped_e: list[dict] = []
+            for e in edges:
+                sid = e["sourceNodeId"]
+                if sid not in seen_e:
+                    seen_e.add(sid)
+                    deduped_e.append(e)
+            if len(deduped_e) < len(edges):
+                n["incomingEdges"] = deduped_e
 
     return {
         "name": model_name,
