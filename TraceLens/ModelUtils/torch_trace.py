@@ -521,9 +521,16 @@ def _fx_op_label(node: torch.fx.Node) -> str:
 
 
 def _is_interesting_op(node: torch.fx.Node) -> bool:
-    """Keep all tensor operations (fully expanded view)."""
-    if node.op in ("placeholder", "output"):
+    """Keep tensor computation operations; skip weights, placeholders, dtype access."""
+    if node.op in ("placeholder", "output", "get_attr"):
         return False
+    # Filter getattr() calls — these just access tensor properties like dtype
+    if node.op == "call_function":
+        target = node.target
+        if target is getattr or (
+            hasattr(target, "__name__") and target.__name__ == "getattr"
+        ):
+            return False
     return True
 
 
@@ -902,6 +909,12 @@ def build_graph(
 
     # ── Try torch.fx on composite modules to get internal ops ────────────
     fx_graphs: dict[str, list[dict]] = {}
+    # Children referenced by call_module in parent's FX graph
+    fx_referenced_children: set[str] = set()
+    # FX-derived incoming edges for call_module children
+    fx_child_edges: dict[str, list[dict]] = {}  # child_path → [edge dicts]
+    # FX graph output node IDs for each composite
+    fx_output_ids: dict[str, list[str]] = {}  # comp_path → [output node IDs]
 
     for path in module_order:
         if path not in composite_modules:
@@ -925,12 +938,30 @@ def build_graph(
             if not _is_interesting_op(fx_node):
                 if fx_node.op == "placeholder":
                     node_map[fx_node.name] = "@input"
+                # Capture output node args for composite output tracking
+                if fx_node.op == "output":
+                    out_ids = []
+                    for arg in fx_node.all_input_nodes:
+                        nid = node_map.get(arg.name)
+                        if nid:
+                            out_ids.append(nid)
+                    if out_ids:
+                        fx_output_ids[path] = out_ids
                 continue
 
             if fx_node.op == "call_module":
                 target = str(fx_node.target)
                 child_path = f"{path}.{target}"
                 node_map[fx_node.name] = _node_id(child_path)
+                fx_referenced_children.add(child_path)
+                # Record incoming edges from the FX graph
+                child_incoming = []
+                for arg in fx_node.all_input_nodes:
+                    src = node_map.get(arg.name)
+                    if src:
+                        child_incoming.append({"sourceNodeId": src})
+                if child_incoming:
+                    fx_child_edges[child_path] = child_incoming
                 continue
 
             label = _fx_op_label(fx_node)
@@ -1105,6 +1136,12 @@ def build_graph(
         if path in fx_graphs:
             continue
 
+        # Skip child modules not referenced by parent's FX graph — the FX
+        # ops already cover their computation (e.g. act_fn inlined as silu)
+        parent = path.rsplit(".", 1)[0] if "." in path else ""
+        if parent in fx_graphs and path not in fx_referenced_children:
+            continue
+
         # Leaf module — add as a node
         attrs = [
             {"key": "class", "value": type(mod).__name__},
@@ -1123,6 +1160,11 @@ def build_graph(
         }
         if shape_str:
             node["outputsMetadata"] = _output_metadata(shape_str, dtype)
+
+        # Apply FX-derived edges if this child is referenced by parent's
+        # FX graph — these override the call_graph/sequential wiring.
+        if path in fx_child_edges:
+            node["incomingEdges"] = fx_child_edges[path]
 
         nodes.append(node)
         edges_from[path] = node_id
@@ -1405,6 +1447,10 @@ def build_graph(
     for comp_path in sorted(composite_modules):
         if _should_skip(comp_path):
             continue
+        # Skip ModuleList/Sequential containers — they are structural,
+        # not meaningful submodule boundaries for I/O.
+        if comp_path in container_set:
+            continue
 
         mod = module_map.get(comp_path)
         if not mod:
@@ -1486,6 +1532,14 @@ def build_graph(
 
         n_outputs = len(output_child_ids)
 
+        # If no output children found via external consumers, use the
+        # FX graph's output nodes (these are the actual computation output)
+        if n_outputs == 0 and comp_path in fx_output_ids:
+            for out_id in fx_output_ids[comp_path]:
+                if out_id not in output_child_ids:
+                    output_child_ids.append(out_id)
+            n_outputs = len(output_child_ids)
+
         # ── Create Input node(s) ──────────────────────────────────────
         if n_inputs >= 1:
             # Always create an internal input node inside the module
@@ -1522,6 +1576,12 @@ def build_graph(
                 }
                 nodes.append(ext_input_node)
                 node_by_id[ext_input_id] = ext_input_node
+                # Register in consumers_of so later composites' output
+                # rewiring can update these sources
+                for e in ext_input_node["incomingEdges"]:
+                    consumers_of.setdefault(e["sourceNodeId"], []).append(
+                        (ext_input_node, e)
+                    )
                 input_node["incomingEdges"] = [{"sourceNodeId": ext_input_id}]
             else:
                 # Single input: internal node gets the external sources
@@ -1531,6 +1591,12 @@ def build_graph(
 
             nodes.append(input_node)
             node_by_id[input_id] = input_node
+            # Register single-input node in consumers_of too
+            if n_inputs == 1:
+                for e in input_node["incomingEdges"]:
+                    consumers_of.setdefault(e["sourceNodeId"], []).append(
+                        (input_node, e)
+                    )
 
             # Rewire input children: replace external sources with input_id
             for cid in input_child_ids:
@@ -1574,18 +1640,107 @@ def build_graph(
                 wire_output_id = output_id
 
             # Rewire consumers: nodes outside this module that consumed
-            # any output child should now consume the (ext) output node
+            # any output child should now consume the (ext) output node.
+            # Guard: only rewire if the edge still points to the original
+            # source (it may have been rewired by a prior composite's I/O).
             for oid in output_child_ids:
                 if oid in consumers_of:
                     for consumer_node, edge in consumers_of[oid]:
-                        if not consumer_node["id"].startswith(child_prefix):
+                        if (not consumer_node["id"].startswith(child_prefix)
+                                and edge["sourceNodeId"] == oid):
                             edge["sourceNodeId"] = wire_output_id
                 # Also check alias consumers
                 for alias_id, target_id in _fx_leaf_aliases.items():
                     if target_id == oid and alias_id in consumers_of:
                         for consumer_node, edge in consumers_of[alias_id]:
-                            if not consumer_node["id"].startswith(child_prefix):
+                            if (not consumer_node["id"].startswith(child_prefix)
+                                    and edge["sourceNodeId"] == alias_id):
                                 edge["sourceNodeId"] = wire_output_id
+
+    # ── Add I/O nodes for FX-expanded leaf modules ───────────────────
+    # These aren't composite modules, but they have FX ops that need
+    # input/output boundary nodes.
+    node_by_id = {n["id"]: n for n in nodes}
+    consumers_of = {}
+    for n in nodes:
+        for e in n.get("incomingEdges", []):
+            consumers_of.setdefault(e["sourceNodeId"], []).append((n, e))
+
+    for path in fx_graphs:
+        if path in composite_modules:
+            continue  # already handled above
+        if _should_skip(path):
+            continue
+
+        prefix = _node_id(path) + "/"
+        fx_nodes = [n for n in nodes if n["id"].startswith(prefix)]
+        if not fx_nodes:
+            continue
+
+        # Find the namespace these FX ops live in
+        fx_ns = fx_nodes[0].get("namespace", "")
+
+        # Input node: find FX ops whose sources come from outside
+        first_id = fx_nodes[0]["id"]
+        ext_srcs: list[str] = []
+        seen_ext: set[str] = set()
+        for fn in fx_nodes:
+            for e in fn.get("incomingEdges", []):
+                src = e["sourceNodeId"]
+                if not src.startswith(prefix) and src not in seen_ext:
+                    seen_ext.add(src)
+                    ext_srcs.append(src)
+
+        if ext_srcs:
+            input_id = _node_id(path) + "/@input"
+            input_node = {
+                "id": input_id,
+                "label": "Input",
+                "namespace": fx_ns,
+                "attrs": [{"key": "synthetic", "value": "input"}],
+                "style": _STYLE_INPUT,
+                "incomingEdges": [{"sourceNodeId": s} for s in ext_srcs],
+            }
+            nodes.append(input_node)
+            node_by_id[input_id] = input_node
+            # Rewire FX ops to use input node
+            for fn in fx_nodes:
+                for e in fn.get("incomingEdges", []):
+                    if not e["sourceNodeId"].startswith(prefix):
+                        e["sourceNodeId"] = input_id
+
+        # Output node: find the last FX op(s)
+        last_id = fx_nodes[-1]["id"]
+        # Check if the last op has external consumers
+        has_ext_consumer = last_id in consumers_of
+        if not has_ext_consumer:
+            # Check aliases
+            orig_id = _node_id(path)
+            has_ext_consumer = orig_id in consumers_of
+
+        output_id = _node_id(path) + "/@output"
+        output_node = {
+            "id": output_id,
+            "label": "Output",
+            "namespace": fx_ns,
+            "attrs": [{"key": "synthetic", "value": "output"}],
+            "style": _STYLE_OUTPUT,
+            "incomingEdges": [{"sourceNodeId": last_id}],
+        }
+        nodes.append(output_node)
+        node_by_id[output_id] = output_node
+
+        # Rewire external consumers of last FX op to use output node
+        if last_id in consumers_of:
+            for consumer_node, edge in consumers_of[last_id]:
+                if not consumer_node["id"].startswith(prefix):
+                    edge["sourceNodeId"] = output_id
+        # Also check alias
+        orig_id = _node_id(path)
+        if orig_id in consumers_of:
+            for consumer_node, edge in consumers_of[orig_id]:
+                if not consumer_node["id"].startswith(prefix):
+                    edge["sourceNodeId"] = output_id
 
     # ── Add layer group attributes ───────────────────────────────────────
     for container_path, groups in layer_group_map.items():
