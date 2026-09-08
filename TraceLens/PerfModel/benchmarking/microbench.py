@@ -41,6 +41,7 @@ Examples:
 import argparse
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -167,8 +168,30 @@ def _bpe(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
 
 
+# Trailing words in a device string that name no product model.
+_MARKETING_SUFFIXES = frozenset({"graphics", "series", "oem", "edition"})
+
+
 def _arch_product_name(gpu_name: str, mem_gb: float) -> str:
     """Short name to match arch JSONs like `MI300X.json` (e.g. 'MI300X')."""
+    # Instinct parts name the model in the device string. Match it before the
+    # memory tier below, which cannot tell MI325X (256 GB) from MI300X.
+    match = re.search(r"\bMI\d{3}[A-Z]?\b", gpu_name, re.IGNORECASE)
+    if match:
+        return match.group(0).upper()
+
+    # Client parts report e.g. "AMD Radeon 8060S Graphics", where the trailing
+    # word is a marketing suffix rather than the model.
+    match = re.search(r"\bRadeon\b(.*)", gpu_name, re.IGNORECASE)
+    if match:
+        tokens = [
+            tok
+            for tok in match.group(1).split()
+            if tok.lower() not in _MARKETING_SUFFIXES
+        ]
+        if tokens:
+            return "_".join(["Radeon", *tokens])
+
     # ROCm containers often report a generic device string; use memory tier as hint.
     mem = int(round(mem_gb))
     if mem >= 280:

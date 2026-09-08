@@ -37,18 +37,21 @@ def _require_cuda_gpu():
 
 def _import_microbench():
     _require_torch()
+    from TraceLens.PerfModel.benchmarking import microbench as mb
 
     return mb
 
 
 def _import_microbench_rocprof():
     _require_torch()
+    from TraceLens.PerfModel.benchmarking import microbench_rocprof as rp
 
     return rp
 
 
 def _import_fp4fp6_helpers():
     _require_torch()
+    from TraceLens.PerfModel.benchmarking import fp4fp6_helpers as fp
 
     return fp
 
@@ -133,8 +136,17 @@ class TestMicrobenchHelpers:
         "gpu_name,mem_gb,expected",
         [
             ("AMD Instinct MI300X", 192.0, "MI300X"),
+            # 256 GB clears the >=180 tier, so the tier alone reports MI300X.
+            ("AMD Instinct MI325X", 256.0, "MI325X"),
+            ("AMD Instinct MI210", 64.0, "MI210"),
+            # Trailing "Graphics" is a marketing suffix, not the model.
+            ("AMD Radeon 8060S Graphics", 64.0, "Radeon_8060S"),
+            ("AMD Radeon RX 7900 XTX", 24.0, "Radeon_RX_7900_XTX"),
+            # Generic container strings still fall back to the memory tier.
+            ("AMD Radeon Graphics", 192.0, "MI300X"),
             ("Generic GPU", 280.0, "MI355X"),
             ("Some Card", 64.0, "Card"),
+            ("", 0.0, "GPU"),
         ],
     )
     def test_arch_product_name(self, gpu_name, mem_gb, expected):
