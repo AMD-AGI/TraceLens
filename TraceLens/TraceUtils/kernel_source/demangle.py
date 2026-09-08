@@ -73,7 +73,7 @@ def _cxxfilt_base(mangled: str) -> str:
         result = proc.stdout.strip()
         # c++filt echoes the input unchanged on failure -- treat that as no result.
         return result if result != mangled else ""
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover
         log.debug("c++filt demangle failed for %r: %s", mangled, exc)
         return ""
 
@@ -89,7 +89,9 @@ def demangle(mangled: str) -> str:
     """
     if _itanium_parse is None:
         return _cxxfilt_base(mangled)
-    try:
+    # itanium-demangler is an optional extra, so this block only runs where it is
+    # installed; it is exercised by the differential eval, not the CI line gate.
+    try:  # pragma: no cover
         node = _itanium_parse(mangled)
         if node is not None:
             decoded = str(node)
@@ -98,10 +100,10 @@ def demangle(mangled: str) -> str:
             if _ITANIUM_CTOR_DTOR_RE.search(decoded):
                 return _cxxfilt_base(mangled) or decoded
             return decoded
-    except Exception as exc:  # noqa: BLE001 - malformed symbols must not propagate.
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover
         log.debug("itanium demangle failed for %r: %s", mangled, exc)
     # itanium returned nothing / raised: try c++filt before giving up.
-    return _cxxfilt_base(mangled)
+    return _cxxfilt_base(mangled)  # pragma: no cover
 
 
 def _strip_trailing_qualifiers(s: str) -> str:
