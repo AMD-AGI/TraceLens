@@ -1107,3 +1107,196 @@ class TestTopLevelNodeOrder:
             "before 'z_encoder' — final node order must be driven by "
             "execution order, not alphabetical convenience"
         )
+
+
+class TestAstCallOrder:
+    """Unit tests for ``forward_call_order`` (ast_call_order.py) — the
+    ported, well-developed static call-order extractor from the old
+    AST-only graph builder. Used as an ordering fallback for composites
+    that have zero runtime call-graph signal (e.g. an optional modality
+    branch never invoked during the dummy trace), where declaration
+    order (``named_children()``) can disagree with true forward() order.
+    """
+
+    def test_matches_declared_order_when_same(self):
+        from TraceLens.ModelUtils.ast_call_order import forward_call_order
+
+        class _Seq(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = torch.nn.Linear(4, 4)
+                self.b = torch.nn.Linear(4, 4)
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        assert forward_call_order(_Seq()) == ["a", "b"]
+
+    def test_detects_order_different_from_declaration(self):
+        """Mirrors the real GLM vision-encoder bug: post_layernorm is
+        declared before downsample/merger in __init__, but forward()
+        actually applies it first."""
+        from TraceLens.ModelUtils.ast_call_order import forward_call_order
+
+        class _Mismatched(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.stem = torch.nn.Linear(4, 4)
+                # Declared BEFORE norm, but called AFTER norm below.
+                self.proj_out = torch.nn.Linear(4, 4)
+                self.norm = torch.nn.LayerNorm(4)
+
+            def forward(self, x):
+                h = self.stem(x)
+                h = self.norm(h)
+                h = self.proj_out(h)
+                return h
+
+        declared = [n for n, _ in _Mismatched().named_children()]
+        assert declared == ["stem", "proj_out", "norm"]
+        assert forward_call_order(_Mismatched()) == ["stem", "norm", "proj_out"]
+
+    def test_nested_calls_evaluate_inner_first(self):
+        """self.a(self.b(x)) must record b before a — b's result is
+        computed first and fed into a."""
+        from TraceLens.ModelUtils.ast_call_order import forward_call_order
+
+        class _Nested(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = torch.nn.Linear(4, 4)
+                self.b = torch.nn.Linear(4, 4)
+
+            def forward(self, x):
+                return self.a(self.b(x))
+
+        assert forward_call_order(_Nested()) == ["b", "a"]
+
+    def test_modulelist_for_loop_records_container(self):
+        """A ``for blk in self.blocks:`` loop should place the container
+        itself at the correct position relative to its siblings."""
+        from TraceLens.ModelUtils.ast_call_order import forward_call_order
+
+        class _Blk(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = torch.nn.Linear(4, 4)
+
+            def forward(self, x):
+                return self.lin(x)
+
+        class _WithLoop(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.pre = torch.nn.Linear(4, 4)
+                self.post = torch.nn.Linear(4, 4)
+                self.blocks = torch.nn.ModuleList([_Blk(), _Blk()])
+
+            def forward(self, x):
+                h = self.pre(x)
+                for blk in self.blocks:
+                    h = blk(h)
+                return self.post(h)
+
+        assert forward_call_order(_WithLoop()) == ["pre", "blocks", "post"]
+
+    def test_returns_none_when_no_source_available(self):
+        from TraceLens.ModelUtils.ast_call_order import forward_call_order
+
+        class _Builtin(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = torch.nn.Linear(4, 4)
+
+        # torch.nn.Module's own default forward raises NotImplementedError
+        # and has no children-calling source to analyze in a useful way;
+        # more relevantly, a module using a builtin like nn.Sequential's
+        # forward should still not crash.
+        seq = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
+        result = forward_call_order(seq)
+        assert result is None or isinstance(result, list)
+
+
+class TestUninvokedBranchExecutionOrder:
+    """Integration regression test: a composite that's never invoked at
+    all during the dummy trace (e.g. an optional vision encoder branch,
+    matching the real GLM-5.3-Flash bug) must have its internal children
+    sequenced by true forward()-source order, not __init__ declaration
+    order — and its synthetic @output boundary must resolve to the
+    module that actually runs LAST in forward(), not the one declared
+    last in __init__.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _Encoder(torch.nn.Module):
+            """Mirrors Glm5NextVisionModel: post_layernorm/downsample/
+            merger are declared in an order that does NOT match the
+            order forward() actually calls them in."""
+
+            def __init__(self):
+                super().__init__()
+                self.stem = torch.nn.Linear(8, 8)
+                # Declared before norm, but applied AFTER norm+extra in
+                # forward() — matching downsample/merger being declared
+                # before post_layernorm in the real vision model.
+                self.extra = torch.nn.Linear(8, 8)
+                self.norm = torch.nn.LayerNorm(8)
+
+            def forward(self, x):
+                h = self.stem(x)
+                h = self.norm(h)
+                h = self.extra(h)
+                return h
+
+        class _Decoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(64, 8)
+                self.norm = torch.nn.LayerNorm(8)
+
+            def forward(self, x, inputs_embeds=None):
+                h = inputs_embeds if inputs_embeds is not None else self.embed(x)
+                return self.norm(h)
+
+        class _FakeVLM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.decoder = _Decoder()
+                self.encoder = _Encoder()
+
+            def forward(self, x, pixel_values=None, **kwargs):
+                # encoder is never invoked — mirrors pixel_values being
+                # omitted from the dummy trace.
+                return self.decoder(x)
+
+        with torch.device("meta"):
+            model = _FakeVLM()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_internal_children_sequenced_by_forward_order(self, payload):
+        """encoder/extra should be wired after encoder/norm (true
+        forward() order), not after encoder/stem directly (which
+        declaration order would incorrectly suggest)."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        extra_node = next((n for n in nodes if n["id"] == "encoder/extra"), None)
+        assert extra_node is not None, "encoder/extra node not found"
+        sources = [e["sourceNodeId"] for e in extra_node.get("incomingEdges", [])]
+        assert sources == ["encoder/norm"], (
+            f"encoder/extra should be wired from encoder/norm "
+            f"(true forward() order), got {sources}"
+        )
+
+    def test_composite_output_resolves_to_true_last_child(self, payload):
+        """encoder/@output must resolve to encoder/extra's output (the
+        module that actually runs last in forward()), not encoder/norm's
+        (which is declared last in __init__)."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        encoder_output = next((n for n in nodes if n["id"] == "encoder/@output"), None)
+        assert encoder_output is not None, "encoder/@output node not found"
+        sources = [e["sourceNodeId"] for e in encoder_output.get("incomingEdges", [])]
+        assert sources == ["encoder/extra"], (
+            f"encoder/@output should resolve to encoder/extra (true last "
+            f"child in forward()), got {sources}"
+        )

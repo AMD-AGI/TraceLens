@@ -17,6 +17,7 @@ Replaces the AST-based pipeline with runtime tracing:
 
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 import sys
@@ -30,6 +31,8 @@ import torch
 import torch.fx
 import transformers
 from transformers import AutoConfig
+
+from TraceLens.ModelUtils.ast_call_order import forward_call_order
 
 _log = logging.getLogger(__name__)
 
@@ -1005,6 +1008,38 @@ def build_graph(
         elif name:
             module_children[""].append(name)
 
+    # ── Reorder using AST-derived execution order ────────────────────────
+    # named_modules() only reflects declaration order (the order
+    # submodules were assigned in __init__), which can differ from the
+    # order they're actually invoked in forward(). This matters most for
+    # composites that are never invoked at all during the dummy trace
+    # (e.g. an optional modality encoder branch whose inputs, like
+    # pixel_values, were omitted) — there's no runtime call-graph signal
+    # for their internals, so declaration order is the only fallback,
+    # and it can be wrong (e.g. a norm declared last but applied before
+    # a later-declared submodule). Fix this by statically reading each
+    # module's own forward() source to learn the true call order of its
+    # direct children — still "from the code", just read rather than run.
+    # Reuses the well-developed call-order extraction from the pre-
+    # torch_trace AST pipeline (ast_call_order.py), which correctly
+    # handles nested/method-chained calls in true evaluation order.
+    def _dfs_order(path: str, mod: torch.nn.Module, out: list[str]) -> None:
+        declared = list(mod.named_children())
+        call_order = forward_call_order(mod)
+        if call_order:
+            rank = {n: i for i, n in enumerate(call_order)}
+            declared = sorted(declared, key=lambda np: rank.get(np[0], len(call_order)))
+        for cname, cmod in declared:
+            cpath = f"{path}.{cname}" if path else cname
+            out.append(cpath)
+            _dfs_order(cpath, cmod, out)
+
+    _ast_ordered: list[str] = []
+    _dfs_order("", model, _ast_ordered)
+    if len(_ast_ordered) == len(module_order):
+        module_order = _ast_ordered
+        module_map = {"": module_map[""], **{p: module_map[p] for p in module_order}}
+
     # Identify leaf vs composite modules
     composite_modules: set[str] = set()
     for name, mod in model.named_modules():
@@ -1408,6 +1443,27 @@ def build_graph(
             fx_graphs[path] = op_nodes
 
     # ── Add module nodes ─────────────────────────────────────────────────
+    # Emits nodes (plain leaves, group attrs, and FX-expanded op nodes) in
+    # a single pass over module_order, so relative ordering between e.g. a
+    # composite-with-FX-graph child and a leaf-with-FX-graph sibling stays
+    # correct (previously these were emitted in two separate later loops,
+    # split by composite-vs-leaf classification rather than true call
+    # order — which silently reordered custom leaf modules like a rotary
+    # embedding helper to the very end, after every composite's FX ops).
+    def _emit_fx_op_nodes(path: str) -> None:
+        namespace = _namespace_for(path)
+        mod = module_map[path]
+        attr = attr_names.get(path, type(mod).__name__)
+        parent_ns = (
+            namespace + f"/{attr} ({type(mod).__name__})"
+            if namespace
+            else f"{attr} ({type(mod).__name__})"
+        )
+        for op_node in fx_graphs[path]:
+            if not op_node["namespace"].startswith(parent_ns):
+                op_node["namespace"] = parent_ns
+            nodes.append(op_node)
+
     for path in module_order:
         if not path:
             continue
@@ -1449,10 +1505,13 @@ def build_graph(
             continue
 
         if path in composite_modules and path in fx_graphs:
+            _emit_fx_op_nodes(path)
             continue
 
-        # Custom leaf module that was FX-expanded — skip the single node
+        # Custom leaf module that was FX-expanded — emit its op nodes here
+        # (in module_order position) instead of the single leaf node.
         if path in fx_graphs:
+            _emit_fx_op_nodes(path)
             continue
 
         # Skip child modules not referenced by parent's FX graph — the FX
@@ -1487,22 +1546,6 @@ def build_graph(
 
         nodes.append(node)
         edges_from[path] = node_id
-
-    # ── Add fx op nodes ──────────────────────────────────────────────────
-    for path, op_nodes in fx_graphs.items():
-        namespace = _namespace_for(path)
-        mod = module_map[path]
-        attr = attr_names.get(path, type(mod).__name__)
-        parent_ns = (
-            namespace + f"/{attr} ({type(mod).__name__})"
-            if namespace
-            else f"{attr} ({type(mod).__name__})"
-        )
-
-        for op_node in op_nodes:
-            if not op_node["namespace"].startswith(parent_ns):
-                op_node["namespace"] = parent_ns
-            nodes.append(op_node)
 
     # ── Build parallel branch info for edge wiring ─────────────────────
     # For containers with multiple layer types, collect the namespace
@@ -2336,6 +2379,45 @@ def build_graph(
                     if parent_ns in group_attrs:
                         group_attrs[parent_ns]["output_shape"] = f"{term_out} {dtype}"
                     break
+        elif parent_path:
+            # No call-graph signal at all for this composite (e.g. an
+            # optional modality branch — like a vision encoder — whose
+            # own forward() never ran during the dummy trace because its
+            # inputs were omitted). Fall back to the module's true
+            # source-order direct children (see forward_call_order) to
+            # find its actual first/last child for I/O shapes, instead of
+            # leaving the ModuleList's own representative-layer shape
+            # (e.g. a decoder block's output) misattributed as the whole
+            # composite's boundary shape.
+            parent_ns = _namespace_for(parent_path + ".dummy").rsplit("/", 1)[0]
+            if parent_ns in group_attrs:
+                direct_children = [
+                    c for c in module_order if c.rsplit(".", 1)[0] == parent_path
+                ]
+                if direct_children:
+                    first_child = direct_children[0]
+                    first_inp = input_shapes.get(first_child)
+                    if not first_inp:
+                        for child_name in module_map:
+                            if child_name.startswith(first_child + ".") and child_name in input_shapes:
+                                first_inp = input_shapes[child_name]
+                                break
+                    if first_inp:
+                        first_mod = module_map.get(first_child)
+                        parent_inp_dtype = dtype
+                        if first_mod and isinstance(first_mod, torch.nn.Embedding):
+                            parent_inp_dtype = "int64"
+                        group_attrs[parent_ns]["input_shape"] = f"{first_inp} {parent_inp_dtype}"
+
+                    last_child = direct_children[-1]
+                    last_out = shapes.get(last_child)
+                    if not last_out:
+                        for child_name in reversed(list(module_map)):
+                            if child_name.startswith(last_child + ".") and child_name in shapes:
+                                last_out = shapes[child_name]
+                                break
+                    if last_out:
+                        group_attrs[parent_ns]["output_shape"] = f"{last_out} {dtype}"
 
     # ── Build fact sheet ─────────────────────────────────────────────────
     fact_sheet = _build_fact_sheet(model_name, config)
