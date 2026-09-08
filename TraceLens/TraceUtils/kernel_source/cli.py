@@ -13,8 +13,11 @@ exercised without writing Python. Examples::
     TraceLens_resolve_kernel_source --kernel _Z12my_kernelPf \\
         --search-path /opt/vllm/csrc --search-path /opt/aiter/csrc
 
-    # Just the cheap gate verdict:
-    TraceLens_resolve_kernel_source --kernel Cijk_Ailk_Bljk --gate-only
+    # Native kernel, aided by call-stack frames (one frame per line in the file,
+    # e.g. "/repo/moe.py(247): _grouped_gemm"). Optional; used only from the CLI,
+    # since integrated callers pass the frames to the API directly.
+    TraceLens_resolve_kernel_source --kernel _fwd_kernel \\
+        --search-path /opt/vllm --call-stack-file frames.txt
 
     # Triton kernel from a trace kernel_file:
     TraceLens_resolve_kernel_source --triton-kernel-file "/repo/moe.py:120:kernel"
@@ -23,13 +26,11 @@ exercised without writing Python. Examples::
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import sys
 from pathlib import Path
 
 from .datatypes import ResolveResult
-from .patchability import classify_patchability
 from .resolver import resolve
 from .triton_pin import resolve_triton_source
 
@@ -89,11 +90,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--call-stack-file", default="", help="File with one call-stack frame per line."
     )
     parser.add_argument(
-        "--gate-only",
-        action="store_true",
-        help="Print only the patchability gate verdict.",
-    )
-    parser.add_argument(
         "--triton-kernel-file",
         default="",
         help="Resolve a Triton .py kernel from this trace kernel_file instead of a native symbol.",
@@ -116,13 +112,8 @@ def main(argv: list[str] | None = None) -> int:
 
     call_stack = _read_call_stack(args.call_stack_file)
 
-    if args.gate_only:
-        verdict = classify_patchability(
-            args.kernel, op_name=args.op_name, call_stack=call_stack
-        )
-        print(json.dumps(dataclasses.asdict(verdict), indent=2))
-        return 0
-
+    # ``resolve`` runs the patchability gate first, so a non-patchable kernel is
+    # reported (method ``gate_non_patchable``) without a separate gate-only path.
     result = resolve(
         args.kernel,
         args.search_path or None,

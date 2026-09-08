@@ -29,7 +29,7 @@ from pathlib import Path
 from .editable import is_editable_source
 from .datatypes import ResolveResult, SourceLocation
 
-__all__ = ["resolve_triton_source", "triton_def_line", "editable_trace_source"]
+__all__ = ["resolve_triton_source", "triton_def_line"]
 
 # Triton decorators marking a device-kernel def (``@triton.jit`` / ``@jit`` and
 # the autotune/heuristics wrappers that sit on top of a jit'd kernel).
@@ -63,18 +63,6 @@ def _parse_launcher_form(raw: str) -> tuple[str, int | None, str]:
             match.group("func") or "",
         )
     return text, None, ""
-
-
-def editable_trace_source(kernel_file: str, kind: str = "") -> str:
-    """Return a trace ``kernel_file`` iff it is an editable source, else ``""``.
-
-    A repo-resident ``.py`` is directly editable; inductor-generated / ``/tmp``
-    Triton is not.
-    """
-    kf = str(kernel_file or "").strip()
-    if not kf:
-        return ""
-    return kf if is_editable_source(kf, kind or None) else ""
 
 
 def _is_triton_kernel_def(node: ast.AST) -> bool:
@@ -165,7 +153,9 @@ def resolve_triton_source(
             None, patchable=False, method="unresolved", reason="empty kernel_file"
         )
 
-    source = editable_trace_source(path, kind)
+    # Keep only an editable source path; inductor-generated / ``/tmp`` Triton
+    # has no durable source to rewrite.
+    source = path if is_editable_source(path, kind or None) else ""
     if not source:
         return ResolveResult(
             None,

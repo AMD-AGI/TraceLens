@@ -392,6 +392,13 @@ class TestEditable:
     def test_kind_hint_rejects_generated(self):
         assert is_editable_source("/repo/a.py", "triton_inductor_generated") is False
 
+    def test_extra_exts_extend_editable_set(self):
+        # A caller can treat extra native extensions as editable without editing
+        # the module; leading dot optional and matching is case-insensitive.
+        assert is_editable_source("/pkg/kernel.cc") is False
+        assert is_editable_source("/pkg/kernel.cc", extra_exts=(".cc",)) is True
+        assert is_editable_source("/pkg/kernel.CXX", extra_exts=("cxx",)) is True
+
     def test_non_source_and_empty(self):
         assert is_editable_source("/repo/readme.md") is False
         assert is_editable_source("") is False
@@ -492,7 +499,7 @@ class TestNativeResolve:
         # A CK name with the gate off is not short-circuited; it just misses the
         # index (no CK source there) and reports unresolved rather than gated.
         res = resolve(
-            "ck_tile::gemm_kernel<float>", [framework_tree["root"]], run_gate=False
+            "ck_tile::gemm_kernel<float>", [framework_tree["root"]], gate=False
         )
         assert res.method == "unresolved"
 

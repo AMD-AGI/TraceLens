@@ -110,8 +110,21 @@ def test_resolve_skips_non_editable_record(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # triton_pin
 # ---------------------------------------------------------------------------
-def test_editable_trace_source_empty():
-    assert triton_pin.editable_trace_source("") == ""
+def test_resolve_triton_source_empty_is_unresolved():
+    # An empty kernel_file yields a clean unresolved result (no crash).
+    res = triton_pin.resolve_triton_source("")
+    assert res.patchable is False
+    assert res.method == "unresolved"
+
+
+def test_resolve_triton_source_generated_kind_is_gated():
+    # An explicit kind hint marks the source non-patchable via is_editable_source,
+    # even for a plausible .py path.
+    res = triton_pin.resolve_triton_source(
+        "/repo/my_kernel.py:3:k", kind="triton_inductor_generated"
+    )
+    assert res.patchable is False
+    assert res.method == "gate_non_patchable"
 
 
 def test_is_triton_kernel_def_without_decorator():

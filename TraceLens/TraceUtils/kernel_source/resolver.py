@@ -24,7 +24,8 @@ log = logging.getLogger(__name__)
 __all__ = ["resolve_source_path", "resolve"]
 
 # Framework labels inferred from a resolved path, for SourceLocation.framework.
-_FRAMEWORK_HINTS = ("aiter", "sglang", "vllm")
+# Kept in sync with index._KNOWN (the frameworks we locate by name).
+_FRAMEWORK_HINTS = ("aiter", "sglang", "vllm", "atom")
 
 
 def _framework_of(path: str) -> str:
@@ -112,11 +113,15 @@ def resolve(
     *,
     op_name: str = "",
     call_stack: Sequence[str] = (),
-    run_gate: bool = True,
+    gate: bool = True,
     index_obj: index.SourceIndex | None = None,
 ) -> ResolveResult:
-    """Run the cheap patchability gate first, then resolve survivors via :func:`resolve_source_path`."""
-    if run_gate:
+    """Run the cheap patchability gate first, then resolve survivors via :func:`resolve_source_path`.
+
+    ``gate`` is on by default; pass ``gate=False`` only when the caller has
+    already classified patchability upstream and wants to skip re-running it.
+    """
+    if gate:
         gate = classify_patchability(
             kernel_name, op_name=op_name, call_stack=call_stack
         )
