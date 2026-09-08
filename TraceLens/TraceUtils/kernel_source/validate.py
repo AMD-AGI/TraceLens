@@ -20,9 +20,9 @@ installed). It exercises the resolver two ways:
 Nothing here is GPU-dependent: it only reads installed source files.
 
 Examples:
-    python tools/validate_kernel_source.py --candidates kernel_candidates.json
-    python tools/validate_kernel_source.py --candidates kc.json --trace rank0.pt.trace.json.gz
-    python tools/validate_kernel_source.py --candidates kc.json \\
+    python -m TraceLens.TraceUtils.kernel_source.validate --candidates kernel_candidates.json
+    python -m TraceLens.TraceUtils.kernel_source.validate --candidates kc.json --trace rank0.pt.trace.json.gz
+    python -m TraceLens.TraceUtils.kernel_source.validate --candidates kc.json \\
         --search-path /usr/local/lib/python3.12/dist-packages/aiter_meta/csrc
 """
 
@@ -32,7 +32,7 @@ import argparse
 import gzip
 import json
 
-from TraceLens.TraceUtils.kernel_source import (
+from . import (
     discover_library_paths,
     resolve,
     resolve_triton_source,

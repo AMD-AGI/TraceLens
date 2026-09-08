@@ -189,32 +189,19 @@ def test_make_entry_carries_previous_fields():
     assert entry["previous_method"] == contract.METHOD_SYMBOL_INDEX
 
 
-def test_validate_document_non_dict():
-    assert contract.validate_document(["not", "a", "dict"])
+def test_make_document_stamps_tracelens_version(monkeypatch):
+    monkeypatch.setattr(contract, "version", lambda _name: "0.1.0.dev20260101+gabc123")
+    doc = contract.make_document([], generated_by="pytest")
+    assert doc["tracelens_version"] == "0.1.0.dev20260101+gabc123"
+    assert "schema_version" not in doc
 
 
-def test_validate_document_missing_keys_and_bad_version():
-    problems = contract.validate_document({"schema_version": "9.9.9", "entries": []})
-    assert any("missing required key" in p for p in problems)
-    assert any("different major" in p for p in problems)
+def test_tracelens_version_missing_distribution_returns_blank(monkeypatch):
+    def _raise(_name):
+        raise contract.PackageNotFoundError(_name)
 
-
-def test_validate_document_entries_not_list():
-    problems = contract.validate_document(
-        {"schema_version": "1.0.0", "generated_by": "t", "entries": "nope"}
-    )
-    assert any("entries is str" in p for p in problems)
-
-
-def test_validate_document_entry_not_dict_and_missing_key():
-    doc = {
-        "schema_version": "1.0.0",
-        "generated_by": "t",
-        "entries": ["nope", {"name": "x"}],
-    }
-    problems = contract.validate_document(doc)
-    assert any("entries[0] is str" in p for p in problems)
-    assert any("entries[1] missing required key" in p for p in problems)
+    monkeypatch.setattr(contract, "version", _raise)
+    assert contract._tracelens_version() == ""
 
 
 def test_split_line_suffix_plain_path_has_no_line():

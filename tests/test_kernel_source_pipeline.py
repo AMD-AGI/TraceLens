@@ -38,6 +38,7 @@ import os
 import sys
 
 import pytest
+from kernel_source_contract_check import validate_document
 
 
 def _load_kernel_source():
@@ -657,13 +658,13 @@ class TestContract:
             ),
         ]
         doc = contract.make_document(entries, generated_by="pytest", framework="vllm")
-        assert contract.validate_document(doc) == []
+        assert validate_document(doc) == []
 
         out = tmp_path / contract.SOURCE_RESOLUTION_FILENAME
         out.write_text(json.dumps(doc), encoding="utf-8")
         loaded = contract.read_document(out)
         assert loaded is not None
-        assert contract.validate_document(loaded) == []
+        assert validate_document(loaded) == []
         assert len(loaded["entries"]) == 2
 
     def test_unknown_method_flagged(self):
@@ -671,7 +672,7 @@ class TestContract:
             kernel_id="k1", name="x", gpu_pct=1.0, source_file="/a.cu", method="bogus"
         )
         doc = contract.make_document([entry], generated_by="pytest")
-        problems = contract.validate_document(doc)
+        problems = validate_document(doc)
         assert any("unknown method" in p for p in problems)
 
     def test_source_with_non_patchable_method_flagged(self):
@@ -683,7 +684,7 @@ class TestContract:
             method=contract.METHOD_GATE_NON_PATCHABLE,
         )
         doc = contract.make_document([entry], generated_by="pytest")
-        problems = contract.validate_document(doc)
+        problems = validate_document(doc)
         assert any("source_file but method is" in p for p in problems)
 
     def test_out_of_range_confidence_flagged(self):
@@ -696,7 +697,7 @@ class TestContract:
             confidence=1.5,
         )
         doc = contract.make_document([entry], generated_by="pytest")
-        problems = contract.validate_document(doc)
+        problems = validate_document(doc)
         assert any("invalid confidence" in p for p in problems)
 
     def test_split_line_suffix(self):

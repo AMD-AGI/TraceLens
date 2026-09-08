@@ -6,6 +6,9 @@ omit =
     TraceLens/PerfModel/benchmarking/*
     TraceLens/PerfModel/origami_helper.py
     TraceLens/PerfModel/run_perf_model.py
+    # Manual validation script: exercises the resolver against a real framework
+    # install (needs vllm/aiter/sglang present), so it can't run in unit CI.
+    TraceLens/TraceUtils/kernel_source/validate.py
 
 [paths]
 source =

@@ -65,8 +65,6 @@ setup(
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
         ],
-        # Optional: robust pure-Python demangling for the kernel-source resolver.
-        # Without it the resolver falls back to c++filt / a length-prefix parser.
         "kernel_source": [
             "itanium-demangler>=1.0",
         ],

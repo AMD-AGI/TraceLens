@@ -4,30 +4,48 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Versioned, on-disk audit view of kernel source resolution.
+"""On-disk audit view of kernel source resolution.
 
-This is an optional reporting layer. It defines a small, versioned JSON artifact
-that records, per hot kernel, "which file did we decide this kernel lives in, by
+This is an optional reporting layer. It defines a small JSON artifact that
+records, per hot kernel, "which file did we decide this kernel lives in, by
 what method, and how sure are we". It is deliberately an *audit view*, not a
 pipeline contract: consumers that need to act on resolution should use the
 :class:`~.datatypes.ResolveResult` returned by the resolver directly.
 
-The helpers here build entries (:func:`make_entry`), wrap them in a versioned
-envelope (:func:`make_document`), validate a document against the schema
-(:func:`validate_document`), and round-trip it to disk (:func:`read_document`).
+The helpers here build entries (:func:`make_entry`), wrap them in a document
+that carries the producing TraceLens version (:func:`make_document`), and read
+one back from disk (:func:`read_document`). Every entry is built with all keys
+present (blank when unknown), so no separate runtime validation step is needed;
+a light schema check lives in the tests to guard against accidental drift.
 """
 
 from __future__ import annotations
 
-import json
-import math
 import os
 import re
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
-#: Bump the major on any field removal or meaning change; consumers gate on it.
-SOURCE_RESOLUTION_SCHEMA_VERSION = "1.0.0"
+
+def _tracelens_version() -> str:
+    """Return the installed TraceLens version (which embeds the git SHA), or ``""``.
+
+    This is the single version source for the repo: the wheel version built in
+    ``setup.py`` looks like ``0.1.0.dev<date>+g<shortsha>``, so stamping it on
+    the document records exactly which TraceLens produced the artifact.
+    """
+    try:
+        return version("TraceLens")
+    except PackageNotFoundError:  # not installed as a distribution (e.g. source tree)
+        return ""
+
+
+#: A call site is often reported as ``path.py(247): fn_name``; the line and
+#: function ride along in the same string.
+_LINE_SUFFIX_RE = re.compile(
+    r"^(?P<path>.+?)\((?P<line>\d+)\)\s*(?::\s*(?P<function>.*))?$"
+)
 
 #: Canonical artifact name, relative to the analysis run directory.
 SOURCE_RESOLUTION_FILENAME = "kernel_source_resolution.json"
@@ -44,36 +62,6 @@ METHOD_GREP = "name_grep"
 METHOD_LLM_FALLBACK = "llm_fallback"
 METHOD_LLM = "llm_review"
 METHOD_UNRESOLVED = "unresolved"
-
-KNOWN_METHODS = frozenset(
-    {
-        METHOD_SYMBOL_INDEX,
-        METHOD_TRITON_AST,
-        METHOD_TRACE_KERNEL_FILE,
-        METHOD_GATE_NON_PATCHABLE,
-        METHOD_TRACE,
-        METHOD_GREP,
-        METHOD_LLM_FALLBACK,
-        METHOD_LLM,
-        METHOD_UNRESOLVED,
-    }
-)
-
-# Methods whose entries legitimately carry no source_file.
-_NO_SOURCE_METHODS = frozenset({METHOD_UNRESOLVED, METHOD_GATE_NON_PATCHABLE})
-
-#: Every entry carries these keys, so a consumer can rely on presence without
-#: defaulting. Values may be empty; the keys may not be absent.
-REQUIRED_ENTRY_KEYS = (
-    "kernel_id",
-    "name",
-    "gpu_pct",
-    "source_file",
-    "method",
-    "reason",
-)
-
-REQUIRED_DOCUMENT_KEYS = ("schema_version", "generated_by", "entries")
 
 
 def make_entry(
@@ -99,7 +87,7 @@ def make_entry(
         source_file: Resolved path, or ``""`` when unresolved/non-patchable.
         source_line: 1-based line when the method produced one.
         source_function: Enclosing function when the method produced one.
-        method: One of :data:`KNOWN_METHODS`.
+        method: One of the ``METHOD_*`` labels defined in this module.
         confidence: 0..1 when a method reports one; ``None`` for deterministic
             methods, which are either right or silent.
         reason: Human-readable note -- why this path, or why none.
@@ -133,76 +121,14 @@ def make_document(
     model_name: str = "",
     framework: str = "",
 ) -> dict[str, Any]:
-    """Wrap ``entries`` in the versioned envelope."""
+    """Wrap ``entries`` in a document stamped with the producing TraceLens version."""
     return {
-        "schema_version": SOURCE_RESOLUTION_SCHEMA_VERSION,
+        "tracelens_version": _tracelens_version(),
         "generated_by": str(generated_by or ""),
         "model_name": str(model_name or ""),
         "framework": str(framework or ""),
         "entries": list(entries),
     }
-
-
-def validate_document(doc: Any) -> list[str]:
-    """Return a list of contract violations; empty means the document is valid.
-
-    Reports every problem rather than raising on the first, so a producer test
-    failure names all of them at once.
-    """
-    problems: list[str] = []
-    if not isinstance(doc, dict):
-        return [f"document is {type(doc).__name__}, expected dict"]
-    for key in REQUIRED_DOCUMENT_KEYS:
-        if key not in doc:
-            problems.append(f"document missing required key {key!r}")
-    version = str(doc.get("schema_version") or "")
-    if (
-        version
-        and version.split(".")[0] != SOURCE_RESOLUTION_SCHEMA_VERSION.split(".")[0]
-    ):
-        problems.append(
-            f"schema_version {version!r} has a different major than "
-            f"{SOURCE_RESOLUTION_SCHEMA_VERSION!r}"
-        )
-    entries = doc.get("entries")
-    if not isinstance(entries, list):
-        problems.append(f"entries is {type(entries).__name__}, expected list")
-        return problems
-    for i, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            problems.append(f"entries[{i}] is {type(entry).__name__}, expected dict")
-            continue
-        for key in REQUIRED_ENTRY_KEYS:
-            if key not in entry:
-                problems.append(f"entries[{i}] missing required key {key!r}")
-        method = str(entry.get("method") or "")
-        if method and method not in KNOWN_METHODS:
-            problems.append(f"entries[{i}] has unknown method {method!r}")
-        src = str(entry.get("source_file") or "")
-        if src and method in _NO_SOURCE_METHODS:
-            problems.append(f"entries[{i}] has a source_file but method is {method}")
-        if not src and method and method not in _NO_SOURCE_METHODS:
-            problems.append(f"entries[{i}] has method {method!r} but no source_file")
-        confidence = entry.get("confidence")
-        if confidence is not None:
-            if (
-                isinstance(confidence, bool)
-                or not isinstance(confidence, (int, float))
-                or not math.isfinite(float(confidence))
-                or not 0.0 <= float(confidence) <= 1.0
-            ):
-                problems.append(
-                    f"entries[{i}] has invalid confidence {confidence!r}; "
-                    "expected a finite number in [0, 1]"
-                )
-    return problems
-
-
-#: A call site is often reported as ``path.py(247): fn_name``; the line and
-#: function ride along in the same string.
-_LINE_SUFFIX_RE = re.compile(
-    r"^(?P<path>.+?)\((?P<line>\d+)\)\s*(?::\s*(?P<function>.*))?$"
-)
 
 
 def split_line_suffix(path: str) -> tuple[str, int | None, str]:
@@ -220,14 +146,6 @@ def split_line_suffix(path: str) -> tuple[str, int | None, str]:
     )
 
 
-def strip_line_suffix(path: str) -> str:
-    """Return the bare file path from a possibly line-annotated one.
-
-    ``/repo/moe.py(247): _grouped_gemm`` -> ``/repo/moe.py``.
-    """
-    return split_line_suffix(path)[0]
-
-
 def canonical_source_path(path: str, roots: tuple[str, ...]) -> str:
     """Return the validated canonical target for ``path``, or ``""``.
 
@@ -235,7 +153,7 @@ def canonical_source_path(path: str, roots: tuple[str, ...]) -> str:
     Requiring existence guards against a fabricated but plausible-looking path
     passing a mere prefix check.
     """
-    text = strip_line_suffix(path)
+    text = split_line_suffix(path)[0]
     if not text or not os.path.isfile(text):
         return ""
     real = os.path.realpath(text)
@@ -254,8 +172,16 @@ def path_is_acceptable(path: str, roots: tuple[str, ...]) -> bool:
 
 
 def read_document(path: Path | str) -> dict[str, Any] | None:
-    """Load the artifact, or ``None`` when it is absent or unreadable."""
+    """Load the artifact, or ``None`` when it is absent or unreadable.
+
+    Uses TraceLens's shared :class:`~TraceLens.util.DataLoader` so this artifact
+    is read the same way (and with the same fast JSON parser) as every other
+    TraceLens file, rather than a separate one-off reader here.
+    """
+    from TraceLens.util import DataLoader
+
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = DataLoader.load_data(str(path))
+    except (OSError, ValueError, TypeError):
         return None
+    return data if isinstance(data, dict) else None
