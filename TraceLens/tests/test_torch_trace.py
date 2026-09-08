@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Tests for the PyTorch-based model graph builder."""
 
 from __future__ import annotations
@@ -10,12 +16,9 @@ import torch
 from TraceLens.ModelUtils.torch_trace import (
     _classify_module,
     _fx_trace_module,
-    _instantiate_meta,
-    _patch_config,
     _symbolise,
     build_graph,
 )
-
 
 # ── Unit tests (no network) ─────────────────────────────────────────────────
 
@@ -66,6 +69,7 @@ class TestFxTrace:
 
     def test_control_flow_fails(self):
         """Modules with control flow should return None."""
+
         class ConditionalModule(torch.nn.Module):
             def forward(self, x):
                 if x.sum() > 0:
@@ -126,9 +130,7 @@ class _SimpleModel(torch.nn.Module):
     def __init__(self, vocab: int = 256, dim: int = 64, n_layers: int = 4):
         super().__init__()
         self.embed_tokens = torch.nn.Embedding(vocab, dim)
-        self.layers = torch.nn.ModuleList(
-            [_SimpleBlock(dim) for _ in range(n_layers)]
-        )
+        self.layers = torch.nn.ModuleList([_SimpleBlock(dim) for _ in range(n_layers)])
         self.norm = torch.nn.LayerNorm(dim)
         self.lm_head = torch.nn.Linear(dim, vocab, bias=False)
 
@@ -142,25 +144,20 @@ class _SimpleModel(torch.nn.Module):
 
 def _build_simple_payload() -> dict:
     """Build a graph payload from _SimpleModel without network access."""
-    from TraceLens.ModelUtils.torch_trace import (
-        _capture_call_graph,
-        _capture_shapes,
-        _detect_repeated_layers,
-        _infer_shapes_from_weights,
-        _patch_rotary_embeddings,
-    )
 
     with torch.device("meta"):
         model = _SimpleModel()
     model.eval()
 
-    return build_graph.__wrapped__(model) if hasattr(build_graph, "__wrapped__") else _build_from_model(model)
+    return (
+        build_graph.__wrapped__(model)
+        if hasattr(build_graph, "__wrapped__")
+        else _build_from_model(model)
+    )
 
 
 def _build_from_model(model: torch.nn.Module) -> dict:
     """Replicate the core of build_graph() for a pre-instantiated model."""
-    import types
-    from collections import defaultdict
     from TraceLens.ModelUtils import torch_trace as tt
 
     # Monkey-patch _instantiate_meta to return our model
@@ -175,8 +172,11 @@ def _build_from_model(model: torch.nn.Module) -> dict:
         dtype = "float32"
 
         def to_dict(self):
-            return {k: v for k, v in self.__class__.__dict__.items()
-                    if not k.startswith("_") and not callable(v)}
+            return {
+                k: v
+                for k, v in self.__class__.__dict__.items()
+                if not k.startswith("_") and not callable(v)
+            }
 
     tt._instantiate_meta = lambda checkpoint: (model, FakeConfig())
     try:
@@ -210,24 +210,32 @@ class TestNoDuplicateIONodes:
 
     def test_self_attn_has_single_output(self, simple_nodes):
         """self_attn should have exactly one @output, not both @output and @ext_output."""
-        attn_outputs = [n for n in simple_nodes
-                        if "self_attn" in n["id"] and n["id"].endswith("/@output")]
+        attn_outputs = [
+            n
+            for n in simple_nodes
+            if "self_attn" in n["id"] and n["id"].endswith("/@output")
+        ]
         # Should have one per representative layer
         for n in attn_outputs:
             assert n["label"] == "Output"
         # No "self_attn Output" labels
-        ext_labels = [n for n in simple_nodes
-                      if "self_attn Output" in n.get("label", "")]
+        ext_labels = [
+            n for n in simple_nodes if "self_attn Output" in n.get("label", "")
+        ]
         assert ext_labels == []
 
     def test_self_attn_has_single_input(self, simple_nodes):
         """self_attn should have exactly one @input, not both @input and @ext_input."""
-        attn_inputs = [n for n in simple_nodes
-                       if "self_attn" in n["id"] and n["id"].endswith("/@input")]
+        attn_inputs = [
+            n
+            for n in simple_nodes
+            if "self_attn" in n["id"] and n["id"].endswith("/@input")
+        ]
         for n in attn_inputs:
             assert n["label"] == "Input"
-        ext_labels = [n for n in simple_nodes
-                      if "self_attn Input" in n.get("label", "")]
+        ext_labels = [
+            n for n in simple_nodes if "self_attn Input" in n.get("label", "")
+        ]
         assert ext_labels == []
 
 
@@ -248,9 +256,9 @@ class TestShapePropagation:
         for n in simple_nodes:
             attrs = {a["key"]: a["value"] for a in n.get("attrs", [])}
             if attrs.get("synthetic") == "input":
-                assert n.get("outputsMetadata"), (
-                    f"Synthetic input {n['id']} missing outputsMetadata"
-                )
+                assert n.get(
+                    "outputsMetadata"
+                ), f"Synthetic input {n['id']} missing outputsMetadata"
 
     def test_synthetic_output_nodes_have_shapes(self, simple_nodes):
         """Most synthetic output nodes should have outputsMetadata.
@@ -258,24 +266,25 @@ class TestShapePropagation:
         Some composite modules (e.g. decoder blocks) may lack captured
         shapes, so we check that the vast majority have them.
         """
-        outputs = [n for n in simple_nodes
-                   for a in n.get("attrs", [])
-                   if a.get("key") == "synthetic" and a.get("value") == "output"]
+        outputs = [
+            n
+            for n in simple_nodes
+            for a in n.get("attrs", [])
+            if a.get("key") == "synthetic" and a.get("value") == "output"
+        ]
         with_shapes = [n for n in outputs if n.get("outputsMetadata")]
         assert len(outputs) > 0
         # Composites whose children are all FX ops without captured
         # shapes (e.g. decoder blocks with residual adds) may lack
         # outputsMetadata.  Require at least 50% coverage.
-        assert len(with_shapes) / len(outputs) >= 0.5, (
-            f"Only {len(with_shapes)}/{len(outputs)} synthetic outputs have shapes"
-        )
+        assert (
+            len(with_shapes) / len(outputs) >= 0.5
+        ), f"Only {len(with_shapes)}/{len(outputs)} synthetic outputs have shapes"
 
     def test_all_nodes_have_shapes(self, simple_nodes):
         """Every node (leaf, FX op, synthetic) must have outputsMetadata."""
         missing = [n["id"] for n in simple_nodes if not n.get("outputsMetadata")]
-        assert missing == [], (
-            f"{len(missing)} nodes missing outputsMetadata: {missing}"
-        )
+        assert missing == [], f"{len(missing)} nodes missing outputsMetadata: {missing}"
 
     def test_embedding_edge_has_shape(self, simple_nodes):
         """The edge from @input to embedding should carry a shape, not '?'."""
@@ -285,9 +294,9 @@ class TestShapePropagation:
         for e in emb.get("incomingEdges", []):
             src = node_by_id.get(e["sourceNodeId"])
             if src:
-                assert src.get("outputsMetadata"), (
-                    f"Source {src['id']} of embed_tokens edge has no shape"
-                )
+                assert src.get(
+                    "outputsMetadata"
+                ), f"Source {src['id']} of embed_tokens edge has no shape"
 
 
 class TestGroupNodeAttributes:
@@ -295,23 +304,21 @@ class TestGroupNodeAttributes:
 
     def test_is_dict(self, simple_payload):
         ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
-        assert isinstance(ga, dict), (
-            f"groupNodeAttributes should be dict, got {type(ga).__name__}"
-        )
+        assert isinstance(
+            ga, dict
+        ), f"groupNodeAttributes should be dict, got {type(ga).__name__}"
 
     def test_values_are_dicts(self, simple_payload):
         ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
         for key, val in ga.items():
-            assert isinstance(val, dict), (
-                f"groupNodeAttributes['{key}'] should be dict, got {type(val).__name__}"
-            )
+            assert isinstance(
+                val, dict
+            ), f"groupNodeAttributes['{key}'] should be dict, got {type(val).__name__}"
 
     def test_has_class_key(self, simple_payload):
         ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
         for key, val in ga.items():
-            assert "class" in val, (
-                f"groupNodeAttributes['{key}'] missing 'class' key"
-            )
+            assert "class" in val, f"groupNodeAttributes['{key}'] missing 'class' key"
 
     def test_layer_group_has_count(self, simple_payload):
         """Layer groups should have a 'count' attribute."""
@@ -328,18 +335,16 @@ class TestEdgeWiring:
         node_ids = {n["id"] for n in simple_nodes}
         for n in simple_nodes:
             for e in n.get("incomingEdges", []):
-                assert e["sourceNodeId"] in node_ids, (
-                    f"Node {n['id']} has broken edge from {e['sourceNodeId']}"
-                )
+                assert (
+                    e["sourceNodeId"] in node_ids
+                ), f"Node {n['id']} has broken edge from {e['sourceNodeId']}"
 
     def test_all_non_input_nodes_have_edges(self, simple_nodes):
         """Every node except @input must have at least one incoming edge."""
         for n in simple_nodes:
             if n["id"] == "@input":
                 continue
-            assert n.get("incomingEdges"), (
-                f"Node {n['id']} has no incoming edges"
-            )
+            assert n.get("incomingEdges"), f"Node {n['id']} has no incoming edges"
 
     def test_sequential_dataflow_in_block(self, simple_nodes):
         """Inside the decoder block, every child module must be wired
@@ -352,9 +357,9 @@ class TestEdgeWiring:
         for n in block_nodes:
             if n["id"].endswith("/@input") and n["id"].count("/") == 1:
                 continue
-            assert n.get("incomingEdges"), (
-                f"Block node {n['id']} has no incoming edges (dead node)"
-            )
+            assert n.get(
+                "incomingEdges"
+            ), f"Block node {n['id']} has no incoming edges (dead node)"
 
     def test_call_graph_sequential_fallback(self):
         """When a child module has no tensor-ID-tracked producer, the
@@ -394,15 +399,15 @@ class TestEdgeWiring:
 
         call_graph = _capture_call_graph(model, composites, seq_len=8, batch_size=1)
         block_edges = call_graph.get("block", [])
-        edge_set = {(s.split(".")[-1] if s != "@input" else s,
-                      t.split(".")[-1]) for s, t in block_edges}
+        edge_set = {
+            (s.split(".")[-1] if s != "@input" else s, t.split(".")[-1])
+            for s, t in block_edges
+        }
 
         # proj_b should have an edge (either from proj_a via fallback,
         # or from @input). It must not be orphaned.
         proj_b_sources = {s for s, t in edge_set if t == "proj_b"}
-        assert proj_b_sources, (
-            f"proj_b has no incoming edges. Got: {edge_set}"
-        )
+        assert proj_b_sources, f"proj_b has no incoming edges. Got: {edge_set}"
 
 
 # ── Integration tests (require HF Hub) ──────────────────────────────────────
@@ -493,9 +498,9 @@ class TestInputShapeAttribute:
         mlp_groups = {k: v for k, v in ga.items() if "MLP" in k or "mlp" in k}
         for key, attrs in mlp_groups.items():
             if "output_shape" in attrs:
-                assert "input_shape" in attrs, (
-                    f"Group '{key}' has output_shape but missing input_shape"
-                )
+                assert (
+                    "input_shape" in attrs
+                ), f"Group '{key}' has output_shape but missing input_shape"
 
     def test_composite_groups_with_output_have_input(self, simple_payload):
         """All composite module groups with output_shape should also have input_shape."""
@@ -504,18 +509,18 @@ class TestInputShapeAttribute:
             if "count" in attrs:
                 continue  # layer groups may not need input_shape
             if "output_shape" in attrs:
-                assert "input_shape" in attrs, (
-                    f"Group '{key}' has output_shape but missing input_shape"
-                )
+                assert (
+                    "input_shape" in attrs
+                ), f"Group '{key}' has output_shape but missing input_shape"
 
     def test_fx_expanded_module_has_shapes(self, simple_payload):
         """FX-expanded leaf modules (e.g. LayerNorm) should have shape attributes."""
         ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
         norm_groups = {k: v for k, v in ga.items() if "Norm" in k or "norm" in k}
         for key, attrs in norm_groups.items():
-            assert "output_shape" in attrs, (
-                f"FX-expanded group '{key}' missing output_shape"
-            )
+            assert (
+                "output_shape" in attrs
+            ), f"FX-expanded group '{key}' missing output_shape"
 
 
 class TestOutputShapeCoverage:
@@ -528,18 +533,14 @@ class TestOutputShapeCoverage:
         for key, attrs in ga.items():
             if "output_shape" not in attrs:
                 missing.append(key)
-        assert not missing, (
-            f"Groups missing output_shape: {missing}"
-        )
+        assert not missing, f"Groups missing output_shape: {missing}"
 
     def test_layer_groups_have_output_shape(self, simple_payload):
         """Layer groups (with 'count') should have output_shape."""
         ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
         layer_groups = {k: v for k, v in ga.items() if "count" in v}
         for key, attrs in layer_groups.items():
-            assert "output_shape" in attrs, (
-                f"Layer group '{key}' missing output_shape"
-            )
+            assert "output_shape" in attrs, f"Layer group '{key}' missing output_shape"
 
 
 class TestMultiOutputWiring:
@@ -547,7 +548,6 @@ class TestMultiOutputWiring:
 
     def test_no_orphan_output_nodes(self, simple_nodes):
         """No synthetic @output node should be completely disconnected."""
-        node_ids = {n["id"] for n in simple_nodes}
         for n in simple_nodes:
             attrs = {a["key"]: a["value"] for a in n.get("attrs", [])}
             if attrs.get("synthetic") != "output":
@@ -561,23 +561,20 @@ class TestMultiOutputWiring:
                 for e in n2.get("incomingEdges", [])
                 if n2["id"] != n["id"]
             )
-            assert consumed, (
-                f"Synthetic output node {n['id']} has no consumers (dead output)"
-            )
+            assert (
+                consumed
+            ), f"Synthetic output node {n['id']} has no consumers (dead output)"
 
     def test_block_output_wires_from_mlp(self, simple_nodes):
         """The decoder block @output should include mlp's output in the chain."""
         block_output = next(
-            (n for n in simple_nodes if n["id"] == "layers/0/@output"),
-            None
+            (n for n in simple_nodes if n["id"] == "layers/0/@output"), None
         )
         assert block_output is not None, "Missing layers/0/@output"
-        sources = {e["sourceNodeId"] for e in block_output.get("incomingEdges", [])}
         # The block output should be fed by mlp/@output (directly or indirectly)
         # At minimum, check that mlp/@output is consumed by something in the block
         mlp_output = next(
-            (n for n in simple_nodes if n["id"] == "layers/0/mlp/@output"),
-            None
+            (n for n in simple_nodes if n["id"] == "layers/0/mlp/@output"), None
         )
         if mlp_output:
             consumed = any(
@@ -593,6 +590,7 @@ class TestMultiOutputWiring:
         either a sibling @input or the parent's @output node."""
         # Collect all @output nodes grouped by parent composite
         from collections import defaultdict
+
         composites = defaultdict(list)
         for n in simple_nodes:
             nid = n["id"]
@@ -614,9 +612,7 @@ class TestMultiOutputWiring:
             for oid in output_ids:
                 if oid not in consumers:
                     orphans.append(oid)
-        assert not orphans, (
-            f"Orphan @output nodes (not consumed): {orphans}"
-        )
+        assert not orphans, f"Orphan @output nodes (not consumed): {orphans}"
 
 
 class TestSyntheticInputShapeMetadata:
@@ -640,17 +636,15 @@ class TestSyntheticInputShapeMetadata:
         assert shape, "@input has no shape metadata"
         # Token IDs are 2-D (batch, seq) — should NOT have a hidden dimension
         dims = shape.replace(" x ", "x").split("x")
-        assert len(dims) <= 3, (
-            f"@input has too many dims for token IDs: {shape}"
-        )
+        assert len(dims) <= 3, f"@input has too many dims for token IDs: {shape}"
 
     def test_embedding_parent_input_is_integer_dtype(self, simple_nodes):
         """A composite whose first child is Embedding should have int64 @input."""
         # In _SimpleModel, the root model's @input carries token IDs
         shape = self._get_shape(simple_nodes, "@input")
-        assert "int64" in shape, (
-            f"Root @input should be int64 (token IDs), got: {shape}"
-        )
+        assert (
+            "int64" in shape
+        ), f"Root @input should be int64 (token IDs), got: {shape}"
 
     def test_input_shape_not_inherited_from_source(self, simple_nodes):
         """Composite @input nodes should derive shape from their own module's
@@ -696,18 +690,18 @@ class TestSyntheticOutputShapeMetadata:
         block_shape = self._get_shape(simple_nodes, "layers/0/@output")
         assert block_shape, "layers/0/@output has no shape"
         # Block output should be hidden_dim (64), not intermediate (256)
-        assert "256" not in block_shape, (
-            f"layers/0/@output seems to show MLP intermediate shape: {block_shape}"
-        )
+        assert (
+            "256" not in block_shape
+        ), f"layers/0/@output seems to show MLP intermediate shape: {block_shape}"
 
     def test_self_attn_output_shape(self, simple_nodes):
         """self_attn/@output should reflect o_proj output (hidden_dim),
         not an intermediate projection size."""
         shape = self._get_shape(simple_nodes, "layers/0/self_attn/@output")
         if shape:
-            assert "64" in shape, (
-                f"self_attn/@output should include hidden_dim=64, got: {shape}"
-            )
+            assert (
+                "64" in shape
+            ), f"self_attn/@output should include hidden_dim=64, got: {shape}"
 
 
 class TestInputShapeInference:
@@ -715,23 +709,22 @@ class TestInputShapeInference:
 
     def test_linear_input_shape(self):
         from TraceLens.ModelUtils.torch_trace import _infer_input_shapes_from_weights
+
         model = torch.nn.Sequential(torch.nn.Linear(32, 64))
-        shapes = _infer_input_shapes_from_weights(
-            model, {}, batch_size=1, seq_len=10
-        )
+        shapes = _infer_input_shapes_from_weights(model, {}, batch_size=1, seq_len=10)
         assert shapes.get("0") == (1, 10, 32)
 
     def test_embedding_input_shape(self):
         from TraceLens.ModelUtils.torch_trace import _infer_input_shapes_from_weights
+
         model = torch.nn.Sequential(torch.nn.Embedding(100, 64))
-        shapes = _infer_input_shapes_from_weights(
-            model, {}, batch_size=1, seq_len=10
-        )
+        shapes = _infer_input_shapes_from_weights(model, {}, batch_size=1, seq_len=10)
         # Embedding input is (batch, seq) — no hidden dim
         assert shapes.get("0") == (1, 10)
 
     def test_captured_shapes_preserved(self):
         from TraceLens.ModelUtils.torch_trace import _infer_input_shapes_from_weights
+
         model = torch.nn.Sequential(torch.nn.Linear(32, 64))
         captured = {"0": (2, 5, 32)}
         shapes = _infer_input_shapes_from_weights(
@@ -742,10 +735,9 @@ class TestInputShapeInference:
 
     def test_conv2d_input_shape(self):
         from TraceLens.ModelUtils.torch_trace import _infer_input_shapes_from_weights
+
         model = torch.nn.Sequential(torch.nn.Conv2d(3, 16, 3))
-        shapes = _infer_input_shapes_from_weights(
-            model, {}, batch_size=1, seq_len=10
-        )
+        shapes = _infer_input_shapes_from_weights(model, {}, batch_size=1, seq_len=10)
         assert shapes.get("0") == (1, 3, 10, 10)
 
 
@@ -776,22 +768,21 @@ class TestCompositeOutputResolution:
 
     def test_output_has_edges(self, simple_nodes):
         """Root @output should have incoming edges."""
-        root_output = next(
-            (n for n in simple_nodes if n["id"] == "@output"), None
-        )
+        root_output = next((n for n in simple_nodes if n["id"] == "@output"), None)
         assert root_output is not None
         sources = [e["sourceNodeId"] for e in root_output.get("incomingEdges", [])]
         assert sources, "@output has no incoming edges"
 
     def test_output_shape_exists(self, simple_nodes):
         """@output should have shape metadata."""
-        root_output = next(
-            (n for n in simple_nodes if n["id"] == "@output"), None
-        )
+        root_output = next((n for n in simple_nodes if n["id"] == "@output"), None)
         if root_output and root_output.get("outputsMetadata"):
             shape = next(
-                (a["value"] for a in root_output["outputsMetadata"][0].get("attrs", [])
-                 if a["key"] == "shape"),
+                (
+                    a["value"]
+                    for a in root_output["outputsMetadata"][0].get("attrs", [])
+                    if a["key"] == "shape"
+                ),
                 "",
             )
             assert shape, "@output has no shape metadata"
@@ -819,9 +810,9 @@ class TestContainerGroupAttrs:
         ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
         for key, attrs in ga.items():
             if "count" in attrs:
-                assert "output_shape" in attrs, (
-                    f"Layer group '{key}' missing output_shape"
-                )
+                assert (
+                    "output_shape" in attrs
+                ), f"Layer group '{key}' missing output_shape"
 
 
 class TestGroupAttrOrdering:
@@ -832,27 +823,27 @@ class TestGroupAttrOrdering:
         for key, attrs in ga.items():
             keys = list(attrs.keys())
             if "input_shape" in keys and "output_shape" in keys:
-                assert keys.index("input_shape") < keys.index("output_shape"), (
-                    f"In group '{key}', input_shape should come before output_shape: {keys}"
-                )
+                assert keys.index("input_shape") < keys.index(
+                    "output_shape"
+                ), f"In group '{key}', input_shape should come before output_shape: {keys}"
 
     def test_input_shape_is_first(self, simple_payload):
         ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
         for key, attrs in ga.items():
             keys = list(attrs.keys())
             if "input_shape" in keys:
-                assert keys[0] == "input_shape", (
-                    f"In group '{key}', input_shape should be first: {keys}"
-                )
+                assert (
+                    keys[0] == "input_shape"
+                ), f"In group '{key}', input_shape should be first: {keys}"
 
     def test_output_shape_is_last(self, simple_payload):
         ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
         for key, attrs in ga.items():
             keys = list(attrs.keys())
             if "output_shape" in keys:
-                assert keys[-1] == "output_shape", (
-                    f"In group '{key}', output_shape should be last: {keys}"
-                )
+                assert (
+                    keys[-1] == "output_shape"
+                ), f"In group '{key}', output_shape should be last: {keys}"
 
 
 class TestForkJoinNodes:
@@ -867,6 +858,7 @@ class TestForkJoinNodes:
                 super().__init__()
                 self.norm = torch.nn.LayerNorm(64)
                 self.proj = torch.nn.Linear(64, 64)
+
             def forward(self, x):
                 return self.proj(self.norm(x))
 
@@ -875,6 +867,7 @@ class TestForkJoinNodes:
                 super().__init__()
                 self.norm = torch.nn.LayerNorm(64)
                 self.gate = torch.nn.Linear(64, 64)
+
             def forward(self, x):
                 return self.gate(self.norm(x))
 
@@ -882,11 +875,17 @@ class TestForkJoinNodes:
             def __init__(self):
                 super().__init__()
                 self.embed = torch.nn.Embedding(256, 64)
-                self.layers = torch.nn.ModuleList([
-                    _TypeA(), _TypeB(), _TypeA(), _TypeB(),
-                ])
+                self.layers = torch.nn.ModuleList(
+                    [
+                        _TypeA(),
+                        _TypeB(),
+                        _TypeA(),
+                        _TypeB(),
+                    ]
+                )
                 self.norm = torch.nn.LayerNorm(64)
                 self.head = torch.nn.Linear(64, 256, bias=False)
+
             def forward(self, x):
                 h = self.embed(x)
                 for layer in self.layers:
@@ -900,14 +899,20 @@ class TestForkJoinNodes:
 
     def test_fork_node_exists(self, multi_group_model):
         nodes = multi_group_model["graphCollections"][0]["graphs"][0]["nodes"]
-        forks = [n for n in nodes
-                 if any(a.get("value") == "fork" for a in n.get("attrs", []))]
+        forks = [
+            n
+            for n in nodes
+            if any(a.get("value") == "fork" for a in n.get("attrs", []))
+        ]
         assert len(forks) >= 1, "No Fork node found for multi-group container"
 
     def test_join_node_exists(self, multi_group_model):
         nodes = multi_group_model["graphCollections"][0]["graphs"][0]["nodes"]
-        joins = [n for n in nodes
-                 if any(a.get("value") == "join" for a in n.get("attrs", []))]
+        joins = [
+            n
+            for n in nodes
+            if any(a.get("value") == "join" for a in n.get("attrs", []))
+        ]
         assert len(joins) >= 1, "No Join node found for multi-group container"
 
     def test_fork_has_incoming_edge(self, multi_group_model):
@@ -970,8 +975,9 @@ class TestMultiModalFlowDirection:
         with torch.device("meta"):
             model = _FakeVLM()
         model.eval()
-        composites = {n for n, m in model.named_modules()
-                      if n and any(True for _ in m.children())}
+        composites = {
+            n for n, m in model.named_modules() if n and any(True for _ in m.children())
+        }
         return _capture_call_graph(model, composites, seq_len=8, batch_size=1)
 
     def test_uninvoked_sibling_wired_as_input(self):
@@ -984,9 +990,10 @@ class TestMultiModalFlowDirection:
         targets = {tgt for _, tgt in root_edges}
         assert "vision_tower" in targets
         assert "text_backbone" in targets
-        assert ("vision_tower", "text_backbone") in root_edges, (
-            "Uninvoked sibling should feed into the invoked one"
-        )
+        assert (
+            "vision_tower",
+            "text_backbone",
+        ) in root_edges, "Uninvoked sibling should feed into the invoked one"
         assert ("@input", "vision_tower") in root_edges
         assert ("@input", "text_backbone") in root_edges
 
@@ -1029,8 +1036,9 @@ class TestMultiModalFlowDirection:
         with torch.device("meta"):
             model = _Both()
         model.eval()
-        composites = {n for n, m in model.named_modules()
-                      if n and any(True for _ in m.children())}
+        composites = {
+            n for n, m in model.named_modules() if n and any(True for _ in m.children())
+        }
         cg = _capture_call_graph(model, composites, seq_len=8, batch_size=1)
         # Both children were invoked, so the "single invoked child" fallback
         # condition doesn't apply and no root edges are synthesized.
@@ -1367,6 +1375,6 @@ class TestSingleOpLeafInlining:
             (a["value"] for a in meta[0].get("attrs", []) if a["key"] == "shape"),
             "",
         )
-        assert "4" not in shape.split("bfloat16")[0].split("float32")[0], (
-            f"head's output shape should have the reduced dim (4) removed, got: {shape!r}"
-        )
+        assert (
+            "4" not in shape.split("bfloat16")[0].split("float32")[0]
+        ), f"head's output shape should have the reduced dim (4) removed, got: {shape!r}"

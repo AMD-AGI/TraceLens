@@ -81,7 +81,9 @@ setup(
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
         ],
-        "Visualizer": _read_requirements(_ROOT / "TraceLens" / "Visualizer" / "requirements.txt"),
+        "Visualizer": _read_requirements(
+            _ROOT / "TraceLens" / "Visualizer" / "requirements.txt"
+        ),
         "dev": [
             "pytest",
             "black==26.3.1",

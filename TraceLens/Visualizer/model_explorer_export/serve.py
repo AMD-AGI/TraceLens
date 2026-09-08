@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from TraceLens.Visualizer.model_explorer_export.viewer_page import VIEWER_DIR, compose_viewer_html
+from TraceLens.Visualizer.model_explorer_export.viewer_page import (
+    VIEWER_DIR,
+    compose_viewer_html,
+)
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 VISUALIZER_DIST = (

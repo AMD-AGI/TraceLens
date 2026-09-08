@@ -63,7 +63,9 @@ _SYNTHETIC_ATTENTION_NAMES = {
 
 FUNCTIONAL_SYNTHETIC_PREFIX = "@functional_"
 POSITIONAL_SYNTHETIC_PREFIX = "@positional_"
-_POSITIONAL_SOURCE_POS_RE = re.compile(rf"^{re.escape(POSITIONAL_SYNTHETIC_PREFIX)}l(\d+)_")
+_POSITIONAL_SOURCE_POS_RE = re.compile(
+    rf"^{re.escape(POSITIONAL_SYNTHETIC_PREFIX)}l(\d+)_"
+)
 POSITIONAL_ATTR_RE = re.compile(r"(rotary|rope|pos_emb)", re.I)
 
 _DATA_MOVEMENT_NAMES = frozenset(
@@ -305,7 +307,13 @@ def _resolve_local_module_alias_calls(func: ast.AST) -> ast.AST:
 # here we need the *container* itself as a single ordering position).
 # ─────────────────────────────────────────────────────────────────────────
 
-_STMT_VALUE_FIELDS: tuple[type, ...] = (ast.Assign, ast.AnnAssign, ast.Expr, ast.AugAssign, ast.Return)
+_STMT_VALUE_FIELDS: tuple[type, ...] = (
+    ast.Assign,
+    ast.AnnAssign,
+    ast.Expr,
+    ast.AugAssign,
+    ast.Return,
+)
 
 
 def _walk_stmts(
@@ -386,7 +394,9 @@ def forward_call_order(mod: torch.nn.Module) -> list[str] | None:
         tree = ast.parse(textwrap.dedent(src))
     except SyntaxError:
         return None
-    if not tree.body or not isinstance(tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef)):
+    if not tree.body or not isinstance(
+        tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef)
+    ):
         return None
     func = _resolve_local_module_alias_calls(tree.body[0])
 

@@ -18,8 +18,15 @@ from TraceLens.Visualizer.model_explorer_export.build import (
     build_model_explorer_payload,
     save_model_explorer_payload,
 )
-from TraceLens.Visualizer.model_explorer_export.serve import open_viewer, serve_viewer, viewer_url
-from TraceLens.Visualizer.model_explorer_export.viewer_page import is_html_output, save_viewer_html
+from TraceLens.Visualizer.model_explorer_export.serve import (
+    open_viewer,
+    serve_viewer,
+    viewer_url,
+)
+from TraceLens.Visualizer.model_explorer_export.viewer_page import (
+    is_html_output,
+    save_viewer_html,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -122,9 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    checkpoint = _resolve_checkpoint(
-        checkpoint=args.checkpoint, source=args.source
-    )
+    checkpoint = _resolve_checkpoint(checkpoint=args.checkpoint, source=args.source)
     if checkpoint is None:
         parser.error("Provide a Hugging Face checkpoint (SOURCE or --checkpoint)")
 

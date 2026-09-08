@@ -17,7 +17,6 @@ Replaces the AST-based pipeline with runtime tracing:
 
 from __future__ import annotations
 
-import inspect
 import logging
 import re
 import sys
@@ -56,6 +55,7 @@ _STYLE_OP = {"backgroundColor": "#ecf0f1", "textColor": _DARK_TEXT}
 
 # ── Config patching ──────────────────────────────────────────────────────────
 
+
 def _patch_config(config) -> None:
     """Ensure custom HF configs have all attributes the model code expects."""
     raw = config.to_dict()
@@ -68,6 +68,7 @@ def _patch_config(config) -> None:
 
 
 # ── Meta-device model instantiation ──────────────────────────────────────────
+
 
 def _resolve_auto_classes(config) -> list[type]:
     """Return a ranked list of Auto classes to try, based on model card metadata.
@@ -154,12 +155,14 @@ def _instantiate_meta(checkpoint: str | Path) -> tuple[Any, Any]:
 
 # ── Rotary embedding patching ────────────────────────────────────────────────
 
+
 def _patch_rotary_embeddings(model: torch.nn.Module) -> None:
     """Patch rotary embedding modules to stay on meta device.
 
     Many HF models create CPU tensors inside rotary embedding forward().
     This causes meta-device forward passes to fail.
     """
+
     def _rotary_forward_meta(self, *args, **kwargs):
         dim = getattr(self, "dim", 64)
         max_seq = args[0] if args and isinstance(args[0], int) else 4096
@@ -182,6 +185,7 @@ def _patch_rotary_embeddings(model: torch.nn.Module) -> None:
 
 
 # ── Shape capture via forward hooks ──────────────────────────────────────────
+
 
 def _capture_shapes(
     model: torch.nn.Module,
@@ -218,6 +222,7 @@ def _capture_shapes(
                             break
             except Exception:
                 pass
+
         return hook
 
     handles = []
@@ -314,6 +319,7 @@ def _infer_input_shapes_from_weights(
 
 # ── Call-graph capture via forward hooks ─────────────────────────────────────
 
+
 def _tensor_ids(x: Any) -> list[int]:
     """Extract Python id()s of all tensors in a nested structure."""
     if isinstance(x, torch.Tensor):
@@ -360,14 +366,14 @@ def _capture_call_graph(
                 (counter[0], _tensor_ids(args) + _tensor_ids(kwargs))
             )
             counter[0] += 1
+
         return hook
 
     def _post_hook(name: str):
         def hook(_mod, _inp, output):
-            post_outputs[name].append(
-                (counter[0], _tensor_ids(output))
-            )
+            post_outputs[name].append((counter[0], _tensor_ids(output)))
             counter[0] += 1
+
         return hook
 
     handles = []
@@ -420,7 +426,7 @@ def _capture_call_graph(
         prefix = comp_path + "."
         for name in pre_inputs:
             if name.startswith(prefix):
-                suffix = name[len(prefix):]
+                suffix = name[len(prefix) :]
                 if "." not in suffix:
                     children.add(name)
                 elif suffix.count(".") == 1:
@@ -477,9 +483,12 @@ def _capture_call_graph(
         #
         # Run BEFORE untracked_consumers so sequential chaining takes
         # priority over spurious @input edges from shared tensor IDs.
-        children_ordered = sorted(children, key=lambda c: (
-            min((idx for idx, _ in pre_inputs.get(c, [(999,)])), default=999)
-        ))
+        children_ordered = sorted(
+            children,
+            key=lambda c: (
+                min((idx for idx, _ in pre_inputs.get(c, [(999,)])), default=999)
+            ),
+        )
         children_with_edges = {tgt for _, tgt in child_edges}
         last_child: str | None = None
         for child in children_ordered:
@@ -514,11 +523,10 @@ def _capture_call_graph(
             # Filter spurious @input edges: if a child has a sibling
             # source, the @input edge is likely a secondary/control input
             # (e.g. attention_mask, position_ids) — not the main data flow.
-            children_with_sibling_src = {
-                tgt for src, tgt in unique if src != "@input"
-            }
+            children_with_sibling_src = {tgt for src, tgt in unique if src != "@input"}
             unique = [
-                (src, tgt) for src, tgt in unique
+                (src, tgt)
+                for src, tgt in unique
                 if src != "@input" or tgt not in children_with_sibling_src
             ]
 
@@ -572,6 +580,7 @@ def _symbolise(
 
 # ── torch.fx per-module tracing ──────────────────────────────────────────────
 
+
 def _fx_trace_module(mod: torch.nn.Module) -> torch.fx.Graph | None:
     """Try to symbolically trace a module.  Returns None on failure."""
     try:
@@ -584,7 +593,7 @@ def _fx_trace_module(mod: torch.nn.Module) -> torch.fx.Graph | None:
     # like ACT2FN[self.activation] — build a mirror class with the
     # activation registered as a proper submodule.
     try:
-        import inspect, re, types as _types
+        import inspect, re
 
         cls = type(mod)
         src = inspect.getsource(cls.forward)
@@ -596,6 +605,7 @@ def _fx_trace_module(mod: torch.nn.Module) -> torch.fx.Graph | None:
             return None
 
         from transformers.activations import ACT2FN
+
         act_mod = ACT2FN.get(act_name)
         if act_mod is None:
             return None
@@ -699,6 +709,7 @@ def _is_interesting_op(node: torch.fx.Node) -> bool:
 
 # ── Module classification ────────────────────────────────────────────────────
 
+
 def _classify_module(mod: torch.nn.Module) -> str:
     """Classify a module for styling and labeling."""
     name = type(mod).__name__
@@ -755,9 +766,11 @@ def _module_label(mod: torch.nn.Module) -> str:
 
 # ── Layer deduplication ──────────────────────────────────────────────────────
 
+
 @dataclass
 class LayerGroup:
     """A group of structurally identical layers inside a ModuleList."""
+
     class_name: str
     indices: list[int]
     representative: int  # index to keep
@@ -788,8 +801,7 @@ def _detect_repeated_layers(
             # Signature = class name + sorted child module class names
             child_sig = type(child).__name__
             child_structure = tuple(
-                (cname, type(cmod).__name__)
-                for cname, cmod in child.named_children()
+                (cname, type(cmod).__name__) for cname, cmod in child.named_children()
             )
             sig = f"{child_sig}:{child_structure}"
             groups[sig].append(i)
@@ -797,11 +809,13 @@ def _detect_repeated_layers(
         layer_groups = []
         for _sig, indices in groups.items():
             cls_name = type(mod[indices[0]]).__name__
-            layer_groups.append(LayerGroup(
-                class_name=cls_name,
-                indices=indices,
-                representative=indices[0],
-            ))
+            layer_groups.append(
+                LayerGroup(
+                    class_name=cls_name,
+                    indices=indices,
+                    representative=indices[0],
+                )
+            )
 
         if any(g.count > 1 for g in layer_groups):
             repeats[name] = layer_groups
@@ -811,9 +825,9 @@ def _detect_repeated_layers(
 
 # ── Graph building ───────────────────────────────────────────────────────────
 
+
 def _shape_attrs(shape_str: str, dtype: str = "bfloat16") -> list[dict]:
     """Build output shape attributes for a node."""
-    compact = shape_str.replace(" x ", "x")
     return [
         {"key": "output_shape", "value": f"{shape_str} {dtype}"},
         {"key": "output_dtype", "value": dtype},
@@ -867,10 +881,17 @@ def _build_fact_sheet(model_name: str, config) -> str:
             sub_configs[key] = val
 
     _FACT_KEYS = [
-        "model_type", "hidden_size", "num_hidden_layers",
-        "num_attention_heads", "num_key_value_heads",
-        "intermediate_size", "vocab_size", "max_position_embeddings",
-        "dtype", "num_local_experts", "num_experts_per_tok",
+        "model_type",
+        "hidden_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "intermediate_size",
+        "vocab_size",
+        "max_position_embeddings",
+        "dtype",
+        "num_local_experts",
+        "num_experts_per_tok",
         "moe_intermediate_size",
     ]
 
@@ -956,17 +977,19 @@ def build_graph(
     edges_from: dict[str, str] = {}  # module_path → node_id
 
     # Input node
-    nodes.append({
-        "id": "@input",
-        "label": "Tokenized text",
-        "namespace": "",
-        "attrs": [
-            {"key": "synthetic", "value": "@input"},
-            *_shape_attrs("B x S", "int64"),
-        ],
-        "style": _STYLE_INPUT,
-        "outputsMetadata": _output_metadata("B x S", "int64"),
-    })
+    nodes.append(
+        {
+            "id": "@input",
+            "label": "Tokenized text",
+            "namespace": "",
+            "attrs": [
+                {"key": "synthetic", "value": "@input"},
+                *_shape_attrs("B x S", "int64"),
+            ],
+            "style": _STYLE_INPUT,
+            "outputsMetadata": _output_metadata("B x S", "int64"),
+        }
+    )
 
     # ── Build skip set from repeated layer groups ────────────────────────
     # Keep one representative per *distinct layer type* in each ModuleList.
@@ -1071,7 +1094,7 @@ def build_graph(
         # Check if p is a child of a skipped path
         for skip, rep in _skip_to_rep.items():
             if p.startswith(skip + "."):
-                return rep + p[len(skip):]
+                return rep + p[len(skip) :]
         return p
 
     # Remap call_graph edges through collapsed layers
@@ -1310,19 +1333,23 @@ def build_graph(
             incoming = []
             for arg in fx_node.args:
                 if isinstance(arg, torch.fx.Node) and arg.name in node_map:
-                    incoming.append({
-                        "sourceNodeId": node_map[arg.name],
-                        "sourceNodeOutputId": "0",
-                        "targetNodeInputId": str(len(incoming)),
-                    })
+                    incoming.append(
+                        {
+                            "sourceNodeId": node_map[arg.name],
+                            "sourceNodeOutputId": "0",
+                            "targetNodeInputId": str(len(incoming)),
+                        }
+                    )
                 elif isinstance(arg, (tuple, list)):
                     for item in arg:
                         if isinstance(item, torch.fx.Node) and item.name in node_map:
-                            incoming.append({
-                                "sourceNodeId": node_map[item.name],
-                                "sourceNodeOutputId": "0",
-                                "targetNodeInputId": str(len(incoming)),
-                            })
+                            incoming.append(
+                                {
+                                    "sourceNodeId": node_map[item.name],
+                                    "sourceNodeOutputId": "0",
+                                    "targetNodeInputId": str(len(incoming)),
+                                }
+                            )
 
             op_node = {
                 "id": op_id,
@@ -1400,12 +1427,14 @@ def build_graph(
                 for arg_node in fx_node.all_input_nodes:
                     src = node_map.get(arg_node.name, "@input")
                     incoming.append({"sourceNodeId": src})
-                op_nodes.append({
-                    "id": node_id,
-                    "label": label,
-                    "namespace": parent_ns,
-                    "incomingEdges": incoming,
-                })
+                op_nodes.append(
+                    {
+                        "id": node_id,
+                        "label": label,
+                        "namespace": parent_ns,
+                        "incomingEdges": incoming,
+                    }
+                )
                 continue
 
             label = _fx_op_label(fx_node)
@@ -1415,19 +1444,23 @@ def build_graph(
             incoming = []
             for arg in fx_node.args:
                 if isinstance(arg, torch.fx.Node) and arg.name in node_map:
-                    incoming.append({
-                        "sourceNodeId": node_map[arg.name],
-                        "sourceNodeOutputId": "0",
-                        "targetNodeInputId": str(len(incoming)),
-                    })
+                    incoming.append(
+                        {
+                            "sourceNodeId": node_map[arg.name],
+                            "sourceNodeOutputId": "0",
+                            "targetNodeInputId": str(len(incoming)),
+                        }
+                    )
                 elif isinstance(arg, (tuple, list)):
                     for item in arg:
                         if isinstance(item, torch.fx.Node) and item.name in node_map:
-                            incoming.append({
-                                "sourceNodeId": node_map[item.name],
-                                "sourceNodeOutputId": "0",
-                                "targetNodeInputId": str(len(incoming)),
-                            })
+                            incoming.append(
+                                {
+                                    "sourceNodeId": node_map[item.name],
+                                    "sourceNodeOutputId": "0",
+                                    "targetNodeInputId": str(len(incoming)),
+                                }
+                            )
 
             op_node = {
                 "id": op_id,
@@ -1492,7 +1525,11 @@ def build_graph(
             if path in container_set:
                 continue  # ModuleList itself is not a node
             if namespace:
-                group_id = namespace + "/" + f"{attr_names.get(path, '')} ({type(mod).__name__})"
+                group_id = (
+                    namespace
+                    + "/"
+                    + f"{attr_names.get(path, '')} ({type(mod).__name__})"
+                )
                 attrs = {"class": type(mod).__name__}
                 shape_str = shapes.get(path)
                 if not shape_str:
@@ -1507,7 +1544,10 @@ def build_graph(
                 if not inp_str:
                     # Derive input_shape from first child module
                     for child_name in module_map:
-                        if child_name.startswith(path + ".") and child_name in input_shapes:
+                        if (
+                            child_name.startswith(path + ".")
+                            and child_name in input_shapes
+                        ):
                             inp_str = input_shapes[child_name]
                             break
                 if inp_str:
@@ -1578,14 +1618,14 @@ def build_graph(
     # ── Create Fork/Join nodes for parallel layer groups ─────────────────
     # When a container has multiple layer types (interleaved), create
     # Fork and Join nodes so all types fan out from Fork and merge at Join.
-    fork_join_info: dict[str, dict] = {}  # container_path → {fork_id, join_id, branch_ns}
+    fork_join_info: dict[str, dict] = (
+        {}
+    )  # container_path → {fork_id, join_id, branch_ns}
     for container_path, groups in layer_group_map.items():
         if len(groups) <= 1:
             continue
         parent_path = container_path.rsplit(".", 1)[0] if "." in container_path else ""
         parent_ns = _namespace_for(parent_path + ".dummy") if parent_path else ""
-        # Use the container's parent namespace for Fork/Join
-        container_ns = _namespace_for(container_path + ".0.dummy").rsplit("/", 1)[0]
         fork_id = container_path.replace(".", "/") + "/@fork"
         join_id = container_path.replace(".", "/") + "/@join"
 
@@ -1644,24 +1684,28 @@ def build_graph(
     # Check for lm_head or tied embeddings to get vocab size
     if hasattr(model, "lm_head") and isinstance(model.lm_head, torch.nn.Linear):
         output_shape = f"B x S x {model.lm_head.out_features}"
-    elif hasattr(model, "language_model") and hasattr(model.language_model, "embed_tokens"):
+    elif hasattr(model, "language_model") and hasattr(
+        model.language_model, "embed_tokens"
+    ):
         vocab = model.language_model.embed_tokens.num_embeddings
         output_shape = f"B x S x {vocab}"
     elif hasattr(model, "embed_tokens"):
         vocab = model.embed_tokens.num_embeddings
         output_shape = f"B x S x {vocab}"
 
-    nodes.append({
-        "id": "@output",
-        "label": "Logits",
-        "namespace": "",
-        "attrs": [
-            {"key": "synthetic", "value": "@output"},
-            *_shape_attrs(output_shape, dtype),
-        ],
-        "style": _STYLE_OUTPUT,
-        "outputsMetadata": _output_metadata(output_shape, dtype),
-    })
+    nodes.append(
+        {
+            "id": "@output",
+            "label": "Logits",
+            "namespace": "",
+            "attrs": [
+                {"key": "synthetic", "value": "@output"},
+                *_shape_attrs(output_shape, dtype),
+            ],
+            "style": _STYLE_OUTPUT,
+            "outputsMetadata": _output_metadata(output_shape, dtype),
+        }
+    )
 
     # ── Wire edges ───────────────────────────────────────────────────────
     # Pre-compute alias mapping for FX-expanded leaf modules:
@@ -1755,7 +1799,11 @@ def build_graph(
     # Stable sort: preserves relative order of nodes within the same
     # execution group (important for FX op chains within a module).
     inner_nodes.sort(key=_node_exec_key)
-    nodes[:] = [n for n in root_nodes if n["id"] == "@input"] + inner_nodes + [n for n in root_nodes if n["id"] == "@output"]
+    nodes[:] = (
+        [n for n in root_nodes if n["id"] == "@input"]
+        + inner_nodes
+        + [n for n in root_nodes if n["id"] == "@output"]
+    )
 
     # Insert Fork/Join nodes at correct positions in the node list.
     # Fork goes before the first branch node; Join goes after the last.
@@ -1774,7 +1822,12 @@ def build_graph(
             nodes.insert(last_branch_idx + 2, fj["join_node"])
 
     _wire_sequential_edges(
-        nodes, model, module_map, shapes, {}, skip_layers,
+        nodes,
+        model,
+        module_map,
+        shapes,
+        {},
+        skip_layers,
         parallel_ns_groups=parallel_ns_groups,
         call_graph=call_graph,
         fx_leaf_aliases=_fx_leaf_aliases,
@@ -1794,8 +1847,11 @@ def build_graph(
             node_by_id[alias_id] = node_by_id[target_id]
 
     fx_leaf_first = _fx_leaf_first_map
-    fx_leaf_last = {p: _fx_leaf_aliases[_node_id(p)]
-                    for p in _fx_leaf_first_map if _node_id(p) in _fx_leaf_aliases}
+    fx_leaf_last = {
+        p: _fx_leaf_aliases[_node_id(p)]
+        for p in _fx_leaf_first_map
+        if _node_id(p) in _fx_leaf_aliases
+    }
 
     # Find predecessor for each expanded leaf module.
     # Walk up the module hierarchy to find call_graph edges that tell us
@@ -1863,7 +1919,11 @@ def build_graph(
             if n["id"].startswith(prefix) and "incomingEdges" in n:
                 for edge in n["incomingEdges"]:
                     src = edge["sourceNodeId"]
-                    if not src.startswith(prefix) and src != "@input" and src in node_by_id:
+                    if (
+                        not src.startswith(prefix)
+                        and src != "@input"
+                        and src in node_by_id
+                    ):
                         return src
         return None
 
@@ -1956,16 +2016,14 @@ def build_graph(
                     for target_node in _find_entry_nodes(tgt):
                         if "incomingEdges" not in target_node:
                             target_node["incomingEdges"] = []
-                        target_node["incomingEdges"].append(
-                            {"sourceNodeId": last_id}
-                        )
+                        target_node["incomingEdges"].append({"sourceNodeId": last_id})
                         all_sources_post.add(last_id)
 
     # ── Add synthetic I/O nodes for composite modules ────────────────────
     # Rebuild node lookup after all wiring fixups
     node_by_id = {n["id"]: n for n in nodes}
 
-    for comp_path in sorted(composite_modules, key=lambda p: (-p.count('.'), p)):
+    for comp_path in sorted(composite_modules, key=lambda p: (-p.count("."), p)):
         if _should_skip(comp_path):
             continue
 
@@ -1991,9 +2049,7 @@ def build_graph(
 
         # The module's own namespace (where internal nodes go)
         module_ns = (
-            comp_ns + f"/{attr} ({cls_name})"
-            if comp_ns
-            else f"{attr} ({cls_name})"
+            comp_ns + f"/{attr} ({cls_name})" if comp_ns else f"{attr} ({cls_name})"
         )
 
         # Find child node IDs inside this module
@@ -2053,8 +2109,9 @@ def build_graph(
                     for consumer_node, edge in consumers_of[cid]:
                         # Guard: only count if edge still points to this node
                         # (a parent composite's output rewiring may have changed it)
-                        if (edge["sourceNodeId"] == cid
-                                and not consumer_node["id"].startswith(child_prefix)):
+                        if edge["sourceNodeId"] == cid and not consumer_node[
+                            "id"
+                        ].startswith(child_prefix):
                             if cid not in output_child_ids:
                                 output_child_ids.append(cid)
                             break
@@ -2063,8 +2120,9 @@ def build_graph(
             for alias_id, target_id in _fx_leaf_aliases.items():
                 if target_id.startswith(child_prefix) and alias_id in consumers_of:
                     for consumer_node, edge in consumers_of[alias_id]:
-                        if (edge["sourceNodeId"] == alias_id
-                                and not consumer_node["id"].startswith(child_prefix)):
+                        if edge["sourceNodeId"] == alias_id and not consumer_node[
+                            "id"
+                        ].startswith(child_prefix):
                             if target_id not in output_child_ids:
                                 output_child_ids.append(target_id)
                             break
@@ -2081,7 +2139,8 @@ def build_graph(
                 continue
             has_consumer = any(
                 e["sourceNodeId"] == cid
-                for n2 in nodes for e in n2.get("incomingEdges", [])
+                for n2 in nodes
+                for e in n2.get("incomingEdges", [])
                 if n2["id"] != cid
             )
             if not has_consumer:
@@ -2098,7 +2157,8 @@ def build_graph(
                     continue
                 has_consumer = any(
                     e["sourceNodeId"] == cid
-                    for n2 in nodes for e in n2.get("incomingEdges", [])
+                    for n2 in nodes
+                    for e in n2.get("incomingEdges", [])
                     if n2["id"] != cid
                 )
                 if not has_consumer and cid not in output_child_ids:
@@ -2160,16 +2220,12 @@ def build_graph(
                         seen_srcs.add(src)
                         all_ext_srcs.append(src)
 
-            input_node["incomingEdges"] = [
-                {"sourceNodeId": s} for s in all_ext_srcs
-            ]
+            input_node["incomingEdges"] = [{"sourceNodeId": s} for s in all_ext_srcs]
 
             nodes.append(input_node)
             node_by_id[input_id] = input_node
             for e in input_node["incomingEdges"]:
-                consumers_of.setdefault(e["sourceNodeId"], []).append(
-                    (input_node, e)
-                )
+                consumers_of.setdefault(e["sourceNodeId"], []).append((input_node, e))
 
             # Rewire input children: replace external sources with input_id
             for cid in input_child_ids:
@@ -2214,15 +2270,19 @@ def build_graph(
                 cid = cn["id"]
                 if cid in consumers_of:
                     for consumer_node, edge in consumers_of[cid]:
-                        if (not consumer_node["id"].startswith(child_prefix)
-                                and edge["sourceNodeId"] == cid):
+                        if (
+                            not consumer_node["id"].startswith(child_prefix)
+                            and edge["sourceNodeId"] == cid
+                        ):
                             edge["sourceNodeId"] = wire_output_id
             # Also check alias consumers
             for alias_id, target_id in _fx_leaf_aliases.items():
                 if target_id.startswith(child_prefix) and alias_id in consumers_of:
                     for consumer_node, edge in consumers_of[alias_id]:
-                        if (not consumer_node["id"].startswith(child_prefix)
-                                and edge["sourceNodeId"] == alias_id):
+                        if (
+                            not consumer_node["id"].startswith(child_prefix)
+                            and edge["sourceNodeId"] == alias_id
+                        ):
                             edge["sourceNodeId"] = wire_output_id
 
     # ── Add I/O nodes for FX-expanded leaf modules ───────────────────
@@ -2328,12 +2388,18 @@ def build_graph(
         rep_path = f"{container_path}.0"
         mod_0 = module_map.get(rep_path)
         cls_name = type(mod_0).__name__ if mod_0 else "Layer"
-        ns = _namespace_for(rep_path + ".dummy").rsplit("/", 1)[0] if "." in rep_path else ""
+        ns = (
+            _namespace_for(rep_path + ".dummy").rsplit("/", 1)[0]
+            if "." in rep_path
+            else ""
+        )
         group_id = ns if ns else f"{total}x {cls_name}"
         # Summarize layer types
-        type_summary = ", ".join(
-            f"{g.count}x {g.class_name}" for g in groups
-        ) if len(groups) > 1 else f"{total}x {cls_name}"
+        type_summary = (
+            ", ".join(f"{g.count}x {g.class_name}" for g in groups)
+            if len(groups) > 1
+            else f"{total}x {cls_name}"
+        )
         layer_attrs: dict[str, str] = {
             "class": cls_name,
             "count": str(total),
@@ -2375,9 +2441,13 @@ def build_graph(
                         parent_inp_dtype = dtype
                         if first_mod and isinstance(first_mod, torch.nn.Embedding):
                             parent_inp_dtype = "int64"
-                        parent_ns = _namespace_for(parent_path + ".dummy").rsplit("/", 1)[0]
+                        parent_ns = _namespace_for(parent_path + ".dummy").rsplit(
+                            "/", 1
+                        )[0]
                         if parent_ns in group_attrs:
-                            group_attrs[parent_ns]["input_shape"] = f"{first_inp} {parent_inp_dtype}"
+                            group_attrs[parent_ns][
+                                "input_shape"
+                            ] = f"{first_inp} {parent_inp_dtype}"
                     break
             # Find terminal nodes for output shape
             targets = {t for _, t in cg_edges}
@@ -2410,7 +2480,10 @@ def build_graph(
                     first_inp = input_shapes.get(first_child)
                     if not first_inp:
                         for child_name in module_map:
-                            if child_name.startswith(first_child + ".") and child_name in input_shapes:
+                            if (
+                                child_name.startswith(first_child + ".")
+                                and child_name in input_shapes
+                            ):
                                 first_inp = input_shapes[child_name]
                                 break
                     if first_inp:
@@ -2418,13 +2491,18 @@ def build_graph(
                         parent_inp_dtype = dtype
                         if first_mod and isinstance(first_mod, torch.nn.Embedding):
                             parent_inp_dtype = "int64"
-                        group_attrs[parent_ns]["input_shape"] = f"{first_inp} {parent_inp_dtype}"
+                        group_attrs[parent_ns][
+                            "input_shape"
+                        ] = f"{first_inp} {parent_inp_dtype}"
 
                     last_child = direct_children[-1]
                     last_out = shapes.get(last_child)
                     if not last_out:
                         for child_name in reversed(list(module_map)):
-                            if child_name.startswith(last_child + ".") and child_name in shapes:
+                            if (
+                                child_name.startswith(last_child + ".")
+                                and child_name in shapes
+                            ):
                                 last_out = shapes[child_name]
                                 break
                     if last_out:
@@ -2585,7 +2663,9 @@ def build_graph(
             "factSheet": {
                 "title": model_name,
                 "body": fact_sheet,
-                "bodyHtml": fact_sheet.replace("  ", "&nbsp;&nbsp;").replace("\n", "<br>\n"),
+                "bodyHtml": fact_sheet.replace("  ", "&nbsp;&nbsp;").replace(
+                    "\n", "<br>\n"
+                ),
             },
             "dtype": dtype,
         },
@@ -2675,7 +2755,9 @@ def _wire_sequential_edges(
     # For each composite, build set of children that have dataflow sources
     # (children that appear as targets in call_graph edges)
     cg_sources: dict[str, list[str]] = {}  # child_path → [source_child_paths]
-    cg_children_with_no_sources: dict[str, set[str]] = {}  # comp → children with no incoming
+    cg_children_with_no_sources: dict[str, set[str]] = (
+        {}
+    )  # comp → children with no incoming
     for comp_path, edges in call_graph.items():
         targets_seen: dict[str, list[str]] = defaultdict(list)
         all_children: set[str] = set()
@@ -2840,11 +2922,13 @@ def _wire_sequential_edges(
             if source_id is None:
                 source_id = last_in_ns.get("", "@input")
             if source_id and source_id in node_by_id:
-                node["incomingEdges"] = [{
-                    "sourceNodeId": source_id,
-                    "sourceNodeOutputId": "0",
-                    "targetNodeInputId": "0",
-                }]
+                node["incomingEdges"] = [
+                    {
+                        "sourceNodeId": source_id,
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": "0",
+                    }
+                ]
             fork_path = _node_id_to_path(node["id"])
             last_node_for_path[fork_path] = node["id"]
             _update_last(ns, node["id"])
@@ -2862,8 +2946,11 @@ def _wire_sequential_edges(
                     break
             if fan_in:
                 node["incomingEdges"] = [
-                    {"sourceNodeId": src, "sourceNodeOutputId": "0",
-                     "targetNodeInputId": str(i)}
+                    {
+                        "sourceNodeId": src,
+                        "sourceNodeOutputId": "0",
+                        "targetNodeInputId": str(i),
+                    }
                     for i, src in enumerate(fan_in)
                     if src in node_by_id
                 ]
@@ -2898,7 +2985,9 @@ def _wire_sequential_edges(
                 source_id = _branch_to_fork[branch_ns]
                 for s in parallel_siblings.get(branch_ns, set()):
                     parallel_entry_point[s] = source_id
-            elif not any(s in parallel_entered for s in parallel_siblings.get(branch_ns, set())):
+            elif not any(
+                s in parallel_entered for s in parallel_siblings.get(branch_ns, set())
+            ):
                 # First branch in the group — find predecessor normally
                 parts = ns.split("/") if ns else []
                 while parts:
