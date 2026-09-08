@@ -270,6 +270,13 @@ class TestShapePropagation:
             f"Only {len(with_shapes)}/{len(outputs)} synthetic outputs have shapes"
         )
 
+    def test_all_nodes_have_shapes(self, simple_nodes):
+        """Every node (leaf, FX op, synthetic) must have outputsMetadata."""
+        missing = [n["id"] for n in simple_nodes if not n.get("outputsMetadata")]
+        assert missing == [], (
+            f"{len(missing)} nodes missing outputsMetadata: {missing}"
+        )
+
     def test_embedding_edge_has_shape(self, simple_nodes):
         """The edge from @input to embedding should carry a shape, not '?'."""
         emb = next(n for n in simple_nodes if "embed_tokens" in n["id"])
@@ -311,6 +318,91 @@ class TestGroupNodeAttributes:
         ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
         count_entries = {k: v for k, v in ga.items() if "count" in v}
         assert len(count_entries) > 0, "No layer group with 'count' attribute found"
+
+
+class TestEdgeWiring:
+    """Verify that edges inside composite modules follow the correct dataflow."""
+
+    def test_no_broken_edges(self, simple_nodes):
+        """Every edge must reference an existing source node."""
+        node_ids = {n["id"] for n in simple_nodes}
+        for n in simple_nodes:
+            for e in n.get("incomingEdges", []):
+                assert e["sourceNodeId"] in node_ids, (
+                    f"Node {n['id']} has broken edge from {e['sourceNodeId']}"
+                )
+
+    def test_all_non_input_nodes_have_edges(self, simple_nodes):
+        """Every node except @input must have at least one incoming edge."""
+        for n in simple_nodes:
+            if n["id"] == "@input":
+                continue
+            assert n.get("incomingEdges"), (
+                f"Node {n['id']} has no incoming edges"
+            )
+
+    def test_sequential_dataflow_in_block(self, simple_nodes):
+        """Inside the decoder block, every child module must be wired
+        (no orphan nodes). The @input node should be the ultimate
+        source of all nodes in the block."""
+        block_nodes = [n for n in simple_nodes if "layers/0/" in n["id"]]
+        assert len(block_nodes) > 0
+
+        # All block nodes except layer @input must have incoming edges
+        for n in block_nodes:
+            if n["id"].endswith("/@input") and n["id"].count("/") == 1:
+                continue
+            assert n.get("incomingEdges"), (
+                f"Block node {n['id']} has no incoming edges (dead node)"
+            )
+
+    def test_call_graph_sequential_fallback(self):
+        """When a child module has no tensor-ID-tracked producer, the
+        sequential fallback should connect it from the previous child."""
+        from TraceLens.ModelUtils.torch_trace import _capture_call_graph
+
+        # Model where child B receives from child A via a non-module
+        # function call (torch.cat), which creates an untracked tensor.
+        class _Block(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj_a = torch.nn.Linear(32, 32)
+                self.proj_b = torch.nn.Linear(64, 32)
+
+            def forward(self, x):
+                a = self.proj_a(x)
+                # torch.cat creates a new tensor not tracked to any child
+                combined = torch.cat([a, x], dim=-1)
+                return self.proj_b(combined)
+
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.emb = torch.nn.Embedding(64, 32)
+                self.block = _Block()
+
+            def forward(self, x, **kwargs):
+                return self.block(self.emb(x))
+
+        with torch.device("meta"):
+            model = _Model()
+
+        composites = set()
+        for name, mod in model.named_modules():
+            if name and list(mod.children()):
+                composites.add(name)
+
+        call_graph = _capture_call_graph(model, composites, seq_len=8, batch_size=1)
+        block_edges = call_graph.get("block", [])
+        edge_set = {(s.split(".")[-1] if s != "@input" else s,
+                      t.split(".")[-1]) for s, t in block_edges}
+
+        # proj_b should have an edge (either from proj_a via fallback,
+        # or from @input). It must not be orphaned.
+        proj_b_sources = {s for s, t in edge_set if t == "proj_b"}
+        assert proj_b_sources, (
+            f"proj_b has no incoming edges. Got: {edge_set}"
+        )
 
 
 # ── Integration tests (require HF Hub) ──────────────────────────────────────

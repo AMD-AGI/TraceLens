@@ -291,22 +291,27 @@ def _capture_call_graph(
     Children that receive the composite's own input (not a sibling's
     output) are marked as receiving from a virtual "@input" source.
     """
-    # For each module, record pre-hook input tensor IDs and post-hook output IDs
-    pre_inputs: dict[str, list[int]] = {}   # module path → input tensor IDs
-    post_outputs: dict[str, list[int]] = {}  # module path → output tensor IDs
-    call_order: dict[str, int] = {}  # module path → call order
+    # For each module, record ALL calls (modules may be called multiple
+    # times, e.g. HyperConnections).  Each entry is a list of per-call
+    # records: (call_index, tensor_ids).
+    pre_inputs: dict[str, list[tuple[int, list[int]]]] = defaultdict(list)
+    post_outputs: dict[str, list[tuple[int, list[int]]]] = defaultdict(list)
     counter = [0]
 
     def _pre_hook(name: str):
         def hook(_mod, args, kwargs):
-            pre_inputs[name] = _tensor_ids(args) + _tensor_ids(kwargs)
-            call_order[name] = counter[0]
+            pre_inputs[name].append(
+                (counter[0], _tensor_ids(args) + _tensor_ids(kwargs))
+            )
             counter[0] += 1
         return hook
 
     def _post_hook(name: str):
         def hook(_mod, _inp, output):
-            post_outputs[name] = _tensor_ids(output)
+            post_outputs[name].append(
+                (counter[0], _tensor_ids(output))
+            )
+            counter[0] += 1
         return hook
 
     handles = []
@@ -327,47 +332,61 @@ def _capture_call_graph(
             h.remove()
 
     # Build per-composite edge lists.
+    #
+    # Modules may be called multiple times (e.g. HyperConnections that
+    # wrap both the pre- and post-residual path).  We flatten all calls
+    # into a single ordered timeline and process them in call order so
+    # that a second call to the same module can consume outputs from
+    # children that ran between the two calls.
     edges: dict[str, list[tuple[str, str]]] = {}
     for comp_path in composite_modules:
         # Collect direct children
-        children: list[str] = []
+        children: set[str] = set()
         for name in pre_inputs:
             if name.startswith(comp_path + "."):
                 suffix = name[len(comp_path) + 1:]
                 if "." not in suffix:
-                    children.append(name)
+                    children.add(name)
 
         if len(children) < 2:
             continue
 
-        children.sort(key=lambda c: call_order.get(c, 0))
+        # Build a timeline of all calls (pre + post) for direct children
+        # Each event: (call_index, "pre"/"post", child_name, tensor_ids)
+        events: list[tuple[int, str, str, list[int]]] = []
+        for child in children:
+            for call_idx, tids in pre_inputs.get(child, []):
+                events.append((call_idx, "pre", child, tids))
+            for call_idx, tids in post_outputs.get(child, []):
+                events.append((call_idx, "post", child, tids))
+        events.sort(key=lambda e: e[0])
 
         # Map tensor id → producing child (or "@input" for composite's own input)
         producer: dict[int, str] = {}
         # The composite's own input tensors are the "root" source
-        comp_inputs = set(pre_inputs.get(comp_path, []))
-        for tid in comp_inputs:
-            producer[tid] = "@input"
+        for _call_idx, tids in pre_inputs.get(comp_path, []):
+            for tid in tids:
+                producer[tid] = "@input"
 
         child_edges: list[tuple[str, str]] = []
-        # Track untracked tensor IDs shared by multiple children
         untracked_consumers: dict[int, list[str]] = defaultdict(list)
 
-        for child in children:
-            # Check which producer this child's inputs come from
-            sources: set[str] = set()
-            for tid in pre_inputs.get(child, []):
-                if tid in producer:
-                    sources.add(producer[tid])
-                else:
-                    # Untracked tensor — record for shared-input detection
-                    untracked_consumers[tid].append(child)
-            for src in sorted(sources):
-                if src != child:
-                    child_edges.append((src, child))
-            # Register this child's outputs
-            for tid in post_outputs.get(child, []):
-                producer[tid] = child
+        for _call_idx, event_type, child, tids in events:
+            if event_type == "pre":
+                # Check which producer this child's inputs come from
+                sources: set[str] = set()
+                for tid in tids:
+                    if tid in producer:
+                        sources.add(producer[tid])
+                    else:
+                        untracked_consumers[tid].append(child)
+                for src in sorted(sources):
+                    if src != child:
+                        child_edges.append((src, child))
+            else:  # "post"
+                # Register this child's outputs
+                for tid in tids:
+                    producer[tid] = child
 
         # Children sharing the same untracked input tensor are parallel.
         # Treat them as all coming from "@input".
@@ -378,6 +397,23 @@ def _capture_call_graph(
                     if child not in children_with_edges:
                         child_edges.append(("@input", child))
                         children_with_edges.add(child)
+
+        # Sequential fallback: children with no incoming edges (except the
+        # very first child) are connected from the last child that completed
+        # before them.  This handles inline tensor ops (e.g. residual
+        # combinations) that break the tensor-ID tracking chain.
+        children_ordered = sorted(children, key=lambda c: (
+            min((idx for idx, _ in pre_inputs.get(c, [(999,)])), default=999)
+        ))
+        children_with_edges = {tgt for _, tgt in child_edges}
+        last_child: str | None = None
+        for child in children_ordered:
+            if child not in children_with_edges and last_child is not None:
+                child_edges.append((last_child, child))
+                children_with_edges.add(child)
+            # Update last_child to the most recently completed child
+            # (the one whose post-hook fired last before this child's pre-hook)
+            last_child = child
 
         if child_edges:
             # Deduplicate
@@ -1800,28 +1836,31 @@ def build_graph(
             if len(deduped_e) < len(edges):
                 n["incomingEdges"] = deduped_e
 
-    # ── Propagate outputsMetadata to synthetic I/O nodes ─────────────────
-    # Synthetic input/output nodes need shape metadata so edges don't
-    # display as "?" in the viewer.
+    # ── Propagate outputsMetadata to all nodes ──────────────────────────
+    # Every node needs shape metadata so edges don't display as "?" in
+    # the viewer.
     #
     # Strategy:
     # 1. Try inheriting from the source node's outputsMetadata.
-    # 2. Fall back to the parent module's captured shape (from `shapes`).
+    # 2. Fall back to the enclosing module's captured shape (from `shapes`).
     node_by_id = {n["id"]: n for n in nodes}
 
     def _shape_metadata_for_path(node_id: str) -> list[dict] | None:
         """Derive outputsMetadata from the shapes dict for a node's module."""
-        # Strip /@input or /@output suffix to get the module path
-        path = node_id.replace("/", ".").removesuffix(".@input").removesuffix(".@output")
-        shape_str = shapes.get(path)
-        if shape_str:
-            return _output_metadata(shape_str, dtype)
-        # Try parent path (for deeply nested synthetic nodes)
-        while "." in path:
-            path = path.rsplit(".", 1)[0]
-            shape_str = shapes.get(path)
+        # Strip synthetic suffixes to get the module path
+        path = node_id.replace("/", ".")
+        for suffix in (".@input", ".@output"):
+            path = path.removesuffix(suffix)
+        # Walk up the module hierarchy until we find a captured shape
+        check = path
+        while check:
+            shape_str = shapes.get(check)
             if shape_str:
                 return _output_metadata(shape_str, dtype)
+            if "." in check:
+                check = check.rsplit(".", 1)[0]
+            else:
+                break
         return None
 
     changed = True
@@ -1829,9 +1868,6 @@ def build_graph(
         changed = False
         for n in nodes:
             if n.get("outputsMetadata"):
-                continue
-            attrs = {a["key"]: a["value"] for a in n.get("attrs", [])}
-            if attrs.get("synthetic") not in ("input", "output", "@input"):
                 continue
             # Try inheriting from source node
             for e in n.get("incomingEdges", []):
@@ -1842,7 +1878,7 @@ def build_graph(
                     break
             if n.get("outputsMetadata"):
                 continue
-            # Fall back to module's captured shape
+            # Fall back to enclosing module's captured shape
             meta = _shape_metadata_for_path(n["id"])
             if meta:
                 n["outputsMetadata"] = meta
