@@ -928,18 +928,22 @@ class TestForkJoinNodes:
                 )
 
 
-class TestVLMFlowDirection:
-    """Verify VLM call-graph heuristic produces correct flow direction."""
+class TestMultiModalFlowDirection:
+    """Verify the name-agnostic multi-modal call-graph fallback: when a
+    top-level sibling is never invoked (e.g. an optional vision encoder
+    skipped because pixel_values wasn't provided), it should be wired as
+    a parallel input branch feeding into whichever sibling WAS invoked —
+    derived from actual traced call behavior, not hardcoded module names.
+    """
 
-    def test_vlm_heuristic_injected(self):
-        """When a model has visual + language_model, the VLM heuristic
-        should inject root-level call-graph edges."""
+    def _build_fake_vlm(self, *, visual_name: str, lm_name: str):
         from TraceLens.ModelUtils.torch_trace import _capture_call_graph
 
         class _FakeVisual(torch.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.proj = torch.nn.Linear(64, 64)
+
             def forward(self, x):
                 return self.proj(x)
 
@@ -948,6 +952,7 @@ class TestVLMFlowDirection:
                 super().__init__()
                 self.embed = torch.nn.Embedding(256, 64)
                 self.norm = torch.nn.LayerNorm(64)
+
             def forward(self, x, inputs_embeds=None):
                 if inputs_embeds is None:
                     inputs_embeds = self.embed(x)
@@ -956,27 +961,77 @@ class TestVLMFlowDirection:
         class _FakeVLM(torch.nn.Module):
             def __init__(self):
                 super().__init__()
-                self.visual = _FakeVisual()
-                self.language_model = _FakeLM()
-            def forward(self, x, pixel_values=None):
-                h = self.language_model(x)
-                return h
+                setattr(self, visual_name, _FakeVisual())
+                setattr(self, lm_name, _FakeLM())
+
+            def forward(self, x, pixel_values=None, **kwargs):
+                return getattr(self, lm_name)(x)
 
         with torch.device("meta"):
             model = _FakeVLM()
         model.eval()
         composites = {n for n, m in model.named_modules()
                       if n and any(True for _ in m.children())}
+        return _capture_call_graph(model, composites, seq_len=8, batch_size=1)
 
-        cg = _capture_call_graph(model, composites, seq_len=8, batch_size=1)
-        assert "" in cg, "Root call graph should exist for VLM"
+    def test_uninvoked_sibling_wired_as_input(self):
+        """Arbitrarily-named modules should work — not just 'visual'/
+        'language_model' — since the fallback keys off invocation, not
+        naming."""
+        cg = self._build_fake_vlm(visual_name="vision_tower", lm_name="text_backbone")
+        assert "" in cg, "Root call graph should exist"
         root_edges = cg[""]
-        sources = {src for src, _ in root_edges}
         targets = {tgt for _, tgt in root_edges}
-        assert "visual" in targets, "visual should be a target from @input"
-        assert "language_model" in targets, "language_model should be a target"
-        # visual feeds into language_model
-        assert any(
-            src == "visual" and tgt == "language_model"
-            for src, tgt in root_edges
-        ), "visual → language_model edge missing"
+        assert "vision_tower" in targets
+        assert "text_backbone" in targets
+        assert ("vision_tower", "text_backbone") in root_edges, (
+            "Uninvoked sibling should feed into the invoked one"
+        )
+        assert ("@input", "vision_tower") in root_edges
+        assert ("@input", "text_backbone") in root_edges
+
+    def test_glm_style_names_also_work(self):
+        """Sanity check with the GLM naming convention too."""
+        cg = self._build_fake_vlm(visual_name="visual", lm_name="language_model")
+        assert "" in cg
+        assert ("visual", "language_model") in cg[""]
+
+    def test_no_fallback_when_all_children_invoked(self):
+        """If every top-level child is actually invoked, don't guess —
+        real tracing should be trusted over the fallback."""
+        from TraceLens.ModelUtils.torch_trace import _capture_call_graph
+
+        class _A(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = torch.nn.Linear(8, 8)
+
+            def forward(self, x):
+                return self.lin(x)
+
+        class _B(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = torch.nn.Linear(8, 8)
+
+            def forward(self, x):
+                return self.lin(x)
+
+        class _Both(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = _A()
+                self.b = _A()
+
+            def forward(self, x, **kwargs):
+                return self.b(self.a(x))
+
+        with torch.device("meta"):
+            model = _Both()
+        model.eval()
+        composites = {n for n, m in model.named_modules()
+                      if n and any(True for _ in m.children())}
+        cg = _capture_call_graph(model, composites, seq_len=8, batch_size=1)
+        # Both children were invoked, so the "single invoked child" fallback
+        # condition doesn't apply and no root edges are synthesized.
+        assert "" not in cg

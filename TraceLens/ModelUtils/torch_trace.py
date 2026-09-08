@@ -521,19 +521,33 @@ def _capture_call_graph(
 
             edges[comp_path] = unique
 
-    # VLM heuristic: if the model has both `visual` and `language_model`
-    # children but the root call graph is empty (visual wasn't called
-    # because no pixel_values were provided), inject the standard VLM
-    # dataflow pattern:
-    #   @input → visual, @input → language_model, visual → language_model
-    if "" not in edges:
-        top_children = {n for n, _ in model.named_children()}
-        if "visual" in top_children and "language_model" in top_children:
-            edges[""] = [
-                ("@input", "visual"),
-                ("@input", "language_model"),
-                ("visual", "language_model"),
-            ]
+    # Multi-modal fallback: the root module itself is never traced (only
+    # named composites are), so top-level wiring between e.g. a vision
+    # encoder and a language model is otherwise left unresolved. Rather
+    # than hardcoding module names like "visual"/"language_model", use
+    # the ACTUAL traced call behavior: if exactly one top-level child was
+    # invoked during the forward pass (because optional inputs like
+    # pixel_values were omitted) and one or more siblings were never
+    # invoked, treat the uninvoked sibling(s) as parallel input branches
+    # that feed into the invoked one — the standard pattern for an
+    # optional modality encoder whose output gets merged into the main
+    # sequence before the primary model runs.
+    top_children = [n for n, _ in model.named_children()]
+    if len(top_children) >= 2:
+        invoked = [n for n in top_children if pre_inputs.get(n) or post_outputs.get(n)]
+        not_invoked = [n for n in top_children if n not in invoked]
+        if len(invoked) == 1 and not_invoked:
+            main = invoked[0]
+            # List the uninvoked side-branch(es) before the main branch so
+            # the exec-order topological sort (which processes "@input"
+            # targets in list order) places them first — they feed INTO
+            # the main branch, so they must execute first.
+            root_edges = []
+            for side in not_invoked:
+                root_edges.append(("@input", side))
+                root_edges.append((side, main))
+            root_edges.append(("@input", main))
+            edges[""] = root_edges
 
     return edges
 
