@@ -132,7 +132,7 @@ class _SimpleModel(torch.nn.Module):
         self.norm = torch.nn.LayerNorm(dim)
         self.lm_head = torch.nn.Linear(dim, vocab, bias=False)
 
-    def forward(self, input_ids):
+    def forward(self, input_ids, **kwargs):
         x = self.embed_tokens(input_ids)
         for layer in self.layers:
             x = layer(x)
@@ -474,8 +474,146 @@ class TestBuildGraphGLM:
     def test_fact_sheet(self, glm_payload):
         viewer = glm_payload["tracelensViewer"]
         assert "factSheet" in viewer
-        assert "hidden_size" in viewer["factSheet"]
+        fs = viewer["factSheet"]
+        # factSheet may be a string or a dict with title/body
+        text = fs["body"] if isinstance(fs, dict) else fs
+        assert "hidden_size" in text
 
     def test_serializable(self, glm_payload):
         """Payload must be JSON-serializable."""
         json.dumps(glm_payload)
+
+
+class TestInputShapeAttribute:
+    """Verify that expanding modules show input_shape alongside output_shape."""
+
+    def test_mlp_group_has_input_shape(self, simple_payload):
+        """MLP expands dimension (dim → dim*4 → dim), should have input_shape."""
+        ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        mlp_groups = {k: v for k, v in ga.items() if "MLP" in k or "mlp" in k}
+        for key, attrs in mlp_groups.items():
+            if "output_shape" in attrs:
+                assert "input_shape" in attrs, (
+                    f"Group '{key}' has output_shape but missing input_shape"
+                )
+
+    def test_composite_groups_with_output_have_input(self, simple_payload):
+        """All composite module groups with output_shape should also have input_shape."""
+        ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        for key, attrs in ga.items():
+            if "count" in attrs:
+                continue  # layer groups may not need input_shape
+            if "output_shape" in attrs:
+                assert "input_shape" in attrs, (
+                    f"Group '{key}' has output_shape but missing input_shape"
+                )
+
+    def test_fx_expanded_module_has_shapes(self, simple_payload):
+        """FX-expanded leaf modules (e.g. LayerNorm) should have shape attributes."""
+        ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        norm_groups = {k: v for k, v in ga.items() if "Norm" in k or "norm" in k}
+        for key, attrs in norm_groups.items():
+            assert "output_shape" in attrs, (
+                f"FX-expanded group '{key}' missing output_shape"
+            )
+
+
+class TestOutputShapeCoverage:
+    """Verify output_shape is present on all composite module groups."""
+
+    def test_all_composites_have_output_shape(self, simple_payload):
+        """Every composite module group should have an output_shape attribute."""
+        ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        missing = []
+        for key, attrs in ga.items():
+            if "output_shape" not in attrs:
+                missing.append(key)
+        assert not missing, (
+            f"Groups missing output_shape: {missing}"
+        )
+
+    def test_layer_groups_have_output_shape(self, simple_payload):
+        """Layer groups (with 'count') should have output_shape."""
+        ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        layer_groups = {k: v for k, v in ga.items() if "count" in v}
+        for key, attrs in layer_groups.items():
+            assert "output_shape" in attrs, (
+                f"Layer group '{key}' missing output_shape"
+            )
+
+
+class TestMultiOutputWiring:
+    """Verify all output children of composite modules are wired to @output."""
+
+    def test_no_orphan_output_nodes(self, simple_nodes):
+        """No synthetic @output node should be completely disconnected."""
+        node_ids = {n["id"] for n in simple_nodes}
+        for n in simple_nodes:
+            attrs = {a["key"]: a["value"] for a in n.get("attrs", [])}
+            if attrs.get("synthetic") != "output":
+                continue
+            # This @output node must be consumed by someone or be the root
+            if n["id"] == "@output":
+                continue
+            consumed = any(
+                e["sourceNodeId"] == n["id"]
+                for n2 in simple_nodes
+                for e in n2.get("incomingEdges", [])
+                if n2["id"] != n["id"]
+            )
+            assert consumed, (
+                f"Synthetic output node {n['id']} has no consumers (dead output)"
+            )
+
+    def test_block_output_wires_from_mlp(self, simple_nodes):
+        """The decoder block @output should include mlp's output in the chain."""
+        block_output = next(
+            (n for n in simple_nodes if n["id"] == "layers/0/@output"),
+            None
+        )
+        assert block_output is not None, "Missing layers/0/@output"
+        sources = {e["sourceNodeId"] for e in block_output.get("incomingEdges", [])}
+        # The block output should be fed by mlp/@output (directly or indirectly)
+        # At minimum, check that mlp/@output is consumed by something in the block
+        mlp_output = next(
+            (n for n in simple_nodes if n["id"] == "layers/0/mlp/@output"),
+            None
+        )
+        if mlp_output:
+            consumed = any(
+                e["sourceNodeId"] == "layers/0/mlp/@output"
+                for n in simple_nodes
+                for e in n.get("incomingEdges", [])
+                if n["id"] != "layers/0/mlp/@output"
+            )
+            assert consumed, "mlp/@output is not wired to anything"
+
+    def test_all_composite_outputs_consumed(self, simple_nodes):
+        """Every child's @output inside a composite must be consumed by
+        either a sibling @input or the parent's @output node."""
+        # Collect all @output nodes grouped by parent composite
+        from collections import defaultdict
+        composites = defaultdict(list)
+        for n in simple_nodes:
+            nid = n["id"]
+            attrs = {a["key"]: a["value"] for a in n.get("attrs", [])}
+            if attrs.get("synthetic") != "output":
+                continue
+            parts = nid.rsplit("/", 1)
+            if len(parts) == 2:
+                parent = parts[0]
+                composites[parent].append(nid)
+
+        consumers = {}
+        for n in simple_nodes:
+            for e in n.get("incomingEdges", []):
+                consumers.setdefault(e["sourceNodeId"], []).append(n["id"])
+
+        orphans = []
+        for parent, output_ids in composites.items():
+            for oid in output_ids:
+                if oid not in consumers:
+                    orphans.append(oid)
+        assert not orphans, (
+            f"Orphan @output nodes (not consumed): {orphans}"
+        )

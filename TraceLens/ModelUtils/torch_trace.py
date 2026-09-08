@@ -183,13 +183,27 @@ def _capture_shapes(
     *,
     seq_len: int = 128,
     batch_size: int = 1,
-) -> dict[str, tuple[int, ...]]:
-    """Run a meta-device forward pass and capture per-module output shapes."""
+) -> tuple[dict[str, tuple[int, ...]], dict[str, tuple[int, ...]]]:
+    """Run a meta-device forward pass and capture per-module I/O shapes.
+
+    Returns (output_shapes, input_shapes) dicts keyed by module path.
+    """
     shapes: dict[str, tuple[int, ...]] = {}
+    input_shapes: dict[str, tuple[int, ...]] = {}
 
     def _make_hook(name: str):
-        def hook(_mod, _inp, output):
+        def hook(_mod, inp, output):
             try:
+                # Capture first tensor from input
+                if isinstance(inp, (tuple, list)):
+                    for item in inp:
+                        if isinstance(item, torch.Tensor):
+                            input_shapes[name] = tuple(item.shape)
+                            break
+                elif isinstance(inp, torch.Tensor):
+                    input_shapes[name] = tuple(inp.shape)
+
+                # Capture first tensor from output
                 if isinstance(output, torch.Tensor):
                     shapes[name] = tuple(output.shape)
                 elif isinstance(output, (tuple, list)):
@@ -215,7 +229,7 @@ def _capture_shapes(
         for h in handles:
             h.remove()
 
-    return shapes
+    return shapes, input_shapes
 
 
 def _infer_shapes_from_weights(
@@ -768,13 +782,18 @@ def build_graph(
     _patch_rotary_embeddings(model)
 
     # ── Capture shapes ───────────────────────────────────────────────────
-    hook_shapes = _capture_shapes(model, seq_len=seq_len, batch_size=batch_size)
+    hook_shapes, hook_input_shapes = _capture_shapes(
+        model, seq_len=seq_len, batch_size=batch_size
+    )
     raw_shapes = _infer_shapes_from_weights(
         model, hook_shapes, batch_size=batch_size, seq_len=seq_len
     )
     shapes: dict[str, str] = {}
     for path, shape in raw_shapes.items():
         shapes[path] = _symbolise(shape, batch_size=batch_size, seq_len=seq_len)
+    input_shapes: dict[str, str] = {}
+    for path, shape in hook_input_shapes.items():
+        input_shapes[path] = _symbolise(shape, batch_size=batch_size, seq_len=seq_len)
 
     # ── Detect repeated layers ───────────────────────────────────────────
     repeats = _detect_repeated_layers(model)
@@ -1160,8 +1179,23 @@ def build_graph(
                 group_id = namespace + "/" + f"{attr_names.get(path, '')} ({type(mod).__name__})"
                 attrs = {"class": type(mod).__name__}
                 shape_str = shapes.get(path)
+                if not shape_str:
+                    # Derive output_shape from last child module that has a shape
+                    for child_name in reversed(list(module_map)):
+                        if child_name.startswith(path + ".") and child_name in shapes:
+                            shape_str = shapes[child_name]
+                            break
                 if shape_str:
                     attrs["output_shape"] = f"{shape_str} {dtype}"
+                inp_str = input_shapes.get(path)
+                if not inp_str:
+                    # Derive input_shape from first child module
+                    for child_name in module_map:
+                        if child_name.startswith(path + ".") and child_name in input_shapes:
+                            inp_str = input_shapes[child_name]
+                            break
+                if inp_str:
+                    attrs["input_shape"] = f"{inp_str} {dtype}"
                 group_attrs[group_id] = attrs
             continue
 
@@ -1578,17 +1612,39 @@ def build_graph(
                                 output_child_ids.append(target_id)
                             break
 
+        # Also include orphan @output nodes — child synthetic output nodes
+        # with no consumers (data exits via inline ops not tracked by
+        # the call graph).
+        for cn in child_nodes:
+            cid = cn["id"]
+            if cid in output_child_ids:
+                continue
+            cn_attrs = {a["key"]: a["value"] for a in cn.get("attrs", [])}
+            if cn_attrs.get("synthetic") != "output":
+                continue
+            has_consumer = any(
+                e["sourceNodeId"] == cid
+                for n2 in nodes for e in n2.get("incomingEdges", [])
+                if n2["id"] != cid
+            )
+            if not has_consumer:
+                output_child_ids.append(cid)
+
         n_outputs = len(output_child_ids)
 
         # If still no output children, use call-graph terminal nodes
-        # (nodes that are targets but never sources within the composite)
+        # (nodes that are targets but never source within the composite)
         if n_outputs == 0 and comp_path in call_graph:
             targets = {t for _, t in call_graph[comp_path]}
             sources = {s for s, _ in call_graph[comp_path]}
             terminals = targets - sources
             for term_path in terminals:
+                # Composites don't have their own node — use @output
                 term_id = _node_id(term_path)
-                if term_id in node_by_id and term_id not in output_child_ids:
+                term_output_id = term_id + "/@output"
+                if term_output_id in node_by_id and term_output_id not in output_child_ids:
+                    output_child_ids.append(term_output_id)
+                elif term_id in node_by_id and term_id not in output_child_ids:
                     output_child_ids.append(term_id)
             n_outputs = len(output_child_ids)
 
@@ -1596,8 +1652,8 @@ def build_graph(
         if n_outputs == 0 and child_nodes:
             for cn in reversed(child_nodes):
                 cid = cn["id"]
-                attrs = {a["key"]: a["value"] for a in cn.get("attrs", [])}
-                if attrs.get("synthetic"):
+                cn_attrs = {a["key"]: a["value"] for a in cn.get("attrs", [])}
+                if cn_attrs.get("synthetic"):
                     continue
                 has_consumer = any(
                     e["sourceNodeId"] == cid
@@ -1676,22 +1732,24 @@ def build_graph(
             wire_output_id = output_id
 
             # Rewire consumers: nodes outside this module that consumed
-            # any output child should now consume the (ext) output node.
-            # Guard: only rewire if the edge still points to the original
-            # source (it may have been rewired by a prior composite's I/O).
-            for oid in output_child_ids:
-                if oid in consumers_of:
-                    for consumer_node, edge in consumers_of[oid]:
+            # ANY child node should now consume the composite's @output.
+            # This prevents external nodes from bypassing the composite
+            # boundary (e.g. after a child composite's @output was created
+            # in a prior iteration and an external node was wired to it).
+            for cn in child_nodes:
+                cid = cn["id"]
+                if cid in consumers_of:
+                    for consumer_node, edge in consumers_of[cid]:
                         if (not consumer_node["id"].startswith(child_prefix)
-                                and edge["sourceNodeId"] == oid):
+                                and edge["sourceNodeId"] == cid):
                             edge["sourceNodeId"] = wire_output_id
-                # Also check alias consumers
-                for alias_id, target_id in _fx_leaf_aliases.items():
-                    if target_id == oid and alias_id in consumers_of:
-                        for consumer_node, edge in consumers_of[alias_id]:
-                            if (not consumer_node["id"].startswith(child_prefix)
-                                    and edge["sourceNodeId"] == alias_id):
-                                edge["sourceNodeId"] = wire_output_id
+            # Also check alias consumers
+            for alias_id, target_id in _fx_leaf_aliases.items():
+                if target_id.startswith(child_prefix) and alias_id in consumers_of:
+                    for consumer_node, edge in consumers_of[alias_id]:
+                        if (not consumer_node["id"].startswith(child_prefix)
+                                and edge["sourceNodeId"] == alias_id):
+                            edge["sourceNodeId"] = wire_output_id
 
     # ── Add I/O nodes for FX-expanded leaf modules ───────────────────
     # These aren't composite modules, but they have FX ops that need
@@ -1778,6 +1836,18 @@ def build_graph(
                 if not consumer_node["id"].startswith(prefix):
                     edge["sourceNodeId"] = output_id
 
+        # Add group attributes for the FX-expanded module's namespace
+        mod = module_map.get(path)
+        if mod and fx_ns:
+            fx_attrs: dict[str, str] = {"class": type(mod).__name__}
+            out_str = shapes.get(path)
+            if out_str:
+                fx_attrs["output_shape"] = f"{out_str} {dtype}"
+            inp_str = input_shapes.get(path)
+            if inp_str:
+                fx_attrs["input_shape"] = f"{inp_str} {dtype}"
+            group_attrs[fx_ns] = fx_attrs
+
     # ── Add layer group attributes ───────────────────────────────────────
     for container_path, groups in layer_group_map.items():
         total = container_total[container_path]
@@ -1790,11 +1860,29 @@ def build_graph(
         type_summary = ", ".join(
             f"{g.count}x {g.class_name}" for g in groups
         ) if len(groups) > 1 else f"{total}x {cls_name}"
-        group_attrs[group_id] = {
+        layer_attrs: dict[str, str] = {
             "class": cls_name,
             "count": str(total),
             "layer_types": type_summary,
         }
+        # Add shapes from the representative layer
+        rep_shape = shapes.get(rep_path)
+        if not rep_shape:
+            for child_name in reversed(list(module_map)):
+                if child_name.startswith(rep_path + ".") and child_name in shapes:
+                    rep_shape = shapes[child_name]
+                    break
+        if rep_shape:
+            layer_attrs["output_shape"] = f"{rep_shape} {dtype}"
+        rep_inp = input_shapes.get(rep_path)
+        if not rep_inp:
+            for child_name in module_map:
+                if child_name.startswith(rep_path + ".") and child_name in input_shapes:
+                    rep_inp = input_shapes[child_name]
+                    break
+        if rep_inp:
+            layer_attrs["input_shape"] = f"{rep_inp} {dtype}"
+        group_attrs[group_id] = layer_attrs
 
     # ── Build fact sheet ─────────────────────────────────────────────────
     fact_sheet = _build_fact_sheet(model_name, config)
