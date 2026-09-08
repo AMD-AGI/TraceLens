@@ -1800,6 +1800,54 @@ def build_graph(
             if len(deduped_e) < len(edges):
                 n["incomingEdges"] = deduped_e
 
+    # ── Propagate outputsMetadata to synthetic I/O nodes ─────────────────
+    # Synthetic input/output nodes need shape metadata so edges don't
+    # display as "?" in the viewer.
+    #
+    # Strategy:
+    # 1. Try inheriting from the source node's outputsMetadata.
+    # 2. Fall back to the parent module's captured shape (from `shapes`).
+    node_by_id = {n["id"]: n for n in nodes}
+
+    def _shape_metadata_for_path(node_id: str) -> list[dict] | None:
+        """Derive outputsMetadata from the shapes dict for a node's module."""
+        # Strip /@input or /@output suffix to get the module path
+        path = node_id.replace("/", ".").removesuffix(".@input").removesuffix(".@output")
+        shape_str = shapes.get(path)
+        if shape_str:
+            return _output_metadata(shape_str, dtype)
+        # Try parent path (for deeply nested synthetic nodes)
+        while "." in path:
+            path = path.rsplit(".", 1)[0]
+            shape_str = shapes.get(path)
+            if shape_str:
+                return _output_metadata(shape_str, dtype)
+        return None
+
+    changed = True
+    while changed:
+        changed = False
+        for n in nodes:
+            if n.get("outputsMetadata"):
+                continue
+            attrs = {a["key"]: a["value"] for a in n.get("attrs", [])}
+            if attrs.get("synthetic") not in ("input", "output", "@input"):
+                continue
+            # Try inheriting from source node
+            for e in n.get("incomingEdges", []):
+                src = node_by_id.get(e["sourceNodeId"])
+                if src and src.get("outputsMetadata"):
+                    n["outputsMetadata"] = src["outputsMetadata"]
+                    changed = True
+                    break
+            if n.get("outputsMetadata"):
+                continue
+            # Fall back to module's captured shape
+            meta = _shape_metadata_for_path(n["id"])
+            if meta:
+                n["outputsMetadata"] = meta
+                changed = True
+
     return {
         "name": model_name,
         "model_type": model_type,
