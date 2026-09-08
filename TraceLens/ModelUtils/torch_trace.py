@@ -1933,26 +1933,38 @@ def build_graph(
         if pred:
             fx_leaf_predecessor[path] = pred
 
-    # For modules without a resolved predecessor, find the last node
-    # BEFORE the first FX op in the ordered node list that's within
-    # the same parent module's namespace.
+    # For modules without a resolved predecessor, find the nearest
+    # preceding sibling node in the ordered node list. Walk up through
+    # successively wider ancestor scopes (immediate parent, grandparent,
+    # ... root) rather than stopping at the immediate parent: for an
+    # uninvoked composite (no call_graph data at any level), the first
+    # child of a nested submodule (e.g. blocks.0.norm1, where norm1 is
+    # blocks.0's first child) has no sibling within its immediate parent
+    # scope at all — the true predecessor is a "cousin" module that ran
+    # just before the immediate parent started (e.g. visual.rotary_pos_emb
+    # feeding visual.blocks.0). Stopping at the immediate parent caused
+    # such nodes to fall through to the literal "@input" placeholder,
+    # which later got misinterpreted as the top-level graph input.
     for path, first_id in fx_leaf_first.items():
         if path in fx_leaf_predecessor:
             continue
         prefix = _node_id(path) + "/"
-        # Scope to the parent module's namespace
-        parent_path = path.rsplit(".", 1)[0] if "." in path else ""
-        parent_prefix = _node_id(parent_path) + "/" if parent_path else ""
+        path_parts = path.split(".")
         prev_id = None
-        for n in nodes:
-            if n["id"] == first_id:
+        for depth in range(len(path_parts) - 1, -1, -1):
+            scope_path = ".".join(path_parts[:depth])
+            scope_prefix = _node_id(scope_path) + "/" if scope_path else ""
+            for n in nodes:
+                if n["id"] == first_id:
+                    break
+                nid = n["id"]
+                # Only consider nodes within the current ancestor scope
+                if scope_prefix and not nid.startswith(scope_prefix):
+                    continue
+                if not nid.startswith(prefix):
+                    prev_id = nid
+            if prev_id:
                 break
-            nid = n["id"]
-            # Only consider nodes in the same parent scope
-            if parent_prefix and not nid.startswith(parent_prefix):
-                continue
-            if not nid.startswith(prefix):
-                prev_id = nid
         if prev_id and prev_id in node_by_id:
             fx_leaf_predecessor[path] = prev_id
 

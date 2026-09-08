@@ -51,6 +51,26 @@ _METHOD_CHAIN_OPS = {
     "mul_",
     "sum",
     "sigmoid",
+    # Additional common tensor-reshaping chain ops (missing from the
+    # original ast_analyze.py set too). Without these, a self.<module>(...)
+    # call buried in a longer method chain — e.g. the extremely common
+    # QKV-splitting idiom
+    # ``self.qkv(x).reshape(...).permute(...).unbind(0)`` — silently drops
+    # out of the extracted call order because ``_unwrap_expr`` stops
+    # unwrapping as soon as it hits an unrecognized chained method (here
+    # ``unbind``), never reaching the inner ``self.qkv`` call.
+    "permute",
+    "unbind",
+    "flatten",
+    "chunk",
+    "repeat",
+    "repeat_interleave",
+    "to",
+    "clone",
+    "detach",
+    "narrow",
+    "movedim",
+    "flip",
 }
 
 SYNTHETIC_ATTENTION = "@attention"

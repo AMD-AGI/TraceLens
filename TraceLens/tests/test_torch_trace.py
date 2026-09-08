@@ -1224,6 +1224,49 @@ class TestAstCallOrder:
         result = forward_call_order(seq)
         assert result is None or isinstance(result, list)
 
+    def test_qkv_split_method_chain_is_not_dropped(self):
+        """Regression test for a real GLM vision-attention bug: a module
+        call buried in a long method chain — the extremely common QKV
+        split idiom ``self.qkv(x).reshape(...).permute(...).unbind(0)`` —
+        must still be recorded. ``permute``/``unbind`` were missing from
+        ``_METHOD_CHAIN_OPS``, so ``_unwrap_expr`` stopped unwrapping at
+        the outer ``.unbind(0)`` call and silently dropped the inner
+        ``self.qkv(...)`` call entirely, corrupting the extracted order
+        (and, transitively, the wiring of an uninvoked branch)."""
+        from TraceLens.ModelUtils.ast_call_order import forward_call_order
+
+        class _Norm(torch.nn.Module):
+            def forward(self, x):
+                return x
+
+        class _QkvAttn(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.qkv = torch.nn.Linear(4, 12)
+                self.proj = torch.nn.Linear(4, 4)
+                self.q_norm = _Norm()
+                self.k_norm = _Norm()
+
+            def forward(self, hidden_states):
+                seq_length = hidden_states.shape[0]
+                q, k, v = (
+                    self.qkv(hidden_states)
+                    .reshape(seq_length, 3, 1, -1)
+                    .permute(1, 0, 2, 3)
+                    .unbind(0)
+                )
+                q = self.q_norm(q)
+                k = self.k_norm(k)
+                out = q + k + v
+                return self.proj(out)
+
+        assert forward_call_order(_QkvAttn()) == [
+            "qkv",
+            "q_norm",
+            "k_norm",
+            "proj",
+        ]
+
 
 class TestUninvokedBranchExecutionOrder:
     """Integration regression test: a composite that's never invoked at
@@ -1308,6 +1351,125 @@ class TestUninvokedBranchExecutionOrder:
             f"encoder/@output should resolve to encoder/extra (true last "
             f"child in forward()), got {sources}"
         )
+
+
+class TestFxLeafPredecessorAncestorWalk:
+    """Regression test for a real GLM-5.3-Flash bug: inside an uninvoked
+    composite branch (e.g. the vision encoder, never invoked because
+    ``pixel_values`` is omitted from the dummy trace), a custom
+    multi-op leaf module (FX-expanded via the "custom leaf" path, e.g. an
+    RMSNorm) that is the FIRST child of a NESTED submodule — which itself
+    has no earlier sibling within its own immediate parent's scope — must
+    still resolve its predecessor by walking up through wider ancestor
+    scopes (grandparent, etc.), not just the immediate parent. Otherwise
+    it falls through to the unresolved literal "@input" placeholder,
+    which later gets misinterpreted as the top-level graph input —
+    silently severing the real dataflow chain through earlier siblings
+    (e.g. patch_embed → rotary_pos_emb → blocks.0 in the real model).
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _CustomNorm(torch.nn.Module):
+            """A multi-op custom leaf (gets FX-expanded, unlike a plain
+            nn.LayerNorm/nn.Linear leaf which stays a single node)."""
+
+            def forward(self, x):
+                x = x.float()
+                x = x * 2.0
+                x = x + 1.0
+                return x.type_as(x)
+
+        class _Block(torch.nn.Module):
+            """block.inner_norm is the FIRST child of block — it has no
+            earlier sibling within block's own scope, so its predecessor
+            must be resolved from block's *parent* scope instead.
+
+            forward() includes a tensor-value-dependent branch so that
+            symbolic-tracing ``_Block`` as one flat composite graph fails
+            (mirrors why the real GLM vision-attention block can't be
+            traced end-to-end) — otherwise ``inner_norm`` gets silently
+            inlined into a single whole-composite trace instead of
+            exercising the standalone-custom-leaf (Path B) code path this
+            test targets. Never actually invoked at runtime (the whole
+            encoder is uninvoked), so the branch's condition never runs.
+            """
+
+            def __init__(self):
+                super().__init__()
+                self.inner_norm = _CustomNorm()
+                self.tail = torch.nn.Linear(8, 8)
+
+            def forward(self, x, cu_seqlens):
+                if cu_seqlens.sum() > 0:
+                    pass
+                return self.tail(self.inner_norm(x))
+
+        class _Encoder(torch.nn.Module):
+            """encoder.pre runs before encoder.block in forward(), so
+            block.inner_norm's real predecessor is encoder.pre's output —
+            a "cousin" one level up, not anything within block itself."""
+
+            def __init__(self):
+                super().__init__()
+                self.pre = _CustomNorm()
+                self.block = _Block()
+
+            def forward(self, x, cu_seqlens):
+                return self.block(self.pre(x), cu_seqlens)
+
+        class _Decoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(64, 8)
+
+            def forward(self, x, inputs_embeds=None):
+                return self.embed(x)
+
+        class _FakeVLM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.decoder = _Decoder()
+                self.encoder = _Encoder()
+
+            def forward(self, x, pixel_values=None, **kwargs):
+                # encoder is never invoked — mirrors pixel_values being
+                # omitted from the dummy trace.
+                return self.decoder(x)
+
+        with torch.device("meta"):
+            model = _FakeVLM()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_nested_first_child_resolves_to_cousin_sibling(self, payload):
+        """block/inner_norm's @input must chain back through block/@input
+        to encoder/pre/@output (a cousin one level up) — not fall back to
+        the literal root "@input"."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+
+        block_input = by_id.get("encoder/block/@input")
+        assert block_input is not None, "encoder/block/@input node not found"
+        sources = [e["sourceNodeId"] for e in block_input.get("incomingEdges", [])]
+        assert sources == ["encoder/pre/@output"], (
+            "encoder/block/@input should chain back to encoder/pre/@output "
+            f"(a cousin sibling one ancestor level up), got {sources}"
+        )
+
+    def test_no_node_incorrectly_wired_to_root_input(self, payload):
+        """Only the true top-level branches (direct children of the root
+        model) may source from the literal root "@input" — an internal,
+        nested node falling back to it means the ancestor walk failed."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        bad = [
+            n["id"]
+            for n in nodes
+            if n["id"] != "@input" and "/" in n["id"] and n["id"].count("/") > 1
+            for e in n.get("incomingEdges", [])
+            if e["sourceNodeId"] == "@input"
+        ]
+        assert bad == [], f"Deeply-nested nodes wired straight to root @input: {bad}"
 
 
 class TestSingleOpLeafInlining:
