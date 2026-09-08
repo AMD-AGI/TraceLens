@@ -8,15 +8,15 @@
 
 Three validation levels, each at the boundary where issues are still fixable:
 
-Level 1 — validate_findings_file (Steps 6-7, within each sub-agent)
+Level 1 — validate_findings_file (Steps 7-8, within each sub-agent)
     Structural check on a single findings file, including marker structure
     via MarkerValidator (pairing, kind attributes, per-kind required attrs,
     mandatory p_item). Sub-agent retries on failure.
 
-Level 2 — validate_subagent_outputs (Step 8, batch)
+Level 2 — validate_subagent_outputs (Step 9, batch)
     Cross-cutting checks that need all files: time sanity, coverage, priority.
 
-Level 3 — validate_report (Step 11.1, after report assembly)
+Level 3 — validate_report (Step 12.1, after report assembly)
     Final analysis.md structure: headers, metrics table, placeholders,
     and report-level marker structure via MarkerValidator (pairing, kind
     attributes, mandatory top_ops).
@@ -436,7 +436,7 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
     return errors
 
 
-# Level 2: cross-cutting batch checks (called at Step 8)
+# Level 2: cross-cutting batch checks (called at Step 9)
 
 
 def validate_subagent_outputs(output_dir):
@@ -523,9 +523,9 @@ def _check_priority_consistency(output_dir, manifest):
     """Verify priority_data.json invariants: findings sort, rank contiguity,
     and per-category rollup of priorities[].impact_score vs findings[] sum.
 
-    Non-blocking: returns WARN on any violation (preserves Step 8 semantics
+    Non-blocking: returns WARN on any violation (preserves Step 9 semantics
     matching _check_time_sanity / _check_coverage). manifest is accepted for
-    call-site symmetry with the other Step 8 checks.
+    call-site symmetry with the other Step 9 checks.
     """
     del manifest  # unused; kept for signature symmetry with sibling checks
     pd_path = os.path.join(output_dir, "priority_data.json")
@@ -592,7 +592,7 @@ def _check_priority_consistency(output_dir, manifest):
     return {"status": status, "messages": messages}
 
 
-# Level 3: final report validation (called at Step 11.1)
+# Level 3: final report validation (called at Step 12.1)
 
 
 def validate_report(output_dir, comparison_scope=None):
@@ -608,7 +608,7 @@ def validate_report(output_dir, comparison_scope=None):
       required attrs, mandatory kind=top_ops
 
     Findings files are validated separately by validate_findings_file
-    (Level 1, called within each sub-agent at Steps 6-7), which also
+    (Level 1, called within each sub-agent at Steps 7-8), which also
     enforces per-file marker structure.
 
     Args:
@@ -737,7 +737,7 @@ def _validate_report_args_column(content, output_dir):
     """Level-3 check: every Args cell in analysis.md must match some
     operations[].args verbatim across all category metrics JSONs.
 
-    Catches LLM reformatting introduced by the Step 11 orchestrator when it
+    Catches LLM reformatting introduced by the Step 12 orchestrator when it
     pastes per-category Detailed Analysis tables into the final report.
     """
     cat_data_dir = os.path.join(output_dir, "category_data")
@@ -768,7 +768,7 @@ def _validate_report_priority_consistency(content, output_dir):
     R3: Each marker's low/mid/high attrs match findings[N-1] impact_score_low / impact_score / impact_score_high.
     R4: Top Operations marker rows == len(priorities).
 
-    Silently skips when priority_data.json is absent (Step 8 already warns).
+    Silently skips when priority_data.json is absent (Step 9 already warns).
     Numeric attrs are compared as 2-decimal strings to match the writer's
     rounding in generate_priority_data. Every compute-tier finding now carries
     a numeric impact_score (quantified or heuristic estimate), so p_item

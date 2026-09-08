@@ -40,6 +40,7 @@ from TraceLens.PerfModel.triton_compiled_perf_model import (
 )
 from TraceLens.PerfModel.utils import (
     add_simulation_time_columns,
+    gemm_tflops,
     name2bpe,
     optional_float,
     optional_int,
@@ -107,6 +108,11 @@ class TestPerfModelUtils:
         assert metrics["Origami Time (µs)"] == 100.0
         assert metrics["Origami TFLOPS/s"] == pytest.approx(2000.0)
         assert metrics["Pct Origami"] == 50.0
+
+    def test_gemm_tflops(self):
+        assert gemm_tflops(4096, 4096, 4096, 1.0) == pytest.approx(
+            2 * 4096**3 / 1e-3 / 1e12
+        )
 
 
 class TestKernelNameParser:

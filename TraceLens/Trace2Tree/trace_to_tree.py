@@ -154,24 +154,19 @@ class BaseTraceToTree(ABC):
                 if self._is_nn_module_event(popped_event):
                     nn_module_stack.pop()
 
-            # Handle "event bleed": the event starts inside the stack top
-            # but ends after it.  If the overlap (stack[-1].t_end - event.ts)
-            # is < 1 us, this is a tiny timing overlap (e.g. hipLaunchKernel
-            # starting a few hundred ns before a sibling cpu_op finishes).
-            # Pop the sibling and attach the event under the same parent.
-            # Larger bleeds (>= 1 us) are discarded — these are typically
-            # python_function instrumentation artifacts (e.g. PyCapsule
-            # built-ins whose duration includes GPU sync time).
+            # Event bleed: the event starts inside the stack top but ends
+            # after it. Small bleeds (< tolerance) pop the sibling; larger
+            # ones discard the event.
+            bleed_tolerance_us = 1.0
             if stack and (
                 event[TraceEventUtils.TraceKeys.TimeEnd]
-                > stack[-1][TraceEventUtils.TraceKeys.TimeEnd]
+                > stack[-1][TraceEventUtils.TraceKeys.TimeEnd] + bleed_tolerance_us
             ):
                 overlap_us = (
                     stack[-1][TraceEventUtils.TraceKeys.TimeEnd]
                     - event[TraceEventUtils.TraceKeys.TimeStamp]
                 )
-                overlap_tolerance_us = 1.0
-                if overlap_us < overlap_tolerance_us and len(stack) >= 2:
+                if overlap_us < bleed_tolerance_us and len(stack) >= 2:
                     popped_event = stack.pop()
                     if self.event_to_category(popped_event) == "cpu_op":
                         dict_pidtid2num_cpu_ops[stack_key] -= 1

@@ -210,6 +210,8 @@ The following table describes all optional arguments.
   [collective-communication report](./collective-report.md).
 - Isolate a single operation into a reproducer with
   [EventReplay](./event-replay.md).
+- Catalog many reports for search with
+  [Index a corpus of traces](./trace-index.md).
 - Analyze [JAX](./generate-perf-report-jax.md) or
   [rocprof](./generate-perf-report-rocprof.md) traces.
 
