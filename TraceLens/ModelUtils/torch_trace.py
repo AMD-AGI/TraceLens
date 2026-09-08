@@ -40,6 +40,8 @@ _WHITE_TEXT = "#ffffff"
 
 _STYLE_INPUT = {"backgroundColor": "#d9e8f5", "textColor": _DARK_TEXT}
 _STYLE_OUTPUT = {"backgroundColor": "#d5f5d9", "textColor": _DARK_TEXT}
+_STYLE_FORK = {"backgroundColor": "#a29bfe", "textColor": _WHITE_TEXT}
+_STYLE_JOIN = {"backgroundColor": "#a29bfe", "textColor": _WHITE_TEXT}
 _STYLE_EMBEDDING = {"backgroundColor": "#27ae60", "textColor": _WHITE_TEXT}
 _STYLE_LINEAR = {"backgroundColor": "#bdc3c7", "textColor": _DARK_TEXT}
 _STYLE_NORM = {"backgroundColor": "#f0e68c", "textColor": _DARK_TEXT}
@@ -412,9 +414,10 @@ def _capture_call_graph(
     for comp_path in composite_modules:
         # Collect direct children (promoting ModuleList/Dict items)
         children: set[str] = set()
+        prefix = comp_path + "."
         for name in pre_inputs:
-            if name.startswith(comp_path + "."):
-                suffix = name[len(comp_path) + 1:]
+            if name.startswith(prefix):
+                suffix = name[len(prefix):]
                 if "." not in suffix:
                     children.add(name)
                 elif suffix.count(".") == 1:
@@ -517,6 +520,20 @@ def _capture_call_graph(
             ]
 
             edges[comp_path] = unique
+
+    # VLM heuristic: if the model has both `visual` and `language_model`
+    # children but the root call graph is empty (visual wasn't called
+    # because no pixel_values were provided), inject the standard VLM
+    # dataflow pattern:
+    #   @input → visual, @input → language_model, visual → language_model
+    if "" not in edges:
+        top_children = {n for n, _ in model.named_children()}
+        if "visual" in top_children and "language_model" in top_children:
+            edges[""] = [
+                ("@input", "visual"),
+                ("@input", "language_model"),
+                ("visual", "language_model"),
+            ]
 
     return edges
 
@@ -786,6 +803,25 @@ def _shape_attrs(shape_str: str, dtype: str = "bfloat16") -> list[dict]:
     ]
 
 
+def _reorder_group_attrs(
+    group_attrs: dict[str, dict[str, str]],
+) -> dict[str, dict[str, str]]:
+    """Reorder each group's attributes so input_shape is first and
+    output_shape is last, with all other keys in between."""
+    result: dict[str, dict[str, str]] = {}
+    for ns, attrs in group_attrs.items():
+        ordered: dict[str, str] = {}
+        if "input_shape" in attrs:
+            ordered["input_shape"] = attrs["input_shape"]
+        for k, v in attrs.items():
+            if k not in ("input_shape", "output_shape"):
+                ordered[k] = v
+        if "output_shape" in attrs:
+            ordered["output_shape"] = attrs["output_shape"]
+        result[ns] = ordered
+    return result
+
+
 def _output_metadata(shape_str: str, dtype: str = "bfloat16") -> list[dict]:
     compact = shape_str.replace(" x ", "x")
     return [
@@ -1006,6 +1042,72 @@ def build_graph(
         if new_edges:
             remapped_cg[_map_cg_path(comp_path)] = new_edges
     call_graph = remapped_cg
+
+    # For multi-group containers, replace the sequential layer chain in
+    # the parent's call graph with Fork/Join parallel edges.
+    for container_path, groups in layer_group_map.items():
+        if len(groups) <= 1:
+            continue
+        parent_path = container_path.rsplit(".", 1)[0] if "." in container_path else ""
+        if parent_path not in call_graph:
+            continue
+        rep_paths = {f"{container_path}.{g.representative}" for g in groups}
+        fork_path = container_path + ".@fork"
+        join_path = container_path + ".@join"
+
+        old_edges = call_graph[parent_path]
+        new_edges = []
+        # Find the predecessor and successor of the layer block
+        # Predecessor: the source of edges targeting any rep layer
+        predecessors: set[str] = set()
+        successors: set[str] = set()
+        for src, tgt in old_edges:
+            if tgt in rep_paths and src not in rep_paths:
+                predecessors.add(src)
+            if src in rep_paths and tgt not in rep_paths:
+                successors.add(tgt)
+
+        # Keep non-layer edges, skip inter-layer edges
+        for src, tgt in old_edges:
+            if src in rep_paths or tgt in rep_paths:
+                continue  # Skip all edges involving layers
+            new_edges.append((src, tgt))
+
+        # Add Fork/Join edges
+        for pred in predecessors:
+            new_edges.append((pred, fork_path))
+        for rep in rep_paths:
+            new_edges.append((fork_path, rep))
+            new_edges.append((rep, join_path))
+        for succ in successors:
+            new_edges.append((join_path, succ))
+
+        call_graph[parent_path] = new_edges
+
+        # Also transform the container's own call_graph entry so that
+        # the sequential layer chain is replaced with parallel branches.
+        if container_path in call_graph:
+            cont_old = call_graph[container_path]
+            cont_new = []
+            cont_preds: set[str] = set()
+            cont_succs: set[str] = set()
+            for src, tgt in cont_old:
+                if tgt in rep_paths and src not in rep_paths:
+                    cont_preds.add(src)
+                if src in rep_paths and tgt not in rep_paths:
+                    cont_succs.add(tgt)
+            for src, tgt in cont_old:
+                if src in rep_paths or tgt in rep_paths:
+                    continue
+                cont_new.append((src, tgt))
+            for pred in cont_preds:
+                cont_new.append((pred, fork_path))
+            for rep in rep_paths:
+                cont_new.append((fork_path, rep))
+                cont_new.append((rep, join_path))
+            for succ in cont_succs:
+                cont_new.append((join_path, succ))
+            call_graph[container_path] = cont_new
 
     def _should_skip(path: str) -> bool:
         for skip in skip_layers:
@@ -1405,6 +1507,69 @@ def build_graph(
             branch_namespaces.add(branch_ns)
         parallel_ns_groups.append(branch_namespaces)
 
+    # ── Create Fork/Join nodes for parallel layer groups ─────────────────
+    # When a container has multiple layer types (interleaved), create
+    # Fork and Join nodes so all types fan out from Fork and merge at Join.
+    fork_join_info: dict[str, dict] = {}  # container_path → {fork_id, join_id, branch_ns}
+    for container_path, groups in layer_group_map.items():
+        if len(groups) <= 1:
+            continue
+        parent_path = container_path.rsplit(".", 1)[0] if "." in container_path else ""
+        parent_ns = _namespace_for(parent_path + ".dummy") if parent_path else ""
+        # Use the container's parent namespace for Fork/Join
+        container_ns = _namespace_for(container_path + ".0.dummy").rsplit("/", 1)[0]
+        fork_id = container_path.replace(".", "/") + "/@fork"
+        join_id = container_path.replace(".", "/") + "/@join"
+
+        # Determine shape for the fork/join (from first rep's input)
+        rep_path = f"{container_path}.{groups[0].representative}"
+        fork_shape = input_shapes.get(rep_path, "")
+        if not fork_shape:
+            for child_name in module_map:
+                if child_name.startswith(rep_path + ".") and child_name in input_shapes:
+                    fork_shape = input_shapes[child_name]
+                    break
+        join_shape = shapes.get(rep_path, "")
+        if not join_shape:
+            for child_name in reversed(list(module_map)):
+                if child_name.startswith(rep_path + ".") and child_name in shapes:
+                    join_shape = shapes[child_name]
+                    break
+
+        fork_node = {
+            "id": fork_id,
+            "label": "Fork",
+            "namespace": parent_ns,
+            "attrs": [{"key": "synthetic", "value": "fork"}],
+            "style": _STYLE_FORK,
+        }
+        if fork_shape:
+            fork_node["outputsMetadata"] = _output_metadata(fork_shape, dtype)
+
+        join_node = {
+            "id": join_id,
+            "label": "Join",
+            "namespace": parent_ns,
+            "attrs": [{"key": "synthetic", "value": "join"}],
+            "style": _STYLE_JOIN,
+            "incomingEdges": [],  # Will be populated with branch outputs
+        }
+        if join_shape:
+            join_node["outputsMetadata"] = _output_metadata(join_shape, dtype)
+
+        fork_join_info[container_path] = {
+            "fork_id": fork_id,
+            "join_id": join_id,
+            "fork_node": fork_node,
+            "join_node": join_node,
+            "branch_namespaces": set(),
+        }
+        # Collect branch namespace prefixes
+        for group in groups:
+            rep_path = f"{container_path}.{group.representative}"
+            branch_ns = _namespace_for(rep_path + ".dummy")
+            fork_join_info[container_path]["branch_namespaces"].add(branch_ns)
+
     # ── Output node ──────────────────────────────────────────────────────
     # Determine output shape from the model's last module
     output_shape = "B x S x V"
@@ -1497,17 +1662,24 @@ def build_graph(
                 _exec_order[node] = _order_counter
                 _order_counter += 1
 
-    def _node_exec_key(n: dict) -> tuple[int, int]:
-        """Return (exec_order, original_index) for sorting."""
+    def _node_exec_key(n: dict) -> tuple:
+        """Return a hierarchical sort key using the shallowest ancestor's
+        exec_order as the primary key, then deeper ancestors as tie-breakers.
+        This ensures that all nodes under ``layers.3`` (top-level order 2)
+        sort before ``hc_head`` (top-level order 6), even if layers.3's
+        internal children have higher absolute exec_order values."""
         nid = n["id"]
         path = nid.replace("/", ".")
-        # Walk up the path to find the call-graph-ordered ancestor
         parts = path.split(".")
-        for depth in range(len(parts), 0, -1):
+        # Collect all ancestor exec_orders from shallowest to deepest
+        orders: list[int] = []
+        for depth in range(1, len(parts) + 1):
             ancestor = ".".join(parts[:depth])
             if ancestor in _exec_order:
-                return (_exec_order[ancestor], 0)
-        return (999999, 0)
+                orders.append(_exec_order[ancestor])
+        if orders:
+            return tuple(orders)
+        return (999999,)
 
     # Preserve the root @input at position 0 and @output at the end
     root_nodes = [n for n in nodes if n["id"] in ("@input", "@output")]
@@ -1517,11 +1689,28 @@ def build_graph(
     inner_nodes.sort(key=_node_exec_key)
     nodes[:] = [n for n in root_nodes if n["id"] == "@input"] + inner_nodes + [n for n in root_nodes if n["id"] == "@output"]
 
+    # Insert Fork/Join nodes at correct positions in the node list.
+    # Fork goes before the first branch node; Join goes after the last.
+    for container_path, fj in fork_join_info.items():
+        container_prefix = container_path.replace(".", "/") + "/"
+        first_branch_idx = None
+        last_branch_idx = None
+        for i, n in enumerate(nodes):
+            if n["id"].startswith(container_prefix):
+                if first_branch_idx is None:
+                    first_branch_idx = i
+                last_branch_idx = i
+        if first_branch_idx is not None:
+            nodes.insert(first_branch_idx, fj["fork_node"])
+            # last_branch_idx shifted by 1 due to insert
+            nodes.insert(last_branch_idx + 2, fj["join_node"])
+
     _wire_sequential_edges(
         nodes, model, module_map, shapes, {}, skip_layers,
         parallel_ns_groups=parallel_ns_groups,
         call_graph=call_graph,
         fx_leaf_aliases=_fx_leaf_aliases,
+        fork_join_info=fork_join_info,
     )
 
     # ── Fix up FX-expanded leaf module wiring ────────────────────────────
@@ -2281,7 +2470,7 @@ def build_graph(
                     {
                         "id": "model",
                         "nodes": nodes,
-                        "groupNodeAttributes": group_attrs,
+                        "groupNodeAttributes": _reorder_group_attrs(group_attrs),
                         "groupNodeConfigs": group_configs,
                     }
                 ],
@@ -2301,6 +2490,7 @@ def _wire_sequential_edges(
     parallel_ns_groups: list[set[str]] | None = None,
     call_graph: dict[str, list[tuple[str, str]]] | None = None,
     fx_leaf_aliases: dict[str, str] | None = None,
+    fork_join_info: dict[str, dict] | None = None,
 ) -> None:
     """Wire edges between nodes that don't already have incoming edges.
 
@@ -2318,6 +2508,19 @@ def _wire_sequential_edges(
     parallel_ns_groups = parallel_ns_groups or []
     call_graph = call_graph or {}
     fx_leaf_aliases = fx_leaf_aliases or {}
+    fork_join_info = fork_join_info or {}
+
+    # Build lookup: branch_ns → fork_id, join_id
+    _branch_to_fork: dict[str, str] = {}  # branch_ns → fork_id
+    _branch_to_join: dict[str, str] = {}  # branch_ns → join_id
+    _fork_ids: set[str] = set()
+    _join_ids: set[str] = set()
+    for _cp, fj in fork_join_info.items():
+        _fork_ids.add(fj["fork_id"])
+        _join_ids.add(fj["join_id"])
+        for bns in fj["branch_namespaces"]:
+            _branch_to_fork[bns] = fj["fork_id"]
+            _branch_to_join[bns] = fj["join_id"]
 
     # Add FX-expanded leaf module aliases so _cg_find_sources can resolve
     # them.  The alias maps orig_module_id → last_fx_op_id.
@@ -2411,11 +2614,17 @@ def _wire_sequential_edges(
     composite_entry: dict[str, str] = {}  # comp_path → predecessor node ID
     # Pre-populate from call_graph: if parent says "X → C", then C's
     # @input should resolve to the last node of X (set lazily below).
-    _cg_predecessor: dict[str, str] = {}  # child_path → source_child_path
+    _cg_predecessor: dict[str, list[str]] = {}
+    _cg_has_root_input: set[str] = set()  # targets with @input source from root
     for comp_path, edges in call_graph.items():
         for src, tgt in edges:
             if src != "@input":
-                _cg_predecessor[tgt] = src
+                if tgt not in _cg_predecessor:
+                    _cg_predecessor[tgt] = []
+                if src not in _cg_predecessor[tgt]:
+                    _cg_predecessor[tgt].append(src)
+            if src == "@input" and comp_path == "":
+                _cg_has_root_input.add(tgt)
 
     def _node_id_to_path(nid: str) -> str:
         return nid.replace("/", ".")
@@ -2441,13 +2650,16 @@ def _wire_sequential_edges(
                 # predecessor's last node, then the saved composite entry
                 # point, then the sequential fallback.
                 comp_path = child_path.rsplit(".", 1)[0]
-                input_source = None
-                # Check if this composite has a known predecessor from
+                input_sources: list[str] = []
+                # Check if this composite has known predecessors from
                 # the parent's call_graph
+                if comp_path in _cg_has_root_input:
+                    input_sources.append("@input")
                 if comp_path in _cg_predecessor:
-                    pred_path = _cg_predecessor[comp_path]
-                    if pred_path in last_node_for_path:
-                        input_source = last_node_for_path[pred_path]
+                    for pred_path in _cg_predecessor[comp_path]:
+                        if pred_path in last_node_for_path:
+                            input_sources.append(last_node_for_path[pred_path])
+                input_source = input_sources[0] if input_sources else None
                 if not input_source:
                     input_source = composite_entry.get(comp_path, fallback_source)
 
@@ -2455,7 +2667,9 @@ def _wire_sequential_edges(
                 src_ids = []
                 for src_path in cg_sources[child_path]:
                     if src_path == "@input":
-                        if input_source:
+                        if input_sources:
+                            src_ids.extend(input_sources)
+                        elif input_source:
                             src_ids.append(input_source)
                     else:
                         if src_path in last_node_for_path:
@@ -2485,6 +2699,53 @@ def _wire_sequential_edges(
         if node["id"] == "@input":
             _update_last("", "@input")
             continue
+
+        # Handle Fork nodes: wire from current predecessor in parent ns
+        if node["id"] in _fork_ids:
+            ns = node.get("namespace", "")
+            source_id = None
+            parts = ns.split("/") if ns else []
+            while parts:
+                parts.pop()
+                parent = "/".join(parts)
+                if parent in last_in_ns:
+                    source_id = last_in_ns[parent]
+                    break
+            if source_id is None:
+                source_id = last_in_ns.get("", "@input")
+            if source_id and source_id in node_by_id:
+                node["incomingEdges"] = [{
+                    "sourceNodeId": source_id,
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                }]
+            fork_path = _node_id_to_path(node["id"])
+            last_node_for_path[fork_path] = node["id"]
+            _update_last(ns, node["id"])
+            continue
+
+        # Handle Join nodes: wire from all branch last nodes
+        if node["id"] in _join_ids:
+            ns = node.get("namespace", "")
+            fan_in = []
+            for _cp, fj in fork_join_info.items():
+                if fj["join_id"] == node["id"]:
+                    for bns in fj["branch_namespaces"]:
+                        if bns in branch_last_node:
+                            fan_in.append(branch_last_node[bns])
+                    break
+            if fan_in:
+                node["incomingEdges"] = [
+                    {"sourceNodeId": src, "sourceNodeOutputId": "0",
+                     "targetNodeInputId": str(i)}
+                    for i, src in enumerate(fan_in)
+                    if src in node_by_id
+                ]
+            join_path = _node_id_to_path(node["id"])
+            last_node_for_path[join_path] = node["id"]
+            _update_last(ns, node["id"])
+            continue
+
         if "incomingEdges" in node:
             ns = node.get("namespace", "")
             branch_ns = _find_branch_ns(ns)
@@ -2506,10 +2767,12 @@ def _wire_sequential_edges(
 
         if branch_ns is not None and branch_ns not in parallel_entered:
             # First time entering this parallel branch.
-            # If this is the first branch in the group, snapshot the
-            # current predecessor. For subsequent branches, reuse it.
-            siblings = parallel_siblings[branch_ns]
-            if not any(s in parallel_entered for s in siblings):
+            # If a Fork node exists for this branch, use it as the source.
+            if branch_ns in _branch_to_fork:
+                source_id = _branch_to_fork[branch_ns]
+                for s in parallel_siblings.get(branch_ns, set()):
+                    parallel_entry_point[s] = source_id
+            elif not any(s in parallel_entered for s in parallel_siblings.get(branch_ns, set())):
                 # First branch in the group — find predecessor normally
                 parts = ns.split("/") if ns else []
                 while parts:
@@ -2521,7 +2784,7 @@ def _wire_sequential_edges(
                 if source_id is None:
                     source_id = last_in_ns.get("", "@input")
                 # Save this as the entry point for all sibling branches
-                for s in siblings:
+                for s in parallel_siblings.get(branch_ns, set()):
                     parallel_entry_point[s] = source_id
             else:
                 # Subsequent branch — use the saved entry point
@@ -2544,16 +2807,25 @@ def _wire_sequential_edges(
                 source_id = last_in_ns.get("", "@input")
         else:
             # Not in a parallel branch. Check if we just left one —
-            # if so, fan in from all branches.
+            # if so, fan in from all branches (or from the Join node
+            # if Fork/Join nodes exist).
             fan_in_sources = []
+            has_join = False
             for group in parallel_ns_groups:
-                # Check: all branches entered AND this node is past them
                 if group <= parallel_entered:
+                    # Check if any branch in this group has a Join node
                     for sibling_ns in group:
-                        if sibling_ns in branch_last_node:
-                            fan_in_sources.append(branch_last_node[sibling_ns])
+                        if sibling_ns in _branch_to_join:
+                            join_id = _branch_to_join[sibling_ns]
+                            if join_id in node_by_id:
+                                fan_in_sources = [join_id]
+                                has_join = True
+                            break
+                    if not has_join:
+                        for sibling_ns in group:
+                            if sibling_ns in branch_last_node:
+                                fan_in_sources.append(branch_last_node[sibling_ns])
             if fan_in_sources:
-                # Wire from all branch endpoints
                 node["incomingEdges"] = [
                     {
                         "sourceNodeId": src,

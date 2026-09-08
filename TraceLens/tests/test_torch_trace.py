@@ -822,3 +822,161 @@ class TestContainerGroupAttrs:
                 assert "output_shape" in attrs, (
                     f"Layer group '{key}' missing output_shape"
                 )
+
+
+class TestGroupAttrOrdering:
+    """Verify input_shape appears first and output_shape last in group attrs."""
+
+    def test_input_before_output(self, simple_payload):
+        ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        for key, attrs in ga.items():
+            keys = list(attrs.keys())
+            if "input_shape" in keys and "output_shape" in keys:
+                assert keys.index("input_shape") < keys.index("output_shape"), (
+                    f"In group '{key}', input_shape should come before output_shape: {keys}"
+                )
+
+    def test_input_shape_is_first(self, simple_payload):
+        ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        for key, attrs in ga.items():
+            keys = list(attrs.keys())
+            if "input_shape" in keys:
+                assert keys[0] == "input_shape", (
+                    f"In group '{key}', input_shape should be first: {keys}"
+                )
+
+    def test_output_shape_is_last(self, simple_payload):
+        ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        for key, attrs in ga.items():
+            keys = list(attrs.keys())
+            if "output_shape" in keys:
+                assert keys[-1] == "output_shape", (
+                    f"In group '{key}', output_shape should be last: {keys}"
+                )
+
+
+class TestForkJoinNodes:
+    """Verify Fork/Join nodes for multi-group containers."""
+
+    @pytest.fixture(scope="class")
+    def multi_group_model(self):
+        """Build a model with 2 distinct layer types (simulating interleaved)."""
+
+        class _TypeA(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.norm = torch.nn.LayerNorm(64)
+                self.proj = torch.nn.Linear(64, 64)
+            def forward(self, x):
+                return self.proj(self.norm(x))
+
+        class _TypeB(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.norm = torch.nn.LayerNorm(64)
+                self.gate = torch.nn.Linear(64, 64)
+            def forward(self, x):
+                return self.gate(self.norm(x))
+
+        class _InterleavedModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(256, 64)
+                self.layers = torch.nn.ModuleList([
+                    _TypeA(), _TypeB(), _TypeA(), _TypeB(),
+                ])
+                self.norm = torch.nn.LayerNorm(64)
+                self.head = torch.nn.Linear(64, 256, bias=False)
+            def forward(self, x):
+                h = self.embed(x)
+                for layer in self.layers:
+                    h = layer(h)
+                return self.head(self.norm(h))
+
+        with torch.device("meta"):
+            model = _InterleavedModel()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_fork_node_exists(self, multi_group_model):
+        nodes = multi_group_model["graphCollections"][0]["graphs"][0]["nodes"]
+        forks = [n for n in nodes
+                 if any(a.get("value") == "fork" for a in n.get("attrs", []))]
+        assert len(forks) >= 1, "No Fork node found for multi-group container"
+
+    def test_join_node_exists(self, multi_group_model):
+        nodes = multi_group_model["graphCollections"][0]["graphs"][0]["nodes"]
+        joins = [n for n in nodes
+                 if any(a.get("value") == "join" for a in n.get("attrs", []))]
+        assert len(joins) >= 1, "No Join node found for multi-group container"
+
+    def test_fork_has_incoming_edge(self, multi_group_model):
+        nodes = multi_group_model["graphCollections"][0]["graphs"][0]["nodes"]
+        for n in nodes:
+            if any(a.get("value") == "fork" for a in n.get("attrs", [])):
+                edges = n.get("incomingEdges", [])
+                assert edges, f"Fork node {n['id']} has no incoming edges"
+
+    def test_join_has_incoming_edges(self, multi_group_model):
+        nodes = multi_group_model["graphCollections"][0]["graphs"][0]["nodes"]
+        for n in nodes:
+            if any(a.get("value") == "join" for a in n.get("attrs", [])):
+                edges = n.get("incomingEdges", [])
+                assert len(edges) >= 2, (
+                    f"Join node {n['id']} should have >= 2 incoming edges "
+                    f"(one per branch), got {len(edges)}"
+                )
+
+
+class TestVLMFlowDirection:
+    """Verify VLM call-graph heuristic produces correct flow direction."""
+
+    def test_vlm_heuristic_injected(self):
+        """When a model has visual + language_model, the VLM heuristic
+        should inject root-level call-graph edges."""
+        from TraceLens.ModelUtils.torch_trace import _capture_call_graph
+
+        class _FakeVisual(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj = torch.nn.Linear(64, 64)
+            def forward(self, x):
+                return self.proj(x)
+
+        class _FakeLM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(256, 64)
+                self.norm = torch.nn.LayerNorm(64)
+            def forward(self, x, inputs_embeds=None):
+                if inputs_embeds is None:
+                    inputs_embeds = self.embed(x)
+                return self.norm(inputs_embeds)
+
+        class _FakeVLM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.visual = _FakeVisual()
+                self.language_model = _FakeLM()
+            def forward(self, x, pixel_values=None):
+                h = self.language_model(x)
+                return h
+
+        with torch.device("meta"):
+            model = _FakeVLM()
+        model.eval()
+        composites = {n for n, m in model.named_modules()
+                      if n and any(True for _ in m.children())}
+
+        cg = _capture_call_graph(model, composites, seq_len=8, batch_size=1)
+        assert "" in cg, "Root call graph should exist for VLM"
+        root_edges = cg[""]
+        sources = {src for src, _ in root_edges}
+        targets = {tgt for _, tgt in root_edges}
+        assert "visual" in targets, "visual should be a target from @input"
+        assert "language_model" in targets, "language_model should be a target"
+        # visual feeds into language_model
+        assert any(
+            src == "visual" and tgt == "language_model"
+            for src, tgt in root_edges
+        ), "visual → language_model edge missing"
