@@ -270,6 +270,32 @@ def _infer_shapes_from_weights(
     return shapes
 
 
+def _infer_input_shapes_from_weights(
+    model: torch.nn.Module,
+    captured: dict[str, tuple[int, ...]],
+    *,
+    batch_size: int = 1,
+    seq_len: int = 128,
+) -> dict[str, tuple[int, ...]]:
+    """Infer input shapes from module weight dimensions for modules
+    that didn't get input shapes from the forward pass."""
+    shapes = dict(captured)
+    for name, mod in model.named_modules():
+        if name in shapes or not name:
+            continue
+        if isinstance(mod, torch.nn.Linear):
+            shapes[name] = (batch_size, seq_len, mod.in_features)
+        elif isinstance(mod, torch.nn.Embedding):
+            shapes[name] = (batch_size, seq_len)
+        elif isinstance(mod, (torch.nn.LayerNorm, torch.nn.RMSNorm)):
+            ns = getattr(mod, "normalized_shape", None)
+            if ns:
+                shapes[name] = (batch_size, seq_len, *ns)
+        elif isinstance(mod, torch.nn.Conv2d):
+            shapes[name] = (batch_size, mod.in_channels, seq_len, seq_len)
+    return shapes
+
+
 # ── Call-graph capture via forward hooks ─────────────────────────────────────
 
 def _tensor_ids(x: Any) -> list[int]:
@@ -803,8 +829,11 @@ def build_graph(
     shapes: dict[str, str] = {}
     for path, shape in raw_shapes.items():
         shapes[path] = _symbolise(shape, batch_size=batch_size, seq_len=seq_len)
+    raw_input_shapes = _infer_input_shapes_from_weights(
+        model, hook_input_shapes, batch_size=batch_size, seq_len=seq_len
+    )
     input_shapes: dict[str, str] = {}
-    for path, shape in hook_input_shapes.items():
+    for path, shape in raw_input_shapes.items():
         input_shapes[path] = _symbolise(shape, batch_size=batch_size, seq_len=seq_len)
 
     # ── Detect repeated layers ───────────────────────────────────────────
@@ -2009,6 +2038,46 @@ def build_graph(
             else:
                 break
         return None
+
+    # For synthetic @input nodes, use the module's captured input_shape
+    # instead of inheriting from the source (which may be a different
+    # type, e.g. int64 tokens vs. float embeddings).
+    for n in nodes:
+        attrs = {a["key"]: a["value"] for a in n.get("attrs", [])}
+        if attrs.get("synthetic") != "input" or n.get("outputsMetadata"):
+            continue
+        # Derive input shape from the module's captured input_shapes
+        path = n["id"].replace("/", ".").removesuffix(".@input")
+        inp_str = input_shapes.get(path)
+        if not inp_str:
+            # Try first child's input shape
+            for child_name in module_map:
+                if child_name.startswith(path + ".") and child_name in input_shapes:
+                    inp_str = input_shapes[child_name]
+                    break
+        if inp_str:
+            # Determine dtype: if the module's first child is an Embedding,
+            # the input is integer token IDs, not floating-point tensors.
+            inp_dtype = dtype
+            mod = module_map.get(path)
+            if mod is not None:
+                for _child in mod.children():
+                    if isinstance(_child, torch.nn.Embedding):
+                        inp_dtype = "int64"
+                    break
+            n["outputsMetadata"] = _output_metadata(inp_str, inp_dtype)
+
+    # For synthetic @output nodes, use the module's captured output shape
+    # instead of inheriting from the last child (which may be an
+    # intermediate operation, not the module's actual output).
+    for n in nodes:
+        attrs = {a["key"]: a["value"] for a in n.get("attrs", [])}
+        if attrs.get("synthetic") != "output":
+            continue
+        path = n["id"].replace("/", ".").removesuffix(".@output")
+        out_str = shapes.get(path)
+        if out_str:
+            n["outputsMetadata"] = _output_metadata(out_str, dtype)
 
     changed = True
     while changed:
