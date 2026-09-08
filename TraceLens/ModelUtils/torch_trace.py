@@ -761,7 +761,7 @@ def build_graph(
 
     # ── Walk module tree and build nodes ──────────────────────────────────
     nodes: list[dict[str, Any]] = []
-    group_attrs: list[dict[str, Any]] = []
+    group_attrs: dict[str, dict[str, str]] = {}
     group_configs: list[dict[str, Any]] = []
     edges_from: dict[str, str] = {}  # module_path → node_id
 
@@ -1121,12 +1121,12 @@ def build_graph(
             if path in container_set:
                 continue  # ModuleList itself is not a node
             if namespace:
-                group_attrs.append({
-                    "nodeId": namespace + "/" + f"{attr_names.get(path, '')} ({type(mod).__name__})",
-                    "attrs": [
-                        {"key": "class", "value": type(mod).__name__},
-                    ],
-                })
+                group_id = namespace + "/" + f"{attr_names.get(path, '')} ({type(mod).__name__})"
+                attrs = {"class": type(mod).__name__}
+                shape_str = shapes.get(path)
+                if shape_str:
+                    attrs["output_shape"] = f"{shape_str} {dtype}"
+                group_attrs[group_id] = attrs
             continue
 
         if path in composite_modules and path in fx_graphs:
@@ -1594,41 +1594,16 @@ def build_graph(
                         seen_srcs.add(src)
                         all_ext_srcs.append(src)
 
-            if n_inputs > 1:
-                # Multiple inputs: external node in parent ns that fans in,
-                # then wires to the internal input node
-                ext_input_id = comp_id + "/@ext_input"
-                ext_input_node = {
-                    "id": ext_input_id,
-                    "label": f"{attr} Input",
-                    "namespace": comp_ns if comp_ns else "",
-                    "attrs": [{"key": "synthetic", "value": "input"}],
-                    "style": _STYLE_INPUT,
-                    "incomingEdges": [{"sourceNodeId": s} for s in all_ext_srcs],
-                }
-                nodes.append(ext_input_node)
-                node_by_id[ext_input_id] = ext_input_node
-                # Register in consumers_of so later composites' output
-                # rewiring can update these sources
-                for e in ext_input_node["incomingEdges"]:
-                    consumers_of.setdefault(e["sourceNodeId"], []).append(
-                        (ext_input_node, e)
-                    )
-                input_node["incomingEdges"] = [{"sourceNodeId": ext_input_id}]
-            else:
-                # Single input: internal node gets the external sources
-                input_node["incomingEdges"] = [
-                    {"sourceNodeId": s} for s in all_ext_srcs
-                ]
+            input_node["incomingEdges"] = [
+                {"sourceNodeId": s} for s in all_ext_srcs
+            ]
 
             nodes.append(input_node)
             node_by_id[input_id] = input_node
-            # Register single-input node in consumers_of too
-            if n_inputs == 1:
-                for e in input_node["incomingEdges"]:
-                    consumers_of.setdefault(e["sourceNodeId"], []).append(
-                        (input_node, e)
-                    )
+            for e in input_node["incomingEdges"]:
+                consumers_of.setdefault(e["sourceNodeId"], []).append(
+                    (input_node, e)
+                )
 
             # Rewire input children: replace external sources with input_id
             for cid in input_child_ids:
@@ -1662,23 +1637,7 @@ def build_graph(
             nodes.append(output_node)
             node_by_id[output_id] = output_node
 
-            if n_outputs > 1:
-                # Multiple outputs: external node in parent ns
-                ext_output_id = comp_id + "/@ext_output"
-                ext_output_node = {
-                    "id": ext_output_id,
-                    "label": f"{attr} Output",
-                    "namespace": comp_ns if comp_ns else "",
-                    "attrs": [{"key": "synthetic", "value": "output"}],
-                    "style": _STYLE_OUTPUT,
-                    "incomingEdges": [{"sourceNodeId": output_id}],
-                }
-                nodes.append(ext_output_node)
-                node_by_id[ext_output_id] = ext_output_node
-                # Rewire external consumers to use ext_output_id
-                wire_output_id = ext_output_id
-            else:
-                wire_output_id = output_id
+            wire_output_id = output_id
 
             # Rewire consumers: nodes outside this module that consumed
             # any output child should now consume the (ext) output node.
@@ -1795,14 +1754,11 @@ def build_graph(
         type_summary = ", ".join(
             f"{g.count}x {g.class_name}" for g in groups
         ) if len(groups) > 1 else f"{total}x {cls_name}"
-        group_attrs.append({
-            "nodeId": group_id,
-            "attrs": [
-                {"key": "class", "value": cls_name},
-                {"key": "count", "value": str(total)},
-                {"key": "layer_types", "value": type_summary},
-            ],
-        })
+        group_attrs[group_id] = {
+            "class": cls_name,
+            "count": str(total),
+            "layer_types": type_summary,
+        }
 
     # ── Build fact sheet ─────────────────────────────────────────────────
     fact_sheet = _build_fact_sheet(model_name, config)
