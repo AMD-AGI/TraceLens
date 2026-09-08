@@ -617,3 +617,133 @@ class TestMultiOutputWiring:
         assert not orphans, (
             f"Orphan @output nodes (not consumed): {orphans}"
         )
+
+
+class TestSyntheticInputShapeMetadata:
+    """Verify @input synthetic nodes use the module's actual input shape,
+    not the shape inherited from the source node."""
+
+    def _get_shape(self, nodes, node_id):
+        for n in nodes:
+            if n["id"] == node_id:
+                om = n.get("outputsMetadata", [{}])
+                if om and om[0].get("attrs"):
+                    return next(
+                        (a["value"] for a in om[0]["attrs"] if a["key"] == "shape"),
+                        "",
+                    )
+        return ""
+
+    def test_root_input_is_integer(self, simple_nodes):
+        """Root @input should reflect token ID shape (integer, no hidden dim)."""
+        shape = self._get_shape(simple_nodes, "@input")
+        assert shape, "@input has no shape metadata"
+        # Token IDs are 2-D (batch, seq) — should NOT have a hidden dimension
+        dims = shape.replace(" x ", "x").split("x")
+        assert len(dims) <= 3, (
+            f"@input has too many dims for token IDs: {shape}"
+        )
+
+    def test_embedding_parent_input_is_integer_dtype(self, simple_nodes):
+        """A composite whose first child is Embedding should have int64 @input."""
+        # In _SimpleModel, the root model's @input carries token IDs
+        shape = self._get_shape(simple_nodes, "@input")
+        assert "int64" in shape, (
+            f"Root @input should be int64 (token IDs), got: {shape}"
+        )
+
+    def test_input_shape_not_inherited_from_source(self, simple_nodes):
+        """Composite @input nodes should derive shape from their own module's
+        input, not from the upstream source node's output."""
+        # layers/0/@input should reflect the hidden dim (B x S x 64),
+        # not the root @input shape (B x S int64)
+        layer_input_shape = self._get_shape(simple_nodes, "layers/0/@input")
+        root_shape = self._get_shape(simple_nodes, "@input")
+        if layer_input_shape and root_shape:
+            assert layer_input_shape != root_shape, (
+                f"layers/0/@input ({layer_input_shape}) should differ from "
+                f"root @input ({root_shape}) — it should reflect hidden dim"
+            )
+
+
+class TestSyntheticOutputShapeMetadata:
+    """Verify @output synthetic nodes use the module's captured output shape,
+    not the shape of the last internal child."""
+
+    def _get_shape(self, nodes, node_id):
+        for n in nodes:
+            if n["id"] == node_id:
+                om = n.get("outputsMetadata", [{}])
+                if om and om[0].get("attrs"):
+                    return next(
+                        (a["value"] for a in om[0]["attrs"] if a["key"] == "shape"),
+                        "",
+                    )
+        return ""
+
+    def test_output_nodes_have_shape(self, simple_nodes):
+        """All synthetic @output nodes should have outputsMetadata."""
+        for n in simple_nodes:
+            attrs = {a["key"]: a["value"] for a in n.get("attrs", [])}
+            if attrs.get("synthetic") != "output":
+                continue
+            om = n.get("outputsMetadata")
+            assert om, f"Synthetic output {n['id']} has no outputsMetadata"
+
+    def test_block_output_matches_module_shape(self, simple_nodes):
+        """Decoder block @output shape should match the block's captured output shape,
+        not the internal mlp's up_proj intermediate shape."""
+        block_shape = self._get_shape(simple_nodes, "layers/0/@output")
+        assert block_shape, "layers/0/@output has no shape"
+        # Block output should be hidden_dim (64), not intermediate (256)
+        assert "256" not in block_shape, (
+            f"layers/0/@output seems to show MLP intermediate shape: {block_shape}"
+        )
+
+    def test_self_attn_output_shape(self, simple_nodes):
+        """self_attn/@output should reflect o_proj output (hidden_dim),
+        not an intermediate projection size."""
+        shape = self._get_shape(simple_nodes, "layers/0/self_attn/@output")
+        if shape:
+            assert "64" in shape, (
+                f"self_attn/@output should include hidden_dim=64, got: {shape}"
+            )
+
+
+class TestInputShapeInference:
+    """Verify _infer_input_shapes_from_weights produces correct shapes."""
+
+    def test_linear_input_shape(self):
+        from TraceLens.ModelUtils.torch_trace import _infer_input_shapes_from_weights
+        model = torch.nn.Sequential(torch.nn.Linear(32, 64))
+        shapes = _infer_input_shapes_from_weights(
+            model, {}, batch_size=1, seq_len=10
+        )
+        assert shapes.get("0") == (1, 10, 32)
+
+    def test_embedding_input_shape(self):
+        from TraceLens.ModelUtils.torch_trace import _infer_input_shapes_from_weights
+        model = torch.nn.Sequential(torch.nn.Embedding(100, 64))
+        shapes = _infer_input_shapes_from_weights(
+            model, {}, batch_size=1, seq_len=10
+        )
+        # Embedding input is (batch, seq) — no hidden dim
+        assert shapes.get("0") == (1, 10)
+
+    def test_captured_shapes_preserved(self):
+        from TraceLens.ModelUtils.torch_trace import _infer_input_shapes_from_weights
+        model = torch.nn.Sequential(torch.nn.Linear(32, 64))
+        captured = {"0": (2, 5, 32)}
+        shapes = _infer_input_shapes_from_weights(
+            model, captured, batch_size=1, seq_len=10
+        )
+        # Should preserve the captured shape, not override
+        assert shapes["0"] == (2, 5, 32)
+
+    def test_conv2d_input_shape(self):
+        from TraceLens.ModelUtils.torch_trace import _infer_input_shapes_from_weights
+        model = torch.nn.Sequential(torch.nn.Conv2d(3, 16, 3))
+        shapes = _infer_input_shapes_from_weights(
+            model, {}, batch_size=1, seq_len=10
+        )
+        assert shapes.get("0") == (1, 3, 10, 10)
