@@ -221,11 +221,22 @@ def _capture_shapes(
 
     dummy = torch.zeros(batch_size, seq_len, dtype=torch.long, device="meta")
     try:
+        # Enable meta-device workarounds for ops that fail on meta tensors
+        torch.fx.experimental._config.meta_nonzero_assume_all_nonzero = True
+        # Cast model to bfloat16 so matmul ops succeed on meta device
+        original_dtype = next(
+            (p.dtype for p in model.parameters() if p.dtype.is_floating_point),
+            None,
+        )
+        if original_dtype and original_dtype != torch.bfloat16:
+            model.to(torch.bfloat16)
         with torch.no_grad():
             model(dummy, use_cache=False)
     except Exception:
         pass
     finally:
+        if original_dtype and original_dtype != torch.bfloat16:
+            model.to(original_dtype)
         for h in handles:
             h.remove()
 
@@ -363,11 +374,22 @@ def _capture_call_graph(
 
     dummy = torch.zeros(batch_size, seq_len, dtype=torch.long, device="meta")
     try:
+        # Enable meta-device workarounds for ops that fail on meta tensors
+        torch.fx.experimental._config.meta_nonzero_assume_all_nonzero = True
+        # Cast model to bfloat16 so matmul ops succeed on meta device
+        original_dtype = next(
+            (p.dtype for p in model.parameters() if p.dtype.is_floating_point),
+            None,
+        )
+        if original_dtype and original_dtype != torch.bfloat16:
+            model.to(torch.bfloat16)
         with torch.no_grad():
             model(dummy, use_cache=False)
     except Exception:
         pass
     finally:
+        if original_dtype and original_dtype != torch.bfloat16:
+            model.to(original_dtype)
         for h in handles:
             h.remove()
 
@@ -378,15 +400,28 @@ def _capture_call_graph(
     # into a single ordered timeline and process them in call order so
     # that a second call to the same module can consume outputs from
     # children that ran between the two calls.
+    # Identify ModuleList/ModuleDict containers whose children should be
+    # promoted as direct children of the grandparent (these containers
+    # are never called directly; their items are).
+    _container_paths: set[str] = set()
+    for name, mod in model.named_modules():
+        if isinstance(mod, (torch.nn.ModuleList, torch.nn.ModuleDict)):
+            _container_paths.add(name)
+
     edges: dict[str, list[tuple[str, str]]] = {}
     for comp_path in composite_modules:
-        # Collect direct children
+        # Collect direct children (promoting ModuleList/Dict items)
         children: set[str] = set()
         for name in pre_inputs:
             if name.startswith(comp_path + "."):
                 suffix = name[len(comp_path) + 1:]
                 if "." not in suffix:
                     children.add(name)
+                elif suffix.count(".") == 1:
+                    # Check if the intermediate is a container (ModuleList)
+                    parent_path = comp_path + "." + suffix.split(".")[0]
+                    if parent_path in _container_paths:
+                        children.add(name)
 
         if len(children) < 2:
             continue
@@ -428,8 +463,31 @@ def _capture_call_graph(
                 for tid in tids:
                     producer[tid] = child
 
+        # Sequential fallback: children with no incoming edges are
+        # connected from the previous child in execution order.  The
+        # very first child gets "@input".  This handles inline tensor ops
+        # (e.g. residual combinations) and meta-device forward passes
+        # where tensor-ID tracking produces no overlap.
+        #
+        # Run BEFORE untracked_consumers so sequential chaining takes
+        # priority over spurious @input edges from shared tensor IDs.
+        children_ordered = sorted(children, key=lambda c: (
+            min((idx for idx, _ in pre_inputs.get(c, [(999,)])), default=999)
+        ))
+        children_with_edges = {tgt for _, tgt in child_edges}
+        last_child: str | None = None
+        for child in children_ordered:
+            if child not in children_with_edges:
+                if last_child is not None:
+                    child_edges.append((last_child, child))
+                else:
+                    child_edges.append(("@input", child))
+                children_with_edges.add(child)
+            # Update last_child to the most recently completed child
+            last_child = child
+
         # Children sharing the same untracked input tensor are parallel.
-        # Treat them as all coming from "@input".
+        # Treat them as all coming from "@input" (only if still unconnected).
         children_with_edges = {tgt for _, tgt in child_edges}
         for _tid, consumers in untracked_consumers.items():
             if len(consumers) > 1:
@@ -437,23 +495,6 @@ def _capture_call_graph(
                     if child not in children_with_edges:
                         child_edges.append(("@input", child))
                         children_with_edges.add(child)
-
-        # Sequential fallback: children with no incoming edges (except the
-        # very first child) are connected from the last child that completed
-        # before them.  This handles inline tensor ops (e.g. residual
-        # combinations) that break the tensor-ID tracking chain.
-        children_ordered = sorted(children, key=lambda c: (
-            min((idx for idx, _ in pre_inputs.get(c, [(999,)])), default=999)
-        ))
-        children_with_edges = {tgt for _, tgt in child_edges}
-        last_child: str | None = None
-        for child in children_ordered:
-            if child not in children_with_edges and last_child is not None:
-                child_edges.append((last_child, child))
-                children_with_edges.add(child)
-            # Update last_child to the most recently completed child
-            # (the one whose post-hook fired last before this child's pre-hook)
-            last_child = child
 
         if child_edges:
             # Deduplicate
@@ -925,6 +966,47 @@ def build_graph(
         model, composite_modules, seq_len=seq_len, batch_size=batch_size
     )
 
+    # Map skipped layer paths to their representative so the call graph
+    # can resolve edges through collapsed layers.  E.g. if layers 0-2
+    # collapse to rep 0, an edge "layers.2 → layers.3" maps to
+    # "layers.0 → layers.3".
+    _skip_to_rep: dict[str, str] = {}
+    for container_path, groups in layer_group_map.items():
+        for group in groups:
+            rep_path = f"{container_path}.{group.representative}"
+            for idx in group.indices:
+                p = f"{container_path}.{idx}"
+                if p != rep_path:
+                    _skip_to_rep[p] = rep_path
+
+    def _map_cg_path(p: str) -> str:
+        """Map a possibly-skipped module path to its representative."""
+        if p in _skip_to_rep:
+            return _skip_to_rep[p]
+        # Check if p is a child of a skipped path
+        for skip, rep in _skip_to_rep.items():
+            if p.startswith(skip + "."):
+                return rep + p[len(skip):]
+        return p
+
+    # Remap call_graph edges through collapsed layers
+    remapped_cg: dict[str, list[tuple[str, str]]] = {}
+    for comp_path, edges in call_graph.items():
+        new_edges: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for src, tgt in edges:
+            ms = _map_cg_path(src) if src != "@input" else src
+            mt = _map_cg_path(tgt)
+            if ms == mt:
+                continue  # Skip self-edges from collapsed layers
+            pair = (ms, mt)
+            if pair not in seen:
+                seen.add(pair)
+                new_edges.append(pair)
+        if new_edges:
+            remapped_cg[_map_cg_path(comp_path)] = new_edges
+    call_graph = remapped_cg
+
     def _should_skip(path: str) -> bool:
         for skip in skip_layers:
             if path == skip or path.startswith(skip + "."):
@@ -1377,12 +1459,42 @@ def build_graph(
     _exec_order: dict[str, int] = {}
     _order_counter = 0
     for comp_path in sorted(call_graph.keys(), key=lambda p: p.count(".")):
-        for src, tgt in call_graph[comp_path]:
-            if src != "@input" and src not in _exec_order:
-                _exec_order[src] = _order_counter
-                _order_counter += 1
-            if tgt not in _exec_order:
-                _exec_order[tgt] = _order_counter
+        # Topologically sort edges so the first child (after @input)
+        # gets the lowest execution order, regardless of edge list order.
+        cg_edges = call_graph[comp_path]
+        # Build adjacency: src → [tgt]
+        _adj: dict[str, list[str]] = defaultdict(list)
+        _all_nodes: set[str] = set()
+        _has_incoming: set[str] = set()
+        for src, tgt in cg_edges:
+            _adj[src].append(tgt)
+            _all_nodes.add(tgt)
+            _has_incoming.add(tgt)
+            if src != "@input":
+                _all_nodes.add(src)
+        # Start from nodes with no incoming (or @input targets)
+        _roots = [n for n in _all_nodes if n not in _has_incoming]
+        # Also add @input targets in edge order
+        for src, tgt in cg_edges:
+            if src == "@input" and tgt not in _roots:
+                _roots.append(tgt)
+        # BFS topological order
+        _visited: set[str] = set()
+        _queue = list(_roots)
+        _topo: list[str] = []
+        while _queue:
+            node = _queue.pop(0)
+            if node in _visited:
+                continue
+            _visited.add(node)
+            _topo.append(node)
+            for succ in _adj.get(node, []):
+                if succ not in _visited:
+                    _queue.append(succ)
+        # Assign execution order
+        for node in _topo:
+            if node not in _exec_order:
+                _exec_order[node] = _order_counter
                 _order_counter += 1
 
     def _node_exec_key(n: dict) -> tuple[int, int]:
@@ -1720,22 +1832,6 @@ def build_graph(
 
         n_outputs = len(output_child_ids)
 
-        # If still no output children, use call-graph terminal nodes
-        # (nodes that are targets but never source within the composite)
-        if n_outputs == 0 and comp_path in call_graph:
-            targets = {t for _, t in call_graph[comp_path]}
-            sources = {s for s, _ in call_graph[comp_path]}
-            terminals = targets - sources
-            for term_path in terminals:
-                # Composites don't have their own node — use @output
-                term_id = _node_id(term_path)
-                term_output_id = term_id + "/@output"
-                if term_output_id in node_by_id and term_output_id not in output_child_ids:
-                    output_child_ids.append(term_output_id)
-                elif term_id in node_by_id and term_id not in output_child_ids:
-                    output_child_ids.append(term_id)
-            n_outputs = len(output_child_ids)
-
         # Last resort: use child nodes that have no consumers as outputs
         if n_outputs == 0 and child_nodes:
             for cn in reversed(child_nodes):
@@ -1751,6 +1847,39 @@ def build_graph(
                 if not has_consumer and cid not in output_child_ids:
                     output_child_ids.append(cid)
             n_outputs = len(output_child_ids)
+
+        # Call-graph terminal override: use the terminal nodes from the
+        # call graph (nodes that are targets but never sources) as the
+        # authoritative output.  This overrides heuristic-based output
+        # child detection which can pick intermediate modules when
+        # wiring hasn't been finalized yet.
+        if comp_path in call_graph:
+            targets = {t for _, t in call_graph[comp_path]}
+            sources = {s for s, _ in call_graph[comp_path] if s != "@input"}
+            terminals = targets - sources
+            if terminals:
+                cg_output_ids: list[str] = []
+                for term_path in terminals:
+                    term_id = _node_id(term_path)
+                    term_output_id = term_id + "/@output"
+                    if term_output_id in node_by_id:
+                        cg_output_ids.append(term_output_id)
+                    elif term_id in node_by_id:
+                        cg_output_ids.append(term_id)
+                    else:
+                        # Terminal might be an FX-expanded leaf whose
+                        # @output doesn't exist yet.  Find the last
+                        # FX op node under this module prefix.
+                        prefix = term_id + "/"
+                        last_fx_node = None
+                        for cn in child_nodes:
+                            if cn["id"].startswith(prefix):
+                                last_fx_node = cn["id"]
+                        if last_fx_node:
+                            cg_output_ids.append(last_fx_node)
+                if cg_output_ids:
+                    output_child_ids = cg_output_ids
+                    n_outputs = len(output_child_ids)
 
         # ── Create Input node(s) ──────────────────────────────────────
         if n_inputs >= 1:
@@ -1971,6 +2100,39 @@ def build_graph(
         if rep_inp:
             layer_attrs["input_shape"] = f"{rep_inp} {dtype}"
         group_attrs[group_id] = layer_attrs
+
+        # For the container's parent module (e.g. "language_model"), derive
+        # input/output shapes from the call-graph boundary children rather
+        # than the representative layer — the parent's I/O may differ
+        # (e.g. integer token IDs in, float hidden states out).
+        parent_path = container_path.rsplit(".", 1)[0] if "." in container_path else ""
+        if parent_path and parent_path in call_graph:
+            cg_edges = call_graph[parent_path]
+            # Find the first child (after @input) for input shape
+            for src, tgt in cg_edges:
+                if src == "@input":
+                    first_inp = input_shapes.get(tgt)
+                    if first_inp:
+                        # Determine dtype for the parent's input
+                        first_mod = module_map.get(tgt)
+                        parent_inp_dtype = dtype
+                        if first_mod and isinstance(first_mod, torch.nn.Embedding):
+                            parent_inp_dtype = "int64"
+                        parent_ns = _namespace_for(parent_path + ".dummy").rsplit("/", 1)[0]
+                        if parent_ns in group_attrs:
+                            group_attrs[parent_ns]["input_shape"] = f"{first_inp} {parent_inp_dtype}"
+                    break
+            # Find terminal nodes for output shape
+            targets = {t for _, t in cg_edges}
+            sources = {s for s, _ in cg_edges if s != "@input"}
+            term_paths = targets - sources
+            for term in term_paths:
+                term_out = shapes.get(term)
+                if term_out:
+                    parent_ns = _namespace_for(parent_path + ".dummy").rsplit("/", 1)[0]
+                    if parent_ns in group_attrs:
+                        group_attrs[parent_ns]["output_shape"] = f"{term_out} {dtype}"
+                    break
 
     # ── Build fact sheet ─────────────────────────────────────────────────
     fact_sheet = _build_fact_sheet(model_name, config)

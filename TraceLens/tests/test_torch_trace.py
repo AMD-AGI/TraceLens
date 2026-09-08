@@ -747,3 +747,78 @@ class TestInputShapeInference:
             model, {}, batch_size=1, seq_len=10
         )
         assert shapes.get("0") == (1, 3, 10, 10)
+
+
+class TestCallGraphCapture:
+    """Verify call-graph captures correct dataflow edges."""
+
+    def test_embed_tokens_has_edges(self, simple_nodes):
+        """embed_tokens should have incoming edges (wired to something)."""
+        et = next((n for n in simple_nodes if n["id"] == "embed_tokens"), None)
+        assert et is not None, "embed_tokens node not found"
+        edges = [e["sourceNodeId"] for e in et.get("incomingEdges", [])]
+        assert edges, "embed_tokens has no incoming edges"
+
+    def test_all_nodes_wired(self, simple_nodes):
+        """No non-@input node should be completely unwired."""
+        for n in simple_nodes:
+            if n["id"] == "@input":
+                continue
+            edges = n.get("incomingEdges", [])
+            attrs = {a["key"]: a["value"] for a in n.get("attrs", [])}
+            if attrs.get("synthetic") == "input":
+                continue  # input nodes may not always have edges
+            assert edges, f"Node {n['id']} has no incoming edges"
+
+
+class TestCompositeOutputResolution:
+    """Verify @output comes from the end of the forward chain."""
+
+    def test_output_has_edges(self, simple_nodes):
+        """Root @output should have incoming edges."""
+        root_output = next(
+            (n for n in simple_nodes if n["id"] == "@output"), None
+        )
+        assert root_output is not None
+        sources = [e["sourceNodeId"] for e in root_output.get("incomingEdges", [])]
+        assert sources, "@output has no incoming edges"
+
+    def test_output_shape_exists(self, simple_nodes):
+        """@output should have shape metadata."""
+        root_output = next(
+            (n for n in simple_nodes if n["id"] == "@output"), None
+        )
+        if root_output and root_output.get("outputsMetadata"):
+            shape = next(
+                (a["value"] for a in root_output["outputsMetadata"][0].get("attrs", [])
+                 if a["key"] == "shape"),
+                "",
+            )
+            assert shape, "@output has no shape metadata"
+
+
+class TestModuleListChildPromotion:
+    """Verify ModuleList children are promoted as direct children
+    of the grandparent for call-graph edge detection."""
+
+    def test_layers_have_edges(self, simple_nodes):
+        """Decoder layers (inside ModuleList) should have incoming edges."""
+        layer_0_input = next(
+            (n for n in simple_nodes if n["id"] == "layers/0/@input"), None
+        )
+        if layer_0_input:
+            edges = [e["sourceNodeId"] for e in layer_0_input.get("incomingEdges", [])]
+            assert edges, "layers/0/@input has no incoming edges"
+
+
+class TestContainerGroupAttrs:
+    """Verify container-level group attributes have shapes."""
+
+    def test_groups_have_output_shape(self, simple_payload):
+        """All layer groups should have output_shape."""
+        ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        for key, attrs in ga.items():
+            if "count" in attrs:
+                assert "output_shape" in attrs, (
+                    f"Layer group '{key}' missing output_shape"
+                )
