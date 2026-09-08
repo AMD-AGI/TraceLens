@@ -2465,6 +2465,25 @@ def build_graph(
                 n["outputsMetadata"] = meta
                 changed = True
 
+    # ── Final node ordering pass ──────────────────────────────────────
+    # The exec-order sort above ran before composite @input/@output nodes
+    # (and some other synthetic nodes) were appended to `nodes`; those
+    # later appends iterate `sorted(composite_modules)` alphabetically,
+    # which can misorder top-level siblings whose real dataflow order
+    # differs from alphabetical (e.g. "language_model" sorts before
+    # "visual" alphabetically, but visual actually executes first and
+    # feeds into language_model). Re-apply the same hierarchical
+    # exec-order key now that every node has been created, so the final
+    # list order matches true execution order throughout.
+    _root_io = {n["id"] for n in nodes if n["id"] in ("@input", "@output")}
+    _final_inner = [n for n in nodes if n["id"] not in _root_io]
+    _final_inner.sort(key=_node_exec_key)
+    nodes[:] = (
+        [n for n in nodes if n["id"] == "@input"]
+        + _final_inner
+        + [n for n in nodes if n["id"] == "@output"]
+    )
+
     return {
         "name": model_name,
         "model_type": model_type,

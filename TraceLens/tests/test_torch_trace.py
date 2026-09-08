@@ -1035,3 +1035,75 @@ class TestMultiModalFlowDirection:
         # Both children were invoked, so the "single invoked child" fallback
         # condition doesn't apply and no root edges are synthesized.
         assert "" not in cg
+
+
+class TestTopLevelNodeOrder:
+    """Regression test: the final node LIST ORDER (not just edges) must
+    match true execution order, even when alphabetical order disagrees.
+    A prior bug re-appended composite @input/@output nodes in
+    alphabetically-sorted order after the exec-order sort had already
+    run, so e.g. "language_model" (< "visual" alphabetically) ended up
+    listed before "visual" despite visual executing first and feeding
+    into language_model.
+    """
+
+    @pytest.fixture(scope="class")
+    def ordering_payload(self):
+        class _Encoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj = torch.nn.Linear(8, 8)
+
+            def forward(self, x):
+                return self.proj(x)
+
+        class _Decoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(64, 8)
+                self.norm = torch.nn.LayerNorm(8)
+
+            def forward(self, x, inputs_embeds=None):
+                h = inputs_embeds if inputs_embeds is not None else self.embed(x)
+                return self.norm(h)
+
+        class _AlphaOrderedVLM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                # "a_decoder" sorts BEFORE "z_encoder" alphabetically, but
+                # z_encoder is the (uninvoked) side branch that feeds INTO
+                # a_decoder — i.e. alphabetical order is the OPPOSITE of
+                # true execution order, mirroring the real GLM bug where
+                # "language_model" < "visual" alphabetically despite
+                # visual executing first.
+                self.a_decoder = _Decoder()
+                self.z_encoder = _Encoder()
+
+            def forward(self, x, side_input=None, **kwargs):
+                # Only a_decoder is unconditionally invoked; z_encoder is
+                # skipped here to mimic an optional modality encoder whose
+                # optional input wasn't provided.
+                return self.a_decoder(x)
+
+        with torch.device("meta"):
+            model = _AlphaOrderedVLM()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_uninvoked_sibling_ordered_before_main(self, ordering_payload):
+        """Leaf FX-op nodes get ordered correctly by the first exec-order
+        sort regardless of this bug, so check the SYNTHETIC composite
+        @input/@output nodes specifically — those were appended in a
+        separate alphabetically-sorted loop and are what actually
+        exposed the misordering."""
+        nodes = ordering_payload["graphCollections"][0]["graphs"][0]["nodes"]
+        ids = [n["id"] for n in nodes]
+        encoder_out_idx = ids.index("z_encoder/@output")
+        decoder_in_idx = ids.index("a_decoder/@input")
+        assert encoder_out_idx < decoder_in_idx, (
+            f"z_encoder/@output (idx {encoder_out_idx}) feeds into "
+            f"a_decoder/@input (idx {decoder_in_idx}) and must be ordered "
+            "before it, even though 'a_decoder' sorts alphabetically "
+            "before 'z_encoder' — final node order must be driven by "
+            "execution order, not alphabetical convenience"
+        )
