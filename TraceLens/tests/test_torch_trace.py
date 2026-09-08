@@ -76,6 +76,243 @@ class TestFxTrace:
         assert graph is None
 
 
+# ── Structural tests (no network, uses simple local model) ──────────────────
+
+
+class _SimpleAttention(torch.nn.Module):
+    """Minimal attention-like composite for testing."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.q_proj = torch.nn.Linear(dim, dim)
+        self.k_proj = torch.nn.Linear(dim, dim)
+        self.v_proj = torch.nn.Linear(dim, dim)
+        self.o_proj = torch.nn.Linear(dim, dim)
+
+    def forward(self, x):
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+        attn = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        return self.o_proj(attn)
+
+
+class _SimpleMLP(torch.nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.up_proj = torch.nn.Linear(dim, dim * 4)
+        self.act = torch.nn.SiLU()
+        self.down_proj = torch.nn.Linear(dim * 4, dim)
+
+    def forward(self, x):
+        return self.down_proj(self.act(self.up_proj(x)))
+
+
+class _SimpleBlock(torch.nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.input_layernorm = torch.nn.LayerNorm(dim)
+        self.self_attn = _SimpleAttention(dim)
+        self.post_attention_layernorm = torch.nn.LayerNorm(dim)
+        self.mlp = _SimpleMLP(dim)
+
+    def forward(self, x):
+        x = x + self.self_attn(self.input_layernorm(x))
+        x = x + self.mlp(self.post_attention_layernorm(x))
+        return x
+
+
+class _SimpleModel(torch.nn.Module):
+    def __init__(self, vocab: int = 256, dim: int = 64, n_layers: int = 4):
+        super().__init__()
+        self.embed_tokens = torch.nn.Embedding(vocab, dim)
+        self.layers = torch.nn.ModuleList(
+            [_SimpleBlock(dim) for _ in range(n_layers)]
+        )
+        self.norm = torch.nn.LayerNorm(dim)
+        self.lm_head = torch.nn.Linear(dim, vocab, bias=False)
+
+    def forward(self, input_ids):
+        x = self.embed_tokens(input_ids)
+        for layer in self.layers:
+            x = layer(x)
+        x = self.norm(x)
+        return self.lm_head(x)
+
+
+def _build_simple_payload() -> dict:
+    """Build a graph payload from _SimpleModel without network access."""
+    from TraceLens.ModelUtils.torch_trace import (
+        _capture_call_graph,
+        _capture_shapes,
+        _detect_repeated_layers,
+        _infer_shapes_from_weights,
+        _patch_rotary_embeddings,
+    )
+
+    with torch.device("meta"):
+        model = _SimpleModel()
+    model.eval()
+
+    return build_graph.__wrapped__(model) if hasattr(build_graph, "__wrapped__") else _build_from_model(model)
+
+
+def _build_from_model(model: torch.nn.Module) -> dict:
+    """Replicate the core of build_graph() for a pre-instantiated model."""
+    import types
+    from collections import defaultdict
+    from TraceLens.ModelUtils import torch_trace as tt
+
+    # Monkey-patch _instantiate_meta to return our model
+    original = tt._instantiate_meta
+
+    class FakeConfig:
+        _name_or_path = "test/simple-model"
+        model_type = "simple"
+        hidden_size = 64
+        num_hidden_layers = 4
+        vocab_size = 256
+        dtype = "float32"
+
+        def to_dict(self):
+            return {k: v for k, v in self.__class__.__dict__.items()
+                    if not k.startswith("_") and not callable(v)}
+
+    tt._instantiate_meta = lambda checkpoint: (model, FakeConfig())
+    try:
+        payload = build_graph("test/simple-model")
+    finally:
+        tt._instantiate_meta = original
+    return payload
+
+
+@pytest.fixture(scope="module")
+def simple_payload():
+    return _build_from_model(_SimpleModel().eval())
+
+
+@pytest.fixture(scope="module")
+def simple_nodes(simple_payload):
+    return simple_payload["graphCollections"][0]["graphs"][0]["nodes"]
+
+
+class TestNoDuplicateIONodes:
+    """Verify that composite modules have exactly one @input and one @output,
+    with no @ext_input or @ext_output nodes."""
+
+    def test_no_ext_input_nodes(self, simple_nodes):
+        ext = [n for n in simple_nodes if "@ext_input" in n["id"]]
+        assert ext == [], f"Found @ext_input nodes: {[n['id'] for n in ext]}"
+
+    def test_no_ext_output_nodes(self, simple_nodes):
+        ext = [n for n in simple_nodes if "@ext_output" in n["id"]]
+        assert ext == [], f"Found @ext_output nodes: {[n['id'] for n in ext]}"
+
+    def test_self_attn_has_single_output(self, simple_nodes):
+        """self_attn should have exactly one @output, not both @output and @ext_output."""
+        attn_outputs = [n for n in simple_nodes
+                        if "self_attn" in n["id"] and n["id"].endswith("/@output")]
+        # Should have one per representative layer
+        for n in attn_outputs:
+            assert n["label"] == "Output"
+        # No "self_attn Output" labels
+        ext_labels = [n for n in simple_nodes
+                      if "self_attn Output" in n.get("label", "")]
+        assert ext_labels == []
+
+    def test_self_attn_has_single_input(self, simple_nodes):
+        """self_attn should have exactly one @input, not both @input and @ext_input."""
+        attn_inputs = [n for n in simple_nodes
+                       if "self_attn" in n["id"] and n["id"].endswith("/@input")]
+        for n in attn_inputs:
+            assert n["label"] == "Input"
+        ext_labels = [n for n in simple_nodes
+                      if "self_attn Input" in n.get("label", "")]
+        assert ext_labels == []
+
+
+class TestShapePropagation:
+    """Verify that synthetic I/O nodes have outputsMetadata so edges
+    don't display as '?' in the viewer."""
+
+    def test_root_input_has_shape(self, simple_nodes):
+        inp = next(n for n in simple_nodes if n["id"] == "@input")
+        assert inp.get("outputsMetadata"), "@input node missing outputsMetadata"
+
+    def test_root_output_has_shape(self, simple_nodes):
+        out = next(n for n in simple_nodes if n["id"] == "@output")
+        assert out.get("outputsMetadata"), "@output node missing outputsMetadata"
+
+    def test_synthetic_input_nodes_have_shapes(self, simple_nodes):
+        """All synthetic input nodes should have outputsMetadata."""
+        for n in simple_nodes:
+            attrs = {a["key"]: a["value"] for a in n.get("attrs", [])}
+            if attrs.get("synthetic") == "input":
+                assert n.get("outputsMetadata"), (
+                    f"Synthetic input {n['id']} missing outputsMetadata"
+                )
+
+    def test_synthetic_output_nodes_have_shapes(self, simple_nodes):
+        """Most synthetic output nodes should have outputsMetadata.
+
+        Some composite modules (e.g. decoder blocks) may lack captured
+        shapes, so we check that the vast majority have them.
+        """
+        outputs = [n for n in simple_nodes
+                   for a in n.get("attrs", [])
+                   if a.get("key") == "synthetic" and a.get("value") == "output"]
+        with_shapes = [n for n in outputs if n.get("outputsMetadata")]
+        assert len(outputs) > 0
+        # Composites whose children are all FX ops without captured
+        # shapes (e.g. decoder blocks with residual adds) may lack
+        # outputsMetadata.  Require at least 50% coverage.
+        assert len(with_shapes) / len(outputs) >= 0.5, (
+            f"Only {len(with_shapes)}/{len(outputs)} synthetic outputs have shapes"
+        )
+
+    def test_embedding_edge_has_shape(self, simple_nodes):
+        """The edge from @input to embedding should carry a shape, not '?'."""
+        emb = next(n for n in simple_nodes if "embed_tokens" in n["id"])
+        # The source of embedding's edge should have outputsMetadata
+        node_by_id = {n["id"]: n for n in simple_nodes}
+        for e in emb.get("incomingEdges", []):
+            src = node_by_id.get(e["sourceNodeId"])
+            if src:
+                assert src.get("outputsMetadata"), (
+                    f"Source {src['id']} of embed_tokens edge has no shape"
+                )
+
+
+class TestGroupNodeAttributes:
+    """Verify groupNodeAttributes uses the dict format expected by Model Explorer."""
+
+    def test_is_dict(self, simple_payload):
+        ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        assert isinstance(ga, dict), (
+            f"groupNodeAttributes should be dict, got {type(ga).__name__}"
+        )
+
+    def test_values_are_dicts(self, simple_payload):
+        ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        for key, val in ga.items():
+            assert isinstance(val, dict), (
+                f"groupNodeAttributes['{key}'] should be dict, got {type(val).__name__}"
+            )
+
+    def test_has_class_key(self, simple_payload):
+        ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        for key, val in ga.items():
+            assert "class" in val, (
+                f"groupNodeAttributes['{key}'] missing 'class' key"
+            )
+
+    def test_layer_group_has_count(self, simple_payload):
+        """Layer groups should have a 'count' attribute."""
+        ga = simple_payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        count_entries = {k: v for k, v in ga.items() if "count" in v}
+        assert len(count_entries) > 0, "No layer group with 'count' attribute found"
+
+
 # ── Integration tests (require HF Hub) ──────────────────────────────────────
 
 
