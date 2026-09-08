@@ -437,6 +437,18 @@ def _capture_call_graph(
                 if e not in seen:
                     seen.add(e)
                     unique.append(e)
+
+            # Filter spurious @input edges: if a child has a sibling
+            # source, the @input edge is likely a secondary/control input
+            # (e.g. attention_mask, position_ids) — not the main data flow.
+            children_with_sibling_src = {
+                tgt for src, tgt in unique if src != "@input"
+            }
+            unique = [
+                (src, tgt) for src, tgt in unique
+                if src != "@input" or tgt not in children_with_sibling_src
+            ]
+
             edges[comp_path] = unique
 
     return edges
@@ -989,10 +1001,17 @@ def build_graph(
         op_nodes = []
         node_map: dict[str, str] = {}
 
+        # Only the first placeholder (main data tensor) maps to @input.
+        # Secondary placeholders (attention_mask, position_ids, etc.) are
+        # control inputs that shouldn't create visible data-flow edges.
+        first_placeholder_seen = False
         for fx_node in graph.nodes:
             if not _is_interesting_op(fx_node):
                 if fx_node.op == "placeholder":
-                    node_map[fx_node.name] = "@input"
+                    if not first_placeholder_seen:
+                        node_map[fx_node.name] = "@input"
+                        first_placeholder_seen = True
+                    # else: skip — secondary control inputs
                 # Capture output node args for composite output tracking
                 if fx_node.op == "output":
                     out_ids = []
@@ -1009,11 +1028,14 @@ def build_graph(
                 child_path = f"{path}.{target}"
                 node_map[fx_node.name] = _node_id(child_path)
                 fx_referenced_children.add(child_path)
-                # Record incoming edges from the FX graph
+                # Record incoming edges from the FX graph — only from
+                # sibling modules and inline ops, NOT from placeholders.
+                # Placeholder-sourced edges are left to the call_graph /
+                # sequential wiring to resolve correctly.
                 child_incoming = []
                 for arg in fx_node.all_input_nodes:
                     src = node_map.get(arg.name)
-                    if src:
+                    if src and src != "@input":
                         child_incoming.append({"sourceNodeId": src})
                 if child_incoming:
                     fx_child_edges[child_path] = child_incoming
@@ -1316,6 +1338,43 @@ def build_graph(
             _fx_leaf_aliases[_node_id(path)] = last_op
         if first_op:
             _fx_leaf_first_map[path] = first_op
+
+    # ── Reorder nodes by call-graph execution order ─────────────────────
+    # FX-expanded op nodes may appear after leaf module nodes in the list,
+    # but they may execute BEFORE them (e.g. input_layernorm ops must
+    # precede self_attn's q_proj in the wiring traversal).  Build an
+    # execution-order index from the call_graph, processing composites
+    # from shallowest to deepest so top-level order takes precedence.
+    _exec_order: dict[str, int] = {}
+    _order_counter = 0
+    for comp_path in sorted(call_graph.keys(), key=lambda p: p.count(".")):
+        for src, tgt in call_graph[comp_path]:
+            if src != "@input" and src not in _exec_order:
+                _exec_order[src] = _order_counter
+                _order_counter += 1
+            if tgt not in _exec_order:
+                _exec_order[tgt] = _order_counter
+                _order_counter += 1
+
+    def _node_exec_key(n: dict) -> tuple[int, int]:
+        """Return (exec_order, original_index) for sorting."""
+        nid = n["id"]
+        path = nid.replace("/", ".")
+        # Walk up the path to find the call-graph-ordered ancestor
+        parts = path.split(".")
+        for depth in range(len(parts), 0, -1):
+            ancestor = ".".join(parts[:depth])
+            if ancestor in _exec_order:
+                return (_exec_order[ancestor], 0)
+        return (999999, 0)
+
+    # Preserve the root @input at position 0 and @output at the end
+    root_nodes = [n for n in nodes if n["id"] in ("@input", "@output")]
+    inner_nodes = [n for n in nodes if n["id"] not in ("@input", "@output")]
+    # Stable sort: preserves relative order of nodes within the same
+    # execution group (important for FX op chains within a module).
+    inner_nodes.sort(key=_node_exec_key)
+    nodes[:] = [n for n in root_nodes if n["id"] == "@input"] + inner_nodes + [n for n in root_nodes if n["id"] == "@output"]
 
     _wire_sequential_edges(
         nodes, model, module_map, shapes, {}, skip_layers,
@@ -2114,8 +2173,18 @@ def _wire_sequential_edges(
 
     # Track last node emitted per dotted module path (for call-graph wiring)
     last_node_for_path: dict[str, str] = {}
-    # For @input call-graph sources, track the entry point of each composite
+    # For @input call-graph sources, track the entry point of each composite.
+    # Pre-compute from the call_graph: for each composite C, find its
+    # predecessor in the parent's call_graph.  The @input of C resolves
+    # to the last node of that predecessor.
     composite_entry: dict[str, str] = {}  # comp_path → predecessor node ID
+    # Pre-populate from call_graph: if parent says "X → C", then C's
+    # @input should resolve to the last node of X (set lazily below).
+    _cg_predecessor: dict[str, str] = {}  # child_path → source_child_path
+    for comp_path, edges in call_graph.items():
+        for src, tgt in edges:
+            if src != "@input":
+                _cg_predecessor[tgt] = src
 
     def _node_id_to_path(nid: str) -> str:
         return nid.replace("/", ".")
@@ -2137,10 +2206,19 @@ def _wire_sequential_edges(
                 if child_path in last_node_for_path:
                     return None  # already wired a node in this child
 
-                # Determine the @input fallback: use the saved composite
-                # entry point (predecessor before the composite started)
+                # Determine the @input fallback: prefer the call-graph
+                # predecessor's last node, then the saved composite entry
+                # point, then the sequential fallback.
                 comp_path = child_path.rsplit(".", 1)[0]
-                input_source = composite_entry.get(comp_path, fallback_source)
+                input_source = None
+                # Check if this composite has a known predecessor from
+                # the parent's call_graph
+                if comp_path in _cg_predecessor:
+                    pred_path = _cg_predecessor[comp_path]
+                    if pred_path in last_node_for_path:
+                        input_source = last_node_for_path[pred_path]
+                if not input_source:
+                    input_source = composite_entry.get(comp_path, fallback_source)
 
                 # Find the last node of each source child
                 src_ids = []
