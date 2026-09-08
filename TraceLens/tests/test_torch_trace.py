@@ -1300,3 +1300,73 @@ class TestUninvokedBranchExecutionOrder:
             f"encoder/@output should resolve to encoder/extra (true last "
             f"child in forward()), got {sources}"
         )
+
+
+class TestSingleOpLeafInlining:
+    """A childless leaf module whose entire computation is one primitive
+    tensor op (e.g. GLM-5.3-Flash's ``Glm5NextTextHyperHead``, which is
+    just ``hidden_streams.mean(dim=2)``) should be inlined in place as a
+    single flat node — not wrapped in its own namespace box with a
+    synthetic @input/<op>/@output boundary around one op. It should also
+    get its own correctly-computed (hook-captured) output shape, not the
+    pre-op input shape blindly inherited through the boundary chain.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _HyperHeadLike(torch.nn.Module):
+            """No children, no weights — forward is a single reducing op,
+            matching Glm5NextTextHyperHead exactly."""
+
+            def forward(self, hidden_streams):
+                return hidden_streams.mean(dim=2)
+
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(64, 8)
+                self.expand = torch.nn.Linear(8, 4 * 8)
+                self.head = _HyperHeadLike()
+
+            def forward(self, x):
+                h = self.embed(x)
+                h = self.expand(h)
+                h = h.view(*h.shape[:-1], 4, 8)
+                return self.head(h)
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_no_nested_boundary_nodes(self, payload):
+        """There should be no head/@input, head/mean, or head/@output —
+        just a single flat 'head' node."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        ids = {n["id"] for n in nodes}
+        assert "head" in ids, f"Expected a flat 'head' node, got: {sorted(ids)}"
+        assert "head/@input" not in ids
+        assert "head/@output" not in ids
+        assert "head/mean" not in ids
+
+    def test_label_is_the_op_name(self, payload):
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        head_node = next((n for n in nodes if n["id"] == "head"), None)
+        assert head_node is not None
+        assert head_node["label"] == "Mean"
+
+    def test_output_shape_reflects_the_reduction(self, payload):
+        """head's output shape must reflect mean(dim=2) reducing the 4
+        dim away — not the pre-reduction input shape."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        head_node = next((n for n in nodes if n["id"] == "head"), None)
+        assert head_node is not None
+        meta = head_node.get("outputsMetadata")
+        assert meta, "head node is missing outputsMetadata"
+        shape = next(
+            (a["value"] for a in meta[0].get("attrs", []) if a["key"] == "shape"),
+            "",
+        )
+        assert "4" not in shape.split("bfloat16")[0].split("float32")[0], (
+            f"head's output shape should have the reduced dim (4) removed, got: {shape!r}"
+        )

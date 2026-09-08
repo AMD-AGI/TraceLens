@@ -1439,7 +1439,18 @@ def build_graph(
             op_node["incomingEdges"] = incoming
             op_nodes.append(op_node)
 
-        if op_nodes:
+        # If the module's entire computation is a single primitive op
+        # (e.g. Glm5NextTextHyperHead's `hidden_streams.mean(dim=2)`),
+        # showing a nested "hc_head (Glm5NextTextHyperHead)" box with its
+        # own @input/mean/@output boundary just wraps one op in
+        # pointless indirection. Leave it out of fx_graphs entirely so
+        # it falls through to the regular leaf-module path below, which
+        # already (a) picks the op's own name as the label for a
+        # single-op leaf (see _module_label) and (b) uses the module's
+        # own hook-captured output shape — correct even for shape-
+        # changing ops like `mean`, unlike the op-node path which just
+        # inherits the (pre-reduction) input's shape.
+        if len(op_nodes) > 1:
             fx_graphs[path] = op_nodes
 
     # ── Add module nodes ─────────────────────────────────────────────────
