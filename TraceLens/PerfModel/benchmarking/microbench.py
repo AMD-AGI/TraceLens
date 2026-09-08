@@ -128,6 +128,18 @@ GEMM_SHAPES: List[Tuple[int, int, int]] = [
     (16384, 3584, 8192),
 ]
 
+# Deep-K peak probes, benchmarked in the transA=T/transB=N layout (see
+# bench_gemm). GEMM_SHAPES above is wide and shallow with dims that are
+# multiples of 304 -- MI300X's CU count -- so it leaves a smaller GPU short of
+# its peak: on a 40-CU gfx1151 these reach ~7% (fp16) and ~8% (bf16) higher.
+# M and N stay multiples of 128 to tile evenly, while K is 128*257 rather than
+# a power of two, which would alias in cache and depress the result.
+# Only widened for fp16/bf16 (see PEAK_PROBE_LABELS); max() over the combined
+# list means a shape that suits neither part can lower no reported figure.
+GEMM_SHAPES_PEAK_TN: List[Tuple[int, int, int]] = [
+    (2560, 1920, 32896),
+]
+
 # Sizes for memory bandwidth sweeps (bytes)
 BW_SIZES: List[int] = [
     64 * 1024 * 1024,  # 64 MB
@@ -235,11 +247,27 @@ def _gemm_flops(M: int, N: int, K: int) -> int:
     return 2 * M * N * K
 
 
-def bench_gemm(M: int, N: int, K: int, dtype: torch.dtype, device: int = 0) -> float:
-    """Returns achieved TFLOPS for a single GEMM shape."""
+def bench_gemm(
+    M: int,
+    N: int,
+    K: int,
+    dtype: torch.dtype,
+    device: int = 0,
+    trans_b: bool = False,
+) -> float:
+    """Returns achieved TFLOPS for a single GEMM shape.
+
+    ``trans_b`` stores B as (N, K) and multiplies by its transpose, which is
+    the layout ``nn.Linear`` holds weights in and what hipBLASLt logs as
+    transA=T/transB=N. The FP8 and INT8 benchmarks below already use it; it is
+    optional here only to leave the existing NN measurements untouched.
+    """
     dev = f"cuda:{device}"
     A = torch.randn(M, K, dtype=dtype, device=dev)
-    B = torch.randn(K, N, dtype=dtype, device=dev)
+    if trans_b:
+        B = torch.randn(N, K, dtype=dtype, device=dev).t()
+    else:
+        B = torch.randn(K, N, dtype=dtype, device=dev)
 
     ms = do_bench(lambda: torch.matmul(A, B), warmup=WARMUP, rep=REP)
     tflops = gemm_tflops(M, N, K, ms)
@@ -374,6 +402,10 @@ def _bench_mx_matrix_peak(
     return round(best, 1)
 
 
+# Dtypes whose peak is also probed with GEMM_SHAPES_PEAK_TN.
+PEAK_PROBE_LABELS = frozenset({"matrix_fp16", "matrix_bf16"})
+
+
 def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
     """Benchmark matrix (tensor core) TFLOPS across dtypes."""
     results = {}
@@ -390,8 +422,13 @@ def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
         shape_results = []
         for M, N, K in GEMM_SHAPES:
             tflops = bench_gemm(M, N, K, dtype, device)
-            print(f"    ({M:>5},{N:>5},{K:>5}) → {tflops:8.1f} TFLOPS")
+            print(f"    ({M:>5},{N:>5},{K:>5})    → {tflops:8.1f} TFLOPS")
             shape_results.append(tflops)
+        if label in PEAK_PROBE_LABELS:
+            for M, N, K in GEMM_SHAPES_PEAK_TN:
+                tflops = bench_gemm(M, N, K, dtype, device, trans_b=True)
+                print(f"    ({M:>5},{N:>5},{K:>5}) TN → {tflops:8.1f} TFLOPS")
+                shape_results.append(tflops)
         best = max(shape_results)
         median = sorted(shape_results)[len(shape_results) // 2]
         results[label] = round(best, 1)

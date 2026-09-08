@@ -171,6 +171,20 @@ class TestMicrobenchHelpers:
         mb = _import_microbench()
         assert len(mb.GEMM_SHAPES) >= 1
 
+    def test_peak_tn_shapes_are_tile_aligned_with_non_pow2_k(self):
+        mb = _import_microbench()
+        assert len(mb.GEMM_SHAPES_PEAK_TN) >= 1
+        for M, N, K in mb.GEMM_SHAPES_PEAK_TN:
+            assert M % 128 == 0 and N % 128 == 0
+            # A power-of-two K aliases in cache and depresses the result.
+            assert K & (K - 1) != 0
+
+    def test_peak_probe_labels_are_emitted_arch_keys(self):
+        """A label that is not an arch key would probe a figure nothing reads."""
+        mb = _import_microbench()
+        assert mb.PEAK_PROBE_LABELS
+        assert mb.PEAK_PROBE_LABELS <= set(mb.ARCH_TLOPS_KEYS)
+
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 class TestMicrobenchRocprofParsing:
@@ -266,6 +280,45 @@ class TestMicrobenchGpuBenchmarks:
         mb.REP = 1
         tflops = mb.bench_gemm(64, 64, 64, torch.float16, device=0)
         assert tflops > 0
+
+    def test_bench_gemm_trans_b_smoke(self):
+        torch = _require_cuda_gpu()
+        mb = _import_microbench()
+        mb.WARMUP = 1
+        mb.REP = 1
+        tflops = mb.bench_gemm(64, 128, 256, torch.float16, device=0, trans_b=True)
+        assert tflops > 0
+
+    @pytest.mark.parametrize(
+        "trans_b,expected_b_stride",
+        # B is (K,N) either way; only its strides say how it is laid out.
+        [(False, (128, 1)), (True, (1, 256))],
+    )
+    def test_bench_gemm_operand_layout(self, trans_b, expected_b_stride):
+        """trans_b must hand matmul a K-major B, or the shape is benchmarked
+        in the NN layout it was not tuned for."""
+        torch = _require_cuda_gpu()
+        mb = _import_microbench()
+        M, N, K = 64, 128, 256
+        captured = {}
+        real_matmul = torch.matmul
+
+        def spy_matmul(a, b):
+            captured["a"] = (tuple(a.shape), tuple(a.stride()))
+            captured["b"] = (tuple(b.shape), tuple(b.stride()))
+            return real_matmul(a, b)
+
+        def fake_do_bench(fn, warmup=None, rep=None):
+            fn()
+            return 1.0
+
+        with patch.object(mb, "do_bench", fake_do_bench), patch.object(
+            torch, "matmul", spy_matmul
+        ):
+            mb.bench_gemm(M, N, K, torch.float16, device=0, trans_b=trans_b)
+
+        assert captured["a"] == ((M, K), (K, 1))
+        assert captured["b"] == ((K, N), expected_b_stride)
 
     def test_prepare_mxfp4_gemm_on_gpu(self):
         torch = _require_cuda_gpu()
