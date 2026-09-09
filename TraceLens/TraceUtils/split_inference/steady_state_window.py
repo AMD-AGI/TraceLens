@@ -383,7 +383,10 @@ def classify_phases_from_batch_sizes(
     batch size exceeds ``PREFILL_SPIKE_FACTOR * median`` are labelled
     ``'prefill_bearing'``; the rest are ``'decode'``.
     """
-    baseline = median([b for b in batch_sizes if b is not None])
+    valid = [b for b in batch_sizes if b is not None]
+    if not valid:
+        return ["decode"] * len(batch_sizes)
+    baseline = median(valid)
     threshold = PREFILL_SPIKE_FACTOR * baseline
 
     labels: list[str] = []
@@ -393,16 +396,6 @@ def classify_phases_from_batch_sizes(
         else:
             labels.append("prefill_bearing")
     return labels
-
-
-def _identify_regions_from_batch_sizes(
-    batch_sizes: list[int], num_steps: int
-) -> tuple[list[tuple[int, int]], int]:
-    """Detect steady-state regions from shape-derived batch sizes."""
-    return _identify_regions_by_peak(
-        batch_sizes, num_steps,
-        label="Steady state (from shapes)",
-    )
 
 
 def find_steady_state_inference_from_shapes(
@@ -423,11 +416,11 @@ def find_steady_state_inference_from_shapes(
     if not batch_sizes or not iteration_roots:
         return [], []
 
-    valid_sizes = [b for b in batch_sizes if b is not None]
-    if not valid_sizes:
-        return iteration_roots[:num_steps], [(0, min(num_steps, len(iteration_roots)))]
+    total = len(iteration_roots)
+    if total == 0:
+        return [], []
 
-    regions, _ = _identify_regions_from_batch_sizes(valid_sizes, num_steps)
+    regions, _ = _identify_regions_by_duration_cv(iteration_roots, num_steps)
     phase_labels = classify_phases_from_batch_sizes(batch_sizes)
 
     largest_start, largest_end = max(regions, key=lambda r: r[1] - r[0])
@@ -501,6 +494,42 @@ MIN_STEADY_WINDOW = 4
 CV_THRESHOLD = 0.15
 
 
+def _identify_regions_by_duration_cv(
+    iteration_roots: list[dict], num_steps: int
+) -> tuple[list[tuple[int, int]], float]:
+    """Find the most duration-consistent region via sliding-window CV.
+
+    Returns ``(regions, best_cv)`` where ``regions`` is a single-element
+    list ``[(start, end)]`` for the best window.
+    """
+    total = len(iteration_roots)
+    durations = [r.get("dur", 0) for r in iteration_roots]
+    scan_size = min(max(num_steps, MIN_STEADY_WINDOW), total)
+
+    windows = []
+    for start in range(total - scan_size + 1):
+        chunk = durations[start : start + scan_size]
+        m = mean(chunk)
+        cv = pstdev(chunk) / m if m else 0.0
+        windows.append((start, start + scan_size, cv, m))
+
+    if not windows:
+        return [(0, min(num_steps, total))], 0.0
+
+    passing = [(s, e, cv, m) for s, e, cv, m in windows if cv < CV_THRESHOLD]
+    if passing:
+        best_start, best_end, best_cv, best_mean = min(passing, key=lambda x: x[3])
+    else:
+        best_start, best_end, best_cv, best_mean = min(windows, key=lambda x: x[2])
+
+    print(
+        f"[duration-cv] Steady state by duration: [{best_start}, {best_end}) "
+        f"cv={best_cv:.4f}, mean_dur={best_mean:.0f}us"
+    )
+
+    return [(best_start, best_end)], best_cv
+
+
 def find_steady_state_generic(
     iteration_roots: list[dict],
     num_steps: int,
@@ -519,31 +548,9 @@ def find_steady_state_generic(
     if total == 0:
         return [], []
 
-    durations = [r.get("dur", 0) for r in iteration_roots]
+    region, _ = _identify_regions_by_duration_cv(iteration_roots, num_steps)
+    best_start, best_end = region[0]
     scan_size = min(max(num_steps, MIN_STEADY_WINDOW), total)
-
-    windows = []
-    for start in range(total - scan_size + 1):
-        chunk = durations[start : start + scan_size]
-        m = mean(chunk)
-        cv = pstdev(chunk) / m if m else 0.0
-        windows.append((start, start + scan_size, cv, m))
-
-    if not windows:
-        return iteration_roots[:num_steps], [(0, min(num_steps, total))]
-
-    passing = [(s, e, cv, m) for s, e, cv, m in windows if cv < CV_THRESHOLD]
-    if passing:
-        best_start, best_end, best_cv, best_mean = min(passing, key=lambda x: x[3])
-    else:
-        best_start, best_end, best_cv, best_mean = min(windows, key=lambda x: x[2])
-
-    print(
-        f"[generic] Steady state by duration: [{best_start}, {best_end}) "
-        f"cv={best_cv:.4f}, mean_dur={best_mean:.0f}us"
-    )
-
-    region = [(best_start, best_end)]
 
     if num_steps < scan_size:
         center = (best_start + best_end) // 2
