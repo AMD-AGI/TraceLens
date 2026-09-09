@@ -740,6 +740,57 @@ class TestInputShapeInference:
         shapes = _infer_input_shapes_from_weights(model, {}, batch_size=1, seq_len=10)
         assert shapes.get("0") == (1, 3, 10, 10)
 
+    def test_conv1d_input_shape(self):
+        from TraceLens.ModelUtils.torch_trace import _infer_input_shapes_from_weights
+
+        model = torch.nn.Sequential(torch.nn.Conv1d(3, 16, 3))
+        shapes = _infer_input_shapes_from_weights(model, {}, batch_size=1, seq_len=10)
+        assert shapes.get("0") == (1, 3, 10)
+
+    def test_conv3d_input_shape(self):
+        from TraceLens.ModelUtils.torch_trace import _infer_input_shapes_from_weights
+
+        model = torch.nn.Sequential(torch.nn.Conv3d(3, 16, 3))
+        shapes = _infer_input_shapes_from_weights(model, {}, batch_size=1, seq_len=10)
+        assert shapes.get("0") == (1, 3, 10, 10, 10)
+
+    def test_custom_norm_class_gets_generic_weight_fallback(self):
+        """Vision-encoder-style RMSNorm variants often don't subclass
+        torch.nn.LayerNorm/RMSNorm, so they need to fall back to the
+        generic weight-shape heuristic (this is the bug that left the
+        GLM vision submodel's internal norms without an input_shape)."""
+        from TraceLens.ModelUtils.torch_trace import _infer_input_shapes_from_weights
+
+        class CustomRMSNorm(torch.nn.Module):
+            def __init__(self, hidden_size):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.ones(hidden_size))
+
+            def forward(self, x):
+                return x
+
+        model = torch.nn.Sequential(CustomRMSNorm(48))
+        shapes = _infer_input_shapes_from_weights(model, {}, batch_size=1, seq_len=10)
+        assert shapes.get("0") == (1, 10, 48)
+
+    def test_hidden_size_attr_fallback(self):
+        """Modules with no weight tensor but a hidden_size attribute
+        (e.g. some rotary-embedding-style modules) still get a
+        best-effort input_shape."""
+        from TraceLens.ModelUtils.torch_trace import _infer_input_shapes_from_weights
+
+        class HiddenSizeOnly(torch.nn.Module):
+            def __init__(self, hidden_size):
+                super().__init__()
+                self.hidden_size = hidden_size
+
+            def forward(self, x):
+                return x
+
+        model = torch.nn.Sequential(HiddenSizeOnly(32))
+        shapes = _infer_input_shapes_from_weights(model, {}, batch_size=1, seq_len=10)
+        assert shapes.get("0") == (1, 10, 32)
+
 
 class TestCallGraphCapture:
     """Verify call-graph captures correct dataflow edges."""
@@ -1522,6 +1573,106 @@ class TestUninvokedBranchExecutionOrder:
             f"encoder/@output should resolve to encoder/extra (true last "
             f"child in forward()), got {sources}"
         )
+
+
+class TestUninvokedBranchShapeInference:
+    """Regression test for a real GLM-5.3-Flash bug: inside an uninvoked
+    branch (e.g. a vision encoder never run because ``pixel_values`` was
+    omitted from the dummy trace), custom norm-like modules that don't
+    subclass ``torch.nn.LayerNorm``/``torch.nn.RMSNorm`` fell through
+    every branch of ``_infer_input_shapes_from_weights`` and ended up
+    with NO ``input_shape`` at all, even though
+    ``_infer_shapes_from_weights`` (the output-shape counterpart) had a
+    generic fallback and produced an ``output_shape`` just fine. This
+    left every internal norm-like group of the visual submodel showing
+    ``input_shape: ?`` in the viewer while ``output_shape`` was present.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _CustomRMSNorm(torch.nn.Module):
+            """Doesn't subclass torch.nn.LayerNorm/RMSNorm — mirrors the
+            real Glm5NextRMSNorm class used by the GLM vision encoder.
+            Multi-op forward so it gets FX-expanded into its own nested
+            group/namespace, like the real vision norms do."""
+
+            def __init__(self, hidden_size):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.ones(hidden_size))
+
+            def forward(self, x):
+                x = x.float()
+                x = x * self.weight
+                x = x + 0.0
+                return x.type_as(x)
+
+        class _Encoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.patch_embed = torch.nn.Conv3d(3, 16, 3)
+                self.norm = _CustomRMSNorm(16)
+
+            def forward(self, pixel_values, cu_seqlens=None):
+                # Tensor-value-dependent branch so symbolic-tracing the
+                # whole encoder as one flat graph fails — mirrors why the
+                # real GLM vision block can't be traced end-to-end and
+                # forces `norm` through the standalone custom-leaf
+                # expansion path instead of being silently inlined.
+                if cu_seqlens is not None and cu_seqlens.sum() > 0:
+                    pass
+                h = self.patch_embed(pixel_values)
+                return self.norm(h)
+
+        class _Decoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(64, 8)
+                self.norm = torch.nn.LayerNorm(8)
+
+            def forward(self, x, inputs_embeds=None):
+                h = inputs_embeds if inputs_embeds is not None else self.embed(x)
+                return self.norm(h)
+
+        class _FakeVLM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.decoder = _Decoder()
+                self.encoder = _Encoder()
+
+            def forward(self, x, pixel_values=None, **kwargs):
+                # encoder is never invoked — mirrors pixel_values being
+                # omitted from the dummy trace.
+                return self.decoder(x)
+
+        with torch.device("meta"):
+            model = _FakeVLM()
+        model.eval()
+        return _build_from_model(model)
+
+    def _group_attrs(self, payload, suffix):
+        """Look up groupNodeAttributes by a plain dotted path, ignoring
+        the ` (ClassName)` annotation each key segment carries."""
+        ga = payload["graphCollections"][0]["graphs"][0]["groupNodeAttributes"]
+        target_parts = suffix.split("/")
+        for key, val in ga.items():
+            parts = [seg.split(" (", 1)[0] for seg in key.split("/")]
+            if parts[-len(target_parts) :] == target_parts:
+                return val
+        return None
+
+    def test_custom_norm_group_has_input_shape(self, payload):
+        """encoder/norm (a non-stdlib norm class, never invoked) must
+        get an input_shape, not just an output_shape."""
+        attrs = self._group_attrs(payload, "encoder/norm")
+        assert attrs is not None, "encoder/norm group attrs not found"
+        assert attrs.get(
+            "input_shape"
+        ), f"encoder/norm is missing input_shape, got attrs: {attrs}"
+        assert attrs.get(
+            "output_shape"
+        ), f"encoder/norm is missing output_shape, got attrs: {attrs}"
+        # Norm preserves shape, so input and output should match.
+        assert attrs["input_shape"] == attrs["output_shape"]
 
 
 class TestFxLeafPredecessorAncestorWalk:

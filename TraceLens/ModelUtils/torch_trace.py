@@ -326,6 +326,21 @@ def _infer_input_shapes_from_weights(
                 shapes[name] = (batch_size, seq_len, *ns)
         elif isinstance(mod, torch.nn.Conv2d):
             shapes[name] = (batch_size, mod.in_channels, seq_len, seq_len)
+        elif isinstance(mod, torch.nn.Conv1d):
+            shapes[name] = (batch_size, mod.in_channels, seq_len)
+        elif isinstance(mod, torch.nn.Conv3d):
+            shapes[name] = (batch_size, mod.in_channels, seq_len, seq_len, seq_len)
+        elif hasattr(mod, "weight") and hasattr(mod.weight, "shape"):
+            # Generic fallback (e.g. custom norm classes that don't
+            # subclass torch.nn.LayerNorm/RMSNorm, such as vision-encoder
+            # RMSNorm variants): these are almost always shape-preserving,
+            # so mirror the same heuristic used for their output shape.
+            w_shape = mod.weight.shape
+            if len(w_shape) >= 1:
+                shapes[name] = (batch_size, seq_len, w_shape[0])
+        # For norm-like modules, try to infer from the hidden_size attr
+        elif hasattr(mod, "hidden_size"):
+            shapes[name] = (batch_size, seq_len, mod.hidden_size)
     return shapes
 
 
