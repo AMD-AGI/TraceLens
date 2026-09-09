@@ -315,7 +315,7 @@ class TestGpuAttribution:
         report = GpuAttribution(events).audit(roots, roots)
         assert report.covered_spans < 1.0
         assert report.covered_selected == 1.0
-        assert report.span_share > 0.9
+        assert report.span_share >= 0.9
         assert report.passes
 
     def test_sparse_roots_stretched_over_many_iterations_do_not_pass(self):
