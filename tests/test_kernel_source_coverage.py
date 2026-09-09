@@ -134,6 +134,72 @@ def test_resolve_triton_source_generated_kind_is_gated():
     assert res.method == "gate_non_patchable"
 
 
+def test_resolve_triton_by_symbol_empty_core_returns_none():
+    # A symbol that normalizes to nothing (all punctuation) -> no lookup, None.
+    assert triton_pin._resolve_triton_by_symbol("!!!") is None
+
+
+def test_resolve_triton_by_symbol_skips_unrelated_names(monkeypatch):
+    # A def name that neither equals nor overlaps the symbol is skipped.
+    canned = index.SourceIndex(
+        fingerprint="fp",
+        symbol_index={"totally_unrelated": [{"file": "/workspace/x.py", "line": 1}]},
+    )
+    monkeypatch.setattr(index, "load_or_build_triton", lambda _roots: canned)
+    assert (
+        triton_pin._resolve_triton_by_symbol("add_kernel", search_paths=["/x"]) is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# index -- Triton .py scanning + fallback index
+# ---------------------------------------------------------------------------
+def test_scan_triton_file_unreadable_returns_empty(tmp_path):
+    # Reading a directory as a file raises OSError -> handled as no defs.
+    assert index._scan_triton_file(tmp_path) == []
+
+
+def test_scan_triton_file_unparseable_returns_empty(tmp_path):
+    # Mentions "triton" (passes the pre-filter) but is not valid Python.
+    bad = tmp_path / "broken.py"
+    bad.write_text("import triton\ndef (:\n", encoding="utf-8")
+    assert index._scan_triton_file(bad) == []
+
+
+def test_python_files_nonexistent_root_yields_nothing():
+    assert list(index._python_files(Path("/no/such/dir"))) == []
+
+
+def test_load_or_build_triton_builds_and_caches(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRACELENS_KSI_CACHE_DIR", str(tmp_path / "cache"))
+    index.reset_index_cache()
+    pkg = tmp_path / "vllm"
+    pkg.mkdir()
+    (pkg / "k.py").write_text(
+        "import triton\n@triton.jit\ndef my_kernel(x):\n    return x\n",
+        encoding="utf-8",
+    )
+    idx = index.load_or_build_triton([pkg])
+    assert "my_kernel" in idx.symbol_index
+    # Drop the in-process singleton so the second call is served from the on-disk
+    # cache (which reports build_ms == 0.0 to signal "not rebuilt").
+    index.reset_index_cache()
+    again = index.load_or_build_triton([pkg])
+    assert again.build_ms == 0.0
+    assert "my_kernel" in again.symbol_index
+    index.reset_index_cache()
+
+
+def test_discover_python_paths_returns_package_roots(tmp_path, monkeypatch):
+    pkg = tmp_path / "vllm"
+    pkg.mkdir()
+    fake = {"vllm": index.FrameworkRoot("vllm", pkg, "1.0", ())}
+    monkeypatch.setattr(index, "discover_frameworks", lambda: fake)
+    assert index.discover_python_paths() == [pkg]
+    # Name filter that excludes everything -> empty.
+    assert index.discover_python_paths(("sglang",)) == []
+
+
 def test_is_triton_kernel_def_without_decorator():
     import ast
 
@@ -356,7 +422,9 @@ def test_load_cache_fingerprint_mismatch_is_miss(tmp_path, monkeypatch):
 def test_save_cache_failure_is_swallowed(monkeypatch):
     # If the cache path can't be written, _save_cache must not raise.
     monkeypatch.setattr(
-        index, "_cache_path", lambda _fp: Path("/proc/nonexistent/x.json")
+        index,
+        "_cache_path",
+        lambda _fp, _kind="native": Path("/proc/nonexistent/x.json"),
     )
     index._save_cache(index.SourceIndex(fingerprint="fp"))  # no exception
 

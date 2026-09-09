@@ -68,7 +68,8 @@ class ResolveResult:
         reason: Human-readable explanation of the outcome.
         method: How the outcome was reached -- ``"gate_non_patchable"``,
             ``"symbol_index"``, ``"triton_ast"``, ``"trace_kernel_file"``,
-            or ``"unresolved"``.
+            ``"triton_symbol_index"`` (Triton ``.py`` fallback by symbol), or
+            ``"unresolved"``.
     """
 
     location: SourceLocation | None

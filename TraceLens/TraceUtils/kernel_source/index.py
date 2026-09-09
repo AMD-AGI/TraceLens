@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import ast
 import getpass
 import hashlib
 import importlib.metadata as importlib_metadata
@@ -28,12 +29,15 @@ log = logging.getLogger(__name__)
 __all__ = [
     "SourceIndex",
     "build_index",
+    "build_triton_index",
     "load_or_build",
+    "load_or_build_triton",
     "fingerprint",
     "reset_index_cache",
     "FrameworkRoot",
     "discover_frameworks",
     "discover_library_paths",
+    "discover_python_paths",
 ]
 
 # Environment variables this module reads (collected here so every knob is
@@ -47,6 +51,10 @@ _ENV_DISCOVER_ONLY = "TRACELENS_DISCOVER_ONLY"
 
 # Native source extensions to scan (kept in sync with .editable's editability filter).
 _NATIVE_EXTS = (".cu", ".cuh", ".hip", ".h", ".hpp")
+
+# Python source extension, scanned for the Triton fallback index (stage 2 when
+# the trace carries no ``kernel_file`` to point straight at the ``.py`` source).
+_PY_EXTS = (".py",)
 
 # Serving frameworks always located by name (for version reporting), even without native source.
 _KNOWN = ("vllm", "sglang", "aiter", "atom")
@@ -209,6 +217,65 @@ def _native_files(root: Path):
                 yield Path(dirpath) / nm
 
 
+# --- Triton kernel-definition scanning (for the stage-2 .py fallback) --------
+# Decorators that mark a Triton device-kernel def (``@triton.jit`` / ``@jit``
+# and the autotune/heuristics wrappers stacked on top of a jit'd kernel).
+_TRITON_DECORATORS = frozenset({"jit", "autotune", "heuristics"})
+
+
+def _is_triton_kernel_def(node: ast.AST) -> bool:
+    """Return whether an AST function node carries a Triton kernel decorator."""
+    for dec in getattr(node, "decorator_list", []):
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        name = getattr(target, "attr", None) or getattr(target, "id", None)
+        if name in _TRITON_DECORATORS:
+            return True
+    return False
+
+
+def _scan_triton_file(path: Path) -> list[tuple[str, int]]:
+    """Return ``(def_name, def_line)`` for each ``@triton.jit`` kernel in ``path``.
+
+    pre-filter first: a file that never mentions ``triton`` can't define a
+    Triton kernel, so we skip parsing it (mirrors the native scanner's
+    ``"__global__" not in text`` guard). Only the survivors are AST-parsed.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError as exc:
+        log.debug("triton index: cannot read %s: %s", path, exc)
+        return []
+    if "triton" not in text:
+        return []
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, UnicodeDecodeError):
+        return []
+    return [
+        (node.name, node.lineno)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and _is_triton_kernel_def(node)
+    ]
+
+
+def _python_files(root: Path):
+    """Yield every ``.py`` file under ``root``, pruning tests/build/cache dirs."""
+    if not root.is_dir():
+        return
+    for dirpath, dirs, names in os.walk(root):
+        # Prune the same noise dirs the native discovery skips (in place, so
+        # os.walk doesn't descend into them) plus hidden dirs.
+        dirs[:] = [
+            d
+            for d in dirs
+            if d.lower() not in _CSRC_PRUNE_NAMES and not d.startswith(".")
+        ]
+        for nm in names:
+            if nm.endswith(".py"):
+                yield Path(dirpath) / nm
+
+
 # --- search-path normalization + fingerprint --------------------------------
 def _normalize_paths(search_paths: Sequence[str | Path]) -> list[Path]:
     """De-duplicate and keep only existing directories, order-preserving."""
@@ -222,14 +289,14 @@ def _normalize_paths(search_paths: Sequence[str | Path]) -> list[Path]:
     return out
 
 
-def _dir_signature(path: Path) -> str:
-    """Recursive change signature for a source dir: newest native-file mtime + file count."""
+def _dir_signature(path: Path, exts: tuple[str, ...] = _NATIVE_EXTS) -> str:
+    """Recursive change signature for a source dir: newest matching-file mtime + file count."""
     try:
         count = 0
         max_mtime_ns = 0
         for dirpath, _dirs, names in os.walk(path):
             for nm in names:
-                if not nm.lower().endswith(_NATIVE_EXTS):
+                if not nm.lower().endswith(exts):
                     continue
                 try:
                     st = os.stat(os.path.join(dirpath, nm))
@@ -243,9 +310,15 @@ def _dir_signature(path: Path) -> str:
         return f"{path}:missing"
 
 
-def fingerprint(search_paths: Sequence[str | Path]) -> str:
-    """Stable cache key over the search paths' recursive signatures; changes on any add/remove/edit."""
-    parts = [_dir_signature(p) for p in sorted(_normalize_paths(search_paths))]
+def fingerprint(
+    search_paths: Sequence[str | Path], exts: tuple[str, ...] = _NATIVE_EXTS
+) -> str:
+    """Stable cache key over the search paths' recursive signatures; changes on any add/remove/edit.
+
+    ``exts`` selects which files feed the signature (native sources by default,
+    or ``.py`` for the Triton index) so the two caches invalidate independently.
+    """
+    parts = [_dir_signature(p, exts) for p in sorted(_normalize_paths(search_paths))]
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[
         :16
     ]  # nosec B324 - cache key, not security.
@@ -291,8 +364,42 @@ def build_index(search_paths: Sequence[str | Path]) -> SourceIndex:
     )
 
 
+def build_triton_index(search_paths: Sequence[str | Path]) -> SourceIndex:
+    """Scan ``.py`` files under the search paths for ``@triton.jit`` kernel defs.
+
+    Same shape as :func:`build_index` (def-name -> ``[{file, line}]``), but over
+    Python sources -- this backs the stage-2 fallback that finds a Triton kernel
+    by its symbol name when the trace gave us no ``kernel_file``.
+    """
+    started = time.perf_counter()
+    paths = _normalize_paths(search_paths)
+    symbol_index: dict[str, list[dict[str, object]]] = {}
+    file_count = 0
+    for root in paths:
+        for path in _python_files(root):
+            defs = _scan_triton_file(path)
+            if defs:
+                file_count += 1
+            for name, line_no in defs:
+                symbol_index.setdefault(name, []).append(
+                    {"file": str(path), "line": line_no}
+                )
+    return SourceIndex(
+        fingerprint=fingerprint(paths, _PY_EXTS),
+        symbol_index=symbol_index,
+        build_ms=round((time.perf_counter() - started) * 1000.0, 2),
+        file_count=file_count,
+        symbol_count=len(symbol_index),
+    )
+
+
 # --- cache ------------------------------------------------------------------
-def _cache_path(fp: str) -> Path:
+# Cache-file name prefixes keep the native and Triton indexes in separate files
+# even if two fingerprints ever coincide.
+_CACHE_PREFIX = {"native": "ksi", "triton": "tksi"}
+
+
+def _cache_path(fp: str, kind: str = "native") -> Path:
     """Cache file path: ``$TRACELENS_KSI_CACHE_DIR`` if set, else a user-scoped (0o700) temp subdir."""
     raw = os.environ.get(_ENV_CACHE_DIR, "").strip()
     if raw:
@@ -312,12 +419,12 @@ def _cache_path(fp: str) -> Path:
             os.chmod(d, 0o700)  # best-effort: restrict the user-scoped temp cache.
     except OSError:
         pass  # optimization only; _save_cache no-ops and the index rebuilds
-    return d / f"ksi_{fp}.json"
+    return d / f"{_CACHE_PREFIX[kind]}_{fp}.json"
 
 
-def _load_cache(fp: str) -> SourceIndex | None:
+def _load_cache(fp: str, kind: str = "native") -> SourceIndex | None:
     try:
-        with open(_cache_path(fp), encoding="utf-8") as fh:
+        with open(_cache_path(fp, kind), encoding="utf-8") as fh:
             data = json.load(fh)
         if isinstance(data, dict) and data.get("fingerprint") == fp:
             return SourceIndex(**data)
@@ -328,8 +435,8 @@ def _load_cache(fp: str) -> SourceIndex | None:
     return None
 
 
-def _save_cache(index: SourceIndex) -> None:
-    path = _cache_path(index.fingerprint)
+def _save_cache(index: SourceIndex, kind: str = "native") -> None:
+    path = _cache_path(index.fingerprint, kind)
     try:
         tmp = path.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -340,7 +447,8 @@ def _save_cache(index: SourceIndex) -> None:
         log.debug("kernel index: cache write failed (%s): %s", index.fingerprint, exc)
 
 
-# Per-fingerprint in-process singletons, so repeated resolves in one run skip the on-disk cache.
+# Per-(kind, fingerprint) in-process singletons, so repeated resolves in one run
+# skip the on-disk cache. The key is ``"native:<fp>"`` / ``"triton:<fp>"``.
 _PROCESS_INDEX: dict[str, SourceIndex] = {}
 
 
@@ -349,37 +457,72 @@ def reset_index_cache() -> None:
     _PROCESS_INDEX.clear()
 
 
-def load_or_build(search_paths: Sequence[str | Path]) -> SourceIndex:
-    """Return a cached index (in-process -> on-disk -> fresh build); ``build_ms`` is ``0.0`` on a hit."""
+def _load_or_build(
+    search_paths: Sequence[str | Path],
+    *,
+    kind: str,
+    exts: tuple[str, ...],
+    builder,
+    empty_warning: str,
+) -> SourceIndex:
+    """Shared in-process -> on-disk -> fresh-build loader for both index kinds."""
     paths = _normalize_paths(search_paths)
     if not paths:
-        log.warning(
-            "kernel index: no search paths given/found; native symbol resolution "
-            "is disabled for this call"
-        )
-    fp = fingerprint(paths)
+        log.warning(empty_warning)
+    fp = fingerprint(paths, exts)
+    key = f"{kind}:{fp}"
 
-    cached_singleton = _PROCESS_INDEX.get(fp)
+    cached_singleton = _PROCESS_INDEX.get(key)
     if cached_singleton is not None:
         return cached_singleton
 
-    on_disk = _load_cache(fp)
+    on_disk = _load_cache(fp, kind)
     if on_disk is not None:
         on_disk.build_ms = 0.0
-        _PROCESS_INDEX[fp] = on_disk
+        _PROCESS_INDEX[key] = on_disk
         return on_disk
 
-    index = build_index(paths)
+    index = builder(paths)
     log.info(
-        "kernel index: built %d symbols across %d files (fingerprint=%s, build_ms=%.1f)",
+        "kernel index [%s]: built %d symbols across %d files "
+        "(fingerprint=%s, build_ms=%.1f)",
+        kind,
         index.symbol_count,
         index.file_count,
         index.fingerprint,
         index.build_ms,
     )
-    _save_cache(index)
-    _PROCESS_INDEX[fp] = index
+    _save_cache(index, kind)
+    _PROCESS_INDEX[key] = index
     return index
+
+
+def load_or_build(search_paths: Sequence[str | Path]) -> SourceIndex:
+    """Return a cached native index (in-process -> on-disk -> fresh build); ``build_ms`` is ``0.0`` on a hit."""
+    return _load_or_build(
+        search_paths,
+        kind="native",
+        exts=_NATIVE_EXTS,
+        builder=build_index,
+        empty_warning=(
+            "kernel index: no search paths given/found; native symbol resolution "
+            "is disabled for this call"
+        ),
+    )
+
+
+def load_or_build_triton(search_paths: Sequence[str | Path]) -> SourceIndex:
+    """Return a cached Triton ``.py`` index (in-process -> on-disk -> fresh build); ``build_ms`` is ``0.0`` on a hit."""
+    return _load_or_build(
+        search_paths,
+        kind="triton",
+        exts=_PY_EXTS,
+        builder=build_triton_index,
+        empty_warning=(
+            "triton index: no search paths given/found; the Triton .py fallback "
+            "is disabled for this call"
+        ),
+    )
 
 
 # --- discovery ----------------------------------------------------------------
@@ -573,4 +716,23 @@ def discover_library_paths(names: tuple[str, ...] = ()) -> list[Path]:
             if root not in seen and root.is_dir():
                 seen.add(root)
                 paths.append(root)
+    return paths
+
+
+def discover_python_paths(names: tuple[str, ...] = ()) -> list[Path]:
+    """Package roots (where ``.py`` sources live) for the Triton fallback index.
+
+    Unlike :func:`discover_library_paths` (which returns native ``csrc`` roots),
+    this returns each framework's top-level package dir, since Triton kernels are
+    plain ``.py`` files inside the package rather than under ``csrc``.
+    """
+    wanted = {n.strip().lower() for n in names if n.strip()}
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for fw_name, fr in discover_frameworks().items():
+        if wanted and fw_name.lower() not in wanted:
+            continue
+        if fr.root not in seen and fr.root.is_dir():
+            seen.add(fr.root)
+            paths.append(fr.root)
     return paths

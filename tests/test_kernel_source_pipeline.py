@@ -629,6 +629,85 @@ class TestTritonResolve:
         assert res.patchable is False
         assert res.method == "unresolved"
 
+    # -- Stage-2 fallback: no kernel_file in the trace, so find the .py by symbol.
+    def test_build_triton_index_finds_jit_defs(self, tmp_path):
+        # The .py index scanner picks up @triton.jit defs with their line numbers.
+        pkg = tmp_path / "vllm"
+        pkg.mkdir()
+        (pkg / "moe.py").write_text(_TRITON_PY, encoding="utf-8")
+        # A non-Triton file is skipped by the cheap "triton" pre-filter.
+        (pkg / "plain.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+        idx = index_mod.build_triton_index([pkg])
+        assert "add_kernel" in idx.symbol_index
+        assert idx.symbol_index["add_kernel"][0]["line"] == _line_of(
+            _TRITON_PY, "def add_kernel"
+        )
+        assert idx.file_count == 1  # only moe.py contributed defs
+
+    def test_resolve_triton_by_symbol_fallback(self, monkeypatch):
+        # With no kernel_file, a known symbol is resolved via the .py index. The
+        # index is stubbed with an editable (non-/tmp) path so the editability
+        # filter accepts it.
+        canned = index_mod.SourceIndex(
+            fingerprint="fp",
+            symbol_index={
+                "add_kernel": [{"file": "/workspace/vllm/moe.py", "line": 5}]
+            },
+        )
+        monkeypatch.setattr(index_mod, "load_or_build_triton", lambda _roots: canned)
+        res = resolve_triton_source("", symbol="add_kernel_0d1d2d3de")
+        assert res.patchable is True
+        assert res.method == "triton_symbol_index"
+        assert res.source_file == "/workspace/vllm/moe.py"
+        assert res.line == 5
+
+    def test_resolve_triton_by_symbol_prefers_exact_then_shortest(self, monkeypatch):
+        # Exact normalized-name match beats a substring one; among equals, the
+        # shortest path wins.
+        canned = index_mod.SourceIndex(
+            fingerprint="fp",
+            symbol_index={
+                "add_kernel_variant": [
+                    {"file": "/workspace/a/long/path.py", "line": 9}
+                ],
+                "add_kernel": [
+                    {"file": "/workspace/z.py", "line": 3},
+                    {"file": "/workspace/pkg/z.py", "line": 7},
+                ],
+            },
+        )
+        monkeypatch.setattr(index_mod, "load_or_build_triton", lambda _roots: canned)
+        res = resolve_triton_source("", symbol="add_kernel")
+        assert res.source_file == "/workspace/z.py"
+        assert res.line == 3
+
+    def test_resolve_triton_by_symbol_no_match_is_unresolved(self, monkeypatch):
+        canned = index_mod.SourceIndex(fingerprint="fp", symbol_index={})
+        monkeypatch.setattr(index_mod, "load_or_build_triton", lambda _roots: canned)
+        res = resolve_triton_source("", symbol="nonexistent_kernel")
+        assert res.patchable is False
+        assert res.method == "unresolved"
+
+    def test_resolve_triton_no_kernel_file_and_no_symbol_is_unresolved(self):
+        # Empty kernel_file and no symbol -> nothing to search on.
+        res = resolve_triton_source("", symbol="")
+        assert res.patchable is False
+        assert res.method == "unresolved"
+
+    def test_resolve_triton_by_symbol_skips_generated_paths(self, monkeypatch):
+        # A candidate that lives in a generated cache is rejected by the
+        # editability filter, so the fallback reports unresolved.
+        canned = index_mod.SourceIndex(
+            fingerprint="fp",
+            symbol_index={
+                "add_kernel": [{"file": "/tmp/torchinductor_u/x.py", "line": 2}]
+            },
+        )
+        monkeypatch.setattr(index_mod, "load_or_build_triton", lambda _roots: canned)
+        res = resolve_triton_source("", symbol="add_kernel")
+        assert res.patchable is False
+        assert res.method == "unresolved"
+
 
 # ===========================================================================
 # Stage 7 -- discovery of installed framework trees
