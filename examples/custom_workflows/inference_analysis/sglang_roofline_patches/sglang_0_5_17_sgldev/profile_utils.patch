@@ -1,8 +1,7 @@
 diff --git a/python/sglang/srt/utils/profile_utils.py b/python/sglang/srt/utils/profile_utils.py
-index 705f1010b6..ad2672db19 100644
 --- a/python/sglang/srt/utils/profile_utils.py
 +++ b/python/sglang/srt/utils/profile_utils.py
-@@ -8,6 +8,7 @@ from typing import Callable, Dict, List, Optional
+@@ -8,10 +8,11 @@
  
  import torch
  
@@ -10,15 +9,25 @@ index 705f1010b6..ad2672db19 100644
  from sglang.srt.distributed.parallel_state_wrapper import ParallelState
  from sglang.srt.environ import envs
  from sglang.srt.managers.io_struct import ProfileReqOutput
-@@ -98,6 +99,7 @@ class ProfileManager:
+-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
++from sglang.srt.model_executor.forward_batch_info import ForwardMode
+ from sglang.srt.platforms import current_platform
+ from sglang.srt.runtime_context import get_device
+ from sglang.srt.utils import is_npu
+@@ -98,7 +99,12 @@
          merge_profiles: bool,
          profile_prefix: str,
          profile_stages: Optional[List[str]] = None,
 +        shape_discovery: bool = False,
++        detailed_annotations: bool = False,
      ):
++        # Roofline step-span folding is toggled on the model_runner by the
++        # scheduler's profiler manager (via set_detailed_annotations), so the
++        # flag only needs to be accepted here for the V2 configure path.
          # not supported yet
          assert start_step is None
-@@ -118,6 +120,7 @@ class ProfileManager:
+         assert (
+@@ -118,6 +124,7 @@
              output_dir=output_dir,
              output_prefix=profile_prefix,
              profile_id=profile_id,
@@ -26,7 +35,7 @@ index 705f1010b6..ad2672db19 100644
          )
  
          self.stage_based_trigger.configure(
-@@ -302,11 +305,19 @@ class _ProfilerConcreteBase(_ProfilerBase):
+@@ -302,11 +309,19 @@
  
  
  class _ProfilerTorch(_ProfilerConcreteBase):
@@ -47,7 +56,7 @@ index 705f1010b6..ad2672db19 100644
  
      def start(self):
          activity_map = {
-@@ -335,12 +346,19 @@ class _ProfilerTorch(_ProfilerConcreteBase):
+@@ -335,12 +350,20 @@
                  else torch_npu.profiler.tensorboard_trace_handler(self.output_dir)
              ),
          )
@@ -64,6 +73,21 @@ index 705f1010b6..ad2672db19 100644
 +
 +        if self.record_shapes and self.shape_discovery:
 +            kernel_shape_profiler.disable()
++
          if not _is_npu:
              # Build filename with only non-zero ranks to maintain backward compatibility
              filename_parts = [self.profile_id, f"TP-{self.ps.tp_rank}"]
+@@ -443,13 +466,3 @@
+             from sglang.srt.utils.rpd_utils import rpd_to_chrome_trace
+ 
+             rpd_to_chrome_trace("trace.rpd", self.rpd_profile_path)
+-
+-
+-def build_step_span_name(forward_batch: ForwardBatch) -> str:
+-    """Build a profile-trace span name for one forward step."""
+-    mode = forward_batch.forward_mode
+-    bs = forward_batch.batch_size
+-    if mode == ForwardMode.EXTEND:
+-        ext_toks = forward_batch.extend_num_tokens or 0
+-        return f"step[EXTEND bs={bs} toks={ext_toks}]"
+-    return f"step[{mode.name} bs={bs}]"
