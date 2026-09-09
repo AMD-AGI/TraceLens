@@ -11,6 +11,7 @@ import json
 import os
 import zipfile
 from bisect import bisect_left, bisect_right
+from collections import Counter
 
 from tqdm import tqdm
 
@@ -96,6 +97,66 @@ def build_cpu_event_index(
     cpu_events.sort(key=lambda e: e["ts"])
     cpu_starts = [e["ts"] for e in cpu_events]
     return cpu_events, cpu_starts
+
+
+def most_common_first_dim(events: list[dict]) -> int | None:
+    """Return the most common first dimension across all ``Input Dims`` of cpu_op events.
+
+    Scans every ``cpu_op`` event's ``Input Dims`` argument, collects the first
+    element of each dimension list, and returns the most frequent value.
+    Returns ``None`` when no cpu_op carries ``Input Dims``.
+    """
+    first_dims: list[int] = []
+    for e in events:
+        if e.get("cat") != "cpu_op":
+            continue
+        input_dims = e.get("args", {}).get("Input Dims")
+        if not input_dims:
+            continue
+        for dim_list in input_dims:
+            if isinstance(dim_list, list) and dim_list and isinstance(dim_list[0], int):
+                first_dims.append(dim_list[0])
+    if not first_dims:
+        return None
+    return Counter(first_dims).most_common(1)[0][0]
+
+
+def infer_batch_sizes_from_shapes(
+    roots: list[dict],
+    cpu_event_index: tuple[list[dict], list[float]],
+    root_tiles: dict | None = None,
+) -> list[int | None]:
+    """Derive batch size per iteration from the most common first dim of cpu_op Input Dims.
+
+    Performs a lightweight scan (no full extraction) using the pre-built
+    cpu_event_index for bisect-based windowing.  Returns one value per root,
+    or ``None`` when no cpu_op with ``Input Dims`` falls in the window.
+    """
+    cpu_events, cpu_starts = cpu_event_index
+    batch_sizes: list[int | None] = []
+
+    for root in roots:
+        if root_tiles is not None:
+            key = (root.get("pid"), root.get("tid"), root.get("ts", 0))
+            win_ts, win_end = root_tiles.get(
+                key, (root["ts"], root["ts"] + root["dur"])
+            )
+        else:
+            win_ts = root["ts"]
+            win_end = win_ts + root["dur"]
+
+        lo = bisect_left(cpu_starts, win_ts)
+        hi = bisect_right(cpu_starts, win_end)
+        win_dur = win_end - win_ts
+
+        # Filter to events within the window, excluding enclosing spans
+        window_events = [
+            e for e in cpu_events[lo:hi]
+            if win_ts <= e["ts"] < win_end and e["dur"] <= win_dur
+        ]
+        batch_sizes.append(most_common_first_dim(window_events))
+
+    return batch_sizes
 
 
 def extract_iteration(
@@ -458,6 +519,7 @@ def divide_phases_and_save(
     meta_events: list[dict],
     steady_state_regions: list[tuple[int, int]],
     root_tiles: dict | None = None,
+    phase_labels: list[str] | None = None,
 ) -> list[dict]:
     """
     Group contiguous steps of the same phase within steady-state regions and
@@ -474,22 +536,37 @@ def divide_phases_and_save(
     steady_state_regions
         Pre-computed steady-state region list as ``(start, end)`` index pairs.
         Pass ``[(0, len(iteration_roots))]`` to treat the entire slice as steady state.
+    phase_labels
+        Optional per-iteration phase labels (``"decode"`` or ``"prefill_bearing"``),
+        e.g. from :func:`classify_phases_from_batch_sizes`.  When provided,
+        annotation-based classification is skipped — use this for
+        ``--llm-inference`` traces without serving annotations.
     """
-    iter_details = iteration_details(iteration_roots)
     regions = steady_state_regions
     print(f"[divide-phases] Steady-state regions: {regions}")
 
     # Build an ordered list of (phase_label, root) for all steady-state steps
     steady_steps: list[tuple[str, dict]] = []
-    for s, e in regions:
-        for idx in range(s, e):
-            detail = iter_details[idx]
-            root = iteration_roots[idx]
-            if has_context(detail):
-                steady_steps.append(("prefilldecodemix", root))
-            elif has_generation(detail):
-                steady_steps.append(("decode_only", root))
-            # steps that are neither (e.g. idle) are skipped
+    if phase_labels is not None:
+        for s, e in regions:
+            for idx in range(s, e):
+                root = iteration_roots[idx]
+                label = phase_labels[idx]
+                if label == "prefill_bearing":
+                    steady_steps.append(("prefilldecodemix", root))
+                else:
+                    steady_steps.append(("decode_only", root))
+    else:
+        iter_details = iteration_details(iteration_roots)
+        for s, e in regions:
+            for idx in range(s, e):
+                detail = iter_details[idx]
+                root = iteration_roots[idx]
+                if has_context(detail):
+                    steady_steps.append(("prefilldecodemix", root))
+                elif has_generation(detail):
+                    steady_steps.append(("decode_only", root))
+                # steps that are neither (e.g. idle) are skipped
 
     # Group into contiguous runs of the same phase
     runs: list[tuple[str, list[dict]]] = []  # (phase, [roots])

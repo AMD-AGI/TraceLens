@@ -4,10 +4,28 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Stage 2: steady-state region detection and window selection."""
+"""Stage 2: steady-state region detection and window selection.
+
+Three public entry points:
+
+* :func:`find_steady_state_inference` — for LLM inference serving traces
+  (vLLM, SGLang, ATOM) where annotations encode request concurrency.
+  Uses concurrency-based region detection + prefill/decode mode selection.
+
+* :func:`find_steady_state_inference_from_shapes` — for LLM inference traces
+  without parseable serving annotations.  Uses batch sizes derived from
+  cpu_op shapes as a concurrency proxy + threshold-based phase classification.
+
+* :func:`find_steady_state_generic` — for training, diffusion, and other
+  workloads where annotations lack concurrency info.  Uses duration-CV
+  sliding window.
+
+Both return ``(selected_roots, regions)`` so callers can also use the
+region list (e.g. ``divide_phases_and_save``).
+"""
 
 import math
-from statistics import mean, pstdev
+from statistics import mean, median, pstdev
 
 from ..annotation_utils import (
     has_context,
@@ -17,27 +35,33 @@ from ..annotation_utils import (
 )
 
 
-def identify_steady_state_regions(
-    iter_details: list[dict], num_steps: int
-) -> tuple[list[tuple[int, int]], int]:
-    """Detect contiguous steady-state regions based on num_requests proximity to global max.
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
 
-    Returns ``(regions, global_max)`` where ``regions`` is a list of
-    ``(start, end)`` index pairs and ``global_max`` is the peak concurrency
-    observed across all iterations.
+
+def _identify_regions_by_peak(
+    values: list[int], num_steps: int, label: str = "Steady state",
+) -> tuple[list[tuple[int, int]], int]:
+    """Find contiguous regions where ``values`` are near the global peak.
+
+    The core scan shared by both the inference (num_requests) and shape-based
+    (batch_sizes) steady-state finders.
+
+    Returns ``(regions, global_max)``.
     """
-    n = len(iter_details)
+    n = len(values)
     thresh = 0.1 if n >= num_steps else 0.2
-    global_max = max(t["num_requests"] for t in iter_details)
+    global_max = max(values)
 
     steady_state_started = False
     steady_state_ended = False
     prev_events_in_steady = 0
     start_index = 0
-    regions = []
+    regions: list[tuple[int, int]] = []
 
-    for i, t in enumerate(iter_details):
-        if abs(t["num_requests"] - global_max) <= max(1, thresh * global_max):
+    for i, v in enumerate(values):
+        if abs(v - global_max) <= max(1, thresh * global_max):
             if not steady_state_started:
                 prev_events_in_steady += 1
         else:
@@ -45,7 +69,7 @@ def identify_steady_state_regions(
                 prev_events_in_steady -= 1
 
         if prev_events_in_steady > 5 and not steady_state_started:
-            print(f"Steady state started at index {i - 5}")
+            print(f"{label} started at index {i - 5}")
             steady_state_started = True
             start_index = i - prev_events_in_steady + 1
 
@@ -54,7 +78,7 @@ def identify_steady_state_regions(
             and steady_state_started
             and not steady_state_ended
         ):
-            print(f"Steady state ended at index {i}")
+            print(f"{label} ended at index {i}")
             steady_state_ended = True
             regions.append((start_index, i))
             steady_state_started = False
@@ -64,7 +88,7 @@ def identify_steady_state_regions(
     if steady_state_started and not steady_state_ended:
         regions.append((start_index, i))
 
-    print(f"Steady state regions: {regions}")
+    print(f"{label} regions: {regions}")
 
     if len(regions) == 0:
         delta = min(n, max(8, num_steps - n))
@@ -72,24 +96,28 @@ def identify_steady_state_regions(
         end = max(start + 1, min(n, n - delta // 2))
         regions = [(start, end)]
         print(
-            "Warning: no steady state region found; discarding initial/final iterations "
-            "and selecting middle region"
+            f"Warning: no {label.lower()} region found; discarding initial/final "
+            "iterations and selecting middle region"
         )
 
     return regions, global_max
 
 
-def compute_reference_pd_ratio(
+def _identify_regions_inference(
+    iter_details: list[dict], num_steps: int
+) -> tuple[list[tuple[int, int]], int]:
+    """Detect contiguous steady-state regions based on num_requests proximity to global max."""
+    return _identify_regions_by_peak(
+        [t["num_requests"] for t in iter_details], num_steps,
+        label="Steady state",
+    )
+
+
+def _compute_reference_pd_ratio(
     regions: list[tuple[int, int]], iter_details: list[dict]
 ) -> tuple[tuple[int, int], float, float]:
-    """
-    Return the largest steady-state region, a reference PD ratio, and the
+    """Return the largest steady-state region, a reference PD ratio, and the
     median PD ratio across all regions.
-
-    The reference ratio starts as the PD/total ratio of the largest region.  A
-    sanity check compares it to the median ratio across ALL regions.  If the
-    largest region deviates by more than 50 % relative from the median, the
-    median is used instead and a warning is printed.
     """
     region_stats = []
     total_steps = 0
@@ -117,58 +145,51 @@ def compute_reference_pd_ratio(
     return (largest["start"], largest["end"]), average_ratio, largest_window_ratio
 
 
-def find_steady_state_annotations(
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def find_steady_state_inference(
     iteration_roots: list[dict],
     num_steps: int,
-    steady_state_regions: list[tuple[int, int]],
     mode: str = "mixed",
     CONC: int | None = None,
     OSL: float | None = None,
     R: float | None = None,
-) -> list[dict]:
-    """
-    Find the best contiguous window of up to ``num_steps`` iterations.
+) -> tuple[list[dict], list[tuple[int, int]]]:
+    """Find the best contiguous window for an LLM inference serving trace.
+
+    Combines concurrency-based region detection with prefill/decode-aware
+    window selection.
+
+    Returns ``(selected_roots, regions)`` — the chosen window of iteration
+    roots and the steady-state region list (useful for ``divide_phases``).
 
     Parameters
     ----------
     iteration_roots : list of iteration-root events
     num_steps : requested window size
-    steady_state_regions : pre-computed steady-state region list as ``(start, end)``
-        index pairs.  Pass ``[(0, len(iteration_roots))]`` to treat the entire
-        slice as steady state.
     mode : one of ``"mixed"``, ``"decode_only"``, ``"max_prefilldecode"``
     CONC : expected peak concurrency (number of concurrent requests).
-        If provided, a warning is printed when the observed peak in the trace
-        differs from this value.
     OSL : average output sequence length (decode tokens per request).
-        Combined with ``R`` to derive the ideal PD ratio.
-    R : OSL window ratio in [0, 1]. The actual OSL per request is sampled from
-        ``[R * OSL, OSL]``, giving mean OSL = OSL * (1 + R) / 2.
-
-    When ``CONC``, ``OSL``, and ``R`` are all provided the ideal PD ratio is
-
-        ideal_pd_ratio = (CONC * 2) / (OSL * (1 + R))
-
-    and ``num_steps`` is automatically raised to ``ceil(1 / ideal_pd_ratio)``
-    if it is too small to capture the true DO/PD distribution.
+    R : OSL window ratio in [0, 1].
 
     Modes
     -----
     ``"mixed"``
-        Pick the sub-window whose pd_ratio is closest to the reference ratio
-        (ideal when available, otherwise largest-region / median sanity-checked).
+        Pick the sub-window whose pd_ratio is closest to the reference ratio.
         Ties broken by highest average num_requests.
     ``"decode_only"``
-        Fewest-PD window: sub-window with lowest pd_ratio.
+        Longest contiguous run of pure decode-only steps, capped at num_steps.
     ``"max_prefilldecode"``
-        Most-PD window: sub-window with highest pd_ratio.
+        Longest contiguous run of pure prefill-bearing steps, capped at num_steps.
     """
     iter_details = iteration_details(iteration_roots)
-    regions = steady_state_regions
-    global_max = max(t["num_requests"] for t in iter_details)
+    regions, global_max = _identify_regions_inference(iter_details, num_steps)
 
     (largest_start, largest_end), reference_ratio, _largest_window_ratio = (
-        compute_reference_pd_ratio(regions, iter_details)
+        _compute_reference_pd_ratio(regions, iter_details)
     )
 
     # --- Optional: CONC / OSL / R validation and ideal ratio override ----------
@@ -204,7 +225,6 @@ def find_steady_state_annotations(
         else:
             print(f"num_steps={num_steps} >= min required {min_steps_for_ratio} — OK.")
 
-        # Ideal ratio overrides the empirical reference for the mixed mode
         reference_ratio = ideal_pd_ratio
         print(
             f"Using ideal prefilldecodemix_to_totalsteps_ratio={ideal_pd_ratio:.4f} as reference (overrides empirical {reference_ratio:.4f})"
@@ -215,12 +235,10 @@ def find_steady_state_annotations(
     divider = max(1, min(int(num_steps / 2), 10))
     step = max(1, num_steps // divider)
 
-    # Build candidate sub-windows from the largest region
     candidates = []
     s, e = largest_start, largest_end
 
     def _count_mixed(window: list[dict]) -> int:
-        """Count truly-mixed steps (both context and generation requests > 0)."""
         return sum(1 for t in window if is_mixed(t))
 
     if (e - s) >= num_steps:
@@ -238,7 +256,6 @@ def find_steady_state_annotations(
                 }
             )
     else:
-        # Region is smaller than num_steps — use the whole region
         window = iter_details[s:e]
         pd_count = sum(1 for t in window if has_context(t))
         candidates.append(
@@ -255,10 +272,6 @@ def find_steady_state_annotations(
         )
 
     if mode == "mixed":
-        # Prefer candidate windows that contain at least one prefill-bearing
-        # step (pure prefill OR truly mixed, i.e. context_requests > 0). Fall
-        # back to all candidates only when no window contains any prefill
-        # activity at all.
         pd_candidates = [c for c in candidates if c["pd_count"] > 0]
         if pd_candidates:
             print(
@@ -284,84 +297,204 @@ def find_steady_state_annotations(
             f"avg_requests={best['avg_requests']:.1f}, "
             f"pd_count={best['pd_count']}, mixed_count={best['mixed_count']}"
         )
+        return iteration_roots[best["start"] : best["end"]], regions
 
-    elif mode == "decode_only":
-        # Find the longest contiguous run of pure decode-only steps (active
-        # generation with no context requests) in the largest steady-state
-        # region, capped at num_steps.
-        do_runs: list[tuple[int, int]] = []  # (start, end) in iter_details coords
-        run_start: int | None = None
-        for idx in range(largest_start, largest_end):
-            if is_decode_only(iter_details[idx]):
-                if run_start is None:
-                    run_start = idx
-            else:
-                if run_start is not None:
-                    do_runs.append((run_start, idx))
-                    run_start = None
-        if run_start is not None:
-            do_runs.append((run_start, largest_end))
-
-        if do_runs:
-            longest = max(do_runs, key=lambda r: r[1] - r[0])
-            run_s, run_e = longest
-            win_s = run_s
-            win_e = min(run_e, run_s + num_steps)
-            print(
-                f"[decode_only] Longest pure decode-only run: [{run_s}, {run_e}) "
-                f"({run_e - run_s} steps). "
-                f"Selected [{win_s}, {win_e}) ({win_e - win_s} steps, "
-                f"capped at num_steps={num_steps})."
-            )
-            return iteration_roots[win_s:win_e]
-        else:
-            print(
-                "[decode_only] No pure decode-only run found in steady-state region; "
-            )
-            return []
-
-    elif mode == "max_prefilldecode":
-        # Find the longest contiguous run of pure PD steps (no decode-only) in
-        # the largest steady-state region, capped at num_steps.
-        pd_runs: list[tuple[int, int]] = []  # (start, end) in iter_details coords
-        run_start: int | None = None
-        for idx in range(largest_start, largest_end):
-            if has_context(iter_details[idx]):
-                if run_start is None:
-                    run_start = idx
-            else:
-                if run_start is not None:
-                    pd_runs.append((run_start, idx))
-                    run_start = None
-        if run_start is not None:
-            pd_runs.append((run_start, largest_end))
-
-        if pd_runs:
-            # Pick the longest pure-PD run
-            longest = max(pd_runs, key=lambda r: r[1] - r[0])
-            run_s, run_e = longest
-            # Cap to num_steps from the start of the run
-            win_s = run_s
-            win_e = min(run_e, run_s + num_steps)
-            print(
-                f"[max_prefilldecode] Longest pure prefilldecodemix run: [{run_s}, {run_e}) "
-                f"({run_e - run_s} steps). "
-                f"Selected [{win_s}, {win_e}) ({win_e - win_s} steps, "
-                f"capped at num_steps={num_steps})."
-            )
-            return iteration_roots[win_s:win_e]
-        else:
-            print(
-                "[max_prefilldecode] No pure prefilldecodemix run found in steady-state "
-            )
-            return []
+    elif mode in ("decode_only", "max_prefilldecode"):
+        phase_labels = [
+            "prefill_bearing" if has_context(d) else "decode"
+            for d in iter_details
+        ]
+        target = "decode" if mode == "decode_only" else "prefill_bearing"
+        return _select_run_window(
+            iteration_roots, phase_labels, target,
+            largest_start, largest_end, num_steps, regions, mode,
+        )
 
     else:
         raise ValueError(
             f"Unknown mode: {mode!r}. Use 'mixed', 'decode_only', or 'max_prefilldecode'."
         )
 
-    return iteration_roots[best["start"] : best["end"]]
+
+def _longest_contiguous_run(
+    labels: list[str],
+    target: str,
+    start: int,
+    end: int,
+) -> tuple[int, int] | None:
+    """Find the longest contiguous run of ``target`` in ``labels[start:end]``.
+
+    Returns ``(run_start, run_end)`` or ``None`` if no run exists.
+    """
+    best: tuple[int, int] | None = None
+    run_start: int | None = None
+    for idx in range(start, end):
+        if labels[idx] == target:
+            if run_start is None:
+                run_start = idx
+        else:
+            if run_start is not None:
+                if best is None or (idx - run_start) > (best[1] - best[0]):
+                    best = (run_start, idx)
+                run_start = None
+    if run_start is not None:
+        if best is None or (end - run_start) > (best[1] - best[0]):
+            best = (run_start, end)
+    return best
+
+
+def _select_run_window(
+    iteration_roots: list[dict],
+    labels: list[str],
+    target: str,
+    largest_start: int,
+    largest_end: int,
+    num_steps: int,
+    regions: list[tuple[int, int]],
+    mode_tag: str,
+) -> tuple[list[dict], list[tuple[int, int]]]:
+    """Select the longest contiguous run of ``target``-labelled iterations,
+    capped at ``num_steps``.  Shared by both annotation- and shape-based paths.
+    """
+    run = _longest_contiguous_run(labels, target, largest_start, largest_end)
+    if run:
+        run_s, run_e = run
+        win_e = min(run_e, run_s + num_steps)
+        print(
+            f"[{mode_tag}] Longest {target} run: [{run_s}, {run_e}) "
+            f"({run_e - run_s} steps). Selected [{run_s}, {win_e}) "
+            f"({win_e - run_s} steps, capped at num_steps={num_steps})."
+        )
+        return iteration_roots[run_s:win_e], regions
+    else:
+        print(f"[{mode_tag}] No {target} run found in steady-state region.")
+        return [], regions
+
+
+PREFILL_SPIKE_FACTOR = 2.0
+
+
+def classify_phases_from_batch_sizes(
+    batch_sizes: list[int | None],
+) -> list[str]:
+    """Classify each iteration as ``'decode'`` or ``'prefill_bearing'``.
+
+    Uses the median batch size as the decode baseline.  Iterations whose
+    batch size exceeds ``PREFILL_SPIKE_FACTOR * median`` are labelled
+    ``'prefill_bearing'``; the rest are ``'decode'``.
+    """
+    baseline = median([b for b in batch_sizes if b is not None])
+    threshold = PREFILL_SPIKE_FACTOR * baseline
+
+    labels: list[str] = []
+    for b in batch_sizes:
+        if b is None or b <= threshold:
+            labels.append("decode")
+        else:
+            labels.append("prefill_bearing")
+    return labels
+
+
+def _identify_regions_from_batch_sizes(
+    batch_sizes: list[int], num_steps: int
+) -> tuple[list[tuple[int, int]], int]:
+    """Detect steady-state regions from shape-derived batch sizes."""
+    return _identify_regions_by_peak(
+        batch_sizes, num_steps,
+        label="Steady state (from shapes)",
+    )
+
+
+def find_steady_state_inference_from_shapes(
+    iteration_roots: list[dict],
+    batch_sizes: list[int],
+    num_steps: int,
+    mode: str = "mixed",
+) -> tuple[list[dict], list[tuple[int, int]]]:
+    """Find steady state for LLM inference traces without serving annotations.
+
+    Uses ``batch_sizes`` (derived from cpu_op shapes) as a proxy for
+    concurrency and :func:`classify_phases_from_batch_sizes` for
+    prefill/decode classification.
+
+    Returns ``(selected_roots, regions)`` — same shape as
+    :func:`find_steady_state_inference`.
+    """
+    if not batch_sizes or not iteration_roots:
+        return [], []
+
+    valid_sizes = [b for b in batch_sizes if b is not None]
+    if not valid_sizes:
+        return iteration_roots[:num_steps], [(0, min(num_steps, len(iteration_roots)))]
+
+    regions, _ = _identify_regions_from_batch_sizes(valid_sizes, num_steps)
+    phase_labels = classify_phases_from_batch_sizes(batch_sizes)
+
+    largest_start, largest_end = max(regions, key=lambda r: r[1] - r[0])
+
+    divider = max(1, min(int(num_steps / 2), 10))
+    step = max(1, num_steps // divider)
+
+    if mode == "mixed":
+        total_pf = sum(
+            1 for i in range(largest_start, largest_end)
+            if phase_labels[i] == "prefill_bearing"
+        )
+        region_size = largest_end - largest_start
+        reference_ratio = total_pf / region_size if region_size else 0.0
+
+        candidates = []
+        if (largest_end - largest_start) >= num_steps:
+            for s1 in range(largest_start, largest_end - num_steps + 1, step):
+                pf_count = sum(
+                    1 for i in range(s1, s1 + num_steps)
+                    if phase_labels[i] == "prefill_bearing"
+                )
+                avg_bs = mean(
+                    b for b in batch_sizes[s1 : s1 + num_steps] if b is not None
+                ) if any(b is not None for b in batch_sizes[s1 : s1 + num_steps]) else 0
+                candidates.append({
+                    "start": s1,
+                    "end": s1 + num_steps,
+                    "pf_ratio": pf_count / num_steps,
+                    "avg_bs": avg_bs,
+                })
+        else:
+            pf_count = sum(
+                1 for i in range(largest_start, largest_end)
+                if phase_labels[i] == "prefill_bearing"
+            )
+            candidates.append({
+                "start": largest_start,
+                "end": largest_end,
+                "pf_ratio": pf_count / region_size if region_size else 0.0,
+                "avg_bs": mean(
+                    b for b in batch_sizes[largest_start:largest_end] if b is not None
+                ) if any(b is not None for b in batch_sizes[largest_start:largest_end]) else 0,
+            })
+
+        best = min(
+            candidates,
+            key=lambda c: (abs(c["pf_ratio"] - reference_ratio), -c["avg_bs"]),
+        )
+        print(
+            f"[mixed/shapes] Selected window [{best['start']}, {best['end']}): "
+            f"pf_ratio={best['pf_ratio']:.3f} (target={reference_ratio:.3f}), "
+            f"avg_bs={best['avg_bs']:.1f}"
+        )
+        return iteration_roots[best["start"] : best["end"]], regions
+
+    elif mode in ("decode_only", "max_prefilldecode"):
+        target = "decode" if mode == "decode_only" else "prefill_bearing"
+        return _select_run_window(
+            iteration_roots, phase_labels, target,
+            largest_start, largest_end, num_steps, regions, f"{mode}/shapes",
+        )
+
+    else:
+        raise ValueError(
+            f"Unknown mode: {mode!r}. Use 'mixed', 'decode_only', or 'max_prefilldecode'."
+        )
 
 
 MIN_STEADY_WINDOW = 4
@@ -371,7 +504,7 @@ CV_THRESHOLD = 0.15
 def find_steady_state_generic(
     iteration_roots: list[dict],
     num_steps: int,
-) -> list[dict]:
+) -> tuple[list[dict], list[tuple[int, int]]]:
     """Find steady state by duration consistency for non-serving workloads.
 
     Slides an overlapping window (stride 1) across all iterations, computes
@@ -379,12 +512,12 @@ def find_steady_state_generic(
     and picks the fastest window whose CV is below ``CV_THRESHOLD``.  Falls
     back to the lowest-CV window when nothing passes.
 
-    A minimum scan window of ``MIN_STEADY_WINDOW`` ensures the CV is
-    meaningful even when ``num_steps`` is small.
+    Returns ``(selected_roots, regions)`` — the chosen window and the
+    region it was drawn from.
     """
     total = len(iteration_roots)
     if total == 0:
-        return []
+        return [], []
 
     durations = [r.get("dur", 0) for r in iteration_roots]
     scan_size = min(max(num_steps, MIN_STEADY_WINDOW), total)
@@ -397,7 +530,7 @@ def find_steady_state_generic(
         windows.append((start, start + scan_size, cv, m))
 
     if not windows:
-        return iteration_roots[:num_steps]
+        return iteration_roots[:num_steps], [(0, min(num_steps, total))]
 
     passing = [(s, e, cv, m) for s, e, cv, m in windows if cv < CV_THRESHOLD]
     if passing:
@@ -410,12 +543,14 @@ def find_steady_state_generic(
         f"cv={best_cv:.4f}, mean_dur={best_mean:.0f}us"
     )
 
+    region = [(best_start, best_end)]
+
     if num_steps < scan_size:
         center = (best_start + best_end) // 2
         half = num_steps // 2
         final_start = max(best_start, center - half)
         final_end = min(final_start + num_steps, total)
         final_start = max(0, final_end - num_steps)
-        return iteration_roots[final_start:final_end]
+        return iteration_roots[final_start:final_end], region
 
-    return iteration_roots[best_start:best_end]
+    return iteration_roots[best_start:best_end], region

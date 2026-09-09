@@ -226,21 +226,9 @@ def classify_graph_capture_trace(input_folder: str):
             and e.get("cat") == "cuda_runtime"
         )
 
-    def infer_batch_size_from_cpu_ops(events):
-        first_dims = []
-        for e in events:
-            if e.get("cat") != "cpu_op":
-                continue
-            input_dims = e.get("args", {}).get("Input Dims")
-            if not input_dims:
-                continue
-            for dim_list in input_dims:
-                if isinstance(dim_list, list) and dim_list:
-                    if isinstance(dim_list[0], int):
-                        first_dims.append(dim_list[0])
-        if not first_dims:
-            return None
-        return collections.Counter(first_dims).most_common(1)[0][0]
+    from TraceLens.TraceUtils.split_inference.trace_extraction import (
+        most_common_first_dim as infer_batch_size_from_cpu_ops,
+    )
 
     def infer_mode_from_captures(num_captures: int):
         return "FULL" if num_captures <= 1 else "PIECEWISE"
