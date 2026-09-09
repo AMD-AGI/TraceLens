@@ -103,13 +103,28 @@ python visualize_model_in_explorer.py moonshotai/Kimi-K3 --operators-json kimi_o
 
 
 
-### Model Explorer (`visualize_model_in_explorer.py`)
+### Model Explorer (`python -m TraceLens.Visualizer.model_explorer_export.cli`)
 
+Two graph-building backends are available via `--backend`:
+
+- `torch` (default) — traces the model with PyTorch on the meta device
+  (`TraceLens.ModelUtils.torch_trace`). Requires `torch` + `transformers`.
+- `ast` — the original static-analysis pipeline: parses the model's
+  `modeling_*.py` source with Python's `ast` module instead of executing any
+  model code (`TraceLens.ModelUtils.extract` / `computation_graph` / `merge`
+  / ...). Kept as a switchable fallback, e.g. for checkpoints that cannot be
+  instantiated or traced. All flags below except the torch-tracing ones
+  (`--seq-len`, `--batch-size`) apply only to `--backend ast`.
+
+```bash
+python -m TraceLens.Visualizer.model_explorer_export.cli moonshotai/Kimi-K3 --backend ast --serve --open
+```
 
 | Option                          | Description                                                                                             |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `SOURCE` / `--checkpoint`, `-c` | Hugging Face model id or local checkpoint directory                                                     |
-| `--github`, `-g`                | GitHub repo URL or `github:owner/repo@ref:path` for modeling source (repo must be whitelisted)          |
+| `--backend`                     | `torch` (default, meta-device tracing) or `ast` (static source parsing)                                 |
+| `--github`, `-g`                | *(ast only)* GitHub repo URL or `github:owner/repo@ref:path` for modeling source (repo must be whitelisted) |
 | `--allow-repo OWNER/REPO`       | Whitelist an extra GitHub repo for remote source introspection (repeatable)                             |
 | `-o`, `--output`                | Write a self-contained `.html` viewer (`<model>.html` by default) or an explicit `.html` / `.json` path |
 | `--title`                       | Architecture display name override                                                                      |
