@@ -1,7 +1,6 @@
 {
     "name": "Radeon 8060S",
     "gfx_arch": "gfx1151",
-    "memory_type": "unified",
     "mem_bw_gbps": 256,
     "max_achievable_tflops": {
         "matrix_fp16": 59.4,
@@ -11,6 +10,5 @@
         "vector_fp16": 29.7,
         "vector_bf16": 29.7,
         "vector_fp32": 29.7
-    },
-    "_reference": "https://gpuopen.com/learn/wmma_on_rdna3/"
+    }
 }
