@@ -1,44 +1,8 @@
-"""
-Automatic tensor shape metadata for Triton / FlashInfer / aiter kernels
-in PyTorch profiler traces.
+"""Tensor shape metadata for Triton / FlashInfer / aiter kernels in profiler traces.
 
-When enabled, targeted kernel entry-point functions are registered as
-torch custom ops via torch.library so they appear as ``cpu_op`` events
-with ``Input Dims`` and ``Input type`` in profiler traces.
-
-Usage:
-    from kernel_shape_profiler import enable, disable
-    enable()   # before profiling starts
-    disable()  # after profiling stops
-
-In practice you do not call these by hand: the co-located ``sitecustomize.py``
-is auto-loaded via ``PYTHONPATH`` and drives them from the torch-profiler
-window, so no serving-framework source needs patching. See README.md.
-
-Design:
-    We maintain an explicit registry of kernel entry points.  For each one
-    we create a ``torch.library`` custom-op wrapper and then replace **every
-    module-level reference** to the original function across all of
-    ``sys.modules``.  This handles the common ``from X import Y`` pattern
-    where patching only the definition module would miss callers that
-    already captured a local binding.
-
-    Functions whose references were captured as *instance attributes*
-    before ``enable()`` (e.g. ``self.fn = dispatch()``) cannot be
-    intercepted directly.  For those cases the registry should target the
-    **inner kernel** that the wrapper calls via module-global lookup at
-    call time (e.g. ``gemm_a8w8_blockscale`` inside
-    ``aiter_w8a8_block_fp8_linear``).
-
-Coverage:
-    Because interception happens at the *launcher* function rather than at a
-    JIT boundary, the backend behind the launcher is irrelevant: an ASM GEMM,
-    a CK MoE kernel, an aiter C++ binding and a Triton kernel are all
-    annotated the same way, as long as the launcher is a Python function that
-    can be reached by name. The cost is that the launcher must be *known*
-    (registry) or *guessed* (auto-discovery heuristics), and the framework
-    module paths in ``_KERNEL_ENTRY_POINTS`` make this file version-coupled to
-    SGLang / aiter internals.
+Registered kernel launchers are wrapped as torch custom ops so they appear as
+``cpu_op`` events carrying ``Input Dims`` / ``Input type``. ``sitecustomize.py``
+drives ``enable()`` / ``disable()`` from the profiler window. See README.md.
 """
 
 import contextlib
@@ -58,15 +22,11 @@ logger = logging.getLogger(__name__)
 
 
 def _active_default_device_override():
-    """Return the active ``torch.set_default_device`` override, or ``None`` if unset.
+    """Active ``set_default_device`` override, or ``None`` if unset.
 
-    Unlike ``torch.get_default_device()`` — which always resolves to a concrete
-    device (``cpu`` when no override is installed) — this reads the raw
-    ``torch.utils._device.CURRENT_DEVICE`` sentinel, which is ``None`` when no
-    override is active. That distinction matters for restoration: passing the
-    concrete ``cpu`` back into ``torch.set_default_device`` *installs* a device
-    mode, whereas passing ``None`` truly clears any mode a module leaked at
-    import time.
+    Reads the raw ``CURRENT_DEVICE`` sentinel, not ``get_default_device()``
+    (always concrete): restoring ``None`` clears a device mode a module leaked
+    at import time, whereas restoring a concrete ``cpu`` would *install* one.
     """
     device_mod = sys.modules.get("torch.utils._device")
     if device_mod is None:
@@ -79,24 +39,11 @@ def _active_default_device_override():
 
 @contextlib.contextmanager
 def _preserve_global_torch_state():
-    """Snapshot and restore process-global torch defaults.
+    """Snapshot and restore global torch default device & dtype.
 
-    ``enable()`` imports a large number of modules (both the explicit
-    registry via ``_resolve_target`` and the auto-discovery
-    ``_force_import_submodules``). Some of those modules mutate
-    process-global torch state at import time — most notably
-    ``torch.set_default_device("cuda")`` — and that mutation is NOT undone
-    by ``disable()`` (which only restores patched *function references*).
-
-    A leaked default device corrupts downstream CPU tensor creation: e.g.
-    a buffer such as ``seq_lens_cpu`` is suddenly allocated on cuda, which
-    surfaces as ``Buffer seq_lens_cpu has different device than before`` in
-    the input-buffer pool and, later, as out-of-bounds GPU memory access
-    faults in index kernels (e.g. ``write_req_to_token_pool_triton``).
-
-    Restoring the default device and dtype around the import-heavy regions
-    keeps these side effects from escaping into the serving path. In the
-    healthy case (nothing mutates the defaults) this is a no-op.
+    ``enable()`` imports modules that may mutate global state (e.g.
+    ``set_default_device("cuda")``); a leaked default device corrupts later CPU
+    tensor creation (``Buffer seq_lens_cpu has different device than before``).
     """
     saved_device = _active_default_device_override()
     saved_dtype = torch.get_default_dtype()
@@ -113,31 +60,15 @@ def _preserve_global_torch_state():
             pass
 
 
-# ---------------------------------------------------------------------------
-# State
-# ---------------------------------------------------------------------------
 _lock = threading.Lock()
 _enabled = False
-# The torch.library.Library is created once and kept alive for the whole
-# process lifetime. It is intentionally NEVER torn down: dropping it destroys
-# the registered custom ops (freeing their OperatorName / schema). A wrapper
-# reference can outlive a disable() — e.g. a module imported lazily *during* a
-# profiling window captured the wrapper via ``from X import Y`` and is not in
-# ``_patches`` to be restored. If the backing op were freed, that leaked
-# wrapper would later dispatch into freed memory and segfault. Keeping the
-# Library (and the monotonic op counter) alive makes such a stale dispatch
-# safe; the ``if not _enabled`` guard in each wrapper then routes it straight
-# to the original function.
+# Created once and NEVER torn down: dropping it frees the registered ops, so a
+# wrapper reference that leaked past disable() would dispatch into freed memory.
+# The ``if not _enabled`` guard in each wrapper routes leaked calls to the original.
 _lib: Optional[Library] = None
-# Monotonic — NEVER reset, so op names from earlier enable() cycles stay valid.
-_op_counter = 0
-# Each entry: (module_obj, attr_name, original_fn)
-_patches: List[Tuple[Any, str, Callable]] = []
-# Persistent cache of built wrappers keyed by qualified function name.
-# Value: (wrapper_fn, original_fn). Reused across enable()/disable() cycles so
-# each op is defined exactly once and a given function maps to a stable wrapper
-# object (so references that leaked across cycles still point at a live op).
-_built_wrappers: dict = {}
+_op_counter = 0  # monotonic, never reset, so old op names stay valid
+_patches: List[Tuple[Any, str, Callable]] = []  # (module, attr, original_fn)
+_built_wrappers: dict = {}  # {qualified_name: (wrapper, original_fn)}, reused across cycles
 
 
 def _get_or_create_lib() -> Library:
@@ -148,26 +79,8 @@ def _get_or_create_lib() -> Library:
     return _lib
 
 
-# ---------------------------------------------------------------------------
-# Registry of kernel entry points to wrap.
-#
-# Each entry is (module_path, function_name).
-#
-# **Guidelines for choosing what to register:**
-#
-# 1. Prefer functions that are called via *module-global name lookup*
-#    at call time.  These are always patchable because Python resolves
-#    the name in the module's ``__dict__`` on every call.
-#
-# 2. Avoid outer "dispatch" wrappers whose references get captured as
-#    instance attributes (e.g. ``self.w8a8_block_fp8_linear =
-#    dispatch_w8a8_block_fp8_linear()``).  Instead register the *inner*
-#    kernel they call.
-#
-# 3. For functions imported via ``from X import Y`` into multiple
-#    modules, the ``_patch_all_references()`` helper will find and
-#    replace them everywhere in ``sys.modules``.
-# ---------------------------------------------------------------------------
+# Registry of kernel entry points to wrap: (module_path, function_name).
+# Register the inner kernel, not dispatch wrappers captured as instance attrs.
 _KERNEL_ENTRY_POINTS = [
     # ── Triton attention ──
     ("sglang.srt.layers.attention.triton_ops.decode_attention", "decode_attention_fwd"),
@@ -193,9 +106,7 @@ _KERNEL_ENTRY_POINTS = [
     ),
     # ── MoE TopK ──
     ("sglang.srt.layers.moe.topk", "biased_grouped_topk_gpu"),
-    # ── Layer norm ──
-    # The actual module-level names are rmsnorm / fused_add_rmsnorm
-    # (imported from sgl_kernel on CUDA, or aiter on HIP).
+    # ── Layer norm (rmsnorm / fused_add_rmsnorm from sgl_kernel or aiter) ──
     ("sglang.srt.layers.layernorm", "rmsnorm"),
     ("sglang.srt.layers.layernorm", "fused_add_rmsnorm"),
     ("sglang.srt.layers.layernorm", "gemma_rmsnorm"),
@@ -203,36 +114,21 @@ _KERNEL_ENTRY_POINTS = [
     # ── FP8 quantization ──
     ("sglang.srt.layers.quantization.fp8_utils", "per_token_group_quant_fp8"),
     ("sglang.srt.layers.quantization.fp8_utils", "scaled_fp8_quant"),
-    # Inner kernel called by triton_w8a8_block_fp8_linear via global lookup:
+    # inner kernels looked up from the module __dict__ on every call
     ("sglang.srt.layers.quantization.fp8_utils", "w8a8_block_fp8_matmul_triton"),
-    # Inner kernel called by aiter_w8a8_block_fp8_linear via global lookup
-    # (the outer wrapper is captured by reference at model init, but this
-    # inner kernel is looked up from the module __dict__ on every call):
     ("sglang.srt.layers.quantization.fp8_utils", "gemm_a8w8_blockscale"),
-    # ── LoRA Triton (inner kernel functions, no *args/**kwargs) ──
+    # ── LoRA Triton ──
     ("sglang.srt.lora.triton_ops.sgemm_lora_a", "sgemm_lora_a_fwd"),
     ("sglang.srt.lora.triton_ops.sgemm_lora_b", "sgemm_lora_b_fwd"),
-    # ── aiter (AMD) ops — definition-site patching ──
+    # ── aiter (AMD) ops ──
     ("aiter.ops.triton.gemm_a8w8_blockscale", "gemm_a8w8_blockscale"),
     ("aiter.ops.triton.batched_gemm_a8w8_blockscale", "batched_gemm_a8w8_blockscale"),
     ("aiter.ops.norm", "rms_norm"),
     ("aiter.ops.norm", "fused_add_rms_norm"),
     # ── FlashInfer MoE (cutedsl) ──
     ("flashinfer.moe", "moe_gemm_fp8_nt_groupwise"),
-    # ─────────────────────────────────────────────────────────────────────
-    # Current-layout paths (SGLang 0.5.18+ / matching aiter).
-    #
-    # SGLang moved its Triton kernels out of ``sglang.srt.layers.*`` into a
-    # separate ``sglang.kernels.ops.*`` package, and aiter regrouped its
-    # Triton ops into subpackages. Measured against
-    # sglang 0.5.18 + aiter, only 5 of the 24 legacy entries above still
-    # resolve, so the current paths are listed here as well.
-    #
-    # Both sets are kept on purpose: ``_resolve_target`` returns None for a
-    # path that does not exist and the entry is skipped silently, so one
-    # registry works across framework versions. Duplicates are harmless --
-    # ``_wrapped_ids`` in enable() prevents double-wrapping the same object.
-    # ─────────────────────────────────────────────────────────────────────
+    # Current-layout paths (SGLang 0.5.18+ moved kernels to sglang.kernels.ops.*;
+    # aiter regrouped its ops). Unresolved legacy paths above are skipped silently.
     # ── SGLang Triton attention ──
     ("sglang.kernels.ops.attention.decode_attention", "decode_attention_fwd"),
     ("sglang.kernels.ops.attention.decode_attention", "decode_attention_fwd_normal"),
@@ -254,37 +150,22 @@ _KERNEL_ENTRY_POINTS = [
     # ── aiter regrouped Triton ops ──
     ("aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale", "gemm_a8w8_blockscale"),
     ("aiter.ops.triton.normalization.rmsnorm", "rms_norm"),
-    # aiter's batched blockscale GEMM was renamed, not just moved (it is now
-    # batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant
-    # under aiter.ops.triton.gemm.batched). Auto-discovery picks it up, so it
-    # is deliberately not pinned to a name here.
+    # aiter's batched blockscale GEMM was renamed (not just moved); left to
+    # auto-discovery rather than pinned to its long current name here.
 ]
 
-# ---------------------------------------------------------------------------
-# Auto-discovery prefixes.
-#
-# In addition to the explicit registry above, ``enable()`` scans every
-# already-loaded module whose name starts with one of these prefixes and
-# wraps only functions likely to launch kernels.  Discovery is filtered by
-# signature/source heuristics to avoid wrapping unrelated utility code.
-# ---------------------------------------------------------------------------
+# Auto-discovery prefixes: enable() scans loaded modules under these and wraps
+# functions that look like kernel launchers (signature/source heuristics).
 _AUTO_DISCOVER_PREFIXES: Tuple[str, ...] = (
     "flashinfer.",
-    # SGLang 0.5.18+ moved its Triton kernels out of sglang.srt.layers.* into
-    # this package, which is where most launchers now live. sglang.srt. is kept
-    # because quantization / MoE-runner launchers still sit there (and for
-    # older versions).
     "sglang.kernels.ops.",
     "sglang.srt.",
     "aiter.ops.",
 )
 
 
-# ---------------------------------------------------------------------------
-# Schema building — works with or without type annotations
-# ---------------------------------------------------------------------------
-
-# Python type → torch schema type
+# Schema building — works with or without type annotations.
+# Python type → torch schema type.
 _TYPE_MAP = {
     torch.Tensor: "Tensor",
     Optional[torch.Tensor]: "Tensor?",
@@ -295,8 +176,7 @@ _TYPE_MAP = {
     torch.dtype: "ScalarType",
 }
 
-# String annotation variants produced by ``from __future__ import annotations``
-# (PEP 563) – annotations are stored as literal strings in the source code.
+# Same, for PEP 563 string annotations.
 _STRING_TYPE_MAP = {
     "torch.Tensor": "Tensor",
     "Tensor": "Tensor",
@@ -316,11 +196,10 @@ def _infer_schema_type(param: inspect.Parameter) -> Optional[str]:
     if annotation is inspect._empty:
         return None
 
-    # ── Handle string annotations (PEP 563) ──
+    # String annotations (PEP 563)
     if isinstance(annotation, str):
         if annotation in _STRING_TYPE_MAP:
             return _STRING_TYPE_MAP[annotation]
-        # Check "Optional[X]" pattern in string form
         if annotation.startswith("Optional[") and annotation.endswith("]"):
             inner = annotation[len("Optional[") : -1]
             base = _STRING_TYPE_MAP.get(inner)
@@ -328,11 +207,9 @@ def _infer_schema_type(param: inspect.Parameter) -> Optional[str]:
                 return base if base.endswith("?") else base + "?"
         return None
 
-    # ── Handle real type annotations ──
-    # Check direct match
+    # Real type annotations: direct match, then Optional[X] / Union[X, None]
     if annotation in _TYPE_MAP:
         return _TYPE_MAP[annotation]
-    # Check Optional[X] (Union[X, None])
     origin = getattr(annotation, "__origin__", None)
     if origin is type(None):
         return None
@@ -348,10 +225,10 @@ def _build_schema_from_sig(
     sig: inspect.Signature,
     skip_self: bool = False,
 ) -> Optional[Tuple[str, List[str], List[str]]]:
-    """
-    Build schema string from signature annotations.
-    Returns (schema_str, tensor_param_names, non_tensor_param_names) or None
-    if there are no tensor params or the signature can't be mapped.
+    """Build a schema from signature annotations.
+
+    Returns ``(schema_str, tensor_params, non_tensor_params)``, or ``None`` if
+    there are no tensor params or the signature can't be mapped.
     """
     tensor_params: List[str] = []
     non_tensor_params: List[str] = []
@@ -377,9 +254,7 @@ def _build_schema_from_sig(
     return schema_str, tensor_params, non_tensor_params
 
 
-# ---------------------------------------------------------------------------
-# Thread-local side channel for non-tensor args
-# ---------------------------------------------------------------------------
+# Thread-local side channel for non-tensor args and return values.
 _tls = threading.local()
 
 
@@ -407,11 +282,6 @@ def _pop_return_value(op_name: str) -> Any:
     return _tls.returns.pop(op_name, None)
 
 
-# ---------------------------------------------------------------------------
-# Registration
-# ---------------------------------------------------------------------------
-
-
 def _next_op_name(base: str) -> str:
     global _op_counter
     sanitized = base.replace(".", "_").replace("::", "_").replace("-", "_")
@@ -429,10 +299,7 @@ def _register_op(
     sig: inspect.Signature,
     skip_self: bool = False,
 ) -> Optional[Callable]:
-    """
-    Register a function as a torch custom op and return a dispatch wrapper.
-    Returns None if registration fails.
-    """
+    """Register a function as a torch custom op and return a dispatch wrapper, or None on failure."""
     try:
         lib = _get_or_create_lib()
         lib.define(op_name + schema_str)
@@ -453,8 +320,7 @@ def _register_op(
                     elif param.default is not inspect._empty:
                         full_kwargs[pname] = param.default
             result = original_fn(**full_kwargs)
-            # Schema is -> () so we can't return the actual value
-            # through the dispatcher.  Stash it for the caller.
+            # Schema is -> () so stash the real return for the caller.
             _stash_return_value(op_name, result)
 
         lib.impl(op_name, impl, dispatch_key="CompositeExplicitAutograd")
@@ -463,11 +329,7 @@ def _register_op(
 
         @functools.wraps(original_fn)
         def dispatch_wrapper(*args, **kwargs):
-            # When profiling is not active, never route through the custom op.
-            # A wrapper reference may outlive disable() (captured by a module
-            # imported lazily while profiling was on, so _patch_all_references
-            # could not restore it). Falling back to the original keeps such
-            # leaked bindings correct and crash-free.
+            # A leaked reference must be a no-op when profiling is inactive.
             if not _enabled:
                 return original_fn(*args, **kwargs)
             try:
@@ -486,9 +348,7 @@ def _register_op(
                 elif pname in non_tensor_param_names:
                     nt_vals[pname] = val
 
-            # If every tensor arg is None (all Optional[Tensor] and not
-            # provided), torch dispatch will fail with "no tensor arguments".
-            # Fall back to calling the original function directly.
+            # torch dispatch fails with "no tensor arguments" if all are None.
             if not any(isinstance(t, torch.Tensor) for t in tensor_args):
                 return original_fn(*args, **kwargs)
 
@@ -497,15 +357,12 @@ def _register_op(
                 torch_op(*tensor_args)
                 return _pop_return_value(op_name)
             except Exception:
-                # Dispatch failed (e.g. device/type mismatch, None for
-                # non-optional Tensor, schema arity error).  Clean up
-                # thread-local stash and fall back to the original call.
+                # Dispatch failed: clear the stash and fall back to the original.
                 _pop_non_tensor_args(op_name)
                 _pop_return_value(op_name)
                 return original_fn(*args, **kwargs)
 
-        # Mark so enable() can recognise its own wrappers and never wrap one
-        # again (see the guard in enable()).
+        # Lets enable() recognise its own wrappers and never re-wrap one.
         dispatch_wrapper._kernel_shape_wrapper = True
         return dispatch_wrapper
 
@@ -514,15 +371,8 @@ def _register_op(
         return None
 
 
-# ---------------------------------------------------------------------------
-# Module + attribute resolution
-# ---------------------------------------------------------------------------
-
-
 def _resolve_target(module_path: str, attr_name: str):
-    """
-    Resolve a target function from *module_path* and *attr_name*.
-    *attr_name* can be ``"func_name"`` or ``"ClassName.method_name"``.
+    """Resolve *attr_name* (``"func"`` or ``"Class.method"``) in *module_path*.
 
     Returns ``(container, attr_name, original_fn, is_method)`` or ``None``.
     """
@@ -548,16 +398,10 @@ def _resolve_target(module_path: str, attr_name: str):
 
 
 def _patch_all_references(original_fn: Callable, wrapper_fn: Callable):
-    """
-    Scan ``sys.modules`` and replace **every** module-level attribute that
-    points to *original_fn* with *wrapper_fn*.
+    """Rebind every ``sys.modules`` reference to *original_fn* to *wrapper_fn*.
 
-    This handles the common ``from X import Y`` pattern: if module A
-    defines ``Y`` and module B does ``from A import Y``, both A and B
-    will have their binding replaced.
-
-    Returns a list of ``(module, attr_name, original_fn)`` for later
-    restoration.
+    Handles the ``from X import Y`` pattern. Returns ``(module, attr, original_fn)``
+    tuples for later restoration.
     """
     patches = []
     for _mod_name, mod in list(sys.modules.items()):
@@ -579,27 +423,18 @@ def _patch_all_references(original_fn: Callable, wrapper_fn: Callable):
     return patches
 
 
-# ---------------------------------------------------------------------------
-# Lightweight wrappers for functions that can't use torch.library
-# ---------------------------------------------------------------------------
-
-
 def _make_record_function_wrapper(
     qualified_name: str,
     original_fn: Callable,
 ) -> Callable:
-    """
-    Create a wrapper that uses ``torch.profiler.record_function`` to emit
-    a ``cpu_op`` event with tensor shapes embedded in the event name.
+    """Fallback wrapper: emit a ``record_function`` event with shapes in the name.
 
-    Used for functions where we can't build a ``torch.library`` schema
-    (e.g. no type annotations, ``*args``/``**kwargs``, etc.).
+    Used when a ``torch.library`` schema can't be built (no annotations, ``*args``).
     """
 
     @functools.wraps(original_fn)
     def wrapper(*args, **kwargs):
-        # See dispatch_wrapper: a leaked reference must be a no-op when
-        # profiling is inactive.
+        # A leaked reference must be a no-op when profiling is inactive.
         if not _enabled:
             return original_fn(*args, **kwargs)
         shape_parts: List[str] = []
@@ -620,10 +455,7 @@ def _make_record_function_wrapper(
     return wrapper
 
 
-# ---------------------------------------------------------------------------
-# Kernel-launch detection heuristics
-# ---------------------------------------------------------------------------
-
+# Kernel-launch detection heuristics.
 # Substrings that strongly indicate a function launches a GPU kernel.
 _KERNEL_SOURCE_INDICATORS = (
     "[grid",  # Triton launch pattern: kernel[grid](...)
@@ -642,13 +474,10 @@ def _source_launches_kernel(fn: Callable) -> bool:
 
 
 def _is_likely_kernel_launcher(fn: Callable, sig: inspect.Signature) -> bool:
-    """
-    Decide whether *fn* is likely to launch a GPU kernel.
+    """Decide whether *fn* likely launches a GPU kernel.
 
-    Priority:
-    1) Tensor annotation exists -> include.
-    2) Non-tensor annotations only -> exclude.
-    3) No annotations -> fallback to source pattern matching.
+    A Tensor annotation includes it; non-tensor-only annotations exclude it; no
+    annotations falls back to source pattern matching.
     """
     has_any_annotation = False
     for param in sig.parameters.values():
@@ -666,12 +495,9 @@ def _is_likely_kernel_launcher(fn: Callable, sig: inspect.Signature) -> bool:
 
 
 def _force_import_submodules(prefix: str) -> None:
-    """
-    Recursively import submodules under *prefix* so they appear in
-    ``sys.modules`` before auto-discovery runs.
+    """Recursively import submodules under *prefix* into ``sys.modules``.
 
-    *prefix* should be a top-level package name without a trailing dot
-    (e.g. ``"sglang.srt"``).
+    *prefix* is a package name without a trailing dot (e.g. ``"sglang.srt"``).
     """
     try:
         pkg = importlib.import_module(prefix)
@@ -682,12 +508,8 @@ def _force_import_submodules(prefix: str) -> None:
     if pkg_path is None:
         return
 
-    # Snapshot the global defaults once; restore them after *every* import so
-    # a module that calls torch.set_default_device("cuda") at import time
-    # cannot taint subsequently imported modules during discovery (nor leak
-    # into the serving path). The leaf-name skip list below catches the known
-    # offenders, but this restore makes the discovery robust to any other
-    # module with the same import-time side effect.
+    # Restore global defaults after every import so a module that mutates them
+    # can't taint later imports or the serving path.
     saved_device = _active_default_device_override()
     saved_dtype = torch.get_default_dtype()
 
@@ -706,11 +528,8 @@ def _force_import_submodules(prefix: str) -> None:
     ):
         if mod_name in sys.modules:
             continue
-        # Skip test / benchmark / autotune modules.  These are not kernel
-        # entry points and several of them (e.g. aiter.ops.flydsl.test_*)
-        # call ``torch.set_default_device("cuda")`` at import time, which
-        # leaks a CUDA default-device mode into the importing process and
-        # corrupts CPU tensor creation downstream (e.g. seq_lens_cpu).
+        # Skip test / benchmark / autotune modules: not entry points, and some
+        # set the default device at import.
         leaf = mod_name.rsplit(".", 1)[-1]
         if (
             "test" in leaf
@@ -730,15 +549,11 @@ def _force_import_submodules(prefix: str) -> None:
 
 
 def _discover_kernel_entry_points() -> List[Tuple[str, str]]:
-    """
-    Scan already-loaded ``sys.modules`` for modules whose name starts
-    with one of ``_AUTO_DISCOVER_PREFIXES`` and collect only functions
-    likely to launch GPU kernels.
+    """Scan ``sys.modules`` under ``_AUTO_DISCOVER_PREFIXES`` for likely kernel launchers.
 
     Returns a list of ``(module_path, function_name)`` pairs.
     """
-    # Force-import submodules under each discovery prefix first so deeper
-    # kernels become visible in sys.modules.
+    # Force-import submodules first so deeper kernels appear in sys.modules.
     for prefix in _AUTO_DISCOVER_PREFIXES:
         _force_import_submodules(prefix.rstrip("."))
 
@@ -759,15 +574,12 @@ def _discover_kernel_entry_points() -> List[Tuple[str, str]]:
                 continue
             obj = mod_dict[attr_name]
 
-            # Only wrap regular Python functions.
-            # @triton.jit objects (JITFunction / Autotuner) must NOT be
-            # wrapped — replacing them in module globals breaks the
-            # Triton compiler's global resolution for device-side calls
-            # between JIT kernels (e.g. remap_xcd, _rmsmorm_op, etc.).
+            # Only plain Python functions. @triton.jit objects must NOT be wrapped:
+            # rebinding them breaks Triton's device-side global resolution.
             if not inspect.isfunction(obj):
                 continue
 
-            # Only include functions *defined* within a target namespace
+            # Only functions defined within a target namespace.
             fn_module = getattr(obj, "__module__", "") or ""
             if not any(fn_module.startswith(p) for p in _AUTO_DISCOVER_PREFIXES):
                 continue
@@ -777,7 +589,6 @@ def _discover_kernel_entry_points() -> List[Tuple[str, str]]:
                 continue
             seen_ids.add(obj_id)
 
-            # Require at least one parameter
             try:
                 sig = inspect.signature(obj)
             except (ValueError, TypeError):
@@ -785,14 +596,13 @@ def _discover_kernel_entry_points() -> List[Tuple[str, str]]:
             if not sig.parameters:
                 continue
 
-            # Skip signatures we cannot map to a torch schema.
+            # Skip signatures we can't map to a torch schema.
             if any(
                 p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
                 for p in sig.parameters.values()
             ):
                 continue
 
-            # Core filter: only keep likely kernel launchers.
             if not _is_likely_kernel_launcher(obj, sig):
                 continue
 
@@ -806,11 +616,6 @@ def _discover_kernel_entry_points() -> List[Tuple[str, str]]:
     return results
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
 def enable():
     """Patch registered kernel entry points to appear as cpu_op."""
     global _enabled
@@ -818,22 +623,12 @@ def enable():
         if _enabled:
             return
 
-        # NOTE: the Library and op counter are process-persistent (see the
-        # _lib / _op_counter docs). We do NOT recreate or reset them here so
-        # ops registered in earlier cycles stay valid. Only the per-cycle
-        # reference patches are rebuilt.
+        # _lib / _op_counter are process-persistent; only per-cycle patches rebuild.
         _patches.clear()
-        _wrapped_ids: set = set()  # track function ids to avoid double-wrapping
+        _wrapped_ids: set = set()  # function ids, to avoid double-wrapping
 
-        # Backstop guard around the import-heavy region. Both the explicit
-        # registry (_resolve_target -> importlib.import_module) and the
-        # auto-discovery (_discover_kernel_entry_points -> _force_import_*)
-        # import modules that may mutate process-global torch defaults at
-        # import time; restore them on exit so the leak cannot escape into
-        # the serving path. (No-op when nothing mutates the defaults.)
+        # Import-heavy region may mutate global torch defaults; restore on exit.
         with _preserve_global_torch_state():
-            # Merge explicit registry with filtered auto-discovered functions.
-            # Duplicates are harmless — _wrapped_ids prevents double-wrapping.
             all_entry_points = (
                 list(_KERNEL_ENTRY_POINTS) + _discover_kernel_entry_points()
             )
@@ -846,20 +641,14 @@ def enable():
                 container, name, original_fn, is_method = resolved
                 is_plain_function = not is_method
 
-                # Already one of our own wrappers. This happens when a
-                # framework keeps a compat re-export and both the old and new
-                # module paths are in the registry: the first entry wraps the
-                # function and _patch_all_references rebinds every reference to
-                # it, so the second entry now resolves to the wrapper. Wrapping
-                # again would nest two annotations around a single call and
-                # double-count it.
+                # Already our own wrapper (a compat re-export resolved to it).
+                # Re-wrapping would nest annotations and double-count the call.
                 if getattr(original_fn, "_kernel_shape_wrapper", False):
                     logger.debug(
                         "Skipping already-wrapped %s.%s", module_path, attr_name
                     )
                     continue
 
-                # Skip if this exact function object was already wrapped
                 fn_id = id(original_fn)
                 if fn_id in _wrapped_ids:
                     logger.debug("Skipping duplicate %s.%s", module_path, attr_name)
@@ -868,18 +657,14 @@ def enable():
 
                 qualified_name = f"{module_path}.{name}"
 
-                # Reuse a wrapper built in a previous cycle if the underlying
-                # function object is unchanged. This keeps each op defined
-                # exactly once and ensures a given function maps to a stable
-                # wrapper, so a reference that leaked across cycles still
-                # targets a live op.
+                # Reuse a prior-cycle wrapper if the function is unchanged, so
+                # each op is defined once and leaked refs stay live.
                 wrapper = None
                 cached = _built_wrappers.get(qualified_name)
                 if cached is not None and cached[1] is original_fn:
                     wrapper = cached[0]
 
                 if wrapper is None:
-                    # ── Regular functions ──
                     try:
                         sig = inspect.signature(original_fn)
                     except (ValueError, TypeError):
@@ -893,7 +678,7 @@ def enable():
                     schema_info = _build_schema_from_sig(sig, skip_self=is_method)
 
                     if schema_info is not None:
-                        # Full tensor annotations → use torch.library custom op
+                        # Full tensor annotations → torch.library custom op
                         schema_str, t_names, nt_names = schema_info
                         op_name = _next_op_name(base)
                         wrapper = _register_op(
@@ -911,8 +696,7 @@ def enable():
                             )
 
                     if wrapper is None:
-                        # Fallback: no annotations or schema registration failed
-                        # → use record_function wrapper (shapes in event name)
+                        # No annotations / registration failed → record_function
                         wrapper = _make_record_function_wrapper(
                             qualified_name,
                             original_fn,
@@ -953,9 +737,7 @@ def disable():
     with _lock:
         if not _enabled:
             return
-        # Flip the flag first so any wrapper invoked concurrently — or one that
-        # leaked past restoration — short-circuits to the original instead of
-        # dispatching into a custom op.
+        # Flip the flag first so any leaked wrapper short-circuits to the original.
         _enabled = False
         for container, name, original_fn in reversed(_patches):
             try:
@@ -963,9 +745,7 @@ def disable():
             except Exception:
                 pass
         _patches.clear()
-        # Intentionally keep _lib, _op_counter and _built_wrappers alive: the
-        # registered ops must outlive any wrapper reference that may have
-        # leaked (see module-level _lib docs).
+        # Keep _lib / _op_counter / _built_wrappers alive (see _lib docs).
         logger.info("kernel_shape_profiler disabled: all patches restored")
 
 

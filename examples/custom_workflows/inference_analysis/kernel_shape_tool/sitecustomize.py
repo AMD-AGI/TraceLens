@@ -1,32 +1,15 @@
-"""
-Auto-loaded shim that turns on kernel-shape annotation without patching the
-inference server (SGLang / vLLM / any torch workload).
+"""Auto-loaded shim that drives kernel-shape annotation without patching the server.
 
-CPython imports a top-level module named ``sitecustomize`` automatically at
-interpreter startup for every process, as long as its directory is on
-``sys.path`` (i.e. on ``PYTHONPATH``). This shim uses that hook to drive
-``kernel_shape_profiler.enable()`` / ``disable()`` from the torch-profiler
-window, so the launcher wrapping costs nothing outside a profiling run.
+CPython auto-imports ``sitecustomize`` at interpreter startup for any process
+whose ``sys.path`` (``PYTHONPATH``) includes this directory. The shim wraps
+``torch.profiler`` start/stop to call ``kernel_shape_profiler.enable()`` /
+``disable()`` around each profiling window, so launcher wrapping costs nothing
+outside a profiling run. Gated on ``TRACELENS_SHAPE_DISCOVERY``; when unset,
+every hook short-circuits, so it is safe to leave on ``PYTHONPATH`` permanently.
 
-Activation (both required):
-    export PYTHONPATH=/path/to/kernel_shape_tool:$PYTHONPATH
-    export TRACELENS_SHAPE_DISCOVERY=1
-
-Behaviour when ``TRACELENS_SHAPE_DISCOVERY`` is unset/false: this shim installs
-nothing observable -- every hook short-circuits, so it is safe to leave the
-directory on ``PYTHONPATH`` permanently.
-
-torch is usually not imported yet when ``sitecustomize`` runs, so patches are
-registered as *pending* and applied by an ``__import__`` hook the moment the
-target module appears in ``sys.modules``. All hooks are idempotent (guarded by a
-sentinel attribute) and crash-proof (wrapped in ``try/except``) so they can
-never break the workload.
-
-Note on timing: unlike a JIT-hook tracer, ``enable()`` here is *expensive* --
-it walks ``sglang.srt`` / ``aiter.ops`` / ``flashinfer`` with
-``pkgutil.walk_packages``, then rebinds module-level references across all of
-``sys.modules``. It therefore runs once, at the first profiler start, and the
-first ``start()`` call is measurably slower than subsequent ones.
+torch is usually not imported yet when this runs, so profiler patches are
+registered as *pending* and applied by an ``__import__`` hook once the target
+module loads. All hooks are idempotent and wrapped in ``try/except``.
 """
 
 import builtins
@@ -47,22 +30,17 @@ def _shape_discovery_on() -> bool:
     return _flag_on(_ENV_FLAG, "0")
 
 
-# ---------------------------------------------------------------------------
-# Lazy handle to the co-located profiler.
-#
-# We intentionally do NOT import kernel_shape_profiler (which imports torch) at
-# sitecustomize time -- that would force a heavy torch import at interpreter
-# startup and run torch's import-time side effects too early. Instead we import
-# it lazily, once a hook actually needs it and torch is already loaded.
-# ---------------------------------------------------------------------------
+# Lazy handle to the co-located profiler. We do NOT import kernel_shape_profiler
+# (which imports torch) at sitecustomize time -- that would force a heavy torch
+# import at startup. Import it lazily once a hook needs it and torch is loaded.
 _profiler = None
 
 
 def _get_profiler():
     global _profiler
     if _profiler is None:
-        # Make sure this file's own directory is importable even if only the
-        # parent ended up on sys.path.
+        # Ensure this file's directory is importable even if only the parent
+        # ended up on sys.path.
         here = os.path.dirname(os.path.abspath(__file__))
         if here not in sys.path:
             sys.path.insert(0, here)
@@ -94,12 +72,8 @@ def _disable_profiler() -> None:
 _profiler_active = [0]
 
 
-# ---------------------------------------------------------------------------
-# Patch: torch.profiler.profile.start / stop
-#   enable() runs just before the profiler starts recording so the first
-#   captured launch already carries shape metadata; stop() restores the
-#   original function references.
-# ---------------------------------------------------------------------------
+# Patch torch.profiler.profile.start/stop: enable() just before recording starts
+# (so the first captured launch carries shapes), disable() on the last stop().
 def _patch_torch_profiler_profile() -> bool:
     try:
         import torch.profiler as tp
@@ -138,13 +112,8 @@ def _patch_torch_profiler_profile() -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
-# Patch: _KinetoProfile.__init__  -> force record_shapes=True
-#   The wrapped launchers only surface "Input Dims" / "Input type" in the trace
-#   when the profiler was constructed with record_shapes=True. Force it on (opt
-#   out with TRACELENS_SHAPE_FORCE_RECORD_SHAPES=0) so shape annotation "just
-#   works" regardless of how the server configured its profiler.
-# ---------------------------------------------------------------------------
+# Patch _KinetoProfile.__init__ to force record_shapes=True -- "Input Dims" only
+# surface when shapes are recorded (opt out with TRACELENS_SHAPE_FORCE_RECORD_SHAPES=0).
 def _patch_kineto_record_shapes() -> bool:
     try:
         from torch.profiler.profiler import _KinetoProfile
@@ -177,9 +146,7 @@ def _patch_torch_profiler_both() -> bool:
     return a and b
 
 
-# ---------------------------------------------------------------------------
-# Patch: torch.cuda.profiler.start / stop  (legacy profiling API)
-# ---------------------------------------------------------------------------
+# Patch torch.cuda.profiler.start/stop (legacy profiling API).
 def _patch_torch_cuda_profiler() -> bool:
     try:
         import torch.cuda.profiler as tcp
@@ -214,15 +181,8 @@ def _patch_torch_cuda_profiler() -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
-# Pending-patch registry + import hook.
-#
-# Only the profiler entry points need patching here: the launcher wrapping
-# itself is done by kernel_shape_profiler.enable(), which resolves its targets
-# by importing them on demand. Kernels launched during CUDA-graph replay need
-# no special handling: their shapes are recorded when the graph is *captured*,
-# and capture that happens inside a profiler window is already covered.
-# ---------------------------------------------------------------------------
+# Pending-patch registry + import hook. Only profiler entry points are patched
+# here; launcher wrapping is done by kernel_shape_profiler.enable() on demand.
 _PENDING_PATCHES = {
     "torch.profiler": _patch_torch_profiler_both,
     "torch.cuda.profiler": _patch_torch_cuda_profiler,
@@ -267,10 +227,9 @@ def _install_import_hook() -> None:
 
 
 def _bootstrap() -> None:
-    # Even when the flag is off we still install the (cheap) profiler patches:
-    # they all short-circuit via _shape_discovery_on(), and installing
-    # unconditionally keeps behaviour stable if the flag is toggled between
-    # fork/exec boundaries.
+    # Install the cheap profiler patches even when the flag is off: they all
+    # short-circuit via _shape_discovery_on(), keeping behaviour stable if the
+    # flag is toggled across fork/exec boundaries.
     if getattr(sys, "_tracelens_shape_bootstrapped", False):
         return
     sys._tracelens_shape_bootstrapped = True
