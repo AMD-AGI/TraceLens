@@ -24,7 +24,7 @@ MAX_PERIOD_CANDIDATES = 64
 DIVISOR_COVERAGE_TOLERANCE = 0.05
 
 # Label sequences shorter than this are utility-function child lists, not loops.
-MIN_LABEL_CHILDREN = 6
+MIN_LABEL_CHILDREN = 4
 
 # The python_function event category, used when reuniting worker threads and
 # when scanning a thread's frames.

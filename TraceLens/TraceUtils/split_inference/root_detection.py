@@ -25,7 +25,6 @@ from ...Trace2Tree.inference_iteration_roots import (
     GPU_KERNEL_CATS,
     MIN_LABEL_CHILDREN,
     _blocks_by_pattern,
-    _descendant_gpu_time,
     _find_repeating_period,
     _gpu_bearing,
 )
@@ -174,6 +173,7 @@ def detect_from_branch_descent(
     tree: TraceToTree,
     entry_roots: List[dict],
     total_gpu: float,
+    attribution: GpuAttribution,
 ) -> Optional[RootSet]:
     """Walk the call tree to find the frame whose children repeat and cover the GPU.
 
@@ -211,7 +211,7 @@ def detect_from_branch_descent(
                         event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
                         iteration_roots.append(event)
                         blocked.extend(block)
-                    cov = _descendant_gpu_time(tree, blocked) / total_gpu
+                    cov = attribution.gpu_time_by_correlation(iteration_roots) / total_gpu
                     candidate = RootSet(
                         roots=iteration_roots,
                         method=f"generic:{BRANCH_DESCENT_TIER}",
@@ -238,6 +238,7 @@ def detect_from_sibling_roots(
     tree: TraceToTree,
     entry_roots: List[dict],
     total_gpu: float,
+    attribution: GpuAttribution,
 ) -> Optional[RootSet]:
     """Detect iterations that are top-level sibling frames.
 
@@ -266,7 +267,7 @@ def detect_from_sibling_roots(
     if not sibling_roots:
         return None
 
-    cov = _descendant_gpu_time(tree, blocked) / total_gpu if total_gpu else 0.0
+    cov = attribution.gpu_time_by_correlation(sibling_roots) / total_gpu if total_gpu else 0.0
     return RootSet(
         roots=sibling_roots,
         method="generic:sibling_roots",
