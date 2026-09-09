@@ -397,7 +397,7 @@ class TestEdgeWiring:
             if name and list(mod.children()):
                 composites.add(name)
 
-        call_graph = _capture_call_graph(model, composites, seq_len=8, batch_size=1)
+        call_graph, _ = _capture_call_graph(model, composites, seq_len=8, batch_size=1)
         block_edges = call_graph.get("block", [])
         edge_set = {
             (s.split(".")[-1] if s != "@input" else s, t.split(".")[-1])
@@ -933,6 +933,104 @@ class TestForkJoinNodes:
                 )
 
 
+class TestMultiModalSideBranchIntoForkedLayers:
+    """Regression test: when the side branch (e.g. a vision encoder) feeds
+    into a layer stack that ALSO has multiple interleaved layer types (so
+    the stack gets collapsed into Fork/Join nodes), the side branch's
+    output must still resolve to a concrete node id on the Fork's
+    incoming edges — not get lost, and not collide with the container's
+    own "@input" sequential-fallback edge to the same Fork target (both
+    independently synthesize a "(pred, fork_path)" call-graph edge for
+    the same target, keyed only by target in the global `cg_sources`
+    map, which silently let one clobber the other).
+    """
+
+    @pytest.fixture(scope="class")
+    def vlm_with_forked_layers(self):
+        class _Vision(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj = torch.nn.Linear(64, 64)
+
+            def forward(self, x):
+                return self.proj(x)
+
+        class _TypeA(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.norm = torch.nn.LayerNorm(64)
+
+            def forward(self, x):
+                return self.norm(x)
+
+        class _TypeB(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.gate = torch.nn.Linear(64, 64)
+
+            def forward(self, x):
+                return self.gate(x)
+
+        class _TextModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed_tokens = torch.nn.Embedding(256, 64)
+                self.layers = torch.nn.ModuleList(
+                    [_TypeA(), _TypeB(), _TypeA(), _TypeB()]
+                )
+                self.norm = torch.nn.LayerNorm(64)
+
+            def forward(self, x, inputs_embeds=None):
+                h = inputs_embeds if inputs_embeds is not None else self.embed_tokens(x)
+                for layer in self.layers:
+                    h = layer(h)
+                return self.norm(h)
+
+        class _VLM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.visual = _Vision()
+                self.language_model = _TextModel()
+
+            def forward(self, x, pixel_values=None, **kwargs):
+                return self.language_model(x)
+
+        with torch.device("meta"):
+            model = _VLM()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_fork_incoming_edges_have_resolved_source_ids(self, vlm_with_forked_layers):
+        nodes = vlm_with_forked_layers["graphCollections"][0]["graphs"][0]["nodes"]
+        node_ids = {n["id"] for n in nodes}
+        forks = [
+            n
+            for n in nodes
+            if any(a.get("value") == "fork" for a in n.get("attrs", []))
+        ]
+        assert forks, "No Fork node found for the interleaved layer stack"
+        for fork in forks:
+            edges = fork.get("incomingEdges", [])
+            assert edges, f"Fork node {fork['id']} has no incoming edges"
+            for e in edges:
+                assert e["sourceNodeId"] in node_ids, (
+                    f"Fork edge source {e['sourceNodeId']!r} does not resolve to "
+                    "a real node (dropped during call-graph merge)"
+                )
+
+    def test_visual_output_is_consumed_somewhere(self, vlm_with_forked_layers):
+        """The vision branch's output must feed into something visible,
+        not dead-end at the collapsed group boundary."""
+        nodes = vlm_with_forked_layers["graphCollections"][0]["graphs"][0]["nodes"]
+        consumers = [
+            n["id"]
+            for n in nodes
+            for e in n.get("incomingEdges", [])
+            if e["sourceNodeId"] == "visual/@output"
+        ]
+        assert consumers, "visual/@output has no consumers — the arrow dead-ends"
+
+
 class TestMultiModalFlowDirection:
     """Verify the name-agnostic multi-modal call-graph fallback: when a
     top-level sibling is never invoked (e.g. an optional vision encoder
@@ -978,12 +1076,22 @@ class TestMultiModalFlowDirection:
         composites = {
             n for n, m in model.named_modules() if n and any(True for _ in m.children())
         }
-        return _capture_call_graph(model, composites, seq_len=8, batch_size=1)
+        cg, _ = _capture_call_graph(model, composites, seq_len=8, batch_size=1)
+        return cg
 
     def test_uninvoked_sibling_wired_as_input(self):
         """Arbitrarily-named modules should work — not just 'visual'/
         'language_model' — since the fallback keys off invocation, not
-        naming."""
+        naming.
+
+        The side branch must NOT be wired straight into the main branch's
+        own boundary when the main branch's first child is a token
+        embedding lookup (nn.Embedding): that child only ever consumes
+        discrete token ids, never the side branch's continuous features,
+        so an edge landing there would look dead once the main branch is
+        expanded. It should instead be routed to the child right after
+        the embedding, where a real merge would happen.
+        """
         cg = self._build_fake_vlm(visual_name="vision_tower", lm_name="text_backbone")
         assert "" in cg, "Root call graph should exist"
         root_edges = cg[""]
@@ -993,15 +1101,78 @@ class TestMultiModalFlowDirection:
         assert (
             "vision_tower",
             "text_backbone",
-        ) in root_edges, "Uninvoked sibling should feed into the invoked one"
+        ) not in root_edges, (
+            "Should not wire straight into the embedding-guarded boundary"
+        )
         assert ("@input", "vision_tower") in root_edges
         assert ("@input", "text_backbone") in root_edges
+        assert (
+            "vision_tower",
+            "text_backbone.norm",
+        ) in cg.get("text_backbone", []), (
+            "Side branch should be routed past the embedding lookup to "
+            "the next child, where it's actually consumable"
+        )
 
     def test_glm_style_names_also_work(self):
         """Sanity check with the GLM naming convention too."""
         cg = self._build_fake_vlm(visual_name="visual", lm_name="language_model")
         assert "" in cg
-        assert ("visual", "language_model") in cg[""]
+        assert ("visual", "language_model") not in cg[""]
+        assert ("visual", "language_model.norm") in cg.get("language_model", [])
+
+    def test_side_branch_routed_to_first_layer_when_module_list(self):
+        """When the main branch's second child is a ModuleList (the usual
+        decoder-layer-stack pattern), the side branch should be routed to
+        the FIRST layer instance, not the list container itself."""
+        from TraceLens.ModelUtils.torch_trace import _capture_call_graph
+
+        class _FakeVisual(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj = torch.nn.Linear(64, 64)
+
+            def forward(self, x):
+                return self.proj(x)
+
+        class _FakeLayer(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = torch.nn.Linear(64, 64)
+
+            def forward(self, x):
+                return self.lin(x)
+
+        class _FakeLM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed_tokens = torch.nn.Embedding(256, 64)
+                self.layers = torch.nn.ModuleList([_FakeLayer(), _FakeLayer()])
+
+            def forward(self, x, inputs_embeds=None):
+                h = inputs_embeds if inputs_embeds is not None else self.embed_tokens(x)
+                for layer in self.layers:
+                    h = layer(h)
+                return h
+
+        class _FakeVLM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.visual = _FakeVisual()
+                self.language_model = _FakeLM()
+
+            def forward(self, x, pixel_values=None, **kwargs):
+                return self.language_model(x)
+
+        with torch.device("meta"):
+            model = _FakeVLM()
+        model.eval()
+        composites = {
+            n for n, m in model.named_modules() if n and any(True for _ in m.children())
+        }
+        cg, _ = _capture_call_graph(model, composites, seq_len=8, batch_size=1)
+        assert ("visual", "language_model") not in cg.get("", [])
+        assert ("visual", "language_model.layers.0") in cg.get("language_model", [])
 
     def test_no_fallback_when_all_children_invoked(self):
         """If every top-level child is actually invoked, don't guess —
@@ -1039,7 +1210,7 @@ class TestMultiModalFlowDirection:
         composites = {
             n for n, m in model.named_modules() if n and any(True for _ in m.children())
         }
-        cg = _capture_call_graph(model, composites, seq_len=8, batch_size=1)
+        cg, _ = _capture_call_graph(model, composites, seq_len=8, batch_size=1)
         # Both children were invoked, so the "single invoked child" fallback
         # condition doesn't apply and no root edges are synthesized.
         assert "" not in cg
@@ -1540,3 +1711,833 @@ class TestSingleOpLeafInlining:
         assert (
             "4" not in shape.split("bfloat16")[0].split("float32")[0]
         ), f"head's output shape should have the reduced dim (4) removed, got: {shape!r}"
+
+
+class TestPathAOpInterleaving:
+    """Regression test for a real GLM-5.3-Flash bug: a composite module
+    that mixes call_module children with inline tensor ops (like the
+    vision patch merger's ``proj -> norm -> act -> gate/up_proj ->
+    (raw silu/mul ops) -> down_proj``) gets whole-module Path-A FX-traced
+    as one flat graph. All of that graph's raw tensor ops used to be
+    emitted at the PARENT's own module_order position — i.e. before ANY
+    of its call_module children — even though some of those raw ops
+    actually run at the END of real execution (after the last child).
+    This corrupted the "last node in this namespace" sequential-wiring
+    fallback used for children with no preset edges (e.g. the first
+    child, whose only real source is the composite's own placeholder
+    input, which is deliberately left unwired at that point): the first
+    child's predecessor got wrongly resolved to the LAST raw op instead
+    of the composite's true external input, creating a dataflow cycle
+    that severed the composite from everything upstream of it.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _Merger(torch.nn.Module):
+            """Mirrors Glm5NextVisionPatchMerger's shape: proj -> (later)
+            gate_proj/up_proj (parallel) -> raw ops (silu, mul) ->
+            down_proj. No data-dependent control flow, unlike the
+            HyperConnection-like fixtures elsewhere in this file — this
+            one must whole-module Path-A FX-trace successfully as ONE
+            flat graph."""
+
+            def __init__(self):
+                super().__init__()
+                self.proj = torch.nn.Linear(8, 8)
+                self.gate_proj = torch.nn.Linear(8, 8)
+                self.up_proj = torch.nn.Linear(8, 8)
+                self.down_proj = torch.nn.Linear(8, 8)
+
+            def forward(self, x):
+                h = self.proj(x)
+                gate = self.gate_proj(h)
+                up = self.up_proj(h)
+                combined = torch.nn.functional.silu(gate) * up
+                return self.down_proj(combined)
+
+        class _Encoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Linear(8, 8)
+                self.merger = _Merger()
+
+            def forward(self, x, pixel_values=None):
+                # merger is never invoked at runtime — mirrors the real
+                # vision branch being skipped when pixel_values is
+                # omitted from the dummy trace.
+                return self.embed(x)
+
+        with torch.device("meta"):
+            model = _Encoder()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_proj_not_wired_from_its_own_downstream_ops(self, payload):
+        """merger/proj is the FIRST module called in merger's forward()
+        — its only real source should be merger's own @input, never one
+        of the raw ops that only exist because they run LATER in the
+        same forward() (e.g. ``mul``) — that would be a dataflow cycle."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        proj = by_id.get("merger/proj")
+        assert proj is not None, "merger/proj node not found"
+        sources = [e["sourceNodeId"] for e in proj.get("incomingEdges", [])]
+        assert sources == ["merger/@input"], (
+            f"merger/proj should be wired from merger/@input, got {sources} "
+            "— likely wired from a downstream raw op instead, creating a "
+            "cycle."
+        )
+
+    def test_no_cycle_in_merger(self, payload):
+        """Walking backwards from merger/@output must terminate without
+        revisiting any node."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        cur = "merger/@output"
+        seen: set[str] = set()
+        for _ in range(50):
+            seen.add(cur)
+            n = by_id.get(cur)
+            if not n:
+                break
+            inc = n.get("incomingEdges", [])
+            if not inc:
+                break
+            cur = inc[0]["sourceNodeId"]
+            assert cur not in seen, f"Cycle detected back at {cur}"
+
+
+class TestEdgeOutputIdNormalization:
+    """Regression test: the viewer looks up
+    ``sourceNode.outputsMetadata[edge.sourceNodeOutputId]`` to render a
+    tensor's shape on an edge/tooltip. Many edges throughout torch_trace
+    are built as bare ``{"sourceNodeId": ...}`` dicts (composite
+    boundary wiring, sequential fallback, fx_child_edges, etc.) without
+    a ``sourceNodeOutputId``/``targetNodeInputId`` — when missing, the
+    viewer's lookup fails and the shape renders as "?" even though the
+    source node's own outputsMetadata is well-defined."""
+
+    def test_all_incoming_edges_have_output_and_input_ids(self, simple_nodes):
+        missing = []
+        for n in simple_nodes:
+            for e in n.get("incomingEdges", []):
+                if "sourceNodeOutputId" not in e or "targetNodeInputId" not in e:
+                    missing.append((n["id"], e))
+        assert missing == [], (
+            f"{len(missing)} incoming edge(s) missing sourceNodeOutputId/"
+            f"targetNodeInputId (will render shape as '?' in the viewer): "
+            f"{missing[:5]}"
+        )
+
+
+class TestSingleChildPassthroughComposite:
+    """Regression test for a real GLM-5.3-Flash bug: a composite module
+    whose ONLY registered child fails whole-module Path-A tracing
+    entirely (e.g. Glm5NextTextHyperConnection, whose real math involves
+    a sinkhorn-iteration loop that can't be symbolically traced) ends up
+    with nothing to show except that lone child's own content —
+    wrapping it in a pointless, empty "@input"/"@output" boundary box.
+    Such composites should be rendered pass-through: no separate box, no
+    duplicate boundary — while still keeping sibling instances (e.g.
+    attn_hc vs ffn_hc, each wrapping a same-named/same-class child)
+    visually distinguishable, since the viewer groups nodes into boxes
+    keyed by the raw namespace string.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _InnerNorm(torch.nn.Module):
+            """Childless leaf — the HyperConnection-like wrapper's only
+            real submodule."""
+
+            def forward(self, x):
+                return x * 2.0 + 1.0
+
+        class _HyperConnLike(torch.nn.Module):
+            """Mirrors Glm5NextTextHyperConnection: registers exactly
+            one real submodule child (`input_norm`), but forward() has
+            a data-dependent branch (mirroring the untraceable sinkhorn
+            loop) that makes whole-module FX tracing fail — so nothing
+            of "self" gets captured besides input_norm's own content.
+            Never actually invoked (mirrors the real uninvoked branch),
+            so the branch condition never runs."""
+
+            def __init__(self):
+                super().__init__()
+                self.input_norm = _InnerNorm()
+                self.scale = torch.nn.Parameter(torch.ones(1))
+
+            def forward(self, x, cu_seqlens):
+                if cu_seqlens.sum() > 0:
+                    pass
+                return self.input_norm(x) * self.scale
+
+        class _DecoderLayer(torch.nn.Module):
+            """Two sibling HyperConnection-like wrappers, each with an
+            identically-named/-classed `input_norm` child — the exact
+            pattern that risks a namespace collision if both get
+            inlined naively."""
+
+            def __init__(self):
+                super().__init__()
+                self.attn_hc = _HyperConnLike()
+                self.ffn_hc = _HyperConnLike()
+
+            def forward(self, x, cu_seqlens):
+                a = self.attn_hc(x, cu_seqlens)
+                return self.ffn_hc(a, cu_seqlens)
+
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layer = _DecoderLayer()
+
+            def forward(self, x, cu_seqlens=None, **kwargs):
+                # layer is never invoked — mirrors the real branch being
+                # skipped (uninvoked) in the dummy trace.
+                return x
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_no_wrapper_boundary_nodes(self, payload):
+        """No layer/attn_hc/@input, layer/attn_hc/@output, layer/ffn_hc/
+        @input, or layer/ffn_hc/@output — those would wrap a single
+        child with no real computation of the composite's own."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        ids = {n["id"] for n in nodes}
+        for hc in ("attn_hc", "ffn_hc"):
+            assert f"layer/{hc}/@input" not in ids
+            assert f"layer/{hc}/@output" not in ids
+
+    def test_sibling_namespaces_stay_distinct(self, payload):
+        """attn_hc/input_norm and ffn_hc/input_norm must NOT share a
+        namespace string, or the viewer would merge them into one
+        visual box."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        attn_ns = {
+            n["namespace"]
+            for n in nodes
+            if n["id"].startswith("layer/attn_hc/input_norm")
+        }
+        ffn_ns = {
+            n["namespace"]
+            for n in nodes
+            if n["id"].startswith("layer/ffn_hc/input_norm")
+        }
+        assert attn_ns, "no layer/attn_hc/input_norm nodes found"
+        assert ffn_ns, "no layer/ffn_hc/input_norm nodes found"
+        assert attn_ns.isdisjoint(ffn_ns), (
+            "attn_hc/input_norm and ffn_hc/input_norm share a namespace "
+            f"— they'd be merged into one box in the viewer: "
+            f"{attn_ns & ffn_ns}"
+        )
+
+
+class TestAttentionKernelGapRealOutput:
+    """Regression test for a real GLM-5.3-Flash bug: inside self_attn,
+    Q and K/V are produced by separate Linear projections
+    (q_b_proj / kv_b_proj), but the actual attention math combining
+    them (``attention_interface(...)``, e.g. eager/SDPA attention) is a
+    raw *function* call, not an nn.Module — invisible to both FX
+    tracing (whole-module Path-A fails here due to data-dependent
+    control flow, like the real module's indexer/cache branching) and
+    hook-based call-graph capture. This left q_b_proj's and kv_b_proj's
+    outputs as untracked dead-ends alongside the genuine o_proj output,
+    so ALL THREE got dumped into self_attn's @output — as if self_attn
+    returned three tensors — even though only o_proj's shape/value is
+    the real output.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _AttnLike(torch.nn.Module):
+            """Mirrors Glm5NextTextAttention's shape: q_proj and kv_proj
+            both consume the composite's own input directly (parallel,
+            untracked-@input siblings); the attention math itself is a
+            raw op producing a brand-new tensor unrelated (by identity)
+            to either projection's output, mirroring the un-hooked
+            ``attention_interface(...)`` call; o_proj consumes that new
+            tensor and its output IS the composite's real return
+            value."""
+
+            def __init__(self):
+                super().__init__()
+                self.q_proj = torch.nn.Linear(8, 8)
+                self.kv_proj = torch.nn.Linear(8, 8)
+                self.o_proj = torch.nn.Linear(8, 8)
+
+            def forward(self, x):
+                for _ in x:  # unsupported by FX tracing (Proxy can't be
+                    break  # iterated) but fine at real eager runtime —
+                    # forces whole-module Path-A tracing to fail without
+                    # crashing the meta-device forward pass used for
+                    # call-graph capture.
+                q = self.q_proj(x)
+                kv = self.kv_proj(x)
+                attn_out = torch.ones_like(x)  # stand-in for the
+                # un-hooked attention kernel; identity unrelated to q/kv
+                return self.o_proj(attn_out)
+
+        class _Model(torch.nn.Module):
+            # Needs a real embedding so the dummy token-id input (a
+            # LongTensor) becomes a proper float feature tensor before
+            # reaching self_attn's Linear layers — otherwise the runtime
+            # forward pass used for call-graph capture raises (silently
+            # swallowed), leaving no edges captured at all for self_attn
+            # and defeating the point of this regression test.
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(16, 8)
+                self.self_attn = _AttnLike()
+
+            def forward(self, input_ids, **kwargs):
+                return self.self_attn(self.embed(input_ids))
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_output_sourced_only_from_o_proj(self, payload):
+        """self_attn/@output must be wired from o_proj alone — not also
+        from q_proj/kv_proj, whose outputs are consumed by the (unseen)
+        attention kernel, not by @output."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        output = by_id.get("self_attn/@output")
+        assert output is not None, "self_attn/@output node not found"
+        sources = [e["sourceNodeId"] for e in output.get("incomingEdges", [])]
+        assert sources == ["self_attn/o_proj"], (
+            f"self_attn/@output should be sourced only from self_attn/o_proj, "
+            f"got {sources} — q_proj/kv_proj dead-ends should not leak into "
+            "the composite's output."
+        )
+
+
+class TestNoDistinctNormColor:
+    """Regression test for a real GLM-5.3-Flash bug: a built-in
+    ``nn.LayerNorm`` leaf (e.g. the indexer's ``k_norm``) rendered as an
+    atomic box styled with a unique "norm" category color (khaki),
+    while every OTHER norm in the graph is a custom RMSNorm subclass
+    that gets FX-expanded into its raw ops (styled the same neutral
+    gray as any other primitive op). This made the plain nn.LayerNorm
+    stand out as if it were structurally different, when it isn't. No
+    node should ever use that distinct color — every leaf module that
+    isn't specifically categorized (embedding/linear/attention/
+    activation) should render with the same neutral default style."""
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(16, 8)
+                self.k_norm = torch.nn.LayerNorm(8)
+                self.lin = torch.nn.Linear(8, 8)
+
+            def forward(self, input_ids, **kwargs):
+                return self.lin(self.k_norm(self.embed(input_ids)))
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_layernorm_uses_default_style_not_a_unique_color(self, payload):
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        k_norm = by_id.get("k_norm")
+        lin = by_id.get("lin")
+        assert k_norm is not None, "k_norm node not found"
+        assert lin is not None, "lin node not found"
+        assert k_norm["style"] == lin["style"], (
+            "nn.LayerNorm should render with the same neutral style as "
+            f"other uncategorized leaf modules, got {k_norm['style']} vs "
+            f"Linear's {lin['style']}"
+        )
+
+    def test_no_node_uses_the_retired_norm_color(self, payload):
+        """No node anywhere should use the old khaki "norm" color
+        (#f0e68c) — it should be fully unreachable now."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        for n in nodes:
+            style = n.get("style") or {}
+            assert (
+                style.get("backgroundColor") != "#f0e68c"
+            ), f"Node {n['id']} uses the retired norm color"
+
+
+class TestParallelSiblingsShareUntrackedInput:
+    """Regression test for a real GLM-5.3-Flash bug: inside
+    Glm5NextTextLinearAttention, q_proj/k_proj/v_proj (and other
+    siblings) are all called directly on the SAME masked hidden_states
+    produced by an un-hooked helper (``apply_mask_to_padding_states``),
+    which returns a brand-new tensor when a mask is present — breaking
+    tensor-identity tracking back to the composite's real "@input".
+    Because the sequential fallback used to run BEFORE the "siblings
+    sharing an untracked input are parallel" rule, it unconditionally
+    chained these into a bogus straight line (q_proj → k_proj → v_proj)
+    before the parallel rule ever got a chance to apply, making three
+    independent parallel projections look like a serial pipeline.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _Attn(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.q_proj = torch.nn.Linear(8, 8)
+                self.k_proj = torch.nn.Linear(8, 8)
+                self.v_proj = torch.nn.Linear(8, 8)
+
+            def forward(self, x, mask):
+                for _ in x:  # unsupported by FX tracing (Proxy can't be
+                    break  # iterated) but fine at real eager runtime —
+                    # forces whole-module Path-A tracing to fail, so this
+                    # falls through to the call-graph-driven fallback
+                    # wiring instead of FX's (correct) ground truth.
+                # Mirrors apply_mask_to_padding_states: multiplying by a
+                # mask produces a brand-new tensor (untracked identity),
+                # consumed in parallel by three sibling projections.
+                masked = x * mask
+                q = self.q_proj(masked)
+                k = self.k_proj(masked)
+                v = self.v_proj(masked)
+                return torch.cat([q, k, v], dim=-1)
+
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(16, 8)
+                self.attn = _Attn()
+
+            def forward(self, input_ids, **kwargs):
+                x = self.embed(input_ids)
+                mask = torch.ones_like(x)
+                return self.attn(x, mask)
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_siblings_all_wired_from_input_not_chained(self, payload):
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        for name in ("q_proj", "k_proj", "v_proj"):
+            node = by_id.get(f"attn/{name}")
+            assert node is not None, f"attn/{name} node not found"
+            sources = [e["sourceNodeId"] for e in node.get("incomingEdges", [])]
+            assert sources == ["attn/@input"], (
+                f"attn/{name} should be wired directly from attn/@input "
+                f"(parallel sibling), got {sources} — looks chained from "
+                "another sibling instead."
+            )
+
+
+class TestDeadLeafInLiveParent:
+    """Regression test for a real GLM-5.3-Flash bug: a leaf module that
+    is registered as a submodule but never actually invoked (its
+    .weight/.bias are read directly by a raw, un-hooked kernel function
+    instead of calling ``self.mod(x)`` — e.g. KDA linear attention's
+    conv1d, whose weights feed a raw ``causal_conv1d_fn(...)`` call)
+    used to still get a speculative "@input" edge from the generic
+    positional-fallback wiring pass, even though no real tensor ever
+    flows into (or out of) it. A half-wire (input but no consumer)
+    looks like a broken/dead computation step. Such leaves should
+    render as standalone info boxes instead — no incoming edges at all
+    — since they aren't really part of the traced dataflow.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _WithDeadConv(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj = torch.nn.Linear(8, 8)
+                # Registered but never called anywhere in forward() —
+                # mirrors reading conv1d.weight/.bias directly instead of
+                # calling self.conv1d(x).
+                self.conv1d = torch.nn.Conv1d(8, 8, kernel_size=3, padding=2)
+
+            def forward(self, x):
+                return self.proj(x)
+
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(16, 8)
+                self.blk = _WithDeadConv()
+
+            def forward(self, input_ids, **kwargs):
+                return self.blk(self.embed(input_ids))
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_never_invoked_leaf_has_no_incoming_edges(self, payload):
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        conv1d = by_id.get("blk/conv1d")
+        assert conv1d is not None, "blk/conv1d node not found"
+        assert conv1d.get("incomingEdges") == [], (
+            "conv1d was never invoked, so it should have no incoming "
+            f"edges (standalone info box), got {conv1d.get('incomingEdges')}"
+        )
+
+    def test_never_invoked_leaf_still_has_shape_metadata(self, payload):
+        """It should still render with a weight-inferred shape, just
+        without pretending it's wired into the dataflow."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        conv1d = by_id.get("blk/conv1d")
+        assert conv1d is not None
+        assert conv1d.get("outputsMetadata"), "conv1d should still have shape metadata"
+
+
+class TestSingleChildPassthroughShapeMismatchBlocked:
+    """Regression test for a real GLM-5.3-Flash bug: a single-child
+    composite whose FX trace fails does NOT always deserve the
+    pass-through treatment from `TestSingleChildPassthroughComposite`
+    above. That's only correct for a genuine trivial wrapper, where the
+    child's own captured shapes match the composite's own exactly.
+
+    Glm5NextTextHyperConnection registers exactly one real submodule
+    (`input_norm`), but only feeds it a *flattened* side-branch used to
+    derive gating weights — the composite's actual returned hidden
+    state is a differently-shaped reduction of the *original*
+    (unflattened) input, computed via untraceable math that never
+    touches `input_norm`'s output. Naively inlining `input_norm` made
+    it look like the composite's real output IS input_norm's output,
+    silently propagating the WRONG (flattened) shape downstream —
+    creating the appearance of two norm-like ops in a row with a bogus
+    shape change between them, when really there's a whole (untraced)
+    computation in between.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _InnerNorm(torch.nn.Module):
+            """Leaf child used only on a flattened side-branch to derive
+            gating weights — its own shape is NOT the composite's real
+            output shape."""
+
+            def forward(self, x):
+                return x * 2.0
+
+        class _HyperConnLike(torch.nn.Module):
+            """Mirrors Glm5NextTextHyperConnection: registers exactly one
+            real submodule child (`input_norm`), but the child only ever
+            sees a *flattened* view of the input, while the composite's
+            actual returned value is a differently-shaped reduction of
+            the *original*, unflattened input — computed via math the
+            child's output is never used in."""
+
+            def __init__(self):
+                super().__init__()
+                self.input_norm = _InnerNorm()
+
+            def forward(self, x):
+                for _ in x:  # unsupported by FX tracing (Proxy can't be
+                    break  # iterated) but fine at real eager runtime —
+                    # forces whole-module Path-A tracing to fail, so this
+                    # falls through to the call-graph-driven fallback.
+                flat = self.input_norm(x.flatten(start_dim=2))  # (B, S, H*D)
+                # Real output never touches `flat` — different shape,
+                # different (unnormalized) source tensor.
+                return x.sum(dim=2)  # (B, S, D), collapsing the H axis
+
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(16, 8)
+                self.hc = _HyperConnLike()
+                self.next_layer = torch.nn.Linear(4, 4)
+
+            def forward(self, input_ids, **kwargs):
+                x = self.embed(input_ids)  # (B, S, 8)
+                streams = x.view(*x.shape[:-1], 2, 4)  # (B, S, H=2, D=4)
+                h = self.hc(streams)  # (B, S, 4) — NOT (B, S, 8)
+                return self.next_layer(h)
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_hc_gets_own_boundary_not_inlined(self, payload):
+        """Since input_norm's shape doesn't match hc's real output
+        shape, hc must NOT be collapsed into a pass-through — it needs
+        its own @input/@output boundary box."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        ids = {n["id"] for n in nodes}
+        assert "hc/@input" in ids, "hc should get its own @input boundary"
+        assert "hc/@output" in ids, "hc should get its own @output boundary"
+
+    def test_downstream_consumer_shape_matches_hc_output_shape(self, payload):
+        """next_layer must see the SAME shape that hc's own @output
+        declares — not input_norm's (flattened, mismatched) shape."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+
+        def _shape(node_id):
+            n = by_id.get(node_id)
+            assert n is not None, f"{node_id} node not found"
+            meta = n.get("outputsMetadata")
+            assert meta, f"{node_id} is missing outputsMetadata"
+            return next(
+                a["value"] for a in meta[0]["attrs"] if a["key"] == "shape"
+            )
+
+        hc_out_shape = _shape("hc/@output")
+        next_layer = by_id.get("next_layer")
+        assert next_layer is not None, "next_layer node not found"
+        sources = [e["sourceNodeId"] for e in next_layer.get("incomingEdges", [])]
+        assert sources == ["hc/@output"], (
+            f"next_layer should be wired directly from hc/@output, got {sources}"
+        )
+        # The declared output shape must reflect the real (D=4) reduction,
+        # not input_norm's flattened (H*D=8) shape.
+        assert "4 " in hc_out_shape or hc_out_shape.endswith("4"), (
+            f"hc/@output shape should reflect the real D=4 output, got {hc_out_shape!r}"
+        )
+        assert "8" not in hc_out_shape, (
+            f"hc/@output shape should NOT be input_norm's flattened (H*D=8) "
+            f"shape, got {hc_out_shape!r}"
+        )
+
+
+class TestNestedGateWiredFromCompositeEntryNotSibling:
+    """Regression test for a real GLM-5.3-Flash bug: inside
+    Glm5NextTextLinearAttention, ``forget_gate`` is a NESTED composite
+    (its own children ``f_a_proj``/``f_b_proj``) that receives
+    ``self_attn``'s own input directly — in parallel with sibling
+    projections like ``v_proj``, not sequentially after them. But
+    ``forget_gate``'s own call-graph edge is just ``("@input",
+    "forget_gate")`` (relative to ``self_attn``), which
+    ``_cg_predecessor`` deliberately skips (it only tracks *real*
+    sibling predecessors, not generic "@input" edges) — so resolving
+    forget_gate's entry point requires recursing up to self_attn's own
+    (real) predecessor.
+
+    The bug: `_record_composite_entry` used to run BEFORE
+    `_cg_find_sources` for a given node, using the naive *sequential*
+    guess (whatever ran immediately before it — a sibling like
+    ``v_proj``, purely by chance of node-list order) as that node's
+    ancestors' recorded "entry point" — including ``forget_gate``
+    itself. Since this happened for forget_gate's OWN first inner node
+    (``f_a_proj``), it poisoned ``composite_entry["...forget_gate"]``
+    with the wrong sibling-based guess *before* the call-graph-aware
+    resolution for that exact same node ever got to look it up —
+    silently overriding the correct recursive resolution with a bogus
+    "wired from an unrelated sibling" edge.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _Gate(torch.nn.Module):
+            """Mirrors Glm5NextTextForgetGate: a nested composite with
+            its own two children, called directly on the parent's own
+            input (not on a sibling's output)."""
+
+            def __init__(self):
+                super().__init__()
+                self.f_a_proj = torch.nn.Linear(8, 8)
+                self.f_b_proj = torch.nn.Linear(8, 8)
+
+            def forward(self, x):
+                return self.f_b_proj(self.f_a_proj(x))
+
+        class _SelfAttnLike(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.v_proj = torch.nn.Linear(8, 8)
+                self.gate = _Gate()
+
+            def forward(self, x):
+                for _ in x:  # unsupported by FX tracing (Proxy can't be
+                    break  # iterated) but fine at real eager runtime —
+                    # forces whole-module Path-A tracing to fail, so this
+                    # falls through to the call-graph-driven fallback
+                    # wiring instead of FX's (correct) ground truth.
+                v = self.v_proj(x)
+                g = self.gate(x)  # SAME x as v_proj — parallel, not
+                # sequential — mirrors `g = self.forget_gate(hidden_states)`
+                # running after `v = self.v_proj(hidden_states)` but on
+                # the identical tensor, not on v_proj's output.
+                return v + g
+
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(16, 8)
+                self.norm = torch.nn.LayerNorm(8)
+                self.self_attn = _SelfAttnLike()
+
+            def forward(self, input_ids, **kwargs):
+                return self.self_attn(self.norm(self.embed(input_ids)))
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_gate_input_wired_from_composite_entry_not_sibling(self, payload):
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        # `gate` gets its own synthetic @input/@output boundary (it has
+        # >= 2 real children), so the edge of interest is on THAT
+        # boundary node — it must resolve back to self_attn's own
+        # shared entry point, not to the sibling v_proj.
+        gate_input_boundary = by_id.get("self_attn/gate/@input")
+        assert gate_input_boundary is not None, "self_attn/gate/@input node not found"
+        sources = [
+            e["sourceNodeId"] for e in gate_input_boundary.get("incomingEdges", [])
+        ]
+        assert sources == ["self_attn/@input"], (
+            "self_attn/gate/@input should be wired directly from "
+            f"self_attn/@input (its real, shared predecessor), got {sources} "
+            "— looks like it was wired from an unrelated sibling instead."
+        )
+
+    def test_sibling_v_proj_also_wired_from_composite_entry(self, payload):
+        """Sanity check: v_proj (the sibling whose wrong guess used to
+        leak into gate's resolution) must itself still resolve
+        correctly too."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        v_proj = by_id.get("self_attn/v_proj")
+        assert v_proj is not None, "self_attn/v_proj node not found"
+        sources = [e["sourceNodeId"] for e in v_proj.get("incomingEdges", [])]
+        assert sources == ["self_attn/@input"], (
+            f"self_attn/v_proj should be wired from self_attn/@input, got {sources}"
+        )
+
+
+class TestForkPredecessorNotClobberedByAncestorInput:
+    """Regression test for a real GLM-5.3-Flash bug: when a side-modality
+    branch (e.g. a vision encoder, skipped because its optional input was
+    omitted) merges into a Fork node for an interleaved layer-type stack,
+    the Fork's correctly-resolved predecessor used to get silently
+    overwritten by the *generic* ancestor's own "@input" boundary.
+
+    Root cause: composite boundary creation (which builds each module's
+    own synthetic "@input"/"@output" nodes) treats ANY child node whose
+    incoming edge source lives outside the ancestor's own subtree as a
+    generic "input child" needing rewiring to the ancestor's own
+    "@input" — but a Fork node is namespaced INSIDE the ancestor even
+    though it represents the entry to a NESTED layer-stack container,
+    and its predecessor was already carefully resolved straight from the
+    real call graph. Treating it like any other "input child" collapsed
+    that specific, real source into the ancestor's own generic "@input",
+    destroying the distinction between "the model's own primary input"
+    and "a side branch merging in partway through" — and also left the
+    token-embedding path (the model's OTHER real predecessor) as a
+    disconnected dead end with no consumer at all.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _Vision(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj = torch.nn.Linear(64, 64)
+
+            def forward(self, x):
+                return self.proj(x)
+
+        class _TypeA(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.norm = torch.nn.LayerNorm(64)
+
+            def forward(self, x):
+                return self.norm(x)
+
+        class _TypeB(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.gate = torch.nn.Linear(64, 64)
+
+            def forward(self, x):
+                return self.gate(x)
+
+        class _TextModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed_tokens = torch.nn.Embedding(256, 64)
+                self.layers = torch.nn.ModuleList(
+                    [_TypeA(), _TypeB(), _TypeA(), _TypeB()]
+                )
+                self.norm = torch.nn.LayerNorm(64)
+
+            def forward(self, x, inputs_embeds=None):
+                h = inputs_embeds if inputs_embeds is not None else self.embed_tokens(x)
+                for layer in self.layers:
+                    h = layer(h)
+                return self.norm(h)
+
+        class _VLM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.visual = _Vision()
+                self.language_model = _TextModel()
+
+            def forward(self, x, pixel_values=None, **kwargs):
+                return self.language_model(x)
+
+        with torch.device("meta"):
+            model = _VLM()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_fork_predecessor_is_visual_not_generic_input(self, payload):
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        fork = by_id.get("language_model/layers/@fork")
+        assert fork is not None, "language_model/layers/@fork node not found"
+        sources = {e["sourceNodeId"] for e in fork.get("incomingEdges", [])}
+        assert "visual/@output" in sources, (
+            "Fork's predecessor should include visual/@output (the real, "
+            f"resolved side-branch source), got {sources}"
+        )
+
+    def test_embed_tokens_also_feeds_fork_and_has_a_consumer(self, payload):
+        """The token-embedding path must ALSO be visible as a parallel
+        predecessor of the Fork — not left disconnected just because the
+        side branch's edge claims the merge point first."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        fork = by_id.get("language_model/layers/@fork")
+        assert fork is not None
+        sources = {e["sourceNodeId"] for e in fork.get("incomingEdges", [])}
+        assert "language_model/embed_tokens" in sources, (
+            f"Fork should also be wired from language_model/embed_tokens, got {sources}"
+        )
+        consumers = [
+            n["id"]
+            for n in nodes
+            for e in n.get("incomingEdges", [])
+            if e["sourceNodeId"] == "language_model/embed_tokens"
+        ]
+        assert consumers, "language_model/embed_tokens has no consumers — dead end"
+
+    def test_language_model_own_input_is_clean(self, payload):
+        """language_model's own @input boundary should carry only the
+        model's real primary (token id) input — not also get polluted
+        with the side-branch's edge that actually belongs to the nested
+        Fork merge point."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        lm_input = by_id.get("language_model/@input")
+        assert lm_input is not None, "language_model/@input node not found"
+        sources = [e["sourceNodeId"] for e in lm_input.get("incomingEdges", [])]
+        assert "visual/@output" not in sources, (
+            "language_model/@input should not carry the visual side-branch "
+            f"edge (that belongs on the nested Fork instead), got {sources}"
+        )

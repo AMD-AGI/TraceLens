@@ -23,6 +23,7 @@ import sys
 import types
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +47,6 @@ _STYLE_FORK = {"backgroundColor": "#a29bfe", "textColor": _WHITE_TEXT}
 _STYLE_JOIN = {"backgroundColor": "#a29bfe", "textColor": _WHITE_TEXT}
 _STYLE_EMBEDDING = {"backgroundColor": "#27ae60", "textColor": _WHITE_TEXT}
 _STYLE_LINEAR = {"backgroundColor": "#bdc3c7", "textColor": _DARK_TEXT}
-_STYLE_NORM = {"backgroundColor": "#f0e68c", "textColor": _DARK_TEXT}
 _STYLE_ATTENTION = {"backgroundColor": "#5dade2", "textColor": _WHITE_TEXT}
 _STYLE_ACTIVATION = {"backgroundColor": "#e67e22", "textColor": _WHITE_TEXT}
 _STYLE_DEFAULT = {"backgroundColor": "#bdc3c7", "textColor": _DARK_TEXT}
@@ -192,13 +192,21 @@ def _capture_shapes(
     *,
     seq_len: int = 128,
     batch_size: int = 1,
-) -> tuple[dict[str, tuple[int, ...]], dict[str, tuple[int, ...]]]:
+) -> tuple[dict[str, tuple[int, ...]], dict[str, tuple[int, ...]], dict[str, list[tuple[int, ...]]]]:
     """Run a meta-device forward pass and capture per-module I/O shapes.
 
-    Returns (output_shapes, input_shapes) dicts keyed by module path.
+    Returns (output_shapes, input_shapes, all_output_shapes) dicts keyed by
+    module path. ``all_output_shapes`` additionally lists EVERY tensor shape
+    found in a tuple/list return value (not just the first) — needed to
+    disambiguate composites like a HyperConnection wrapper that return
+    several tensors of genuinely different shapes (e.g. gating weights
+    alongside the actual hidden-state that continues downstream), where
+    naively picking "the first tensor" as *the* output shape can pick the
+    wrong element.
     """
     shapes: dict[str, tuple[int, ...]] = {}
     input_shapes: dict[str, tuple[int, ...]] = {}
+    all_output_shapes: dict[str, list[tuple[int, ...]]] = {}
 
     def _make_hook(name: str):
         def hook(_mod, inp, output):
@@ -215,11 +223,15 @@ def _capture_shapes(
                 # Capture first tensor from output
                 if isinstance(output, torch.Tensor):
                     shapes[name] = tuple(output.shape)
+                    all_output_shapes[name] = [tuple(output.shape)]
                 elif isinstance(output, (tuple, list)):
+                    found: list[tuple[int, ...]] = []
                     for item in output:
                         if isinstance(item, torch.Tensor):
-                            shapes[name] = tuple(item.shape)
-                            break
+                            found.append(tuple(item.shape))
+                    if found:
+                        shapes[name] = found[0]
+                        all_output_shapes[name] = found
             except Exception:
                 pass
 
@@ -250,7 +262,7 @@ def _capture_shapes(
         for h in handles:
             h.remove()
 
-    return shapes, input_shapes
+    return shapes, input_shapes, all_output_shapes
 
 
 def _infer_shapes_from_weights(
@@ -320,19 +332,35 @@ def _infer_input_shapes_from_weights(
 # ── Call-graph capture via forward hooks ─────────────────────────────────────
 
 
-def _tensor_ids(x: Any) -> list[int]:
-    """Extract Python id()s of all tensors in a nested structure."""
+def _tensor_ids(x: Any, keepalive: list[torch.Tensor] | None = None) -> list[int]:
+    """Extract Python id()s of all tensors in a nested structure.
+
+    ``id()`` is only a valid identity key for as long as the object is
+    alive — CPython aggressively reuses the memory address (and hence
+    the same ``id()``) of a garbage-collected object for the very next
+    allocation. A deep model's forward pass creates and immediately
+    drops a huge number of intermediate tensors (e.g. args to a
+    function call that aren't stored anywhere else), so without holding
+    a reference open, a *later, completely unrelated* tensor can easily
+    get assigned the exact same ``id()`` as an earlier one — silently
+    corrupting the call-graph's tensor-identity tracking with bogus
+    "matches". Pass ``keepalive`` (a list held open for the whole trace)
+    to pin every tensor we record an id for, so ids stay unique for the
+    duration of the capture.
+    """
     if isinstance(x, torch.Tensor):
+        if keepalive is not None:
+            keepalive.append(x)
         return [id(x)]
     if isinstance(x, (tuple, list)):
         ids = []
         for item in x:
-            ids.extend(_tensor_ids(item))
+            ids.extend(_tensor_ids(item, keepalive))
         return ids
     if isinstance(x, dict):
         ids = []
         for v in x.values():
-            ids.extend(_tensor_ids(v))
+            ids.extend(_tensor_ids(v, keepalive))
         return ids
     return []
 
@@ -343,12 +371,19 @@ def _capture_call_graph(
     *,
     seq_len: int = 128,
     batch_size: int = 1,
-) -> dict[str, list[tuple[str, str]]]:
+) -> tuple[dict[str, list[tuple[str, str]]], dict[str, set[str]]]:
     """Capture dataflow edges between child modules of each composite.
 
     Runs a forward pass, tracking which tensor objects flow between
     children of each composite module. Returns a dict mapping composite
-    module path → list of (source_child, target_child) edges.
+    module path → list of (source_child, target_child) edges, plus a
+    second dict mapping composite path → set of child paths whose
+    output tensor is literally part of the composite's own returned
+    output (ground truth, used to disambiguate the *real* output child
+    when a composite has multiple call-graph "terminals" — e.g. when a
+    raw function call, such as an attention kernel, isn't captured by
+    module hooks and leaves some children's outputs as untracked
+    dead-ends alongside the genuine output).
 
     Children that receive the composite's own input (not a sibling's
     output) are marked as receiving from a virtual "@input" source.
@@ -359,11 +394,19 @@ def _capture_call_graph(
     pre_inputs: dict[str, list[tuple[int, list[int]]]] = defaultdict(list)
     post_outputs: dict[str, list[tuple[int, list[int]]]] = defaultdict(list)
     counter = [0]
+    # Keep every tensor we ever id() alive for the whole trace — see
+    # `_tensor_ids`'s docstring for why this matters (id() reuse after
+    # garbage collection would otherwise silently create bogus identity
+    # matches between unrelated tensors in a deep model).
+    _keepalive: list[torch.Tensor] = []
 
     def _pre_hook(name: str):
         def hook(_mod, args, kwargs):
             pre_inputs[name].append(
-                (counter[0], _tensor_ids(args) + _tensor_ids(kwargs))
+                (
+                    counter[0],
+                    _tensor_ids(args, _keepalive) + _tensor_ids(kwargs, _keepalive),
+                )
             )
             counter[0] += 1
 
@@ -371,7 +414,7 @@ def _capture_call_graph(
 
     def _post_hook(name: str):
         def hook(_mod, _inp, output):
-            post_outputs[name].append((counter[0], _tensor_ids(output)))
+            post_outputs[name].append((counter[0], _tensor_ids(output, _keepalive)))
             counter[0] += 1
 
         return hook
@@ -420,6 +463,7 @@ def _capture_call_graph(
             _container_paths.add(name)
 
     edges: dict[str, list[tuple[str, str]]] = {}
+    real_output_children: dict[str, set[str]] = {}
     for comp_path in composite_modules:
         # Collect direct children (promoting ModuleList/Dict items)
         children: set[str] = set()
@@ -437,6 +481,26 @@ def _capture_call_graph(
 
         if len(children) < 2:
             continue
+
+        # Ground truth: which child (if any) produced a tensor that is
+        # literally part of this composite's own returned output.  Used
+        # later to pick the *real* output child when multiple children
+        # end up as untracked dead-ends (e.g. an attention kernel that
+        # consumes Q/K/V via a raw function call we can't hook, leaving
+        # the Q/K/V-producing linears as spurious dead-ends alongside
+        # the genuine output projection).
+        comp_output_tids = {
+            tid for _, tids in post_outputs.get(comp_path, []) for tid in tids
+        }
+        if comp_output_tids:
+            matches = {
+                child
+                for child in children
+                if comp_output_tids
+                & {tid for _, tids in post_outputs.get(child, []) for tid in tids}
+            }
+            if matches:
+                real_output_children[comp_path] = matches
 
         # Build a timeline of all calls (pre + post) for direct children
         # Each event: (call_index, "pre"/"post", child_name, tensor_ids)
@@ -475,14 +539,30 @@ def _capture_call_graph(
                 for tid in tids:
                     producer[tid] = child
 
+        # Children sharing the same untracked input tensor are parallel
+        # (e.g. q_proj/k_proj/v_proj all consuming the same masked
+        # hidden_states produced by an un-hooked helper function like
+        # apply_mask_to_padding_states — a genuinely shared, untracked
+        # tensor).  Treat them as all coming from "@input".  Must run
+        # BEFORE the sequential fallback below: sequential fallback
+        # unconditionally chains every still-unconnected child from
+        # whichever child ran immediately before it, so if it ran first
+        # it would serialize these parallel siblings into a bogus chain
+        # (proj_a → proj_b → proj_c) before this rule ever got a chance
+        # to recognize them as parallel.
+        children_with_edges = {tgt for _, tgt in child_edges}
+        for _tid, consumers in untracked_consumers.items():
+            if len(consumers) > 1:
+                for child in consumers:
+                    if child not in children_with_edges:
+                        child_edges.append(("@input", child))
+                        children_with_edges.add(child)
+
         # Sequential fallback: children with no incoming edges are
         # connected from the previous child in execution order.  The
         # very first child gets "@input".  This handles inline tensor ops
         # (e.g. residual combinations) and meta-device forward passes
         # where tensor-ID tracking produces no overlap.
-        #
-        # Run BEFORE untracked_consumers so sequential chaining takes
-        # priority over spurious @input edges from shared tensor IDs.
         children_ordered = sorted(
             children,
             key=lambda c: (
@@ -500,16 +580,6 @@ def _capture_call_graph(
                 children_with_edges.add(child)
             # Update last_child to the most recently completed child
             last_child = child
-
-        # Children sharing the same untracked input tensor are parallel.
-        # Treat them as all coming from "@input" (only if still unconnected).
-        children_with_edges = {tgt for _, tgt in child_edges}
-        for _tid, consumers in untracked_consumers.items():
-            if len(consumers) > 1:
-                for child in consumers:
-                    if child not in children_with_edges:
-                        child_edges.append(("@input", child))
-                        children_with_edges.add(child)
 
         if child_edges:
             # Deduplicate
@@ -549,6 +619,39 @@ def _capture_call_graph(
         not_invoked = [n for n in top_children if n not in invoked]
         if len(invoked) == 1 and not_invoked:
             main = invoked[0]
+            # Determine where the side branch's output actually gets
+            # consumed inside `main`. Naively wiring it straight to
+            # `main`'s own boundary is wrong when `main`'s first child is
+            # a token embedding lookup (nn.Embedding): that child only
+            # accepts discrete token ids, never a side branch's continuous
+            # features, so the edge would land on a node that can't (and
+            # doesn't) consume it — appearing dead when `main` is expanded.
+            # This mirrors the common VLM pattern (embed tokens, then
+            # splice in modality features, then run the layer stack): route
+            # the side branch to the first layer instead, right where the
+            # merged embeddings actually enter computation.
+            merge_target = main
+            embed_path: str | None = None
+            try:
+                main_children = list(dict(model.named_modules())[main].named_children())
+            except (KeyError, AttributeError):
+                main_children = []
+            if len(main_children) > 1 and isinstance(
+                main_children[0][1], torch.nn.Embedding
+            ):
+                # Remember the token-embedding child so we can wire it as
+                # a parallel predecessor of `merge_target` too (below):
+                # real dataflow is text embeddings AND modality features
+                # both feeding the merge, not just the modality branch —
+                # otherwise the embedding lookup renders as a dead end
+                # with no consumer.
+                embed_path = f"{main}.{main_children[0][0]}"
+                second_name, second_mod = main_children[1]
+                if isinstance(second_mod, torch.nn.ModuleList) and len(second_mod) > 0:
+                    merge_target = f"{main}.{second_name}.0"
+                else:
+                    merge_target = f"{main}.{second_name}"
+
             # List the uninvoked side-branch(es) before the main branch so
             # the exec-order topological sort (which processes "@input"
             # targets in list order) places them first — they feed INTO
@@ -556,11 +659,25 @@ def _capture_call_graph(
             root_edges = []
             for side in not_invoked:
                 root_edges.append(("@input", side))
-                root_edges.append((side, main))
+                if merge_target == main:
+                    root_edges.append((side, main))
+                else:
+                    # Wire directly into `main`'s internal entry child
+                    # rather than `main`'s own boundary, so the merge is
+                    # visible when `main` is expanded.
+                    edges.setdefault(main, []).append((side, merge_target))
+                    if embed_path is not None:
+                        # Also show the token-embedding path converging
+                        # at the same merge point, so it isn't left as a
+                        # disconnected dead end once the side branch's
+                        # edge claims `merge_target` as "input from
+                        # @fork/predecessor". Both are genuinely parallel
+                        # sources of the merged embeddings.
+                        edges.setdefault(main, []).append((embed_path, merge_target))
             root_edges.append(("@input", main))
             edges[""] = root_edges
 
-    return edges
+    return edges, real_output_children
 
 
 def _symbolise(
@@ -731,10 +848,15 @@ def _classify_module(mod: torch.nn.Module) -> str:
 
 
 def _style_for(category: str) -> dict[str, str]:
+    # "norm" is intentionally absent: every norm in practice is either a
+    # custom RMSNorm subclass (FX-expanded into its raw ops, each styled
+    # via _STYLE_OP) or a built-in nn.LayerNorm leaf that falls through
+    # to _STYLE_DEFAULT below — giving it its own distinct color would
+    # make it stand out as if it were structurally different from every
+    # other norm in the graph, when it isn't.
     return {
         "embedding": _STYLE_EMBEDDING,
         "linear": _STYLE_LINEAR,
-        "norm": _STYLE_NORM,
         "attention": _STYLE_ATTENTION,
         "activation": _STYLE_ACTIVATION,
         "op": _STYLE_OP,
@@ -868,8 +990,14 @@ def _output_metadata(shape_str: str, dtype: str = "bfloat16") -> list[dict]:
 
 
 def _build_fact_sheet(model_name: str, config) -> str:
-    """Build an HTML fact sheet from the config, including sub-configs."""
-    lines = [f"<b>{model_name}</b>"]
+    """Build an HTML fact sheet from the config, including sub-configs.
+
+    The model name is already shown as the fact-sheet title in the viewer
+    header, so it isn't repeated here — the first line is a non-bold
+    generation timestamp instead.
+    """
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [f"Generated: {generated_at}"]
 
     # Collect all config dicts (top-level + sub-configs like text_config)
     top = config.to_dict()
@@ -935,7 +1063,7 @@ def build_graph(
     _patch_rotary_embeddings(model)
 
     # ── Capture shapes ───────────────────────────────────────────────────
-    hook_shapes, hook_input_shapes = _capture_shapes(
+    hook_shapes, hook_input_shapes, hook_all_output_shapes = _capture_shapes(
         model, seq_len=seq_len, batch_size=batch_size
     )
     raw_shapes = _infer_shapes_from_weights(
@@ -950,6 +1078,75 @@ def build_graph(
     input_shapes: dict[str, str] = {}
     for path, shape in raw_input_shapes.items():
         input_shapes[path] = _symbolise(shape, batch_size=batch_size, seq_len=seq_len)
+    # Every tensor shape found in each module's returned tuple/list
+    # (symbolised), keyed by path — used to disambiguate which element of
+    # a multi-tensor return value is the "real" one that continues into a
+    # given downstream consumer (see `_pick_output_shape`).
+    all_output_shapes: dict[str, list[str]] = {}
+    for path, shape_list in hook_all_output_shapes.items():
+        all_output_shapes[path] = [
+            _symbolise(s, batch_size=batch_size, seq_len=seq_len) for s in shape_list
+        ]
+
+    def _pick_output_shape(path: str) -> str | None:
+        """Return the symbolised output shape to show for ``path``.
+
+        Defaults to ``shapes.get(path)`` (the first tensor found in the
+        module's return value). If the module actually returned SEVERAL
+        differently-shaped tensors, and we know (from the call graph) which
+        sibling it feeds directly, prefer whichever returned tensor's shape
+        matches that successor's OWN captured input shape — e.g.
+        Glm5NextTextHyperConnection returns ``(post, comb, collapsed)``;
+        only ``collapsed`` (the last element, not the first) is what
+        actually flows into the next module (``input_layernorm``), and
+        picking the first tensor's shape would silently print a shape that
+        doesn't match its successor's input, implying a bogus reshape.
+        """
+        candidates = all_output_shapes.get(path)
+        if not candidates or len(candidates) < 2:
+            return shapes.get(path)
+        if len(set(candidates)) == 1:
+            return candidates[0]
+        successors: set[str] = set()
+        for _comp_path, edges in call_graph.items():
+            for src, tgt in edges:
+                if src == path:
+                    successors.add(tgt)
+        for succ in successors:
+            succ_in = input_shapes.get(succ)
+            if succ_in and succ_in in candidates:
+                return succ_in
+        return shapes.get(path)
+
+    # Leaf modules that were never actually invoked during the dummy
+    # forward pass (no hook fired for them at all — distinct from
+    # modules whose *tensor identity* just couldn't be tracked), yet
+    # whose direct parent WAS invoked. This is the "read my .weight/
+    # .bias directly, never call self.mod(x)" pattern (e.g. Kimi linear
+    # attention's conv1d, whose kernel weights are passed straight into
+    # a raw causal_conv1d_fn(...) call instead of `self.conv1d(x)`).
+    # There's no real tensor to trace flowing in or out of these, so
+    # they should render as standalone info boxes (shape inferred from
+    # weights above) rather than getting a speculative positional
+    # "@input" edge from the generic wiring fallback later — a half
+    # wire (input but no consumer) looks like a broken/dead computation
+    # step, when really the module just isn't part of the traced
+    # dataflow at all.  This must NOT apply to leaves whose entire
+    # ancestor chain was never invoked (e.g. an omitted vision branch)
+    # — those still need the generic positional fallback to render
+    # sensibly, since there's no live parent to contrast them against.
+    def _was_invoked(path: str) -> bool:
+        return path in hook_shapes or path in hook_input_shapes
+
+    _dead_leaves_in_live_parents: set[str] = set()
+    for _name, _mod in model.named_modules():
+        if not _name or list(_mod.children()):
+            continue  # only leaves
+        if _was_invoked(_name):
+            continue
+        _parent = _name.rsplit(".", 1)[0] if "." in _name else ""
+        if _was_invoked(_parent):
+            _dead_leaves_in_live_parents.add(_name)
 
     # ── Detect repeated layers ───────────────────────────────────────────
     repeats = _detect_repeated_layers(model)
@@ -1069,8 +1266,16 @@ def build_graph(
         if name and list(mod.children()):
             composite_modules.add(name)
 
+    # Populated later (after FX tracing) with composites that should be
+    # rendered pass-through (see `_single_child_passthrough` below).
+    # Declared up front — before `_namespace_for` even exists — because
+    # `_namespace_for` is a closure invoked during FX tracing itself
+    # (before this set's real contents are known); it must see an empty
+    # set at that point rather than raise NameError.
+    _single_child_passthrough: set[str] = set()
+
     # ── Capture call graph for dataflow-aware edge wiring ────────────────
-    call_graph = _capture_call_graph(
+    call_graph, real_output_children = _capture_call_graph(
         model, composite_modules, seq_len=seq_len, batch_size=batch_size
     )
 
@@ -1243,8 +1448,13 @@ def build_graph(
                 i += 1
                 continue
 
-            # Use attr name for composites, class name for clarity
-            if prefix in composite_modules:
+            # Use attr name for composites, class name for clarity.
+            # Single-child pass-through composites (see
+            # `_single_child_passthrough` below) don't get their own
+            # namespace segment — their one child is promoted to render
+            # directly inside the parent's namespace instead of being
+            # nested inside a pointless wrapper box.
+            if prefix in composite_modules and prefix not in _single_child_passthrough:
                 attr = attr_names.get(prefix, parts[i])
                 mod = module_map.get(prefix)
                 cls_name = type(mod).__name__ if mod else attr
@@ -1267,6 +1477,21 @@ def build_graph(
     fx_child_edges: dict[str, list[dict]] = {}  # child_path → [edge dicts]
     # FX graph output node IDs for each composite
     fx_output_ids: dict[str, list[str]] = {}  # comp_path → [output node IDs]
+    # Raw op nodes that must be emitted right after a specific call_module
+    # child (keyed by that child's dotted path) rather than all up-front at
+    # the parent composite's own module_order position. This preserves true
+    # execution order when a composite's forward() interleaves calls to
+    # child submodules with inline tensor ops (e.g. proj -> norm -> act ->
+    # gate_proj/up_proj -> (raw silu/mul ops) -> down_proj).
+    fx_trailing_ops: dict[str, list[dict]] = {}  # child_path → [op nodes]
+    # Composites where whole-module Path A tracing was attempted (has a
+    # leaf child) but genuinely failed (e.g. data-dependent control flow
+    # like a sinkhorn-iteration loop) — as opposed to composites that
+    # simply have no raw ops of their own because tracing trivially
+    # succeeded (e.g. a wrapper whose forward is just `self.proj(x)`).
+    # Only the former should be considered for single-child pass-through
+    # rendering below — the latter's own boundary is still meaningful.
+    fx_trace_failed: set[str] = set()
 
     for path in module_order:
         if path not in composite_modules:
@@ -1280,11 +1505,18 @@ def build_graph(
 
         graph = _fx_trace_module(mod)
         if graph is None:
+            fx_trace_failed.add(path)
             continue
 
         namespace = _namespace_for(path) or type(mod).__name__
         op_nodes = []
         node_map: dict[str, str] = {}
+        # Tracks the most recently seen call_module child in the FX graph's
+        # own node order. Raw tensor ops are tagged with this so that later
+        # emission can interleave them AFTER that child (matching true
+        # execution order) instead of dumping all raw ops before any child
+        # — see `fx_trailing_ops` below.
+        last_child_path: str | None = None
 
         # Only the first placeholder (main data tensor) maps to @input.
         # Secondary placeholders (attention_mask, position_ids, etc.) are
@@ -1324,6 +1556,7 @@ def build_graph(
                         child_incoming.append({"sourceNodeId": src})
                 if child_incoming:
                     fx_child_edges[child_path] = child_incoming
+                last_child_path = child_path
                 continue
 
             label = _fx_op_label(fx_node)
@@ -1359,10 +1592,79 @@ def build_graph(
                 "style": _STYLE_OP,
             }
             op_node["incomingEdges"] = incoming
+            op_node["_anchor_child"] = last_child_path
             op_nodes.append(op_node)
 
         if op_nodes:
             fx_graphs[path] = op_nodes
+
+    # ── Detect single-child pass-through composites ──────────────────────
+    # A composite with exactly one direct child module and no computation
+    # of its own — its whole-module Path A trace was attempted (it has a
+    # leaf child) but genuinely failed (e.g. data-dependent control flow
+    # like a sinkhorn-iteration loop), as opposed to a composite that
+    # simply has no raw ops because tracing trivially succeeded (e.g. a
+    # wrapper whose forward is just `self.proj(x)`) — contributes nothing
+    # besides wrapping that one child in an extra "@input"/"@output" box.
+    # Render such composites' children directly in the parent's namespace
+    # instead of nesting them one level deeper.
+    # Must run BEFORE the custom-leaf-expansion loop below, since that
+    # loop bakes each leaf's `parent_ns` (namespace + own attr/class
+    # label) into all of its emitted op nodes up front.
+    #
+    # Guard: only inline when the child's OWN captured I/O shapes match
+    # the composite's OWN captured I/O shapes exactly. A genuine trivial
+    # wrapper's shapes are identical to its child's (nothing happens
+    # before/after the call). If they differ, the composite has real
+    # extra computation around the child that we can't see — e.g.
+    # Glm5NextTextHyperConnection normalizes a *flattened* view of its
+    # input through `input_norm` purely to derive gating weights, then
+    # separately returns a differently-shaped weighted combination of the
+    # *original* (unnormalized) input. Inlining `input_norm` there would
+    # make it look like the composite's real output IS `input_norm`'s
+    # output, which has a different shape than what the next module
+    # actually consumes — a bogus "shape changed for no reason" edge.
+    for cpath in fx_trace_failed:
+        if cpath in fx_graphs:
+            continue
+        direct_children = module_children.get(cpath, [])
+        if len(direct_children) != 1:
+            continue
+        child_path = direct_children[0]
+        # Compare against every tensor shape the composite's own hook saw
+        # in its return value (not just the first) — a composite that
+        # returns a tuple where *some* element matches the child's output
+        # is still plausibly a genuine wrapper for that element.
+        comp_out_candidates = all_output_shapes.get(cpath) or (
+            [shapes[cpath]] if cpath in shapes else []
+        )
+        child_out = shapes.get(child_path)
+        comp_in, child_in = input_shapes.get(cpath), input_shapes.get(child_path)
+        out_mismatch = bool(comp_out_candidates) and child_out is not None and (
+            child_out not in comp_out_candidates
+        )
+        in_mismatch = comp_in is not None and child_in is not None and comp_in != child_in
+        if out_mismatch or in_mismatch:
+            continue
+        _single_child_passthrough.add(cpath)
+
+    # The viewer groups nodes into visual boxes keyed by the raw
+    # `namespace` string, so two DIFFERENT pass-through composites whose
+    # namespace segment we're about to drop (e.g. sibling `attn_hc` and
+    # `ffn_hc`, each wrapping a same-named/same-class `input_norm` child)
+    # would otherwise produce an IDENTICAL namespace for their children
+    # once stripped, silently merging two distinct instances into one
+    # box. Disambiguate by labeling the inlined child with the DROPPED
+    # composite's own attr name alone (e.g. "attn_hc", not
+    # "attn_hc.input_norm") — the parent attr is already unique among
+    # its own siblings, so it's sufficient on its own, and it avoids
+    # echoing the child's generic name (often something like
+    # "input_norm"), which visually reads as a near-duplicate of
+    # unrelated same-layer nodes like "input_layernorm".
+    for cpath in _single_child_passthrough:
+        child_path = module_children[cpath][0]  # full dotted path
+        parent_attr = attr_names.get(cpath, cpath.rsplit(".", 1)[-1])
+        attr_names[child_path] = parent_attr
 
     # ── Try torch.fx on custom leaf modules to expand their ops ──────────
     for path in module_order:
@@ -1494,7 +1796,7 @@ def build_graph(
     # split by composite-vs-leaf classification rather than true call
     # order — which silently reordered custom leaf modules like a rotary
     # embedding helper to the very end, after every composite's FX ops).
-    def _emit_fx_op_nodes(path: str) -> None:
+    def _emit_fx_op_nodes(path: str, op_nodes: list[dict] | None = None) -> None:
         namespace = _namespace_for(path)
         mod = module_map[path]
         attr = attr_names.get(path, type(mod).__name__)
@@ -1503,15 +1805,30 @@ def build_graph(
             if namespace
             else f"{attr} ({type(mod).__name__})"
         )
-        for op_node in fx_graphs[path]:
+        for op_node in fx_graphs[path] if op_nodes is None else op_nodes:
+            op_node.pop("_anchor_child", None)
             if not op_node["namespace"].startswith(parent_ns):
                 op_node["namespace"] = parent_ns
             nodes.append(op_node)
+
+    def _flush_trailing_ops(path: str) -> None:
+        """Emit any raw ops that ran right after `path` (a call_module
+        child) in its parent's FX graph, immediately after `path` itself
+        has been emitted — preserving true execution order."""
+        if path not in fx_trailing_ops:
+            return
+        parent_path = path.rsplit(".", 1)[0] if "." in path else ""
+        _emit_fx_op_nodes(parent_path, fx_trailing_ops[path])
 
     for path in module_order:
         if not path:
             continue
         if _should_skip(path):
+            continue
+        if path in _single_child_passthrough:
+            # No group box for this composite — its single child renders
+            # directly in the parent's namespace (see
+            # `_single_child_passthrough` above).
             continue
 
         mod = module_map[path]
@@ -1531,7 +1848,7 @@ def build_graph(
                     + f"{attr_names.get(path, '')} ({type(mod).__name__})"
                 )
                 attrs = {"class": type(mod).__name__}
-                shape_str = shapes.get(path)
+                shape_str = _pick_output_shape(path)
                 if not shape_str:
                     # Derive output_shape from last child module that has a shape
                     for child_name in reversed(list(module_map)):
@@ -1553,16 +1870,29 @@ def build_graph(
                 if inp_str:
                     attrs["input_shape"] = f"{inp_str} {dtype}"
                 group_attrs[group_id] = attrs
+            _flush_trailing_ops(path)
             continue
 
         if path in composite_modules and path in fx_graphs:
-            _emit_fx_op_nodes(path)
+            # Split into a leading segment (raw ops that ran before any
+            # call_module child) emitted now, and trailing segments
+            # (raw ops that ran right after a given child) deferred until
+            # that child itself is emitted below — preserving true
+            # execution order instead of dumping all raw ops up-front.
+            leading = [n for n in fx_graphs[path] if n.get("_anchor_child") is None]
+            _emit_fx_op_nodes(path, leading)
+            for n in fx_graphs[path]:
+                anchor = n.get("_anchor_child")
+                if anchor is not None:
+                    fx_trailing_ops.setdefault(anchor, []).append(n)
+            _flush_trailing_ops(path)
             continue
 
         # Custom leaf module that was FX-expanded — emit its op nodes here
         # (in module_order position) instead of the single leaf node.
         if path in fx_graphs:
             _emit_fx_op_nodes(path)
+            _flush_trailing_ops(path)
             continue
 
         # Skip child modules not referenced by parent's FX graph — the FX
@@ -1594,9 +1924,17 @@ def build_graph(
         # FX graph — these override the call_graph/sequential wiring.
         if path in fx_child_edges:
             node["incomingEdges"] = fx_child_edges[path]
+        elif path in _dead_leaves_in_live_parents:
+            # Never actually invoked, even though its parent was — there's
+            # no real tensor flowing in (or out). Pre-set an empty edge
+            # list so the generic positional-fallback wiring pass below
+            # leaves it alone instead of guessing a misleading "@input"
+            # source for a module that isn't really part of the dataflow.
+            node["incomingEdges"] = []
 
         nodes.append(node)
         edges_from[path] = node_id
+        _flush_trailing_ops(path)
 
     # ── Build parallel branch info for edge wiring ─────────────────────
     # For containers with multiple layer types, collect the namespace
@@ -1671,6 +2009,7 @@ def build_graph(
             "fork_node": fork_node,
             "join_node": join_node,
             "branch_namespaces": set(),
+            "parent_path": parent_path,
         }
         # Collect branch namespace prefixes
         for group in groups:
@@ -1789,9 +2128,22 @@ def build_graph(
             ancestor = ".".join(parts[:depth])
             if ancestor in _exec_order:
                 orders.append(_exec_order[ancestor])
-        if orders:
-            return tuple(orders)
-        return (999999,)
+        if not orders:
+            return (999999,)
+        # A composite's own synthetic "@output" boundary genuinely runs
+        # LAST within its subtree — but if a deeper descendant (a nested
+        # composite with its own call-graph entry) has a *longer*
+        # resolved order tuple, plain tuple comparison would rank the
+        # @output's short tuple as "less than" (i.e. before) the
+        # descendant's, since a tuple that's a strict prefix of another
+        # always sorts first regardless of what follows. That silently
+        # places e.g. "visual/@output" before "visual/merger/down_proj",
+        # even though merger's down_proj is what visual/@output is
+        # actually derived from. Pad with a large sentinel so it always
+        # sorts after any sibling/descendant sharing the same prefix.
+        if nid == "@output" or nid.endswith("/@output"):
+            orders.append(999998)
+        return tuple(orders)
 
     # Preserve the root @input at position 0 and @output at the end
     root_nodes = [n for n in nodes if n["id"] in ("@input", "@output")]
@@ -2034,9 +2386,18 @@ def build_graph(
     # ── Add synthetic I/O nodes for composite modules ────────────────────
     # Rebuild node lookup after all wiring fixups
     node_by_id = {n["id"]: n for n in nodes}
+    _fork_join_ids: set[str] = set()
+    for _fj in fork_join_info.values():
+        _fork_join_ids.add(_fj["fork_id"])
+        _fork_join_ids.add(_fj["join_id"])
 
     for comp_path in sorted(composite_modules, key=lambda p: (-p.count("."), p)):
         if _should_skip(comp_path):
+            continue
+        if comp_path in _single_child_passthrough:
+            # No wrapper box for this composite — its single child's own
+            # @input/@output (created in its own iteration of this loop,
+            # or via the FX-expanded-leaf I/O pass) stand in for it.
             continue
 
         # Rebuild consumers_of each iteration so child I/O nodes
@@ -2083,10 +2444,23 @@ def build_graph(
                 break
 
         # ── Determine input children ──────────────────────────────────
-        # Children whose incoming edges come from OUTSIDE this module
+        # Children whose incoming edges come from OUTSIDE this module.
+        # Fork nodes are excluded: a Fork's predecessor(s) were already
+        # carefully resolved straight from the real call-graph (e.g. a
+        # side-modality branch like vision features merging in ahead of
+        # a specific layer), and that source may live OUTSIDE this
+        # ancestor composite even though the Fork node itself is
+        # namespaced inside it (it represents the entry to a *nested*
+        # layer-stack container). Treating it as a generic "input child"
+        # would collapse its real, specific predecessor into this
+        # ancestor's own blanket "@input" — destroying the distinction
+        # between "the model's own primary input" and "a side branch
+        # merging in partway through".
         input_child_ids: list[str] = []
         external_sources: dict[str, list[str]] = {}  # child_id → [external_src_ids]
         for cn in child_nodes:
+            if cn["id"] in _fork_join_ids:
+                continue
             ext_srcs = []
             for e in cn.get("incomingEdges", []):
                 src = e["sourceNodeId"]
@@ -2186,6 +2560,17 @@ def build_graph(
             targets = {t for _, t in call_graph[comp_path]}
             sources = {s for s, _ in call_graph[comp_path] if s != "@input"}
             terminals = targets - sources
+            # Ground-truth disambiguation: if some terminals are known
+            # (from real tensor-identity tracking) to literally be part
+            # of the composite's own returned output, prefer those over
+            # the full terminal set.  This filters out spurious dead-ends
+            # caused by raw function calls (e.g. an attention kernel)
+            # that aren't captured by module hooks — such calls leave
+            # their inputs (Q/K/V projections) as untracked dead-ends
+            # alongside the genuine output projection.
+            real_terminals = terminals & real_output_children.get(comp_path, set())
+            if real_terminals:
+                terminals = real_terminals
             if terminals:
                 cg_output_ids: list[str] = []
                 for term_path in terminals:
@@ -2418,7 +2803,7 @@ def build_graph(
             "layer_types": type_summary,
         }
         # Add shapes from the representative layer
-        rep_shape = shapes.get(rep_path)
+        rep_shape = _pick_output_shape(rep_path)
         if not rep_shape:
             for child_name in reversed(list(module_map)):
                 if child_name.startswith(rep_path + ".") and child_name in shapes:
@@ -2560,6 +2945,21 @@ def build_graph(
             if len(deduped_e) < len(edges):
                 n["incomingEdges"] = deduped_e
 
+    # ── Normalize edge output/input ids ─────────────────────────────────
+    # Many edges are built throughout this function as bare
+    # {"sourceNodeId": ...} dicts (composite boundary wiring, sequential
+    # fallback, fx_child_edges, etc.) without `sourceNodeOutputId` /
+    # `targetNodeInputId`. The viewer looks up
+    # `sourceNode.outputsMetadata[edge.sourceNodeOutputId]` to render the
+    # tensor shape on an edge/tooltip — when that id is missing, the
+    # lookup fails and the shape displays as "?" even though the source
+    # node's own outputsMetadata is well-defined. Default to single-output
+    # convention ("0") and a positional target input id everywhere.
+    for n in nodes:
+        for idx, e in enumerate(n.get("incomingEdges", [])):
+            e.setdefault("sourceNodeOutputId", "0")
+            e.setdefault("targetNodeInputId", str(idx))
+
     # ── Propagate outputsMetadata to all nodes ──────────────────────────
     # Every node needs shape metadata so edges don't display as "?" in
     # the viewer.
@@ -2578,7 +2978,7 @@ def build_graph(
         # Walk up the module hierarchy until we find a captured shape
         check = path
         while check:
-            shape_str = shapes.get(check)
+            shape_str = _pick_output_shape(check)
             if shape_str:
                 return _output_metadata(shape_str, dtype)
             if "." in check:
@@ -2623,7 +3023,7 @@ def build_graph(
         if attrs.get("synthetic") != "output":
             continue
         path = n["id"].replace("/", ".").removesuffix(".@output")
-        out_str = shapes.get(path)
+        out_str = _pick_output_shape(path)
         if out_str:
             n["outputsMetadata"] = _output_metadata(out_str, dtype)
 
@@ -2733,9 +3133,11 @@ def _wire_sequential_edges(
     _branch_to_join: dict[str, str] = {}  # branch_ns → join_id
     _fork_ids: set[str] = set()
     _join_ids: set[str] = set()
+    _fork_id_to_parent_path: dict[str, str] = {}  # fork_id → its own parent's comp path
     for _cp, fj in fork_join_info.items():
         _fork_ids.add(fj["fork_id"])
         _join_ids.add(fj["join_id"])
+        _fork_id_to_parent_path[fj["fork_id"]] = fj.get("parent_path", "")
         for bns in fj["branch_namespaces"]:
             _branch_to_fork[bns] = fj["fork_id"]
             _branch_to_join[bns] = fj["join_id"]
@@ -2849,6 +3251,40 @@ def _wire_sequential_edges(
     def _node_id_to_path(nid: str) -> str:
         return nid.replace("/", ".")
 
+    def _resolve_nested_input(comp_path: str, _depth: int = 0) -> list[str]:
+        """Resolve the real predecessor(s) of ``comp_path`` even when its
+        own call-graph entry is just "@input" relative to its immediate
+        parent — which itself may only be "@input" relative to ITS
+        parent, and so on (e.g. a gate submodule nested inside an
+        attention module, both of which receive the composite's own
+        input directly, with no transforming sibling in between).
+
+        Without this recursion, a nested child whose ONLY known source
+        is "@input" (skipped by ``_cg_predecessor``, which only tracks
+        *real* sibling predecessors) would have no known entry point and
+        would silently fall back to whatever ran immediately before it
+        in the arbitrary node list order — e.g. wiring a gate module
+        from an unrelated sibling projection just because it happened to
+        run first, rather than from the shared, genuine input.
+        """
+        if _depth > 20 or not comp_path:
+            return []
+        sources: list[str] = []
+        if comp_path in _cg_has_root_input:
+            sources.append("@input")
+        if comp_path in _cg_predecessor:
+            for pred_path in _cg_predecessor[comp_path]:
+                if pred_path in last_node_for_path:
+                    sources.append(last_node_for_path[pred_path])
+        if sources:
+            return sources
+        if comp_path in composite_entry:
+            return [composite_entry[comp_path]]
+        if "." in comp_path and cg_sources.get(comp_path) == ["@input"]:
+            parent_path = comp_path.rsplit(".", 1)[0]
+            return _resolve_nested_input(parent_path, _depth + 1)
+        return []
+
     def _cg_find_sources(node_id: str, fallback_source: str | None) -> list[str] | None:
         """Check if this node is the first node of a child module that has
         call-graph predecessors. Returns list of source node IDs or None.
@@ -2868,20 +3304,14 @@ def _wire_sequential_edges(
 
                 # Determine the @input fallback: prefer the call-graph
                 # predecessor's last node, then the saved composite entry
-                # point, then the sequential fallback.
+                # point, then (recursively) a grandparent's resolved
+                # entry when this composite's own source is itself just
+                # "@input", then the sequential fallback.
                 comp_path = child_path.rsplit(".", 1)[0]
-                input_sources: list[str] = []
-                # Check if this composite has known predecessors from
-                # the parent's call_graph
-                if comp_path in _cg_has_root_input:
-                    input_sources.append("@input")
-                if comp_path in _cg_predecessor:
-                    for pred_path in _cg_predecessor[comp_path]:
-                        if pred_path in last_node_for_path:
-                            input_sources.append(last_node_for_path[pred_path])
+                input_sources: list[str] = _resolve_nested_input(comp_path)
                 input_source = input_sources[0] if input_sources else None
                 if not input_source:
-                    input_source = composite_entry.get(comp_path, fallback_source)
+                    input_source = fallback_source
 
                 # Find the last node of each source child
                 src_ids = []
@@ -2920,28 +3350,53 @@ def _wire_sequential_edges(
             _update_last("", "@input")
             continue
 
-        # Handle Fork nodes: wire from current predecessor in parent ns
+        # Handle Fork nodes: wire from call-graph predecessor(s) when
+        # known (e.g. a side-modality branch merging in alongside the
+        # main chain), falling back to the current predecessor in the
+        # parent namespace otherwise.
         if node["id"] in _fork_ids:
             ns = node.get("namespace", "")
-            source_id = None
-            parts = ns.split("/") if ns else []
-            while parts:
-                parts.pop()
-                parent = "/".join(parts)
-                if parent in last_in_ns:
-                    source_id = last_in_ns[parent]
-                    break
-            if source_id is None:
-                source_id = last_in_ns.get("", "@input")
-            if source_id and source_id in node_by_id:
+            fork_path = _node_id_to_path(node["id"])
+            src_ids: list[str] = []
+            # Read predecessors straight from the fork's own parent
+            # composite's call-graph edges (not the global `cg_sources`
+            # map, which can collide: both the parent AND the container
+            # itself independently synthesize a "(pred, fork_path)"
+            # edge, and since `cg_sources` is keyed only by target, one
+            # silently clobbers the other).
+            parent_path = _fork_id_to_parent_path.get(node["id"], "")
+            pred_paths = [
+                src
+                for src, tgt in call_graph.get(parent_path, [])
+                if tgt == fork_path and src != "@input"
+            ]
+            for pred_path in pred_paths:
+                pred_id = last_node_for_path.get(pred_path)
+                if pred_id and pred_id not in src_ids:
+                    src_ids.append(pred_id)
+            if not src_ids:
+                source_id = None
+                parts = ns.split("/") if ns else []
+                while parts:
+                    parts.pop()
+                    parent = "/".join(parts)
+                    if parent in last_in_ns:
+                        source_id = last_in_ns[parent]
+                        break
+                if source_id is None:
+                    source_id = last_in_ns.get("", "@input")
+                if source_id:
+                    src_ids = [source_id]
+            src_ids = [s for s in src_ids if s in node_by_id]
+            if src_ids:
                 node["incomingEdges"] = [
                     {
-                        "sourceNodeId": source_id,
+                        "sourceNodeId": s,
                         "sourceNodeOutputId": "0",
-                        "targetNodeInputId": "0",
+                        "targetNodeInputId": str(i),
                     }
+                    for i, s in enumerate(src_ids)
                 ]
-            fork_path = _node_id_to_path(node["id"])
             last_node_for_path[fork_path] = node["id"]
             _update_last(ns, node["id"])
             continue
@@ -3089,13 +3544,25 @@ def _wire_sequential_edges(
 
         # ── Call-graph-aware wiring: override source_id if we have
         #    dataflow information for this node's parent composite ────────
-        _record_composite_entry(node["id"], source_id)
+        # IMPORTANT: resolve via the call graph BEFORE recording this
+        # node as its ancestors' entry point. `_record_composite_entry`
+        # is what lets a LATER sibling (e.g. a nested gate submodule
+        # that only receives the composite's own "@input", recursively
+        # resolved by `_cg_find_sources`) look up "what did this
+        # composite's first node actually connect from?". If we recorded
+        # the naive pre-correction `source_id` (the arbitrary sequential
+        # guess) first, that wrong guess would get locked in as the
+        # composite's entry point and poison every later sibling's
+        # resolution before the call-graph override ever had a chance to
+        # run — even though THIS node's own edge gets corrected fine.
         cg_srcs = _cg_find_sources(node["id"], source_id)
         if cg_srcs is not None:
             if len(cg_srcs) == 1:
                 source_id = cg_srcs[0]
+                _record_composite_entry(node["id"], source_id)
             elif len(cg_srcs) > 1:
                 # Multiple dataflow predecessors
+                _record_composite_entry(node["id"], cg_srcs[0])
                 node["incomingEdges"] = [
                     {
                         "sourceNodeId": src,
@@ -3112,6 +3579,8 @@ def _wire_sequential_edges(
                     last_node_for_path[".".join(parts[:depth])] = node["id"]
                 _update_last(ns, node["id"])
                 continue
+        else:
+            _record_composite_entry(node["id"], source_id)
 
         if source_id and source_id in node_by_id:
             node["incomingEdges"] = [
