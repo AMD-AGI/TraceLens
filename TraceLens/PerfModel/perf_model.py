@@ -3272,6 +3272,16 @@ class aten_upsample_nearest(UnaryElementwise):
         return nelems_in * self.bpe_in + nelems_out * self.bpe_out
 
 
+class aten_upsample_bilinear(aten_upsample_nearest):
+    # Bilinear 2d upsample. Same trace layout / bandwidth roofline as nearest
+    # (inherited); only differs in per-output arithmetic: ~11 FLOPs/elem for the
+    # 4-tap blend. Bandwidth-bound in practice.
+    FLOP_PER_ELEM = 11
+
+    def flops(self):
+        return self.FLOP_PER_ELEM * self.nelems
+
+
 class BinaryElementwise:
     category = "elementwise"
     bwd_category = None

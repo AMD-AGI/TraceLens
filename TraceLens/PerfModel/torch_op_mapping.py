@@ -64,6 +64,15 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
 OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     (re.compile(r"^triton"), "triton"),
     (re.compile(r"^record_param_comms"), "record_param_comms"),
+    # gsplat 3DGS kernels whose op names carry a launcher/synthetic prefix
+    # (e.g. "cudaLaunchKernel->void gsplat::...", "_FullyFusedProjectionPacked->
+    # ... (Synthetic Op)"). Patterns are applied via re.match, so a leading
+    # ".*" is required to reach the embedded gsplat symbol. The projection op
+    # also has a full perf model (resolved by _match_gsplat); the tile-
+    # intersection kernels are classified only -- their nnz / n_isects live on
+    # the sibling _RasterizeToPixels op, so no roofline.
+    (re.compile(r".*gsplat::projection_ewa_3dgs_packed_fwd"), "GaussianSplat"),
+    (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
 ]
 
 
@@ -370,6 +379,12 @@ upsample_ops = [
     "aten::upsample_nearest3d",
 ]
 
+# Bilinear upsampling (F.interpolate mode='bilinear'); same trace layout /
+# bandwidth roofline as nearest, higher per-output arithmetic (4-tap blend).
+bilinear_upsample_ops = [
+    "aten::upsample_bilinear2d",
+]
+
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
 for op in binary_elemwise_ops:
@@ -380,6 +395,8 @@ for op in reduce_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_reduce
 for op in upsample_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_upsample_nearest
+for op in bilinear_upsample_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_upsample_bilinear
 
 # ---------------------------------------------------------------------------
 # Pattern-based matchers for perf models with generated kernel names.
@@ -414,6 +431,26 @@ def _match_triton_compiled(name):
 
 
 register_perf_model_matcher(_match_triton_compiled)
+
+
+def _match_gsplat(name):
+    """Resolve gsplat 3DGS kernels whose trace op names embed template/kernel
+    signatures (e.g. the projection ``... (Synthetic Op)`` child) and cannot be
+    keyed by an exact op name. The plain ``_RasterizeToPixels`` /
+    ``_SphericalHarmonics`` autograd ops are handled by the exact pseudo-op map;
+    these substring rules also cover suffixed / synthetic-child variants."""
+    from TraceLens.PerfModel.extensions import gsplat_perf_model_extensions as _g
+
+    if "gsplat::projection_ewa_3dgs_packed_fwd" in name:
+        return _g.gsplat_projection_ewa_packed
+    if name.startswith("_RasterizeToPixels"):
+        return _g.gsplat_rasterize_to_pixels
+    if name.startswith("_SphericalHarmonics"):
+        return _g.gsplat_spherical_harmonics
+    return None
+
+
+register_perf_model_matcher(_match_gsplat)
 
 OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,

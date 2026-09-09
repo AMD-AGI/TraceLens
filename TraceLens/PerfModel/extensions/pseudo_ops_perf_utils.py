@@ -14,6 +14,7 @@ from . import (
     perf_model_extensions,
     rmsnorm_perf_model_extensions,
     custom_collectives_perf_model_extensions,
+    gsplat_perf_model_extensions,
 )
 
 
@@ -146,6 +147,12 @@ def get_pseudo_op_mappings():
         "aiter::topk_softplus": perf_model_extensions.topk_softplus,
         ## Fused RMSNorm + per-group dynamic FP8 quant.
         "aiter::rmsnorm_quant": rmsnorm_perf_model_extensions.aiter_rmsnorm_quant,
+        ## gsplat 3D Gaussian Splatting (3DGS) rasterization backbone
+        # (src/models/models/rasterization.py). Function-level autograd ops that
+        # carry tensor shapes in the trace; the projection/intersect kernels are
+        # resolved by substring matcher in torch_op_mapping.py instead.
+        "_SphericalHarmonics": gsplat_perf_model_extensions.gsplat_spherical_harmonics,
+        "_RasterizeToPixels": gsplat_perf_model_extensions.gsplat_rasterize_to_pixels,
     }
 
     return pseudo_op_mappings

@@ -1973,6 +1973,9 @@ class TreePerfAnalyzer:
                     f"{parent_evt['name']}->{kernel['name']} (Synthetic Op)"
                 )
                 synthetic["gpu_events"] = [kernel["UID"]]
+                # Register so get_UID2event(synthetic UID) resolves in downstream
+                # perf-metric computation (dict-only; not added to events list).
+                self.tree.events_by_uid[synthetic["UID"]] = synthetic
                 collected.append(synthetic)
         for evt, parent in kernels_with_cpu_op:
             synthetic = dict(parent)
@@ -1980,6 +1983,7 @@ class TreePerfAnalyzer:
             next_uid += 1
             synthetic["name"] = f"{parent['name']}->{evt['name']} (Synthetic Op)"
             synthetic["gpu_events"] = [evt["UID"]]
+            self.tree.events_by_uid[synthetic["UID"]] = synthetic
             collected.append(synthetic)
         return collected
 
