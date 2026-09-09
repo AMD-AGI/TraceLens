@@ -131,11 +131,15 @@ def test_preprocess_trace_builds_correlation_maps():
 
 
 def test_compute_reference_pd_ratio_uses_largest_region(capsys):
+    from TraceLens.TraceUtils.split_inference.steady_state_window import (
+        _compute_reference_pd_ratio,
+    )
+
     iter_details = [{"context_requests": 1} for _ in range(4)] + [
         {"context_requests": 0} for _ in range(6)
     ]
     regions = [(0, 4), (4, 10)]
-    largest, avg_ratio, largest_ratio = split.compute_reference_pd_ratio(
+    largest, avg_ratio, largest_ratio = _compute_reference_pd_ratio(
         regions, iter_details
     )
     assert largest == (4, 10)

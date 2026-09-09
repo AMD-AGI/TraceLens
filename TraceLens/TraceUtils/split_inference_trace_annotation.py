@@ -161,23 +161,31 @@ from ..util import DataLoader
 from .annotation_utils import (
     ITERATION_BACKUP_PATTERNS,  # noqa: F401
     ITERATION_PATTERNS,  # noqa: F401
-    iteration_details,
+    IterationAnnotation,
 )
+
+SERVING_KINDS = {
+    "vllm_detailed", "vllm_native",
+    "sglang_detailed", "sglang_native",
+    "atom_detailed", "atom_native",
+}
 
 # Re-exports for tests and downstream callers.
 from .split_inference import (  # noqa: F401
     DetectStatus,
+    build_cpu_event_index,
     build_root_tiles,
-    compute_reference_pd_ratio,
+    classify_phases_from_batch_sizes,
     divide_phases_and_save,
     extract_and_save,
     extract_iteration,
     extract_phases_and_save,
     find_iteration_roots,
-    find_steady_state_annotations,
     find_steady_state_generic,
+    find_steady_state_inference,
+    find_steady_state_inference_from_shapes,
     get_filename,
-    identify_steady_state_regions,
+    infer_batch_sizes_from_shapes,
     parse_range,
     preprocess_trace,
 )
@@ -323,6 +331,17 @@ def main():
             "time. The manifest records the shortfall either way."
         ),
     )
+    parser.add_argument(
+        "--llm-inference",
+        action="store_true",
+        default=False,
+        help=(
+            "Treat as LLM inference trace. When annotations lack serving "
+            "semantics (e.g. no vLLM/SGLang/ATOM annotations), derive batch "
+            "size from cpu_op shapes and use it for phase classification "
+            "(prefill vs decode) and steady-state identification."
+        ),
+    )
     args = parser.parse_args()
     execution_details = []
     # Only the partitioning pass can be checked for kernel conservation.
@@ -405,22 +424,18 @@ def main():
             per_iteration_details = temp_execution_details
             execution_details.extend(temp_execution_details)
 
-        # Determine the working set and compute steady-state regions once,
-        # shared across all downstream calls.
-        steady_state_regions: list[tuple[int, int]] = []
+        # Determine the working set.
         if args.iterations != "all":
             working_roots = iteration_roots[start:end]
-            steady_state_regions: list[tuple[int, int]] = [(0, end - start)]
             print(
                 f"\nUsing explicit iteration range [{start}, {end}) as the working region."
             )
         else:
             working_roots = iteration_roots
-            if args.find_steady_state or args.divide_phases:
-                _iter_details = iteration_details(working_roots)
-                steady_state_regions, _ = identify_steady_state_regions(
-                    _iter_details, args.num_steps
-                )
+
+        # Check if annotations have serving semantics (concurrency info).
+        _ann = IterationAnnotation(working_roots[0]["name"]) if working_roots else None
+        llm_inference_annotations = _ann is not None and _ann.kind in SERVING_KINDS
 
         _extract_args = (
             events,
@@ -435,35 +450,86 @@ def main():
             meta_events,
         )
 
-        if args.divide_phases:
-            print("\n--- Dividing steady-state steps by phase ---")
-            temp_execution_details = divide_phases_and_save(
-                working_roots,
-                events,
-                trace_json,
-                args.output_dir,
-                base_name,
-                gpu_corr_map,
-                flow_corr_map,
-                meta_events,
-                steady_state_regions=steady_state_regions or [(0, len(working_roots))],
-                root_tiles=root_tiles,
+        # Derive batch sizes from shapes when --llm-inference is set and
+        # annotations lack serving semantics.
+        batch_sizes: list[int | None] | None = None
+        if args.llm_inference and not llm_inference_annotations and working_roots:
+            cpu_idx = build_cpu_event_index(events)
+            batch_sizes = infer_batch_sizes_from_shapes(
+                working_roots, cpu_idx, root_tiles,
             )
-            execution_details.extend(temp_execution_details)
+            valid = [b for b in batch_sizes if b is not None]
+            print(
+                f"\n[llm-inference] Inferred batch sizes from shapes for "
+                f"{len(valid)}/{len(batch_sizes)} iterations"
+                + (f", median={sorted(valid)[len(valid)//2]}" if valid else "")
+            )
+
+        def _find_ss(mode: str):
+            """Route to the appropriate steady-state finder."""
+            if llm_inference_annotations:
+                kwargs = {"mode": mode}
+                if mode == "mixed":
+                    kwargs.update(CONC=args.CONC, OSL=args.OSL, R=args.R)
+                return find_steady_state_inference(
+                    working_roots, num_steps=args.num_steps, **kwargs,
+                )
+            elif batch_sizes is not None:
+                return find_steady_state_inference_from_shapes(
+                    working_roots, batch_sizes, num_steps=args.num_steps, mode=mode,
+                )
+            else:
+                return find_steady_state_generic(
+                    working_roots, num_steps=args.num_steps,
+                )
+
+        if args.divide_phases:
+            if not llm_inference_annotations and batch_sizes is None:
+                print(
+                    "\n--divide-phases requires LLM inference annotations or "
+                    "--llm-inference flag. Skipping phase division for this trace."
+                )
+            elif llm_inference_annotations:
+                print("\n--- Dividing steady-state steps by phase ---")
+                _, ss_regions = _find_ss("mixed")
+                temp_execution_details = divide_phases_and_save(
+                    working_roots,
+                    events,
+                    trace_json,
+                    args.output_dir,
+                    base_name,
+                    gpu_corr_map,
+                    flow_corr_map,
+                    meta_events,
+                    steady_state_regions=ss_regions or [(0, len(working_roots))],
+                    root_tiles=root_tiles,
+                )
+                execution_details.extend(temp_execution_details)
+            else:
+                # --llm-inference without serving annotations: use shape-based phases
+                print("\n--- Dividing steady-state steps by phase (from shapes) ---")
+                _, ss_regions = _find_ss("mixed")
+                phase_labels = classify_phases_from_batch_sizes(batch_sizes)
+                temp_execution_details = divide_phases_and_save(
+                    working_roots,
+                    events,
+                    trace_json,
+                    args.output_dir,
+                    base_name,
+                    gpu_corr_map,
+                    flow_corr_map,
+                    meta_events,
+                    steady_state_regions=ss_regions or [(0, len(working_roots))],
+                    root_tiles=root_tiles,
+                    phase_labels=phase_labels,
+                )
+                execution_details.extend(temp_execution_details)
 
         elif args.find_steady_state:
-            if detection.method.startswith("annotation:"):
-                # Serving trace with parseable annotations — use concurrency
+            if llm_inference_annotations or args.llm_inference:
+                # Inference path: three windows (annotation-based or shape-based)
                 print("\n--- Finding mixed steady-state window ---")
-                mixed_roots = find_steady_state_annotations(
-                    working_roots,
-                    num_steps=args.num_steps,
-                    steady_state_regions=steady_state_regions,
-                    mode="mixed",
-                    CONC=args.CONC,
-                    OSL=args.OSL,
-                    R=args.R,
-                )
+                mixed_roots, _ = _find_ss("mixed")
                 temp_execution_details = extract_and_save(
                     [mixed_roots],
                     *_extract_args,
@@ -473,12 +539,7 @@ def main():
                 execution_details.extend(temp_execution_details)
 
                 print("\n--- Finding decode-only steady-state window ---")
-                do_roots = find_steady_state_annotations(
-                    working_roots,
-                    num_steps=args.num_steps,
-                    steady_state_regions=steady_state_regions,
-                    mode="decode_only",
-                )
+                do_roots, _ = _find_ss("decode_only")
                 temp_execution_details = extract_and_save(
                     [do_roots],
                     *_extract_args,
@@ -488,12 +549,7 @@ def main():
                 execution_details.extend(temp_execution_details)
 
                 print("\n--- Finding biggest prefill-decode steady-state window ---")
-                pd_roots = find_steady_state_annotations(
-                    working_roots,
-                    num_steps=args.num_steps,
-                    steady_state_regions=steady_state_regions,
-                    mode="max_prefilldecode",
-                )
+                pd_roots, _ = _find_ss("max_prefilldecode")
                 temp_execution_details = extract_and_save(
                     [pd_roots],
                     *_extract_args,
@@ -502,12 +558,9 @@ def main():
                 )
                 execution_details.extend(temp_execution_details)
             else:
-                # Generic trace — use duration consistency
+                # Generic path: single duration-based window
                 print("\n--- Finding steady-state window by duration ---")
-                ss_roots = find_steady_state_generic(
-                    working_roots,
-                    num_steps=args.num_steps,
-                )
+                ss_roots, _ = _find_ss("mixed")
                 temp_execution_details = extract_and_save(
                     [ss_roots],
                     *_extract_args,
