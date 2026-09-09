@@ -6,8 +6,6 @@ See LICENSE for license information.
 
 # TraceLens Agent
 
-> **Capturing a trace first?** See [Collect a trace](../../../docs/how-to/generate-perf-report-pytorch.md#collect-a-trace) for the profiler flags that matter, and [inference collection](../../../docs/how-to/generate-perf-report-pytorch-inference.md) for the graph-capture path.
-
 The TraceLens Agent is an agentic performance analysis tool that generates actionable optimization recommendations for training and inference workloads. The system supports automated analysis of training and inference traces supported by TraceLens. Skills have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability. The output is a single stakeholder-facing report (`analysis.md`) organized as a prioritized bottleneck list. Findings are ranked and grouped into three tiers (Compute Kernel Optimizations, Kernel Fusion Opportunities, and System-Level Optimizations), and each finding carries the supporting evidence, the reasoning behind the call-out and a possible concrete resolution.
 
 ## Analysis Modes
