@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/entrypoints/grpc_server.py b/python/sglang/srt/entrypoints/grpc_server.py
-index c3e22762c7..bd61380282 100644
+index c3e2276..bd61380 100644
 --- a/python/sglang/srt/entrypoints/grpc_server.py
 +++ b/python/sglang/srt/entrypoints/grpc_server.py
 @@ -103,6 +103,7 @@ def _add_admin_routes(app, request_manager):
