@@ -1,8 +1,6 @@
-diff --git a/python/sglang/srt/entrypoints/grpc_server.py b/python/sglang/srt/entrypoints/grpc_server.py
-index c3e22762c7..bd61380282 100644
 --- a/python/sglang/srt/entrypoints/grpc_server.py
 +++ b/python/sglang/srt/entrypoints/grpc_server.py
-@@ -103,6 +103,7 @@ def _add_admin_routes(app, request_manager):
+@@ -103,6 +103,7 @@
              record_shapes = body.get("record_shapes")
              env_record_shapes = get_bool_env_var("SGLANG_PROFILE_RECORD_SHAPES", "true")
              record_shapes = (record_shapes is not False) and env_record_shapes
@@ -10,7 +8,7 @@ index c3e22762c7..bd61380282 100644
  
              req = ProfileReq(
                  req_type=ProfileReqType.START_PROFILE,
-@@ -117,6 +118,7 @@ def _add_admin_routes(app, request_manager):
+@@ -117,6 +118,7 @@
                  merge_profiles=body.get("merge_profiles", False),
                  profile_prefix=body.get("profile_prefix"),
                  profile_stages=body.get("profile_stages"),
