@@ -793,6 +793,136 @@ def test_unconsumed_output_port_prunes_its_producer_backwards():
     } == {"used"}
 
 
+def _cast_node(node_id: str, *, source: str, dtype: str, shape: str = "B x S x 4") -> dict:
+    """A `Cast` node with one incoming edge and its own inferred output dtype."""
+    return {
+        "id": node_id,
+        "label": "Cast",
+        "incomingEdges": [_edge(source)],
+        "outputsMetadata": [
+            {
+                "id": "0",
+                "attrs": [
+                    {"key": "shape", "value": f"{shape} {dtype}"},
+                    {"key": "dtype", "value": dtype},
+                ],
+            }
+        ],
+    }
+
+
+def _real_node(node_id: str, *, dtype: str, source: str | None = None) -> dict:
+    """A non-Cast node with its own inferred output dtype (a trustworthy producer)."""
+    node = {
+        "id": node_id,
+        "label": "Multiply",
+        "outputsMetadata": [
+            {
+                "id": "0",
+                "attrs": [
+                    {"key": "shape", "value": f"B x S x 4 {dtype}"},
+                    {"key": "dtype", "value": dtype},
+                ],
+            }
+        ],
+    }
+    if source:
+        node["incomingEdges"] = [_edge(source)]
+    return node
+
+
+def test_prune_noop_cast_removes_same_dtype_cast_and_rewires_consumer():
+    """A `Cast` whose output dtype equals its (real, non-synthetic) input's
+    dtype is a no-op — it must be removed and its consumer rewired straight
+    to the real producer."""
+    nodes = [
+        _real_node("producer", dtype="bfloat16"),
+        _cast_node("noop_cast", source="producer", dtype="bfloat16"),
+        {
+            "id": "consumer",
+            "incomingEdges": [_edge("noop_cast")],
+        },
+    ]
+
+    merge._prune_noop_cast_nodes(nodes)
+
+    by_id = {node["id"]: node for node in nodes}
+    assert "noop_cast" not in by_id
+    assert by_id["consumer"]["incomingEdges"][0]["sourceNodeId"] == "producer"
+
+
+def test_prune_noop_cast_keeps_genuine_dtype_change():
+    """A `Cast` that actually changes dtype must remain in the graph."""
+    nodes = [
+        _real_node("producer", dtype="bfloat16"),
+        _cast_node("real_cast", source="producer", dtype="float32"),
+        {
+            "id": "consumer",
+            "incomingEdges": [_edge("real_cast")],
+        },
+    ]
+
+    merge._prune_noop_cast_nodes(nodes)
+
+    by_id = {node["id"]: node for node in nodes}
+    assert "real_cast" in by_id
+    assert by_id["consumer"]["incomingEdges"][0]["sourceNodeId"] == "real_cast"
+
+
+def test_prune_noop_cast_skips_synthetic_predecessor():
+    """A synthetic boundary port's OWN dtype has no independent ground
+    truth (it can be back-filled from whatever it feeds) — a same-dtype
+    match against one must NOT be treated as proof of a no-op, or a
+    genuine cast right after a boundary would be wrongly erased."""
+    nodes = [
+        {
+            "id": "@input:gate",
+            "attrs": [{"key": "synthetic", "value": "@input"}],
+            "outputsMetadata": [
+                {
+                    "id": "0",
+                    "attrs": [
+                        {"key": "shape", "value": "B x S x 4 float32"},
+                        {"key": "dtype", "value": "float32"},
+                    ],
+                }
+            ],
+        },
+        _cast_node("maybe_real_cast", source="@input:gate", dtype="float32"),
+        {
+            "id": "consumer",
+            "incomingEdges": [_edge("maybe_real_cast")],
+        },
+    ]
+
+    merge._prune_noop_cast_nodes(nodes)
+
+    by_id = {node["id"]: node for node in nodes}
+    assert "maybe_real_cast" in by_id
+    assert by_id["consumer"]["incomingEdges"][0]["sourceNodeId"] == "maybe_real_cast"
+
+
+def test_prune_noop_cast_resolves_chained_removals():
+    """Two consecutive no-op casts must both be removed, with the final
+    consumer wired all the way back to the real producer."""
+    nodes = [
+        _real_node("producer", dtype="bfloat16"),
+        _cast_node("noop_1", source="producer", dtype="bfloat16"),
+        _cast_node("noop_2", source="noop_1", dtype="bfloat16"),
+        {
+            "id": "consumer",
+            "incomingEdges": [_edge("noop_2")],
+        },
+    ]
+
+    merge._prune_noop_cast_nodes(nodes)
+
+    by_id = {node["id"]: node for node in nodes}
+    assert "noop_1" not in by_id
+    assert "noop_2" not in by_id
+    assert by_id["consumer"]["incomingEdges"][0]["sourceNodeId"] == "producer"
+
+
 def test_shape_fill_and_boundary_multiple_crossings():
     context = ShapeContext({"H": 16, "V": 101}, "float16")
     nodes = [

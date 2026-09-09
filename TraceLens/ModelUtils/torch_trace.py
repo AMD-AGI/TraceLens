@@ -43,8 +43,6 @@ _WHITE_TEXT = "#ffffff"
 
 _STYLE_INPUT = {"backgroundColor": "#d9e8f5", "textColor": _DARK_TEXT}
 _STYLE_OUTPUT = {"backgroundColor": "#d5f5d9", "textColor": _DARK_TEXT}
-_STYLE_FORK = {"backgroundColor": "#a29bfe", "textColor": _WHITE_TEXT}
-_STYLE_JOIN = {"backgroundColor": "#a29bfe", "textColor": _WHITE_TEXT}
 _STYLE_EMBEDDING = {"backgroundColor": "#27ae60", "textColor": _WHITE_TEXT}
 _STYLE_LINEAR = {"backgroundColor": "#bdc3c7", "textColor": _DARK_TEXT}
 _STYLE_ATTENTION = {"backgroundColor": "#5dade2", "textColor": _WHITE_TEXT}
@@ -184,6 +182,96 @@ def _patch_rotary_embeddings(model: torch.nn.Module) -> None:
         model_module.apply_rotary_pos_emb = lambda x, *a, **k: x
 
 
+# ── Synthetic attention-kernel node ──────────────────────────────────────────
+
+# Attribute name used to attach a synthetic ``_AttentionKernel`` child to a
+# real attention module the first time it's observed calling through
+# transformers' attention dispatch. Deliberately unlikely to collide with a
+# real submodule name.
+_ATTN_KERNEL_ATTR = "_tracelens_attention_kernel"
+
+_ATTN_IMPL_LABELS = {
+    "sdpa": "SDPA",
+    "eager": "Eager Attention",
+    "flash_attention_2": "Flash Attention",
+    "flash_attention_3": "Flash Attention",
+    "flash_attention_4": "Flash Attention",
+    "flex_attention": "Flex Attention",
+}
+
+
+class _AttentionKernel(torch.nn.Module):
+    """Synthetic placeholder for an attention computation dispatched via a
+    raw function call (e.g. transformers' ``ALL_ATTENTION_FUNCTIONS``
+    sdpa/eager/flash dispatch, ``attention_interface(module, q, k, v,
+    mask, ...)``) rather than through a real ``nn.Module`` child — and
+    therefore otherwise entirely invisible to hook-based tracing.
+
+    Without this, Q/K/V projection outputs that only ever feed into that
+    raw call look like dead ends (nothing downstream ever appears to
+    consume them), while whatever *unrelated* module happens to run next
+    (e.g. an indexer with no real data dependency at all) gets a
+    spurious "this is my input" edge from the positional sequential
+    fallback instead — silently drawing a wrong, misleading dataflow
+    edge and completely hiding the real attention computation.
+
+    Instances are attached lazily (the first time the wrapped
+    ``attention_interface`` call is observed for a given module) via
+    ``setattr(module, _ATTN_KERNEL_ATTR, kernel)``, making them a genuine
+    submodule that ``named_modules()``/hook registration naturally picks
+    up from that point on — no special-casing needed anywhere else in
+    the graph-building pipeline.
+    """
+
+    def __init__(self, impl_name: str = "") -> None:
+        super().__init__()
+        self._impl_name = impl_name
+
+
+def _attention_kernel_label(impl_name: str) -> str:
+    return _ATTN_IMPL_LABELS.get(impl_name, "Attention")
+
+
+def _patch_attention_interface(get_or_create_kernel):
+    """Monkeypatch ``transformers.modeling_utils.AttentionInterface`` (the
+    ``ALL_ATTENTION_FUNCTIONS`` dispatch table almost all modern HF
+    attention modules use) so every call through it is redirected
+    through ``get_or_create_kernel(module, real_fn) -> callable``, which
+    should return a callable taking the same ``(*args, **kwargs)`` and
+    returning the same result as ``real_fn(module, *args, **kwargs)``,
+    but wired up so the call becomes observable via hooks (see
+    ``_AttentionKernel``).
+
+    Returns a zero-arg ``restore()`` callback; safe to call even if
+    ``transformers`` doesn't expose ``AttentionInterface`` (older/newer
+    versions), in which case this is a no-op.
+    """
+    try:
+        from transformers.modeling_utils import AttentionInterface
+    except ImportError:
+        return lambda: None
+
+    orig_get_interface = AttentionInterface.get_interface
+
+    def patched_get_interface(self, attn_implementation, default):
+        real_fn = orig_get_interface(self, attn_implementation, default)
+
+        def wrapped(module, *args, **kwargs):
+            kernel_call = get_or_create_kernel(module, real_fn)
+            if kernel_call is None:
+                return real_fn(module, *args, **kwargs)
+            return kernel_call(*args, **kwargs)
+
+        return wrapped
+
+    AttentionInterface.get_interface = patched_get_interface
+
+    def restore() -> None:
+        AttentionInterface.get_interface = orig_get_interface
+
+    return restore
+
+
 # ── Shape capture via forward hooks ──────────────────────────────────────────
 
 
@@ -241,6 +329,34 @@ def _capture_shapes(
     for name, mod in model.named_modules():
         handles.append(mod.register_forward_hook(_make_hook(name)))
 
+    path_by_id = {id(m): n for n, m in model.named_modules() if n}
+    # Kernels persist as real submodules across repeated calls to this
+    # function (e.g. the two-probe shape disambiguation in `build_graph`
+    # re-runs `_capture_shapes` on the same `model` instance), but hook
+    # *handles* don't — they're removed in this function's own `finally`
+    # block each time. Track which kernels already have a hook attached
+    # for *this* call so a reused kernel still gets (re-)hooked, without
+    # double-registering a hook within a single call.
+    _hooked_kernel_ids: set[int] = set()
+
+    def _get_or_create_kernel(module: torch.nn.Module, real_fn):
+        path = path_by_id.get(id(module))
+        if path is None:
+            return None
+        kernel = getattr(module, _ATTN_KERNEL_ATTR, None)
+        if kernel is None:
+            impl_name = getattr(getattr(module, "config", None), "_attn_implementation", "") or ""
+            kernel = _AttentionKernel(impl_name)
+            setattr(module, _ATTN_KERNEL_ATTR, kernel)
+        kernel.forward = lambda *a, **kw: real_fn(module, *a, **kw)
+        if id(kernel) not in _hooked_kernel_ids:
+            _hooked_kernel_ids.add(id(kernel))
+            child_path = f"{path}.{_ATTN_KERNEL_ATTR}"
+            handles.append(kernel.register_forward_hook(_make_hook(child_path)))
+        return kernel
+
+    restore_attention_interface = _patch_attention_interface(_get_or_create_kernel)
+
     dummy = torch.zeros(batch_size, seq_len, dtype=torch.long, device="meta")
     try:
         # Enable meta-device workarounds for ops that fail on meta tensors
@@ -257,6 +373,7 @@ def _capture_shapes(
     except Exception:
         pass
     finally:
+        restore_attention_interface()
         if original_dtype and original_dtype != torch.bfloat16:
             model.to(original_dtype)
         for h in handles:
@@ -366,7 +483,29 @@ def _tensor_ids(x: Any, keepalive: list[torch.Tensor] | None = None) -> list[int
     if isinstance(x, torch.Tensor):
         if keepalive is not None:
             keepalive.append(x)
-        return [id(x)]
+        ids = [id(x)]
+        # Also register the tensor's *view root* (``._base``), if any,
+        # under the same alias set. ``.view()``/``.transpose()``/
+        # ``.squeeze()``/etc. all return a NEW tensor object (different
+        # ``id()``) that shares the same underlying storage as the
+        # original — e.g. MLA attention's
+        # ``self.q_b_proj(q_resid).view(...).transpose(1, 2)`` produces
+        # a `query_states` tensor whose ``id()`` differs from
+        # ``q_b_proj``'s raw output, even though it's really "the same
+        # tensor" for dataflow purposes. Without this, a raw function
+        # call downstream (e.g. an attention kernel) that only ever sees
+        # the *reshaped* tensor could never be linked back to the real
+        # producer via pure ``id()`` matching, making the producer look
+        # like a dead end. PyTorch tracks this lineage for us (even on
+        # meta tensors) via ``._base``, which always points straight to
+        # the root non-view tensor regardless of how many views were
+        # chained in between.
+        base = getattr(x, "_base", None)
+        if base is not None:
+            if keepalive is not None:
+                keepalive.append(base)
+            ids.append(id(base))
+        return ids
     if isinstance(x, (tuple, list)):
         ids = []
         for item in x:
@@ -441,6 +580,32 @@ def _capture_call_graph(
         handles.append(mod.register_forward_pre_hook(_pre_hook(name), with_kwargs=True))
         handles.append(mod.register_forward_hook(_post_hook(name)))
 
+    path_by_id = {id(m): n for n, m in model.named_modules() if n}
+    # See the identical comment in `_capture_shapes`: kernels persist as
+    # real submodules across repeated calls, but hook handles don't.
+    _hooked_kernel_ids: set[int] = set()
+
+    def _get_or_create_kernel(module: torch.nn.Module, real_fn):
+        path = path_by_id.get(id(module))
+        if path is None:
+            return None
+        kernel = getattr(module, _ATTN_KERNEL_ATTR, None)
+        if kernel is None:
+            impl_name = getattr(getattr(module, "config", None), "_attn_implementation", "") or ""
+            kernel = _AttentionKernel(impl_name)
+            setattr(module, _ATTN_KERNEL_ATTR, kernel)
+        kernel.forward = lambda *a, **kw: real_fn(module, *a, **kw)
+        if id(kernel) not in _hooked_kernel_ids:
+            _hooked_kernel_ids.add(id(kernel))
+            child_path = f"{path}.{_ATTN_KERNEL_ATTR}"
+            handles.append(
+                kernel.register_forward_pre_hook(_pre_hook(child_path), with_kwargs=True)
+            )
+            handles.append(kernel.register_forward_hook(_post_hook(child_path)))
+        return kernel
+
+    restore_attention_interface = _patch_attention_interface(_get_or_create_kernel)
+
     dummy = torch.zeros(batch_size, seq_len, dtype=torch.long, device="meta")
     try:
         # Enable meta-device workarounds for ops that fail on meta tensors
@@ -457,6 +622,7 @@ def _capture_call_graph(
     except Exception:
         pass
     finally:
+        restore_attention_interface()
         if original_dtype and original_dtype != torch.bfloat16:
             model.to(original_dtype)
         for h in handles:
@@ -494,7 +660,7 @@ def _capture_call_graph(
                     if parent_path in _container_paths:
                         children.add(name)
 
-        if len(children) < 2:
+        if not children:
             continue
 
         # Ground truth: which child (if any) produced a tensor that is
@@ -504,6 +670,16 @@ def _capture_call_graph(
         # consumes Q/K/V via a raw function call we can't hook, leaving
         # the Q/K/V-producing linears as spurious dead-ends alongside
         # the genuine output projection).
+        #
+        # Computed even for a single-child composite: a composite whose
+        # sole child's output tensor is NOT part of the composite's own
+        # returned output (e.g. Glm5NextTextHyperConnection, whose real
+        # output is a weighted combination of its *raw* input that never
+        # flows through its one child, `input_norm` — `input_norm`'s
+        # output only feeds an untracked internal weight computation)
+        # must NOT have that child treated as ground truth for its
+        # output below — `matches` staying empty is exactly the signal
+        # the later output-child heuristics need to avoid picking it.
         comp_output_tids = {
             tid for _, tids in post_outputs.get(comp_path, []) for tid in tids
         }
@@ -514,8 +690,10 @@ def _capture_call_graph(
                 if comp_output_tids
                 & {tid for _, tids in post_outputs.get(child, []) for tid in tids}
             }
-            if matches:
-                real_output_children[comp_path] = matches
+            real_output_children[comp_path] = matches
+
+        if len(children) < 2:
+            continue
 
         # Build a timeline of all calls (pre + post) for direct children
         # Each event: (call_index, "pre"/"post", child_name, tensor_ids)
@@ -608,6 +786,19 @@ def _capture_call_graph(
             # Filter spurious @input edges: if a child has a sibling
             # source, the @input edge is likely a secondary/control input
             # (e.g. attention_mask, position_ids) — not the main data flow.
+            #
+            # NOTE: this is a known simplification — it also fires for
+            # children with a genuine SECOND substantive input straight
+            # from the composite's own input (e.g. GLM's DSA indexer,
+            # called as `indexer(hidden_states=hidden_states,
+            # q_resid=q_a_layernorm(...))`, truly consumes both the
+            # composite's raw input AND a sibling's output). Dropping the
+            # "@input" edge there under-represents that second input
+            # rather than mis-attributing it, which downstream consumers
+            # (single-port "@input" boundary nodes, `_resolve_predecessor`)
+            # aren't equipped to render as two distinct edges anyway —
+            # see the corresponding shape-audit note for this class of
+            # multi-input leaf.
             children_with_sibling_src = {tgt for src, tgt in unique if src != "@input"}
             unique = [
                 (src, tgt)
@@ -685,9 +876,9 @@ def _capture_call_graph(
                         # Also show the token-embedding path converging
                         # at the same merge point, so it isn't left as a
                         # disconnected dead end once the side branch's
-                        # edge claims `merge_target` as "input from
-                        # @fork/predecessor". Both are genuinely parallel
-                        # sources of the merged embeddings.
+                        # edge claims `merge_target` as its predecessor.
+                        # Both are genuinely parallel sources of the
+                        # merged embeddings.
                         edges.setdefault(main, []).append((embed_path, merge_target))
             root_edges.append(("@input", main))
             edges[""] = root_edges
@@ -695,15 +886,76 @@ def _capture_call_graph(
     return edges, real_output_children
 
 
+def _dim_role_map(
+    shape1: tuple[int, ...],
+    shape2: tuple[int, ...],
+    *,
+    batch_size: int,
+    seq_len: int,
+    batch_size2: int,
+    seq_len2: int,
+) -> tuple[str, ...] | None:
+    """Classify each dim of a *real* captured shape as batch/seq/fixed by
+    comparing two probe forward passes run with different concrete
+    ``(batch_size, seq_len)`` values.
+
+    A naive single-run heuristic (matching a dim's raw *value* against
+    ``batch_size``/``seq_len``) gets fooled whenever an unrelated fixed
+    weight dimension coincidentally equals the probed seq_len/batch_size —
+    e.g. an attention ``head_dim`` of 128 gets mislabelled as the sequence
+    dim "S" purely because tracing happened to use ``seq_len=128`` too,
+    producing an impossible-looking "Linear turns 1536 into SxS" shape.
+    Comparing two probes with *different* seq_len/batch_size values breaks
+    that coincidence: a dim is only "S" if it tracks seq_len in BOTH probes
+    (a fixed weight dim can't change across probes, since it doesn't
+    depend on the runtime input shape at all).
+
+    Returns ``None`` if the two shapes have different rank (e.g. dynamic,
+    input-size-dependent control flow), in which case callers should fall
+    back to naive single-shape matching.
+    """
+    if len(shape1) != len(shape2):
+        return None
+    roles = []
+    for d1, d2 in zip(shape1, shape2):
+        if d1 == batch_size and d2 == batch_size2:
+            roles.append("B")
+        elif d1 == seq_len and d2 == seq_len2:
+            roles.append("S")
+        else:
+            roles.append("fixed")
+    return tuple(roles)
+
+
 def _symbolise(
-    shape: tuple[int, ...], *, batch_size: int = 1, seq_len: int = 128
+    shape: tuple[int, ...],
+    *,
+    batch_size: int = 1,
+    seq_len: int = 128,
+    roles: tuple[str, ...] | None = None,
 ) -> str:
-    """Convert shape tuple to symbolic string like ``B x S x 4096``."""
+    """Convert shape tuple to symbolic string like ``B x S x 4096``.
+
+    If ``roles`` (from `_dim_role_map`, derived from a two-probe
+    comparison) is supplied and matches the shape's rank, it takes
+    precedence over naive single-value matching — see `_dim_role_map`'s
+    docstring for why that matters for correctness.
+    """
+    if not shape:
+        # A genuine 0-d/scalar tensor (e.g. `self.scale.unbind(0)`'s
+        # elements) — distinct from "no shape known", which callers
+        # represent as `None`/`""`. Must NOT be an empty string: several
+        # callers treat a falsy shape string as "unknown, fall back to
+        # something else", which would silently mis-attribute a
+        # DIFFERENT (wrong) shape to a real 0-d tensor.
+        return "scalar"
     parts = []
-    for d in shape:
-        if d == batch_size:
+    has_roles = bool(roles) and len(roles) == len(shape)
+    for i, d in enumerate(shape):
+        role = roles[i] if has_roles else None
+        if role == "B" or (role is None and d == batch_size):
             parts.append("B")
-        elif d == seq_len:
+        elif role == "S" or (role is None and d == seq_len):
             parts.append("S")
         else:
             parts.append(str(d))
@@ -721,11 +973,57 @@ def _fx_trace_module(mod: torch.nn.Module) -> torch.fx.Graph | None:
     except Exception:
         pass
 
+    # Handle a common shape-unpack idiom that breaks FX tracing:
+    # `x.view(*x.shape[:-1], a, b)` requires iterating a Proxy's
+    # symbolic `.shape`, which FX can't do (Proxies don't support
+    # `__iter__`/`__len__`) — but it's exactly equivalent to
+    # `x.unflatten(-1, (a, b))` (reshape the trailing dim(s) only,
+    # leaving every leading dim untouched), which traces fine. Without
+    # this, tracing the WHOLE module aborts with no graph at all — even
+    # for every op that ran fine *before* hitting this one line — so
+    # e.g. `Glm5NextTextHyperConnection`'s real `hidden_streams.flatten(
+    # start_dim=2)` feeding its `input_norm` becomes entirely invisible,
+    # and the shape change across that edge looks unexplained.
+    # `type(root).forward` is what `torch.fx` actually reads during
+    # tracing (see `Tracer.trace`), so an instance-level override
+    # wouldn't be picked up — patch the class itself, then always
+    # restore it right after, whether tracing then succeeds or not.
+    try:
+        import inspect
+
+        cls = type(mod)
+        src = inspect.getsource(cls.forward)
+        pattern = re.compile(r"(\w+)\.view\(\*\1\.shape\[:-1\],\s*(.+?)\)")
+        if pattern.search(src):
+            new_src = pattern.sub(r"\1.unflatten(-1, (\2,))", src)
+            lines = new_src.split("\n")
+            start = next(i for i, l in enumerate(lines) if "def forward" in l)
+            lines = lines[start:]
+            indent = len(lines[0]) - len(lines[0].lstrip())
+            lines = [l[indent:] if len(l) > indent else l for l in lines]
+            new_src = "\n".join(lines)
+
+            ns: dict = dict(cls.forward.__globals__)
+            exec(compile(new_src, "<shape_unpack_patch>", "exec"), ns)  # noqa: S102
+            patched_forward = ns.get("forward")
+            if patched_forward is not None:
+                orig_forward = cls.forward
+                cls.forward = patched_forward
+                try:
+                    traced = torch.fx.symbolic_trace(mod)
+                    return traced.graph
+                except Exception:
+                    pass
+                finally:
+                    cls.forward = orig_forward
+    except Exception:
+        pass
+
     # Handle modules with unregistered nn.Module activations from dicts
     # like ACT2FN[self.activation] — build a mirror class with the
     # activation registered as a proper submodule.
     try:
-        import inspect, re
+        import inspect
 
         cls = type(mod)
         src = inspect.getsource(cls.forward)
@@ -825,6 +1123,276 @@ def _fx_op_label(node: torch.fx.Node) -> str:
     return _FX_OP_LABELS.get(base, base.replace("_", " ").title())
 
 
+def _propagate_fx_node_shapes(
+    mod: torch.nn.Module,
+    graph: torch.fx.Graph,
+    input_shape: tuple[int, ...] | None,
+    *,
+    model_dtype: "torch.dtype | None" = None,
+) -> dict[str, tuple[tuple[int, ...], "torch.dtype | None"]]:
+    """Compute each FX node's REAL output shape (and dtype) by actually running the
+    traced graph (on meta tensors) with ``input_shape`` as the module's
+    genuine captured input shape.
+
+    Without this, per-op shapes in an FX-expanded sequence (e.g.
+    RMSNorm's ``to``/``pow``/``mean``/``add``/``rsqrt``/``mul`` chain)
+    were rendered by blindly copying whatever shape was available from
+    the nearest node with a known shape — which is simply WRONG for any
+    op that actually changes shape: e.g. RMSNorm's
+    ``variance = hidden_states.pow(2).mean(-1, keepdim=True)`` reduces
+    the last dim to size 1, but the old fallback showed ``mean`` with
+    the SAME (un-reduced) shape as its input. Every shape shown must be
+    driven by the real op, not assumed to equal a neighbor's.
+
+    Returns ``{}`` (meaning: caller should fall back to the old
+    best-effort heuristic) if ``input_shape`` is unknown (the module was
+    never actually invoked during tracing — no ground truth exists) or
+    if propagation fails for any reason (e.g. a secondary placeholder
+    like ``attention_mask``, stood in for with ``None`` below since its
+    real value isn't tracked here, turns out to be genuinely used in a
+    real tensor op) — never worse than the pre-existing behavior.
+    """
+    if input_shape is None:
+        return {}
+    try:
+        from torch.fx.passes.shape_prop import ShapeProp
+
+        gm = torch.fx.GraphModule(mod, graph)
+        # The module's OWN parameters' dtype is NOT a reliable proxy for
+        # its real runtime input dtype — e.g. `RMSNorm.weight` defaults
+        # to float32 even inside a bfloat16 model, so guessing from it
+        # would make `hidden_states.to(torch.float32)` look like a
+        # (false) no-op cast against a float32 example input that was
+        # never really the case (and a parameter-less module has no
+        # such guess to make at all). Prefer the model's real compute
+        # dtype (`model_dtype`) whenever the caller knows it; only fall
+        # back to guessing from parameters (or float32) otherwise. If
+        # the module's real input is actually integer (rare for a
+        # custom class reaching this point), propagation below simply
+        # fails and callers fall back to the old best-effort heuristic
+        # — never worse than before.
+        if model_dtype is not None:
+            dtype = model_dtype
+        else:
+            dtype = next(
+                (p.dtype for p in mod.parameters() if p.dtype.is_floating_point),
+                torch.float32,
+            )
+        example = torch.zeros(*input_shape, dtype=dtype, device="meta")
+        # Only the first placeholder (the main data tensor) gets the real
+        # captured shape; secondary placeholders (attention_mask,
+        # position_ids, etc.) are control inputs we don't track values
+        # for — `None` is a safe stand-in: either they're genuinely
+        # unused in a real tensor op (propagation just succeeds), or
+        # they are, and propagation raises, which we catch below exactly
+        # like any other failure.
+        num_placeholders = sum(1 for n in graph.nodes if n.op == "placeholder")
+        args = [example] + [None] * (num_placeholders - 1)
+        ShapeProp(gm).propagate(*args)
+    except Exception:
+        return {}
+
+    result: dict[str, tuple[tuple[int, ...], "torch.dtype | None"]] = {}
+    for node in graph.nodes:
+        tensor_meta = node.meta.get("tensor_meta")
+        shape = getattr(tensor_meta, "shape", None)
+        if shape is not None:
+            try:
+                result[node.name] = (tuple(shape), getattr(tensor_meta, "dtype", None))
+            except Exception:
+                pass
+    return result
+
+
+def _fx_noop_to_node_names(
+    graph: torch.fx.Graph,
+    node_metas: dict[str, tuple[tuple[int, ...], "torch.dtype | None"]],
+) -> set[str]:
+    """FX ``.to(...)`` calls that don't actually change anything: the
+    output dtype equals the input dtype. ``.to()`` never changes shape,
+    and device is meaningless here since every tensor traces on the
+    meta device regardless of the original ``.to(device)`` argument —
+    dtype is the only thing that could possibly differ.
+
+    Real models are full of these (e.g. a defensive/no-op ``.to(dtype)``
+    inside branches that don't apply to the traced dtype, or
+    round-tripping through the same dtype for clarity in the source).
+    Showing them as real graph nodes implies a data transformation that
+    never actually happens for this trace.
+    """
+    noop: set[str] = set()
+    for node in graph.nodes:
+        if node.op != "call_method" or node.target != "to":
+            continue
+        if not node.args:
+            continue
+        src = node.args[0]
+        if not isinstance(src, torch.fx.Node):
+            continue
+        self_meta = node_metas.get(node.name)
+        src_meta = node_metas.get(src.name)
+        if self_meta is None or src_meta is None:
+            continue
+        self_dtype, src_dtype = self_meta[1], src_meta[1]
+        if self_dtype is not None and self_dtype == src_dtype:
+            noop.add(node.name)
+    return noop
+
+
+def _fx_node_shape_strings(
+    mod: torch.nn.Module,
+    graph: torch.fx.Graph,
+    path: str,
+    *,
+    hook_input_shapes: dict[str, tuple[int, ...]],
+    hook_input_shapes2: dict[str, tuple[int, ...]],
+    batch_size: int,
+    seq_len: int,
+    batch_size2: int,
+    seq_len2: int,
+    model_dtype: "torch.dtype | None" = None,
+) -> tuple[dict[str, str], set[str]]:
+    """Real, symbolised per-FX-node output shapes for ``path``'s traced
+    graph (see `_propagate_fx_node_shapes`), disambiguated against a
+    second probe the same way real hook-captured shapes are (see
+    `_dim_role_map`) — a fixed weight dim inside the op sequence could
+    just as easily coincide with the probed seq_len/batch_size as any
+    other captured shape.
+
+    Also returns the set of no-op ``.to(...)`` FX node names (see
+    `_fx_noop_to_node_names`) found via the SAME (primary-probe)
+    ShapeProp run, so callers can skip emitting a node for a cast that
+    doesn't actually change anything.
+    """
+    shapes1 = _propagate_fx_node_shapes(
+        mod, graph, hook_input_shapes.get(path), model_dtype=model_dtype
+    )
+    if not shapes1:
+        return {}, set()
+    noop_to_names = _fx_noop_to_node_names(graph, shapes1)
+    shapes2 = _propagate_fx_node_shapes(
+        mod, graph, hook_input_shapes2.get(path), model_dtype=model_dtype
+    )
+    result: dict[str, str] = {}
+    for name, (shape, _dtype) in shapes1.items():
+        shape2_entry = shapes2.get(name)
+        shape2 = shape2_entry[0] if shape2_entry is not None else None
+        roles = (
+            _dim_role_map(
+                shape,
+                shape2,
+                batch_size=batch_size,
+                seq_len=seq_len,
+                batch_size2=batch_size2,
+                seq_len2=seq_len2,
+            )
+            if shape2 is not None
+            else None
+        )
+        result[name] = _symbolise(
+            shape, batch_size=batch_size, seq_len=seq_len, roles=roles
+        )
+    return result, noop_to_names
+
+
+def _collapse_repeated_op_blocks(
+    op_nodes: list[dict],
+) -> tuple[list[dict], dict[str, str]]:
+    """Collapse a straight-line chain of REPEATED, identically-labeled op
+    blocks — the FX-unrolled form of a Python ``for _ in range(N): ...``
+    loop over a loop-carried tensor (e.g. HyperConnection's Sinkhorn
+    normalization, ``for _ in range(hc_sinkhorn_iters - 1): comb = comb /
+    (...)``  ) — down to ONE representative iteration annotated with the
+    real iteration count.
+
+    This mirrors how the AST-based backend represents a ``for`` loop:
+    trace the body ONCE and annotate it with the real iteration count
+    (``ast_analyze.py``'s ``"loop: N iterations"`` detail), rather than
+    literally duplicating the same op sequence dozens of times, which
+    would bloat the graph with near-identical nodes without adding any
+    real information (every repetition has the exact same op sequence
+    and, since it's a genuine reduction/normalize-in-place loop, the
+    exact same shape at each corresponding position).
+
+    Detection is purely structural (label sequence + dataflow chaining),
+    not tied to any specific model/module — a run of >=3 consecutive,
+    equal-length, equal-label-sequence blocks where each block's first
+    node consumes the PREVIOUS block's LAST node (the loop-carried
+    tensor) qualifies, for any op sequence.
+
+    Returns the (possibly shortened) op_nodes list plus a
+    ``{removed_node_id: surviving_representative_id}`` remap the caller
+    must apply to any other edges/lookups (e.g. `fx_output_ids`,
+    `fx_child_edges`, `node_map`) that may have referenced a removed
+    node.
+    """
+    n = len(op_nodes)
+    id_remap: dict[str, str] = {}
+    if n < 6:
+        return op_nodes, id_remap
+
+    def label_seq(start: int, length: int) -> tuple[str, ...]:
+        return tuple(op_nodes[start + i]["label"] for i in range(length))
+
+    def chains(prev_last_idx: int, next_first_idx: int) -> bool:
+        edges = op_nodes[next_first_idx].get("incomingEdges", [])
+        prev_id = op_nodes[prev_last_idx]["id"]
+        return any(e.get("sourceNodeId") == prev_id for e in edges)
+
+    result: list[dict] = []
+    i = 0
+    while i < n:
+        collapsed = False
+        max_block_len = min(8, (n - i) // 3)
+        for block_len in range(1, max_block_len + 1):
+            reps = 1
+            while True:
+                cur_start = i + reps * block_len
+                if cur_start + block_len > n:
+                    break
+                if label_seq(i, block_len) != label_seq(cur_start, block_len):
+                    break
+                if not chains(cur_start - 1, cur_start):
+                    break
+                reps += 1
+            if reps >= 3:
+                rep_block = op_nodes[i : i + block_len]
+                for r in range(1, reps):
+                    removed_block = op_nodes[
+                        i + r * block_len : i + (r + 1) * block_len
+                    ]
+                    for pos, removed_node in enumerate(removed_block):
+                        id_remap[removed_node["id"]] = rep_block[pos]["id"]
+                annotated_rep = [dict(node) for node in rep_block]
+                first = dict(annotated_rep[0])
+                first["attrs"] = [
+                    *first.get("attrs", []),
+                    {"key": "loop_iterations", "value": str(reps)},
+                ]
+                annotated_rep[0] = first
+                result.extend(annotated_rep)
+                i += reps * block_len
+                collapsed = True
+                break
+        if not collapsed:
+            result.append(op_nodes[i])
+            i += 1
+    return result, id_remap
+
+
+def _apply_id_remap(nodes: list[dict], id_remap: dict[str, str]) -> None:
+    """Redirect any incoming edge that pointed at a now-removed node
+    (per `_collapse_repeated_op_blocks`) to its surviving representative.
+    """
+    if not id_remap:
+        return
+    for node in nodes:
+        for edge in node.get("incomingEdges", []):
+            sid = edge.get("sourceNodeId")
+            if sid in id_remap:
+                edge["sourceNodeId"] = id_remap[sid]
+
+
 def _is_interesting_op(node: torch.fx.Node) -> bool:
     """Keep tensor computation operations; skip weights, placeholders, dtype access."""
     if node.op in ("placeholder", "output", "get_attr"):
@@ -845,6 +1413,8 @@ def _is_interesting_op(node: torch.fx.Node) -> bool:
 def _classify_module(mod: torch.nn.Module) -> str:
     """Classify a module for styling and labeling."""
     name = type(mod).__name__
+    if isinstance(mod, _AttentionKernel):
+        return "attention"
     if isinstance(mod, torch.nn.Embedding):
         return "embedding"
     if isinstance(mod, (torch.nn.Linear,)):
@@ -882,6 +1452,8 @@ def _style_for(category: str) -> dict[str, str]:
 def _module_label(mod: torch.nn.Module) -> str:
     """Friendly label for a module."""
     cls = type(mod).__name__
+    if isinstance(mod, _AttentionKernel):
+        return _attention_kernel_label(mod._impl_name)
     if isinstance(mod, torch.nn.Linear):
         return "Linear"
     if isinstance(mod, torch.nn.Embedding):
@@ -1081,27 +1653,79 @@ def build_graph(
     hook_shapes, hook_input_shapes, hook_all_output_shapes = _capture_shapes(
         model, seq_len=seq_len, batch_size=batch_size
     )
+    # Second probe pass with *different* concrete (batch_size, seq_len)
+    # values, purely to disambiguate which dims of the shapes captured
+    # above are actually batch-/sequence-derived vs. fixed weight dims
+    # that happen to coincide numerically with the probed batch_size/
+    # seq_len (see `_dim_role_map`). Meta-device tracing has no real
+    # compute cost, so this second pass is cheap.
+    seq_len2 = seq_len + 11
+    batch_size2 = batch_size + 5
+    hook_shapes2, hook_input_shapes2, hook_all_output_shapes2 = _capture_shapes(
+        model, seq_len=seq_len2, batch_size=batch_size2
+    )
+
+    def _roles_for(path: str, shape: tuple[int, ...], probe: dict[str, tuple[int, ...]]):
+        shape2 = probe.get(path)
+        if shape2 is None:
+            return None
+        return _dim_role_map(
+            shape,
+            shape2,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            batch_size2=batch_size2,
+            seq_len2=seq_len2,
+        )
+
     raw_shapes = _infer_shapes_from_weights(
         model, hook_shapes, batch_size=batch_size, seq_len=seq_len
     )
     shapes: dict[str, str] = {}
     for path, shape in raw_shapes.items():
-        shapes[path] = _symbolise(shape, batch_size=batch_size, seq_len=seq_len)
+        roles = _roles_for(path, shape, hook_shapes2)
+        shapes[path] = _symbolise(
+            shape, batch_size=batch_size, seq_len=seq_len, roles=roles
+        )
     raw_input_shapes = _infer_input_shapes_from_weights(
         model, hook_input_shapes, batch_size=batch_size, seq_len=seq_len
     )
     input_shapes: dict[str, str] = {}
     for path, shape in raw_input_shapes.items():
-        input_shapes[path] = _symbolise(shape, batch_size=batch_size, seq_len=seq_len)
+        roles = _roles_for(path, shape, hook_input_shapes2)
+        input_shapes[path] = _symbolise(
+            shape, batch_size=batch_size, seq_len=seq_len, roles=roles
+        )
     # Every tensor shape found in each module's returned tuple/list
     # (symbolised), keyed by path — used to disambiguate which element of
     # a multi-tensor return value is the "real" one that continues into a
     # given downstream consumer (see `_pick_output_shape`).
     all_output_shapes: dict[str, list[str]] = {}
     for path, shape_list in hook_all_output_shapes.items():
-        all_output_shapes[path] = [
-            _symbolise(s, batch_size=batch_size, seq_len=seq_len) for s in shape_list
-        ]
+        shape_list2 = hook_all_output_shapes2.get(path)
+        symbolised: list[str] = []
+        for i, s in enumerate(shape_list):
+            s2 = (
+                shape_list2[i]
+                if shape_list2 is not None and i < len(shape_list2)
+                else None
+            )
+            roles = (
+                _dim_role_map(
+                    s,
+                    s2,
+                    batch_size=batch_size,
+                    seq_len=seq_len,
+                    batch_size2=batch_size2,
+                    seq_len2=seq_len2,
+                )
+                if s2 is not None
+                else None
+            )
+            symbolised.append(
+                _symbolise(s, batch_size=batch_size, seq_len=seq_len, roles=roles)
+            )
+        all_output_shapes[path] = symbolised
 
     def _pick_output_shape(path: str) -> str | None:
         """Return the symbolised output shape to show for ``path``.
@@ -1213,11 +1837,35 @@ def build_graph(
     # Set of representative layer paths to keep
     representative_paths: set[str] = set()
 
+    # Representatives of containers with MULTIPLE distinct layer types
+    # (interleaved). These render as parallel sibling groups (AST-style)
+    # rather than a sequential chain, so any "previous representative
+    # ran right before me" edge — e.g. from whole-module FX tracing,
+    # which always unrolls a for-loop into a flat sequential chain — is
+    # a misleading artifact of collapsing duplicates to one
+    # representative and must be suppressed; the real fan-out/fan-in
+    # wiring is instead derived from the call graph (see the Fork/Join
+    # replacement below).
+    multi_group_rep_paths: set[str] = set()
+    # Node-ID prefixes of every multi-group container's *entire* index
+    # range (reps AND skipped duplicates) — used to catch FX edges whose
+    # source is "whichever duplicate happened to be unrolled last" (e.g.
+    # a node right after the whole layer stack sourcing from the FX
+    # graph's literal final iteration instead of fanning in from every
+    # representative's own output).
+    multi_group_container_id_prefixes: list[str] = []
+
     for container_path, groups in layer_group_map.items():
         total = sum(g.count for g in groups)
         container_total[container_path] = total
         for group in groups:
             representative_paths.add(f"{container_path}.{group.representative}")
+        if len(groups) > 1:
+            for group in groups:
+                multi_group_rep_paths.add(f"{container_path}.{group.representative}")
+            multi_group_container_id_prefixes.append(
+                container_path.replace(".", "/") + "/"
+            )
         # Skip all layers that aren't a representative
         for i in range(total):
             path = f"{container_path}.{i}"
@@ -1336,7 +1984,12 @@ def build_graph(
     call_graph = remapped_cg
 
     # For multi-group containers, replace the sequential layer chain in
-    # the parent's call graph with Fork/Join parallel edges.
+    # the parent's call graph with direct parallel edges — every
+    # predecessor feeds every layer-type representative directly, and
+    # every representative feeds every successor directly. This mirrors
+    # how the AST backend renders interleaved layer-type stacks: sibling
+    # variant groups fanning out from (and back into) the surrounding
+    # dataflow with no separate Fork/Join wiring nodes in between.
     for container_path, groups in layer_group_map.items():
         if len(groups) <= 1:
             continue
@@ -1344,8 +1997,6 @@ def build_graph(
         if parent_path not in call_graph:
             continue
         rep_paths = {f"{container_path}.{g.representative}" for g in groups}
-        fork_path = container_path + ".@fork"
-        join_path = container_path + ".@join"
 
         old_edges = call_graph[parent_path]
         new_edges = []
@@ -1359,46 +2010,59 @@ def build_graph(
             if src in rep_paths and tgt not in rep_paths:
                 successors.add(tgt)
 
+        # The generic "@input" sentinel is a weak, low-priority fallback
+        # predecessor — some rep may have a stray "(@input, rep)" edge
+        # (e.g. a secondary FX placeholder) alongside a genuinely
+        # resolved real predecessor like a token-embedding lookup or a
+        # side-modality merge. Fanning "@input" out to every
+        # representative alongside real predecessors would dilute/
+        # collide with those real, specific sources once flattened into
+        # the target-keyed `cg_sources` map downstream. Prefer real
+        # predecessors whenever any exist.
+        real_predecessors = predecessors - {"@input"}
+        fan_out_predecessors = real_predecessors or predecessors
+
         # Keep non-layer edges, skip inter-layer edges
         for src, tgt in old_edges:
             if src in rep_paths or tgt in rep_paths:
                 continue  # Skip all edges involving layers
             new_edges.append((src, tgt))
 
-        # Add Fork/Join edges
-        for pred in predecessors:
-            new_edges.append((pred, fork_path))
+        # Fan every predecessor out to every representative, and fan
+        # every representative in to every successor — directly, with
+        # no intermediary Fork/Join node.
+        for pred in fan_out_predecessors:
+            for rep in rep_paths:
+                new_edges.append((pred, rep))
         for rep in rep_paths:
-            new_edges.append((fork_path, rep))
-            new_edges.append((rep, join_path))
-        for succ in successors:
-            new_edges.append((join_path, succ))
+            for succ in successors:
+                new_edges.append((rep, succ))
 
         call_graph[parent_path] = new_edges
 
         # Also transform the container's own call_graph entry so that
         # the sequential layer chain is replaced with parallel branches.
+        # Reuse the SAME (fully-resolved) predecessors/successors as the
+        # parent scope above rather than re-deriving them from the
+        # container's own, more limited edge set: `cg_sources` (built
+        # later from ALL call_graph scopes) is a flat, target-keyed map
+        # with "last write wins" semantics, so a weaker container-scope
+        # entry for the same rep target would silently clobber the
+        # parent's more complete resolution (e.g. dropping a
+        # side-modality merge the container itself has no knowledge of).
         if container_path in call_graph:
             cont_old = call_graph[container_path]
             cont_new = []
-            cont_preds: set[str] = set()
-            cont_succs: set[str] = set()
-            for src, tgt in cont_old:
-                if tgt in rep_paths and src not in rep_paths:
-                    cont_preds.add(src)
-                if src in rep_paths and tgt not in rep_paths:
-                    cont_succs.add(tgt)
             for src, tgt in cont_old:
                 if src in rep_paths or tgt in rep_paths:
                     continue
                 cont_new.append((src, tgt))
-            for pred in cont_preds:
-                cont_new.append((pred, fork_path))
+            for pred in fan_out_predecessors:
+                for rep in rep_paths:
+                    cont_new.append((pred, rep))
             for rep in rep_paths:
-                cont_new.append((fork_path, rep))
-                cont_new.append((rep, join_path))
-            for succ in cont_succs:
-                cont_new.append((join_path, succ))
+                for succ in successors:
+                    cont_new.append((rep, succ))
             call_graph[container_path] = cont_new
 
     def _should_skip(path: str) -> bool:
@@ -1523,6 +2187,19 @@ def build_graph(
             fx_trace_failed.add(path)
             continue
 
+        fx_shape_strings, fx_noop_to_names = _fx_node_shape_strings(
+            mod,
+            graph,
+            path,
+            hook_input_shapes=hook_input_shapes,
+            hook_input_shapes2=hook_input_shapes2,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            batch_size2=batch_size2,
+            seq_len2=seq_len2,
+            model_dtype=getattr(torch, dtype, None),
+        )
+
         namespace = _namespace_for(path) or type(mod).__name__
         op_nodes = []
         node_map: dict[str, str] = {}
@@ -1569,9 +2246,44 @@ def build_graph(
                     src = node_map.get(arg.name)
                     if src and src != "@input":
                         child_incoming.append({"sourceNodeId": src})
-                if child_incoming:
+                # A layer-type representative's FX-graph predecessor is
+                # always "whatever representative (or duplicate) was
+                # unrolled right before it" — an artifact of the
+                # for-loop unrolling, not real fan-out/fan-in semantics.
+                # Leave it for the call-graph-based wiring pass to
+                # resolve instead, both when THIS child is itself such a
+                # representative, and when its FX-graph source lies
+                # inside a multi-group container (e.g. the node right
+                # after the whole interleaved layer stack, whose FX
+                # source is literally the stack's final unrolled
+                # duplicate rather than every representative's output).
+                from_multi_group_container = any(
+                    edge["sourceNodeId"].startswith(prefix)
+                    or edge["sourceNodeId"].rstrip("/") == prefix.rstrip("/")
+                    for edge in child_incoming
+                    for prefix in multi_group_container_id_prefixes
+                )
+                if (
+                    child_incoming
+                    and child_path not in multi_group_rep_paths
+                    and not from_multi_group_container
+                ):
                     fx_child_edges[child_path] = child_incoming
                 last_child_path = child_path
+                continue
+
+            if fx_node.name in fx_noop_to_names:
+                # A `.to(...)` call that doesn't actually change dtype
+                # (or anything else — shape never changes via `.to()`,
+                # and device is meaningless on the meta device) — skip
+                # emitting a node for it; downstream ops connect
+                # straight through to its real predecessor instead of
+                # implying a cast that never actually happens.
+                src_arg = fx_node.args[0] if fx_node.args else None
+                src_name = (
+                    src_arg.name if isinstance(src_arg, torch.fx.Node) else None
+                )
+                node_map[fx_node.name] = node_map.get(src_name, "@input")
                 continue
 
             label = _fx_op_label(fx_node)
@@ -1608,9 +2320,27 @@ def build_graph(
             }
             op_node["incomingEdges"] = incoming
             op_node["_anchor_child"] = last_child_path
+            shape_str = fx_shape_strings.get(fx_node.name)
+            if shape_str:
+                op_node["outputsMetadata"] = _output_metadata(shape_str, dtype)
             op_nodes.append(op_node)
 
         if op_nodes:
+            op_nodes, _loop_id_remap = _collapse_repeated_op_blocks(op_nodes)
+            if _loop_id_remap:
+                _apply_id_remap(op_nodes, _loop_id_remap)
+                for _k, _v in node_map.items():
+                    if _v in _loop_id_remap:
+                        node_map[_k] = _loop_id_remap[_v]
+                if path in fx_output_ids:
+                    fx_output_ids[path] = [
+                        _loop_id_remap.get(nid, nid) for nid in fx_output_ids[path]
+                    ]
+                for _edges in fx_child_edges.values():
+                    for _edge in _edges:
+                        _sid = _edge.get("sourceNodeId")
+                        if _sid in _loop_id_remap:
+                            _edge["sourceNodeId"] = _loop_id_remap[_sid]
             fx_graphs[path] = op_nodes
 
     # ── Detect single-child pass-through composites ──────────────────────
@@ -1704,6 +2434,19 @@ def build_graph(
         if graph is None:
             continue
 
+        fx_shape_strings, fx_noop_to_names = _fx_node_shape_strings(
+            mod,
+            graph,
+            path,
+            hook_input_shapes=hook_input_shapes,
+            hook_input_shapes2=hook_input_shapes2,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            batch_size2=batch_size2,
+            seq_len2=seq_len2,
+            model_dtype=getattr(torch, dtype, None),
+        )
+
         namespace = _namespace_for(path)
         # Build a parent namespace for the expanded ops
         attr = attr_names.get(path, cls.__name__)
@@ -1720,6 +2463,18 @@ def build_graph(
             if not _is_interesting_op(fx_node):
                 if fx_node.op == "placeholder":
                     node_map[fx_node.name] = "@input"
+                # Capture output node args for multi-return output-port
+                # splitting below (mirrors the composite call site above)
+                # — e.g. Glm5NextTextTopkRouter's `return router_logits,
+                # topk_weights, topk_indices`.
+                if fx_node.op == "output":
+                    out_ids = []
+                    for arg in fx_node.all_input_nodes:
+                        nid = node_map.get(arg.name)
+                        if nid and nid != "@input":
+                            out_ids.append(nid)
+                    if out_ids:
+                        fx_output_ids[path] = out_ids
                 continue
 
             if fx_node.op == "call_module":
@@ -1752,6 +2507,17 @@ def build_graph(
                         "incomingEdges": incoming,
                     }
                 )
+                continue
+
+            if fx_node.name in fx_noop_to_names:
+                # A `.to(...)` call that doesn't actually change dtype
+                # (or anything else) — skip emitting a node for it; see
+                # the identical check at the composite call site above.
+                src_arg = fx_node.args[0] if fx_node.args else None
+                src_name = (
+                    src_arg.name if isinstance(src_arg, torch.fx.Node) else None
+                )
+                node_map[fx_node.name] = node_map.get(src_name, "@input")
                 continue
 
             label = _fx_op_label(fx_node)
@@ -1787,6 +2553,9 @@ def build_graph(
                 "style": _STYLE_OP,
             }
             op_node["incomingEdges"] = incoming
+            shape_str = fx_shape_strings.get(fx_node.name)
+            if shape_str:
+                op_node["outputsMetadata"] = _output_metadata(shape_str, dtype)
             op_nodes.append(op_node)
 
         # If the module's entire computation is a single primitive op
@@ -1795,12 +2564,20 @@ def build_graph(
         # own @input/mean/@output boundary just wraps one op in
         # pointless indirection. Leave it out of fx_graphs entirely so
         # it falls through to the regular leaf-module path below, which
-        # already (a) picks the op's own name as the label for a
-        # single-op leaf (see _module_label) and (b) uses the module's
-        # own hook-captured output shape — correct even for shape-
-        # changing ops like `mean`, unlike the op-node path which just
-        # inherits the (pre-reduction) input's shape.
+        # already picks the op's own name as the label for a single-op
+        # leaf (see _module_label) and uses the module's own
+        # hook-captured output shape directly.
         if len(op_nodes) > 1:
+            op_nodes, _loop_id_remap = _collapse_repeated_op_blocks(op_nodes)
+            if _loop_id_remap:
+                _apply_id_remap(op_nodes, _loop_id_remap)
+                for _k, _v in node_map.items():
+                    if _v in _loop_id_remap:
+                        node_map[_k] = _loop_id_remap[_v]
+                if path in fx_output_ids:
+                    fx_output_ids[path] = [
+                        _loop_id_remap.get(nid, nid) for nid in fx_output_ids[path]
+                    ]
             fx_graphs[path] = op_nodes
 
     # ── Add module nodes ─────────────────────────────────────────────────
@@ -1968,70 +2745,6 @@ def build_graph(
             branch_namespaces.add(branch_ns)
         parallel_ns_groups.append(branch_namespaces)
 
-    # ── Create Fork/Join nodes for parallel layer groups ─────────────────
-    # When a container has multiple layer types (interleaved), create
-    # Fork and Join nodes so all types fan out from Fork and merge at Join.
-    fork_join_info: dict[str, dict] = (
-        {}
-    )  # container_path → {fork_id, join_id, branch_ns}
-    for container_path, groups in layer_group_map.items():
-        if len(groups) <= 1:
-            continue
-        parent_path = container_path.rsplit(".", 1)[0] if "." in container_path else ""
-        parent_ns = _namespace_for(parent_path + ".dummy") if parent_path else ""
-        fork_id = container_path.replace(".", "/") + "/@fork"
-        join_id = container_path.replace(".", "/") + "/@join"
-
-        # Determine shape for the fork/join (from first rep's input)
-        rep_path = f"{container_path}.{groups[0].representative}"
-        fork_shape = input_shapes.get(rep_path, "")
-        if not fork_shape:
-            for child_name in module_map:
-                if child_name.startswith(rep_path + ".") and child_name in input_shapes:
-                    fork_shape = input_shapes[child_name]
-                    break
-        join_shape = shapes.get(rep_path, "")
-        if not join_shape:
-            for child_name in reversed(list(module_map)):
-                if child_name.startswith(rep_path + ".") and child_name in shapes:
-                    join_shape = shapes[child_name]
-                    break
-
-        fork_node = {
-            "id": fork_id,
-            "label": "Fork",
-            "namespace": parent_ns,
-            "attrs": [{"key": "synthetic", "value": "fork"}],
-            "style": _STYLE_FORK,
-        }
-        if fork_shape:
-            fork_node["outputsMetadata"] = _output_metadata(fork_shape, dtype)
-
-        join_node = {
-            "id": join_id,
-            "label": "Join",
-            "namespace": parent_ns,
-            "attrs": [{"key": "synthetic", "value": "join"}],
-            "style": _STYLE_JOIN,
-            "incomingEdges": [],  # Will be populated with branch outputs
-        }
-        if join_shape:
-            join_node["outputsMetadata"] = _output_metadata(join_shape, dtype)
-
-        fork_join_info[container_path] = {
-            "fork_id": fork_id,
-            "join_id": join_id,
-            "fork_node": fork_node,
-            "join_node": join_node,
-            "branch_namespaces": set(),
-            "parent_path": parent_path,
-        }
-        # Collect branch namespace prefixes
-        for group in groups:
-            rep_path = f"{container_path}.{group.representative}"
-            branch_ns = _namespace_for(rep_path + ".dummy")
-            fork_join_info[container_path]["branch_namespaces"].add(branch_ns)
-
     # ── Output node ──────────────────────────────────────────────────────
     # Determine output shape from the model's last module
     output_shape = "B x S x V"
@@ -2172,22 +2885,6 @@ def build_graph(
         + [n for n in root_nodes if n["id"] == "@output"]
     )
 
-    # Insert Fork/Join nodes at correct positions in the node list.
-    # Fork goes before the first branch node; Join goes after the last.
-    for container_path, fj in fork_join_info.items():
-        container_prefix = container_path.replace(".", "/") + "/"
-        first_branch_idx = None
-        last_branch_idx = None
-        for i, n in enumerate(nodes):
-            if n["id"].startswith(container_prefix):
-                if first_branch_idx is None:
-                    first_branch_idx = i
-                last_branch_idx = i
-        if first_branch_idx is not None:
-            nodes.insert(first_branch_idx, fj["fork_node"])
-            # last_branch_idx shifted by 1 due to insert
-            nodes.insert(last_branch_idx + 2, fj["join_node"])
-
     _wire_sequential_edges(
         nodes,
         model,
@@ -2198,7 +2895,7 @@ def build_graph(
         parallel_ns_groups=parallel_ns_groups,
         call_graph=call_graph,
         fx_leaf_aliases=_fx_leaf_aliases,
-        fork_join_info=fork_join_info,
+        real_output_children=real_output_children,
     )
 
     # ── Fix up FX-expanded leaf module wiring ────────────────────────────
@@ -2260,6 +2957,23 @@ def build_graph(
         for n in nodes:
             if n["id"].startswith(prefix):
                 last = n["id"]
+        # Ground truth (from real tensor-identity tracking, see
+        # `_capture_call_graph`): if NONE of this composite's direct
+        # children are known to produce its real returned output (e.g.
+        # Glm5NextTextHyperConnection/`attn_hc`, whose real computation
+        # is an untracked sinkhorn-iteration loop — its one real
+        # submodule, `input_norm`, only feeds an untracked internal
+        # weight computation, never the composite's actual return
+        # value), don't hand back that merely-orphaned descendant as if
+        # it stood in for the composite's output. Point at the
+        # composite's own (not-yet-created) "@output" boundary instead
+        # — the composite-boundary pass later in `build_graph` creates
+        # a real node with exactly this id (giving it correct shape
+        # metadata from the composite's own captured hook shape,
+        # regardless of internal wiring), so this reference resolves
+        # correctly once that pass runs.
+        if last is not None and real_output_children.get(mod_path) == set():
+            return f"{prefix}@output"
         return last
 
     def _resolve_predecessor(mod_path: str, depth: int = 0) -> str | None:
@@ -2401,10 +3115,20 @@ def build_graph(
     # ── Add synthetic I/O nodes for composite modules ────────────────────
     # Rebuild node lookup after all wiring fixups
     node_by_id = {n["id"]: n for n in nodes}
-    _fork_join_ids: set[str] = set()
-    for _fj in fork_join_info.values():
-        _fork_join_ids.add(_fj["fork_id"])
-        _fork_join_ids.add(_fj["join_id"])
+
+    # Layer-type representatives of multi-group (interleaved) containers
+    # each get their OWN "@input" boundary, carefully resolved straight
+    # from the real call-graph (e.g. a side-modality branch like vision
+    # features merging in ahead of a specific layer type). That source
+    # may live OUTSIDE an ancestor composite even though the rep is
+    # namespaced inside it — see the exclusion below.
+    _layer_group_rep_input_ids: set[str] = set()
+    for _container_path, _groups in layer_group_map.items():
+        if len(_groups) <= 1:
+            continue
+        for _group in _groups:
+            _rep_path = f"{_container_path}.{_group.representative}"
+            _layer_group_rep_input_ids.add(_node_id(_rep_path) + "/@input")
 
     for comp_path in sorted(composite_modules, key=lambda p: (-p.count("."), p)):
         if _should_skip(comp_path):
@@ -2460,21 +3184,21 @@ def build_graph(
 
         # ── Determine input children ──────────────────────────────────
         # Children whose incoming edges come from OUTSIDE this module.
-        # Fork nodes are excluded: a Fork's predecessor(s) were already
-        # carefully resolved straight from the real call-graph (e.g. a
-        # side-modality branch like vision features merging in ahead of
-        # a specific layer), and that source may live OUTSIDE this
-        # ancestor composite even though the Fork node itself is
-        # namespaced inside it (it represents the entry to a *nested*
-        # layer-stack container). Treating it as a generic "input child"
-        # would collapse its real, specific predecessor into this
-        # ancestor's own blanket "@input" — destroying the distinction
-        # between "the model's own primary input" and "a side branch
-        # merging in partway through".
+        # A layer-type representative's own "@input" is excluded: its
+        # predecessor(s) were already carefully resolved straight from
+        # the real call-graph (e.g. a side-modality branch like vision
+        # features merging in ahead of a specific layer type), and that
+        # source may live OUTSIDE this ancestor composite even though
+        # the representative is namespaced inside it. Treating its
+        # "@input" as a generic "input child" would collapse its real,
+        # specific predecessor into this ancestor's own blanket
+        # "@input" — destroying the distinction between "the model's
+        # own primary input" and "a side branch merging in partway
+        # through".
         input_child_ids: list[str] = []
         external_sources: dict[str, list[str]] = {}  # child_id → [external_src_ids]
         for cn in child_nodes:
-            if cn["id"] in _fork_join_ids:
+            if cn["id"] in _layer_group_rep_input_ids:
                 continue
             ext_srcs = []
             for e in cn.get("incomingEdges", []):
@@ -2527,6 +3251,18 @@ def build_graph(
                             if target_id not in output_child_ids:
                                 output_child_ids.append(target_id)
                             break
+
+        # Ground truth (ordinary FX-graph output, or a real consumer
+        # genuinely outside this module) is trustworthy on its own —
+        # only the weaker heuristics below (orphan/last-resort guesses)
+        # need the `real_output_children` sanity check applied later,
+        # since an "empty means untracked" ground-truth reading is only
+        # safe to *distrust a guess* with, not to override real
+        # evidence (e.g. a residual-add composite legitimately has no
+        # single child whose tensor IS its output, yet tier 1/2 above
+        # can still correctly identify the right child via real
+        # dataflow).
+        _output_child_ids_are_weak_guess = not output_child_ids
 
         # Also include orphan @output nodes — child synthetic output nodes
         # with no consumers (data exits via inline ops not tracked by
@@ -2658,44 +3394,158 @@ def build_graph(
 
         # ── Create Output node(s) ─────────────────────────────────────
         if n_outputs >= 1:
-            # Always create an internal output node inside the module
-            output_id = comp_id + "/@output"
-            output_node = {
-                "id": output_id,
-                "label": "Output",
-                "namespace": children_ns,
-                "attrs": [{"key": "synthetic", "value": "output"}],
-                "style": _STYLE_OUTPUT,
-                "incomingEdges": [{"sourceNodeId": oid} for oid in output_child_ids],
-            }
-            nodes.append(output_node)
-            node_by_id[output_id] = output_node
+            # Ground truth (from real tensor-identity tracking, see
+            # `_capture_call_graph`): the set of this composite's DIRECT
+            # children whose output is literally part of its own
+            # returned output. When known (even as an empty set), don't
+            # wire the boundary's @output from a candidate outside that
+            # set — e.g. Glm5NextTextHyperConnection (`attn_hc`)'s real
+            # computation (a sinkhorn-iteration loop) is untracked, so
+            # nothing of "self" is visible except its one real
+            # submodule, `input_norm` — whose own output only feeds an
+            # untracked internal weight computation, never the
+            # composite's actual returned value. Wiring @output from it
+            # anyway would misrepresent input_norm's (differently-
+            # shaped) output as attn_hc's real return value, making it
+            # look like two RMSNorms run back-to-back with nothing in
+            # between. Still create the @output node itself (with
+            # correct shape metadata from the composite's own captured
+            # hook shape, set later) so downstream consumers have a
+            # boundary to be rewired onto below — just leave it with no
+            # (known-wrong) incoming edge of its own.
+            _known_real_outputs = (
+                real_output_children.get(comp_path)
+                if _output_child_ids_are_weak_guess
+                else None
+            )
+            if _known_real_outputs is not None:
 
-            wire_output_id = output_id
+                def _direct_child_path(oid: str) -> str:
+                    rel = oid[len(child_prefix) :]
+                    return f"{comp_path}.{rel.split('/', 1)[0]}"
+
+                _filtered_output_child_ids = [
+                    oid
+                    for oid in output_child_ids
+                    if _direct_child_path(oid) in _known_real_outputs
+                ]
+            else:
+                _filtered_output_child_ids = output_child_ids
+
+            # Always create output node(s) inside the module. A composite
+            # whose real forward() returns MULTIPLE distinct values (a
+            # tuple — e.g. Glm5NextTextHyperConnection returning `(post,
+            # comb, collapsed_hidden_states)`, three DIFFERENT shapes)
+            # gets one @output PORT NODE per return value, each with
+            # exactly the ONE real incoming edge (and, once shape
+            # propagation runs below, the one real shape) that belongs
+            # to it — mirroring how the AST backend splits a composite's
+            # multi-value output (`_port_output_id`) rather than merging
+            # distinct-shaped tensors into a single node whose one
+            # declared shape can't represent all of them. The
+            # input/output list for an expandable (composite) node must
+            # match its actual edges, port for port — a single merged
+            # node with 3 incoming edges but 1 declared shape doesn't.
+            output_id = comp_id + "/@output"
+            multi_port = len(_filtered_output_child_ids) > 1
+            port_output_ids = [
+                f"{output_id}:{idx}" if multi_port else output_id
+                for idx in range(len(_filtered_output_child_ids))
+            ] or [output_id]
+
+            for port_id, oid in zip(port_output_ids, _filtered_output_child_ids):
+                port_node = {
+                    "id": port_id,
+                    "label": "Output",
+                    "namespace": children_ns,
+                    "attrs": [{"key": "synthetic", "value": "output"}],
+                    "style": _STYLE_OUTPUT,
+                    "incomingEdges": [{"sourceNodeId": oid}],
+                }
+                nodes.append(port_node)
+                node_by_id[port_id] = port_node
+            if not _filtered_output_child_ids:
+                # No known-real output child (e.g. attn_hc's real return
+                # is untracked entirely) — still create an empty @output
+                # boundary so downstream consumers have somewhere to be
+                # rewired onto (with correct shape metadata from the
+                # composite's own captured hook shape, set later).
+                output_node = {
+                    "id": output_id,
+                    "label": "Output",
+                    "namespace": children_ns,
+                    "attrs": [{"key": "synthetic", "value": "output"}],
+                    "style": _STYLE_OUTPUT,
+                    "incomingEdges": [],
+                }
+                nodes.append(output_node)
+                node_by_id[output_id] = output_node
+
+            child_to_port = dict(zip(_filtered_output_child_ids, port_output_ids))
+            # Fallback target for (a) a child that (rarely) has a real
+            # external consumer despite not being among the known real
+            # outputs, and (b) any STALE reference to the old bare
+            # `output_id` placeholder — an earlier pass (`_resolve_
+            # predecessor`/`_find_last_node_for`) may have pointed a
+            # real successor straight at `comp_id + "/@output"` *before*
+            # this composite-boundary pass ran, back when a single
+            # merged node was going to be created there.
+            default_wire_id = port_output_ids[-1]
+            if multi_port:
+                _candidates = all_output_shapes.get(comp_path)
+                _picked_shape = _pick_output_shape(comp_path)
+                if _picked_shape and _candidates and _picked_shape in _candidates:
+                    default_wire_id = port_output_ids[_candidates.index(_picked_shape)]
+                for n2 in nodes:
+                    for e2 in n2.get("incomingEdges", []):
+                        if e2["sourceNodeId"] != output_id or n2["id"].startswith(
+                            child_prefix
+                        ):
+                            continue
+                        # Prefer matching THIS specific consumer's own
+                        # captured input shape directly against each
+                        # port's real shape — more robust than
+                        # `_pick_output_shape`'s `call_graph`-derived
+                        # successor lookup, which needs a populated
+                        # sequential-fallback entry that may not exist
+                        # (e.g. when real tensor-identity tracking
+                        # already resolved everything else and never
+                        # recorded a call_graph edge for this pair).
+                        wire_id = default_wire_id
+                        if _candidates:
+                            succ_in = input_shapes.get(
+                                n2["id"].replace("/", ".")
+                            )
+                            if succ_in and succ_in in _candidates:
+                                wire_id = port_output_ids[_candidates.index(succ_in)]
+                        e2["sourceNodeId"] = wire_id
 
             # Rewire consumers: nodes outside this module that consumed
-            # ANY child node should now consume the composite's @output.
+            # ANY child node should now consume the composite's @output
+            # — its own specific port, for a known real-output child.
             # This prevents external nodes from bypassing the composite
             # boundary (e.g. after a child composite's @output was created
             # in a prior iteration and an external node was wired to it).
             for cn in child_nodes:
                 cid = cn["id"]
+                wire_id = child_to_port.get(cid, default_wire_id)
                 if cid in consumers_of:
                     for consumer_node, edge in consumers_of[cid]:
                         if (
                             not consumer_node["id"].startswith(child_prefix)
                             and edge["sourceNodeId"] == cid
                         ):
-                            edge["sourceNodeId"] = wire_output_id
+                            edge["sourceNodeId"] = wire_id
             # Also check alias consumers
             for alias_id, target_id in _fx_leaf_aliases.items():
                 if target_id.startswith(child_prefix) and alias_id in consumers_of:
+                    wire_id = child_to_port.get(target_id, default_wire_id)
                     for consumer_node, edge in consumers_of[alias_id]:
                         if (
                             not consumer_node["id"].startswith(child_prefix)
                             and edge["sourceNodeId"] == alias_id
                         ):
-                            edge["sourceNodeId"] = wire_output_id
+                            edge["sourceNodeId"] = wire_id
 
     # ── Add I/O nodes for FX-expanded leaf modules ───────────────────
     # These aren't composite modules, but they have FX ops that need
@@ -2749,38 +3599,99 @@ def build_graph(
                     if not e["sourceNodeId"].startswith(prefix):
                         e["sourceNodeId"] = input_id
 
-        # Output node: find the last FX op(s)
-        last_id = fx_nodes[-1]["id"]
-        # Check if the last op has external consumers
-        has_ext_consumer = last_id in consumers_of
-        if not has_ext_consumer:
-            # Check aliases
-            orig_id = _node_id(path)
-            has_ext_consumer = orig_id in consumers_of
-
+        # Output node(s): a leaf whose real forward() returns MULTIPLE
+        # distinct values (ground truth from `fx_output_ids`, e.g.
+        # Glm5NextTextTopkRouter's `return router_logits, topk_weights,
+        # topk_indices`) gets one @output PORT NODE per return value —
+        # same rationale/mechanism as the composite case above: a
+        # single merged node with one declared shape can't represent
+        # several genuinely different per-port shapes, and the
+        # input/output list for an expandable node must match its
+        # actual edges. Fall back to the single last-FX-op node when
+        # there's no multi-return ground truth (e.g. tracing failed to
+        # capture the output node's args, or there's truly one return
+        # value).
+        _fx_out_ids = [
+            oid for oid in fx_output_ids.get(path, []) if oid in node_by_id
+        ]
         output_id = _node_id(path) + "/@output"
-        output_node = {
-            "id": output_id,
-            "label": "Output",
-            "namespace": fx_ns,
-            "attrs": [{"key": "synthetic", "value": "output"}],
-            "style": _STYLE_OUTPUT,
-            "incomingEdges": [{"sourceNodeId": last_id}],
-        }
-        nodes.append(output_node)
-        node_by_id[output_id] = output_node
+        if len(_fx_out_ids) > 1:
+            port_ids = [f"{output_id}:{idx}" for idx in range(len(_fx_out_ids))]
+            for port_id, oid in zip(port_ids, _fx_out_ids):
+                port_node = {
+                    "id": port_id,
+                    "label": "Output",
+                    "namespace": fx_ns,
+                    "attrs": [{"key": "synthetic", "value": "output"}],
+                    "style": _STYLE_OUTPUT,
+                    "incomingEdges": [{"sourceNodeId": oid}],
+                }
+                nodes.append(port_node)
+                node_by_id[port_id] = port_node
+            child_to_port = dict(zip(_fx_out_ids, port_ids))
+            _candidates = all_output_shapes.get(path)
+            _picked_shape = _pick_output_shape(path)
+            default_port_id = port_ids[-1]
+            if _picked_shape and _candidates and _picked_shape in _candidates:
+                default_port_id = port_ids[_candidates.index(_picked_shape)]
+            for oid, port_id in zip(_fx_out_ids, port_ids):
+                if oid in consumers_of:
+                    for consumer_node, edge in consumers_of[oid]:
+                        if (
+                            not consumer_node["id"].startswith(prefix)
+                            and edge["sourceNodeId"] == oid
+                        ):
+                            edge["sourceNodeId"] = port_id
+            # Any stale reference to the bare placeholder id (from an
+            # earlier pass that pointed a successor straight at
+            # `_node_id(path) + "/@output"` before this ran) or to the
+            # module's own alias id: prefer matching THIS specific
+            # consumer's own captured input shape directly against each
+            # port's real shape (more robust than `_pick_output_shape`'s
+            # `call_graph`-derived successor lookup, which needs a
+            # populated sequential-fallback entry that may not exist),
+            # falling back to the ground-truth-matched default port.
+            orig_id = _node_id(path)
+            for stale_src in (output_id, orig_id):
+                if stale_src in consumers_of:
+                    for consumer_node, edge in consumers_of[stale_src]:
+                        if (
+                            not consumer_node["id"].startswith(prefix)
+                            and edge["sourceNodeId"] == stale_src
+                        ):
+                            wire_id = default_port_id
+                            if _candidates:
+                                succ_in = input_shapes.get(
+                                    consumer_node["id"].replace("/", ".")
+                                )
+                                if succ_in and succ_in in _candidates:
+                                    wire_id = port_ids[_candidates.index(succ_in)]
+                            edge["sourceNodeId"] = wire_id
+        else:
+            # find the last FX op(s)
+            last_id = fx_nodes[-1]["id"]
+            output_node = {
+                "id": output_id,
+                "label": "Output",
+                "namespace": fx_ns,
+                "attrs": [{"key": "synthetic", "value": "output"}],
+                "style": _STYLE_OUTPUT,
+                "incomingEdges": [{"sourceNodeId": last_id}],
+            }
+            nodes.append(output_node)
+            node_by_id[output_id] = output_node
 
-        # Rewire external consumers of last FX op to use output node
-        if last_id in consumers_of:
-            for consumer_node, edge in consumers_of[last_id]:
-                if not consumer_node["id"].startswith(prefix):
-                    edge["sourceNodeId"] = output_id
-        # Also check alias
-        orig_id = _node_id(path)
-        if orig_id in consumers_of:
-            for consumer_node, edge in consumers_of[orig_id]:
-                if not consumer_node["id"].startswith(prefix):
-                    edge["sourceNodeId"] = output_id
+            # Rewire external consumers of last FX op to use output node
+            if last_id in consumers_of:
+                for consumer_node, edge in consumers_of[last_id]:
+                    if not consumer_node["id"].startswith(prefix):
+                        edge["sourceNodeId"] = output_id
+            # Also check alias
+            orig_id = _node_id(path)
+            if orig_id in consumers_of:
+                for consumer_node, edge in consumers_of[orig_id]:
+                    if not consumer_node["id"].startswith(prefix):
+                        edge["sourceNodeId"] = output_id
 
         # Add group attributes for the FX-expanded module's namespace
         mod = module_map.get(path)
@@ -3033,9 +3944,19 @@ def build_graph(
     # For synthetic @output nodes, use the module's captured output shape
     # instead of inheriting from the last child (which may be an
     # intermediate operation, not the module's actual output).
+    #
+    # Skip PORT-specific @output nodes (id ends in ":<idx>", from a
+    # multi-value composite return split into one node per port above):
+    # `_pick_output_shape` only knows the composite's OWN (single) captured
+    # hook shape, which is at most one of several genuinely different
+    # per-port shapes — applying it to every port would blow away the
+    # correct, per-port shape the fixed-point inheritance loop below
+    # would otherwise pull from each port's own (single) source edge.
     for n in nodes:
         attrs = {a["key"]: a["value"] for a in n.get("attrs", [])}
         if attrs.get("synthetic") != "output":
+            continue
+        if re.search(r"/@output:\d+$", n["id"]):
             continue
         path = n["id"].replace("/", ".").removesuffix(".@output")
         out_str = _pick_output_shape(path)
@@ -3123,7 +4044,7 @@ def _wire_sequential_edges(
     parallel_ns_groups: list[set[str]] | None = None,
     call_graph: dict[str, list[tuple[str, str]]] | None = None,
     fx_leaf_aliases: dict[str, str] | None = None,
-    fork_join_info: dict[str, dict] | None = None,
+    real_output_children: dict[str, set[str]] | None = None,
 ) -> None:
     """Wire edges between nodes that don't already have incoming edges.
 
@@ -3133,29 +4054,15 @@ def _wire_sequential_edges(
 
     For parallel branches (multiple layer types in the same container),
     all branches fan out from the same predecessor instead of being
-    chained sequentially.
-    chained sequentially.
+    chained sequentially, and all branches fan back in to whatever
+    consumes them next — with no separate Fork/Join wiring node.
     """
     node_ids = {n["id"] for n in nodes}
     node_by_id: dict[str, dict] = {n["id"]: n for n in nodes}
     parallel_ns_groups = parallel_ns_groups or []
     call_graph = call_graph or {}
     fx_leaf_aliases = fx_leaf_aliases or {}
-    fork_join_info = fork_join_info or {}
-
-    # Build lookup: branch_ns → fork_id, join_id
-    _branch_to_fork: dict[str, str] = {}  # branch_ns → fork_id
-    _branch_to_join: dict[str, str] = {}  # branch_ns → join_id
-    _fork_ids: set[str] = set()
-    _join_ids: set[str] = set()
-    _fork_id_to_parent_path: dict[str, str] = {}  # fork_id → its own parent's comp path
-    for _cp, fj in fork_join_info.items():
-        _fork_ids.add(fj["fork_id"])
-        _join_ids.add(fj["join_id"])
-        _fork_id_to_parent_path[fj["fork_id"]] = fj.get("parent_path", "")
-        for bns in fj["branch_namespaces"]:
-            _branch_to_fork[bns] = fj["fork_id"]
-            _branch_to_join[bns] = fj["join_id"]
+    real_output_children = real_output_children or {}
 
     # Add FX-expanded leaf module aliases so _cg_find_sources can resolve
     # them.  The alias maps orig_module_id → last_fx_op_id.
@@ -3244,6 +4151,39 @@ def _wire_sequential_edges(
 
     # Track last node emitted per dotted module path (for call-graph wiring)
     last_node_for_path: dict[str, str] = {}
+
+    def _redirect_from_untracked_output(source_id: str) -> str | None:
+        """If `source_id` sits inside a descendant subtree of some
+        composite whose real output children are known (ground truth
+        from tensor-identity tracking, see `_capture_call_graph`) and
+        are known to NOT include that subtree, redirect to that
+        composite's own (not-yet-created) "@output" boundary instead —
+        mirrors the same redirect in `_find_last_node_for` inside
+        `build_graph` (see its docstring for the motivating
+        Glm5NextTextHyperConnection/attn_hc example). Returns None
+        (no redirect) if `source_id` isn't affected.
+
+        Only meant to veto a *positional guess* (callers only consult
+        this when no call-graph-derived source was found) — an empty
+        ground-truth set does NOT mean "definitely wrong" in general
+        (e.g. a residual-add composite legitimately has no single
+        child whose tensor IS its output either), so this must stay
+        scoped to the weak positional-guess path only — anything with
+        real, reliable dataflow evidence (an actual call-graph edge, a
+        genuine outside consumer) is handled elsewhere and must never
+        be overridden by this heuristic.
+        """
+        path = source_id.replace("/", ".")
+        parts = path.split(".")
+        for depth in range(len(parts) - 1, 0, -1):
+            anc = ".".join(parts[:depth])
+            known = real_output_children.get(anc)
+            if known is not None:
+                direct_child = ".".join(parts[: depth + 1])
+                if direct_child not in known:
+                    return anc.replace(".", "/") + "/@output"
+        return None
+
     # For @input call-graph sources, track the entry point of each composite.
     # Pre-compute from the call_graph: for each composite C, find its
     # predecessor in the parent's call_graph.  The @input of C resolves
@@ -3365,82 +4305,6 @@ def _wire_sequential_edges(
             _update_last("", "@input")
             continue
 
-        # Handle Fork nodes: wire from call-graph predecessor(s) when
-        # known (e.g. a side-modality branch merging in alongside the
-        # main chain), falling back to the current predecessor in the
-        # parent namespace otherwise.
-        if node["id"] in _fork_ids:
-            ns = node.get("namespace", "")
-            fork_path = _node_id_to_path(node["id"])
-            src_ids: list[str] = []
-            # Read predecessors straight from the fork's own parent
-            # composite's call-graph edges (not the global `cg_sources`
-            # map, which can collide: both the parent AND the container
-            # itself independently synthesize a "(pred, fork_path)"
-            # edge, and since `cg_sources` is keyed only by target, one
-            # silently clobbers the other).
-            parent_path = _fork_id_to_parent_path.get(node["id"], "")
-            pred_paths = [
-                src
-                for src, tgt in call_graph.get(parent_path, [])
-                if tgt == fork_path and src != "@input"
-            ]
-            for pred_path in pred_paths:
-                pred_id = last_node_for_path.get(pred_path)
-                if pred_id and pred_id not in src_ids:
-                    src_ids.append(pred_id)
-            if not src_ids:
-                source_id = None
-                parts = ns.split("/") if ns else []
-                while parts:
-                    parts.pop()
-                    parent = "/".join(parts)
-                    if parent in last_in_ns:
-                        source_id = last_in_ns[parent]
-                        break
-                if source_id is None:
-                    source_id = last_in_ns.get("", "@input")
-                if source_id:
-                    src_ids = [source_id]
-            src_ids = [s for s in src_ids if s in node_by_id]
-            if src_ids:
-                node["incomingEdges"] = [
-                    {
-                        "sourceNodeId": s,
-                        "sourceNodeOutputId": "0",
-                        "targetNodeInputId": str(i),
-                    }
-                    for i, s in enumerate(src_ids)
-                ]
-            last_node_for_path[fork_path] = node["id"]
-            _update_last(ns, node["id"])
-            continue
-
-        # Handle Join nodes: wire from all branch last nodes
-        if node["id"] in _join_ids:
-            ns = node.get("namespace", "")
-            fan_in = []
-            for _cp, fj in fork_join_info.items():
-                if fj["join_id"] == node["id"]:
-                    for bns in fj["branch_namespaces"]:
-                        if bns in branch_last_node:
-                            fan_in.append(branch_last_node[bns])
-                    break
-            if fan_in:
-                node["incomingEdges"] = [
-                    {
-                        "sourceNodeId": src,
-                        "sourceNodeOutputId": "0",
-                        "targetNodeInputId": str(i),
-                    }
-                    for i, src in enumerate(fan_in)
-                    if src in node_by_id
-                ]
-            join_path = _node_id_to_path(node["id"])
-            last_node_for_path[join_path] = node["id"]
-            _update_last(ns, node["id"])
-            continue
-
         if "incomingEdges" in node:
             ns = node.get("namespace", "")
             branch_ns = _find_branch_ns(ns)
@@ -3461,13 +4325,9 @@ def _wire_sequential_edges(
         branch_ns = _find_branch_ns(ns)
 
         if branch_ns is not None and branch_ns not in parallel_entered:
-            # First time entering this parallel branch.
-            # If a Fork node exists for this branch, use it as the source.
-            if branch_ns in _branch_to_fork:
-                source_id = _branch_to_fork[branch_ns]
-                for s in parallel_siblings.get(branch_ns, set()):
-                    parallel_entry_point[s] = source_id
-            elif not any(
+            # First time entering this parallel branch — all branches
+            # fan out from the same predecessor (no Fork node).
+            if not any(
                 s in parallel_entered for s in parallel_siblings.get(branch_ns, set())
             ):
                 # First branch in the group — find predecessor normally
@@ -3503,25 +4363,17 @@ def _wire_sequential_edges(
             if source_id is None:
                 source_id = last_in_ns.get("", "@input")
         else:
-            # Not in a parallel branch. Check if we just left one —
-            # if so, fan in from all branches (or from the Join node
-            # if Fork/Join nodes exist).
+            # Not in a parallel branch. Check if we just left one — if
+            # so, fan in directly from every branch's last node (no
+            # Join node — matches the AST backend's rendering, where an
+            # interleaved layer-type stack's tail simply gets multiple
+            # incomingEdges, one per variant).
             fan_in_sources = []
-            has_join = False
             for group in parallel_ns_groups:
                 if group <= parallel_entered:
-                    # Check if any branch in this group has a Join node
                     for sibling_ns in group:
-                        if sibling_ns in _branch_to_join:
-                            join_id = _branch_to_join[sibling_ns]
-                            if join_id in node_by_id:
-                                fan_in_sources = [join_id]
-                                has_join = True
-                            break
-                    if not has_join:
-                        for sibling_ns in group:
-                            if sibling_ns in branch_last_node:
-                                fan_in_sources.append(branch_last_node[sibling_ns])
+                        if sibling_ns in branch_last_node:
+                            fan_in_sources.append(branch_last_node[sibling_ns])
             if fan_in_sources:
                 node["incomingEdges"] = [
                     {
@@ -3571,6 +4423,7 @@ def _wire_sequential_edges(
         # resolution before the call-graph override ever had a chance to
         # run — even though THIS node's own edge gets corrected fine.
         cg_srcs = _cg_find_sources(node["id"], source_id)
+        source_is_weak_guess = cg_srcs is None
         if cg_srcs is not None:
             if len(cg_srcs) == 1:
                 source_id = cg_srcs[0]
@@ -3597,7 +4450,14 @@ def _wire_sequential_edges(
         else:
             _record_composite_entry(node["id"], source_id)
 
-        if source_id and source_id in node_by_id:
+        redirected_to_future_boundary = False
+        if source_id and source_is_weak_guess:
+            redirected = _redirect_from_untracked_output(source_id)
+            if redirected:
+                source_id = redirected
+                redirected_to_future_boundary = True
+
+        if source_id and (redirected_to_future_boundary or source_id in node_by_id):
             node["incomingEdges"] = [
                 {
                     "sourceNodeId": source_id,

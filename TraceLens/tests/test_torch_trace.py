@@ -9,12 +9,14 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 import torch
 
 from TraceLens.ModelUtils.torch_trace import (
     _classify_module,
+    _dim_role_map,
     _fx_trace_module,
     _symbolise,
     build_graph,
@@ -32,6 +34,85 @@ class TestSymbolise:
 
     def test_scalar(self):
         assert _symbolise((1,), batch_size=1, seq_len=128) == "B"
+
+    def test_fixed_dim_coinciding_with_seq_len_without_roles(self):
+        # Without role info, a fixed weight dim that happens to equal the
+        # probed seq_len is naively (and wrongly) rendered as "S x S" —
+        # this documents the old, collision-prone behavior `roles`
+        # disambiguates in the tests below.
+        assert _symbolise((1, 128, 128), batch_size=1, seq_len=128) == "B x S x S"
+
+    def test_roles_disambiguate_fixed_dim_from_seq_len_collision(self):
+        # A head_dim of 128 that coincidentally equals the probed
+        # seq_len=128 should render as a literal "128", not "S", once we
+        # know (via `roles`) that it's actually a fixed dim.
+        assert (
+            _symbolise(
+                (1, 128, 128),
+                batch_size=1,
+                seq_len=128,
+                roles=("B", "S", "fixed"),
+            )
+            == "B x S x 128"
+        )
+
+    def test_true_0d_scalar_is_not_empty_string(self):
+        # A genuine 0-d tensor (e.g. `nn.Parameter(torch.ones(3)).unbind(0)`'s
+        # elements) must render as a real, truthy string ("scalar"), NOT
+        # an empty string. Several callers treat an empty/falsy shape
+        # string as "no shape known, fall back to something else" — an
+        # empty string here would silently make a real 0-d tensor's
+        # shape look unknown and get mis-attributed to a neighboring
+        # node's shape instead.
+        assert _symbolise((), batch_size=1, seq_len=128) == "scalar"
+
+    def test_roles_ignored_when_rank_mismatches(self):
+        # A stale/mismatched roles tuple (e.g. from dynamic control flow
+        # that changed rank between probes) must not be applied blindly.
+        assert (
+            _symbolise((1, 128, 128), batch_size=1, seq_len=128, roles=("B", "S"))
+            == "B x S x S"
+        )
+
+
+class TestDimRoleMap:
+    def test_batch_and_seq_tracked_across_probes(self):
+        # dim0 moves with batch_size (1->6), dim1 moves with seq_len
+        # (128->139): both should be classified correctly.
+        roles = _dim_role_map(
+            (1, 128, 4096),
+            (6, 139, 4096),
+            batch_size=1,
+            seq_len=128,
+            batch_size2=6,
+            seq_len2=139,
+        )
+        assert roles == ("B", "S", "fixed")
+
+    def test_fixed_dim_coinciding_with_seq_len_is_not_misclassified(self):
+        # head_dim=128 coincidentally equals the first probe's seq_len,
+        # but does NOT track seq_len across the second probe (stays 128),
+        # so it must be classified as "fixed", not "S".
+        roles = _dim_role_map(
+            (1, 128, 128),
+            (6, 139, 128),
+            batch_size=1,
+            seq_len=128,
+            batch_size2=6,
+            seq_len2=139,
+        )
+        assert roles == ("B", "S", "fixed")
+
+    def test_rank_mismatch_returns_none(self):
+        roles = _dim_role_map(
+            (1, 128, 4096),
+            (6, 139),
+            batch_size=1,
+            seq_len=128,
+            batch_size2=6,
+            seq_len2=139,
+        )
+        assert roles is None
 
 
 class TestClassifyModule:
@@ -156,7 +237,7 @@ def _build_simple_payload() -> dict:
     )
 
 
-def _build_from_model(model: torch.nn.Module) -> dict:
+def _build_from_model(model: torch.nn.Module, model_dtype: str = "float32") -> dict:
     """Replicate the core of build_graph() for a pre-instantiated model."""
     from TraceLens.ModelUtils import torch_trace as tt
 
@@ -169,7 +250,7 @@ def _build_from_model(model: torch.nn.Module) -> dict:
         hidden_size = 64
         num_hidden_layers = 4
         vocab_size = 256
-        dtype = "float32"
+        dtype = model_dtype
 
         def to_dict(self):
             return {
@@ -897,8 +978,11 @@ class TestGroupAttrOrdering:
                 ), f"In group '{key}', output_shape should be last: {keys}"
 
 
-class TestForkJoinNodes:
-    """Verify Fork/Join nodes for multi-group containers."""
+class TestParallelLayerGroupWiring:
+    """Verify multi-group (interleaved layer-type) containers render as
+    sibling variant groups with NO Fork/Join wiring nodes — matching the
+    AST backend's rendering, where each variant fans out from the same
+    predecessor(s) and fans back in to the same successor(s) directly."""
 
     @pytest.fixture(scope="class")
     def multi_group_model(self):
@@ -948,52 +1032,67 @@ class TestForkJoinNodes:
         model.eval()
         return _build_from_model(model)
 
-    def test_fork_node_exists(self, multi_group_model):
+    def test_no_fork_join_nodes(self, multi_group_model):
+        """No synthetic Fork/Join wiring nodes should be created."""
         nodes = multi_group_model["graphCollections"][0]["graphs"][0]["nodes"]
-        forks = [
+        fork_join = [
             n
             for n in nodes
-            if any(a.get("value") == "fork" for a in n.get("attrs", []))
+            if any(a.get("value") in ("fork", "join") for a in n.get("attrs", []))
         ]
-        assert len(forks) >= 1, "No Fork node found for multi-group container"
+        assert not fork_join, f"Fork/Join nodes should not exist, found {fork_join}"
 
-    def test_join_node_exists(self, multi_group_model):
+    def test_each_variant_group_has_its_own_input(self, multi_group_model):
+        """Each layer-type representative gets its own '@input' boundary,
+        fanned out directly from the shared predecessor (no Fork node)."""
         nodes = multi_group_model["graphCollections"][0]["graphs"][0]["nodes"]
-        joins = [
+        by_id = {n["id"]: n for n in nodes}
+        rep_inputs = [
             n
             for n in nodes
-            if any(a.get("value") == "join" for a in n.get("attrs", []))
+            if re.match(r"layers/\d+/@input$", n["id"])
         ]
-        assert len(joins) >= 1, "No Join node found for multi-group container"
-
-    def test_fork_has_incoming_edge(self, multi_group_model):
-        nodes = multi_group_model["graphCollections"][0]["graphs"][0]["nodes"]
-        for n in nodes:
-            if any(a.get("value") == "fork" for a in n.get("attrs", [])):
-                edges = n.get("incomingEdges", [])
-                assert edges, f"Fork node {n['id']} has no incoming edges"
-
-    def test_join_has_incoming_edges(self, multi_group_model):
-        nodes = multi_group_model["graphCollections"][0]["graphs"][0]["nodes"]
-        for n in nodes:
-            if any(a.get("value") == "join" for a in n.get("attrs", [])):
-                edges = n.get("incomingEdges", [])
-                assert len(edges) >= 2, (
-                    f"Join node {n['id']} should have >= 2 incoming edges "
-                    f"(one per branch), got {len(edges)}"
+        assert len(rep_inputs) >= 2, (
+            "Expected at least one '@input' per layer-type representative, "
+            f"got {[n['id'] for n in rep_inputs]}"
+        )
+        for n in rep_inputs:
+            edges = n.get("incomingEdges", [])
+            assert edges, f"{n['id']} has no incoming edges"
+            for e in edges:
+                assert e["sourceNodeId"] in by_id, (
+                    f"{n['id']}'s source {e['sourceNodeId']!r} does not "
+                    "resolve to a real node"
                 )
+
+    def test_successor_fans_in_from_every_variant(self, multi_group_model):
+        """Whatever runs after the interleaved layer stack should get
+        multiple incomingEdges — one per variant's own '@output' —
+        instead of a single Join node."""
+        nodes = multi_group_model["graphCollections"][0]["graphs"][0]["nodes"]
+        norm_node = next(n for n in nodes if n["id"] == "norm")
+        edges = norm_node.get("incomingEdges", [])
+        assert len(edges) >= 2, (
+            "'norm' (right after the interleaved layer stack) should have "
+            f">= 2 incoming edges (one per layer-type variant), got {len(edges)}"
+        )
+        sources = {e["sourceNodeId"] for e in edges}
+        assert any(s.endswith("/@output") for s in sources), (
+            f"Expected sources to be layer-rep '@output' nodes, got {sources}"
+        )
 
 
 class TestMultiModalSideBranchIntoForkedLayers:
     """Regression test: when the side branch (e.g. a vision encoder) feeds
     into a layer stack that ALSO has multiple interleaved layer types (so
-    the stack gets collapsed into Fork/Join nodes), the side branch's
-    output must still resolve to a concrete node id on the Fork's
-    incoming edges — not get lost, and not collide with the container's
-    own "@input" sequential-fallback edge to the same Fork target (both
-    independently synthesize a "(pred, fork_path)" call-graph edge for
-    the same target, keyed only by target in the global `cg_sources`
-    map, which silently let one clobber the other).
+    the stack renders as sibling variant groups), the side branch's
+    output must still resolve to a concrete node id on each variant
+    representative's own "@input" — not get lost, and not collide with
+    the container's own "@input" sequential-fallback edge to the same
+    target (both independently synthesize a "(pred, rep_path)"
+    call-graph edge for the same target, keyed only by target in the
+    global `cg_sources` map, which could otherwise silently let one
+    clobber the other).
     """
 
     @pytest.fixture(scope="class")
@@ -1051,22 +1150,20 @@ class TestMultiModalSideBranchIntoForkedLayers:
         model.eval()
         return _build_from_model(model)
 
-    def test_fork_incoming_edges_have_resolved_source_ids(self, vlm_with_forked_layers):
+    def test_rep_input_incoming_edges_have_resolved_source_ids(
+        self, vlm_with_forked_layers
+    ):
         nodes = vlm_with_forked_layers["graphCollections"][0]["graphs"][0]["nodes"]
         node_ids = {n["id"] for n in nodes}
-        forks = [
-            n
-            for n in nodes
-            if any(a.get("value") == "fork" for a in n.get("attrs", []))
-        ]
-        assert forks, "No Fork node found for the interleaved layer stack"
-        for fork in forks:
-            edges = fork.get("incomingEdges", [])
-            assert edges, f"Fork node {fork['id']} has no incoming edges"
+        rep_inputs = [n for n in nodes if re.match(r".*layers/\d+/@input$", n["id"])]
+        assert rep_inputs, "No layer-type representative '@input' found"
+        for rep_input in rep_inputs:
+            edges = rep_input.get("incomingEdges", [])
+            assert edges, f"{rep_input['id']} has no incoming edges"
             for e in edges:
                 assert e["sourceNodeId"] in node_ids, (
-                    f"Fork edge source {e['sourceNodeId']!r} does not resolve to "
-                    "a real node (dropped during call-graph merge)"
+                    f"{rep_input['id']} edge source {e['sourceNodeId']!r} does "
+                    "not resolve to a real node (dropped during call-graph merge)"
                 )
 
     def test_visual_output_is_consumed_somewhere(self, vlm_with_forked_layers):
@@ -2168,6 +2265,141 @@ class TestAttentionKernelGapRealOutput:
         )
 
 
+class TestRawAttentionDispatchGetsKernelNode:
+    """Regression test for a real GLM-5.3-Flash bug: the *real*
+    transformers attention dispatch mechanism
+    (``ALL_ATTENTION_FUNCTIONS.get_interface(...)``, used by nearly
+    every modern HF attention module to pick sdpa/eager/flash attention)
+    invokes the actual attention math as a raw *function* call —
+    ``attention_interface(module, query, key, value, mask, ...)`` — never
+    as an ``nn.Module`` child, so it's completely invisible to hook-based
+    call-graph capture on its own. Worse, real MLA/GQA-style attention
+    reshapes each Q/K/V projection's output (``.view(...).transpose(...)``)
+    before that raw call, so even naive ``id()``-based tensor-identity
+    tracking can't link producer to consumer (a ``.view()`` returns a
+    brand-new tensor object).
+
+    Unless both gaps are closed, q_proj/k_proj/v_proj render as
+    untracked dead-ends, the attention computation itself never appears
+    in the graph at all, and o_proj gets a spurious guessed input from
+    whatever unrelated module happened to run right before it.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        def _eager_attention(module, query, key, value, attention_mask, scaling, **kwargs):
+            attn_weights = torch.matmul(query, key.transpose(-1, -2)) * scaling
+            attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
+            attn_output = torch.matmul(attn_weights, value)
+            return attn_output.transpose(1, 2).contiguous(), attn_weights
+
+        class _Config:
+            _attn_implementation = "eager"
+
+        class _AttnLike(torch.nn.Module):
+            """Mirrors Glm5NextTextAttention's shape: separate Q/K/V
+            Linear projections, each reshaped via view+transpose, feed
+            the real ``ALL_ATTENTION_FUNCTIONS`` dispatch mechanism —
+            not a stand-in — before o_proj."""
+
+            def __init__(self):
+                super().__init__()
+                self.config = _Config()
+                self.num_heads = 2
+                self.head_dim = 4
+                self.q_proj = torch.nn.Linear(8, 8)
+                self.k_proj = torch.nn.Linear(8, 8)
+                self.v_proj = torch.nn.Linear(8, 8)
+                self.o_proj = torch.nn.Linear(8, 8)
+                self.scaling = self.head_dim**-0.5
+
+            def forward(self, x):
+                for _ in x:  # unsupported by FX tracing (Proxy can't be
+                    break  # iterated) but fine at real eager runtime —
+                    # forces whole-module FX tracing to fail, matching
+                    # the real module's Cache/indexer branching, so this
+                    # renders via the hooks-based fallback path instead
+                    # of an FX-expanded op graph.
+                b, s, _ = x.shape
+                shape = (b, s, self.num_heads, self.head_dim)
+                q = self.q_proj(x).view(shape).transpose(1, 2)
+                k = self.k_proj(x).view(shape).transpose(1, 2)
+                v = self.v_proj(x).view(shape).transpose(1, 2)
+                attn_fn = ALL_ATTENTION_FUNCTIONS.get_interface(
+                    self.config._attn_implementation, _eager_attention
+                )
+                attn_output, _ = attn_fn(self, q, k, v, None, scaling=self.scaling)
+                attn_output = attn_output.reshape(b, s, -1).contiguous()
+                return self.o_proj(attn_output)
+
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(16, 8)
+                self.self_attn = _AttnLike()
+
+            def forward(self, input_ids, **kwargs):
+                return self.self_attn(self.embed(input_ids))
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_attention_kernel_node_exists_with_friendly_label(self, payload):
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        kernels = [n for n in nodes if n["id"].endswith("_tracelens_attention_kernel")]
+        assert len(kernels) == 1, f"expected exactly one attention kernel node, got {kernels}"
+        assert kernels[0]["label"] == "Eager Attention", kernels[0]["label"]
+
+    def test_qkv_projections_feed_the_kernel_via_view_transpose(self, payload):
+        """q_proj/k_proj/v_proj's raw outputs must be linked to the
+        kernel despite the intervening .view().transpose() reshape."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        kernel = by_id.get("self_attn/_tracelens_attention_kernel")
+        assert kernel is not None, "attention kernel node not found"
+        sources = {e["sourceNodeId"] for e in kernel.get("incomingEdges", [])}
+        assert sources == {
+            "self_attn/q_proj",
+            "self_attn/k_proj",
+            "self_attn/v_proj",
+        }, sources
+
+    def test_o_proj_is_fed_by_the_kernel(self, payload):
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        o_proj = by_id.get("self_attn/o_proj")
+        assert o_proj is not None, "o_proj node not found"
+        sources = [e["sourceNodeId"] for e in o_proj.get("incomingEdges", [])]
+        assert sources == ["self_attn/_tracelens_attention_kernel"], (
+            f"o_proj should be fed by the attention kernel, got {sources} "
+            "— it must not fall back to a spurious guess from an "
+            "unrelated sibling."
+        )
+
+    def test_no_qkv_dead_ends_leak_into_composite_output(self, payload):
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        output = by_id.get("self_attn/@output")
+        assert output is not None, "self_attn/@output node not found"
+        sources = [e["sourceNodeId"] for e in output.get("incomingEdges", [])]
+        assert sources == ["self_attn/o_proj"], sources
+
+    def test_kernel_classified_as_attention_style(self, payload):
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        kernel = by_id.get("self_attn/_tracelens_attention_kernel")
+        q_proj = by_id.get("self_attn/q_proj")
+        assert kernel is not None and q_proj is not None
+        assert kernel["style"] != q_proj["style"], (
+            "the attention kernel should be styled distinctly from a "
+            "plain Linear leaf"
+        )
+
+
 class TestNoDistinctNormColor:
     """Regression test for a real GLM-5.3-Flash bug: a built-in
     ``nn.LayerNorm`` leaf (e.g. the indexer's ``k_norm``) rendered as an
@@ -2462,6 +2694,26 @@ class TestSingleChildPassthroughShapeMismatchBlocked:
             f"shape, got {hc_out_shape!r}"
         )
 
+    def test_hc_output_not_wired_from_input_norm(self, payload):
+        """Regression test for a real GLM-5.3-Flash bug: hc/@output's
+        OWN incoming edge must not be sourced from input_norm's output.
+        Since input_norm's output is never part of hc's real returned
+        value (see the shape mismatch above), wiring hc/@output from it
+        would misrepresent input_norm's content as hc's real output —
+        visually indistinguishable from "input_norm feeds directly into
+        whatever consumes hc's output", when really there's a whole
+        untracked computation (the sinkhorn-iteration math, in the real
+        Glm5NextTextHyperConnection) in between that never touches
+        input_norm's output at all."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        hc_output = by_id.get("hc/@output")
+        assert hc_output is not None, "hc/@output node not found"
+        sources = [e["sourceNodeId"] for e in hc_output.get("incomingEdges", [])]
+        assert not any("input_norm" in s for s in sources), (
+            f"hc/@output must not be wired from input_norm, got {sources}"
+        )
+
 
 class TestNestedGateWiredFromCompositeEntryNotSibling:
     """Regression test for a real GLM-5.3-Flash bug: inside
@@ -2573,23 +2825,25 @@ class TestNestedGateWiredFromCompositeEntryNotSibling:
 class TestForkPredecessorNotClobberedByAncestorInput:
     """Regression test for a real GLM-5.3-Flash bug: when a side-modality
     branch (e.g. a vision encoder, skipped because its optional input was
-    omitted) merges into a Fork node for an interleaved layer-type stack,
-    the Fork's correctly-resolved predecessor used to get silently
-    overwritten by the *generic* ancestor's own "@input" boundary.
+    omitted) merges into a layer-type representative's own "@input" for
+    an interleaved layer-type stack, that correctly-resolved predecessor
+    used to get silently overwritten by the *generic* ancestor's own
+    "@input" boundary.
 
     Root cause: composite boundary creation (which builds each module's
     own synthetic "@input"/"@output" nodes) treats ANY child node whose
     incoming edge source lives outside the ancestor's own subtree as a
     generic "input child" needing rewiring to the ancestor's own
-    "@input" — but a Fork node is namespaced INSIDE the ancestor even
-    though it represents the entry to a NESTED layer-stack container,
-    and its predecessor was already carefully resolved straight from the
-    real call graph. Treating it like any other "input child" collapsed
-    that specific, real source into the ancestor's own generic "@input",
-    destroying the distinction between "the model's own primary input"
-    and "a side branch merging in partway through" — and also left the
-    token-embedding path (the model's OTHER real predecessor) as a
-    disconnected dead end with no consumer at all.
+    "@input" — but a layer-type representative's "@input" is namespaced
+    INSIDE the ancestor even though it represents the entry to a NESTED
+    layer-stack container, and its predecessor was already carefully
+    resolved straight from the real call graph. Treating it like any
+    other "input child" collapsed that specific, real source into the
+    ancestor's own generic "@input", destroying the distinction between
+    "the model's own primary input" and "a side branch merging in
+    partway through" — and also left the token-embedding path (the
+    model's OTHER real predecessor) as a disconnected dead end with no
+    consumer at all.
     """
 
     @pytest.fixture(scope="class")
@@ -2647,29 +2901,34 @@ class TestForkPredecessorNotClobberedByAncestorInput:
         model.eval()
         return _build_from_model(model)
 
-    def test_fork_predecessor_is_visual_not_generic_input(self, payload):
+    def _rep_input_nodes(self, payload):
         nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
-        by_id = {n["id"]: n for n in nodes}
-        fork = by_id.get("language_model/layers/@fork")
-        assert fork is not None, "language_model/layers/@fork node not found"
-        sources = {e["sourceNodeId"] for e in fork.get("incomingEdges", [])}
-        assert "visual/@output" in sources, (
-            "Fork's predecessor should include visual/@output (the real, "
-            f"resolved side-branch source), got {sources}"
-        )
+        return [n for n in nodes if re.match(r"language_model/layers/\d+/@input$", n["id"])]
 
-    def test_embed_tokens_also_feeds_fork_and_has_a_consumer(self, payload):
+    def test_rep_predecessor_is_visual_not_generic_input(self, payload):
+        rep_inputs = self._rep_input_nodes(payload)
+        assert rep_inputs, "No layer-type representative '@input' found"
+        for rep_input in rep_inputs:
+            sources = {e["sourceNodeId"] for e in rep_input.get("incomingEdges", [])}
+            assert "visual/@output" in sources, (
+                f"{rep_input['id']}'s predecessor should include visual/@output "
+                f"(the real, resolved side-branch source), got {sources}"
+            )
+
+    def test_embed_tokens_also_feeds_reps_and_has_a_consumer(self, payload):
         """The token-embedding path must ALSO be visible as a parallel
-        predecessor of the Fork — not left disconnected just because the
-        side branch's edge claims the merge point first."""
+        predecessor of every layer-type representative — not left
+        disconnected just because the side branch's edge claims the
+        merge point first."""
         nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
-        by_id = {n["id"]: n for n in nodes}
-        fork = by_id.get("language_model/layers/@fork")
-        assert fork is not None
-        sources = {e["sourceNodeId"] for e in fork.get("incomingEdges", [])}
-        assert "language_model/embed_tokens" in sources, (
-            f"Fork should also be wired from language_model/embed_tokens, got {sources}"
-        )
+        rep_inputs = self._rep_input_nodes(payload)
+        assert rep_inputs, "No layer-type representative '@input' found"
+        for rep_input in rep_inputs:
+            sources = {e["sourceNodeId"] for e in rep_input.get("incomingEdges", [])}
+            assert "language_model/embed_tokens" in sources, (
+                f"{rep_input['id']} should also be wired from "
+                f"language_model/embed_tokens, got {sources}"
+            )
         consumers = [
             n["id"]
             for n in nodes
@@ -2681,8 +2940,8 @@ class TestForkPredecessorNotClobberedByAncestorInput:
     def test_language_model_own_input_is_clean(self, payload):
         """language_model's own @input boundary should carry only the
         model's real primary (token id) input — not also get polluted
-        with the side-branch's edge that actually belongs to the nested
-        Fork merge point."""
+        with the side-branch's edge that actually belongs to a nested
+        layer-type representative's own merge point."""
         nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
         by_id = {n["id"]: n for n in nodes}
         lm_input = by_id.get("language_model/@input")
@@ -2691,4 +2950,592 @@ class TestForkPredecessorNotClobberedByAncestorInput:
         assert "visual/@output" not in sources, (
             "language_model/@input should not carry the visual side-branch "
             f"edge (that belongs on the nested Fork instead), got {sources}"
+        )
+
+
+class TestFixedDimNotConfusedWithSeqLen:
+    """Regression test for a real GLM-5.3-Flash bug: the DSA indexer's
+    ``wk`` (``nn.Linear(hidden_size, head_dim=128)``) and ``k_norm``
+    (``nn.LayerNorm(128)``) got rendered with an impossible output shape
+    of "B x S x S" instead of "B x S x 128". This happened because
+    ``build_graph``'s default probe ``seq_len=128`` numerically
+    coincided with the module's *fixed* weight-derived ``head_dim=128``,
+    and the old single-probe `_symbolise` heuristic couldn't tell a
+    "moves with sequence length" dim from a "just happens to equal 128"
+    dim — there is no way a Linear layer with a constant weight matrix
+    can turn a fixed-size input into an output whose size depends on the
+    runtime sequence length. A second probe pass at a different
+    (batch_size, seq_len) breaks that coincidence (see `_dim_role_map`).
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(16, 8)
+                # out_features deliberately equals build_graph's default
+                # seq_len=128 — this is the coincidence that used to get
+                # mislabelled as the sequence dimension "S".
+                self.wk = torch.nn.Linear(8, 128, bias=False)
+                self.k_norm = torch.nn.LayerNorm(128)
+
+            def forward(self, input_ids, **kwargs):
+                return self.k_norm(self.wk(self.embed(input_ids)))
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_linear_with_fixed_out_features_not_shown_as_sxs(self, payload):
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        wk = by_id.get("wk")
+        assert wk is not None, "wk node not found"
+        meta = wk.get("outputsMetadata")
+        assert meta, "wk has no outputsMetadata"
+        shape = next(
+            (a["value"] for a in meta[0]["attrs"] if a["key"] == "shape"), None
+        )
+        assert shape is not None and shape.startswith("B x S x 128"), (
+            "A Linear layer with a constant weight can't turn a fixed-size "
+            f"input into a shape that depends on the sequence length, got {shape!r}"
+        )
+
+    def test_layernorm_with_fixed_normalized_shape_not_shown_as_sxs(self, payload):
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        k_norm = by_id.get("k_norm")
+        assert k_norm is not None, "k_norm node not found"
+        meta = k_norm.get("outputsMetadata")
+        assert meta, "k_norm has no outputsMetadata"
+        shape = next(
+            (a["value"] for a in meta[0]["attrs"] if a["key"] == "shape"), None
+        )
+        assert shape is not None and shape.startswith("B x S x 128"), (
+            f"LayerNorm is shape-preserving, expected B x S x 128, got {shape!r}"
+        )
+
+
+class ShapeUnpackAndSinkhornLoop(torch.nn.Module):
+    """Mirrors two real GLM-5.3-Flash `Glm5NextTextHyperConnection` bugs
+    in one module:
+
+    1. ``x.view(*x.shape[:-1], a, b)`` — unpacking a Proxy's symbolic
+       ``.shape`` breaks whole-module FX tracing outright (fixed by
+       rewriting to the equivalent, FX-traceable ``x.unflatten(-1, (a,
+       b))`` before tracing).
+    2. A ``for _ in range(N): y = y / (y.sum(...) + eps)`` loop (mirrors
+       Sinkhorn normalization) unrolls into N *real*, correctly-shaped
+       op nodes when traced — which is accurate but would flood the
+       graph with near-duplicate nodes, so it must be collapsed to ONE
+       representative iteration annotated with the real iteration count
+       (mirroring how the AST backend represents a ``for`` loop: trace
+       the body once, annotate with the real count, rather than
+       literally duplicating it).
+    """
+
+    def __init__(self, iters: int = 20):
+        super().__init__()
+        self.iters = iters
+
+    def forward(self, x):
+        y = x.view(*x.shape[:-1], 2, 4)
+        for _ in range(self.iters):
+            y = y / (y.sum(dim=-1, keepdim=True) + 1e-6)
+        return y.sum(dim=-2)
+
+
+class TestShapeUnpackIdiomAndLoopCollapse:
+    """Regression test for two real GLM-5.3-Flash `Glm5NextTextHyperConnection`
+    bugs: (1) whole-module FX tracing failing outright on the
+    ``x.view(*x.shape[:-1], ...)`` shape-unpack idiom, which left
+    HyperConnection rendered as an empty pass-through box wired from the
+    wrong predecessor; and (2) once fixed, a real ``for`` loop (Sinkhorn
+    normalization) unrolling into dozens of near-duplicate op nodes.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed_tokens = torch.nn.Embedding(16, 8)
+                self.hc = ShapeUnpackAndSinkhornLoop(iters=20)
+
+            def forward(self, input_ids, **kwargs):
+                return self.hc(self.embed_tokens(input_ids))
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_module_traces_instead_of_falling_back_to_a_single_node(self, payload):
+        """Before the shape-unpack-idiom fix, whole-module tracing threw
+        a TraceError and `hc` was rendered as a single opaque node (or a
+        pass-through box) with none of its real ops visible."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        hc_op_nodes = [
+            n
+            for n in nodes
+            if n["id"].startswith("hc/") and n["id"] not in ("hc/@input", "hc/@output")
+        ]
+        assert hc_op_nodes, (
+            "hc's real ops (unflatten/sum/add/truediv/...) should be "
+            "visible — whole-module FX tracing must succeed on the "
+            "shape-unpack idiom now that it's rewritten to `unflatten`"
+        )
+        labels = {n["label"] for n in hc_op_nodes}
+        assert "Unflatten" in labels, f"expected an Unflatten node, got labels {labels}"
+
+    def test_sinkhorn_style_loop_collapses_to_one_representative(self, payload):
+        """The 20-iteration loop must not unroll into ~60 near-duplicate
+        Sum/Add/Truediv nodes — it should collapse to ONE representative
+        iteration, annotated with the real iteration count."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        hc_op_nodes = [
+            n
+            for n in nodes
+            if n["id"].startswith("hc/") and n["id"] not in ("hc/@input", "hc/@output")
+        ]
+        truediv_nodes = [n for n in hc_op_nodes if n["label"] == "Truediv"]
+        assert len(truediv_nodes) == 1, (
+            f"expected exactly ONE representative Truediv node after "
+            f"collapsing the 20-iteration loop, got {len(truediv_nodes)}: "
+            f"{[n['id'] for n in truediv_nodes]}"
+        )
+        loop_iter_attrs = [
+            a["value"]
+            for n in hc_op_nodes
+            for a in n.get("attrs", [])
+            if a["key"] == "loop_iterations"
+        ]
+        assert loop_iter_attrs == ["20"], (
+            f"expected a single loop_iterations=20 annotation, got {loop_iter_attrs}"
+        )
+
+    def test_collapsed_loop_body_has_real_shapeprop_shape_not_ambient(self, payload):
+        """The collapsed representative Sum (a `dim=-1, keepdim=True`
+        reduction over the size-4 axis) must show its own real reduced
+        shape (`...x 1`), not the ambient (pre-reduction, size-4) shape
+        naive shape-inheritance used to produce."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        hc_op_nodes = [n for n in nodes if n["id"].startswith("hc/")]
+        sum_nodes = [n for n in hc_op_nodes if n["label"] == "Sum"]
+        # The final `y.sum(dim=-2)` (collapsing the size-2 axis) is a
+        # separate, non-loop Sum — only check the loop-body Sum(s).
+        loop_sums = [n for n in sum_nodes if n["id"] != "hc/sum_21"]
+        assert loop_sums, "expected at least one loop-body Sum node"
+        for n in loop_sums:
+            meta = n.get("outputsMetadata")
+            assert meta, f"{n['id']} is missing outputsMetadata"
+            shape = next(
+                a["value"] for a in meta[0]["attrs"] if a["key"] == "shape"
+            )
+            assert shape.split(" ")[-2] == "1", (
+                f"a `dim=-1, keepdim=True` reduction over a size-4 axis "
+                f"must end in '... x 1', got {shape!r} for {n['id']}"
+            )
+
+
+class TestCollapseRepeatedOpBlocks:
+    """Unit tests for `_collapse_repeated_op_blocks`, the helper that
+    collapses a straight-line chain of repeated, identically-labeled,
+    dataflow-chained op blocks (the FX-unrolled form of a Python
+    ``for`` loop over a loop-carried tensor) down to one representative
+    block annotated with the real iteration count.
+    """
+
+    @staticmethod
+    def _op(node_id: str, label: str, src: str | None) -> dict:
+        return {
+            "id": node_id,
+            "label": label,
+            "incomingEdges": (
+                [{"sourceNodeId": src, "sourceNodeOutputId": "0", "targetNodeInputId": "0"}]
+                if src
+                else []
+            ),
+        }
+
+    def _make_chain(self, n_reps: int) -> list[dict]:
+        """`n_reps` repetitions of a (Sum, Div) block, each chained off
+        the previous repetition's last node — mirrors a loop-carried
+        tensor being reassigned every iteration."""
+        nodes = [self._op("start", "Embedding", None)]
+        prev = "start"
+        for i in range(n_reps):
+            sum_id, div_id = f"sum_{i}", f"div_{i}"
+            nodes.append(self._op(sum_id, "Sum", prev))
+            nodes.append(self._op(div_id, "Div", sum_id))
+            prev = div_id
+        nodes.append(self._op("end", "Linear", prev))
+        return nodes
+
+    def test_no_collapse_below_threshold(self):
+        from TraceLens.ModelUtils.torch_trace import _collapse_repeated_op_blocks
+
+        nodes = self._make_chain(2)
+        result, remap = _collapse_repeated_op_blocks(nodes)
+        assert result == nodes, "fewer than 3 repetitions should not collapse"
+        assert remap == {}
+
+    def test_collapses_long_chain_to_one_representative(self):
+        from TraceLens.ModelUtils.torch_trace import _collapse_repeated_op_blocks
+
+        nodes = self._make_chain(20)
+        result, remap = _collapse_repeated_op_blocks(nodes)
+        # start + (sum, div) representative + end == 4 nodes, down from
+        # 1 + 40 + 1 == 42.
+        assert len(result) == 4, [n["id"] for n in result]
+        assert [n["label"] for n in result] == ["Embedding", "Sum", "Div", "Linear"]
+        # The representative is the FIRST repetition, annotated with the
+        # real count.
+        assert result[1]["id"] == "sum_0"
+        assert result[2]["id"] == "div_0"
+        rep_attrs = {a["key"]: a["value"] for a in result[1].get("attrs", [])}
+        assert rep_attrs.get("loop_iterations") == "20"
+        # Every removed repetition's nodes must remap onto the
+        # representative's corresponding node.
+        assert remap["sum_19"] == "sum_0"
+        assert remap["div_19"] == "div_0"
+
+    def test_downstream_consumer_remapped_to_representative(self):
+        """A consumer that referenced the LAST (now-removed) repetition
+        must have its edge redirected to the surviving representative."""
+        from TraceLens.ModelUtils.torch_trace import (
+            _apply_id_remap,
+            _collapse_repeated_op_blocks,
+        )
+
+        nodes = self._make_chain(20)
+        result, remap = _collapse_repeated_op_blocks(nodes)
+        end = next(n for n in result if n["id"] == "end")
+        assert end["incomingEdges"][0]["sourceNodeId"] == "div_19"
+        _apply_id_remap(result, remap)
+        assert end["incomingEdges"][0]["sourceNodeId"] == "div_0", (
+            "end's incoming edge must be redirected from the removed "
+            "div_19 to the surviving representative div_0"
+        )
+
+    def test_non_repeating_sequence_untouched(self):
+        from TraceLens.ModelUtils.torch_trace import _collapse_repeated_op_blocks
+
+        nodes = [
+            self._op("a", "Linear", None),
+            self._op("b", "ReLU", "a"),
+            self._op("c", "Linear", "b"),
+        ]
+        result, remap = _collapse_repeated_op_blocks(nodes)
+        assert result == nodes
+        assert remap == {}
+
+
+class _MultiReturnComposite(torch.nn.Module):
+    """Mirrors Glm5NextTextHyperConnection: a composite module (has a real
+    nn.Module child) whose real forward() returns MULTIPLE genuinely
+    differently-shaped tensors, only ONE of which is what actually
+    continues into the next module. The one real child's (``norm``) own
+    output is NOT part of the returned tuple, so the ground-truth
+    ``real_output_children`` set for this composite is empty — its
+    boundary can only be wired from these anonymous FX ops, not from
+    ``norm`` directly.
+    """
+
+    def __init__(self, dim: int = 8):
+        super().__init__()
+        self.norm = torch.nn.LayerNorm(dim)
+
+    def forward(self, x):
+        y = self.norm(x)
+        small = y.sum(dim=-1, keepdim=True)  # (..., 1) — a "side" value
+        main = y * 2  # (..., dim) — the value that actually continues
+        return small, main
+
+
+class _MultiReturnLeafRouter(torch.nn.Module):
+    """Mirrors Glm5NextTextTopkRouter: a LEAF module (no nn.Module
+    children at all) whose forward() returns THREE genuinely
+    differently-shaped tensors, only ONE of which continues downstream.
+    """
+
+    def __init__(self, dim: int = 8, num_experts: int = 6, top_k: int = 2):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(num_experts, dim))
+        self.top_k = top_k
+
+    def forward(self, x):
+        logits = torch.nn.functional.linear(x, self.weight)  # (..., 6)
+        topk_weights, topk_indices = logits.topk(self.top_k, dim=-1)  # (..., 2)
+        topk_weights = topk_weights * 2.0
+        return logits, topk_weights, topk_indices
+
+
+class TestMultiReturnOutputPortSplitting:
+    """Regression test for a real GLM-5.3-Flash class of bugs:
+    ``Glm5NextTextHyperConnection`` (a composite) and
+    ``Glm5NextTextTopkRouter`` (a leaf) both return SEVERAL genuinely
+    differently-shaped tensors from one ``forward()``. Merging all of
+    them into a single ``@output`` node — one node, several incoming
+    edges, but only ONE declared shape — can't represent them (the
+    input/output list for an expandable node must match its actual
+    edges). Each distinct return value must get its OWN ``@output:N``
+    port node with exactly one incoming edge and its own real shape,
+    and downstream consumers must land on the CORRECT port.
+    """
+
+    @pytest.fixture(scope="class")
+    def composite_payload(self):
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed_tokens = torch.nn.Embedding(16, 8)
+                self.mrc = _MultiReturnComposite(dim=8)
+                self.next_norm = torch.nn.LayerNorm(8)
+
+            def forward(self, input_ids, **kwargs):
+                x = self.embed_tokens(input_ids)
+                _small, main = self.mrc(x)
+                return self.next_norm(main)
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    @pytest.fixture(scope="class")
+    def leaf_payload(self):
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed_tokens = torch.nn.Embedding(16, 8)
+                self.router = _MultiReturnLeafRouter(dim=8, num_experts=6, top_k=2)
+                self.combine = torch.nn.LayerNorm(2)
+
+            def forward(self, input_ids, **kwargs):
+                x = self.embed_tokens(input_ids)
+                _logits, topk_weights, _topk_indices = self.router(x)
+                return self.combine(topk_weights)
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    @staticmethod
+    def _shape_of(nodes_by_id, node_id):
+        n = nodes_by_id.get(node_id)
+        if not n or not n.get("outputsMetadata"):
+            return None
+        return next(
+            (a["value"] for a in n["outputsMetadata"][0]["attrs"] if a["key"] == "shape"),
+            None,
+        )
+
+    def test_composite_multi_return_splits_into_ports(self, composite_payload):
+        nodes = composite_payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        port0 = by_id.get("mrc/@output:0")
+        port1 = by_id.get("mrc/@output:1")
+        assert port0 is not None and port1 is not None, (
+            f"expected mrc/@output:0 and mrc/@output:1, got "
+            f"{[nid for nid in by_id if 'mrc/@output' in nid]}"
+        )
+        # No merged, un-suffixed node should remain.
+        assert "mrc/@output" not in by_id
+        # Each port has exactly ONE incoming edge.
+        assert len(port0["incomingEdges"]) == 1
+        assert len(port1["incomingEdges"]) == 1
+        # Each port's declared shape matches its OWN source's real shape.
+        for port in (port0, port1):
+            src_id = port["incomingEdges"][0]["sourceNodeId"]
+            assert self._shape_of(by_id, port["id"]) == self._shape_of(by_id, src_id), (
+                f"{port['id']}'s declared shape must match its own source "
+                f"{src_id}, not some other port's"
+            )
+        # The two ports must have genuinely DIFFERENT shapes ("small" is
+        # (..., 1), "main" is (..., 8)).
+        assert self._shape_of(by_id, "mrc/@output:0") != self._shape_of(
+            by_id, "mrc/@output:1"
+        )
+
+    def test_composite_downstream_consumer_wired_to_correct_port(
+        self, composite_payload
+    ):
+        nodes = composite_payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        # next_norm is a plain torch.nn.LayerNorm leaf — it gets a direct
+        # incoming edge, not a synthetic @input boundary of its own.
+        next_norm = by_id.get("next_norm")
+        assert next_norm is not None
+        sources = [e["sourceNodeId"] for e in next_norm["incomingEdges"]]
+        assert "mrc/@output:1" in sources, (
+            f"next_norm (which expects dim=8, matching 'main') must be "
+            f"wired from mrc/@output:1 ('main'), not {sources}"
+        )
+        assert "mrc/@output:0" not in sources
+        assert "mrc/@output" not in sources, (
+            "no consumer should reference the old, no-longer-existing "
+            "bare (un-suffixed) placeholder id"
+        )
+
+    def test_leaf_multi_return_splits_into_ports(self, leaf_payload):
+        nodes = leaf_payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        port_ids = [nid for nid in by_id if "router/@output:" in nid]
+        assert len(port_ids) == 3, f"expected 3 output ports, got {port_ids}"
+        assert "router/@output" not in by_id
+        for port_id in port_ids:
+            port = by_id[port_id]
+            assert len(port["incomingEdges"]) == 1
+            src_id = port["incomingEdges"][0]["sourceNodeId"]
+            assert self._shape_of(by_id, port_id) == self._shape_of(by_id, src_id)
+        shapes = {self._shape_of(by_id, pid) for pid in port_ids}
+        assert len(shapes) == 2, (
+            f"logits is (..., 6) while topk_weights/topk_indices are both "
+            f"(..., 2) — expected exactly 2 distinct shapes among the 3 "
+            f"ports, got {shapes}"
+        )
+
+    def test_leaf_downstream_consumer_wired_to_correct_port(self, leaf_payload):
+        nodes = leaf_payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        # combine is a plain torch.nn.LayerNorm leaf — it gets a direct
+        # incoming edge, not a synthetic @input boundary of its own.
+        combine = by_id.get("combine")
+        assert combine is not None
+        sources = [e["sourceNodeId"] for e in combine["incomingEdges"]]
+        # topk_weights is produced by the `mul` op (`* 2.0`); topk_indices
+        # comes from a `getitem`/`topk` op instead — only the `mul`-sourced
+        # port should feed `combine`.
+        matching_ports = [
+            pid
+            for pid in sources
+            if pid.startswith("router/@output:")
+            and by_id[pid]["incomingEdges"][0]["sourceNodeId"].endswith("mul")
+        ]
+        assert matching_ports, (
+            f"combine (dim=2, fed by topk_weights) must be wired from "
+            f"whichever router port is sourced from the `mul` op, got "
+            f"sources={sources}"
+        )
+
+
+class TestNoOpToCastRemoval:
+    """`.to(...)` calls that don't actually change dtype (shape never
+    changes via `.to()`, and device is meaningless on the meta device)
+    must be removed from the graph entirely — downstream ops should
+    connect straight through to the real predecessor — while a genuine
+    dtype-changing cast must remain visible. Mirrors a real GLM-5.3-Flash
+    pattern: ``Glm5NextTextUnweightedRMSNorm.forward`` does
+    ``torch.rsqrt(...).to(x.dtype)``, which is a real cast when called
+    directly on a bfloat16 tensor, but a no-op when its caller
+    (``Glm5NextTextHyperConnection``) has already pre-cast the argument
+    to float32 before calling it.
+    """
+
+    def test_fx_noop_to_node_names_unit(self):
+        """Unit test for `_fx_noop_to_node_names` directly against a
+        small traced graph: a same-dtype `.to()` call is flagged, a
+        genuinely dtype-changing one is not."""
+        from TraceLens.ModelUtils.torch_trace import (
+            _fx_noop_to_node_names,
+            _propagate_fx_node_shapes,
+        )
+
+        class _M(torch.nn.Module):
+            def forward(self, x):
+                noop = x.to(x.dtype)  # same dtype as x — no-op
+                real = noop.to(torch.float32)  # genuine upcast
+                back = real.to(x.dtype)  # genuine downcast back to x's dtype
+                return back + 1
+
+        with torch.device("meta"):
+            mod = _M()
+        graph = _fx_trace_module(mod)
+        assert graph is not None
+        metas = _propagate_fx_node_shapes(
+            mod, graph, (2, 4), model_dtype=torch.bfloat16
+        )
+        noop_names = _fx_noop_to_node_names(graph, metas)
+        to_nodes = {n.name: n for n in graph.nodes if n.target == "to"}
+        assert len(to_nodes) == 3, [n.name for n in to_nodes.values()]
+        noop_matches = [name for name in to_nodes if name in noop_names]
+        real_matches = [name for name in to_nodes if name not in noop_names]
+        assert len(noop_matches) == 1, (
+            f"exactly one `.to()` call (the same-dtype one) should be "
+            f"flagged as no-op, got {noop_matches}"
+        )
+        assert len(real_matches) == 2, (
+            f"the two genuinely dtype-changing `.to()` calls must NOT be "
+            f"flagged as no-op, got real={real_matches} noop={noop_matches}"
+        )
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _NoOpAndRealCast(torch.nn.Module):
+            """Leaf module (no nn.Module children) exercising a no-op
+            cast sandwiched between two genuine casts."""
+
+            def forward(self, x):
+                noop = x.to(x.dtype)  # no-op: same dtype in and out
+                up = noop.to(torch.float32)  # genuine upcast
+                down = up.pow(2).to(x.dtype)  # genuine downcast
+                return down
+
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed_tokens = torch.nn.Embedding(16, 8)
+                self.caster = _NoOpAndRealCast()
+
+            def forward(self, input_ids, **kwargs):
+                x = self.embed_tokens(input_ids)
+                return self.caster(x)
+
+        with torch.device("meta"):
+            # Real dtype must be bfloat16 (matching a real quantized/
+            # mixed-precision model) so `x` genuinely starts out as
+            # bfloat16 — otherwise `.to(torch.float32)` would ALSO be a
+            # no-op relative to the model's real (float32) dtype, and
+            # the test wouldn't actually exercise the "keep real casts"
+            # half of the behavior.
+            model = _Model().to(torch.bfloat16)
+        model.eval()
+        return _build_from_model(model, model_dtype="bfloat16")
+
+    def test_noop_cast_removed_real_casts_kept(self, payload):
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        caster_nodes = [n for n in nodes if n["id"].startswith("caster/")]
+        to_nodes = [n for n in caster_nodes if n["label"] == "To"]
+        assert len(to_nodes) == 2, (
+            f"expected exactly 2 real `To` nodes (the no-op `x.to(x.dtype)` "
+            f"must be removed entirely), got {[n['id'] for n in to_nodes]}"
+        )
+
+    def test_downstream_op_wired_past_removed_noop_cast(self, payload):
+        """The op that consumed the no-op cast's OUTPUT must now connect
+        directly to its (real) predecessor instead."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        caster_input = by_id.get("caster/@input")
+        assert caster_input is not None
+        # `up` (the genuine upcast to float32) must consume directly
+        # from `caster/@input` — NOT from a no-op `to` node in between.
+        up_node = next(
+            (
+                n
+                for n in nodes
+                if n["id"].startswith("caster/")
+                and n["label"] == "To"
+                and n["incomingEdges"]
+                and n["incomingEdges"][0]["sourceNodeId"] == "caster/@input"
+            ),
+            None,
+        )
+        assert up_node is not None, (
+            "the genuine upcast must be wired directly from caster/@input "
+            "(the no-op `x.to(x.dtype)` between them must be skipped)"
         )

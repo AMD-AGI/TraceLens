@@ -1567,6 +1567,94 @@ def _mirror_boundary_inputs(nodes: list[dict[str, Any]]) -> None:
     nodes.extend(mirrors)
 
 
+def _prune_noop_cast_nodes(nodes: list[dict[str, Any]]) -> None:
+    """Remove ``Cast`` nodes whose output dtype equals their (single) input's
+    dtype — the AST-path counterpart of the torch-trace backend's no-op
+    ``.to()``/``.float()``/``.type()`` removal.
+
+    A cast never changes shape, so a ``Cast`` op whose own dtype matches its
+    predecessor's dtype does nothing real: e.g. ``Glm5NextTextRMSNorm``'s
+    ``hidden_states.to(input_dtype)`` is a genuine float32→bfloat16 downcast
+    when called on a bfloat16 tensor directly, but becomes a no-op in
+    ``Glm5NextTextHyperConnection`` (``attn_hc``/``ffn_hc``), which pre-casts
+    its argument to float32 before calling it — the SAME instance-specific
+    pattern the torch-trace fix caught. Keeping a no-op cast visible implies
+    a data transformation that never actually happens; downstream consumers
+    are rewired straight through to the real predecessor instead.
+    """
+    def _is_synthetic(candidate: dict[str, Any]) -> bool:
+        return any(
+            attr.get("key") == "synthetic" for attr in candidate.get("attrs", [])
+        )
+
+    node_by_id = {str(node.get("id")): node for node in nodes}
+    redirect: dict[str, tuple[str, str]] = {}
+
+    for node in nodes:
+        if str(node.get("label") or "") != "Cast":
+            continue
+        incoming = node.get("incomingEdges", [])
+        if len(incoming) != 1:
+            continue  # only the simple single-input case is unambiguous
+        edge = incoming[0]
+        source_id = str(edge.get("sourceNodeId") or "")
+        source_port = str(edge.get("sourceNodeOutputId", "0"))
+        source_node = node_by_id.get(source_id)
+        if not source_id or source_node is None:
+            continue
+        if _is_synthetic(source_node):
+            # Boundary/mirror ports (`@input`, `@input:NAME`, `@output`, ...)
+            # can have their OWN dtype back-filled from whatever consumes
+            # them (there's no independent ground truth for a synthetic
+            # port), so comparing against a synthetic predecessor risks a
+            # circular false match — e.g. a genuine `gate.to(torch.float32)`
+            # cast whose `@input:gate` boundary was itself seeded from this
+            # very cast's dtype. Only prune against a REAL producer op.
+            continue
+        own_spec = node_output_spec(node, "0")
+        source_spec = node_output_spec(source_node, source_port)
+        if own_spec is None or source_spec is None or not own_spec.dtype:
+            continue
+        if own_spec.dtype != source_spec.dtype:
+            continue
+        redirect[str(node.get("id"))] = (source_id, source_port)
+
+    if not redirect:
+        return
+
+    def _resolve(node_id: str, port: str) -> tuple[str, str]:
+        seen: set[str] = set()
+        while node_id in redirect and node_id not in seen:
+            seen.add(node_id)
+            node_id, port = redirect[node_id]
+        return node_id, port
+
+    removed_ids = set(redirect)
+    for node in nodes:
+        if str(node.get("id")) in removed_ids:
+            continue
+        incoming = node.get("incomingEdges", [])
+        if not incoming:
+            continue
+        changed = False
+        new_incoming = []
+        for edge in incoming:
+            source_id = str(edge.get("sourceNodeId") or "")
+            if source_id in redirect:
+                real_id, real_port = _resolve(
+                    source_id, str(edge.get("sourceNodeOutputId", "0"))
+                )
+                edge = dict(edge)
+                edge["sourceNodeId"] = real_id
+                edge["sourceNodeOutputId"] = real_port
+                changed = True
+            new_incoming.append(edge)
+        if changed:
+            node["incomingEdges"] = new_incoming
+
+    nodes[:] = [node for node in nodes if str(node.get("id")) not in removed_ids]
+
+
 def _prune_unconsumed_outputs(nodes: list[dict[str, Any]]) -> None:
     """Strip unused boundary ports, then remove their dead producer subgraphs."""
     outgoing_ports: dict[str, set[str]] = {}
@@ -2771,6 +2859,7 @@ def build_merged_model_graph(
                 ports=root_ports,
             )
         )
+    _prune_noop_cast_nodes(nodes)
     _prune_unconsumed_outputs(nodes)
     _label_boundary_outputs_by_port(nodes)
     _mirror_boundary_inputs(nodes)
