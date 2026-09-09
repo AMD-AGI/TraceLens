@@ -34,7 +34,7 @@ def test_base_symbol_handles_anonymous_namespace():
 
 
 def test_base_symbol_mangled_roundtrip():
-    # Works via itanium-demangler or the c++filt / length-prefix fallbacks.
+    # Works via itanium-demangler or the pure-Python length-prefix fallback.
     assert base_symbol("_Z6kernelv") == "kernel"
 
 

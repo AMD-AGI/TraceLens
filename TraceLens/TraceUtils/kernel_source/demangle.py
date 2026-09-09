@@ -12,9 +12,9 @@ A profiler may report a kernel three ways, all handled by :func:`base_symbol`:
 * C++ signature:   ``void ns::my_fused_kernel<float>(float*, int)``
 * mangled ``_Z``:  ``_ZN2ns15my_fused_kernelEPfi``
 
-The mangled form is decoded by :func:`demangle`, which uses whichever of these is
-available: the ``itanium-demangler`` package, the ``c++filt`` program, or a tiny
-built-in parser. Anything that can't be decoded returns ``""``.
+The mangled form is decoded by :func:`demangle`, which uses the
+``itanium-demangler`` package when it is installed and otherwise falls back to a
+tiny built-in parser. Anything that can't be decoded returns ``""``.
 """
 
 from __future__ import annotations
@@ -22,14 +22,12 @@ from __future__ import annotations
 import functools
 import logging
 import re
-import shutil
-import subprocess  # nosec B404 - invokes c++filt with a fixed, non-shell argv.
 
 log = logging.getLogger(__name__)
 
 try:
     from itanium_demangler import parse as _itanium_parse
-except ImportError:
+except ImportError:  # pragma: no cover - warning path when extra is absent.
     _itanium_parse = None
     log.warning(
         "itanium-demangler is not installed. Kernel classification may be degraded. "
@@ -43,67 +41,35 @@ __all__ = ["base_symbol", "demangle"]
 _IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 
 # The itanium-demangler package prints constructors/destructors as placeholder
-# tokens (``{ctor}``, ``{base ctor}``, ``{dtor}``, ``{deleting dtor}``, ...)
-# instead of the real ``ClassName`` / ``~ClassName``. c++filt spells them out, so
-# when we see such a placeholder we fall back to c++filt. (Note: a lambda's
-# ``{lambda(...)#1}`` is *not* matched here -- it has no ``ctor``/``dtor`` word.)
+# tokens (``{ctor}``, ``{base ctor}``, ``{dtor}``, ``{deleting dtor}``, ...) in
+# place of the real ``ClassName`` / ``~ClassName``. We recover the real name from
+# the qualifier in front of the token (see ``_base_from_demangled``). (Note: a
+# lambda's ``{lambda(...)#1}`` is *not* matched here -- it has no ctor/dtor word.)
 _ITANIUM_CTOR_DTOR_RE = re.compile(r"\{[^{}]*\b(?:c|d)tor\}")
-
-
-@functools.lru_cache(maxsize=8192)
-def _cxxfilt_base(mangled: str) -> str:
-    """Decode a mangled name by shelling out to the ``c++filt`` program.
-
-    The second-choice decoder, used when ``itanium-demangler`` isn't available.
-    Cached, so each distinct name only launches ``c++filt`` once. Returns ``""``
-    if ``c++filt`` is missing or can't decode the name.
-
-    Example:
-        ``_Z6kernelv`` -> ``kernel()``
-    """
-    if not shutil.which("c++filt"):
-        return ""
-    try:
-        proc = subprocess.run(  # nosec B603 B607 - fixed argv, no shell.
-            ["c++filt", mangled],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        result = proc.stdout.strip()
-        # c++filt echoes the input unchanged on failure -- treat that as no result.
-        return result if result != mangled else ""
-    except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover
-        log.debug("c++filt demangle failed for %r: %s", mangled, exc)
-        return ""
 
 
 @functools.lru_cache(maxsize=8192)
 def demangle(mangled: str) -> str:
     """Decode a mangled ``_Z...`` name into a readable C++ signature.
 
-    Uses the ``itanium-demangler`` package if available, otherwise ``c++filt``.
+    Uses the ``itanium-demangler`` package when installed; returns ``""`` if it
+    is unavailable or can't decode the name (callers then fall back to the
+    built-in length-prefix parser).
 
     Example:
-        ``_ZN2ns6kernelEPf`` -> ``ns::kernel(float*)`` (``""`` if neither works)
+        ``_ZN2ns6kernelEPf`` -> ``ns::kernel(float*)`` (``""`` if it can't decode)
     """
     if _itanium_parse is None:
-        return _cxxfilt_base(mangled)
-    # itanium-demangler is an optional extra, so this block only runs where it is
-    # installed; it is exercised by the differential eval, not the CI line gate.
+        return ""
+    # Only runs where the itanium-demangler extra is installed (it is, in CI and
+    # via the [kernel_source] extra); excluded from the line gate for bare envs.
     try:  # pragma: no cover
         node = _itanium_parse(mangled)
         if node is not None:
-            decoded = str(node)
-            # itanium prints ctors/dtors as ``{ctor}``/``{dtor}`` placeholders;
-            # c++filt spells out the real name, so prefer it in that one case.
-            if _ITANIUM_CTOR_DTOR_RE.search(decoded):
-                return _cxxfilt_base(mangled) or decoded
-            return decoded
+            return str(node)
     except Exception as exc:  # noqa: BLE001  # pragma: no cover
         log.debug("itanium demangle failed for %r: %s", mangled, exc)
-    # itanium returned nothing / raised: try c++filt before giving up.
-    return _cxxfilt_base(mangled)  # pragma: no cover
+    return ""  # pragma: no cover
 
 
 def _strip_trailing_qualifiers(s: str) -> str:
@@ -154,6 +120,16 @@ def _base_from_demangled(name: str) -> str:
     n = _strip_trailing_qualifiers(n)
     n = _rstrip_balanced(n, "<", ">")
     n = n.strip()
+    # itanium-demangler leaves a ctor/dtor as a ``{ctor}``/``{dtor}`` placeholder;
+    # the real name is the class, which is the qualifier just before it. Recover
+    # it as ``ClassName`` (ctor) or ``~ClassName`` (dtor) rather than emit "{ctor}".
+    if _ITANIUM_CTOR_DTOR_RE.search(n):
+        parts = n.split("::")
+        placeholder = parts[-1]
+        cls = parts[-2].split("<", 1)[0] if len(parts) >= 2 else ""
+        if not cls:
+            return ""
+        return ("~" + cls) if "dtor" in placeholder else cls
     if "::" in n:
         n = n.rsplit("::", 1)[-1]
     return n

@@ -41,7 +41,6 @@ def test_base_symbol_pure_python_fallback(monkeypatch):
     # Force both real decoders to yield nothing so base_symbol must fall back to
     # reading the name straight out of the mangled string.
     monkeypatch.setattr(demangle, "_itanium_parse", None)
-    monkeypatch.setattr(demangle, "_cxxfilt_base", lambda _m: "")
     demangle.demangle.cache_clear()
     demangle.base_symbol.cache_clear()
     assert demangle.base_symbol("_ZN2ns6kernelEPf") == "kernel"
@@ -61,18 +60,26 @@ def test_base_from_demangled_variants():
     assert demangle._base_from_demangled("") == ""
 
 
+def test_base_from_demangled_ctor_dtor_placeholders():
+    # itanium-demangler emits "{ctor}"/"{dtor}" placeholders; we recover the real
+    # class name (ctor) or "~ClassName" (dtor) from the qualifier before it.
+    assert demangle._base_from_demangled("KernelLauncher::{ctor}(float*)") == (
+        "KernelLauncher"
+    )
+    assert demangle._base_from_demangled("ns::KernelLauncher::{base ctor}()") == (
+        "KernelLauncher"
+    )
+    assert demangle._base_from_demangled("KernelLauncher::{dtor}()") == (
+        "~KernelLauncher"
+    )
+    # A bare placeholder with no class qualifier -> "" rather than "{ctor}".
+    assert demangle._base_from_demangled("{ctor}") == ""
+
+
 def test_base_from_mangled_prefers_kernel_token():
     # Picks the identifier containing "kernel"; else the last one.
     assert demangle._base_from_mangled("_ZN2ns6kernelEv") == "kernel"
     assert demangle._base_from_mangled("_ZN2ns3fooE") == "foo"
-
-
-def test_cxxfilt_missing_returns_empty(monkeypatch):
-    # When c++filt isn't on PATH, the helper returns "" rather than raising.
-    monkeypatch.setattr(demangle.shutil, "which", lambda _n: None)
-    demangle._cxxfilt_base.cache_clear()
-    assert demangle._cxxfilt_base("_ZN2ns6kernelEv") == ""
-    demangle._cxxfilt_base.cache_clear()
 
 
 def test_rstrip_balanced_unbalanced_left_unchanged():
