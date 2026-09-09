@@ -459,11 +459,18 @@ def main():
                 working_roots, cpu_idx, root_tiles,
             )
             valid = [b for b in batch_sizes if b is not None]
-            print(
-                f"\n[llm-inference] Inferred batch sizes from shapes for "
-                f"{len(valid)}/{len(batch_sizes)} iterations"
-                + (f", median={sorted(valid)[len(valid)//2]}" if valid else "")
-            )
+            if not valid:
+                batch_sizes = None
+                print(
+                    "\n[llm-inference] No cpu_op shapes found — falling back to "
+                    "generic duration-based steady state."
+                )
+            else:
+                print(
+                    f"\n[llm-inference] Inferred batch sizes from shapes for "
+                    f"{len(valid)}/{len(batch_sizes)} iterations"
+                    f", median={sorted(valid)[len(valid)//2]}"
+                )
 
         def _find_ss(mode: str):
             """Route to the appropriate steady-state finder."""
