@@ -3539,3 +3539,381 @@ class TestNoOpToCastRemoval:
             "the genuine upcast must be wired directly from caster/@input "
             "(the no-op `x.to(x.dtype)` between them must be skipped)"
         )
+
+
+class TestTensorProvenanceTracking:
+    """Unit tests for `_tensor_ids`' `provenance` parameter and
+    `_patch_tensor_provenance`, added to fix a real GLM-5.3-Flash bug:
+    ``inputs_embeds.unsqueeze(2).expand(...).contiguous()`` (the idiom
+    used to broadcast a single-stream residual into HyperConnections'
+    parallel streams) materializes a genuinely NEW tensor — non-
+    contiguous after `.expand()`, so `.contiguous()` must copy — meaning
+    `._base` is `None` even though it's still "the same logical value"
+    for call-graph dataflow purposes. Without bridging this gap, the
+    hook-based call graph lost track of where `embed_tokens`'s output
+    was flowing, leaving decoder layers wired to a bare, unresolved
+    "@input" instead of the real embedding source.
+    """
+
+    def test_tensor_ids_without_provenance_does_not_bridge_copy(self):
+        from TraceLens.ModelUtils.torch_trace import _tensor_ids
+
+        original = torch.zeros(2, 3, device="meta")
+        # `.expand()` then `.contiguous()` on a non-contiguous view
+        # forces a real copy: `._base` is None on the result.
+        copied = original.unsqueeze(0).expand(4, 2, 3).contiguous()
+        assert copied._base is None, "test setup must produce a real copy"
+        assert id(original) not in _tensor_ids(copied)
+
+    def test_tensor_ids_with_provenance_bridges_copy(self):
+        from TraceLens.ModelUtils.torch_trace import _tensor_ids
+
+        original = torch.zeros(2, 3, device="meta")
+        copied = original.unsqueeze(0).expand(4, 2, 3).contiguous()
+        provenance = {id(copied): id(original)}
+        assert id(original) in _tensor_ids(copied, provenance=provenance)
+
+    def test_tensor_ids_provenance_walks_transitive_chain(self):
+        """Several copy-triggering ops chained back to back (e.g.
+        `.contiguous().clone().to(dtype)`) must all resolve to the same
+        root id, not just the immediately preceding one."""
+        from TraceLens.ModelUtils.torch_trace import _tensor_ids
+
+        a = torch.zeros(2, 3, device="meta")
+        b = torch.zeros(2, 3, device="meta")
+        c = torch.zeros(2, 3, device="meta")
+        provenance = {id(c): id(b), id(b): id(a)}
+        ids = _tensor_ids(c, provenance=provenance)
+        assert id(a) in ids and id(b) in ids
+
+    def test_tensor_ids_provenance_chain_is_bounded_against_cycles(self):
+        """A malformed/cyclic provenance chain must not hang."""
+        from TraceLens.ModelUtils.torch_trace import _tensor_ids
+
+        a = torch.zeros(2, 3, device="meta")
+        b = torch.zeros(2, 3, device="meta")
+        provenance = {id(a): id(b), id(b): id(a)}  # cycle
+        ids = _tensor_ids(a, provenance=provenance)  # must terminate
+        assert id(a) in ids
+
+    def test_patch_tensor_provenance_registers_contiguous(self):
+        from TraceLens.ModelUtils.torch_trace import _patch_tensor_provenance
+
+        provenance: dict[int, int] = {}
+        restore = _patch_tensor_provenance(provenance)
+        try:
+            # `.t()` returns a non-contiguous VIEW; `.contiguous()` on it
+            # must copy — registering `self` (the view) as the copy's
+            # provenance parent.
+            view = torch.zeros(2, 3, device="meta").t()
+            copied = view.contiguous()
+            assert copied is not view
+            assert provenance.get(id(copied)) == id(view)
+        finally:
+            restore()
+
+    def test_patch_tensor_provenance_registers_clone_and_to(self):
+        from TraceLens.ModelUtils.torch_trace import _patch_tensor_provenance
+
+        provenance: dict[int, int] = {}
+        restore = _patch_tensor_provenance(provenance)
+        try:
+            original = torch.zeros(2, 3, dtype=torch.float32, device="meta")
+            cloned = original.clone()
+            assert provenance.get(id(cloned)) == id(original)
+            cast = original.to(torch.bfloat16)
+            assert provenance.get(id(cast)) == id(original)
+        finally:
+            restore()
+
+    def test_patch_tensor_provenance_skips_self_returning_calls(self):
+        """`.to()` with no real dtype/device change returns `self` —
+        must not register a bogus self-referential provenance entry."""
+        from TraceLens.ModelUtils.torch_trace import _patch_tensor_provenance
+
+        provenance: dict[int, int] = {}
+        restore = _patch_tensor_provenance(provenance)
+        try:
+            original = torch.zeros(2, 3, dtype=torch.float32, device="meta")
+            same = original.to(torch.float32)
+            assert same is original
+            assert id(original) not in provenance
+        finally:
+            restore()
+
+    def test_restore_undoes_the_patch(self):
+        from TraceLens.ModelUtils.torch_trace import _patch_tensor_provenance
+
+        original_contiguous = torch.Tensor.contiguous
+        provenance: dict[int, int] = {}
+        restore = _patch_tensor_provenance(provenance)
+        assert torch.Tensor.contiguous is not original_contiguous
+        restore()
+        assert torch.Tensor.contiguous is original_contiguous
+
+    def test_keepalive_prevents_stale_id_reuse_causing_bogus_matches(self):
+        """Regression test for a bug introduced (and caught) in this same
+        session: `_patch_tensor_provenance` fires constantly on short-
+        lived tensors from *internal* op machinery (e.g. a dtype
+        promotion inside a reduction), not just explicit user calls.
+        Without holding `self`/`result` open via `keepalive` for the
+        rest of the capture, CPython promptly reuses a freed tensor's
+        id() for the very next allocation — so a later, completely
+        unrelated tensor can collide with a stale id() recorded here,
+        corrupting `_tensor_ids`' identity matching with a bogus link
+        between two unrelated values."""
+        from TraceLens.ModelUtils.torch_trace import _patch_tensor_provenance
+
+        provenance: dict[int, int] = {}
+        keepalive: list[torch.Tensor] = []
+        restore = _patch_tensor_provenance(provenance, keepalive)
+        try:
+            view = torch.zeros(2, 3, device="meta").t()
+            copied = view.contiguous()
+            recorded_parent_id = provenance[id(copied)]
+            assert recorded_parent_id == id(view)
+            # `view` must be kept alive — its id() must not be reusable
+            # by a later, unrelated allocation while `provenance` still
+            # references it.
+            assert any(id(t) == recorded_parent_id for t in keepalive), (
+                "the provenance parent must be held open via `keepalive`, "
+                "not just referenced by a soon-stale id()"
+            )
+        finally:
+            restore()
+
+
+class _HCMlp(torch.nn.Module):
+    """Mirrors a real GLM-5.3-Flash MLP: `down_proj` consumes `mul`,
+    which consumes both the SiLU-activated `gate_proj` and `up_proj` —
+    an intra-instance chain of raw ops interleaved with `call_module`
+    children, all within ONE layer instance."""
+
+    def __init__(self, dim: int = 8):
+        super().__init__()
+        self.gate_proj = torch.nn.Linear(dim, dim)
+        self.up_proj = torch.nn.Linear(dim, dim)
+        self.down_proj = torch.nn.Linear(dim, dim)
+        self.act = torch.nn.SiLU()
+
+    def forward(self, x):
+        return self.down_proj(self.act(self.gate_proj(x)) * self.up_proj(x))
+
+
+class _HCHyperConnection(torch.nn.Module):
+    """Mirrors Glm5NextTextHyperConnection: a composite with a multi-
+    port output (only one port — `main` — continues downstream)."""
+
+    def __init__(self, dim: int = 8):
+        super().__init__()
+        self.norm = torch.nn.LayerNorm(dim)
+
+    def forward(self, x):
+        y = self.norm(x)
+        side = y.sum(dim=-1, keepdim=True)  # unused downstream
+        main = y.sum(dim=-2)
+        return side, main
+
+
+class _HCDecoderLayerA(torch.nn.Module):
+    def __init__(self, dim: int = 8):
+        super().__init__()
+        self.hc = _HCHyperConnection(dim)
+        self.mlp = _HCMlp(dim)
+
+    def forward(self, x):
+        _side, main = self.hc(x)
+        return self.mlp(main)
+
+
+class _HCDecoderLayerB(torch.nn.Module):
+    """A structurally different layer type, interleaved with `_HCDecoderLayerA`
+    so `layers` renders as a multi-group (interleaved layer-type)
+    container — exercising the multi-group-container edge-scoping fix."""
+
+    def __init__(self, dim: int = 8):
+        super().__init__()
+        self.hc = _HCHyperConnection(dim)
+        self.gate = torch.nn.Linear(dim, dim)
+
+    def forward(self, x):
+        _side, main = self.hc(x)
+        return self.gate(main)
+
+
+class _HCLanguageModel(torch.nn.Module):
+    """Mirrors GLM-5.3-Flash's language model: `embed_tokens`'s output is
+    broadcast into multiple HyperConnection streams via
+    `.unsqueeze(2).expand(...).contiguous()` — the exact idiom that broke
+    tensor-identity tracking — before flowing into an interleaved
+    multi-group layer stack whose MLP has an intra-instance raw-op
+    chain, and whose HyperConnection has a multi-port output."""
+
+    def __init__(self, dim: int = 8, vocab: int = 32, streams: int = 3):
+        super().__init__()
+        self.embed_tokens = torch.nn.Embedding(vocab, dim)
+        self.layers = torch.nn.ModuleList(
+            [
+                _HCDecoderLayerA(dim),
+                _HCDecoderLayerB(dim),
+                _HCDecoderLayerA(dim),
+                _HCDecoderLayerB(dim),
+            ]
+        )
+        self.norm = torch.nn.LayerNorm(dim)
+        self.streams = streams
+
+    def forward(self, input_ids):
+        # Whole-module Path-A FX tracing of an `nn.Embedding`-first
+        # composite hits an unrelated shape-inference limitation
+        # (dtype is always guessed as floating-point for the first
+        # placeholder); force it to fall through to the call-graph-
+        # driven fallback wiring instead, matching how a real
+        # `Glm5NextTextModel`-style module (too complex for whole-
+        # module Path-A tracing to succeed on anyway) is actually
+        # rendered.
+        for _ in input_ids:
+            break
+        inputs_embeds = self.embed_tokens(input_ids)
+        x = (
+            inputs_embeds.unsqueeze(2)
+            .expand(
+                inputs_embeds.shape[0],
+                inputs_embeds.shape[1],
+                self.streams,
+                inputs_embeds.shape[2],
+            )
+            .contiguous()
+        )
+        for layer in self.layers:
+            x = layer(x)
+        return self.norm(x.sum(dim=-2))
+
+
+class TestTopLevelAndLanguageModelWiringRegressions:
+    """Regression tests for three real GLM-5.3-Flash wiring bugs fixed
+    together in one session (reported by the user as: "no path from
+    the visual model to the language model", "no path from the
+    language model to the logits", and "In the language_model there
+    are no paths between nodes"):
+
+    1. Tensor-identity tracking broke at `.contiguous()` on an expanded
+       tensor, losing `embed_tokens`'s dataflow into the decoder layers.
+    2. The multi-group (interleaved layer-type) container heuristic was
+       too broad and swallowed intra-instance edges like MLP's
+       `down_proj <- mul <- silu <- gate_proj` chain, wiring `down_proj`
+       straight from `up_proj` instead (dropping the activation and
+       multiplication from the graph entirely).
+    3. A composite's bare, unresolved "@input" placeholder could
+       resolve to another composite's bare multi-port "/@output" — which
+       never actually gets created (only "/@output:0", ":1", ... do) —
+       leaving a dangling edge to a nonexistent node.
+    """
+
+    @pytest.fixture(scope="class")
+    def payload(self):
+        class _Model(torch.nn.Module):
+            def __init__(self, dim=8, vocab=32):
+                super().__init__()
+                self.language_model = _HCLanguageModel(dim, vocab)
+                self.lm_head = torch.nn.Linear(dim, vocab, bias=False)
+
+            def forward(self, input_ids, **kwargs):
+                hidden = self.language_model(input_ids)
+                return self.lm_head(hidden)
+
+        with torch.device("meta"):
+            model = _Model()
+        model.eval()
+        return _build_from_model(model)
+
+    def test_no_dangling_edges_anywhere(self, payload):
+        """Every incoming edge's source must resolve to a real node —
+        catches a bare multi-port "/@output" placeholder that was never
+        actually created (Error 3)."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        node_ids = {n["id"] for n in nodes}
+        dangling = [
+            (n["id"], e["sourceNodeId"])
+            for n in nodes
+            for e in n.get("incomingEdges", [])
+            if e["sourceNodeId"] not in node_ids and e["sourceNodeId"] != "@input"
+        ]
+        assert not dangling, f"dangling edge source(s) found: {dangling}"
+
+    def test_embed_tokens_reaches_first_layer_through_contiguous(self, payload):
+        """`embed_tokens`'s output must survive
+        `.unsqueeze().expand().contiguous()` and reach the first decoder
+        layer's boundary — not dead-end at a bare, unresolved "@input"
+        (Error 1)."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        rep_input = by_id.get("language_model/layers/0/@input")
+        assert rep_input is not None, "language_model/layers/0/@input not found"
+        sources = {e["sourceNodeId"] for e in rep_input.get("incomingEdges", [])}
+        assert sources, "language_model/layers/0/@input has no incoming edges"
+        assert "@input" not in sources, (
+            "layers/0's boundary is still wired from the bare, unresolved "
+            "top-level '@input' instead of the real embed_tokens source — "
+            "the .contiguous() identity chain broke"
+        )
+        assert "language_model/embed_tokens" in sources, (
+            f"expected language_model/embed_tokens among the sources, got {sources}"
+        )
+
+    def test_intra_layer_mlp_chain_preserved_under_multi_group_scoping(self, payload):
+        """`down_proj` must be wired from `mul` (not skip straight to
+        `up_proj`, dropping `act`/`gate_proj`/`mul` from the dataflow) —
+        the multi-group-container heuristic must not swallow this
+        intra-instance edge (Error 2)."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        down_proj = by_id.get("language_model/layers/0/mlp/down_proj")
+        assert down_proj is not None
+        down_proj_sources = {
+            e["sourceNodeId"] for e in down_proj.get("incomingEdges", [])
+        }
+        assert down_proj_sources == {"language_model/layers/0/mlp/mul"}, (
+            f"expected down_proj <- mul, got {down_proj_sources}"
+        )
+        mul_node = by_id.get("language_model/layers/0/mlp/mul")
+        assert mul_node is not None
+        mul_sources = {e["sourceNodeId"] for e in mul_node.get("incomingEdges", [])}
+        assert mul_sources == {
+            "language_model/layers/0/mlp/act",
+            "language_model/layers/0/mlp/up_proj",
+        }, f"expected mul <- {{act, up_proj}}, got {mul_sources}"
+
+    def test_language_model_output_reaches_logits(self, payload):
+        """`lm_head` (the logits projection) must be wired from the
+        language model's real final output — not empty/dangling."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+        lm_head = by_id.get("lm_head")
+        assert lm_head is not None
+        sources = [e["sourceNodeId"] for e in lm_head.get("incomingEdges", [])]
+        assert sources, "lm_head has no incoming edges — no path to logits"
+        for src in sources:
+            assert src in by_id, f"lm_head's source {src!r} does not resolve to a real node"
+
+    def test_every_layer_representative_input_resolves(self, payload):
+        """Every layer-type representative's own '@input' boundary must
+        resolve to a real predecessor, across the whole interleaved
+        multi-group stack — not just layer 0."""
+        nodes = payload["graphCollections"][0]["graphs"][0]["nodes"]
+        node_ids = {n["id"] for n in nodes}
+        rep_inputs = [
+            n for n in nodes if re.match(r"language_model/layers/\d+/@input$", n["id"])
+        ]
+        assert len(rep_inputs) >= 2, (
+            f"expected >= 2 layer-type representative inputs, got "
+            f"{[n['id'] for n in rep_inputs]}"
+        )
+        for rep_input in rep_inputs:
+            sources = [e["sourceNodeId"] for e in rep_input.get("incomingEdges", [])]
+            assert sources, f"{rep_input['id']} has no incoming edges"
+            for src in sources:
+                assert src in node_ids, (
+                    f"{rep_input['id']}'s source {src!r} does not resolve to a "
+                    "real node"
+                )

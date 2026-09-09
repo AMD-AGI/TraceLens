@@ -25,7 +25,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import torch
 import torch.fx
@@ -464,7 +464,11 @@ def _infer_input_shapes_from_weights(
 # ── Call-graph capture via forward hooks ─────────────────────────────────────
 
 
-def _tensor_ids(x: Any, keepalive: list[torch.Tensor] | None = None) -> list[int]:
+def _tensor_ids(
+    x: Any,
+    keepalive: list[torch.Tensor] | None = None,
+    provenance: dict[int, int] | None = None,
+) -> list[int]:
     """Extract Python id()s of all tensors in a nested structure.
 
     ``id()`` is only a valid identity key for as long as the object is
@@ -505,18 +509,115 @@ def _tensor_ids(x: Any, keepalive: list[torch.Tensor] | None = None) -> list[int
             if keepalive is not None:
                 keepalive.append(base)
             ids.append(id(base))
+        # ``._base`` only covers true VIEWS. Ops that copy into new
+        # storage — ``.contiguous()`` on a non-contiguous (e.g. just
+        # expanded) tensor, ``.clone()``, ``.to()``/``.float()``/etc.
+        # with an actual dtype/device change, ``.detach()`` — return a
+        # tensor with ``._base is None`` even though it's still "the
+        # same logical value" for dataflow purposes (e.g.
+        # ``inputs_embeds.unsqueeze(2).expand(...).contiguous()``, which
+        # must materialize a real copy since the expanded dim is
+        # non-contiguous). ``provenance`` (populated by
+        # `_patch_tensor_provenance` for the duration of a single
+        # capture pass) bridges exactly this gap: walk it transitively
+        # so every tensor in an alias chain resolves to the same id set,
+        # regardless of how many copy-triggering ops sit in between.
+        if provenance:
+            seen = {id(x)}
+            current = id(x)
+            for _ in range(64):  # generous but bounded; chains are never this deep
+                parent = provenance.get(current)
+                if parent is None or parent in seen:
+                    break
+                ids.append(parent)
+                seen.add(parent)
+                current = parent
         return ids
     if isinstance(x, (tuple, list)):
         ids = []
         for item in x:
-            ids.extend(_tensor_ids(item, keepalive))
+            ids.extend(_tensor_ids(item, keepalive, provenance))
         return ids
     if isinstance(x, dict):
         ids = []
         for v in x.values():
-            ids.extend(_tensor_ids(v, keepalive))
+            ids.extend(_tensor_ids(v, keepalive, provenance))
         return ids
     return []
+
+
+_PROVENANCE_METHODS: tuple[str, ...] = (
+    "contiguous",
+    "clone",
+    "detach",
+    "to",
+    "type",
+    "type_as",
+    "float",
+    "half",
+    "bfloat16",
+    "double",
+)
+
+
+def _patch_tensor_provenance(
+    provenance: dict[int, int], keepalive: list[torch.Tensor] | None = None
+) -> Callable[[], None]:
+    """Monkeypatch a handful of ``torch.Tensor`` methods that can return a
+    genuinely new tensor (new storage, so ``._base`` is ``None``) that is
+    nonetheless "the same logical value" for call-graph dataflow purposes
+    — dtype/device casts and, critically, ``.contiguous()`` on a tensor
+    made non-contiguous by a preceding ``.expand()`` (the idiom used to
+    broadcast a single-stream residual into HyperConnections' parallel
+    streams: ``inputs_embeds.unsqueeze(2).expand(...).contiguous()``).
+
+    Populates ``provenance`` in place with ``id(result) -> id(self)`` for
+    every call made while patched (pass the SAME dict to `_tensor_ids` so
+    composite call-graph wiring can walk through these copies instead of
+    treating the far side as an untracked dead end — hooks read from it
+    live as the forward pass runs, so it must be the identical object,
+    not a copy taken afterward). Returns ``restore()``, which undoes the
+    patch and must always be called (e.g. in a ``finally`` block).
+
+    These methods fire constantly as part of *internal* op machinery
+    (e.g. dtype promotion inside a reduction, or an internal
+    ``.contiguous()`` call inside some other op's implementation) —
+    almost always on short-lived tensors nobody else references. Without
+    holding `self` and `result` open via ``keepalive`` for the rest of
+    the capture, CPython's prompt reuse of a freed tensor's memory
+    address would let a *later, completely unrelated* tensor collide
+    with a stale ``id()`` recorded here — silently corrupting
+    `_tensor_ids`' identity matching with bogus links (e.g. making an
+    unrelated composite's real output look like it came from some other
+    module's leaf child).
+    """
+    originals: dict[str, Any] = {}
+
+    for name in _PROVENANCE_METHODS:
+        original = getattr(torch.Tensor, name, None)
+        if original is None:
+            continue
+        originals[name] = original
+
+        def make_wrapper(orig):
+            def wrapper(self, *args, **kwargs):
+                result = orig(self, *args, **kwargs)
+                if isinstance(result, torch.Tensor) and result is not self:
+                    provenance[id(result)] = id(self)
+                    if keepalive is not None:
+                        keepalive.append(self)
+                        keepalive.append(result)
+                return result
+
+            return wrapper
+
+        setattr(torch.Tensor, name, make_wrapper(original))
+
+    def restore() -> None:
+        for name, original in originals.items():
+            setattr(torch.Tensor, name, original)
+
+    return restore
 
 
 def _capture_call_graph(
@@ -553,13 +654,18 @@ def _capture_call_graph(
     # garbage collection would otherwise silently create bogus identity
     # matches between unrelated tensors in a deep model).
     _keepalive: list[torch.Tensor] = []
+    # Populated by `_patch_tensor_provenance` below for the duration of
+    # this forward pass — bridges copy-triggering ops (`.contiguous()`,
+    # `.to()`, ...) that `._base` alone can't see through.
+    _provenance: dict[int, int] = {}
 
     def _pre_hook(name: str):
         def hook(_mod, args, kwargs):
             pre_inputs[name].append(
                 (
                     counter[0],
-                    _tensor_ids(args, _keepalive) + _tensor_ids(kwargs, _keepalive),
+                    _tensor_ids(args, _keepalive, _provenance)
+                    + _tensor_ids(kwargs, _keepalive, _provenance),
                 )
             )
             counter[0] += 1
@@ -568,7 +674,9 @@ def _capture_call_graph(
 
     def _post_hook(name: str):
         def hook(_mod, _inp, output):
-            post_outputs[name].append((counter[0], _tensor_ids(output, _keepalive)))
+            post_outputs[name].append(
+                (counter[0], _tensor_ids(output, _keepalive, _provenance))
+            )
             counter[0] += 1
 
         return hook
@@ -617,8 +725,12 @@ def _capture_call_graph(
         )
         if original_dtype and original_dtype != torch.bfloat16:
             model.to(torch.bfloat16)
-        with torch.no_grad():
-            model(dummy, use_cache=False)
+        _restore_provenance = _patch_tensor_provenance(_provenance, _keepalive)
+        try:
+            with torch.no_grad():
+                model(dummy, use_cache=False)
+        finally:
+            _restore_provenance()
     except Exception:
         pass
     finally:
@@ -2203,6 +2315,24 @@ def build_graph(
         namespace = _namespace_for(path) or type(mod).__name__
         op_nodes = []
         node_map: dict[str, str] = {}
+        # If `path` itself is nested inside one specific instance of a
+        # multi-group (interleaved layer-type) container — e.g.
+        # "language_model.layers.0.mlp" living inside layer-index 0 of
+        # "language_model.layers" — an FX-graph source that ALSO lies
+        # inside that SAME instance (e.g. mlp's own `down_proj`
+        # consuming mlp's own `mul`) is ordinary intra-layer dataflow,
+        # not a cross-duplicate unrolling artifact. Only a source
+        # belonging to a DIFFERENT instance (or the container itself)
+        # should be deferred to the call-graph-based wiring pass below —
+        # see `from_multi_group_container`'s use further down.
+        _own_instance_prefixes: list[str] = []
+        for _container_path in layer_group_map:
+            _dotted_prefix = _container_path + "."
+            if path.startswith(_dotted_prefix):
+                _own_instance = path[len(_dotted_prefix) :].split(".", 1)[0]
+                _own_instance_prefixes.append(
+                    f"{_container_path.replace('.', '/')}/{_own_instance}/"
+                )
         # Tracks the most recently seen call_module child in the FX graph's
         # own node order. Raw tensor ops are tagged with this so that later
         # emission can interleave them AFTER that child (matching true
@@ -2258,8 +2388,14 @@ def build_graph(
                 # source is literally the stack's final unrolled
                 # duplicate rather than every representative's output).
                 from_multi_group_container = any(
-                    edge["sourceNodeId"].startswith(prefix)
-                    or edge["sourceNodeId"].rstrip("/") == prefix.rstrip("/")
+                    (
+                        edge["sourceNodeId"].startswith(prefix)
+                        or edge["sourceNodeId"].rstrip("/") == prefix.rstrip("/")
+                    )
+                    and not any(
+                        edge["sourceNodeId"].startswith(own_prefix)
+                        for own_prefix in _own_instance_prefixes
+                    )
                     for edge in child_incoming
                     for prefix in multi_group_container_id_prefixes
                 )
@@ -3008,6 +3144,76 @@ def build_graph(
                         return src
         return None
 
+    def _resolve_predecessors_all(mod_path: str, depth: int = 0) -> list[str]:
+        """Like `_resolve_predecessor`, but returns every distinct real
+        predecessor instead of just the first.
+
+        A module can genuinely be fed by MULTIPLE parallel sources — the
+        canonical case is a modality-fusion point that consumes both the
+        token-embedding path AND a side branch's features (e.g. vision
+        features merging into the language model right before its first
+        decoder layer). `_resolve_predecessor`'s early `return result`
+        after the first hit would silently drop every source after the
+        first, which is exactly how a real visual→language edge could
+        vanish even though `leaf_sources` captured it correctly.
+        """
+        if depth > 10:
+            return []
+        results: list[str] = []
+        seen: set[str] = set()
+        if mod_path in leaf_sources:
+            for src_path in leaf_sources[mod_path]:
+                if src_path == "@input":
+                    parent = mod_path.rsplit(".", 1)[0] if "." in mod_path else ""
+                    if parent:
+                        for r in _resolve_predecessors_all(parent, depth + 1):
+                            if r not in seen:
+                                seen.add(r)
+                                results.append(r)
+                else:
+                    r = _find_last_node_for(src_path)
+                    if r and r not in seen:
+                        seen.add(r)
+                        results.append(r)
+            if results:
+                return results
+        single = _resolve_predecessor(mod_path, depth)
+        if single and single not in seen:
+            results.append(single)
+        return results
+
+    def _resolve_bare_output_ref(bare_id: str, consumer_node_id: str) -> str:
+        """If `bare_id` is the bare (non-port) ``.../@output`` placeholder
+        for a composite that turned out to need MULTIPLE output ports
+        (see the port-splitting logic in "Create Output node(s)" below),
+        no node with that exact id ever gets created — only
+        ``.../@output:0``, ``:1``, etc. do. `_find_last_node_for` can
+        still hand back the bare id though (it predicts the composite's
+        *eventual* boundary id before that pass has run), and composites
+        processed AFTER the multi-port one (alphabetically, in the
+        deepest-first boundary-creation order) resolve their own
+        predecessor through here — i.e. AFTER that pass's own stale-
+        reference redirect already ran and thus can't fix this one.
+        Resolve it to the specific port matching `consumer_node_id`'s own
+        captured input shape, mirroring that same redirect's logic.
+        """
+        if bare_id in node_by_id or not bare_id.endswith("/@output"):
+            return bare_id
+        if f"{bare_id}:0" not in node_by_id:
+            return bare_id  # genuinely unresolved (e.g. untracked composite)
+        mod_path = bare_id[: -len("/@output")].replace("/", ".")
+        port_ids = []
+        idx = 0
+        while f"{bare_id}:{idx}" in node_by_id:
+            port_ids.append(f"{bare_id}:{idx}")
+            idx += 1
+        candidates = all_output_shapes.get(mod_path)
+        if candidates:
+            succ_in = input_shapes.get(consumer_node_id.replace("/", "."))
+            if succ_in and succ_in in candidates:
+                return port_ids[candidates.index(succ_in)]
+        return port_ids[-1]
+
     fx_leaf_predecessor: dict[str, str] = {}
     for path in fx_leaf_first:
         pred = _resolve_predecessor(path)
@@ -3197,13 +3403,40 @@ def build_graph(
         # through".
         input_child_ids: list[str] = []
         external_sources: dict[str, list[str]] = {}  # child_id → [external_src_ids]
+        # A child's incoming edge may still be the literal "@input"
+        # placeholder string baked in during FX emission for a
+        # composite's very first op (see the FX-emission loops' "only
+        # the first placeholder maps to @input" comment) — deliberately
+        # left unresolved there for a later pass to fix up. Composite
+        # modules are explicitly excluded from the FX-leaf predecessor
+        # pass (`_fx_leaf_first_map` skips anything in
+        # `composite_modules`), so if `comp_path` itself is a composite
+        # whose first child is ALSO a composite (e.g. a HyperConnection
+        # that is `layers.N`'s first child), nothing else ever rewrites
+        # that literal "@input" — it would otherwise surface as a bogus
+        # top-level-input edge instead of `comp_path`'s real,
+        # call-graph-derived predecessor(s) (possibly more than one,
+        # e.g. token embeddings AND a side-modality branch both merging
+        # in here). Resolve it here, once per `comp_path` (composites
+        # are processed deepest-first, so a nested composite's own
+        # boundary — and thus its real predecessor — is already fixed
+        # up by the time an ancestor looks at it).
+        _resolved_bare_input: list[str] | None = None
         for cn in child_nodes:
             if cn["id"] in _layer_group_rep_input_ids:
                 continue
             ext_srcs = []
             for e in cn.get("incomingEdges", []):
                 src = e["sourceNodeId"]
-                if not src.startswith(child_prefix):
+                if src == "@input":
+                    if _resolved_bare_input is None:
+                        _resolved_bare_input = _resolve_predecessors_all(comp_path) or [
+                            "@input"
+                        ]
+                    ext_srcs.extend(
+                        _resolve_bare_output_ref(r, cn["id"]) for r in _resolved_bare_input
+                    )
+                elif not src.startswith(child_prefix):
                     ext_srcs.append(src)
             if ext_srcs:
                 input_child_ids.append(cn["id"])
