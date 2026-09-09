@@ -64,6 +64,12 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
 OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     (re.compile(r"^triton"), "triton"),
     (re.compile(r"^record_param_comms"), "record_param_comms"),
+    # gsplat 3DGS kernels; op names embed the symbol behind a launcher/synthetic
+    # prefix, so ".*" is needed (patterns use re.match). projection also gets a
+    # full model via _match_gsplat; the intersect kernels are classify-only
+    # (nnz/n_isects live on the sibling _RasterizeToPixels op).
+    (re.compile(r".*gsplat::projection_ewa_3dgs_packed_fwd"), "GaussianSplat"),
+    (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
 ]
 
 
@@ -376,6 +382,12 @@ upsample_ops = [
     "aten::upsample_nearest3d",
 ]
 
+# Bilinear upsampling (F.interpolate mode='bilinear'); same trace layout /
+# bandwidth roofline as nearest, higher per-output arithmetic (4-tap blend).
+bilinear_upsample_ops = [
+    "aten::upsample_bilinear2d",
+]
+
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
 for op in binary_elemwise_ops:
@@ -388,6 +400,8 @@ for op in replication_pad_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_replication_pad
 for op in upsample_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_upsample_nearest
+for op in bilinear_upsample_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_upsample_bilinear
 
 # ---------------------------------------------------------------------------
 # Pattern-based matchers for perf models with generated kernel names.
@@ -422,6 +436,25 @@ def _match_triton_compiled(name):
 
 
 register_perf_model_matcher(_match_triton_compiled)
+
+
+def _match_gsplat(name):
+    """Resolve gsplat 3DGS kernels by substring, for op names that embed
+    template/kernel signatures (e.g. the projection ``(Synthetic Op)`` child) and
+    can't be keyed exactly. Also covers suffixed variants of the
+    _RasterizeToPixels / _SphericalHarmonics autograd ops."""
+    from TraceLens.PerfModel.extensions import gsplat_perf_model_extensions as _g
+
+    if "gsplat::projection_ewa_3dgs_packed_fwd" in name:
+        return _g.gsplat_projection_ewa_packed
+    if name.startswith("_RasterizeToPixels"):
+        return _g.gsplat_rasterize_to_pixels
+    if name.startswith("_SphericalHarmonics"):
+        return _g.gsplat_spherical_harmonics
+    return None
+
+
+register_perf_model_matcher(_match_gsplat)
 
 OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,
