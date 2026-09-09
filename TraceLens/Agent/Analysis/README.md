@@ -6,6 +6,8 @@ See LICENSE for license information.
 
 # TraceLens Agent
 
+> **Capturing a trace first?** See [Collect a trace](../../../docs/how-to/generate-perf-report-pytorch.md#collect-a-trace) for the profiler flags that matter, and [inference collection](../../../docs/how-to/generate-perf-report-pytorch-inference.md) for the graph-capture path.
+
 The TraceLens Agent is an agentic performance analysis tool that generates actionable optimization recommendations for training and inference workloads. The system supports automated analysis of training and inference traces supported by TraceLens. Skills have been employed to define a structured workflow and interpret analysis results, combined with codified analysis to offer repeatability and reliability. The output is a single stakeholder-facing report (`analysis.md`) organized as a prioritized bottleneck list. Findings are ranked and grouped into three tiers (Compute Kernel Optimizations, Kernel Fusion Opportunities, and System-Level Optimizations), and each finding carries the supporting evidence, the reasoning behind the call-out and a possible concrete resolution.
 
 ## Analysis Modes
@@ -58,9 +60,9 @@ pip install -e .
 
 ### 2. Collect a trace
 
-The orchestrator runs against a single PyTorch profiler trace (`.json` or `.json.gz`). Collection is workload-specific:
+The orchestrator runs against a PyTorch profiler trace. Collection is workload-specific:
 
-- **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling walkthrough](../../../notebooks/torch-profiling.ipynb) walks through this end to end.
+- **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. See [Collect a trace](../../../docs/how-to/generate-perf-report-pytorch.md#collect-a-trace).
 - **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](../../../docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](../Profiling/README.md) automates vLLM/SGLang/ATOM benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces. For graph-mode workloads you produce two artifacts: a graph-replay trace and a graph-capture folder. In inference mode with execution mode `graph replay + capture`, TraceLens merges call-stack and shape information from the capture folder into the replay tree before analysis.
 
 ### 3. Establish a hardware performance baseline
