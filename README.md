@@ -127,6 +127,32 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 
 ---
 
+## Project Structure
+
+```text
+TraceLens/
+├── TraceLens/
+│   ├── Reporting/        # CLI tools for quick start utils
+│   ├── Trace2Tree/       # Trace2Tree parses trace into tree data structure
+│   ├── PerfModel/        # Op meta data parsing and performance modelling code (roofline, FLOPs/Byte, etc.)
+│   ├── TreePerf/         # TreePerf uses Trace Tree and PerfModel to generate perf breakdowns and perf metrics TFLOPS/s, etc.
+│   ├── NcclAnalyser/     # Analysis of collective communications
+│   ├── TraceFusion/      # Merging of multi-rank traces into a global view
+│   ├── TraceDiff/        # TraceDiff uses the Trace Tree format and does morphological comparison across traces
+│   ├── EventReplay/      # Extracts meta data and replays almost arbitrary operations
+│   ├── TraceIndex/       # Build a searchable SQLite catalog of TraceLens reports
+│   ├── TraceUtils/       # Shared trace loaders and annotation helpers
+│   └── Agent/            # Agentic optimization report (Analysis) and trace collection (Profiling)
+├── docs/               # tool-specific guides
+├── examples/           # example traces, notebooks, scripts, custom-workflows
+├── notebooks/          # end-to-end profiling and analysis walkthroughs
+├── scripts/            # helper scripts
+├── tests/              # unit & integration tests
+└── setup.py
+```
+
+---
+
 ## Documentation
 
 | Module                       | Doc                                                                                                                              |
@@ -145,16 +171,6 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 | Performance Report Columns   | [docs/reference/perf-report-columns.md](docs/reference/perf-report-columns.md)                                                   |
 | TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
 | TraceIndex                   | [docs/how-to/trace-index.md](docs/how-to/trace-index.md)                                                                         |
-
----
-
-## Development
-
-```bash
-git clone https://github.com/AMD-AGI/TraceLens.git && cd TraceLens
-pip install -e .[dev]
-python -m pytest tests/ -v
-```
 
 ---
 
