@@ -300,6 +300,68 @@ def test_preprocess_trace_collects_flow_and_gpu_maps():
     assert len(meta) == 1
 
 
+def test_extract_iteration_keeps_cpu_ops_between_step_annotations():
+    """Keep host ops that sit after a step annotation and before the next one.
+
+    vLLM ``compute_logits`` / lm_head GEMMs are launched in that gap; bounding
+    the split window by ``annotation.ts + dur`` drops them.
+    """
+    names = [VLLM_PRIMARY_ANNOTATION.format(i=i) for i in range(3)]
+    trace = make_trace(names)
+    events = trace["traceEvents"]
+    events.append(
+        {
+            "name": "compute_logits",
+            "cat": "cpu_op",
+            "ph": "X",
+            "ts": 1200,
+            "dur": 40,
+            "tid": 10,
+            "pid": 1,
+            "args": {"correlation": 9001},
+        }
+    )
+    events.append(
+        {
+            "name": "vllm::rocm_unquantized_gemm",
+            "cat": "kernel",
+            "ph": "X",
+            "ts": 1250,
+            "dur": 15,
+            "tid": 99,
+            "pid": 1,
+            "args": {"correlation": 9001},
+        }
+    )
+    gpu_map, flow_map, meta = split.preprocess_trace(events)
+    roots = split.find_iteration_roots(events)
+    assert roots is not None and len(roots) == 3
+
+    out, _, num_gpu, _, _ = split.extract_iteration(
+        roots, events, trace, gpu_map, flow_map, meta
+    )
+    out_names = {e["name"] for e in out["traceEvents"]}
+    assert "compute_logits" in out_names
+    assert "vllm::rocm_unquantized_gemm" in out_names
+    # Original per-root kernels (2 each) plus the inter-step GEMM.
+    assert num_gpu == 7
+
+    out0, _, _, _, _ = split.extract_iteration(
+        [roots[0]], events, trace, gpu_map, flow_map, meta
+    )
+    names0 = {e["name"] for e in out0["traceEvents"]}
+    assert "compute_logits" in names0
+    assert "vllm::rocm_unquantized_gemm" in names0
+    assert "cpu_op_1_0" not in names0
+
+    out1, _, _, _, _ = split.extract_iteration(
+        [roots[1]], events, trace, gpu_map, flow_map, meta
+    )
+    names1 = {e["name"] for e in out1["traceEvents"]}
+    assert "compute_logits" not in names1
+    assert "cpu_op_0_0" not in names1
+
+
 def test_extract_iteration_empty_roots():
     trace = make_trace([VLLM_PRIMARY_ANNOTATION.format(i=0)])
     events = trace["traceEvents"]
