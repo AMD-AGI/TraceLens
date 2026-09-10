@@ -212,20 +212,55 @@ def test_rotary_pos_emb_shows_multiply_not_buffer():
     assert not any(node.get("namespace") == "rotary_pos_emb" for node in graph["nodes"])
 
 
-def test_glm_attention_expands_straight_line_expand_kv_without_a_frame():
+def test_glm_attention_expand_kv_assembles_key_states_from_split_and_expand():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec)
-    nodes = [node for node in graph["nodes"] if "expand_kv" in node["id"]]
 
-    assert [node["label"] for node in nodes] == [
+    def synthetic(node):
+        return next(
+            (
+                attr["value"]
+                for attr in node.get("attrs", [])
+                if attr.get("key") == "synthetic"
+            ),
+            None,
+        )
+
+    nodes = [node for node in graph["nodes"] if "expand_kv" in node["id"]]
+    op_nodes = [node for node in nodes if synthetic(node) is None]
+
+    # ``expand_kv`` splits ``kv_nope`` and expands ``k_rot``, then assembles
+    # ``key_states`` with two in-place ``copy_`` writes into slices. Those copies
+    # are the real consumers of the Split and Expand — without them modelled, both
+    # dangle with no consumer. This makes the block a genuine (branchy) assembly.
+    assert [node["label"] for node in op_nodes] == [
         "View",
         "Transpose",
         "Split",
         "Expand",
+        "Copy",
+        "Copy",
     ]
-    assert all(not node.get("namespace", "").endswith("/expand_kv") for node in nodes)
-    assert not any(node["label"] in {"hidden_states", "result"} for node in nodes)
+    by_id = {node["id"]: node for node in graph["nodes"]}
+    split = next(node for node in op_nodes if node["label"] == "Split")
+    expand = next(node for node in op_nodes if node["label"] == "Expand")
+    copies = [node for node in op_nodes if node["label"] == "Copy"]
+
+    def consumes(consumer, producer_id):
+        return any(
+            edge["sourceNodeId"] == producer_id
+            for edge in consumer.get("incomingEdges", [])
+        )
+
+    # Each of Split and Expand feeds a Copy that writes it into ``key_states``.
+    assert any(consumes(copy, split["id"]) for copy in copies)
+    assert any(consumes(copy, expand["id"]) for copy in copies)
+    # The final Copy is what the module returns (reaches the block output).
+    assert any(
+        synthetic(node) == "@output" and consumes(node, copies[-1]["id"])
+        for node in nodes
+    )
 
 
 def test_glm_experts_expands_router_boundary_into_named_parameters():

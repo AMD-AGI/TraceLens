@@ -170,6 +170,76 @@ def forward(self, x, weight, index, flag):
     assert compact.operations == []
 
 
+def test_extractor_models_index_bitwise_and_inplace_copy_consumers():
+    # Real consumption patterns the tracer must not drop: advanced (tensor) indexing
+    # is a gather, bitwise ``&``/``|`` combine two operands, and an in-place ``copy_``
+    # into a slice makes the mutated tensor depend on the copied source.
+    func = _function("""
+def forward(self, x):
+    scores = torch.matmul(x, x)
+    selected = scores.topk(4, dim=-1).indices
+    picked = x[selected]
+    mask = scores & picked
+    buf = x.new_empty(2, 2)
+    buf[..., :1].copy_(picked)
+    return buf, mask
+""")
+    analysis = aa._forward_operations_from_forward(
+        func, self_values={}, all_tensor_ops=True
+    )
+    by_label = lambda label: [op for op in analysis.operations if op.label == label]
+
+    topk = by_label("TopK")[0]
+    # ``x[selected]`` becomes a Gather that consumes the TopK index tensor.
+    gathers = by_label("Gather")
+    assert gathers and any(topk.attr_name in g.predecessors for g in gathers)
+    gather = next(g for g in gathers if topk.attr_name in g.predecessors)
+
+    # ``scores & picked`` emits a real op consuming BOTH operands.
+    matmul = by_label("MatMul")[0]
+    bitwise = by_label("Bitwise and")
+    assert bitwise
+    assert matmul.attr_name in bitwise[0].predecessors
+    assert gather.attr_name in bitwise[0].predecessors
+
+    # ``buf[..., :1].copy_(picked)`` emits a Copy consuming the copied Gather.
+    copies = by_label("Copy")
+    assert copies and gather.attr_name in copies[0].predecessors
+
+
+def test_subscript_index_operands_skips_pure_slicing():
+    # ``x[:, None]`` is pure slicing: no tensor index operands.
+    plain = ast.parse("x[:, None]", mode="eval").body
+    assert isinstance(plain, ast.Subscript)
+    assert aa._subscript_index_operands(plain.slice) == []
+    # ``x[idx]`` keeps ``idx`` as a candidate tensor index.
+    indexed = ast.parse("x[idx]", mode="eval").body
+    assert [getattr(op, "id", None) for op in aa._subscript_index_operands(indexed.slice)] == [
+        "idx"
+    ]
+    # ``x[~mask]`` (UnaryOp) is a candidate — boolean-mask indexing is a gather.
+    inverted = ast.parse("x[~mask]", mode="eval").body
+    assert len(aa._subscript_index_operands(inverted.slice)) == 1
+    # ``x[..., -1]`` keeps ``-1`` as a candidate but ``expression`` resolves the
+    # constant to no producer, so no spurious gather input results.
+    trailing = ast.parse("x[..., -1]", mode="eval").body
+    operands = aa._subscript_index_operands(trailing.slice)
+    assert all(not isinstance(op, (ast.Slice, ast.Constant)) for op in operands)
+
+
+def test_inplace_helpers_classify_mutators_and_roots():
+    assert aa._is_inplace_method("copy_")
+    assert aa._is_inplace_method("masked_fill_")
+    assert not aa._is_inplace_method("copy")  # out-of-place
+    assert not aa._is_inplace_method("__init__")  # dunder
+    assert not aa._is_inplace_method("_")
+    root = ast.parse("key_states[..., :n]", mode="eval").body
+    assert aa._subscript_root_name(root) == "key_states"
+    attr_root = ast.parse("self.cache[i]", mode="eval").body
+    assert aa._subscript_root_name(attr_root) is None
+    assert aa._inplace_label("copy_") == "Copy"
+
+
 def test_config_evaluation_and_assignment_shapes():
     expr = lambda text: ast.parse(text, mode="eval").body
     config = {"kind": "fast", "depth": 4, "enabled": True}

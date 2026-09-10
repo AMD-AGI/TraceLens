@@ -708,7 +708,8 @@ def test_shape_format_annotation_and_empty_shape_paths():
     # Human display is bracketed and keeps ``*`` for merged dims; the unicode
     # multiply signs fold to ``*`` and the non-ASCII ``λ`` drops out.
     assert shapes.format_shape(spec) == "[B, 2*H, N*D, ]"
-    assert shapes.format_shape_tensor(spec) == "Bx2xHxNxDx bfloat16"
+    # tensor_shape (edge labels) now uses the same bracket form as node attrs.
+    assert shapes.format_shape_tensor(spec) == "[B, 2*H, N*D, ] bfloat16"
     assert shapes.format_shape_bracket(spec) == "[B, 2×H, N∗D, λ]"
 
     node = {
@@ -793,6 +794,63 @@ def test_unconsumed_output_port_prunes_its_producer_backwards():
     assert {
         edge["targetNodeInputId"] for edge in by_id["block/@output"]["incomingEdges"]
     } == {"used"}
+
+
+def test_no_consumer_op_pruned_but_chains_sinks_and_loop_carried_kept():
+    nodes = [
+        {"id": "@input", "attrs": [{"key": "synthetic", "value": "@input"}]},
+        # A no-consumer leaf sitting on a *shared* tensor (a Clamp feeding only an
+        # index the graph never models) — removing it orphans nothing, so drop it.
+        {
+            "id": "dead_clamp",
+            "label": "Clamp",
+            "incomingEdges": [{"sourceNodeId": "@input", "sourceNodeOutputId": "0"}],
+        },
+        # A no-consumer leaf capping a *dedicated* chain — its producer feeds only
+        # it. This mirrors the DSA indexer's TopK/Expand, whose real consumers are
+        # index/in-place ops the tracer can't model. Removing the leaf would orphan
+        # legitimate compute, so the whole chain is preserved (not unravelled).
+        {
+            "id": "chain_producer",
+            "label": "Split",
+            "incomingEdges": [{"sourceNodeId": "@input", "sourceNodeOutputId": "0"}],
+        },
+        {
+            "id": "chain_leaf",
+            "label": "Clamp",
+            "incomingEdges": [
+                {"sourceNodeId": "chain_producer", "sourceNodeOutputId": "0"}
+            ],
+        },
+        # A live op consumed by @output must survive.
+        {
+            "id": "live",
+            "label": "Linear",
+            "incomingEdges": [{"sourceNodeId": "@input", "sourceNodeOutputId": "0"}],
+        },
+        # A loop-carried-in with no consumer yet is wired later — never pruned here.
+        {
+            "id": "block/@loop_carried_in:loop_l1_c1:h",
+            "label": "Loop carried dependencies in",
+            "attrs": [{"key": "synthetic", "value": "@loop_carried"}],
+            "incomingEdges": [{"sourceNodeId": "@input", "sourceNodeOutputId": "0"}],
+        },
+        {
+            "id": "@output",
+            "attrs": [{"key": "synthetic", "value": "@output"}],
+            "incomingEdges": [{"sourceNodeId": "live", "sourceNodeOutputId": "0"}],
+        },
+    ]
+
+    merge._prune_unconsumed_outputs(nodes)
+
+    ids = {node["id"] for node in nodes}
+    assert "dead_clamp" not in ids  # shared-input leaf: orphans nothing → pruned
+    assert "chain_leaf" in ids  # dedicated chain preserved (indexer-like)
+    assert "chain_producer" in ids
+    assert "live" in ids
+    assert "block/@loop_carried_in:loop_l1_c1:h" in ids  # kept for later wiring
+    assert "@output" in ids
 
 
 def _cast_node(node_id: str, *, source: str, dtype: str, shape: str = "B x S x 4") -> dict:
@@ -2106,12 +2164,12 @@ def test_bracket_shape_display_round_trips():
     assert shapes.parse_shape_dims(shapes.format_shape(spec)) == ["B", "S", "4096"]
     # Legacy `` x `` form is still parseable defensively.
     assert shapes.parse_shape_dims("B x S x 4096") == ["B", "S", "4096"]
-    # tensor_shape stays the compact Model-Explorer-native ``x`` join.
-    assert shapes.format_shape_tensor(spec) == "BxSx4096 bfloat16"
+    # tensor_shape (edge labels) now uses the bracket form on every edge.
+    assert shapes.format_shape_tensor(spec) == "[B, S, 4096] bfloat16"
     # A shape without a dtype omits the suffix in both display forms.
     no_dtype = TensorSpec(("B", "S", 4096), "")
     assert shapes.format_shape_with_dtype(no_dtype) == "[B, S, 4096]"
-    assert shapes.format_shape_tensor(no_dtype) == "BxSx4096"
+    assert shapes.format_shape_tensor(no_dtype) == "[B, S, 4096]"
 
 
 def test_split_and_write_port_shape_bracket_round_trip():
@@ -2131,8 +2189,8 @@ def test_split_and_write_port_shape_bracket_round_trip():
     tensor_val = next(
         a["value"] for a in metadata["attrs"] if a["key"] == "tensor_shape"
     )
-    # tensor_shape keeps the compact ``x`` join, never brackets.
-    assert tensor_val == "B*Sx4096 bfloat16"
+    # tensor_shape (edge labels) now uses the bracket form on every edge.
+    assert tensor_val == "[B*S, 4096] bfloat16"
 
 
 def test_merge_data_movement_reshape_flatten_and_expand():

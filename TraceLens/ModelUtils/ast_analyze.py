@@ -1315,6 +1315,12 @@ _BINOP_LABELS = {
     ast.Div: "Divide",
     ast.FloorDiv: "Floor divide",
     ast.Pow: "Power",
+    # Bitwise operators combine two tensors element-wise (mask logic such as
+    # ``pool_visible & pool_valid``); without a label they collapse to a
+    # pass-through that silently drops one operand and its producer subgraph.
+    ast.BitAnd: "Bitwise and",
+    ast.BitOr: "Bitwise or",
+    ast.BitXor: "Bitwise xor",
 }
 
 
@@ -1596,7 +1602,27 @@ class _ForwardOperationExtractor:
         if isinstance(node, ast.Constant):
             return None, []
         if isinstance(node, ast.Subscript):
-            return self.expression(node.value)
+            base, base_external = self.expression(node.value)
+            # Advanced indexing (``x[idx]`` where ``idx`` is a tensor, e.g.
+            # ``pool_indices[batch_idx, selected]`` or a boolean mask) is a gather:
+            # the index tensor is a genuine data consumer, not slicing. Plain
+            # slices/ints/``None``/``...`` carry no producer and stay pass-through.
+            index_producers: list[str] = []
+            index_external: list[str] = []
+            for operand in _subscript_index_operands(node.slice):
+                producer, operand_external = self.expression(operand)
+                if producer:
+                    index_producers.append(producer)
+                index_external.extend(operand_external)
+            if index_producers:
+                producer = self._emit(
+                    node,
+                    "Gather",
+                    [value for value in (base, *index_producers) if value],
+                    [*base_external, *index_external],
+                )
+                return producer, []
+            return base, base_external
         if isinstance(node, ast.UnaryOp):
             return self.expression(node.operand)
         if isinstance(node, ast.IfExp):
@@ -1967,13 +1993,52 @@ class _ForwardOperationExtractor:
                         self.var_producer[stmt.target.id] = producer
                 continue
             if isinstance(stmt, ast.Expr):
-                producer, _ = self.expression(stmt.value)
+                value = stmt.value
+                # An in-place write into a slice (``key_states[..., :n].copy_(src)``)
+                # mutates the base tensor: its new value depends on ``src``. The base
+                # is a Subscript, not a Name, so the plain-owner rebind below misses
+                # it and ``src`` (e.g. an ``expand_kv`` Split) is dropped. Emit the
+                # mutation as a real op reading [prior base, operands] and rebind the
+                # root tensor name so downstream reads (and the return) carry it.
+                if (
+                    isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Attribute)
+                    and _is_inplace_method(value.func.attr)
+                    and isinstance(value.func.value, ast.Subscript)
+                ):
+                    root = _subscript_root_name(value.func.value)
+                    if root is not None:
+                        base_producer, base_external = self.expression(value.func.value)
+                        operand_producers: list[str] = []
+                        operand_external: list[str] = []
+                        for operand in (*value.args, *(kw.value for kw in value.keywords)):
+                            operand_producer, ext = self.expression(operand)
+                            if operand_producer:
+                                operand_producers.append(operand_producer)
+                            operand_external.extend(ext)
+                        producer = self._emit(
+                            value,
+                            _inplace_label(value.func.attr),
+                            [
+                                producer
+                                for producer in (
+                                    self.var_producer.get(root),
+                                    base_producer,
+                                    *operand_producers,
+                                )
+                                if producer
+                            ],
+                            [*base_external, *operand_external],
+                        )
+                        self.var_producer[root] = producer
+                        continue
+                producer, _ = self.expression(value)
                 if (
                     producer
-                    and isinstance(stmt.value, ast.Call)
-                    and isinstance(stmt.value.func, ast.Attribute)
+                    and isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Attribute)
                 ):
-                    owner = stmt.value.func.value
+                    owner = value.func.value
                     if isinstance(owner, ast.Name):
                         self.var_producer[owner.id] = producer
                 continue
@@ -3007,6 +3072,61 @@ def _parse_init(
                 record_assignment(target.attr, node.value)
 
     return assignments, details, options
+
+
+def _subscript_index_operands(index: ast.AST) -> list[ast.AST]:
+    """Slice operands that could be *tensor* indices (advanced indexing).
+
+    Returns the per-axis operands of a subscript, dropping the ones that can never
+    be a tensor: ``Slice`` (``a:b``), ``Constant`` (ints, ``None``, ``...``), and
+    ``Starred``. A ``Tuple`` slice (``x[i, j]``) is unpacked to its axes. The caller
+    resolves each survivor through ``expression`` — only those bound to a traced
+    tensor become gather inputs; scalar names (``layer_idx``) resolve to nothing.
+    """
+    if isinstance(index, ast.Tuple):
+        operands = list(index.elts)
+    else:
+        operands = [index]
+    return [
+        operand
+        for operand in operands
+        if not isinstance(operand, (ast.Slice, ast.Constant, ast.Starred))
+    ]
+
+
+def _is_inplace_method(name: str) -> bool:
+    """True for tensor in-place mutators (``copy_``, ``add_``, ``masked_fill_``…).
+
+    These end in a single trailing underscore; dunders and private helpers are
+    excluded so only genuine mutating tensor methods qualify.
+    """
+    return (
+        len(name) > 1
+        and name.endswith("_")
+        and not name.endswith("__")
+        and not name.startswith("_")
+    )
+
+
+def _subscript_root_name(expr: ast.AST) -> str | None:
+    """Root local tensor name of a (possibly nested) subscript, else ``None``.
+
+    ``key_states[..., :n]`` → ``"key_states"``; ``self.cache[i]`` (rooted at an
+    attribute, not a local) → ``None`` so only local tensors get rebound.
+    """
+    while isinstance(expr, ast.Subscript):
+        expr = expr.value
+    return expr.id if isinstance(expr, ast.Name) else None
+
+
+def _inplace_label(method: str) -> str:
+    """Display label for an in-place mutator, reusing the out-of-place op's label."""
+    base = method[:-1]
+    return (
+        _TENSOR_METHOD_LABELS.get(base)
+        or _FUNCTION_LABELS.get(base)
+        or base.replace("_", " ").title()
+    )
 
 
 def _activation_registry_class_name(

@@ -503,6 +503,12 @@ _POINTWISE_LABELS = frozenset(
         "view as complex",
         "view as real",
         "repeat interleave",
+        # Bitwise/logical mask combinators and in-place copies keep the widest
+        # operand's shape, like any other element-wise op.
+        "bitwise and",
+        "bitwise or",
+        "bitwise xor",
+        "copy",
     }
 )
 

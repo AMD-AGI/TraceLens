@@ -1796,7 +1796,7 @@ def _write_port_shape(
     shape_attr["value"] = display
     for attr in metadata.get("attrs", []):
         if attr.get("key") == "tensor_shape":
-            tensor = "x".join(dims)
+            tensor = format_shape_dims(dims)
             attr["value"] = f"{tensor} {dtype}" if dtype else tensor
 
 
@@ -1843,6 +1843,7 @@ def _prune_unconsumed_outputs(nodes: list[dict[str, Any]]) -> None:
         for edge in node.get("incomingEdges", []):
             source_id = str(edge["sourceNodeId"])
             outgoing_count[source_id] = outgoing_count.get(source_id, 0) + 1
+
     dead: set[str] = set()
     pending = list(dead_candidates)
     while pending:
@@ -1854,7 +1855,7 @@ def _prune_unconsumed_outputs(nodes: list[dict[str, Any]]) -> None:
         ):
             continue
         node = node_by_id[node_id]
-        if _is_synthetic_input(node):
+        if _is_synthetic_input(node) or _node_attr(node, "synthetic") == "@loop_carried":
             continue
         dead.add(node_id)
         for edge in node.get("incomingEdges", []):
@@ -1862,6 +1863,66 @@ def _prune_unconsumed_outputs(nodes: list[dict[str, Any]]) -> None:
             outgoing_count[source_id] = max(outgoing_count.get(source_id, 0) - 1, 0)
             pending.append(source_id)
     if dead:
+        nodes[:] = [node for node in nodes if str(node.get("id")) not in dead]
+
+    _prune_dangling_op_leaves(nodes)
+
+
+def _prune_dangling_op_leaves(nodes: list[dict[str, Any]]) -> None:
+    """Remove no-consumer op leaves whose inputs are shared with live nodes.
+
+    Beyond dead boundary ports, a plain op whose result feeds only control flow
+    the graph never models (an int kernel arg, an index, a mask) surfaces with no
+    consumer — e.g. the vision ``max_seqlen`` kernel input or the patch-merger
+    ``Clamp``. Those are safe to drop. But some no-consumer leaves cap a *dedicated*
+    compute chain the viewer still wants shown (the sparse-attention indexer's
+    ``Split``/``Expand``/``TopK`` over the ``kv_a_layernorm`` output). Unravelling
+    those transitively deletes legitimate, named layers.
+
+    Prune a leaf only when removing it orphans none of its producers — i.e. every
+    producer keeps another consumer, or is a synthetic input allowed to dangle.
+    That drops artifacts sitting on shared tensors while leaving dedicated chains
+    intact. Iterate to a fixpoint; the orphan guard prevents chain unravelling.
+    """
+    while True:
+        outgoing_count: dict[str, int] = {}
+        for node in nodes:
+            for edge in node.get("incomingEdges", []):
+                source_id = str(edge["sourceNodeId"])
+                outgoing_count[source_id] = outgoing_count.get(source_id, 0) + 1
+        node_by_id = {str(node.get("id")): node for node in nodes}
+
+        dead: set[str] = set()
+        for node in nodes:
+            node_id = str(node.get("id"))
+            if outgoing_count.get(node_id, 0):
+                continue
+            if (
+                node_id == "@output"
+                or _is_synthetic_input(node)
+                or _is_synthetic_output(node)
+                or _node_attr(node, "synthetic") == "@loop_carried"
+            ):
+                continue
+            # Count edges to each producer so a producer feeding this leaf more
+            # than once is judged on its remaining (other) consumers.
+            edges_to: dict[str, int] = {}
+            for edge in node.get("incomingEdges", []):
+                source_id = str(edge["sourceNodeId"])
+                edges_to[source_id] = edges_to.get(source_id, 0) + 1
+            orphans = False
+            for source_id, count in edges_to.items():
+                producer = node_by_id.get(source_id)
+                if producer is not None and _is_synthetic_input(producer):
+                    continue
+                if outgoing_count.get(source_id, 0) - count < 1:
+                    orphans = True
+                    break
+            if not orphans:
+                dead.add(node_id)
+
+        if not dead:
+            return
         nodes[:] = [node for node in nodes if str(node.get("id")) not in dead]
 
 

@@ -78,8 +78,13 @@ def format_shape_with_dtype(spec: TensorSpec) -> str:
 
 
 def format_shape_tensor(spec: TensorSpec) -> str:
-    """Compact ``BxSxH`` shape for outputsMetadata tensor_shape conversion."""
-    dims = "x".join(_font_safe(dim) for dim in spec.shape)
+    """Bracket ``[B, S, H]`` shape for outputsMetadata tensor_shape / edge labels.
+
+    Model Explorer labels edges from the ``tensor_shape`` attr, so this uses the
+    same bracket form as node attrs (``*`` for merged reshape dims) rather than a
+    compact ``BxSxH`` string.
+    """
+    dims = format_shape_dims([_font_safe(dim, star="*") for dim in spec.shape])
     if not dims or not spec.dtype:
         return dims
     return f"{dims} {spec.dtype}"

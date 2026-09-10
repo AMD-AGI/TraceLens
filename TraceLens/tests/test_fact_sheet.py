@@ -14,8 +14,35 @@ from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
     build_fact_sheet_viewer,
     checkpoint_source_url,
     github_source_url,
+    hf_model_id,
 )
 from TraceLens.ModelUtils.extract import ArchitectureSpec
+
+
+def test_hf_model_id_extracts_owner_name():
+    assert hf_model_id("hf://zai-org/GLM-5.3-Flash/config.json") == "zai-org/GLM-5.3-Flash"
+    assert hf_model_id("hf://owner/model") == "owner/model"
+    # Non-HF / malformed labels have no HF id.
+    assert hf_model_id("/local/path/config.json") is None
+    assert hf_model_id("hf://onlyowner") is None
+
+
+def test_fact_sheet_leads_with_bold_hf_model_name():
+    spec = ArchitectureSpec(
+        name="Glm5NextForConditionalGeneration",
+        model_type="glm5_next_text",
+        checkpoint_source="hf://zai-org/GLM-5.3-Flash/config.json",
+    )
+    viewer = build_fact_sheet_viewer(spec)
+    # Exact HF id leads the body, bold, before the metadata bullets.
+    assert viewer["body"].startswith("**zai-org/GLM-5.3-Flash**\n- Model type:")
+    assert viewer["bodyHtml"].startswith("<strong>zai-org/GLM-5.3-Flash</strong>\n")
+
+
+def test_fact_sheet_falls_back_to_class_name_without_hf_source():
+    spec = ArchitectureSpec(name="CustomNet", model_type="custom")
+    viewer = build_fact_sheet_viewer(spec)
+    assert viewer["body"].startswith("**CustomNet**\n")
 
 
 def test_checkpoint_source_url_maps_hf_scheme_to_huggingface():

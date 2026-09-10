@@ -1028,7 +1028,9 @@ def test_fact_sheet_panel_in_payload():
     fact = payload["tracelensViewer"]["factSheet"]
     assert fact["title"] == "Fact sheet"
     assert "Model type:" in fact["body"]
-    assert fact["body"].startswith("- Model type:")
+    # The exact model name leads the fact sheet, in bold, before the metadata.
+    assert fact["body"].startswith("**Custom MLA MoE**\n- Model type:")
+    assert fact["bodyHtml"].startswith("<strong>Custom MLA MoE</strong>\n")
     graph = payload["graphCollections"][0]["graphs"][0]
     assert not any(node["id"] == "@fact_sheet" for node in graph["nodes"])
 
@@ -1142,20 +1144,34 @@ def test_save_viewer_html_is_self_contained(tmp_path: Path):
     assert 'id="tracelens-worker-source"' in html
 
 
-def test_with_generated_timestamp_appends_line():
+def test_with_generated_timestamp_inserts_after_model_name():
     from datetime import datetime
 
     from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
         with_generated_timestamp,
     )
 
-    viewer = {"title": "Fact sheet", "body": "- Model type: demo", "bodyHtml": "- Model type: demo"}
+    # With a bold model-name line the timestamp goes right after it (second line).
+    viewer = {
+        "title": "Fact sheet",
+        "body": "**owner/Model**\n- Model type: demo",
+        "bodyHtml": "<strong>owner/Model</strong>\n- Model type: demo",
+    }
     stamped = with_generated_timestamp(viewer, datetime(2026, 1, 2, 3, 4, 5))
-
-    assert stamped["body"].endswith("- Generated: 2026-01-02 03:04:05")
-    assert stamped["bodyHtml"].endswith("- Generated: 2026-01-02 03:04:05")
+    assert stamped["body"] == (
+        "**owner/Model**\n- Generated: 2026-01-02 03:04:05\n- Model type: demo"
+    )
+    assert stamped["bodyHtml"] == (
+        "<strong>owner/Model</strong>\n"
+        "- Generated: 2026-01-02 03:04:05\n- Model type: demo"
+    )
     # Original dict is not mutated.
     assert "Generated" not in viewer["body"]
+
+    # Without a model-name line the timestamp leads the fact sheet.
+    bare = {"title": "Fact sheet", "body": "- Model type: demo", "bodyHtml": "- x"}
+    bare_stamped = with_generated_timestamp(bare, datetime(2026, 1, 2, 3, 4, 5))
+    assert bare_stamped["body"].startswith("- Generated: 2026-01-02 03:04:05\n")
 
 
 def test_compose_viewer_html_generated_at_stamps_fact_sheet():

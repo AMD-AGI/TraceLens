@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import re
+from collections.abc import Callable
 from datetime import datetime
 
 from TraceLens.ModelUtils.ast_analyze import _classify_role, _label_for
@@ -63,6 +64,27 @@ def github_source_url(label: str) -> str | None:
     if subpath:
         return f"https://github.com/{owner}/{repo}/blob/{ref}/{subpath}"
     return f"https://github.com/{owner}/{repo}/tree/{ref}"
+
+
+def hf_model_id(label: str) -> str | None:
+    """Extract the bare ``owner/name`` Hugging Face id from a checkpoint label."""
+    text = label.strip()
+    match = _HF_SOURCE_RE.match(text)
+    if match is None:
+        return None
+    parts = [part for part in match.group("rest").split("/") if part]
+    if len(parts) < 2:
+        return None
+    return "/".join(parts[:2])
+
+
+def _model_display_name(spec: ArchitectureSpec) -> str | None:
+    """The exact HF model id when known, else the architecture class name."""
+    if spec.checkpoint_source:
+        model_id = hf_model_id(spec.checkpoint_source)
+        if model_id:
+            return model_id
+    return spec.name or None
 
 
 def _format_source_line(prefix: str, label: str) -> str:
@@ -182,6 +204,9 @@ def _highlight_lines(spec: ArchitectureSpec) -> list[str]:
 
 def _render_fact_sheet_html(spec: ArchitectureSpec) -> str:
     parts: list[str] = []
+    name = _model_display_name(spec)
+    if name:
+        parts.append(f"<strong>{html.escape(name)}</strong>")
     for line in _fact_lines(spec):
         if line.startswith(_FACT_SUBLINE_INDENT):
             parts.append(f"  {html.escape(line[len(_FACT_SUBLINE_INDENT) :].strip())}")
@@ -205,6 +230,9 @@ def _render_fact_sheet_html(spec: ArchitectureSpec) -> str:
 def build_fact_sheet_viewer(spec: ArchitectureSpec) -> dict[str, str]:
     """Return left-aligned fact sheet text for the HTML viewer panel."""
     body: list[str] = []
+    name = _model_display_name(spec)
+    if name:
+        body.append(f"**{name}**")
     for line in _fact_lines(spec):
         if line.startswith(_FACT_SUBLINE_INDENT):
             body.append(f"  {line[len(_FACT_SUBLINE_INDENT) :].strip()}")
@@ -226,21 +254,40 @@ def format_generated_line(generated_at: datetime) -> str:
     return f"{_GENERATED_LABEL}: {generated_at.strftime('%Y-%m-%d %H:%M:%S')}"
 
 
+def _insert_after_model_name(
+    text: str, line: str, is_name: Callable[[str], bool]
+) -> str:
+    """Insert ``line`` right after a leading model-name line, else at the top."""
+    if not text:
+        return line
+    existing = text.split("\n")
+    at = 1 if existing and is_name(existing[0]) else 0
+    existing.insert(at, line)
+    return "\n".join(existing)
+
+
 def with_generated_timestamp(
     viewer: dict[str, str], generated_at: datetime
 ) -> dict[str, str]:
-    """Return a copy of a fact-sheet viewer dict with a generated-time line appended.
+    """Return a copy of a fact-sheet viewer dict with a generated-time line added.
 
-    The timestamp is added only to the viewer (HTML/body) forms, never to the
-    persisted payload JSON, so exported payloads stay byte-reproducible.
+    The 'Generated' line is placed right after the bold model-name line (so the
+    fact sheet reads: model name, then time, then the metadata bullets). It is
+    added only to the viewer (HTML/body) forms, never to the persisted payload
+    JSON, so exported payloads stay byte-reproducible.
     """
     line = format_generated_line(generated_at)
     updated = dict(viewer)
-    body = viewer.get("body", "")
-    updated["body"] = f"{body}\n- {line}" if body else f"- {line}"
-    body_html = viewer.get("bodyHtml", "")
-    html_line = f"- {html.escape(line)}"
-    updated["bodyHtml"] = f"{body_html}\n{html_line}" if body_html else html_line
+    updated["body"] = _insert_after_model_name(
+        viewer.get("body", ""),
+        f"- {line}",
+        lambda first: first.startswith("**") and first.endswith("**"),
+    )
+    updated["bodyHtml"] = _insert_after_model_name(
+        viewer.get("bodyHtml", ""),
+        f"- {html.escape(line)}",
+        lambda first: first.startswith("<strong>"),
+    )
     return updated
 
 
