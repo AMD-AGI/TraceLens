@@ -51,7 +51,6 @@ def test_editable_extra_exts_extends_native_set():
 def test_not_editable_generated_python():
     assert is_editable_source("/tmp/torchinductor_u/xx.py") is False
     assert is_editable_source("/root/.cache/torchinductor/abc.py") is False
-    assert is_editable_source("/repo/a.py", "triton_inductor_generated") is False
 
 
 def test_not_editable_vllm_compile_cache():

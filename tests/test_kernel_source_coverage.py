@@ -124,12 +124,10 @@ def test_resolve_triton_source_empty_is_unresolved():
     assert res.method == "unresolved"
 
 
-def test_resolve_triton_source_generated_kind_is_gated():
-    # An explicit kind hint marks the source non-patchable via is_editable_source,
-    # even for a plausible .py path.
-    res = triton_pin.resolve_triton_source(
-        "/repo/my_kernel.py:3:k", kind="triton_inductor_generated"
-    )
+def test_resolve_triton_source_generated_path_is_gated():
+    # A generated Triton path (inductor cache) is marked non-patchable via the
+    # path-based is_editable_source check.
+    res = triton_pin.resolve_triton_source("/tmp/torchinductor_u/abc/my_kernel.py:3:k")
     assert res.patchable is False
     assert res.method == "gate_non_patchable"
 

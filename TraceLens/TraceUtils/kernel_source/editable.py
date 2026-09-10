@@ -22,8 +22,9 @@ from collections.abc import Iterable
 
 __all__ = ["is_editable_source"]
 
-# Native device-code extensions that are always editable.
-_NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h", ".hpp")
+# Native device-code extensions that are always editable. Canonical set, also
+# imported by ``index`` as its native scan set so the two can't drift.
+NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h", ".hpp")
 
 # Path markers for compiler-generated Triton (torch.compile / inductor). These
 # files are produced at compile time and have no durable source to rewrite.
@@ -34,7 +35,6 @@ _GENERATED_MARKERS = ("torchinductor", "inductor_cache", "torch_compile_cache")
 
 def is_editable_source(
     path: str | None,
-    kind: str | None = None,
     *,
     extra_exts: Iterable[str] | None = None,
 ) -> bool:
@@ -42,8 +42,6 @@ def is_editable_source(
 
     Args:
         path: Candidate source path (from a trace ``kernel_file`` or the index).
-        kind: Optional kernel-kind hint; ``"triton_inductor_generated"`` is
-            always rejected.
         extra_exts: Optional extra file extensions to treat as editable native
             source, in addition to the built-in ones. Lets callers extend the
             set over time (e.g. ``(".cc", ".cxx")``) without editing this module.
@@ -55,7 +53,7 @@ def is_editable_source(
     """
     if not path:
         return False
-    native_exts = _NATIVE_SOURCE_EXTS
+    native_exts = NATIVE_SOURCE_EXTS
     if extra_exts:
         # Normalize each extra ext to lowercase with a leading dot before adding.
         extra = tuple(
@@ -66,8 +64,6 @@ def is_editable_source(
     if low.endswith(native_exts):
         return True
     if low.endswith(".py"):
-        if kind == "triton_inductor_generated":
-            return False
         # Generated Triton lives in an inductor/compile cache or a temp dir; it
         # has no durable source to rewrite.
         if any(m in low for m in _GENERATED_MARKERS) or path.startswith(

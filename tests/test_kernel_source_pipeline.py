@@ -408,9 +408,6 @@ class TestEditable:
     def test_generated_python_not_editable(self, path):
         assert is_editable_source(path) is False
 
-    def test_kind_hint_rejects_generated(self):
-        assert is_editable_source("/repo/a.py", "triton_inductor_generated") is False
-
     def test_extra_exts_extend_editable_set(self):
         # A caller can treat extra native extensions as editable without editing
         # the module; leading dot optional and matching is case-insensitive.

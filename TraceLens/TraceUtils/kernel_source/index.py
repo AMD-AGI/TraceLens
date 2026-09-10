@@ -24,6 +24,8 @@ from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .editable import NATIVE_SOURCE_EXTS
+
 log = logging.getLogger(__name__)
 
 __all__ = [
@@ -49,12 +51,17 @@ _ENV_CACHE_DIR = "TRACELENS_KSI_CACHE_DIR"
 _ENV_SOURCE_ROOTS = "TRACELENS_FRAMEWORK_SOURCE_ROOTS"
 _ENV_DISCOVER_ONLY = "TRACELENS_DISCOVER_ONLY"
 
-# Native source extensions to scan (kept in sync with .editable's editability filter).
-_NATIVE_EXTS = (".cu", ".cuh", ".hip", ".h", ".hpp")
+# Native source extensions to scan. Single source of truth lives in ``editable``
+# (the editability authority) so the scan set and the edit filter can't drift.
+_NATIVE_EXTS = NATIVE_SOURCE_EXTS
 
 # Python source extension, scanned for the Triton fallback index (stage 2 when
 # the trace carries no ``kernel_file`` to point straight at the ``.py`` source).
 _PY_EXTS = (".py",)
+
+# Decorators that mark a Triton device-kernel def (``@triton.jit`` / ``@jit``
+# and the autotune/heuristics wrappers stacked on top of a jit'd kernel).
+_TRITON_DECORATORS = frozenset({"jit", "autotune", "heuristics"})
 
 # Serving frameworks always located by name (for version reporting), even without native source.
 _KNOWN = ("vllm", "sglang", "aiter", "atom")
@@ -218,11 +225,6 @@ def _native_files(root: Path):
 
 
 # --- Triton kernel-definition scanning (for the stage-2 .py fallback) --------
-# Decorators that mark a Triton device-kernel def (``@triton.jit`` / ``@jit``
-# and the autotune/heuristics wrappers stacked on top of a jit'd kernel).
-_TRITON_DECORATORS = frozenset({"jit", "autotune", "heuristics"})
-
-
 def _is_triton_kernel_def(node: ast.AST) -> bool:
     """Return whether an AST function node carries a Triton kernel decorator."""
     for dec in getattr(node, "decorator_list", []):

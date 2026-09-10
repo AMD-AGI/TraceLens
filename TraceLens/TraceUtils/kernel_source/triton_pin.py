@@ -174,7 +174,6 @@ def _resolve_triton_by_symbol(
 def resolve_triton_source(
     kernel_file: str,
     *,
-    kind: str = "",
     symbol: str = "",
     search_paths: Sequence[str | Path] | None = None,
 ) -> ResolveResult:
@@ -184,8 +183,6 @@ def resolve_triton_source(
         kernel_file: The ``kernel_file`` string from the trace (may be a bare
             path or a launcher form like ``a.py:12:foo``). May be empty when the
             trace didn't record it.
-        kind: Optional kernel-kind hint; ``"triton_inductor_generated"`` is
-            treated as non-patchable.
         symbol: Optional device kernel symbol, used to pin the exact def line and,
             when ``kernel_file`` is empty, to drive the ``.py`` search fallback.
         search_paths: Optional roots for the fallback ``.py`` search; defaults to
@@ -212,7 +209,7 @@ def resolve_triton_source(
 
     # Keep only an editable source path; inductor-generated / ``/tmp`` Triton
     # has no durable source to rewrite.
-    source = path if is_editable_source(path, kind or None) else ""
+    source = path if is_editable_source(path) else ""
     if not source:
         return ResolveResult(
             None,
