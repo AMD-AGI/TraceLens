@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from statistics import mean, pstdev
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from ..util import normalize_name_for_comparison
 from .trace_to_tree import TraceToTree
 
 # A period must explain more than half the sequence, matching the original rule.
@@ -314,7 +315,7 @@ def _blocks_by_pattern(
         j = i
         while pos < period and j < n:
             child = ordered[j]
-            if child.get("name", "") == pattern[pos]:
+            if normalize_name_for_comparison(child.get("name", "")) == pattern[pos]:
                 block.append(child)
                 pos += 1
                 j += 1
