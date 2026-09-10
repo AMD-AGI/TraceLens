@@ -1028,7 +1028,19 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
         "Expand",
         "Contiguous",
     ]
-    assert model_ops[0]["incomingEdges"][0]["sourceNodeId"] == "embed_tokens"
+    # The decoder consumes the vision/text combine (masked_scatter), not the raw
+    # token embeddings — the combine is the true entry to the language stack.
+    assert (
+        model_ops[0]["incomingEdges"][0]["sourceNodeId"]
+        == "@vision_language_combine"
+    )
+    combine = next(
+        node for node in graph["nodes"] if node["id"] == "@vision_language_combine"
+    )
+    combine_sources = {
+        edge["sourceNodeId"] for edge in combine["incomingEdges"]
+    }
+    assert combine_sources == {"embed_tokens", "visual/@output"}
     assert model_ops[1]["incomingEdges"][0]["sourceNodeId"] == model_ops[0]["id"]
     assert model_ops[2]["incomingEdges"][0]["sourceNodeId"] == model_ops[1]["id"]
     assert not any(node["id"] == "rotary_pos_emb" for node in graph["nodes"])

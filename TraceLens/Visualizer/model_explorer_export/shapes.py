@@ -11,7 +11,13 @@ from __future__ import annotations
 from typing import Any
 
 from TraceLens.ModelUtils.block_tree import BlockNode
-from TraceLens.ModelUtils.shape_inference import ShapeContext, ShapeInferencer, Symbol, TensorSpec
+from TraceLens.ModelUtils.shape_inference import (
+    ShapeContext,
+    ShapeInferencer,
+    Symbol,
+    TensorSpec,
+    _resolve_cast_dtype,
+)
 
 SHAPE_SEPARATOR = " x "
 
@@ -217,7 +223,10 @@ def _incoming_source_ids(node: dict[str, Any]) -> list[str]:
 
 
 def _fallback_node_spec(
-    node: dict[str, Any], sources: list[tuple[str, TensorSpec]]
+    node: dict[str, Any],
+    sources: list[tuple[str, TensorSpec]],
+    *,
+    working_dtype: str = "float16",
 ) -> TensorSpec:
     """Infer merge-only synthetic ops that have no block-tree shape record."""
     specs = [spec for _target_port, spec in sources]
@@ -228,6 +237,23 @@ def _fallback_node_spec(
         for attr in node.get("attrs", [])
         if attr.get("key") == "detail"
     ]
+
+    if label == "Cast" and specs:
+        source = specs[0]
+        dtype_detail = next(
+            (
+                detail.split(":", 1)[1].strip()
+                for detail in details
+                if detail.startswith("dtype:")
+            ),
+            "",
+        )
+        if dtype_detail:
+            return TensorSpec(
+                source.shape,
+                _resolve_cast_dtype(dtype_detail, source.dtype, working_dtype),
+            )
+        return source
 
     if label == "Unsqueeze":
         source = specs[0]
@@ -371,7 +397,7 @@ def fill_missing_node_shapes(
                     sources.append((target_port, spec))
             if not sources or len(sources) != len(incoming_sources):
                 continue
-            spec = _fallback_node_spec(node, sources)
+            spec = _fallback_node_spec(node, sources, working_dtype=context.dtype)
             node_id = str(node.get("id", ""))
             known[(node_id, "0")] = spec
             _apply_shape_attrs(node, spec)

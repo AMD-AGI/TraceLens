@@ -197,6 +197,12 @@ class ShapeContext:
             for alias in aliases:
                 dims.setdefault(alias, resolved)
 
+        # Fold ``__init__`` self-attribute scalars (e.g.
+        # ``self.qkv_dim = self.head_dim * self.num_heads``) so shape expressions
+        # that reference them (``.split([self.qkv_dim] * 3)``) resolve.
+        for name, value in _collect_init_scalar_attrs(spec, dims, config).items():
+            dims.setdefault(name, value)
+
         # Fold forward-local scalar bindings (e.g. `hc = self.hc_mult`) so shape
         # expressions that use them (`.split([hc, hc, hc * hc])`) resolve.
         for name, value in _collect_forward_scalar_locals(spec, dims).items():
@@ -1178,8 +1184,10 @@ class ShapeInferencer:
                 ),
                 "",
             )
-            if "float32" in dtype_detail:
-                cast_dtype = "float32"
+            if operation_label == "cast" and dtype_detail:
+                cast_dtype = _resolve_cast_dtype(
+                    dtype_detail, source.dtype, self.context.dtype
+                )
             return TensorSpec(shape=source.shape, dtype=cast_dtype)
 
         if operation_label == "topk":
@@ -1233,7 +1241,14 @@ class ShapeInferencer:
                 dtype="int64" if index_reduction else source.dtype,
             )
 
-        if operation_label in _POINTWISE_LABELS:
+        # An activation module resolved from a registry (e.g. ``act_fn = ACT2FN[...]``)
+        # keeps its attribute name as the label (``act_fn``) while its class is the
+        # concrete activation (``SiLU``); match on the class so it is treated as the
+        # pointwise op it is rather than falling through to the shape warning.
+        if (
+            operation_label in _POINTWISE_LABELS
+            or (class_name or "").strip().lower() in _POINTWISE_LABELS
+        ):
             if inputs:
                 source = max(inputs, key=_broadcast_rank)
                 return TensorSpec(shape=source.shape, dtype=source.dtype)
@@ -1279,6 +1294,11 @@ class ShapeInferencer:
                 parameter = self._lookup_parameter_spec(
                     node, root=root, names=external_inputs
                 )
+                if parameter is None:
+                    # The weight arg (`self.fn.float()`) is often not recorded as an
+                    # external input, so fall back to the owning class's sole matrix
+                    # Parameter (e.g. the mHC ``fn`` weight in HyperConnection).
+                    parameter = self._unique_matrix_parameter(node, root)
                 if parameter is not None and len(parameter.shape) >= 2:
                     out_features = parameter.shape[-2]
             if out_features is None and inputs:
@@ -2042,6 +2062,33 @@ class ShapeInferencer:
                     return spec
         return None
 
+    def _unique_matrix_parameter(
+        self, node: ModelGraphNode, root: BlockNode | None
+    ) -> ModuleParameterSpec | None:
+        """The sole 2-D Parameter of the class owning a functional ``F.linear``.
+
+        When the weight argument isn't captured as an external input we cannot
+        name it, but a functional linear whose owning class declares exactly one
+        matrix Parameter (``self.fn`` for the mHC mapping) has an unambiguous
+        weight — use its row axis as ``out_features``.
+        """
+        candidates = [
+            node.metadata.get("class_name"),
+            self._owner_class_name(node, root),
+            root.class_name if root is not None else None,
+        ]
+        for class_name in candidates:
+            if not class_name:
+                continue
+            matrices = [
+                spec
+                for (cls, _attr), spec in self.module_dims.parameter.items()
+                if cls == class_name and len(spec.shape) >= 2
+            ]
+            if len(matrices) == 1:
+                return matrices[0]
+        return None
+
     def _owner_class_name(
         self, node: ModelGraphNode, root: BlockNode | None
     ) -> str | None:
@@ -2339,8 +2386,8 @@ def _parse_split_sizes(
     by ``ShapeContext.from_spec``).
     """
     text = text.strip()
-    # "[name] * N" pattern
-    m = re.match(r"\[(\w+)\]\s*\*\s*(\d+)", text)
+    # "[name] * N" pattern — name may be dotted (``self.qkv_dim``).
+    m = re.match(r"\[([\w.]+)\]\s*\*\s*(\d+)", text)
     if m:
         name, count = m.group(1), int(m.group(2))
         resolved = _resolve_dim_name(name, dims)
@@ -2365,6 +2412,65 @@ def _parse_split_sizes(
         if all(isinstance(s, int) for s in sizes):
             return sizes
     return None
+
+
+def _collect_init_scalar_attrs(
+    spec: ArchitectureSpec, dims: dict[str, DimExpr], config: dict[str, Any]
+) -> dict[str, int]:
+    """Fold ``__init__`` self-attribute scalars (``self.qkv_dim = ...``) into dims.
+
+    A forward often reads an integer attribute set in ``__init__`` from config
+    values (``self.qkv_dim = self.head_dim * self.num_heads``) and then uses it
+    in a shape expression (``.split([self.qkv_dim] * 3)``). Resolve those
+    attributes to their integer values by walking each class's ``__init__`` in
+    statement order, carrying forward earlier self-attrs and plain locals.
+    """
+    import ast as _pyast
+
+    ctx = ShapeContext(dims=dict(dims))
+    extra: dict[str, int] = {}
+    for structure in (getattr(spec, "class_registry", None) or {}).values():
+        class_node = getattr(structure, "node", None)
+        if class_node is None:
+            continue
+        init_func = _find_init_function(class_node)
+        if init_func is None:
+            continue
+        local_vars: dict[str, DimExpr] = {}
+
+        def _walk(stmts: list[_pyast.stmt]) -> None:
+            for stmt in stmts:
+                targets: list[tuple[Any, Any]] = []
+                if isinstance(stmt, _pyast.Assign):
+                    targets = [(t, stmt.value) for t in stmt.targets]
+                elif isinstance(stmt, _pyast.AnnAssign) and stmt.value is not None:
+                    targets = [(stmt.target, stmt.value)]
+                elif isinstance(stmt, _pyast.If):
+                    branch = _eval_config_condition(
+                        stmt.test, config=config, local_vars=local_vars
+                    )
+                    if branch is not False:
+                        _walk(stmt.body)
+                    if branch is not True:
+                        _walk(stmt.orelse)
+                    continue
+                elif isinstance(stmt, (_pyast.For, _pyast.While, _pyast.With, _pyast.Try)):
+                    _walk(stmt.body)
+                    continue
+                for target, value in targets:
+                    resolved = _resolve_dim_expr(
+                        value, config=config, local_vars=local_vars, context=ctx
+                    )
+                    if not isinstance(resolved, int):
+                        continue
+                    if isinstance(target, _pyast.Name):
+                        local_vars[target.id] = resolved
+                    elif isinstance(target, _pyast.Attribute) and _is_self_attr(target):
+                        local_vars[target.attr] = resolved
+                        extra.setdefault(target.attr, resolved)
+
+        _walk(init_func.body)
+    return extra
 
 
 def _collect_forward_scalar_locals(
@@ -2429,6 +2535,52 @@ def _infer_einsum_shape(
     if any(d is None for d in out_shape):
         return None
     return out_shape  # type: ignore[return-value]
+
+
+# Concrete dtype tokens, checked longest-first so ``bfloat16`` wins over the
+# ``float16`` substring it contains.
+_CONCRETE_DTYPE_TOKENS: tuple[tuple[str, str], ...] = (
+    ("bfloat16", "bfloat16"),
+    ("float64", "float64"),
+    ("float32", "float32"),
+    ("float16", "float16"),
+    ("complex64", "complex64"),
+    ("complex128", "complex128"),
+    ("int64", "int64"),
+    ("int32", "int32"),
+    ("int16", "int16"),
+    ("uint8", "uint8"),
+    ("int8", "int8"),
+    ("bool", "bool"),
+    ("double", "float64"),
+    ("half", "float16"),
+    ("long", "int64"),
+    ("short", "int16"),
+    ("float", "float32"),
+)
+
+
+def _resolve_cast_dtype(
+    dtype_detail: str, source_dtype: str, working_dtype: str
+) -> str:
+    """Resolve the target dtype of a ``.to(...)`` cast from its recorded expr.
+
+    ``dtype_detail`` is the raw argument text captured by the AST analyzer, e.g.
+    ``torch.float32``, ``int32``, or a variable like ``dtype`` / ``x.dtype`` /
+    ``input_dtype``. A concrete dtype token is honoured directly. A *variable*
+    dtype reference is the "compute in float32, cast back" idiom — it restores
+    the module's working dtype (``dtype = hidden_states.dtype``), so it resolves
+    to ``working_dtype`` rather than silently keeping the float32 source dtype.
+    """
+    text = dtype_detail.strip().lower()
+    if not text:
+        return source_dtype
+    for token, resolved in _CONCRETE_DTYPE_TOKENS:
+        if token in text:
+            return resolved
+    # A non-concrete dtype expression (a captured local or ``<tensor>.dtype``)
+    # names the module's working precision the float32 compute is cast back to.
+    return working_dtype
 
 
 def _config_dtype(config: dict[str, Any]) -> str:

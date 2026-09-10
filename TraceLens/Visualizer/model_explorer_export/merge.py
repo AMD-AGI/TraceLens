@@ -49,6 +49,7 @@ from TraceLens.Visualizer.model_explorer_export.shapes import (
     group_boundary_shapes,
     infer_block_tree_shapes,
     node_output_spec,
+    SHAPE_SEPARATOR,
 )
 from TraceLens.Visualizer.model_explorer_export.labels import (
     apply_kernel_frame_labels,
@@ -1659,6 +1660,109 @@ def _prune_noop_cast_nodes(nodes: list[dict[str, Any]]) -> None:
     nodes[:] = [node for node in nodes if str(node.get("id")) not in removed_ids]
 
 
+def _dim_is_weak(dim: str) -> bool:
+    """A shape dim carries no real information when it is ``-1`` or a collapsed
+    product (``BxS``) — either hides the batch/seq structure a sibling edge end
+    may still spell out concretely."""
+    d = dim.strip()
+    if d in {"-1", "?", ""}:
+        return True
+    # A collapsed dim like ``BxS`` / ``B*S`` keeps an ``x``/``*`` inside a single
+    # token (the shape separator is `` x `` with spaces, so a real dim never does).
+    return ("x" in d.lower() or "*" in d) and not d.lstrip("-").isdigit()
+
+
+def _port_shape_attrs(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    for attr in metadata.get("attrs", []):
+        if attr.get("key") == "shape":
+            return attr
+    return None
+
+
+def _split_shape_dtype(text: str) -> tuple[list[str], str]:
+    """Split a stored ``B x S x 4096 float16`` value into dims and dtype."""
+    parts = text.split(SHAPE_SEPARATOR)
+    dtype = ""
+    if parts:
+        tail = parts[-1].split()
+        if len(tail) > 1:
+            dtype = tail[-1]
+            parts[-1] = " ".join(tail[:-1])
+    return [p.strip() for p in parts], dtype
+
+
+def _reconcile_edge_endpoint_shapes(nodes: list[dict[str, Any]]) -> None:
+    """Make both ends of every edge agree on shape where one end is under-specified.
+
+    A boundary/mirror port sometimes falls back to a collapsed ``-1``/``BxS``
+    shape even though the op on the other side of the edge still spells out the
+    concrete ``B x S x …`` dims. Only reconcile when the two ends have the SAME
+    rank — a genuine rank change (a ``view(-1, hidden)`` flatten, a
+    ``masked_scatter`` combine) must be preserved, not papered over — and only
+    ever replace a weak dim with a concrete one, never the reverse.
+    """
+    node_by_id = {str(node.get("id")): node for node in nodes}
+
+    def _reconcile(a: dict[str, Any], b: dict[str, Any]) -> None:
+        attr_a, attr_b = _port_shape_attrs(a), _port_shape_attrs(b)
+        if attr_a is None or attr_b is None:
+            return
+        dims_a, dt_a = _split_shape_dtype(str(attr_a.get("value", "")))
+        dims_b, dt_b = _split_shape_dtype(str(attr_b.get("value", "")))
+        if not dims_a or len(dims_a) != len(dims_b):
+            return
+        changed_a = changed_b = False
+        for i, (da, db) in enumerate(zip(dims_a, dims_b)):
+            if da == db:
+                continue
+            if _dim_is_weak(da) and not _dim_is_weak(db):
+                dims_a[i] = db
+                changed_a = True
+            elif _dim_is_weak(db) and not _dim_is_weak(da):
+                dims_b[i] = da
+                changed_b = True
+        if changed_a:
+            _write_port_shape(a, attr_a, dims_a, dt_a)
+        if changed_b:
+            _write_port_shape(b, attr_b, dims_b, dt_b)
+
+    for node in nodes:
+        for edge in node.get("incomingEdges", []):
+            source = node_by_id.get(str(edge.get("sourceNodeId") or ""))
+            if source is None:
+                continue
+            src_port = str(edge.get("sourceNodeOutputId", "0"))
+            tgt_port = str(edge.get("targetNodeInputId", "0"))
+            src_md = _find_port_metadata(source, "outputsMetadata", src_port)
+            tgt_md = _find_port_metadata(node, "inputsMetadata", tgt_port)
+            if src_md is None or tgt_md is None:
+                continue
+            _reconcile(src_md, tgt_md)
+
+
+def _find_port_metadata(
+    node: dict[str, Any], key: str, port: str
+) -> dict[str, Any] | None:
+    items = node.get(key, [])
+    match = next((m for m in items if str(m.get("id", "0")) == port), None)
+    if match is not None:
+        return match
+    return items[0] if len(items) == 1 else None
+
+
+def _write_port_shape(
+    metadata: dict[str, Any], shape_attr: dict[str, Any], dims: list[str], dtype: str
+) -> None:
+    display = SHAPE_SEPARATOR.join(dims)
+    if dtype:
+        display = f"{display} {dtype}"
+    shape_attr["value"] = display
+    for attr in metadata.get("attrs", []):
+        if attr.get("key") == "tensor_shape":
+            tensor = "x".join(dims)
+            attr["value"] = f"{tensor} {dtype}" if dtype else tensor
+
+
 def _prune_unconsumed_outputs(nodes: list[dict[str, Any]]) -> None:
     """Strip unused boundary ports, then remove their dead producer subgraphs."""
     outgoing_ports: dict[str, set[str]] = {}
@@ -2792,23 +2896,60 @@ def _append_vision_section(
     return exits[0] if exits else None
 
 
-def _attach_vision_language_edge(
+def _attach_vision_language_combine(
     nodes: list[dict[str, Any]],
+    *,
     vision_exit: SourceRef,
-    target_attr: str | None,
-) -> None:
-    """Feed the vision tower's output into the language embedding merge point."""
-    if target_attr is None:
-        return
-    target = next((node for node in nodes if node.get("id") == target_attr), None)
-    if target is None:
-        # The embedding expanded into a namespace group: feed its input port.
-        input_id = _merge_node_id(target_attr, "@input")
-        target = next((node for node in nodes if node.get("id") == input_id), None)
-    if target is None:
-        return
-    edges = target.setdefault("incomingEdges", [])
-    edges.append(_source_edge(vision_exit, str(len(edges))))
+    text_exits: list[SourceRef],
+    shape_inferencer: ShapeInferencer | None,
+) -> list[SourceRef]:
+    """Merge image-patch embeddings into the text token embeddings explicitly.
+
+    A VLM wrapper doesn't just embed tokens — it ``masked_scatter``s the vision
+    tower's patch embeddings into the positions of the image placeholder tokens
+    (``inputs_embeds.masked_scatter(image_mask, image_embeds)``). Rendering the
+    embedding tile as the merge point hides that computation and makes the
+    embedding node misleadingly take two inputs. Instead, emit a dedicated
+    combine node fed by (text embeddings, image embeddings); it becomes the new
+    entry to the language stack. Returns the exits the decoder should consume.
+    """
+    if not text_exits:
+        return text_exits
+    text_ref = text_exits[0]
+    combine_id = "@vision_language_combine"
+    node: dict[str, Any] = {
+        "id": combine_id,
+        "label": "Masked scatter",
+        "namespace": "",
+        "attrs": [
+            {
+                "key": "detail",
+                "value": (
+                    "inputs_embeds.masked_scatter(image_mask, image_embeds) — "
+                    "scatters vision patch embeddings into image placeholder positions"
+                ),
+            }
+        ],
+        "incomingEdges": [
+            _source_edge(text_ref, "inputs_embeds"),
+            _source_edge(vision_exit, "image_embeds"),
+        ],
+        "inputsMetadata": [
+            {"id": "inputs_embeds", "attrs": [{"key": "port_label", "value": "inputs_embeds"}]},
+            {"id": "image_embeds", "attrs": [{"key": "port_label", "value": "image_embeds"}]},
+        ],
+    }
+    if shape_inferencer is not None:
+        context = shape_inferencer.context
+        hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+        apply_shape_attrs(
+            node,
+            TensorSpec(
+                (Symbol.BATCH.value, Symbol.SEQ.value, hidden), context.dtype
+            ),
+        )
+    nodes.append(node)
+    return [(combine_id, "0")]
 
 
 def build_merged_model_graph(
@@ -2897,7 +3038,16 @@ def build_merged_model_graph(
             stack_module_sources[component.attr_name] = previous_exits[0]
 
     if vision_exit is not None:
-        _attach_vision_language_edge(nodes, vision_exit, embedding_target_attr)
+        previous_exits = _attach_vision_language_combine(
+            nodes,
+            vision_exit=vision_exit,
+            text_exits=previous_exits,
+            shape_inferencer=shape_inferencer,
+        )
+        # Route the language stack's embedding consumers through the combine so
+        # the merged embeddings — not the raw token embeddings — flow downstream.
+        if embedding_target_attr is not None and previous_exits:
+            stack_module_sources[embedding_target_attr] = previous_exits[0]
 
     source_entry = _append_stack_entry_dataflow(
         nodes,
@@ -2968,6 +3118,7 @@ def build_merged_model_graph(
 
     if shape_inferencer is not None:
         fill_missing_node_shapes(nodes, context=shape_inferencer.context)
+        _reconcile_edge_endpoint_shapes(nodes)
 
     model_attrs: dict[str, str] = {
         "title": spec.name,

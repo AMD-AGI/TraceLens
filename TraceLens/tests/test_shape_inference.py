@@ -667,6 +667,44 @@ def test_einsum_shape_inference():
     assert result.shape == ("B", "S", 32, "S")
 
 
+def test_resolve_cast_dtype_honours_concrete_tokens():
+    from TraceLens.ModelUtils.shape_inference import _resolve_cast_dtype
+
+    # Concrete dtype tokens win, and longest-first matching keeps bfloat16 from
+    # being misread as the float16 substring it contains.
+    assert _resolve_cast_dtype("float32", "float16", "float16") == "float32"
+    assert _resolve_cast_dtype("torch.float32", "float16", "float16") == "float32"
+    assert _resolve_cast_dtype("torch.bfloat16", "float16", "float16") == "bfloat16"
+    assert _resolve_cast_dtype("torch.int32", "float16", "float16") == "int32"
+    assert _resolve_cast_dtype("half", "float32", "float16") == "float16"
+    assert _resolve_cast_dtype("double", "float16", "float16") == "float64"
+
+
+def test_resolve_cast_dtype_variable_ref_restores_working_dtype():
+    from TraceLens.ModelUtils.shape_inference import _resolve_cast_dtype
+
+    # `comb.to(dtype)` where `dtype = hidden_states.dtype`: a float32 tensor cast
+    # back to the module's working precision. The variable ref must resolve to the
+    # working dtype, not silently keep the float32 source.
+    assert _resolve_cast_dtype("dtype", "float32", "float16") == "float16"
+    assert _resolve_cast_dtype("x.dtype", "float32", "bfloat16") == "bfloat16"
+    assert _resolve_cast_dtype("input_dtype", "float32", "float16") == "float16"
+    # An empty expression carries no information: keep the source dtype.
+    assert _resolve_cast_dtype("", "float32", "float16") == "float32"
+
+
+def test_cast_to_variable_dtype_downcasts_from_float32():
+    # A `.to(dtype)` cast fed a float32 tensor resolves to the working dtype so the
+    # HyperConnection's float32 → float16 downcast renders as a real op.
+    inf = _make_inferencer()
+    assert inf.context.dtype == "float16"
+    inp = TensorSpec(shape=("B", "S", 4), dtype="float32")
+    node = _node("Cast", details=["dtype: dtype"])
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", "S", 4)
+    assert result.dtype == "float16"
+
+
 def test_parse_module_ctor_parses_conv_channels():
     import ast as _ast
 

@@ -2700,10 +2700,12 @@ class _ModelAstVisitor(ast.NodeVisitor):
         *,
         config: dict[str, Any] | None = None,
         all_tensor_ops: bool = False,
+        activation_param_bindings: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self.classes: dict[str, ClassStructure] = {}
         self.config = dict(config or {})
         self.all_tensor_ops = all_tensor_ops
+        self.activation_param_bindings = activation_param_bindings or {}
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         init_assignments: dict[str, str] = {}
@@ -2749,6 +2751,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             init_assignments, init_details, init_assignment_options = _parse_init(
                 init_func,
                 config=self.config,
+                param_bindings=self.activation_param_bindings.get(node.name),
             )
         if forward_func is not None:
             forward_input_name = _primary_forward_input_name(forward_func)
@@ -2961,19 +2964,24 @@ def _parse_init(
     func: ast.FunctionDef,
     *,
     config: dict[str, Any] | None = None,
+    param_bindings: dict[str, str] | None = None,
 ) -> tuple[dict[str, str], dict[str, list[str]], dict[str, list[str]]]:
     assignments: dict[str, str] = {}
     details: dict[str, list[str]] = {}
     options: dict[str, list[str]] = {}
 
     def record_assignment(attr: str, value: ast.AST) -> None:
-        class_names = _assignment_class_names(value, config=config)
+        class_names = _assignment_class_names(
+            value, config=config, param_bindings=param_bindings
+        )
         if not class_names:
             return
         # A registry lookup is the fallback arm of a config switch whose other arm
         # constructs a real module (`SituAndMul` vs `ACT2FN[...]`), so it must not
         # displace that module regardless of which arm the walk reaches last.
-        if attr in assignments and _activation_registry_class_name(value, config):
+        if attr in assignments and _activation_registry_class_name(
+            value, config, param_bindings
+        ):
             return
         attr_options = options.setdefault(attr, [])
         for class_name in class_names:
@@ -3004,6 +3012,7 @@ def _parse_init(
 def _activation_registry_class_name(
     node: ast.AST,
     config: dict[str, Any] | None,
+    param_bindings: dict[str, str] | None = None,
 ) -> str | None:
     """Resolve an activation-registry lookup to the activation the config selects."""
     if not isinstance(node, ast.Subscript):
@@ -3017,6 +3026,11 @@ def _activation_registry_class_name(
         name = key.value
     elif isinstance(key, ast.Attribute):
         name = (config or {}).get(key.attr)
+    elif isinstance(key, ast.Name):
+        # ``self.act_fn = ACT2FN[hidden_act]`` where ``hidden_act`` is a constructor
+        # parameter; the activation is only knowable from how the class is
+        # instantiated (e.g. ``Merger(hidden_act=config.hidden_act)``).
+        name = (param_bindings or {}).get(key.id)
     if not isinstance(name, str) or not name.strip():
         return None
     lowered = name.strip().lower()
@@ -3025,21 +3039,73 @@ def _activation_registry_class_name(
     return lowered.replace("_", " ").title().replace(" ", "")
 
 
+def _collect_activation_param_bindings(
+    tree: ast.AST, config: dict[str, Any] | None
+) -> dict[str, dict[str, str]]:
+    """Map ``{class_name: {ctor_param: activation_key}}`` from instantiation sites.
+
+    A submodule may select its activation from a constructor parameter, e.g.
+    ``self.act_fn = ACT2FN[hidden_act]``. The activation is only knowable from how
+    the class is *instantiated* — ``Merger(hidden_act=config.hidden_act)`` in some
+    parent's ``__init__`` — and that site is often a different (later) class. This
+    pre-pass walks every ``__init__`` and records, for each submodule constructed
+    there, the config-resolved value of each keyword argument that names an
+    activation, keyed by the submodule's parameter name.
+    """
+    config = dict(config or {})
+    # Vision submodules resolve their config args against ``vision_config``; fall
+    # back to it so ``hidden_act=config.hidden_act`` resolves even when the value
+    # only lives in the nested sub-config.
+    sub_config = config.get("vision_config")
+    fallbacks = [config]
+    if isinstance(sub_config, dict):
+        fallbacks.append(sub_config)
+    bindings: dict[str, dict[str, str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        init_func = _class_init_method(node)
+        if init_func is None:
+            continue
+        for call in ast.walk(init_func):
+            if not isinstance(call, ast.Call):
+                continue
+            class_name = _call_class_name(call)
+            if not class_name:
+                continue
+            for keyword in call.keywords:
+                if keyword.arg is None:
+                    continue
+                resolved: Any = _UNKNOWN
+                for cfg in fallbacks:
+                    resolved = _config_value(keyword.value, cfg, {})
+                    if resolved is not _UNKNOWN:
+                        break
+                if isinstance(resolved, str) and resolved.strip():
+                    bindings.setdefault(class_name, {})[keyword.arg] = resolved
+    return bindings
+
+
 def _assignment_class_names(
     node: ast.AST,
     *,
     config: dict[str, Any] | None = None,
+    param_bindings: dict[str, str] | None = None,
 ) -> list[str]:
     """Return every constructible module class represented by an assignment."""
     if isinstance(node, ast.IfExp):
         names = _assignment_class_names(
-            node.body, config=config
-        ) + _assignment_class_names(node.orelse, config=config)
+            node.body, config=config, param_bindings=param_bindings
+        ) + _assignment_class_names(
+            node.orelse, config=config, param_bindings=param_bindings
+        )
         return list(dict.fromkeys(names))
     if isinstance(node, ast.ListComp):
-        return _assignment_class_names(node.elt, config=config)
+        return _assignment_class_names(
+            node.elt, config=config, param_bindings=param_bindings
+        )
     if isinstance(node, ast.Subscript):
-        activation = _activation_registry_class_name(node, config)
+        activation = _activation_registry_class_name(node, config, param_bindings)
         return [activation] if activation else []
     if isinstance(node, ast.Call):
         if isinstance(node.func, ast.Name) and node.func.id == "getattr":
@@ -3054,7 +3120,9 @@ def _assignment_class_names(
             "torch.nn.ModuleList",
         }:
             if node.args:
-                return _assignment_class_names(node.args[0], config=config)
+                return _assignment_class_names(
+                    node.args[0], config=config, param_bindings=param_bindings
+                )
             return []
         class_name = _call_class_name(node)
         if class_name in _SKIP_INIT_CLASS_NAMES:
@@ -3063,7 +3131,11 @@ def _assignment_class_names(
     if isinstance(node, (ast.List, ast.Tuple)):
         names: list[str] = []
         for item in node.elts:
-            names.extend(_assignment_class_names(item, config=config))
+            names.extend(
+                _assignment_class_names(
+                    item, config=config, param_bindings=param_bindings
+                )
+            )
         return list(dict.fromkeys(names))
     return []
 
@@ -4857,7 +4929,12 @@ def build_class_registry(
 ) -> dict[str, ClassStructure]:
     """Return all class structures discovered in one modeling file."""
     tree = parse_python_ast(source, filename=filename)
-    visitor = _ModelAstVisitor(config=config, all_tensor_ops=all_tensor_ops)
+    activation_param_bindings = _collect_activation_param_bindings(tree, config)
+    visitor = _ModelAstVisitor(
+        config=config,
+        all_tensor_ops=all_tensor_ops,
+        activation_param_bindings=activation_param_bindings,
+    )
     visitor.visit(tree)
     return visitor.classes
 
@@ -4881,7 +4958,12 @@ def analyze_source(
     """Analyze one modeling file and return extracted block structure."""
     tree = parse_python_ast(source, filename=filename)
     external_imports = _collect_external_imports(tree)
-    visitor = _ModelAstVisitor(config=config, all_tensor_ops=all_tensor_ops)
+    activation_param_bindings = _collect_activation_param_bindings(tree, config)
+    visitor = _ModelAstVisitor(
+        config=config,
+        all_tensor_ops=all_tensor_ops,
+        activation_param_bindings=activation_param_bindings,
+    )
     visitor.visit(tree)
     finalize_class_registry(visitor.classes)
     _enrich_kernel_import_details(visitor.classes, external_imports)

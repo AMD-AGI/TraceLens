@@ -957,6 +957,62 @@ def test_shape_fill_and_boundary_multiple_crossings():
     assert store == {"g": ["x"]}
 
 
+def test_fill_missing_node_shapes_cast_resolves_downcast_dtype():
+    # A residual-mix `.to(dtype)` cast fed a float32 HyperConnection output must
+    # render as a genuine float32 -> float16 downcast, not a float32 no-op.
+    context = ShapeContext({"H": 16}, "float16")
+    nodes = [
+        {
+            "id": "comb",
+            "label": "Linear",
+            "outputsMetadata": [
+                {
+                    "id": "0",
+                    "attrs": [
+                        {"key": "shape", "value": "B x S x 4 float32"},
+                        {"key": "tensor_shape", "value": "BxSx4 float32"},
+                        {"key": "dtype", "value": "float32"},
+                    ],
+                }
+            ],
+        },
+        {
+            "id": "@op_cast",
+            "label": "Cast",
+            "attrs": [{"key": "detail", "value": "dtype: dtype"}],
+            "incomingEdges": [_edge("comb")],
+        },
+    ]
+    shapes.fill_missing_node_shapes(nodes, context=context)
+    cast = next(node for node in nodes if node["id"] == "@op_cast")
+    shape_attr = next(
+        attr
+        for meta in cast["outputsMetadata"]
+        for attr in meta["attrs"]
+        if attr["key"] == "shape"
+    )
+    assert shape_attr["value"] == "B x S x 4 float16"
+
+
+def test_fallback_node_spec_cast_without_detail_keeps_source_dtype():
+    source = TensorSpec(("B", "S", 4), "float32")
+    node = {"id": "@op_cast", "label": "Cast"}
+    result = shapes._fallback_node_spec(
+        node, [("0", source)], working_dtype="float16"
+    )
+    assert result.dtype == "float32"
+    assert result.shape == ("B", "S", 4)
+
+
+def test_fallback_node_spec_unsqueeze_non_integer_dim_defaults_to_zero():
+    source = TensorSpec(("B", "S", 4), "float16")
+    node = {"id": "u", "label": "Unsqueeze", "attrs": [{"key": "detail", "value": "dim: -1"}]}
+    # A negative dim resolves against rank; a non-integer would default to 0.
+    assert shapes._fallback_node_spec(node, [("0", source)]).shape == ("B", "S", 4, 1)
+    bad = {"id": "u", "label": "Unsqueeze", "attrs": [{"key": "detail", "value": "dim: n"}]}
+    assert shapes._fallback_node_spec(bad, [("0", source)]).shape == (1, "B", "S", 4)
+
+
 def test_shape_context_config_aliases_and_serialization():
     spec = _spec(
         head_dim=None,
@@ -1784,31 +1840,114 @@ def test_find_vision_tower_none_for_empty_registry():
     assert find_vision_tower(_spec(class_registry={})) is None
 
 
-def test_attach_vision_language_edge_feeds_embedding_tile():
-    nodes = [{"id": "embed_tokens", "label": "Embedding", "namespace": ""}]
-    merge._attach_vision_language_edge(nodes, ("visual/@output", "result"), "embed_tokens")
-    assert nodes[0]["incomingEdges"] == [
-        {
-            "sourceNodeId": "visual/@output",
-            "sourceNodeOutputId": "result",
-            "targetNodeInputId": "0",
-        }
-    ]
+def _port(node_id, key, port_id, shape):
+    return {
+        "id": node_id,
+        key: [
+            {
+                "id": port_id,
+                "attrs": [
+                    {"key": "shape", "value": shape},
+                    {"key": "tensor_shape", "value": shape.replace(" x ", "x")},
+                ],
+            }
+        ],
+    }
 
 
-def test_attach_vision_language_edge_falls_back_to_group_input():
-    # When the embedding expanded into a namespace group, its bare id is absent and
-    # the edge must land on the group's `@input` port instead.
-    nodes = [{"id": "embed/@input", "label": "@input", "namespace": "embed"}]
-    merge._attach_vision_language_edge(nodes, "visual/@output", "embed")
-    assert nodes[0]["incomingEdges"][0]["sourceNodeId"] == "visual/@output"
+def test_reconcile_edge_endpoint_shapes_fills_weak_dim_from_concrete_end():
+    # A target port left as a collapsed `-1 x 4096` is rewritten to the source's
+    # concrete `B x 4096` when the two ends share a rank.
+    source = _port("src", "outputsMetadata", "0", "B x 4096 float16")
+    target = {
+        **_port("dst", "inputsMetadata", "0", "-1 x 4096 float16"),
+        "incomingEdges": [
+            {"sourceNodeId": "src", "sourceNodeOutputId": "0", "targetNodeInputId": "0"}
+        ],
+    }
+    nodes = [source, target]
+    merge._reconcile_edge_endpoint_shapes(nodes)
+    shape = merge._port_shape_attrs(target["inputsMetadata"][0])["value"]
+    assert shape == "B x 4096 float16"
 
 
-def test_attach_vision_language_edge_noop_when_target_missing():
-    nodes = [{"id": "embed_tokens", "incomingEdges": []}]
-    merge._attach_vision_language_edge(nodes, "visual/@output", None)
-    merge._attach_vision_language_edge(nodes, "visual/@output", "absent")
-    assert nodes[0]["incomingEdges"] == []
+def test_reconcile_edge_endpoint_shapes_preserves_genuine_rank_change():
+    # A real flatten (2D vision output → 3D combine input) differs in RANK; the
+    # reconciler must leave both ends untouched rather than paper over it.
+    source = _port("visual/@output", "outputsMetadata", "0", "BxS x 4096 float16")
+    target = {
+        **_port("@combine", "inputsMetadata", "image_embeds", "B x S x 4096 float16"),
+        "incomingEdges": [
+            {
+                "sourceNodeId": "visual/@output",
+                "sourceNodeOutputId": "0",
+                "targetNodeInputId": "image_embeds",
+            }
+        ],
+    }
+    nodes = [source, target]
+    merge._reconcile_edge_endpoint_shapes(nodes)
+    assert (
+        merge._port_shape_attrs(source["outputsMetadata"][0])["value"]
+        == "BxS x 4096 float16"
+    )
+    assert (
+        merge._port_shape_attrs(target["inputsMetadata"][0])["value"]
+        == "B x S x 4096 float16"
+    )
+
+
+def test_attach_vision_language_combine_merges_text_and_vision():
+    # The combine node is fed by (text embeddings, image embeddings) and becomes
+    # the new exit the language stack consumes — the embedding tile keeps its own
+    # single input rather than masquerading as the merge point.
+    nodes: list[dict] = []
+    exits = merge._attach_vision_language_combine(
+        nodes,
+        vision_exit=("visual/@output", "result"),
+        text_exits=[("embed_tokens", "0")],
+        shape_inferencer=None,
+    )
+    assert exits == [("@vision_language_combine", "0")]
+    combine = nodes[0]
+    assert combine["id"] == "@vision_language_combine"
+    assert combine["label"] == "Masked scatter"
+    sources = [edge["sourceNodeId"] for edge in combine["incomingEdges"]]
+    assert sources == ["embed_tokens", "visual/@output"]
+
+
+def test_attach_vision_language_combine_applies_shape_from_context():
+    # With a shape inferencer available, the combine carries the (B, S, hidden)
+    # embedding shape so downstream nodes resolve their inputs.
+    context = SimpleNamespace(dims={merge.Symbol.HIDDEN.value: 4096}, dtype="float16")
+    shape_inferencer = SimpleNamespace(context=context)
+    nodes: list[dict] = []
+    merge._attach_vision_language_combine(
+        nodes,
+        vision_exit=("visual/@output", "result"),
+        text_exits=[("embed_tokens", "0")],
+        shape_inferencer=shape_inferencer,
+    )
+    shape_attr = next(
+        attr
+        for meta in nodes[0]["outputsMetadata"]
+        for attr in meta["attrs"]
+        if attr["key"] == "shape"
+    )
+    assert "4096" in shape_attr["value"]
+    assert "float16" in shape_attr["value"]
+
+
+def test_attach_vision_language_combine_noop_without_text_exits():
+    nodes: list[dict] = []
+    exits = merge._attach_vision_language_combine(
+        nodes,
+        vision_exit=("visual/@output", "result"),
+        text_exits=[],
+        shape_inferencer=None,
+    )
+    assert exits == []
+    assert nodes == []
 
 
 def _vision_merge_monkeypatch(monkeypatch, *, embed, vision):
@@ -1872,12 +2011,18 @@ def test_merge_graph_emits_vision_group_and_visual_language_edge(
     assert any(node["namespace"] == "visual" for node in graph["nodes"])
     assert graph["groupNodeAttributes"]["visual"]["label"] == "Vision Tower"
 
-    # (b) a visual -> language edge feeds the text embedding tile.
+    # (b) an explicit combine node merges the text embedding output with the
+    # vision output; the embedding tile itself is NOT the merge point.
     embed_node = next(node for node in graph["nodes"] if node["id"] == "embed_tokens")
-    assert any(
-        edge["sourceNodeId"] == "visual/@output"
+    assert all(
+        edge["sourceNodeId"] != "visual/@output"
         for edge in embed_node.get("incomingEdges", [])
     )
+    combine = next(
+        node for node in graph["nodes"] if node["id"] == "@vision_language_combine"
+    )
+    sources = {edge["sourceNodeId"] for edge in combine["incomingEdges"]}
+    assert sources == {"embed_tokens", "visual/@output"}
 
 
 def test_merge_graph_text_only_spec_has_no_vision_section(
