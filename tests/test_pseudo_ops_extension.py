@@ -22,6 +22,7 @@ from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
 from example_megatron_extension import (
     _link_checkpoint_fwd_bwd,
+    categorize_extension,
     op_category_extension,
     perf_model_extension,
     te_layer_norm_bwd,
@@ -599,6 +600,60 @@ class TestFusedAttnFuncBackwardCategorization:
         )
 
         assert registry["FusedAttnFunc"] == "SDPA_fwd"
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("_GroupedLinear", "GroupedGEMM_fwd"),
+        ("_GroupedLinearBackward", "GroupedGEMM_bwd"),
+    ],
+)
+def test_megatron_category_only_mappings(name, expected):
+    assert op_category_extension[name] == expected
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        (
+            "_GroupedLinearBackward->nvjet_sm103_qrtst (Synthetic Op)",
+            "GroupedGEMM_bwd",
+        ),
+        (
+            "_GroupedLinearBackward->Cijk_Ailk_Bljk (Synthetic Op)",
+            "GroupedGEMM_bwd",
+        ),
+        (
+            "_GroupedLinearBackward->RR_GEMM_test (Synthetic Op)",
+            "GroupedGEMM_bwd",
+        ),
+        (
+            "_OperationFuserAutogradFunctionBackward->ln_tma_bwd_kernel "
+            "(Synthetic Op)",
+            "NORM_bwd",
+        ),
+        (
+            "_OperationFuserAutogradFunctionBackward->ln_bwd_finalize_kernel "
+            "(Synthetic Op)",
+            "NORM_bwd",
+        ),
+    ],
+)
+def test_megatron_synthetic_category_mappings(name, expected):
+    assert categorize_extension({"name": name}, None) == expected
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "_OperationFuserAutogradFunctionBackward->ln_tma_fwd_kernel (Synthetic Op)",
+        "_OperationFuserAutogradFunctionBackward->ln_tma_bwd_kernel",
+        "_GroupedLinearBackward->quantize_kernel (Synthetic Op)",
+    ],
+)
+def test_megatron_synthetic_category_mapping_ignores_unmatched_ops(name):
+    assert categorize_extension({"name": name}, None) is None
 
 
 class TestLayerNormFnPerfModel:
