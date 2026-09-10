@@ -799,13 +799,20 @@ class ShapeInferencer:
                         root.primary_return_slot or "", slot_specs["collapsed"]
                     )
 
+        # Snapshot this graph's own specs before recursing: the recursion below
+        # re-initializes shared instance state (``self._tensor_specs`` etc.), so
+        # without capturing them here every top-level spec would be clobbered and
+        # only the final subgraph's specs would survive. Merge each subgraph's
+        # inferred specs (their node ids are globally unique) into the result so
+        # callers see the full graph, not just the last subgraph.
+        merged = dict(self._tensor_specs)
         for node in graph.nodes:
             if node.kind == NodeKind.SUBGRAPH:
                 subgraph_key = node.metadata.get("subgraph_key")
                 if subgraph_key and subgraph_key in graph.subgraphs:
-                    self.infer_model_graph(graph.subgraphs[subgraph_key])
-
-        return dict(self._tensor_specs)
+                    merged.update(self.infer_model_graph(graph.subgraphs[subgraph_key]))
+        self._tensor_specs = merged
+        return dict(merged)
 
     def infer_block_tree(
         self, root: BlockNode, *, title: str = ""

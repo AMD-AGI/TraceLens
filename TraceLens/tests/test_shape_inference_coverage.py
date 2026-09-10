@@ -1787,6 +1787,40 @@ def test_topological_order_handles_cycles():
     assert set(specs) == {"a", "b", "c"}
 
 
+def test_infer_model_graph_merges_subgraph_specs_without_clobbering():
+    """Recursing into subgraphs must not discard the parent graph's own specs
+    nor earlier subgraphs' specs.
+
+    Regression: the recursion re-initializes shared instance state
+    (``self._tensor_specs``), so before the snapshot/merge fix only the *last*
+    subgraph's specs survived -- every top-level and earlier-subgraph spec was
+    clobbered, leaving those nodes to the render-time fallback.
+    """
+    from TraceLens.ModelUtils.model_graph import ModelGraph
+
+    top_input = _synth("x", "@input", node_id="top_in")
+    sub_a = ModelGraphNode(
+        id="sub_a", kind=NodeKind.SUBGRAPH, label="A",
+        operation=None, metadata={"subgraph_key": "A"},
+    )
+    sub_b = ModelGraphNode(
+        id="sub_b", kind=NodeKind.SUBGRAPH, label="B",
+        operation=None, metadata={"subgraph_key": "B"},
+    )
+    graph = ModelGraph(
+        title="top",
+        nodes=[top_input, sub_a, sub_b],
+        subgraphs={
+            "A": ModelGraph(title="A", nodes=[_synth("a", "@input", node_id="a_in")]),
+            "B": ModelGraph(title="B", nodes=[_synth("b", "@input", node_id="b_in")]),
+        },
+    )
+    inf = _make_inferencer(hidden_size=32)
+    specs = inf.infer_model_graph(graph)
+    # Parent spec AND both subgraph specs are all present in the returned dict.
+    assert {"top_in", "a_in", "b_in"} <= set(specs)
+
+
 # ---------------------------------------------------------------------------
 # Real compute dtype + per-module quantization dtype (Phase 3)
 # ---------------------------------------------------------------------------
