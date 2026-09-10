@@ -1090,6 +1090,47 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
     ]
 
 
+def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    nodes = graph["nodes"]
+
+    # The graph must never ship a cycle even with the vision loop inlined.
+    _assert_export_is_acyclic(nodes)
+
+    lc_in = next(
+        node
+        for node in nodes
+        if "visual/@loop_carried_in:" in node["id"]
+    )
+    # Wiring: the loop-carried-in must actually feed the loop body (mirroring the
+    # decoder LC nodes), not sit dead like ``patch_embed/@output``-only.
+    consumers = [
+        node["id"]
+        for node in nodes
+        for edge in node.get("incomingEdges", [])
+        if edge["sourceNodeId"] == lc_in["id"]
+    ]
+    assert consumers, "visual @loop_carried_in has no consumer"
+    assert any(
+        consumer.startswith("visual/seq:2:blocks") for consumer in consumers
+    ), consumers
+
+    # Topological order: the LC-in floats above every loop-body node even though
+    # the body lives in child namespaces (``visual/Block/norm1`` etc.).
+    positions = {node["id"]: index for index, node in enumerate(nodes)}
+    body_positions = [
+        index
+        for node in nodes
+        if node["id"].startswith("visual/seq:2:blocks")
+        and "@loop_carried" not in node["id"]
+        for index in (positions[node["id"]],)
+    ]
+    assert body_positions
+    assert positions[lc_in["id"]] < min(body_positions)
+
+
 def test_glm53_forget_gate_has_real_boundary_nodes():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)

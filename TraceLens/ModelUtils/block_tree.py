@@ -1913,6 +1913,18 @@ def build_block_node(
         )
 
         if call_attr == SYNTHETIC_ATTENTION:
+            # A phantom attention hoisted from a looped submodule's own forward
+            # (see ``_drop_phantom_attention_steps`` in ast_analyze) survives in
+            # ``forward_calls`` but was pruned from ``forward_step_predecessors``
+            # and never had ``attention_inputs``. Without a backing step or
+            # inputs it is not a real call at this scope; materialising it as a
+            # node produces a duplicate attention the exporter later wires into a
+            # cycle. The genuine attention still renders inside the submodule.
+            if (
+                call_attr not in cls.forward_step_predecessors
+                and not cls.attention_inputs
+            ):
+                continue
             if is_kernel_pipeline_step(child_details, cls.attention_inputs):
                 pipeline_node, output_node = _kernel_pipeline_block_nodes(
                     forward_order=child_order,

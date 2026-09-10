@@ -429,26 +429,61 @@ def _extract_self_calls_ordered(node: ast.AST, out: list[str]) -> None:
         return
 
 
-def _resolve_local_module_alias_calls(func: ast.FunctionDef) -> ast.FunctionDef:
-    """Rewrite ``expert(...)`` aliases of ``self.experts[i]`` as module calls.
+def _self_attr_name(node: ast.AST | None) -> str | None:
+    """Return ``attr`` for a ``self.<attr>`` expression, else ``None``."""
+    if isinstance(node, ast.Attribute) and _is_self_attr(node, node.attr):
+        return node.attr
+    return None
 
-    Expert loops commonly bind one entry from a ModuleList to a local variable before
-    invoking it.  Resolving that alias lets the normal forward parser retain the real
-    routed-expert branch instead of silently dropping it.
+
+def _resolve_local_module_alias_calls(func: ast.FunctionDef) -> ast.FunctionDef:
+    """Rewrite ``expert(...)`` aliases of ``self.experts[i]`` (and ``for blk in
+    self.blocks``) as module calls.
+
+    Two idioms bind a ModuleList entry to a local variable before invoking it:
+
+    - subscript: ``expert = self.experts[i]; expert(...)``
+    - iteration: ``for blk in self.blocks: blk(...)`` (also
+      ``for i, blk in enumerate(self.blocks):``)
+
+    Resolving the alias to ``self.<attr>(...)`` lets the normal forward parser retain
+    the real submodule branch (routed expert, or the vision/decoder block body) instead
+    of collapsing the bare-name call into a phantom kernel tile and silently dropping it.
     """
     aliases: dict[str, str] = {}
     for node in ast.walk(func):
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+        # Subscript alias: ``expert = self.experts[i]``.
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            value = node.value
+            if (
+                isinstance(target, ast.Name)
+                and isinstance(value, ast.Subscript)
+                and isinstance(value.value, ast.Attribute)
+                and _is_self_attr(value.value, value.value.attr)
+            ):
+                aliases[target.id] = value.value.attr
             continue
-        target = node.targets[0]
-        value = node.value
-        if (
-            isinstance(target, ast.Name)
-            and isinstance(value, ast.Subscript)
-            and isinstance(value.value, ast.Attribute)
-            and _is_self_attr(value.value, value.value.attr)
-        ):
-            aliases[target.id] = value.value.attr
+        # Iteration alias: ``for blk in self.blocks`` / ``enumerate(self.blocks)``.
+        if isinstance(node, ast.For):
+            iterable = node.iter
+            if (
+                isinstance(iterable, ast.Call)
+                and isinstance(iterable.func, ast.Name)
+                and iterable.func.id in {"enumerate", "reversed"}
+                and iterable.args
+            ):
+                iterable = iterable.args[0]
+            attr = _self_attr_name(iterable)
+            if attr is None:
+                continue
+            loop_var = node.target
+            # ``for i, blk in enumerate(...)`` binds the element to the last element
+            # of the tuple; ``for blk in ...`` binds it directly.
+            if isinstance(loop_var, ast.Tuple) and loop_var.elts:
+                loop_var = loop_var.elts[-1]
+            if isinstance(loop_var, ast.Name):
+                aliases[loop_var.id] = attr
     if not aliases:
         return func
 
@@ -1508,6 +1543,14 @@ class _ForwardOperationExtractor:
         self.shape_tuple_vars: dict[str, ast.Tuple] = {}
         self.step_predecessors: dict[str, tuple[str, ...]] = {}
         self.step_predecessor_args: dict[str, dict[str, str]] = {}
+        # When an ``if``/``else`` assigns the same variable to different producers
+        # (e.g. ``attn_output`` = flash ``@attention`` in one branch, a manual
+        # ``torch.cat`` in the other), only one survives ``var_producer`` after the
+        # merge. Downstream consumers would then orphan the losing branch's
+        # producer, turning a real runtime path into a dead-end node. Record the
+        # alternatives here (survivor → {losers}) and fold them into consumers'
+        # predecessors in a post-pass so both branches stay live and acyclic.
+        self.branch_alternatives: dict[str, set[str]] = {}
         self.loop_carried: list[LoopCarriedSpec] = []
         self._used_ids: set[str] = set()
 
@@ -1556,16 +1599,40 @@ class _ForwardOperationExtractor:
         return attr_name
 
     def _param_refs(self, node: ast.AST) -> tuple[str, ...]:
-        """Secondary forward parameters this operation's expression reads."""
+        """Secondary forward parameters this operation's expression reads.
+
+        A nested call that becomes its own chain step (a submodule call such as
+        ``self.attn(...)``, or an attention/positional kernel) owns the params
+        passed to it: ``h + self.attn(norm1(h), cu_seqlens=cu_seqlens)`` must
+        not attribute ``cu_seqlens`` to the residual ``Add``. So we do not
+        descend into those sub-calls — only params read directly by this
+        operation's own expression count.
+        """
         if not self.param_names:
             return ()
-        return self._dedupe(
-            [
-                name.id
-                for name in ast.walk(node)
-                if isinstance(name, ast.Name) and name.id in self.param_names
-            ]
-        )
+        names: list[str] = []
+
+        def _owns_own_step(call: ast.Call) -> bool:
+            func = call.func
+            if isinstance(func, ast.Attribute) and _is_self_attr(func, func.attr):
+                return True
+            method = func.attr if isinstance(func, ast.Attribute) else None
+            return self._call_step_producer(call, method) is not None
+
+        def _visit(current: ast.AST, is_root: bool) -> None:
+            if (
+                not is_root
+                and isinstance(current, ast.Call)
+                and _owns_own_step(current)
+            ):
+                return
+            if isinstance(current, ast.Name) and current.id in self.param_names:
+                names.append(current.id)
+            for child in ast.iter_child_nodes(current):
+                _visit(child, False)
+
+        _visit(node, True)
+        return self._dedupe(names)
 
     def _call_step_producer(
         self, node: ast.Call, method_name: str | None
@@ -2006,6 +2073,86 @@ class _ForwardOperationExtractor:
                     names.add(node.func.value.id)
         return names
 
+    def _apply_branch_alternatives(self) -> None:
+        """Fold ``if``/``else`` branch producers into their common consumers.
+
+        After an if/else merge only the survivor's producer lives in
+        ``var_producer``. A later statement consuming the merged variable then
+        depends only on that survivor, orphaning the other branch's producer.
+        Expand every consumer's predecessors to include the recorded
+        alternatives so both runtime paths stay live (no dead-end promoted to a
+        spurious output) and the graph stays acyclic.
+        """
+        if not self.branch_alternatives:
+            return
+
+        def expand(preds: tuple[str, ...]) -> tuple[str, ...]:
+            result: list[str] = []
+            for pred in preds:
+                result.append(pred)
+                for alt in sorted(self.branch_alternatives.get(pred, ())):
+                    if alt != pred:
+                        result.append(alt)
+            return self._dedupe(result)
+
+        for index, operation in enumerate(self.operations):
+            new_preds = expand(operation.predecessors)
+            if new_preds != operation.predecessors:
+                self.operations[index] = ForwardOperation(
+                    **{**operation.__dict__, "predecessors": new_preds}
+                )
+        for step, preds in list(self.step_predecessors.items()):
+            new_preds = expand(preds)
+            if new_preds != preds:
+                self.step_predecessors[step] = new_preds
+
+    def _drop_phantom_attention_steps(self) -> None:
+        """Remove attention kernel steps that carry no predecessors.
+
+        A real attention call always reads query/key/value tensors, so a
+        ``@attention`` step with an empty predecessor list is never a genuine
+        call at this scope. It appears when a forward loops over a submodule
+        (``for blk in self.blocks: blk(...)``) whose *own* forward runs
+        attention: analysing the loop body hoists that inner kernel up to the
+        enclosing forward, where it has nothing to read. Left in place it becomes
+        a phantom top-level attention node that the exporter later mirrors into
+        the real nested attention diagram, wiring the kernel's own outputs back
+        to its inputs and forming a cycle. The genuine attention still lives
+        (with its q/k/v predecessors) inside the submodule's own analysis.
+        """
+        phantom = {
+            step
+            for step, preds in self.step_predecessors.items()
+            if step == SYNTHETIC_ATTENTION and not preds
+        }
+        if not phantom:
+            return
+        for step in phantom:
+            self.step_predecessors.pop(step, None)
+            self.step_predecessor_args.pop(step, None)
+        for step, preds in list(self.step_predecessors.items()):
+            if any(pred in phantom for pred in preds):
+                self.step_predecessors[step] = tuple(
+                    pred for pred in preds if pred not in phantom
+                )
+        self.operations = [
+            operation
+            for operation in self.operations
+            if operation.attr_name not in phantom
+        ]
+        for index, operation in enumerate(self.operations):
+            if any(pred in phantom for pred in operation.predecessors):
+                self.operations[index] = ForwardOperation(
+                    **{
+                        **operation.__dict__,
+                        "predecessors": tuple(
+                            pred
+                            for pred in operation.predecessors
+                            if pred not in phantom
+                        ),
+                    }
+                )
+
     @staticmethod
     def _statements_terminate(statements: list[ast.stmt]) -> bool:
         if not statements:
@@ -2158,7 +2305,23 @@ class _ForwardOperationExtractor:
                                 "details": (*op.details, f"condition: not ({test})"),
                             }
                         )
-                    self.var_producer = else_env if stmt.orelse else body_env
+                    survivor_env = else_env if stmt.orelse else body_env
+                    other_env = body_env if stmt.orelse else else_env
+                    # A variable assigned in both branches keeps only the
+                    # survivor's producer below. Remember the losing branch's
+                    # producer as an alternative so a later consumer of the merged
+                    # variable depends on both (see ``branch_alternatives``).
+                    for variable, survivor_producer in survivor_env.items():
+                        other_producer = other_env.get(variable)
+                        if (
+                            survivor_producer
+                            and other_producer
+                            and survivor_producer != other_producer
+                        ):
+                            self.branch_alternatives.setdefault(
+                                survivor_producer, set()
+                            ).add(other_producer)
+                    self.var_producer = survivor_env
                 continue
             if isinstance(stmt, ast.For):
                 iteration_count = self._range_iteration_count(stmt)
@@ -2199,6 +2362,14 @@ class _ForwardOperationExtractor:
                     initial = before_env.get(variable)
                     updated = self.var_producer.get(variable)
                     if initial and updated and initial != updated:
+                        member_ids = operation_ids
+                        if updated not in member_ids:
+                            # A ``for blk in self.blocks: h = blk(h)`` loop carries
+                            # its value through a ModuleList child, not an inline op,
+                            # so the child never lands in ``operation_ids``. Register
+                            # it as a loop member so the carried-in boundary gets a
+                            # real consumer (mirroring inline-op loops).
+                            member_ids = (*operation_ids, updated)
                         self.loop_carried.append(
                             LoopCarriedSpec(
                                 loop_id=loop_id,
@@ -2206,7 +2377,7 @@ class _ForwardOperationExtractor:
                                 variable=variable,
                                 initial_producer=initial,
                                 updated_producer=updated,
-                                operation_ids=operation_ids,
+                                operation_ids=member_ids,
                             )
                         )
                 continue
@@ -2285,6 +2456,35 @@ def _module_calls_for_forward_merge(
     ]
 
 
+def _forward_node_eval_order(func: ast.FunctionDef) -> dict[tuple[int, int], int]:
+    """Rank every source position by the order the forward actually evaluates it.
+
+    Python evaluates a call's arguments before the call itself, so a nested
+    ``self.norm1(x)`` inside ``self.attn(self.norm1(x), ...)`` runs first. A raw
+    ``(line, col)`` sort assumes the nested call merely sits further right on the
+    same line, which breaks when the enclosing call spans multiple lines and the
+    argument lands on a *later* line than the call it feeds. A post-order walk
+    (children before parent) captures the true evaluation order regardless of
+    line breaks; visiting the parent last lets it win a shared position so an
+    operation node outranks the operand Name it reuses the column of.
+    """
+    order: dict[tuple[int, int], int] = {}
+    counter = 0
+
+    def _walk(node: ast.AST) -> None:
+        nonlocal counter
+        for child in ast.iter_child_nodes(node):
+            _walk(child)
+        line = getattr(node, "lineno", None)
+        if line is not None:
+            order[(line, getattr(node, "col_offset", 0))] = counter
+            counter += 1
+
+    for stmt in func.body:
+        _walk(stmt)
+    return order
+
+
 def _forward_calls_in_source_order(
     func: ast.FunctionDef,
     module_calls: list[str],
@@ -2292,15 +2492,33 @@ def _forward_calls_in_source_order(
 ) -> list[str]:
     """Merge submodule calls and parsed tensor ops into the order the forward runs them.
 
-    Within one statement the nested expressions run first, and those sit further right,
-    so a later column comes earlier in the chain.
+    Ordering follows true evaluation order (arguments before their enclosing
+    call), so nested calls run first even when a multi-line call pushes them onto
+    a later source line.
     """
+    eval_order = _forward_node_eval_order(func)
+    unplaceable = min(eval_order.values(), default=0) - 1
 
-    def sort_key(where: tuple[int, int]) -> tuple[int, int]:
-        line, col = where
-        return (line, -col)
+    # A synthetic call (rope helper, functional op, kernel merge) records only the
+    # line it fired on with a placeholder column, so its exact ``(line, col)`` is
+    # rarely a key in ``eval_order``. Falling back to the *last* evaluation rank on
+    # that source line places the synthetic after its own arguments — the call
+    # completes once its operands are ready — which keeps ``apply_rotary`` behind
+    # the reshape/permute/q_norm it consumes instead of floating to the front.
+    line_last_rank: dict[int, int] = {}
+    for (line, _col), rank in eval_order.items():
+        if rank > line_last_rank.get(line, -1):
+            line_last_rank[line] = rank
 
-    ordered: list[tuple[tuple[int, int], str]] = []
+    def _rank_for(where: tuple[int, int] | None) -> int | None:
+        if where is None:
+            return None
+        rank = eval_order.get(where)
+        if rank is not None:
+            return rank
+        return line_last_rank.get(where[0])
+
+    ordered: list[tuple[float, str]] = []
     call_positions = _self_call_source_positions(func)
     functional_positions = _functional_synthetic_source_positions(func)
     kernel_position = _kernel_merge_source_position(func)
@@ -2313,17 +2531,20 @@ def _forward_calls_in_source_order(
         )
         if where is None and call == SYNTHETIC_ATTENTION:
             where = kernel_position
-        if where is None:
+        rank = _rank_for(where)
+        if rank is None:
             # A call the walk cannot place keeps its parsed order ahead of the ops.
-            where = (0, -fallback)
+            rank = unplaceable - fallback
             fallback += 1
-        ordered.append((sort_key(where), call))
+        ordered.append((rank, call))
+    tail = max(eval_order.values(), default=0) + 1
     for op in operations:
         match = _OPERATION_SOURCE_POS_RE.match(op.attr_name)
-        where = (int(match.group(1)), int(match.group(2))) if match else (10**6, 0)
-        ordered.append((sort_key(where), op.attr_name))
+        where = (int(match.group(1)), int(match.group(2))) if match else None
+        rank = _rank_for(where)
+        ordered.append((tail if rank is None else rank, op.attr_name))
     ordered.sort(key=lambda item: item[0])
-    source_order = [name for _where, name in ordered]
+    source_order = [name for _rank, name in ordered]
     operation_by_name = {operation.attr_name: operation for operation in operations}
     remaining = list(source_order)
     result: list[str] = []
@@ -2352,12 +2573,27 @@ def _return_value_names(value: ast.AST) -> list[str]:
         return [elt.id for elt in value.elts if isinstance(elt, ast.Name)]
     if isinstance(value, ast.Name):
         return [value.id]
+    # ``return BaseModelOutputWithPooling(last_hidden_state=x, pooler_output=y)``
+    # — a HuggingFace ``ModelOutput`` dataclass wrapper. Its positional/keyword
+    # arguments name the real tensor producers; without unwrapping it the forward
+    # looks like it returns nothing, so ``forward_return_slots`` stays empty and
+    # the graph falls back to exporting every dangling node as a spurious output.
+    if isinstance(value, ast.Call):
+        names: list[str] = []
+        for arg in value.args:
+            if isinstance(arg, ast.Name):
+                names.append(arg.id)
+        for keyword in value.keywords:
+            if isinstance(keyword.value, ast.Name):
+                names.append(keyword.value.id)
+        return names
     return []
 
 
 def _extract_forward_return_metadata(
     func: ast.FunctionDef,
     var_producer: dict[str, str],
+    step_predecessors: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[dict[str, str], list[str], str | None]:
     """Map ``return (a, b, c)`` names to the inline ops that produce them."""
     return_order: list[str] = []
@@ -2367,6 +2603,20 @@ def _extract_forward_return_metadata(
             break
     slots = {name: var_producer[name] for name in return_order if name in var_producer}
     input_name = _primary_forward_input_name(func)
+    # When one returned tensor is data-derived from another — ``last_hidden_state``
+    # feeds ``pooler_output = self.merger(last_hidden_state)`` in a vision tower's
+    # ``BaseModelOutputWithPooling`` — the *downstream* slot is the module's real
+    # result; the upstream one is an intermediate a caller may also expose. Prefer
+    # the unique most-downstream returned tensor (the one no other returned tensor
+    # descends from) so the parent wires the true output (the merger), not the
+    # intermediate. Ambiguous fan-out (``hidden_states, past_key_values`` — a cache
+    # side-channel not on the main chain) leaves several terminals; fall back then.
+    terminal = _sole_terminal_return_slot(slots, step_predecessors or {})
+    if terminal is not None:
+        # The intermediate slots are subsumed by the terminal — they are ancestors
+        # on its data chain, so they stay live via its producer and must not become
+        # separate (dead, no-consumer) output ports. Expose the terminal alone.
+        return {terminal: slots[terminal]}, [terminal], terminal
     # A tuple return's last value is often the continuation (``post, comb,
     # collapsed``). The first value is the continuation when it is the module's
     # actual result (``attn_output, attn_weights``). Prefer a tensor the forward
@@ -2380,6 +2630,56 @@ def _extract_forward_return_metadata(
     if primary is None:
         primary = return_order[-1] if return_order else None
     return slots, return_order, primary
+
+
+def _sole_terminal_return_slot(
+    slots: dict[str, str],
+    step_predecessors: dict[str, tuple[str, ...]],
+) -> str | None:
+    """The one returned slot every other returned slot is a data-ancestor of.
+
+    Returns ``None`` unless exactly one slot is downstream of all the others, so a
+    genuine multi-output return (parallel tensors, or a cache side-channel) keeps
+    the source-order heuristics instead of arbitrarily promoting one branch.
+    """
+    if len(slots) < 2:
+        return None
+    producers = {name: producer for name, producer in slots.items()}
+
+    def _ancestors(producer: str) -> set[str]:
+        seen: set[str] = set()
+        stack = list(step_predecessors.get(producer, ()))
+        while stack:
+            step = stack.pop()
+            if step in seen:
+                continue
+            seen.add(step)
+            stack.extend(step_predecessors.get(step, ()))
+        return seen
+
+    other_producers = set(producers.values())
+    terminals = [
+        name
+        for name, producer in producers.items()
+        # A terminal is not an ancestor of any *other* returned producer.
+        if not any(
+            producer in _ancestors(other)
+            for other in other_producers
+            if other != producer
+        )
+    ]
+    if len(terminals) != 1:
+        return None
+    # The lone terminal must actually sit downstream of the others, not merely be
+    # disconnected from them — require every other producer among its ancestors.
+    terminal = terminals[0]
+    ancestors = _ancestors(producers[terminal])
+    if all(
+        producer == producers[terminal] or producer in ancestors
+        for producer in other_producers
+    ):
+        return terminal
+    return None
 
 
 def _live_forward_steps(
@@ -2749,9 +3049,12 @@ def _forward_operations_from_forward(
     if primary:
         extractor.var_producer[primary] = FORWARD_METHOD_INPUT
     extractor.statements(func.body)
+    extractor._apply_branch_alternatives()
+    extractor._drop_phantom_attention_steps()
     return_slots, return_order, primary_return_slot = _extract_forward_return_metadata(
         func,
         extractor.var_producer,
+        extractor.step_predecessors,
     )
     return ForwardAnalysis(
         operations=extractor.operations,
@@ -2925,7 +3228,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             if _is_moe_gate_class(node.name, forward_calls):
                 values = _self_config_values(init_func, self.config)
                 analysis = _forward_operations_from_forward(
-                    forward_func,
+                    resolved_forward_func,
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
                 )
@@ -2984,7 +3287,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             ):
                 values = _self_config_values(init_func, self.config)
                 analysis = _forward_operations_from_forward(
-                    forward_func,
+                    resolved_forward_func,
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
                 )
@@ -2998,7 +3301,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         parsed_operations=analysis.operations,
                     )
                     merged_calls = _forward_calls_in_source_order(
-                        forward_func,
+                        resolved_forward_func,
                         module_calls,
                         analysis.operations,
                     )
@@ -3023,7 +3326,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             elif forward_func is not None:
                 values = _self_config_values(init_func, self.config)
                 probed = _forward_operations_from_forward(
-                    forward_func,
+                    resolved_forward_func,
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
                 )
@@ -3041,7 +3344,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         parsed_operations=probed.operations,
                     )
                     merged_calls = _forward_calls_in_source_order(
-                        forward_func,
+                        resolved_forward_func,
                         module_calls,
                         probed.operations,
                     )

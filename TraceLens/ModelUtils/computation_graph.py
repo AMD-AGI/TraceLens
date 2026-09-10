@@ -296,6 +296,24 @@ def _kernel_input_names(spec: NodeSpec) -> list[str]:
     return []
 
 
+def _inherit_kernel_frames(
+    graph: ComputationGraph, kernel_index: int, port_index: int
+) -> None:
+    """Place a kernel's port node in the same inline frames as the kernel.
+
+    Node namespaces are derived purely from inline-frame membership, not from the
+    node key. A port node created after the fact belongs to no frame, so it would
+    otherwise land at the section root instead of beside its kernel. When the
+    kernel is deep inside an inline-expanded submodule (e.g. a vision attention),
+    that stray root-level port is then mirrored into the submodule's own boundary
+    diagram and wired back into the kernel — a cycle. Inheriting the kernel's
+    frames keeps the port local so no cross-boundary mirror is created.
+    """
+    for frame in graph.inline_frames:
+        if kernel_index in frame.node_indices:
+            frame.node_indices.append(port_index)
+
+
 def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
     """Insert port nodes for every input on kernel tiles.
 
@@ -379,6 +397,7 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
                     label=label,
                     synthetic=SYNTHETIC_KERNEL_PORT_IN,
                 )
+                _inherit_kernel_frames(graph, kernel_index, port_index)
                 graph.links.append((source, port_index))
                 graph.links.append((port_index, kernel_index))
 
@@ -424,11 +443,52 @@ def _add_kernel_output_port_nodes(graph: ComputationGraph) -> None:
                     label=label,
                     synthetic=SYNTHETIC_KERNEL_PORT_OUT,
                 )
+                _inherit_kernel_frames(graph, kernel_index, port_index)
                 graph.links.append((kernel_index, port_index))
                 graph.links.append((port_index, target))
                 for port_name, src in list(graph.output_ports.items()):
                     if src == kernel_index and port_name == label:
                         graph.output_ports[port_name] = port_index
+
+
+def _has_inline_attention_child(block: BlockNode) -> bool:
+    """True when *block* directly owns an inline-expanded attention kernel.
+
+    Straight-line inline sub-blocks (norms, MLPs, expert helpers) have their
+    edges wired during node creation, so re-applying the predecessor passes to
+    them only duplicates inputs.  An attention kernel is different: its q/k/v and
+    output edges live in the owning block's ``forward_step_predecessors`` /
+    ``operation_predecessors`` and are only materialised by these passes.  When
+    such a kernel is flattened into an ancestor graph (e.g. a vision attention
+    inside its vision model, rather than built as its own nested diagram), the
+    owning block must be re-visited or the kernel docks to a spurious parameter
+    boundary and forms a cycle.
+    """
+    return any(
+        child.attr_name == SYNTHETIC_ATTENTION
+        for child in (getattr(block, "children", []) or [])
+    )
+
+
+def _iter_wiring_blocks(root: BlockNode) -> list[BlockNode]:
+    """Return *root* plus descendant blocks that own an inline attention kernel.
+
+    See :func:`_has_inline_attention_child` for why straight-line descendants are
+    deliberately excluded — visiting them would re-wire edges already created at
+    node-construction time.
+    """
+    blocks: list[BlockNode] = [root]
+    seen: set[int] = {id(root)}
+    stack = list(getattr(root, "children", []) or [])
+    while stack:
+        block = stack.pop()
+        if block is None or id(block) in seen:
+            continue
+        seen.add(id(block))
+        if _has_inline_attention_child(block):
+            blocks.append(block)
+        stack.extend(getattr(block, "children", []) or [])
+    return blocks
 
 
 def _wire_all_predecessor_edges(
@@ -450,55 +510,69 @@ def _wire_all_predecessor_edges(
     """
     attr_last_index = _rebuild_attr_last_index(graph)
 
+    # A nested module that is inline-expanded into this graph keeps its own
+    # operation/forward-step predecessor metadata describing data flow among
+    # nodes that now live directly in this graph.  Wire predecessor edges for
+    # the root *and* every such descendant so flattened kernels (e.g. a vision
+    # attention's ``@attention``) keep their real q/k/v and output edges.
+    wiring_blocks = _iter_wiring_blocks(root)
+
+    # Build per-module param entry indices from inline frames so that
+    # side-fed arguments land on the correct expanded pipeline node.  Graph-wide
+    # and independent of which block we are wiring, so build it once.
+    module_param_entries = _build_module_param_entries(graph)
+
     # --- 1. Inline-op predecessor edges ---
-    last_forward_order = max(
-        (child.forward_order or 0 for child in root.children), default=0
-    )
-    for child in root.children:
-        if not is_forward_operation(child.attr_name):
-            continue
-        if not child.operation_predecessors:
-            continue
-        target_index = attr_last_index.get(child.attr_name)
-        if target_index is None:
-            continue
-        module_preds = [
-            pred
-            for pred in child.operation_predecessors
-            if pred != FORWARD_METHOD_INPUT and not is_forward_operation(pred)
-        ]
-        multi_input = len(child.operation_predecessors) >= 2
-        for pred in child.operation_predecessors:
-            if pred == FORWARD_METHOD_INPUT:
-                source_index = input_index
-            else:
-                source_index = attr_last_index.get(pred)
-            if source_index is None:
+    for block in wiring_blocks:
+        last_forward_order = max(
+            (child.forward_order or 0 for child in block.children), default=0
+        )
+        for child in block.children:
+            if not is_forward_operation(child.attr_name):
                 continue
-            link = (source_index, target_index)
-            if link not in graph.links:
-                graph.links.append(link)
-            if multi_input and link not in graph.link_port_labels:
-                source_label = (
-                    graph.nodes[source_index].label
-                    if source_index < len(graph.nodes)
-                    else None
-                )
-                if source_label:
-                    graph.link_port_labels[link] = source_label
-        if len(module_preds) >= 2 and (child.forward_order or 0) < last_forward_order:
-            graph.excluded_output_indices.add(target_index)
+            if not child.operation_predecessors:
+                continue
+            target_index = attr_last_index.get(child.attr_name)
+            if target_index is None:
+                continue
+            module_preds = [
+                pred
+                for pred in child.operation_predecessors
+                if pred != FORWARD_METHOD_INPUT and not is_forward_operation(pred)
+            ]
+            multi_input = len(child.operation_predecessors) >= 2
+            for pred in child.operation_predecessors:
+                if pred == FORWARD_METHOD_INPUT:
+                    source_index = input_index
+                else:
+                    source_index = attr_last_index.get(pred)
+                if source_index is None:
+                    continue
+                link = (source_index, target_index)
+                if link not in graph.links:
+                    graph.links.append(link)
+                if multi_input and link not in graph.link_port_labels:
+                    source_label = (
+                        graph.nodes[source_index].label
+                        if source_index < len(graph.nodes)
+                        else None
+                    )
+                    if source_label:
+                        graph.link_port_labels[link] = source_label
+            if (
+                len(module_preds) >= 2
+                and (child.forward_order or 0) < last_forward_order
+            ):
+                graph.excluded_output_indices.add(target_index)
 
     # --- 1b. Module-call predecessor edges from forward_step_predecessors ---
-    if root.forward_step_predecessors:
-        steps_by_attr = _forward_steps_by_attr(root)
-        pred_arg_maps = root.forward_step_predecessor_args
+    for block in wiring_blocks:
+        if not block.forward_step_predecessors:
+            continue
+        steps_by_attr = _forward_steps_by_attr(block)
+        pred_arg_maps = block.forward_step_predecessor_args
 
-        # Build per-module param entry indices from inline frames so that
-        # side-fed arguments land on the correct expanded pipeline node.
-        module_param_entries = _build_module_param_entries(graph)
-
-        for step_attr, preds in root.forward_step_predecessors.items():
+        for step_attr, preds in block.forward_step_predecessors.items():
             step_node = steps_by_attr.get(step_attr)
             if step_node is None:
                 continue
@@ -1633,6 +1707,14 @@ def _add_loop_carried_nodes(graph: ComputationGraph, root: BlockNode) -> None:
             for index, spec in enumerate(graph.nodes)
             if spec.block is not None and spec.block.attr_name in carried.operation_ids
         }
+        # A ``for blk in self.blocks: h = blk(h)`` loop carries its value through a
+        # ModuleList child expanded as an inline frame, whose interior nodes carry
+        # the child block's attr_name rather than the ModuleList's. Pull in every
+        # node of a frame whose id is a recorded loop member so the carried-in
+        # boundary reroutes the initial value into the loop body's real consumer.
+        for frame in graph.inline_frames:
+            if frame.frame_id in carried.operation_ids:
+                member_indices.update(frame.node_indices)
         matching_frames = [
             frame
             for frame in graph.inline_frames
@@ -2658,6 +2740,21 @@ def build_computation_graph(
                 continue
             expanded_steps, wrapper = _maybe_inline(step, basic_ops=basic_ops, inline_expansion=inline_expansion)
             if wrapper is not None:
+                # The inlined body's ``@method_input`` must bind to this step's
+                # primary (hidden_states) argument, not to whatever chain step
+                # happens to precede it.  In ``patch_embed -> rotary_pos_emb ->
+                # blocks`` the loop body reads ``hidden_states`` from
+                # ``patch_embed`` while ``rotary_pos_emb`` (the immediate
+                # predecessor) only supplies ``position_embeddings``; without
+                # this resolution the body would wrongly read the rotary output
+                # and the loop-carried-in boundary would find no consumer.
+                primary_input = _resolve_primary_input(
+                    step.attr_name,
+                    root,
+                    attr_last_index,
+                    input_index,
+                    last_index,
+                )
                 _step_indices, last_index = _add_linear_pipeline_chain(
                     graph,
                     expanded_steps,
@@ -2665,7 +2762,7 @@ def build_computation_graph(
                     key_prefix=f"seq:{segment_index}:{step.attr_name}",
                     attr_last_index=attr_last_index,
                     input_index=input_index,
-                    last_index=last_index,
+                    last_index=primary_input,
                     fork_from_input=fork_from_input,
                     inline_expansion=inline_expansion,
                 )

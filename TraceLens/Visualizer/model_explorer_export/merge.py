@@ -574,32 +574,41 @@ def _computation_nodes(
             node["outputsMetadata"] = ports
         nodes.append(node)
 
-    # Float loop-carried-in nodes to the front of their namespace so ME's
-    # dagre layout places them at the top of the loop group.  We must
-    # preserve the relative order of *different* namespaces (otherwise
-    # cross-namespace dataflow edges break).  Collect all nodes per
-    # namespace, reorder within each, then emit in the order each
-    # namespace was first seen.
-    from collections import OrderedDict as _ODict
+    # Float each loop-carried-in node to the top of its loop group and each
+    # loop-carried-out to the bottom, so ME's dagre layout renders the carried
+    # state entering above the body and leaving below it. The body frequently
+    # lives in *child* namespaces (LC-in in ``visual/Block``, body ops in
+    # ``visual/Block/norm1``), so an exact-namespace bucket sort can't reach it:
+    # compare by namespace *subtree* (prefix) instead. Only the boundary nodes
+    # move; every other node keeps its relative order, so cross-namespace
+    # dataflow edges are untouched (edges bind ids, not positions).
+    def _in_subtree(root_ns: str, node_ns: str) -> bool:
+        return node_ns == root_ns or node_ns.startswith(root_ns + "/")
 
-    def _lc_priority(node: dict[str, Any]) -> int:
-        nid = node.get("id", "")
-        if "@loop_carried_in:" in nid:
-            return 0
-        if "@loop_carried_out:" in nid:
-            return 2
-        return 1
-
-    ns_buckets: _ODict[str, list[dict[str, Any]]] = _ODict()
-    for node in nodes:
-        ns = node.get("namespace", "")
-        ns_buckets.setdefault(ns, []).append(node)
-
-    reordered: list[dict[str, Any]] = []
-    for bucket in ns_buckets.values():
-        bucket.sort(key=_lc_priority)
-        reordered.extend(bucket)
-    nodes = reordered
+    lc_in_nodes = [n for n in nodes if "@loop_carried_in:" in n.get("id", "")]
+    lc_out_nodes = [n for n in nodes if "@loop_carried_out:" in n.get("id", "")]
+    if lc_in_nodes or lc_out_nodes:
+        movers = {id(n) for n in lc_in_nodes} | {id(n) for n in lc_out_nodes}
+        result = [n for n in nodes if id(n) not in movers]
+        for lc in lc_in_nodes:
+            ns = lc.get("namespace", "")
+            insert_at = next(
+                (
+                    index
+                    for index, node in enumerate(result)
+                    if _in_subtree(ns, node.get("namespace", ""))
+                ),
+                len(result),
+            )
+            result.insert(insert_at, lc)
+        for lc in lc_out_nodes:
+            ns = lc.get("namespace", "")
+            last = None
+            for index, node in enumerate(result):
+                if _in_subtree(ns, node.get("namespace", "")):
+                    last = index
+            result.insert(last + 1 if last is not None else len(result), lc)
+        nodes = result
 
     return nodes
 

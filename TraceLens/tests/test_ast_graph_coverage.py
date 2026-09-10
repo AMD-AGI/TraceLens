@@ -1121,3 +1121,68 @@ class BranchBlock:
 )
 def test_operation_tile_labels(label, expected):
     assert cg._operation_tile_label(label) == expected
+
+
+def test_source_order_places_positional_synthetic_after_its_operands():
+    # A rope helper called on a *later* source line than the reshape/norm ops it
+    # consumes must still sort after them. ``positional_synthetic_source_pos``
+    # reports only ``(line, 0)`` (a placeholder column), so the eval-order lookup
+    # misses the real Call node's column; without the per-line fallback the
+    # synthetic floats to the front and the inline chain wires a cycle
+    # (apply_rotary -> reshape -> ... -> q_norm -> apply_rotary).
+    func = _function(
+        "def forward(self, hidden_states):\n"
+        "    q = hidden_states.reshape(2, -1)\n"       # line 2
+        "    q = self.q_norm(q)\n"                      # line 3
+        "    q = apply_rotary_emb(q, self.freqs)\n"     # line 4
+        "    return self.proj(q)\n"                     # line 5
+    )
+    rope = aa.positional_synthetic_attr("apply_rotary_emb", 4)
+    reshape = aa.ForwardOperation("@op_l2_c8_reshape", "Reshape", "Reshape")
+    module_calls = ["q_norm", rope, "proj"]
+    ordered = aa._forward_calls_in_source_order(func, module_calls, [reshape])
+    # reshape (l2) < q_norm (l3) < apply_rotary (l4) < proj (l5)
+    assert ordered.index("@op_l2_c8_reshape") < ordered.index("q_norm")
+    assert ordered.index("q_norm") < ordered.index(rope)
+    assert ordered.index(rope) < ordered.index("proj")
+
+
+def test_return_metadata_prefers_sole_downstream_terminal_slot():
+    # ``BaseModelOutputWithPooling(last_hidden_state=h, pooler_output=merged)``:
+    # ``merged = self.merger(h)`` is downstream of ``h``, so the merger is the
+    # module's real output. The intermediate slot must not become a second
+    # (dead) output port, and the primary must be the downstream terminal.
+    func = _function(
+        "def forward(self, hidden_states):\n"
+        "    hidden_states = self.encoder(hidden_states)\n"
+        "    merged = self.merger(hidden_states)\n"
+        "    return BaseModelOutputWithPooling(\n"
+        "        last_hidden_state=hidden_states, pooler_output=merged\n"
+        "    )\n"
+    )
+    analysis = aa._forward_operations_from_forward(
+        func, self_values={}, all_tensor_ops=False
+    )
+    assert analysis.primary_return_slot == "merged"
+    # Intermediate slot collapsed away — only the terminal is an output port.
+    assert analysis.return_order == ["merged"]
+    assert set(analysis.return_slots) == {"merged"}
+    assert analysis.return_slots["merged"] == "merger"
+
+
+def test_return_metadata_keeps_parallel_outputs_distinct():
+    # A cache side-channel (``past_key_values``) is not on the hidden-state chain,
+    # so there is no *sole* downstream terminal: both slots survive and the
+    # main-name heuristic keeps ``last_hidden_state`` as primary.
+    func = _function(
+        "def forward(self, hidden_states, past_key_values):\n"
+        "    hidden_states = self.layer(hidden_states)\n"
+        "    return MoeModelOutputWithPast(\n"
+        "        last_hidden_state=hidden_states, past_key_values=past_key_values\n"
+        "    )\n"
+    )
+    analysis = aa._forward_operations_from_forward(
+        func, self_values={}, all_tensor_ops=False
+    )
+    assert set(analysis.return_order) == {"hidden_states", "past_key_values"}
+    assert analysis.primary_return_slot == "hidden_states"
