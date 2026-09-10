@@ -307,6 +307,7 @@ def extract_and_save(
     meta_events: list[dict],
     output_label: str | None = None,
     root_tiles: dict | None = None,
+    llm_inference: bool = False,
 ):
     """Extract and save a range of iterations.
 
@@ -384,9 +385,14 @@ def extract_and_save(
                 name_append = f"batch_NA_gpu{prefix}"
 
         if output_label is not None:
-            out_path = os.path.join(
-                output_dir, f"{output_label}_{name_append}_{base_name}.json.gz"
-            )
+            if llm_inference:
+                out_path = os.path.join(
+                    output_dir, f"{output_label}_{name_append}_{base_name}.json.gz"
+                )
+            else:
+                out_path = os.path.join(
+                    output_dir, f"{output_label}_{base_name}.json.gz"
+                )
         else:
             suffix = f"_{name_append}" if name_append else ""
             out_path = os.path.join(
@@ -628,6 +634,7 @@ def divide_phases_and_save(
                 meta_events,
                 output_label=f"{phase}_{name_append}",
                 root_tiles=root_tiles,
+                llm_inference=True,
             )
         )
 

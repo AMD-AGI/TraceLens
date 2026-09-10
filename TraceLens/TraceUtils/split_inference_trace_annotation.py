@@ -542,6 +542,7 @@ def main():
                     *_extract_args,
                     output_label="mixed_steady_state",
                     root_tiles=root_tiles,
+                    llm_inference=True,
                 )
                 execution_details.extend(temp_execution_details)
 
@@ -552,6 +553,7 @@ def main():
                     *_extract_args,
                     output_label="decode_only_steady_state",
                     root_tiles=root_tiles,
+                    llm_inference=True,
                 )
                 execution_details.extend(temp_execution_details)
 
@@ -562,6 +564,7 @@ def main():
                     *_extract_args,
                     output_label="prefilldecode_steady_state",
                     root_tiles=root_tiles,
+                    llm_inference=True,
                 )
                 execution_details.extend(temp_execution_details)
             else:
