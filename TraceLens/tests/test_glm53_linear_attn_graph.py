@@ -1076,7 +1076,7 @@ def test_glm53_decoder_input_uses_source_data_movement_chain():
     combine_sources = {
         edge["sourceNodeId"] for edge in combine["incomingEdges"]
     }
-    assert combine_sources == {"embed_tokens", "visual/@output"}
+    assert combine_sources == {"embed_tokens", "@image_mask", "visual/@output"}
     assert model_ops[1]["incomingEdges"][0]["sourceNodeId"] == model_ops[0]["id"]
     assert model_ops[2]["incomingEdges"][0]["sourceNodeId"] == model_ops[1]["id"]
     assert not any(node["id"] == "rotary_pos_emb" for node in graph["nodes"])

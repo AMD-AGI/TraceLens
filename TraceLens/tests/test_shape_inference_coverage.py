@@ -47,6 +47,9 @@ from TraceLens.ModelUtils.shape_inference import (
     TensorSpec,
     _call_class_name,
     _config_dtype,
+    _conv_out_dim,
+    _reduce_conv_spatial,
+    _resolve_int_tuple,
     _default_hidden_shape,
     _merge_flatten_dim,
     _module_path_matches,
@@ -1255,9 +1258,33 @@ def test_transpose_and_permute():
     src = TensorSpec(("B", "S", 32, 128), "float16")
     t = inf._infer_node_output(_node("transpose", details=["dim0: 1", "dim1: 2"]), [src], root=None)
     assert t.shape == ("B", 32, "S", 128)
-    # permute is a no-op in symbolic inference -> passes source through.
-    p = inf._infer_node_output(_node("permute", details=["dims: (0, 2, 1, 3)"]), [src], root=None)
-    assert p.shape == ("B", "S", 32, 128)
+    # With captured dims, permute reorders the source axes.
+    p = inf._infer_node_output(_node("permute", details=["dims: 0, 2, 1, 3"]), [src], root=None)
+    assert p.shape == ("B", 32, "S", 128)
+
+
+def test_permute_negative_dims_reorders():
+    inf = _make_inferencer()
+    src = TensorSpec(("B", "S", 32, 128), "float16")
+    # Negative axes normalize against the source rank.
+    p = inf._infer_node_output(_node("permute", details=["dims: 0, -1, 1, 2"]), [src], root=None)
+    assert p.shape == ("B", 128, "S", 32)
+
+
+def test_permute_bad_dims_falls_back_without_corrupting_rank():
+    inf = _make_inferencer()
+    src = TensorSpec(("B", "S", 32, 128), "float16")
+    # Wrong axis count -> not a genuine permutation -> pass through unchanged.
+    short = inf._infer_node_output(_node("permute", details=["dims: 0, 2, 1"]), [src], root=None)
+    assert short.shape == ("B", "S", 32, 128)
+    # Unparseable/parenthesized dims also fall back safely.
+    parens = inf._infer_node_output(
+        _node("permute", details=["dims: (0, 2, 1, 3)"]), [src], root=None
+    )
+    assert parens.shape == ("B", "S", 32, 128)
+    # A non-permutation (repeated axis) is rejected rather than duplicating dims.
+    dup = inf._infer_node_output(_node("permute", details=["dims: 0, 0, 1, 2"]), [src], root=None)
+    assert dup.shape == ("B", "S", 32, 128)
 
 
 def test_matmul_two_inputs():
@@ -1325,6 +1352,101 @@ def test_conv_matches_in_channel_axis():
     node = _node("Conv2d", operation=OperationKind.NN_MODULE, meta={"attr_name": "cv"})
     out = inf._infer_node_output(node, [TensorSpec(("B", 3, 8, 8))], root=None)
     assert out.shape == ("B", 64, 8, 8)
+
+
+def test_conv_reduces_concrete_spatial_with_kernel_stride():
+    # Patch-merger downsample: Conv2d(k=2, s=2) collapses a 2x2 block to 1x1.
+    inf = _make_inferencer()
+    inf.module_dims.conv_by_attr["downsample"] = ModuleConvSpec(
+        in_channels=4096,
+        out_channels=4096,
+        kernel_size=(2, 2),
+        stride=(2, 2),
+        padding=(0, 0),
+    )
+    node = _node("Conv2d", operation=OperationKind.NN_MODULE, meta={"attr_name": "downsample"})
+    out = inf._infer_node_output(node, [TensorSpec(("B*S/4", 4096, 2, 2))], root=None)
+    assert out.shape == ("B*S/4", 4096, 1, 1)
+
+
+def test_conv_passes_symbolic_spatial_through():
+    # Kernel/stride known, but a symbolic spatial extent can't be reduced.
+    inf = _make_inferencer()
+    inf.module_dims.conv_by_attr["cv"] = ModuleConvSpec(
+        in_channels=3, out_channels=8, kernel_size=(2, 2), stride=(2, 2), padding=(0, 0)
+    )
+    node = _node("Conv2d", operation=OperationKind.NN_MODULE, meta={"attr_name": "cv"})
+    out = inf._infer_node_output(node, [TensorSpec(("B", 3, "H", 16))], root=None)
+    assert out.shape == ("B", 8, "H", 8)
+
+
+def test_conv_without_geometry_passes_spatial_through():
+    inf = _make_inferencer()
+    inf.module_dims.conv_by_attr["cv"] = ModuleConvSpec(in_channels=3, out_channels=8)
+    node = _node("Conv2d", operation=OperationKind.NN_MODULE, meta={"attr_name": "cv"})
+    out = inf._infer_node_output(node, [TensorSpec(("B", 3, 8, 8))], root=None)
+    assert out.shape == ("B", 8, 8, 8)
+
+
+def test_conv_ctor_captures_kernel_stride_padding_and_populates_context():
+    src = "nn.Conv2d(hidden, out, kernel_size=merge, stride=merge, padding=1)"
+    call = _ast.parse(src).body[0].value
+    ctx = _ctx()
+    ctx.dims.update({"hidden": 128, "out": 4096, "merge": 2})
+    spec = _parse_module_ctor(call, config={}, local_vars={}, context=ctx)
+    assert isinstance(spec, ModuleConvSpec)
+    assert spec.kernel_size == (2, 2) or spec.kernel_size == (2,)
+    assert spec.stride == (2, 2) or spec.stride == (2,)
+    assert spec.padding == (1,) or spec.padding == (1, 1)
+
+
+def test_conv_ctor_stride_defaults_to_one_when_omitted():
+    call = _ast.parse("nn.Conv2d(3, 8, kernel_size=4)").body[0].value
+    spec = _parse_module_ctor(call, config={}, local_vars={}, context=_ctx())
+    assert isinstance(spec, ModuleConvSpec)
+    assert spec.kernel_size == (4,)
+    assert spec.stride == (1,)
+
+
+def test_conv_ctor_symbolic_kernel_leaves_geometry_none():
+    call = _ast.parse("nn.Conv2d(3, 8, kernel_size=k)").body[0].value
+    spec = _parse_module_ctor(call, config={}, local_vars={}, context=_ctx())
+    assert isinstance(spec, ModuleConvSpec)
+    assert spec.kernel_size is None
+    assert spec.stride is None
+
+
+def test_conv_ctor_positional_geometry_and_tuple_kernel():
+    call = _ast.parse("nn.Conv2d(3, 8, (3, 5), 2)").body[0].value
+    spec = _parse_module_ctor(call, config={}, local_vars={}, context=_ctx())
+    assert isinstance(spec, ModuleConvSpec)
+    assert spec.kernel_size == (3, 5)
+    assert spec.stride == (2,)
+
+
+def test_conv_out_dim_reduces_concrete_and_passes_symbolic():
+    # (in + 2*pad - kernel)//stride + 1
+    assert _conv_out_dim(2, kernel=2, stride=2, padding=0) == 1
+    assert _conv_out_dim(8, kernel=3, stride=1, padding=1) == 8
+    assert _conv_out_dim("H", kernel=2, stride=2, padding=0) == "H"
+    # A non-positive stride can't reduce; pass the input through unchanged.
+    assert _conv_out_dim(8, kernel=2, stride=0, padding=0) == 8
+
+
+def test_reduce_conv_spatial_broadcasts_and_noops_without_geometry():
+    shape = [4, 16, 6, 6]
+    _reduce_conv_spatial(shape, 1, kernel=(3,), stride=(3,), padding=(0,))
+    assert shape == [4, 16, 2, 2]
+    unchanged = [4, 16, 6, 6]
+    _reduce_conv_spatial(unchanged, 1, kernel=None, stride=None, padding=None)
+    assert unchanged == [4, 16, 6, 6]
+
+
+def test_resolve_int_tuple_rejects_symbolic_elements():
+    ctx = _ctx()
+    tup = _ast.parse("(2, k)", mode="eval").body
+    assert _resolve_int_tuple(tup, config={}, local_vars={}, context=ctx) is None
+    assert _resolve_int_tuple(None, config={}, local_vars={}, context=ctx) is None
 
 
 def test_router_module_output():

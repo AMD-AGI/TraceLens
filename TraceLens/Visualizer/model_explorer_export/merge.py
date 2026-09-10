@@ -33,6 +33,7 @@ from TraceLens.ModelUtils.extract import (
 )
 from TraceLens.ModelUtils.shape_inference import (
     _merge_flatten_dim,
+    _permute_shape,
     ShapeInferencer,
     Symbol,
     TensorSpec,
@@ -173,6 +174,11 @@ def _data_movement_shape(
                 # dim rather than leaking a literal ``-1`` into the display shape.
                 resolved[neg_index] = source.shape[neg_index]
         return TensorSpec(tuple(resolved), source.dtype)
+    if label in {"Permute", "Transpose"}:
+        permuted = _permute_shape(source.shape, _operation_detail(operation, "dims"))
+        if permuted is not None:
+            return TensorSpec(permuted, source.dtype)
+        return source
     return source
 
 
@@ -3014,6 +3020,18 @@ def _attach_vision_language_combine(
     if not text_exits:
         return text_exits
     text_ref = text_exits[0]
+    # ``image_mask`` is the boolean placeholder-token selector derived from the
+    # token ids (``input_ids == image_token_id``). It's a genuine control input
+    # to the scatter, not a data tensor produced by either stack, so surface it
+    # as a dedicated synthetic boundary rather than papering over it.
+    mask_id = "@image_mask"
+    mask_node = _make_group_input_node(
+        input_id=mask_id,
+        label="image_mask",
+        namespace="",
+        port_label="image_mask",
+    )
+    nodes.append(mask_node)
     combine_id = "@vision_language_combine"
     node: dict[str, Any] = {
         "id": combine_id,
@@ -3030,10 +3048,12 @@ def _attach_vision_language_combine(
         ],
         "incomingEdges": [
             _source_edge(text_ref, "inputs_embeds"),
+            _source_edge((mask_id, "0"), "image_mask"),
             _source_edge(vision_exit, "image_embeds"),
         ],
         "inputsMetadata": [
             {"id": "inputs_embeds", "attrs": [{"key": "port_label", "value": "inputs_embeds"}]},
+            {"id": "image_mask", "attrs": [{"key": "port_label", "value": "image_mask"}]},
             {"id": "image_embeds", "attrs": [{"key": "port_label", "value": "image_embeds"}]},
         ],
     }

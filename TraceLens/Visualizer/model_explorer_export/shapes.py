@@ -12,11 +12,15 @@ from typing import Any
 
 from TraceLens.ModelUtils.block_tree import BlockNode
 from TraceLens.ModelUtils.shape_inference import (
+    DimExpr,
     ShapeContext,
     ShapeInferencer,
     Symbol,
     TensorSpec,
+    _permute_shape,
+    _reduce_conv_spatial,
     _resolve_cast_dtype,
+    _resolve_view_shape,
 )
 
 SHAPE_SEPARATOR = " x "
@@ -266,16 +270,64 @@ def _fallback_node_spec(
     sources: list[tuple[str, TensorSpec]],
     *,
     working_dtype: str = "float16",
+    dims: dict[str, DimExpr] | None = None,
+    conv_geometry: dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]]
+    | None = None,
 ) -> TensorSpec:
     """Infer merge-only synthetic ops that have no block-tree shape record."""
     specs = [spec for _target_port, spec in sources]
     label = str(node.get("label") or "")
     node_id = str(node.get("id") or "")
+    attrs = node.get("attrs", [])
     details = [
         str(attr.get("value"))
-        for attr in node.get("attrs", [])
-        if attr.get("key") == "detail"
+        for attr in attrs
+        if attr.get("key") == "detail" or attr.get("key") == "details"
     ]
+
+    if label.startswith("Conv") and specs:
+        # Vision patch-merger downsample: a Conv{1,2,3}d is not keyed by block-tree
+        # inference, so reduce spatial extents here using geometry captured from the
+        # constructor (kernel/stride/padding), mirroring the smart inference path.
+        attr_name = next(
+            (str(a.get("value")) for a in attrs if a.get("key") == "attr_name"), ""
+        )
+        geometry = (conv_geometry or {}).get(attr_name)
+        if geometry is not None:
+            kernel, stride, padding = geometry
+            shape = list(specs[0].shape)
+            channel_axis = 1 if len(shape) >= 2 else 0
+            _reduce_conv_spatial(shape, channel_axis, kernel, stride, padding)
+            return TensorSpec(tuple(shape), specs[0].dtype)
+
+    if label in {"View", "Reshape"} and specs:
+        # Vision-model-level reshapes (spatial merge, patch pooling) are not keyed
+        # by the block-tree inference, so resolve them here from the recorded
+        # ``shape:`` detail rather than passing the input through unchanged.
+        shape_detail = next(
+            (
+                detail.split(":", 1)[1].strip()
+                for detail in details
+                if detail.startswith("shape:")
+            ),
+            "",
+        )
+        resolved = _resolve_view_shape(shape_detail, specs[0], dims or {})
+        if resolved is not None:
+            return TensorSpec(resolved, specs[0].dtype)
+
+    if label in {"Permute", "Transpose"} and specs:
+        dims_detail = next(
+            (
+                detail.split(":", 1)[1].strip()
+                for detail in details
+                if detail.startswith("dims:")
+            ),
+            None,
+        )
+        permuted = _permute_shape(specs[0].shape, dims_detail)
+        if permuted is not None:
+            return TensorSpec(permuted, specs[0].dtype)
 
     if label == "Cast" and specs:
         source = specs[0]
@@ -436,7 +488,13 @@ def fill_missing_node_shapes(
                     sources.append((target_port, spec))
             if not sources or len(sources) != len(incoming_sources):
                 continue
-            spec = _fallback_node_spec(node, sources, working_dtype=context.dtype)
+            spec = _fallback_node_spec(
+                node,
+                sources,
+                working_dtype=context.dtype,
+                dims=context.dims,
+                conv_geometry=context.conv_geometry,
+            )
             node_id = str(node.get("id", ""))
             known[(node_id, "0")] = spec
             _apply_shape_attrs(node, spec)

@@ -1064,6 +1064,39 @@ def test_fallback_node_spec_cast_without_detail_keeps_source_dtype():
     assert result.shape == ("B", "S", 4)
 
 
+def test_fallback_node_spec_conv_reduces_spatial_from_geometry():
+    # Vision patch-merger downsample reaches the fallback (never keyed by the
+    # block-tree inference); geometry from the constructor collapses 2x2 -> 1x1.
+    source = TensorSpec(("B*S/4", 4096, 2, 2), "bfloat16")
+    node = {
+        "id": "visual/seq:6:downsample:downsample:0",
+        "label": "Conv2d",
+        "attrs": [{"key": "attr_name", "value": "downsample"}],
+    }
+    result = shapes._fallback_node_spec(
+        node,
+        [("0", source)],
+        conv_geometry={"downsample": ((2, 2), (2, 2), (0, 0))},
+    )
+    assert result.shape == ("B*S/4", 4096, 1, 1)
+
+
+def test_fallback_node_spec_conv_without_geometry_passes_through():
+    source = TensorSpec(("B*S/4", 4096, 2, 2), "bfloat16")
+    node = {
+        "id": "visual/seq:6:downsample:downsample:0",
+        "label": "Conv2d",
+        "attrs": [{"key": "attr_name", "value": "downsample"}],
+    }
+    # No geometry recorded -> spatial axes pass through unchanged.
+    assert shapes._fallback_node_spec(node, [("0", source)]).shape == (
+        "B*S/4",
+        4096,
+        2,
+        2,
+    )
+
+
 def test_fallback_node_spec_unsqueeze_non_integer_dim_defaults_to_zero():
     source = TensorSpec(("B", "S", 4), "float16")
     node = {"id": "u", "label": "Unsqueeze", "attrs": [{"key": "detail", "value": "dim: -1"}]}
@@ -1969,11 +2002,18 @@ def test_attach_vision_language_combine_merges_text_and_vision():
         shape_inferencer=None,
     )
     assert exits == [("@vision_language_combine", "0")]
-    combine = nodes[0]
+    # A dedicated @image_mask boundary is synthesized as the scatter's control
+    # input, then the combine node is appended after it.
+    mask = nodes[0]
+    assert mask["id"] == "@image_mask"
+    assert mask["label"] == "image_mask"
+    combine = nodes[-1]
     assert combine["id"] == "@vision_language_combine"
     assert combine["label"] == "Masked scatter"
     sources = [edge["sourceNodeId"] for edge in combine["incomingEdges"]]
-    assert sources == ["embed_tokens", "visual/@output"]
+    assert sources == ["embed_tokens", "@image_mask", "visual/@output"]
+    ports = [meta["id"] for meta in combine["inputsMetadata"]]
+    assert ports == ["inputs_embeds", "image_mask", "image_embeds"]
 
 
 def test_attach_vision_language_combine_applies_shape_from_context():
@@ -1988,9 +2028,10 @@ def test_attach_vision_language_combine_applies_shape_from_context():
         text_exits=[("embed_tokens", "0")],
         shape_inferencer=shape_inferencer,
     )
+    combine = nodes[-1]
     shape_attr = next(
         attr
-        for meta in nodes[0]["outputsMetadata"]
+        for meta in combine["outputsMetadata"]
         for attr in meta["attrs"]
         if attr["key"] == "shape"
     )
@@ -2082,7 +2123,7 @@ def test_merge_graph_emits_vision_group_and_visual_language_edge(
         node for node in graph["nodes"] if node["id"] == "@vision_language_combine"
     )
     sources = {edge["sourceNodeId"] for edge in combine["incomingEdges"]}
-    assert sources == {"embed_tokens", "visual/@output"}
+    assert sources == {"embed_tokens", "@image_mask", "visual/@output"}
 
 
 def test_merge_graph_text_only_spec_has_no_vision_section(

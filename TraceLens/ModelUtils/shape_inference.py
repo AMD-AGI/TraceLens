@@ -125,15 +125,57 @@ class ModuleParameterSpec:
 class ModuleConvSpec:
     """Channel dimensions of an ``nn.Conv{1,2,3}d`` declared in ``__init__``.
 
-    Only the channel axis is tracked: a conv maps ``(N, in_channels, *spatial)``
-    to ``(N, out_channels, *spatial')``. The spatial extents depend on
-    kernel/stride/padding/dilation and are left unchanged (static analysis can't
-    resolve the runtime spatial size), so shape inference replaces the channel
-    axis and passes the spatial axes through.
+    The channel axis is always tracked: a conv maps ``(N, in_channels, *spatial)``
+    to ``(N, out_channels, *spatial')``. When ``kernel_size``/``stride`` are
+    captured as concrete ints, a *concrete* spatial extent is reduced via
+    ``out = (in + 2*padding - kernel) // stride + 1``; symbolic spatial axes still
+    pass through unchanged. ``None`` geometry means "kernel/stride unknown", in
+    which case the spatial axes pass through as before.
     """
 
     in_channels: DimExpr | None
     out_channels: DimExpr
+    kernel_size: tuple[int, ...] | None = None
+    stride: tuple[int, ...] | None = None
+    padding: tuple[int, ...] | None = None
+
+
+def _conv_out_dim(in_dim: DimExpr, kernel: int, stride: int, padding: int) -> DimExpr:
+    """Reduce one concrete spatial extent through a conv; pass symbolic dims through."""
+    if not isinstance(in_dim, int) or stride <= 0:
+        return in_dim
+    return (in_dim + 2 * padding - kernel) // stride + 1
+
+
+def _reduce_conv_spatial(
+    shape: list[DimExpr],
+    channel_axis: int,
+    kernel: tuple[int, ...] | None,
+    stride: tuple[int, ...] | None,
+    padding: tuple[int, ...] | None,
+) -> None:
+    """In-place reduce the spatial axes (those after ``channel_axis``) of ``shape``.
+
+    Applies ``_conv_out_dim`` per spatial axis when kernel/stride are known. The
+    kernel/stride/padding tuples are broadcast (a length-1 tuple applies to every
+    axis). No-ops when geometry is missing or spatial extents are symbolic.
+    """
+    if not kernel or not stride:
+        return
+    spatial_axes = range(channel_axis + 1, len(shape))
+
+    def _at(values: tuple[int, ...] | None, idx: int, default: int) -> int:
+        if not values:
+            return default
+        return values[idx] if idx < len(values) else values[-1]
+
+    for idx, axis in enumerate(spatial_axes):
+        shape[axis] = _conv_out_dim(
+            shape[axis],
+            _at(kernel, idx, 1),
+            _at(stride, idx, 1),
+            _at(padding, idx, 0),
+        )
 
 
 @dataclass
@@ -142,6 +184,13 @@ class ShapeContext:
 
     dims: dict[str, DimExpr] = field(default_factory=dict)
     dtype: str = "float16"
+    # Conv geometry keyed by constructor attr name (e.g. ``"downsample"``):
+    # ``(kernel_size, stride, padding)`` as concrete-int tuples. Populated when the
+    # module registry is built so the render-time fallback (which has no access to
+    # the inferencer's ModuleConvSpec registry) can reduce spatial extents too.
+    conv_geometry: dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] = (
+        field(default_factory=dict)
+    )
     # Weight storage dtype for quantized checkpoints (e.g. ``fp8_e4m3``); ``None``
     # when the model is not quantized. ``not_convert`` holds the normalized
     # ``modules_to_not_convert`` patterns (kept at the compute dtype).
@@ -385,6 +434,14 @@ class ModuleDimRegistry:
         elif isinstance(spec, ModuleConvSpec):
             self.conv[(class_name, target.attr)] = spec
             self.conv_by_attr[target.attr] = spec
+            if spec.kernel_size is not None and spec.stride is not None:
+                # Expose geometry to the render-time fallback, which reduces
+                # spatial extents without access to this registry.
+                context.conv_geometry[target.attr] = (
+                    spec.kernel_size,
+                    spec.stride,
+                    spec.padding or (0,),
+                )
         elif isinstance(spec, ModuleEmbeddingSpec):
             self.embedding[(class_name, target.attr)] = spec
             self.embedding_by_attr[target.attr] = spec
@@ -1184,6 +1241,11 @@ class ShapeInferencer:
                     shape = list(source.shape)
                     shape[dim0], shape[dim1] = shape[dim1], shape[dim0]
                     return TensorSpec(shape=tuple(shape), dtype=source.dtype)
+            if operation_label == "permute" and source.shape:
+                dims_str = _detail_value(details, "dims")
+                permuted = _permute_shape(source.shape, dims_str)
+                if permuted is not None:
+                    return TensorSpec(shape=permuted, dtype=source.dtype)
             return source
 
         if operation_label in {"matmul", "batchmatmul", "mm", "bmm"}:
@@ -1404,6 +1466,14 @@ class ShapeInferencer:
                         channel_axis = axis
                         break
             shape[channel_axis] = out_channels
+            if conv_spec is not None:
+                _reduce_conv_spatial(
+                    shape,
+                    channel_axis,
+                    conv_spec.kernel_size,
+                    conv_spec.stride,
+                    conv_spec.padding,
+                )
             return TensorSpec(shape=tuple(shape), dtype=source.dtype)
 
         embedding_spec = self._lookup_embedding_spec(node, root=root)
@@ -2263,10 +2333,14 @@ def _resolve_dim_name(name: str, dims: dict[str, DimExpr]) -> DimExpr | None:
     val = dims.get(name)
     if val is not None:
         return val
-    # ``self.xxx`` → ``xxx``
+    # Strip ``self.``/``config.``/``self.config.`` access prefixes, e.g.
+    # ``self.config.out_hidden_size`` → ``out_hidden_size``.
     bare = name
-    if bare.startswith("self."):
-        bare = bare[len("self."):]
+    for prefix in ("self.config.", "config.", "self."):
+        if bare.startswith(prefix):
+            bare = bare[len(prefix):]
+            break
+    if bare != name:
         val = dims.get(bare)
         if val is not None:
             return val
@@ -2318,11 +2392,50 @@ def _merge_flatten_dim(
             remaining.remove(symbol)
         else:
             return None
-    if tgt_num == 0 or src_num % tgt_num != 0:
+    if tgt_num == 0:
         return None
-    num = src_num // tgt_num
-    factors = remaining + ([str(num)] if num != 1 else [])
-    return "*".join(factors) if factors else "1"
+    if src_num % tgt_num == 0:
+        num = src_num // tgt_num
+        factors = remaining + ([str(num)] if num != 1 else [])
+        return "*".join(factors) if factors else "1"
+    # The numeric part does not divide evenly (e.g. flattening ``[B*S, 4096]``
+    # to ``[-1, 2, 2, 4096]`` leaves ``B*S/4``). When the target numeric is an
+    # exact multiple of the source numeric, express the flatten dim as the
+    # remaining symbolic product divided by that factor rather than giving up —
+    # this keeps rank-preserving reshapes (vision spatial-merge, patch pooling)
+    # from collapsing to a no-op pass-through.
+    if remaining and tgt_num % src_num == 0:
+        divisor = tgt_num // src_num
+        base = "*".join(remaining)
+        return f"{base}/{divisor}" if divisor != 1 else base
+    return None
+
+
+def _permute_shape(
+    source_shape: tuple[DimExpr, ...], dims_str: str | None
+) -> tuple[DimExpr, ...] | None:
+    """Reorder ``source_shape`` by a captured ``permute`` dims spec.
+
+    ``dims_str`` is a comma-joined axis list (``"0, 3, 1, 2"``). Returns the
+    reordered shape only when the axes form a genuine permutation of the source
+    rank; otherwise ``None`` so callers fall back to a pass-through rather than
+    corrupting the rank.
+    """
+    if not source_shape or dims_str is None:
+        return None
+    n = len(source_shape)
+    axes: list[int | None] = []
+    for part in dims_str.split(","):
+        try:
+            axes.append(int(part.strip()))
+        except ValueError:
+            axes.append(None)
+    if len(axes) != n or any(a is None for a in axes):
+        return None
+    resolved = [a % n for a in axes]  # type: ignore[operator]
+    if sorted(resolved) != list(range(n)):
+        return None
+    return tuple(source_shape[a] for a in resolved)
 
 
 def _resolve_view_shape(
@@ -2938,6 +3051,37 @@ def _eval_config_condition(
     return None
 
 
+def _resolve_int_tuple(
+    node: ast.AST | None,
+    *,
+    config: dict[str, Any],
+    local_vars: dict[str, DimExpr],
+    context: ShapeContext,
+) -> tuple[int, ...] | None:
+    """Resolve a conv kernel/stride/padding arg to a tuple of concrete ints.
+
+    Accepts a scalar (``kernel_size=2`` → ``(2,)``) or an ``ast.Tuple``/``List``
+    (``kernel_size=(2, 2)`` → ``(2, 2)``). Returns ``None`` unless every element
+    resolves to a concrete int, so symbolic geometry never fabricates a spatial
+    reduction.
+    """
+    if node is None:
+        return None
+    if isinstance(node, (ast.Tuple, ast.List)):
+        elems = node.elts
+    else:
+        elems = [node]
+    resolved: list[int] = []
+    for elem in elems:
+        value = _resolve_dim_expr(
+            elem, config=config, local_vars=local_vars, context=context
+        )
+        if not isinstance(value, int):
+            return None
+        resolved.append(value)
+    return tuple(resolved) if resolved else None
+
+
 def _resolve_dim_expr(
     node: ast.AST,
     *,
@@ -3131,6 +3275,11 @@ def _parse_module_ctor(
             if len(args) >= 2
             else None
         )
+        # positional kernel_size/stride/padding: nn.Conv2d(in, out, k, stride, pad)
+        geometry: dict[str, ast.AST] = {}
+        for name, idx in (("kernel_size", 2), ("stride", 3), ("padding", 4)):
+            if len(args) > idx:
+                geometry[name] = args[idx]
         for keyword in node.keywords:
             if keyword.arg == "in_channels" and in_channels is None:
                 in_channels = _resolve_dim_expr(
@@ -3140,8 +3289,39 @@ def _parse_module_ctor(
                 out_channels = _resolve_dim_expr(
                     keyword.value, config=config, local_vars=local_vars, context=context
                 )
+            if keyword.arg in {"kernel_size", "stride", "padding"}:
+                geometry[keyword.arg] = keyword.value
         if out_channels is not None:
-            return ModuleConvSpec(in_channels=in_channels, out_channels=out_channels)
+            kernel = _resolve_int_tuple(
+                geometry.get("kernel_size"),
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            # When ``stride`` is omitted, nn.Conv2d defaults it to 1 (not to
+            # kernel_size). Only reduce spatial when kernel is known; a missing
+            # stride then means the default stride of 1.
+            stride = _resolve_int_tuple(
+                geometry.get("stride"),
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            if kernel is not None and stride is None:
+                stride = (1,)
+            padding = _resolve_int_tuple(
+                geometry.get("padding"),
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            return ModuleConvSpec(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel,
+                stride=stride,
+                padding=padding,
+            )
     if re.search(r"Linear$", class_name):
         in_features = (
             _resolve_dim_expr(

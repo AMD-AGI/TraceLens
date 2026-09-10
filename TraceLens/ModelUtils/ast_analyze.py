@@ -1814,6 +1814,23 @@ class _ForwardOperationExtractor:
             if len(node.args) > arg_start + 1:
                 details.append(f"dim0: {ast.unparse(node.args[arg_start])}")
                 details.append(f"dim1: {ast.unparse(node.args[arg_start + 1])}")
+        if call_name == "permute":
+            is_method = isinstance(node.func, ast.Attribute) and not (
+                isinstance(node.func.value, ast.Name) and node.func.value.id == "torch"
+            )
+            arg_start = 0 if is_method else 1
+            dims_args = node.args[arg_start:]
+            # ``permute`` accepts either varargs (``x.permute(0, 2, 1, 3)``) or a
+            # single tuple/list (``x.permute((0, 2, 1, 3))``); flatten both to a
+            # comma-joined dims spec so shape inference can reorder the axes.
+            if len(dims_args) == 1 and isinstance(
+                dims_args[0], (ast.Tuple, ast.List)
+            ):
+                dims_args = list(dims_args[0].elts)
+            if dims_args:
+                details.append(
+                    "dims: " + ", ".join(ast.unparse(arg) for arg in dims_args)
+                )
         if call_name == "einsum":
             if node.args and isinstance(node.args[0], ast.Constant):
                 details.append(f"equation: {node.args[0].value}")
