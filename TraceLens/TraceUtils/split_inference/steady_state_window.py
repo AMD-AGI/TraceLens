@@ -398,6 +398,38 @@ def classify_phases_from_batch_sizes(
     return labels
 
 
+def _identify_regions_by_decode_baseline(
+    batch_sizes: list[int | None],
+    phase_labels: list[str],
+    num_steps: int,
+) -> tuple[list[tuple[int, int]], int]:
+    """Find steady-state regions using decode batch sizes as a concurrency proxy.
+
+    Filters out prefill-bearing iterations, runs peak-proximity scan on the
+    decode-only batch sizes, then maps the region back to full-iteration
+    indices (re-including any prefill iterations within the region).
+    """
+    decode_indices = [i for i, p in enumerate(phase_labels) if p == "decode"]
+    decode_bs = [batch_sizes[i] for i in decode_indices if batch_sizes[i] is not None]
+
+    if not decode_bs:
+        n = len(batch_sizes)
+        return [(0, min(num_steps, n))], 0
+
+    decode_regions, global_max = _identify_regions_by_peak(
+        decode_bs, num_steps, label="Steady state (decode baseline)",
+    )
+
+    # Map decode-space indices back to full-iteration indices
+    full_regions: list[tuple[int, int]] = []
+    for ds, de in decode_regions:
+        full_start = decode_indices[ds]
+        full_end = decode_indices[min(de - 1, len(decode_indices) - 1)] + 1
+        full_regions.append((full_start, full_end))
+
+    return full_regions, global_max
+
+
 def find_steady_state_inference_from_shapes(
     iteration_roots: list[dict],
     batch_sizes: list[int],
@@ -406,9 +438,9 @@ def find_steady_state_inference_from_shapes(
 ) -> tuple[list[dict], list[tuple[int, int]]]:
     """Find steady state for LLM inference traces without serving annotations.
 
-    Uses ``batch_sizes`` (derived from cpu_op shapes) as a proxy for
-    concurrency and :func:`classify_phases_from_batch_sizes` for
-    prefill/decode classification.
+    Uses decode-iteration batch sizes as a concurrency proxy (decode batch
+    size ≈ number of sequences ≈ concurrency) and
+    :func:`classify_phases_from_batch_sizes` for prefill/decode classification.
 
     Returns ``(selected_roots, regions)`` — same shape as
     :func:`find_steady_state_inference`.
@@ -420,8 +452,8 @@ def find_steady_state_inference_from_shapes(
     if total == 0:
         return [], []
 
-    regions, _ = _identify_regions_by_duration_cv(iteration_roots, num_steps)
     phase_labels = classify_phases_from_batch_sizes(batch_sizes)
+    regions, _ = _identify_regions_by_decode_baseline(batch_sizes, phase_labels, num_steps)
 
     largest_start, largest_end = max(regions, key=lambda r: r[1] - r[0])
 
@@ -466,8 +498,14 @@ def find_steady_state_inference_from_shapes(
                 ) if any(b is not None for b in batch_sizes[largest_start:largest_end]) else 0,
             })
 
+        pf_candidates = [c for c in candidates if c["pf_ratio"] > 0]
+        if pf_candidates:
+            selection_pool = pf_candidates
+        else:
+            selection_pool = candidates
+
         best = min(
-            candidates,
+            selection_pool,
             key=lambda c: (abs(c["pf_ratio"] - reference_ratio), -c["avg_bs"]),
         )
         print(

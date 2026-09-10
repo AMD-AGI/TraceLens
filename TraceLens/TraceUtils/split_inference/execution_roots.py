@@ -172,12 +172,12 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
     total_gpu = _total_gpu_time(tree)
 
     # --- 3. Branch descent ----------------------------------------------------
-    branch_set = detect_from_branch_descent(tree, entry_roots, total_gpu, attribution)
+    branch_set = detect_from_branch_descent(tree, entry_roots, total_gpu)
     if branch_set is not None and branch_set.status is DetectStatus.SPLITTABLE:
         return branch_set
 
     # --- 4. Sibling roots ----------------------------------------------------
-    sibling_set = detect_from_sibling_roots(tree, entry_roots, total_gpu, attribution)
+    sibling_set = detect_from_sibling_roots(tree, entry_roots, total_gpu)
     if sibling_set is not None and sibling_set.status is DetectStatus.SPLITTABLE:
         return sibling_set
 

@@ -511,13 +511,10 @@ def test_branch_descent_from_synthetic_events():
             )
             corr += 1
 
-    from TraceLens.TraceUtils.split_inference.detect_utils import GpuAttribution
-
     tree = TraceToTree(events, prune_nongpu_paths=False)
     tree.build_tree(add_python_func=True)
     _reattach_worker_threads(tree)
-    attribution = GpuAttribution(events)
-    result = detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu_time(tree), attribution)
+    result = detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu_time(tree))
     assert result is not None
     assert len(result.roots) >= 1
 
