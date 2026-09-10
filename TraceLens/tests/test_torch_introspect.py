@@ -91,8 +91,8 @@ def test_explorer_graph_applies_shapes_and_namespaces():
     def _shape(node):
         return next(a["value"] for a in node["attrs"] if a["key"] == "output_shape")
 
-    assert _shape(nodes["x"]) == "2 x 128 float32"
-    assert _shape(nodes["relu"]) == "2 x 256 float32"
+    assert _shape(nodes["x"]) == "[2, 128] float32"
+    assert _shape(nodes["relu"]) == "[2, 256] float32"
 
     # The output node's incoming edge carries the synthesized result port.
     edge = nodes["out"]["incomingEdges"][0]

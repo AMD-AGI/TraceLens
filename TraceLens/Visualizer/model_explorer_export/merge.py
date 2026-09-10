@@ -31,7 +31,12 @@ from TraceLens.ModelUtils.extract import (
     architecture_section_trees,
     vision_tower_component,
 )
-from TraceLens.ModelUtils.shape_inference import ShapeInferencer, Symbol, TensorSpec
+from TraceLens.ModelUtils.shape_inference import (
+    _merge_flatten_dim,
+    ShapeInferencer,
+    Symbol,
+    TensorSpec,
+)
 
 from TraceLens.Visualizer.model_explorer_export.adapter import (
     _incoming_edges,
@@ -49,6 +54,8 @@ from TraceLens.Visualizer.model_explorer_export.shapes import (
     group_boundary_shapes,
     infer_block_tree_shapes,
     node_output_spec,
+    format_shape_dims,
+    parse_shape_dims,
     SHAPE_SEPARATOR,
 )
 from TraceLens.Visualizer.model_explorer_export.labels import (
@@ -136,10 +143,19 @@ def _data_movement_shape(
         if not shape_text:
             return source
         resolved: list[Any] = []
+        neg_index: int | None = None
         parts = [part.strip() for part in shape_text.split(",")]
         for index, part in enumerate(parts):
-            if part == "-1" and index < len(source.shape):
-                resolved.append(source.shape[index])
+            if part == "-1":
+                # Expand keeps the source dim at a ``-1`` slot; Reshape/View flatten
+                # it, so defer to a merged-product computation below.
+                if label == "Expand" and index < len(source.shape):
+                    resolved.append(source.shape[index])
+                elif label != "Expand" and neg_index is None:
+                    neg_index = len(resolved)
+                    resolved.append(part)
+                else:
+                    resolved.append(part)
             elif re.fullmatch(r"-?\d+", part):
                 resolved.append(int(part))
             elif ".config." in part:
@@ -147,6 +163,15 @@ def _data_movement_shape(
                 resolved.append(value if value is not None else part)
             else:
                 resolved.append(part)
+        if neg_index is not None:
+            explicit = [d for i, d in enumerate(resolved) if i != neg_index]
+            merged = _merge_flatten_dim(tuple(source.shape), explicit)
+            if merged is not None:
+                resolved[neg_index] = merged
+            elif neg_index < len(source.shape):
+                # Element conservation failed; fall back to the same-index source
+                # dim rather than leaking a literal ``-1`` into the display shape.
+                resolved[neg_index] = source.shape[neg_index]
         return TensorSpec(tuple(resolved), source.dtype)
     return source
 
@@ -1682,15 +1707,25 @@ def _port_shape_attrs(metadata: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _split_shape_dtype(text: str) -> tuple[list[str], str]:
-    """Split a stored ``B x S x 4096 float16`` value into dims and dtype."""
-    parts = text.split(SHAPE_SEPARATOR)
+    """Split a stored ``[B, S, 4096] float16`` value into dims and dtype."""
+    stripped = text.strip()
     dtype = ""
-    if parts:
-        tail = parts[-1].split()
-        if len(tail) > 1:
-            dtype = tail[-1]
-            parts[-1] = " ".join(tail[:-1])
-    return [p.strip() for p in parts], dtype
+    if stripped.endswith("]"):
+        shape_text = stripped
+    else:
+        # Bracketed dims followed by a dtype suffix: ``[B, S, 4096] float16``.
+        close = stripped.rfind("]")
+        if close != -1:
+            dtype = stripped[close + 1 :].strip()
+            shape_text = stripped[: close + 1]
+        else:
+            # Legacy `` x ``-separated form without brackets.
+            tail = stripped.rsplit(" ", 1)
+            if len(tail) == 2 and SHAPE_SEPARATOR not in tail[1]:
+                shape_text, dtype = tail[0], tail[1]
+            else:
+                shape_text = stripped
+    return parse_shape_dims(shape_text), dtype
 
 
 def _reconcile_edge_endpoint_shapes(nodes: list[dict[str, Any]]) -> None:
@@ -1755,7 +1790,7 @@ def _find_port_metadata(
 def _write_port_shape(
     metadata: dict[str, Any], shape_attr: dict[str, Any], dims: list[str], dtype: str
 ) -> None:
-    display = SHAPE_SEPARATOR.join(dims)
+    display = format_shape_dims(dims)
     if dtype:
         display = f"{display} {dtype}"
     shape_attr["value"] = display

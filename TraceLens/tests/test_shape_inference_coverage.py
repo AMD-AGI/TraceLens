@@ -48,6 +48,12 @@ from TraceLens.ModelUtils.shape_inference import (
     _call_class_name,
     _config_dtype,
     _default_hidden_shape,
+    _merge_flatten_dim,
+    _module_path_matches,
+    _module_path_segments,
+    _normalize_module_patterns,
+    _quant_storage_dtype,
+    _resolve_cast_dtype,
     _eval_config_condition,
     _eval_dim_expr,
     _export_operation_kind,
@@ -1163,7 +1169,8 @@ def test_tensor_synthetic_weight_bias_scalar_and_parameter():
     inf = _make_inferencer(hidden_size=32)
     inf.context.dims[Symbol.EXPERTS.value] = 8
     w = inf._infer_node_output(_synth("w", "@tensor", port_label="expert_weight"), [], root=None)
-    assert w.shape == (8, 32) and w.dtype == "float32"
+    # Unquantized fixture: weight storage dtype resolves to the model dtype.
+    assert w.shape == (8, 32) and w.dtype == "float16"
     b = inf._infer_node_output(_synth("b", "@tensor", port_label="gate_bias"), [], root=None)
     assert b.shape == (8,)
     s = inf._infer_node_output(_synth("s", "@tensor", port_label="scalar"), [], root=None)
@@ -1189,7 +1196,8 @@ def test_external_spec_weight_and_bias_for_view_without_inputs():
     w = inf._infer_node_output(
         _node("view", external_inputs=["router_weight"]), [], root=None
     )
-    assert w.shape == (4, 16) and w.dtype == "float32"
+    # Unquantized fixture: weight storage dtype resolves to the model dtype.
+    assert w.shape == (4, 16) and w.dtype == "float16"
     b = inf._infer_node_output(
         _node("view", external_inputs=["gate_bias"]), [], root=None
     )
@@ -1655,3 +1663,128 @@ def test_topological_order_handles_cycles():
     specs = inf.infer_model_graph(graph)
     # Every node still receives a spec even though b/c cycle.
     assert set(specs) == {"a", "b", "c"}
+
+
+# ---------------------------------------------------------------------------
+# Real compute dtype + per-module quantization dtype (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def test_config_dtype_reads_nested_and_top_level_and_quant_compute():
+    # Newer HF configs put the real dtype under text_config as ``dtype``.
+    assert _config_dtype({"text_config": {"dtype": "bfloat16"}}) == "bfloat16"
+    # Legacy top-level ``torch_dtype`` with a ``torch.`` prefix is stripped.
+    assert _config_dtype({"torch_dtype": "torch.float16"}) == "float16"
+    # A quant config's explicit compute dtype wins.
+    assert (
+        _config_dtype({"quantization_config": {"bnb_4bit_compute_dtype": "bfloat16"}})
+        == "bfloat16"
+    )
+    # Nothing found -> conservative default.
+    assert _config_dtype({}) == "float16"
+
+
+def test_quant_storage_dtype_across_methods():
+    assert _quant_storage_dtype({"quant_method": "fp8", "fmt": "e4m3"}) == "fp8_e4m3"
+    assert _quant_storage_dtype({"quant_method": "fp8", "fmt": "e5m2"}) == "fp8_e5m2"
+    assert _quant_storage_dtype({"fmt": "e4m3"}) == "fp8_e4m3"
+    assert (
+        _quant_storage_dtype(
+            {
+                "quant_method": "bitsandbytes",
+                "load_in_4bit": True,
+                "bnb_4bit_quant_type": "nf4",
+            }
+        )
+        == "nf4"
+    )
+    assert (
+        _quant_storage_dtype({"quant_method": "bitsandbytes", "load_in_8bit": True})
+        == "int8"
+    )
+    assert _quant_storage_dtype({"quant_method": "gptq", "bits": 4}) == "int4"
+    assert _quant_storage_dtype({"quant_method": "awq", "bits": 8}) == "int8"
+    assert _quant_storage_dtype({"quant_method": "unknown"}) is None
+
+
+def test_normalize_module_patterns_strips_prefix_and_indices():
+    patterns = _normalize_module_patterns(
+        [
+            "model.layers.0.self_attn.q_proj",
+            "model.layers.12.mlp.gate",
+            "lm_head",
+            "visual",
+        ]
+    )
+    assert ("self_attn", "q_proj") in patterns
+    assert ("mlp", "gate") in patterns
+    assert ("lm_head",) in patterns
+    assert ("visual",) in patterns
+    # Non-list input is ignored.
+    assert _normalize_module_patterns(None) == ()
+
+
+def test_module_path_segments_and_matches():
+    segs = _module_path_segments(
+        "decoder/45x_Layer/self_attn/seq:0:q_proj:q_proj:0"
+    )
+    assert segs == ["decoder", "self_attn", "q_proj"]
+    assert _module_path_matches(segs, ("self_attn", "q_proj"))
+    assert not _module_path_matches(segs, ("mlp", "gate"))
+    # Single-segment pattern matches anywhere.
+    assert _module_path_matches(["encoder", "visual", "blocks"], ("visual",))
+    # A multi-segment pattern must be contiguous, so shared_experts.down_proj
+    # never collides with visual.merger.down_proj.
+    shared = ["decoder", "mlp", "shared_experts", "down_proj"]
+    assert _module_path_matches(shared, ("shared_experts", "down_proj"))
+    assert not _module_path_matches(shared, ("merger", "down_proj"))
+    assert not _module_path_matches(segs, ())
+
+
+def test_weight_dtype_fp8_experts_vs_bf16_not_convert():
+    not_convert = _normalize_module_patterns(
+        [
+            "model.layers.0.self_attn.q_proj",
+            "model.layers.0.mlp.gate",
+            "lm_head",
+            "visual",
+        ]
+    )
+    ctx = ShapeContext(
+        dtype="bfloat16", quant_dtype="fp8_e4m3", not_convert=not_convert
+    )
+    # MoE routed + shared experts stay quantized.
+    assert ctx.weight_dtype("d/L/mlp/sidefeed:1:experts:@op_bmm:2") == "fp8_e4m3"
+    assert (
+        ctx.weight_dtype("d/L/mlp/sidefeed:3:shared_experts:down_proj:6")
+        == "fp8_e4m3"
+    )
+    # Everything in modules_to_not_convert keeps the compute dtype.
+    assert ctx.weight_dtype("d/L/self_attn/seq:0:q_proj:q_proj:0") == "bfloat16"
+    assert ctx.weight_dtype("d/L/mlp/seq:0:gate:0") == "bfloat16"
+    assert ctx.weight_dtype("e/visual/blocks/attn/seq:0:qkv:0") == "bfloat16"
+    assert ctx.weight_dtype("d/lm_head:0") == "bfloat16"
+    # A non-quantized context returns the compute dtype for every weight.
+    plain = ShapeContext(dtype="bfloat16")
+    assert plain.weight_dtype("d/L/mlp/sidefeed:1:experts:@op_bmm:2") == "bfloat16"
+
+
+def test_resolve_cast_dtype_low_precision_tokens():
+    assert _resolve_cast_dtype("torch.float8_e4m3fn", "float32", "bf16") == "fp8_e4m3"
+    assert _resolve_cast_dtype("float8_e5m2", "float32", "bf16") == "fp8_e5m2"
+    assert _resolve_cast_dtype("uint4", "float32", "bf16") == "uint4"
+    assert _resolve_cast_dtype("int4", "float32", "bf16") == "int4"
+    # Generic float still resolves to float32, not fp8.
+    assert _resolve_cast_dtype("torch.float", "float16", "bf16") == "float32"
+
+
+def test_merge_flatten_dim_conservation_and_fallback():
+    assert _merge_flatten_dim(("B", "S", 4096), ["4096"]) == "B*S"
+    assert _merge_flatten_dim(("B", "S", 8, 288), ["8", "288"]) == "B*S"
+    assert _merge_flatten_dim(("B", "S", "H"), ["B", "S"]) == "H"
+    # Placeholder ``-1`` in the target is ignored, not treated as a factor.
+    assert _merge_flatten_dim(("B", "S", 4096), ["-1", "4096"]) == "B*S"
+    # Non-divisible numerics -> None (caller falls back).
+    assert _merge_flatten_dim(("B", 7), ["3"]) is None
+    # A target symbol with no source match -> None.
+    assert _merge_flatten_dim(("B", "S"), ["Z"]) is None

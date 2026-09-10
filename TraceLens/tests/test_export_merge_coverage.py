@@ -705,7 +705,9 @@ def test_labels_apply_preserves_existing_group_attrs_and_updates_subops():
 
 def test_shape_format_annotation_and_empty_shape_paths():
     spec = TensorSpec(("B", "2×H", "N∗D", "λ"), "bfloat16")
-    assert shapes.format_shape(spec) == "B x 2xH x NxD x "
+    # Human display is bracketed and keeps ``*`` for merged dims; the unicode
+    # multiply signs fold to ``*`` and the non-ASCII ``λ`` drops out.
+    assert shapes.format_shape(spec) == "[B, 2*H, N*D, ]"
     assert shapes.format_shape_tensor(spec) == "Bx2xHxNxDx bfloat16"
     assert shapes.format_shape_bracket(spec) == "[B, 2×H, N∗D, λ]"
 
@@ -721,7 +723,7 @@ def test_shape_format_annotation_and_empty_shape_paths():
     )
     assert node["attrs"] == [
         {"key": "keep", "value": "yes"},
-        {"key": "output_shape", "value": "1 x 2 float32"},
+        {"key": "output_shape", "value": "[1, 2] float32"},
         {"key": "output_dtype", "value": "float32"},
     ]
     assert shapes._node_spec(node) == TensorSpec(("1", "2"), "float32")
@@ -947,8 +949,8 @@ def test_shape_fill_and_boundary_multiple_crossings():
     ]
     shapes.fill_missing_node_shapes(nodes, context=context)
     result = shapes.group_boundary_shapes(nodes)
-    assert result["outer"]["input_shape"] == "B x S x 16 float16"
-    assert result["outer"]["output_shape"] == "B x S x 16 float16"
+    assert result["outer"]["input_shape"] == "[B, S, 16] float16"
+    assert result["outer"]["output_shape"] == "[B, S, 16] float16"
     assert result["outer/inner"] == result["outer"]
     assert shapes._namespace_chain("/outer//inner/") == ["outer", "outer/inner"]
     store: dict[str, list[str]] = {}
@@ -991,7 +993,7 @@ def test_fill_missing_node_shapes_cast_resolves_downcast_dtype():
         for attr in meta["attrs"]
         if attr["key"] == "shape"
     )
-    assert shape_attr["value"] == "B x S x 4 float16"
+    assert shape_attr["value"] == "[B, S, 4] float16"
 
 
 def test_fallback_node_spec_cast_without_detail_keeps_source_dtype():
@@ -1121,7 +1123,7 @@ def test_shape_special_nodes_linear_router_and_fallbacks():
     )
     assert heuristic_inferencer._infer_node_output(
         _model_node("weight", synthetic="@tensor"), [], root=None
-    ) == TensorSpec((8, 16), "float32")
+    ) == TensorSpec((8, 16), "float16")
     assert inferencer._infer_node_output(
         _model_node("bias", synthetic="@tensor"), [], root=None
     ) == TensorSpec((8,), "float16")
@@ -1718,7 +1720,7 @@ def test_shape_external_spec_and_empty_combine_fallbacks():
     weight_view = inferencer._infer_node_output(
         _model_node("flatten", external_inputs=["expert_weight"]), [], root=None
     )
-    assert weight_view == TensorSpec((8, 16), "float32")
+    assert weight_view == TensorSpec((8, 16), "float16")
     bias_unsqueeze = inferencer._infer_node_output(
         _model_node("unsqueeze", external_inputs=["router_bias"]), [], root=None
     )
@@ -1868,7 +1870,7 @@ def test_reconcile_edge_endpoint_shapes_fills_weak_dim_from_concrete_end():
     nodes = [source, target]
     merge._reconcile_edge_endpoint_shapes(nodes)
     shape = merge._port_shape_attrs(target["inputsMetadata"][0])["value"]
-    assert shape == "B x 4096 float16"
+    assert shape == "[B, 4096] float16"
 
 
 def test_reconcile_edge_endpoint_shapes_preserves_genuine_rank_change():
@@ -2085,3 +2087,65 @@ class FooVisionModel:
     vision = [tree for _title, tree in spec.export_block_trees if tree.attr_name == "visual"]
     assert vision, "vision tower detail tree should be appended alongside the text spine"
     assert vision[0].class_name == "FooVisionModel"
+
+
+# ---------------------------------------------------------------------------
+# Bracket shape display + reshape/view -1 resolution (Phases 1 & 2)
+# ---------------------------------------------------------------------------
+
+
+def test_bracket_shape_display_round_trips():
+    spec = TensorSpec(("B", "S", 4096), "bfloat16")
+    assert shapes.format_shape(spec) == "[B, S, 4096]"
+    assert shapes.format_shape_with_dtype(spec) == "[B, S, 4096] bfloat16"
+    # Merged reshape dims keep the ``*`` product for readability.
+    assert shapes.format_shape_dims(["B*S", "4096"]) == "[B*S, 4096]"
+    assert shapes.format_shape_dims([]) == ""
+    # Round-trip: display -> dims recovers the original list.
+    assert shapes.parse_shape_dims("[B*S, 4096]") == ["B*S", "4096"]
+    assert shapes.parse_shape_dims(shapes.format_shape(spec)) == ["B", "S", "4096"]
+    # Legacy `` x `` form is still parseable defensively.
+    assert shapes.parse_shape_dims("B x S x 4096") == ["B", "S", "4096"]
+    # tensor_shape stays the compact Model-Explorer-native ``x`` join.
+    assert shapes.format_shape_tensor(spec) == "BxSx4096 bfloat16"
+    # A shape without a dtype omits the suffix in both display forms.
+    no_dtype = TensorSpec(("B", "S", 4096), "")
+    assert shapes.format_shape_with_dtype(no_dtype) == "[B, S, 4096]"
+    assert shapes.format_shape_tensor(no_dtype) == "BxSx4096"
+
+
+def test_split_and_write_port_shape_bracket_round_trip():
+    dims, dtype = merge._split_shape_dtype("[B*S, 4096] bfloat16")
+    assert dims == ["B*S", "4096"] and dtype == "bfloat16"
+    # Bracketed dims with no dtype suffix.
+    assert merge._split_shape_dtype("[B, S, 4096]") == (["B", "S", "4096"], "")
+    metadata = {
+        "attrs": [
+            {"key": "shape", "value": "old"},
+            {"key": "tensor_shape", "value": "old"},
+        ]
+    }
+    shape_attr = metadata["attrs"][0]
+    merge._write_port_shape(metadata, shape_attr, ["B*S", "4096"], "bfloat16")
+    assert shape_attr["value"] == "[B*S, 4096] bfloat16"
+    tensor_val = next(
+        a["value"] for a in metadata["attrs"] if a["key"] == "tensor_shape"
+    )
+    # tensor_shape keeps the compact ``x`` join, never brackets.
+    assert tensor_val == "B*Sx4096 bfloat16"
+
+
+def test_merge_data_movement_reshape_flatten_and_expand():
+    spec = ArchitectureSpec(name="T", model_type="t", raw_config={})
+
+    def _op(label, shape):
+        return SimpleNamespace(label=label, details=[f"shape: {shape}"])
+
+    # Reshape (-1, 4096) over (B, S, 4096) -> merged (B*S, 4096), no literal -1.
+    src = TensorSpec(("B", "S", 4096), "bfloat16")
+    out = merge._data_movement_shape(_op("Reshape", "-1, 4096"), src, spec=spec)
+    assert out.shape == ("B*S", 4096)
+    assert "-1" not in [str(d) for d in out.shape]
+    # Expand keeps the source dim at its ``-1`` slot (broadcast, not flatten).
+    exp = merge._data_movement_shape(_op("Expand", "-1, 8"), TensorSpec((4, 1)), spec=spec)
+    assert exp.shape == (4, 8)

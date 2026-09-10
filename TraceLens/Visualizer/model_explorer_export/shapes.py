@@ -20,17 +20,51 @@ from TraceLens.ModelUtils.shape_inference import (
 )
 
 SHAPE_SEPARATOR = " x "
+BRACKET_SEPARATOR = ", "
 
 
-def _font_safe(dim: Any) -> str:
-    """Model Explorer renders characters outside its font atlas as ``?``."""
-    text = str(dim).replace("\u00d7", "x").replace("\u2217", "x").replace("*", "x")
+def _font_safe(dim: Any, *, star: str = "x") -> str:
+    """Model Explorer renders characters outside its font atlas as ``?``.
+
+    ``star`` controls how a multiplication marker is rendered. The compact
+    ``tensor_shape`` form uses ``"x"`` (Model-Explorer-native); the human display
+    form keeps ``"*"`` so a merged reshape dim reads ``B*S``.
+    """
+    text = (
+        str(dim)
+        .replace("\u00d7", star)
+        .replace("\u2217", star)
+        .replace("*", star)
+    )
     return "".join(char if 32 <= ord(char) < 127 else "" for char in text)
 
 
 def format_shape(spec: TensorSpec) -> str:
-    """Human-readable shape for node attrs (Model Explorer font-safe)."""
-    return SHAPE_SEPARATOR.join(_font_safe(dim) for dim in spec.shape)
+    """Bracketed human-readable shape for node attrs, e.g. ``[B, S, 4096]``."""
+    if not spec.shape:
+        return ""
+    inner = BRACKET_SEPARATOR.join(_font_safe(dim, star="*") for dim in spec.shape)
+    return f"[{inner}]"
+
+
+def format_shape_dims(dims: list[str]) -> str:
+    """Bracket a list of already-stringified dims, e.g. ``["B", "S"]`` -> ``[B, S]``."""
+    if not dims:
+        return ""
+    return f"[{BRACKET_SEPARATOR.join(dims)}]"
+
+
+def parse_shape_dims(text: str) -> list[str]:
+    """Inverse of :func:`format_shape` \u2014 recover dims from a display string.
+
+    Accepts the bracket form (``[B, S, 4096]``) and, defensively, the legacy
+    `` x ``-separated form so mixed data never crashes the round trip.
+    """
+    stripped = text.strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        stripped = stripped[1:-1]
+        return [part.strip() for part in stripped.split(",") if part.strip()]
+    return [part.strip() for part in stripped.split(SHAPE_SEPARATOR) if part.strip()]
 
 
 def format_shape_with_dtype(spec: TensorSpec) -> str:
@@ -191,7 +225,7 @@ def _node_spec(
             if dtype and shape_text.endswith(f" {dtype}"):
                 shape_text = shape_text[: -len(dtype) - 1]
             return TensorSpec(
-                shape=tuple(shape_text.split(SHAPE_SEPARATOR)),
+                shape=tuple(parse_shape_dims(shape_text)),
                 dtype=dtype,
             )
     return None

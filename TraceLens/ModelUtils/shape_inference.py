@@ -142,11 +142,35 @@ class ShapeContext:
 
     dims: dict[str, DimExpr] = field(default_factory=dict)
     dtype: str = "float16"
+    # Weight storage dtype for quantized checkpoints (e.g. ``fp8_e4m3``); ``None``
+    # when the model is not quantized. ``not_convert`` holds the normalized
+    # ``modules_to_not_convert`` patterns (kept at the compute dtype).
+    quant_dtype: str | None = None
+    not_convert: tuple[tuple[str, ...], ...] = ()
+
+    def weight_dtype(self, node_id: str) -> str:
+        """Storage dtype of a weight node: quant dtype unless its module is kept
+        at full precision (in ``modules_to_not_convert``)."""
+        if not self.quant_dtype:
+            return self.dtype
+        segments = _module_path_segments(node_id)
+        for pattern in self.not_convert:
+            if _module_path_matches(segments, pattern):
+                return self.dtype
+        return self.quant_dtype
 
     @classmethod
     def from_spec(cls, spec: ArchitectureSpec) -> ShapeContext:
         config = spec.raw_config or {}
         dtype = _config_dtype(config)
+        quant = config.get("quantization_config")
+        quant_dtype: str | None = None
+        not_convert: tuple[tuple[str, ...], ...] = ()
+        if isinstance(quant, dict):
+            quant_dtype = _quant_storage_dtype(quant)
+            not_convert = _normalize_module_patterns(
+                quant.get("modules_to_not_convert")
+            )
         dims: dict[str, DimExpr] = {
             Symbol.BATCH.value: Symbol.BATCH.value,
             Symbol.SEQ.value: Symbol.SEQ.value,
@@ -208,7 +232,12 @@ class ShapeContext:
         for name, value in _collect_forward_scalar_locals(spec, dims).items():
             dims.setdefault(name, value)
 
-        return cls(dims=dims, dtype=dtype)
+        return cls(
+            dims=dims,
+            dtype=dtype,
+            quant_dtype=quant_dtype,
+            not_convert=not_convert,
+        )
 
 
 @dataclass
@@ -939,9 +968,17 @@ class ShapeInferencer:
             hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
             parameter = self._lookup_parameter_spec(node, root=root, names=[label])
             if parameter is not None:
-                return TensorSpec(shape=parameter.shape, dtype=dtype)
+                param_dtype = (
+                    self.context.weight_dtype(str(node.id))
+                    if "weight" in label
+                    else dtype
+                )
+                return TensorSpec(shape=parameter.shape, dtype=param_dtype)
             if "weight" in label:
-                return TensorSpec(shape=(experts, hidden), dtype="float32")
+                return TensorSpec(
+                    shape=(experts, hidden),
+                    dtype=self.context.weight_dtype(str(node.id)),
+                )
             if "bias" in label:
                 return TensorSpec(shape=(experts,), dtype=dtype)
             return TensorSpec(shape=(), dtype=dtype)
@@ -986,10 +1023,16 @@ class ShapeInferencer:
             parameter = self._lookup_parameter_spec(
                 node, root=root, names=external_inputs
             )
+            has_weight = any("weight" in item for item in external_inputs)
             if parameter is not None:
-                return TensorSpec(parameter.shape, dtype)
-            if any("weight" in item for item in external_inputs):
-                return TensorSpec((experts, hidden), "float32")
+                param_dtype = (
+                    self.context.weight_dtype(str(node.id)) if has_weight else dtype
+                )
+                return TensorSpec(parameter.shape, param_dtype)
+            if has_weight:
+                return TensorSpec(
+                    (experts, hidden), self.context.weight_dtype(str(node.id))
+                )
             if any("bias" in item for item in external_inputs):
                 return TensorSpec((experts,), dtype)
             return None
@@ -2212,6 +2255,53 @@ def _resolve_dim_name(name: str, dims: dict[str, DimExpr]) -> DimExpr | None:
     return None
 
 
+def _dim_factors(dim: DimExpr) -> list[str]:
+    """Split a possibly-merged dim like ``B*S`` into its individual factors."""
+    return [token for token in str(dim).split("*") if token]
+
+
+def _merge_flatten_dim(
+    source_shape: tuple[DimExpr, ...], explicit_dims: list[DimExpr]
+) -> str | None:
+    """Compute the ``-1`` dim of a reshape by conservation of elements.
+
+    The flattened axis equals ``prod(source) / prod(explicit target dims)``.
+    Symbolic factors (``B``, ``S``) cancel against matching source factors and
+    numeric factors divide, yielding a readable product like ``B*S`` (or ``H`` /
+    ``4096``). Returns ``None`` when the numerics do not divide cleanly or a
+    target symbol has no matching source factor, so the caller can fall back.
+    """
+
+    def collect(dimlist: list[DimExpr]) -> tuple[int, list[str]]:
+        num = 1
+        sym: list[str] = []
+        for dim in dimlist:
+            for token in _dim_factors(dim):
+                if token == "-1":
+                    # The flatten placeholder; not a real target factor.
+                    continue
+                if token.lstrip("-").isdigit():
+                    num *= int(token)
+                else:
+                    sym.append(token)
+        return num, sym
+
+    src_num, src_sym = collect(list(source_shape))
+    tgt_num, tgt_sym = collect(list(explicit_dims))
+
+    remaining = list(src_sym)
+    for symbol in tgt_sym:
+        if symbol in remaining:
+            remaining.remove(symbol)
+        else:
+            return None
+    if tgt_num == 0 or src_num % tgt_num != 0:
+        return None
+    num = src_num // tgt_num
+    factors = remaining + ([str(num)] if num != 1 else [])
+    return "*".join(factors) if factors else "1"
+
+
 def _resolve_view_shape(
     detail: str,
     source: TensorSpec,
@@ -2245,7 +2335,16 @@ def _resolve_view_shape(
         trailing_start = 1
 
     resolved: list[DimExpr] = list(leading)
+    neg_index: int | None = None
     for part in parts[trailing_start:]:
+        # A ``-1`` axis is resolved last, once every other dim is known.
+        if part == "-1":
+            if neg_index is not None:
+                # More than one ``-1`` cannot be resolved by element conservation.
+                return None
+            neg_index = len(resolved)
+            resolved.append(part)
+            continue
         # Try literal int
         try:
             resolved.append(int(part))
@@ -2259,6 +2358,13 @@ def _resolve_view_shape(
             continue
         # Cannot resolve — give up
         return None
+
+    if neg_index is not None:
+        explicit = [dim for index, dim in enumerate(resolved) if index != neg_index]
+        merged = _merge_flatten_dim(source.shape, explicit)
+        if merged is None:
+            return None
+        resolved[neg_index] = merged
 
     return tuple(resolved) if resolved else None
 
@@ -2541,6 +2647,19 @@ def _infer_einsum_shape(
 # ``float16`` substring it contains.
 _CONCRETE_DTYPE_TOKENS: tuple[tuple[str, str], ...] = (
     ("bfloat16", "bfloat16"),
+    # Low-precision quant dtypes. Placed before the wider float/int tokens so a
+    # substring match resolves e.g. ``float8_e4m3fn`` -> ``fp8_e4m3`` rather than
+    # hitting the generic ``float`` -> ``float32`` fallback. ``uint4`` precedes
+    # ``int4`` because ``uint4`` contains ``int4`` as a substring.
+    ("float8_e4m3", "fp8_e4m3"),
+    ("float8_e5m2", "fp8_e5m2"),
+    ("e4m3", "fp8_e4m3"),
+    ("e5m2", "fp8_e5m2"),
+    ("fp8", "fp8_e4m3"),
+    ("nf4", "nf4"),
+    ("fp4", "fp4"),
+    ("uint4", "uint4"),
+    ("int4", "int4"),
     ("float64", "float64"),
     ("float32", "float32"),
     ("float16", "float16"),
@@ -2583,11 +2702,134 @@ def _resolve_cast_dtype(
     return working_dtype
 
 
+def _clean_dtype(raw: str) -> str:
+    """Normalize a config dtype token: drop a ``torch.`` prefix, lower-case."""
+    return raw.removeprefix("torch.").lower()
+
+
 def _config_dtype(config: dict[str, Any]) -> str:
-    raw = config.get("torch_dtype")
-    if isinstance(raw, str):
-        return raw.removeprefix("torch.").lower()
+    """Resolve the model's real compute/activation dtype.
+
+    Newer HF configs renamed ``torch_dtype`` to ``dtype`` and multimodal models
+    often set it only on ``text_config`` — so search the top level then the known
+    sub-configs for either key. A quantized checkpoint's explicit compute dtype
+    (``bnb_4bit_compute_dtype``) wins, since that is the precision the dequantized
+    weights are computed in.
+    """
+    quant = config.get("quantization_config")
+    if isinstance(quant, dict):
+        compute = quant.get("bnb_4bit_compute_dtype")
+        if isinstance(compute, str) and compute:
+            return _clean_dtype(compute)
+    scopes: list[dict[str, Any]] = [config]
+    for key in ("text_config", "language_config", "vision_config"):
+        nested = config.get(key)
+        if isinstance(nested, dict):
+            scopes.append(nested)
+    for scope in scopes:
+        for field_name in ("torch_dtype", "dtype"):
+            raw = scope.get(field_name)
+            if isinstance(raw, str) and raw:
+                return _clean_dtype(raw)
     return "float16"
+
+
+# FP8 storage-format tokens (``fmt`` in an fp8 quantization_config) -> display dtype.
+_FP8_FMT_DTYPES: dict[str, str] = {"e4m3": "fp8_e4m3", "e5m2": "fp8_e5m2"}
+
+
+def _quant_storage_dtype(quant: dict[str, Any]) -> str | None:
+    """Weight *storage* dtype implied by a HF ``quantization_config``.
+
+    Handles fp8 (e4m3/e5m2), bitsandbytes 4/8-bit, and gptq/awq bit widths.
+    Returns ``None`` when the method/bit-width is unrecognized.
+    """
+    method = str(quant.get("quant_method") or "").lower()
+    if method == "fp8" or quant.get("fmt"):
+        fmt = str(quant.get("fmt") or "e4m3").lower()
+        return _FP8_FMT_DTYPES.get(fmt, "fp8_e4m3")
+    if (
+        method == "bitsandbytes"
+        or quant.get("load_in_4bit")
+        or quant.get("load_in_8bit")
+    ):
+        if quant.get("load_in_8bit"):
+            return "int8"
+        qtype = str(quant.get("bnb_4bit_quant_type") or "").lower()
+        return qtype if qtype in {"nf4", "fp4"} else "int4"
+    bits = quant.get("bits")
+    if method in {"gptq", "awq"} or bits in {4, 8}:
+        return "int8" if bits == 8 else "int4"
+    return None
+
+
+# Structural / non-module tokens that appear in a node id but do not name a
+# module attribute; dropped when reconstructing a module path.
+_STRUCTURAL_ID_TOKENS: frozenset[str] = frozenset(
+    {"seq", "sidefeed", "sideproducer", "side", "loop_repeated", "mirror"}
+)
+
+
+def _module_path_segments(node_id: str) -> list[str]:
+    """Reconstruct a node's local module-attribute path from its graph id.
+
+    Node ids look like ``decoder/11x_.../self_attn/seq:0:q_proj:q_proj:0`` — the
+    module attributes (``self_attn``, ``q_proj``) are interleaved with structural
+    tokens, repeat-group titles, op markers (``@op_*``) and indices, which are all
+    dropped here so the result can be matched against ``modules_to_not_convert``.
+    """
+    segments: list[str] = []
+    for token in re.split(r"[/:]", str(node_id)):
+        token = token.strip().split("^", 1)[0].strip()
+        if not token or token.startswith("@") or token.isdigit():
+            continue
+        if token.lower() in _STRUCTURAL_ID_TOKENS:
+            continue
+        if re.match(r"^\d+x_", token):  # repeat-group title, e.g. 45x_Decoder
+            continue
+        if segments and segments[-1] == token:  # collapse doubled attr (q_proj:q_proj)
+            continue
+        segments.append(token)
+    return segments
+
+
+def _module_path_matches(segments: list[str], pattern: tuple[str, ...]) -> bool:
+    """True when *pattern* (a normalized not-convert tail) applies to *segments*.
+
+    A single-segment pattern (``visual``, ``lm_head``) matches if it appears
+    anywhere (covering all of that module's descendants). A multi-segment pattern
+    must appear as a contiguous run, so ``mlp.shared_experts.down_proj`` never
+    matches ``visual.merger.down_proj`` and vice versa.
+    """
+    if not pattern:
+        return False
+    if len(pattern) == 1:
+        return pattern[0] in segments
+    span = len(pattern)
+    for start in range(len(segments) - span + 1):
+        if tuple(segments[start : start + span]) == pattern:
+            return True
+    return False
+
+
+def _normalize_module_patterns(modules: Any) -> tuple[tuple[str, ...], ...]:
+    """Normalize a ``modules_to_not_convert`` list into matchable segment tuples.
+
+    Drops a leading ``model.`` and any numeric index segments so per-layer entries
+    like ``model.layers.0.self_attn.q_proj`` collapse to ``(self_attn, q_proj)``.
+    """
+    if not isinstance(modules, (list, tuple)):
+        return ()
+    patterns: list[tuple[str, ...]] = []
+    for entry in modules:
+        segs = [seg for seg in str(entry).split(".") if seg and not seg.isdigit()]
+        if segs and segs[0] == "model":
+            segs = segs[1:]
+        if segs and segs[0] == "layers":
+            segs = segs[1:]
+        if segs:
+            patterns.append(tuple(segs))
+    return tuple(dict.fromkeys(patterns))
 
 
 def _is_self_attr(target: ast.Attribute) -> bool:
