@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Sequence
 
 from collections import deque
 
+from ...util import normalize_name_for_comparison
 from ...Trace2Tree.inference_iteration_roots import (
     BRANCH_COVERAGE_GATE,
     BRANCH_DESCENT_TIER,
@@ -197,7 +198,7 @@ def detect_from_branch_descent(
         if len(children) >= MIN_LABEL_CHILDREN:
             ordered = sorted(children, key=lambda e: e.get("ts", 0))
             period, pattern, start = _find_repeating_period(
-                [e.get("name", "") for e in ordered]
+                [normalize_name_for_comparison(e.get("name", "")) for e in ordered]
             )
             if period is not None:
                 unit_blocks = _blocks_by_pattern(ordered, pattern, start)
@@ -249,7 +250,9 @@ def detect_from_sibling_roots(
         return None
 
     ordered = sorted(entry_roots, key=lambda e: e.get("ts", 0))
-    period, _, start = _find_repeating_period([e.get("name", "") for e in ordered])
+    period, _, start = _find_repeating_period(
+        [normalize_name_for_comparison(e.get("name", "")) for e in ordered]
+    )
     if period is None:
         return None
 

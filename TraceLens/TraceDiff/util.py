@@ -6,14 +6,7 @@
 
 """Shared constants and pure utility functions for TraceDiff."""
 
-import re
-
-from ..util import TraceEventUtils
-
-_KERNEL_LAUNCH_EQUIVALENTS = {
-    "hipModuleLaunchKernel": "__kernel_launch__",
-    "cuLaunchKernel": "__kernel_launch__",
-}
+from ..util import TraceEventUtils, normalize_name_for_comparison
 
 _TraceKeys = TraceEventUtils.TraceKeys
 _UID = _TraceKeys.UID
@@ -32,7 +25,7 @@ def _get_name_node(node, strip_details=False):
     if node is None:
         return None
     name = node.get(_NAME)
-    return _normalize_name_for_comparison(name, strip_details) if name else None
+    return normalize_name_for_comparison(name, strip_details) if name else None
 
 
 def _list_to_tuple(obj):
@@ -62,12 +55,3 @@ def _is_kernel(node):
     return node.get(_CATEGORY) in ("kernel", "gpu_memcpy")
 
 
-def _normalize_name_for_comparison(name, strip_details=False):
-    if name is None:
-        return name
-    normalized = re.sub(r"0x[0-9a-fA-F]+", "0xXXXX", name)
-    normalized = re.sub(r"\.py\(\d+\):", ".py:", normalized)
-    if strip_details:
-        normalized = re.sub(r":\s+\S+$", "", normalized)
-        normalized = re.sub(r"^.*/([^/]+\.py)$", r"\1", normalized)
-    return _KERNEL_LAUNCH_EQUIVALENTS.get(normalized, normalized)

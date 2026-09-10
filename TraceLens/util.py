@@ -86,6 +86,29 @@ def merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, f
     return merged
 
 
+_KERNEL_LAUNCH_EQUIVALENTS = {
+    "hipModuleLaunchKernel": "__kernel_launch__",
+    "cuLaunchKernel": "__kernel_launch__",
+}
+
+
+def normalize_name_for_comparison(name, strip_details=False):
+    """Normalize a trace event name for comparison.
+
+    Strips volatile parts (line numbers, hex addresses) so that names like
+    ``scheduler.py(3006): run_batch`` and ``scheduler.py(2996): run_batch``
+    compare as equal.
+    """
+    if name is None:
+        return name
+    normalized = re.sub(r"0x[0-9a-fA-F]+", "0xXXXX", name)
+    normalized = re.sub(r"\.py\(\d+\):", ".py:", normalized)
+    if strip_details:
+        normalized = re.sub(r":\s+\S+$", "", normalized)
+        normalized = re.sub(r"^.*/([^/]+\.py)$", r"\1", normalized)
+    return _KERNEL_LAUNCH_EQUIVALENTS.get(normalized, normalized)
+
+
 # generic data loader class for json, json.gz, or tensorboard pb files
 # tensorboard pb files are useful for Jax in particular because the json.gz traces produced by jax can have incorrect timestamps and missing information
 class DataLoader:
