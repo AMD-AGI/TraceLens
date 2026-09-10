@@ -92,7 +92,7 @@ expects.
 Invoke the agent from any chat session with a capable model using one of the following prompts.
 
 ```{note}
-The orchestrator skills are portable and work with agentic runners that support skill-file discovery.
+The orchestrator skills are portable and work with agentic runners that support skill-file discovery (for example, Claude Code, Cursor, or Codex).
 ```
 
 In a chat with a capable model, invoke one of:
