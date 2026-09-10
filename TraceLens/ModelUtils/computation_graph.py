@@ -663,7 +663,15 @@ def _wire_multi_input_op_forward_links(
         target_index = _first_graph_index_for_module(consumer, attr_last_index)
         if target_index is None:
             target_index = attr_last_index.get(consumer.attr_name)
-        if target_index is not None and (source_index, target_index) not in graph.links:
+        if target_index is None:
+            continue
+        # Only bridge to a consumer that is genuinely waiting for an input. If it
+        # already reads something (its boundary parameter or another producer), the
+        # source is a terminal side-effect — e.g. an unconsumed cache-update ``Cast``
+        # of ``last_recurrent_state`` — and forcing an edge would misattribute it.
+        if _node_has_incoming_links(graph, target_index):
+            continue
+        if (source_index, target_index) not in graph.links:
             graph.links.append((source_index, target_index))
 
 
@@ -1531,6 +1539,10 @@ def _append_step_link(
 
 def _node_has_outgoing_links(graph: ComputationGraph, index: int) -> bool:
     return any(source == index for source, _target in graph.links)
+
+
+def _node_has_incoming_links(graph: ComputationGraph, index: int) -> bool:
+    return any(target == index for _source, target in graph.links)
 
 
 def _forward_steps_by_attr(root: BlockNode) -> dict[str, BlockNode]:
@@ -2675,7 +2687,16 @@ def build_computation_graph(
                 if explicit_sources:
                     for source_index in explicit_sources:
                         graph.links.append((source_index, step_index))
-                elif not _reads_only_a_side_parameter(sub_step):
+                elif (
+                    not _reads_only_a_side_parameter(sub_step)
+                    and not sub_step.operation_predecessors
+                ):
+                    # Only spine-chain steps that name no predecessors. A step that
+                    # names producers (e.g. a gate ``view`` reading a side-producer
+                    # ``g_b_proj`` not yet materialized) gets its real edges from
+                    # ``_wire_all_predecessor_edges``; the sequential fallback would
+                    # otherwise fabricate an edge from whatever ``last_index`` is —
+                    # e.g. an unconsumed cache-update ``Cast`` sitting just before it.
                     use_fork = fork_from_input and sub_index == 0
                     _append_step_link(
                         graph,

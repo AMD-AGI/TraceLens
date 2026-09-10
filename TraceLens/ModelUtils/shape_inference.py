@@ -252,6 +252,11 @@ class ModuleDimRegistry:
     parameter_by_attr: dict[str, ModuleParameterSpec] = field(default_factory=dict)
     conv: dict[tuple[str, str], ModuleConvSpec] = field(default_factory=dict)
     conv_by_attr: dict[str, ModuleConvSpec] = field(default_factory=dict)
+    # Scalar ``self.head_dim = config.linear_head_dim`` style dims, per class. The
+    # global config dim of the same name can be a zero placeholder (GLM's
+    # ``head_dim``), so a reshape naming ``self.head_dim`` must resolve against the
+    # owning module's own constructor value.
+    scalar_by_class: dict[str, dict[str, DimExpr]] = field(default_factory=dict)
     # Names like `weight` are declared by many modules with different shapes; guessing
     # across classes would be worse than having no shape at all.
     ambiguous_parameters: set[str] = field(default_factory=set)
@@ -370,6 +375,7 @@ class ModuleDimRegistry:
         )
         if resolved is not None:
             local_vars[target.attr] = resolved
+            self.scalar_by_class.setdefault(class_name, {})[target.attr] = resolved
         spec = _parse_module_ctor(
             value, config=config, local_vars=local_vars, context=context
         )
@@ -1059,10 +1065,21 @@ class ShapeInferencer:
                 "",
             )
             # Try structured resolution first (handles starred prefixes and
-            # symbolic dimension names from the model config).
-            resolved = _resolve_view_shape(
-                shape_detail, source, self.context.dims
+            # symbolic dimension names from the model config). Overlay the owning
+            # module's own scalar dims so ``self.head_dim`` resolves to that
+            # module's value, not a global zero placeholder.
+            view_dims = self.context.dims
+            # The op may live directly in ``root``'s forward (block-local id with no
+            # module segment), so fall back to the block's own class.
+            owner = self._owner_class_name(node, root=root) or (
+                root.class_name if root is not None else None
             )
+            owner_scalars = (
+                self.module_dims.scalar_by_class.get(owner) if owner else None
+            )
+            if owner_scalars:
+                view_dims = {**self.context.dims, **owner_scalars}
+            resolved = _resolve_view_shape(shape_detail, source, view_dims)
             if resolved is not None:
                 return TensorSpec(shape=resolved, dtype=source.dtype)
             if "-1" in shape_detail:
@@ -2330,8 +2347,6 @@ def _resolve_view_shape(
     # Detect starred prefix like ``*foo.shape[:-1]`` or ``*foo.shape[:-N]``.
     first = parts[0]
     if first.startswith("*") and ".shape" in first:
-        import re
-
         m = re.search(r"\.shape\[:\s*(-?\d+)\]", first)
         if m:
             cut = int(m.group(1))
@@ -2362,6 +2377,15 @@ def _resolve_view_shape(
         if val is not None:
             resolved.append(val)
             continue
+        # A ``x.shape[i]`` axis (from an unpacked ``a, b = x.shape[:2]`` local)
+        # copies that positional dim from the reshape's source — the leading
+        # batch/seq axes a reshape preserves.
+        shape_ref = re.match(r"^[\w.]+\.shape\[(-?\d+)\]$", part)
+        if shape_ref is not None:
+            axis = int(shape_ref.group(1))
+            if -len(source.shape) <= axis < len(source.shape):
+                resolved.append(source.shape[axis])
+                continue
         # Cannot resolve — give up
         return None
 

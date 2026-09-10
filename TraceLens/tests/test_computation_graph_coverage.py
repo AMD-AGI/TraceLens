@@ -146,6 +146,47 @@ def test_node_has_outgoing_links():
     assert not cg._node_has_outgoing_links(graph, 1)
 
 
+def test_node_has_incoming_links():
+    graph = cg.ComputationGraph(links=[(0, 1)])
+    assert cg._node_has_incoming_links(graph, 1)
+    assert not cg._node_has_incoming_links(graph, 0)
+
+
+def _wire_multi_input_graph(consumer_preexisting_input: bool):
+    """Build a root whose producer has a predecessor but no outgoing edge.
+
+    ``up`` (order 0) feeds ``prod`` (order 1); ``sink`` (order 2) follows. The
+    bridge connects ``prod`` to ``sink`` only when the sink is genuinely dangling.
+    """
+    up = _node("up", forward_order=0)
+    prod = _node("prod", forward_order=1, operation_predecessors=["up"])
+    sink = _node("sink", forward_order=2)
+    root = _node("root", children=[up, prod, sink])
+    graph = cg.ComputationGraph(
+        nodes=[
+            _spec(block=up, key="up"),
+            _spec(block=prod, key="prod"),
+            _spec(block=sink, key="sink"),
+        ],
+    )
+    if consumer_preexisting_input:
+        # An @input already feeds the sink, so it is not waiting for ``prod``.
+        graph.nodes.append(_spec(key="@input"))
+        graph.links.append((3, 2))
+    attr_last_index = {"up": 0, "prod": 1, "sink": 2}
+    cg._wire_multi_input_op_forward_links(graph, root, attr_last_index)
+    return graph
+
+
+def test_wire_multi_input_bridges_only_dangling_consumer():
+    # Dangling sink: the producer (prod=index 1) is bridged to it (sink=index 2).
+    dangling = _wire_multi_input_graph(consumer_preexisting_input=False)
+    assert (1, 2) in dangling.links
+    # Sink already has an input: the terminal-side-effect producer is not forced in.
+    guarded = _wire_multi_input_graph(consumer_preexisting_input=True)
+    assert (1, 2) not in guarded.links
+
+
 def test_forward_steps_by_attr():
     a = _node("a")
     b = _node("b")

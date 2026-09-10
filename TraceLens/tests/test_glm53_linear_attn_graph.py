@@ -163,6 +163,39 @@ def test_glm53_linear_attention_gate_chain_is_not_short_circuited():
     assert (key_to_index["@input"], key_to_index[g_b_key]) not in links
 
 
+def test_glm53_gate_view_has_no_recurrent_state_cast_edge():
+    """The gate ``view`` reads only its ``g_b_proj`` producer.
+
+    ``last_recurrent_state.to(torch.float32)`` (source line 726) is an unconsumed
+    cache-update side-effect that sits on the spine just before the gate
+    ``view = self.g_b_proj(...).view(hidden_shape)``. Neither the sequential
+    fallback nor the multi-input forward-link bridge may fabricate an edge from
+    that terminal Cast into the view (or into the ``g_a_proj``/``g_b_proj`` side
+    producers that already read ``hidden_states``).
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    _title, tree = _linear_attn_tree(spec)
+    graph = build_computation_graph(tree, basic_ops=spec.basic_ops)
+
+    key_to_index = {node.key: index for index, node in enumerate(graph.nodes)}
+    view_key = _graph_key_for_op(graph, ":@op_l732_c15_view:")
+    g_b_key = _graph_key(graph, ":g_b_proj")
+    view_index = key_to_index[view_key]
+    incoming = [source for source, target in graph.links if target == view_index]
+    # Exactly one real producer: the g_b_proj Linear.
+    assert incoming == [key_to_index[g_b_key]]
+
+    # The recurrent-state Cast never feeds anything inside the block.
+    cast_indices = [
+        index
+        for index, node in enumerate(graph.nodes)
+        if "@op_l729_c48_cast" in node.key
+    ]
+    for cast_index in cast_indices:
+        assert not any(source == cast_index for source, _target in graph.links)
+
+
 def test_glm53_spine_hyperconnection_stays_on_variant_namespace():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -362,7 +395,10 @@ def test_glm53_gated_norm_boundary_inputs_come_from_their_own_producers():
             for attr in node.get("attrs", [])
         )
     }
-    assert set(inputs) == {"hidden_states", "gate"}
+    # The gated norm is called ``self.o_norm(core_attn_out, gate)``: its first
+    # boundary tile is named for the actual argument ``core_attn_out`` (the
+    # attention output), not the module's own parameter name ``hidden_states``.
+    assert set(inputs) == {"core_attn_out", "gate"}
 
     node_by_id = {node["id"]: node for node in graph["nodes"]}
 
@@ -388,7 +424,7 @@ def test_glm53_gated_norm_boundary_inputs_come_from_their_own_producers():
     assert gate_sources and all(
         "g_b_proj" in source or "view" in source for source in gate_sources
     )
-    hidden_sources = outer_sources(inputs["hidden_states"])
+    hidden_sources = outer_sources(inputs["core_attn_out"])
     assert hidden_sources and not any("g_b_proj" in item for item in hidden_sources)
 
     gate_consumers = {

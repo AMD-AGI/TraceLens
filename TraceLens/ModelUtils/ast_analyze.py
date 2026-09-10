@@ -1498,6 +1498,14 @@ class _ForwardOperationExtractor:
         self.operations: list[ForwardOperation] = []
         self.var_producer: dict[str, str] = {}
         self.var_module_origin: dict[str, str] = {}
+        # ``a, b = x.shape[:2]`` binds ``a``/``b`` to a source dim; record the
+        # positional read token (``x.shape[0]``) so a later ``view``/``reshape``
+        # arg naming ``a`` resolves to that axis instead of an opaque local.
+        self.shape_unpack_tokens: dict[str, str] = {}
+        # ``hidden_shape = (a, b, -1, self.head_dim)`` — a local tuple used as a
+        # reshape target. Record the literal so ``view(hidden_shape)`` expands to
+        # its dims rather than the un-resolvable variable name.
+        self.shape_tuple_vars: dict[str, ast.Tuple] = {}
         self.step_predecessors: dict[str, tuple[str, ...]] = {}
         self.step_predecessor_args: dict[str, dict[str, str]] = {}
         self.loop_carried: list[LoopCarriedSpec] = []
@@ -1780,7 +1788,7 @@ class _ForwardOperationExtractor:
         ):
             details.append("dtype: torch.float32")
         if call_name in {"view", "reshape", "expand"}:
-            details.append("shape: " + ", ".join(ast.unparse(arg) for arg in node.args))
+            details.append("shape: " + self._format_shape_args(node.args))
         if call_name in {"split", "chunk"}:
             # For torch.split(tensor, split_size, dim) the tensor is arg0;
             # for tensor.split(split_size, dim) there is no tensor arg.
@@ -1855,6 +1863,57 @@ class _ForwardOperationExtractor:
             return
         for name in self._target_names(stmt):
             self.var_producer[name] = producer
+
+    def _track_shape_assignment(
+        self, targets: list[ast.expr], value: ast.AST
+    ) -> None:
+        """Record shape-derived locals so reshape args resolve to real axes.
+
+        Two patterns feed reshape targets: unpacking a tensor's shape
+        (``a, b = x.shape[:2]``) and building a dim tuple from those unpacked
+        names (``hidden_shape = (a, b, -1, self.head_dim)``). Neither is a tensor
+        producer, so both are invisible to the data-flow tracking; capturing them
+        here lets ``_format_shape_args`` expand ``view(hidden_shape)`` into
+        ``x.shape[0], x.shape[1], -1, self.head_dim`` for the shape inferencer.
+        """
+        if len(targets) == 1 and isinstance(targets[0], (ast.Tuple, ast.List)):
+            base = _shape_read_base(value)
+            if base is not None:
+                for index, elt in enumerate(targets[0].elts):
+                    if isinstance(elt, ast.Name):
+                        self.shape_unpack_tokens[elt.id] = f"{base}.shape[{index}]"
+        if isinstance(value, ast.Tuple):
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    self.shape_tuple_vars[target.id] = value
+
+    def _format_shape_args(self, args: list[ast.expr]) -> str:
+        """Render ``view``/``reshape``/``expand`` args, expanding shape locals."""
+        parts: list[str] = []
+        for arg in args:
+            if isinstance(arg, ast.Name) and arg.id in self.shape_tuple_vars:
+                parts.extend(self._expand_shape_tuple(self.shape_tuple_vars[arg.id]))
+            else:
+                parts.append(self._render_shape_dim(arg))
+        return ", ".join(parts)
+
+    def _expand_shape_tuple(self, tup: ast.Tuple) -> list[str]:
+        return [self._render_shape_dim(elt) for elt in tup.elts]
+
+    def _render_shape_dim(self, elt: ast.expr) -> str:
+        """One reshape dim as a resolver-friendly token.
+
+        Unpacked shape locals (``batch_size`` → ``x.shape[0]``) keep their source
+        axis; ``self.head_dim``-style config attributes resolve to their concrete
+        int (the global ``head_dim`` is a zero placeholder here); everything else
+        is left as source text for the shape inferencer to interpret.
+        """
+        if isinstance(elt, ast.Name) and elt.id in self.shape_unpack_tokens:
+            return self.shape_unpack_tokens[elt.id]
+        resolved = _config_value(elt, {}, self.self_values)
+        if isinstance(resolved, int) and not isinstance(resolved, bool):
+            return str(resolved)
+        return ast.unparse(elt)
 
     def _range_iteration_count(self, node: ast.For) -> int | None:
         """Resolve a small static ``range(...)`` loop from constructor/config values."""
@@ -1954,6 +2013,7 @@ class _ForwardOperationExtractor:
                 targets = (
                     stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
                 )
+                self._track_shape_assignment(targets, value)
                 direct_module = (
                     value.func.attr
                     if isinstance(value, ast.Call)
@@ -3117,6 +3177,24 @@ def _subscript_root_name(expr: ast.AST) -> str | None:
     while isinstance(expr, ast.Subscript):
         expr = expr.value
     return expr.id if isinstance(expr, ast.Name) else None
+
+
+def _shape_read_base(value: ast.AST) -> str | None:
+    """Source-tensor expression of a ``<tensor>.shape`` / ``.shape[:k]`` read.
+
+    ``hidden_states.shape[:2]`` and ``hidden_states.shape`` both return
+    ``"hidden_states"``; anything that is not a shape read returns ``None``.
+    """
+    node = value
+    if isinstance(node, ast.Subscript):
+        node = node.value
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr == "shape"
+        and not _is_self_attr(node, node.attr)
+    ):
+        return ast.unparse(node.value)
+    return None
 
 
 def _inplace_label(method: str) -> str:
