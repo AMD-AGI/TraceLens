@@ -137,11 +137,11 @@ def test_glm53_linear_attention_gate_chain_is_not_short_circuited():
 
     g_a_key = _graph_key(graph, ":g_a_proj")
     g_b_key = _graph_key(graph, ":g_b_proj")
-    o_norm_power_key = _graph_key_for_op(graph, ":o_norm:@op_l351_c19_power:")
-    o_norm_mean_key = _graph_key_for_op(graph, ":o_norm:@op_l351_c19_mean:")
-    o_norm_rsqrt_key = _graph_key_for_op(graph, ":o_norm:@op_l352_c40_reciprocal_sqrt:")
-    o_norm_gate_key = _graph_key_for_op(graph, ":o_norm:@op_l356_c40_sigmoid:")
-    o_norm_mul_key = _graph_key_for_op(graph, ":o_norm:@op_l356_c24_multiply:")
+    o_norm_power_key = _graph_key_for_op(graph, ":o_norm:@op_l353_c19_power:")
+    o_norm_mean_key = _graph_key_for_op(graph, ":o_norm:@op_l353_c19_mean:")
+    o_norm_rsqrt_key = _graph_key_for_op(graph, ":o_norm:@op_l354_c40_reciprocal_sqrt:")
+    o_norm_gate_key = _graph_key_for_op(graph, ":o_norm:@op_l358_c40_sigmoid:")
+    o_norm_mul_key = _graph_key_for_op(graph, ":o_norm:@op_l358_c24_multiply:")
 
     assert g_a_key in keys
     assert g_b_key in keys
@@ -225,7 +225,7 @@ def test_glm53_hyperconnection_expands_mhc_math():
     assert "Sum" in labels
     assert any(frame.label == "Loop · 19 iterations" for frame in graph.inline_frames)
     assert set(graph.output_ports) == {"post", "comb", "collapsed"}
-    carried_out_index = graph.loop_carried_nodes["@op_l290_c19_divide"]
+    carried_out_index = graph.loop_carried_nodes["@op_l291_c19_divide"]
     assert graph.nodes[carried_out_index].label == "Loop carried dependencies out"
     carried_out_inputs = {
         graph.link_port_labels[(source, carried_out_index)]
@@ -250,7 +250,7 @@ def test_glm53_hyperconnection_expands_mhc_math():
     multiply_index = next(
         index
         for index, node in enumerate(graph.nodes)
-        if node.block is not None and node.block.attr_name == "@op_l294_c21_multiply"
+        if node.block is not None and node.block.attr_name == "@op_l295_c21_multiply"
     )
     incoming_labels = {
         graph.nodes[source].label
@@ -469,13 +469,13 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     key_to_index = {node.key: index for index, node in enumerate(graph.nodes)}
     sources = {source for source, _target in graph.links}
 
-    concat_key = _graph_key(graph, ":@op_l642_c20_concat:@op_l642_c20_concat:0")
-    conv_update_key = _graph_key_for_op(graph, ":@op_l659_c24_causal_conv1d_update:")
-    conv_key = _graph_key_for_op(graph, ":@op_l674_c24_causal_conv1d:")
-    split_key = _graph_key_for_op(graph, ":@op_l685_c28_split:")
+    concat_key = _graph_key(graph, ":@op_l645_c20_concat:@op_l645_c20_concat:0")
+    conv_update_key = _graph_key_for_op(graph, ":@op_l662_c24_causal_conv1d_update:")
+    conv_key = _graph_key_for_op(graph, ":@op_l677_c24_causal_conv1d:")
+    split_key = _graph_key_for_op(graph, ":@op_l688_c28_split:")
     forget_entry_key = _graph_key(graph, ":forget_gate:f_a_proj:0")
-    branch_mul_key = _graph_key_for_op(graph, ":forget_gate:@op_l329_c19_multiply:")
-    branch_add_key = _graph_key_for_op(graph, ":forget_gate:@op_l323_c13_add:")
+    branch_mul_key = _graph_key_for_op(graph, ":forget_gate:@op_l330_c19_multiply:")
+    branch_add_key = _graph_key_for_op(graph, ":forget_gate:@op_l324_c13_add:")
     input_index = next(
         index for index, node in enumerate(graph.nodes) if node.synthetic == "@input"
     )
@@ -691,8 +691,8 @@ def test_glm53_decoder_residual_ops_use_return_slot_producers():
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     decoder = spec.class_registry["Glm5NextTextDecoderLayer"]
     attn_hc = spec.class_registry["Glm5NextTextHyperConnection"]
-    matmul = decoder.forward_operations["@op_l1316_c85_matmul"]
-    multiply = decoder.forward_operations["@op_l1316_c24_multiply"]
+    matmul = decoder.forward_operations["@op_l1319_c85_matmul"]
+    multiply = decoder.forward_operations["@op_l1319_c24_multiply"]
     operations = decoder.forward_operations
 
     def depends_on(operation, producer):
@@ -820,7 +820,7 @@ def test_glm53_moe_keeps_only_the_live_residual_add():
         node
         for node in nodes
         if node["id"].startswith(f"{prefix}/mlp/")
-        and ":@op_l206_c24_add:" in node["id"]
+        and ":@op_l207_c24_add:" in node["id"]
     )
     assert any(
         edge["sourceNodeId"] == add["id"]
@@ -895,7 +895,7 @@ def test_glm53_decoder_boundary_keeps_hyper_stream_shape():
 
     prefix = _linear_attn_variant_prefix(spec)
     node_by_id = {node["id"]: node for node in graph["nodes"]}
-    for operation_id in ("@op_l1316_c24_add", "@op_l1325_c24_add"):
+    for operation_id in ("@op_l1319_c24_add", "@op_l1328_c24_add"):
         residual_add = node_by_id[f"{prefix}/{operation_id}"]
         output_shape = next(
             attr["value"]
@@ -972,7 +972,7 @@ def test_glm53_attention_lora_norms_do_not_share_a_namespace():
     residual = next(
         node
         for node in graph["nodes"]
-        if node["id"].endswith("/@op_l1316_c55_unsqueeze")
+        if node["id"].endswith("/@op_l1319_c55_unsqueeze")
         and "Glm5NextTextAttention_Glm5NextTextMoE" in node["id"]
     )
     assert residual["incomingEdges"][0]["sourceNodeId"].endswith(

@@ -7,15 +7,11 @@
 
 """CLI for exporting TraceLens model graphs to Model Explorer.
 
-Two backends are available via ``--backend``:
-
-- ``torch`` (default): loads the checkpoint and traces it with PyTorch on
-  the meta device (``TraceLens.ModelUtils.torch_trace``).
-- ``ast``: parses the model's ``modeling_*.py`` source with Python's
-  ``ast`` module instead of executing any model code
-  (``TraceLens.ModelUtils.extract`` / ``computation_graph`` / ...). Kept as
-  a switchable fallback, e.g. for checkpoints that cannot be instantiated
-  or traced.
+The graph is built by statically parsing the model's ``modeling_*.py`` source
+with Python's ``ast`` module instead of executing any model code
+(``TraceLens.ModelUtils.extract`` / ``computation_graph`` / ...). A PyTorch
+meta-device pass (``--meta-shapes``, on by default) is used only to fill in
+tensor shapes the static analysis can't infer.
 """
 
 from __future__ import annotations
@@ -39,7 +35,6 @@ from TraceLens.Visualizer.model_explorer_export.ast_build import (
     build_operator_export_payload,
 )
 from TraceLens.Visualizer.model_explorer_export.build import (
-    build_model_explorer_payload as build_torch_model_explorer_payload,
     save_model_explorer_payload,
 )
 from TraceLens.Visualizer.model_explorer_export.serve import (
@@ -52,19 +47,15 @@ from TraceLens.Visualizer.model_explorer_export.viewer_page import (
     save_viewer_html,
 )
 
-BACKENDS = ("torch", "ast")
-DEFAULT_BACKEND = "torch"
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="visualize-model-in-explorer",
         description=(
             "TraceLens Model Explorer export — load a Hugging Face model checkpoint "
             "and build a Model Explorer graph, then serve or write a standalone "
-            "viewer page. Use --backend to pick how the graph is built: 'torch' "
-            "(default) traces the model with PyTorch on the meta device; 'ast' "
-            "statically parses the modeling source instead of running any code."
+            "viewer page. The graph is built by statically parsing the modeling "
+            "source; a PyTorch meta-device pass (--meta-shapes, on by default) "
+            "fills in shapes the static analysis can't infer."
         ),
     )
     parser.add_argument(
@@ -76,16 +67,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--checkpoint",
         "-c",
         help="Hugging Face model id or local checkpoint path for config.json",
-    )
-    parser.add_argument(
-        "--backend",
-        choices=BACKENDS,
-        default=DEFAULT_BACKEND,
-        help=(
-            "Graph-building backend: 'torch' traces the model with PyTorch on the "
-            f"meta device (default), 'ast' statically parses the modeling source "
-            "without executing any code (backup path)"
-        ),
     )
     parser.add_argument(
         "-o",
@@ -121,25 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Open the viewer in a browser after export (implies --serve)",
     )
 
-    torch_group = parser.add_argument_group(
-        "torch backend", "Options used when --backend torch (the default)"
-    )
-    torch_group.add_argument(
-        "--seq-len",
-        type=int,
-        default=128,
-        help="Sequence length for meta-device tracing (default: 128)",
-    )
-    torch_group.add_argument(
-        "--batch-size",
-        type=int,
-        default=1,
-        help="Batch size for meta-device tracing (default: 1)",
-    )
-
-    ast_group = parser.add_argument_group(
-        "ast backend", "Options used when --backend ast"
-    )
+    ast_group = parser.add_argument_group("model source options")
     ast_group.add_argument(
         "--github",
         "-g",
@@ -216,11 +179,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ast_group.add_argument(
         "--meta-shapes",
+        dest="meta_shapes",
         action="store_true",
+        default=True,
         help=(
-            "Run a meta-device forward pass (requires torch + transformers) "
-            "to capture ground-truth output shapes for nn.Module layers"
+            "Run a meta-device forward pass (requires torch + transformers) to "
+            "capture ground-truth shapes for nn.Module layers AND for inline "
+            "operations the static analysis can't resolve (default: on)"
         ),
+    )
+    ast_group.add_argument(
+        "--no-meta-shapes",
+        dest="meta_shapes",
+        action="store_false",
+        help="Disable torch-assisted shape inference (pure static analysis)",
+    )
+
+    torch_group = parser.add_argument_group("pure-PyTorch module options")
+    torch_group.add_argument(
+        "--torch-module",
+        metavar="PKG.MOD:FACTORY",
+        help=(
+            "Introspect a plain torch.nn.Module instead of an HF checkpoint. "
+            "Give an importable 'package.module:callable' that returns an "
+            "nn.Module (a class or zero-arg factory). Requires torch; the "
+            "module is symbolically traced with torch.fx. Requires --input-shape."
+        ),
+    )
+    torch_group.add_argument(
+        "--input-shape",
+        metavar="N,...",
+        help="Comma-separated primary input tensor shape for --torch-module (e.g. 2,128)",
     )
     return parser
 
@@ -254,15 +243,6 @@ def write_optional_output(payload: dict, output: Path) -> Path:
     saved = save_model_explorer_payload(payload, output)
     print(f"Wrote Model Explorer JSON: {saved}")
     return saved
-
-
-def _build_torch_payload(checkpoint: str, args: argparse.Namespace) -> dict:
-    return build_torch_model_explorer_payload(
-        checkpoint,
-        seq_len=args.seq_len,
-        batch_size=args.batch_size,
-        title=args.title,
-    )
 
 
 def _load_ast_spec(
@@ -317,48 +297,122 @@ def _build_ast_payload(
     return payload
 
 
+def parse_input_shape(text: str) -> tuple[int, ...]:
+    """Parse a ``"2,128"`` style ``--input-shape`` into a tuple of ints."""
+    dims = [part.strip() for part in str(text).split(",") if part.strip()]
+    if not dims:
+        raise ValueError("--input-shape must list at least one dimension, e.g. 2,128")
+    try:
+        return tuple(int(dim) for dim in dims)
+    except ValueError as exc:  # noqa: TRY003
+        raise ValueError(f"--input-shape must be comma-separated integers: {text!r}") from exc
+
+
+def _load_torch_module(target: str):  # pragma: no cover
+    """Import ``package.module:callable`` and instantiate an ``nn.Module``."""
+    import importlib
+
+    module_path, _, attr = target.partition(":")
+    if not module_path or not attr:
+        raise ValueError(
+            f"--torch-module must be 'package.module:callable', got {target!r}"
+        )
+    module = importlib.import_module(module_path)
+    factory = getattr(module, attr)
+    instance = factory() if callable(factory) else factory
+    return instance
+
+
+def _build_torch_module_payload(args: argparse.Namespace) -> dict:  # pragma: no cover
+    from TraceLens.ModelUtils.torch_introspect import build_torch_module_payload
+
+    module = _load_torch_module(args.torch_module)
+    input_shape = parse_input_shape(args.input_shape)
+    name = args.title or type(module).__name__
+    return build_torch_module_payload(
+        module, input_shape, include_shapes=args.shapes, name=name
+    )
+
+
+def _run_torch_module(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> int:  # pragma: no cover
+    try:
+        payload = _build_torch_module_payload(args)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error introspecting torch module: {exc}", file=sys.stderr)
+        return 1
+
+    serve_requested = args.serve or args.open
+    module_stem = args.torch_module.replace(":", "_").rsplit(".", 1)[-1]
+
+    if args.output is not None or not serve_requested:
+        output = args.output
+        if output is None or output == Path("__default__"):
+            output = Path.cwd() / (module_stem + ".html")
+        try:
+            write_optional_output(payload, output)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error writing output: {exc}", file=sys.stderr)
+            return 1
+
+    if serve_requested:
+        url = viewer_url(args.port)
+        print(f"Open viewer: {url}")
+        try:
+            if args.open:
+                open_viewer(url)
+            serve_viewer(payload=payload, port=args.port, block=args.serve)
+            if not args.serve:
+                print("Viewer started in the background. Press Ctrl+C to exit.")
+                try:
+                    threading.Event().wait()
+                except KeyboardInterrupt:
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error serving viewer: {exc}", file=sys.stderr)
+            return 1
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.torch_module is not None:
+        if args.input_shape is None:
+            parser.error("--torch-module requires --input-shape")
+        return _run_torch_module(args, parser)
+
     checkpoint = resolve_checkpoint_arg(checkpoint=args.checkpoint, source=args.source)
 
-    if args.backend == "torch":
-        if checkpoint is None:
-            parser.error("Provide a Hugging Face checkpoint (SOURCE or --checkpoint)")
-        try:
-            payload = _build_torch_payload(checkpoint, args)
-        except Exception as exc:  # noqa: BLE001
-            print(f"Error building model graph: {exc}", file=sys.stderr)
-            return 1
-        spec = None
-    else:
-        if checkpoint is None and args.github is None:
-            parser.error(
-                "Provide a Hugging Face checkpoint (SOURCE or --checkpoint) and/or --github"
-            )
-        try:
-            spec = _load_ast_spec(checkpoint, args)
-        except Exception as exc:  # noqa: BLE001
-            print(f"Error loading architecture: {exc}", file=sys.stderr)
-            return 1
+    if checkpoint is None and args.github is None:
+        parser.error(
+            "Provide a Hugging Face checkpoint (SOURCE or --checkpoint) and/or --github"
+        )
+    try:
+        spec = _load_ast_spec(checkpoint, args)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error loading architecture: {exc}", file=sys.stderr)
+        return 1
 
-        try:
-            payload = _build_ast_payload(checkpoint, spec, args)
-        except Exception as exc:  # noqa: BLE001
-            print(f"Error exporting Model Explorer payload: {exc}", file=sys.stderr)
-            return 1
+    try:
+        payload = _build_ast_payload(checkpoint, spec, args)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error exporting Model Explorer payload: {exc}", file=sys.stderr)
+        return 1
 
-        if args.operators_json is not None:
-            try:
-                operator_payload = payload["tracelensViewer"].get("operatorExport")
-                if operator_payload is None:
-                    operator_payload = build_operator_export_payload(spec)
-                saved = save_operator_export(operator_payload, args.operators_json)
-                print(f"Wrote operator export JSON: {saved}")
-            except Exception as exc:  # noqa: BLE001
-                print(f"Error writing operator export: {exc}", file=sys.stderr)
-                return 1
+    if args.operators_json is not None:
+        try:
+            operator_payload = payload["tracelensViewer"].get("operatorExport")
+            if operator_payload is None:
+                operator_payload = build_operator_export_payload(spec)
+            saved = save_operator_export(operator_payload, args.operators_json)
+            print(f"Wrote operator export JSON: {saved}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error writing operator export: {exc}", file=sys.stderr)
+            return 1
 
     serve_requested = args.serve or args.open
 

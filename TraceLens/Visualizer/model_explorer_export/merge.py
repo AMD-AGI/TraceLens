@@ -26,7 +26,11 @@ from TraceLens.ModelUtils.block_tree import (
 )
 from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant
 from TraceLens.ModelUtils.computation_graph import ComputationGraph, build_computation_graph
-from TraceLens.ModelUtils.extract import ArchitectureSpec, architecture_section_trees
+from TraceLens.ModelUtils.extract import (
+    ArchitectureSpec,
+    architecture_section_trees,
+    vision_tower_component,
+)
 from TraceLens.ModelUtils.shape_inference import ShapeInferencer, Symbol, TensorSpec
 
 from TraceLens.Visualizer.model_explorer_export.adapter import (
@@ -2341,6 +2345,7 @@ def _append_variant_layer(
     group_node_configs: list[dict[str, Any]],
     group_node_attributes: dict[str, dict[str, str]],
     shape_inferencer: ShapeInferencer | None = None,
+    inline_expansion: bool = True,
 ) -> list[SourceRef]:
     chain_exits = list(previous_exits)
     residual_source = chain_exits[0] if chain_exits else None
@@ -2658,6 +2663,7 @@ def _append_decoder_layers(
                     group_node_configs=group_node_configs,
                     group_node_attributes=group_node_attributes,
                     shape_inferencer=shape_inferencer,
+                    inline_expansion=inline_expansion,
                 )
             variant_exits.extend(
                 _wrap_actual_group_boundary(
@@ -2730,6 +2736,81 @@ def _group_config_for_role(namespace: str, role: str) -> dict[str, Any] | None:
     return config
 
 
+def _append_vision_section(
+    nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    basic_ops: BasicOpFilter,
+    group_node_configs: list[dict[str, Any]],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+) -> SourceRef | None:
+    """Emit a VLM vision tower as an expandable group; return its output ref.
+
+    Returns ``None`` for a text-only model (nothing is appended) or when the tower
+    is too small to warrant its own subgraph, so the text-only path is untouched.
+    """
+    component = vision_tower_component(spec)
+    if component is None or not component_has_detail_section(component, spec):
+        return None
+
+    nodes.append(
+        {
+            "id": "@vision_input",
+            "label": "Image patches",
+            "namespace": "",
+            "attrs": [{"key": "synthetic", "value": "@input"}],
+            "style": ensure_readable_text(input_port_style()),
+        }
+    )
+    resolved = _resolve_section_tree_for_component(
+        spec, component, variant=None, basic_ops=basic_ops
+    )
+    transparent = resolved is not None and is_transparent_inline_expansion(
+        expand_block_tree_inplace(resolved[1], basic_ops=basic_ops)
+    )
+    namespace_prefix = (
+        _sanitize_namespace_segment(component.attr_name) if not transparent else ""
+    )
+    group = _group_config_for_role(namespace_prefix, component.role)
+    if group:
+        group_node_configs.append(group)
+    exits = _append_section(
+        nodes,
+        spec=spec,
+        component=component,
+        id_prefix=component.attr_name,
+        namespace_prefix=namespace_prefix,
+        basic_ops=basic_ops,
+        previous_exits=["@vision_input"],
+        group_node_attributes=group_node_attributes,
+        shape_inferencer=shape_inferencer,
+        parent_class=None,
+        inline_expansion=inline_expansion,
+    )
+    return exits[0] if exits else None
+
+
+def _attach_vision_language_edge(
+    nodes: list[dict[str, Any]],
+    vision_exit: SourceRef,
+    target_attr: str | None,
+) -> None:
+    """Feed the vision tower's output into the language embedding merge point."""
+    if target_attr is None:
+        return
+    target = next((node for node in nodes if node.get("id") == target_attr), None)
+    if target is None:
+        # The embedding expanded into a namespace group: feed its input port.
+        input_id = _merge_node_id(target_attr, "@input")
+        target = next((node for node in nodes if node.get("id") == input_id), None)
+    if target is None:
+        return
+    edges = target.setdefault("incomingEdges", [])
+    edges.append(_source_edge(vision_exit, str(len(edges))))
+
+
 def build_merged_model_graph(
     spec: ArchitectureSpec,
     *,
@@ -2740,7 +2821,23 @@ def build_merged_model_graph(
 ) -> dict[str, Any]:
     """Build a single graph with overview spine and inlined computation subgraphs."""
     resolved_basic_ops = basic_ops or spec.basic_ops
-    nodes: list[dict[str, Any]] = [
+    nodes: list[dict[str, Any]] = []
+    group_node_configs: list[dict[str, Any]] = []
+    group_node_attributes: dict[str, dict[str, str]] = {}
+
+    # A VLM wrapper's vision tower renders as its own expandable group before the
+    # tokenized-text input; its output later feeds the language embedding tile.
+    vision_exit = _append_vision_section(
+        nodes,
+        spec=spec,
+        basic_ops=resolved_basic_ops,
+        group_node_configs=group_node_configs,
+        group_node_attributes=group_node_attributes,
+        shape_inferencer=shape_inferencer,
+        inline_expansion=inline_expansion,
+    )
+
+    nodes.append(
         {
             "id": "@input",
             "label": "Tokenized text",
@@ -2748,11 +2845,10 @@ def build_merged_model_graph(
             "attrs": [{"key": "synthetic", "value": "@input"}],
             "style": ensure_readable_text(input_port_style()),
         }
-    ]
+    )
     previous_exits = ["@input"]
     stack_module_sources: dict[str, SourceRef] = {}
-    group_node_configs: list[dict[str, Any]] = []
-    group_node_attributes: dict[str, dict[str, str]] = {}
+    embedding_target_attr: str | None = None
     stack_cls = spec.class_registry.get(spec.stack_model_class or "")
     if stack_cls is None:
         stack_cls = _pick_stack_model_class(spec.class_registry, None)
@@ -2795,8 +2891,13 @@ def build_merged_model_graph(
             parent_class=spec.stack_model_class,
             inline_expansion=inline_expansion,
         )
+        if embedding_target_attr is None and component.role == "embedding":
+            embedding_target_attr = component.attr_name
         if previous_exits:
             stack_module_sources[component.attr_name] = previous_exits[0]
+
+    if vision_exit is not None:
+        _attach_vision_language_edge(nodes, vision_exit, embedding_target_attr)
 
     source_entry = _append_stack_entry_dataflow(
         nodes,

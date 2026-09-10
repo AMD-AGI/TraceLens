@@ -865,6 +865,32 @@ def _forward_delegates_to_nothing(class_name: str, forward_calls: list[str]) -> 
     return not forward_calls
 
 
+def _forward_delegates_only_to_sibling_methods(
+    forward_calls: list[str],
+    init_assignments: dict[str, str],
+    method_names: set[str],
+) -> bool:
+    """True when forward()'s only calls are helper methods on the same class.
+
+    A module can factor part of its own tensor math into sibling methods — e.g. a
+    rotary embedding whose ``forward`` computes ``cos``/``sin`` inline and then calls
+    ``self.recomposition_frequencies(...)`` to reshape them. Those calls are not
+    submodules, so the math does not live in a child; the ``forward`` still owns it.
+    Treat this like a forward that delegates to nothing so its inline operations
+    (the multiplies here) are retained instead of collapsing to an opaque tile.
+    """
+    if not forward_calls:
+        return False
+    for call in forward_calls:
+        if call in init_assignments:
+            return False  # a real submodule carries that part of the math
+        if is_positional_synthetic(call) or is_functional_synthetic(call):
+            return False  # positional/functional child, handled elsewhere
+        if call not in method_names:
+            return False  # unknown free call — don't assume inline ownership
+    return True
+
+
 def _forward_mixes_modules_and_inline_ops(
     forward_calls: list[str],
     init_assignments: dict[str, str],
@@ -2218,12 +2244,37 @@ def _live_forward_steps(
     *,
     operations: dict[str, ForwardOperation],
     return_slots: dict[str, str],
+    step_predecessors: dict[str, tuple[str, ...]] | None = None,
 ) -> set[str]:
     """Backward closure of ops and submodule steps that feed returned values."""
     if not return_slots:
         return set(operations.keys())
+    step_predecessors = step_predecessors or {}
+
+    def _seed(step: str, _seen: set[str] | None = None) -> list[str]:
+        """Resolve a producer step to operation steps.
+
+        A returned value may be produced by a non-op step — a sibling helper
+        method such as a rotary embedding's ``recomposition_frequencies``. Such a
+        step is not itself tensor math, but the ops feeding it (the inline
+        multiplies) are live and must not be pruned, so bridge through the
+        recorded ``step_predecessors``.
+        """
+        if step in operations:
+            return [step]
+        _seen = _seen or set()
+        if step in _seen:
+            return []
+        _seen.add(step)
+        seeds: list[str] = []
+        for pred in step_predecessors.get(step, ()):
+            seeds.extend(_seed(pred, _seen))
+        return seeds
+
     live_ops: set[str] = set()
-    pending = [producer for producer in return_slots.values() if producer in operations]
+    pending = [
+        seed for producer in return_slots.values() for seed in _seed(producer)
+    ]
     while pending:
         step = pending.pop()
         if step in live_ops:
@@ -2251,10 +2302,15 @@ def _prune_forward_pipeline(
     forward_calls: list[str],
     operations: dict[str, ForwardOperation],
     return_slots: dict[str, str],
+    step_predecessors: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[list[str], dict[str, ForwardOperation]]:
     if len(return_slots) < 2:
         return forward_calls, operations
-    live = _live_forward_steps(operations=operations, return_slots=return_slots)
+    live = _live_forward_steps(
+        operations=operations,
+        return_slots=return_slots,
+        step_predecessors=step_predecessors,
+    )
     pruned_operations = {name: op for name, op in operations.items() if name in live}
     pruned_calls = [
         step for step in forward_calls if step not in operations or step in live
@@ -2472,6 +2528,7 @@ def _apply_forward_analysis(
         forward_calls=forward_calls,
         operations=operations,
         return_slots=analysis.return_slots,
+        step_predecessors=analysis.step_predecessors,
     )
     return (
         pruned_calls,
@@ -2767,9 +2824,18 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 all_tensor_ops=self.all_tensor_ops,
             )
             delegates_inline = _forward_delegates_to_nothing(node.name, forward_calls)
+            method_names = {
+                item.name
+                for item in node.body
+                if isinstance(item, ast.FunctionDef)
+            }
+            delegates_to_siblings = _forward_delegates_only_to_sibling_methods(
+                forward_calls, init_assignments, method_names
+            )
             if (
                 _forward_owns_tensor_math(forward_calls, init_assignments)
                 or delegates_inline
+                or delegates_to_siblings
             ):
                 values = _self_config_values(init_func, self.config)
                 analysis = _forward_operations_from_forward(

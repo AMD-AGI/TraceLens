@@ -49,11 +49,16 @@ jobs:
           . .venv/bin/activate
           python -m pip install --upgrade pip
           pip install . pytest pytest-xdist pytest-cov openpyxl orjson 'protobuf>=6.31.1,<7.0.0' rocm-origami
+          # CPU torch + transformers are required by the Visualizer / ModelUtils
+          # unit tests under TraceLens/tests (FX tracing, shape inference, HF source
+          # introspection). Pinned to the versions the tests were validated against.
+          pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.14.0'
+          pip install 'transformers==5.16.1' 'huggingface_hub==1.30.0'
 
       - name: Run unit tests
         run: |
           . .venv/bin/activate
-          python -m pytest tests/ -v --tb=short -n auto --dist loadgroup \
+          python -m pytest tests/ TraceLens/tests/ -v --tb=short -n auto --dist loadgroup \
             -m "not gpu" \
             --cov=./TraceLens --cov-config=.coveragerc \
             --cov-report=xml --cov-fail-under=95 \

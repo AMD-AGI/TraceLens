@@ -137,8 +137,6 @@ def test_cli_dump_ast_operator_fallback_and_explicit_output(
     result = cli.main(
         [
             "org/model",
-            "--backend",
-            "ast",
             "--dump-ast",
             str(ast_path),
             "--operators-json",
@@ -169,7 +167,7 @@ def test_cli_uses_embedded_operator_export_and_default_output(monkeypatch, tmp_p
     monkeypatch.setattr(cli, "build_operator_export_payload", fallback)
 
     assert (
-        cli.main(["org/model", "--backend", "ast", "--operators-json", "ops.json"]) == 0
+        cli.main(["org/model", "--operators-json", "ops.json"]) == 0
     )
     save_operators.assert_called_once_with({"embedded": True}, Path("ops.json"))
     fallback.assert_not_called()
@@ -192,7 +190,7 @@ def test_cli_reports_pipeline_failures(monkeypatch, capsys, failing_name, expect
         failing_name,
         Mock(side_effect=RuntimeError("deliberate failure")),
     )
-    argv = ["org/model", "--backend", "ast"]
+    argv = ["org/model"]
     if failing_name == "save_operator_export":
         argv.extend(["--operators-json", "ops.json"])
 
@@ -205,13 +203,13 @@ def test_cli_reports_explicit_output_failure(monkeypatch, capsys):
     monkeypatch.setattr(
         cli, "write_optional_output", Mock(side_effect=OSError("read only"))
     )
-    assert cli.main(["org/model", "--backend", "ast", "--output", "graph.json"]) == 1
+    assert cli.main(["org/model", "--output", "graph.json"]) == 1
     assert "Error writing output: read only" in capsys.readouterr().err
 
 
 def test_cli_rejects_empty_graphs(monkeypatch, capsys):
     _patch_cli_success(monkeypatch, _payload(graphs=[]))
-    assert cli.main(["org/model", "--backend", "ast"]) == 1
+    assert cli.main(["org/model"]) == 1
     assert "No computation graphs" in capsys.readouterr().err
 
 
@@ -224,7 +222,7 @@ def test_cli_serves_opens_and_handles_server_error(monkeypatch, capsys):
     monkeypatch.setattr(cli, "serve_viewer", served)
 
     assert (
-        cli.main(["org/model", "--backend", "ast", "--open", "--serve", "--port", "42"])
+        cli.main(["org/model", "--open", "--serve", "--port", "42"])
         == 0
     )
     opened.assert_called_once_with("url:42")
@@ -232,7 +230,7 @@ def test_cli_serves_opens_and_handles_server_error(monkeypatch, capsys):
     assert "Open viewer: url:42" in capsys.readouterr().out
 
     served.side_effect = RuntimeError("busy")
-    assert cli.main(["org/model", "--backend", "ast", "--serve"]) == 1
+    assert cli.main(["org/model", "--serve"]) == 1
     assert "Error serving viewer: busy" in capsys.readouterr().err
 
 
@@ -243,7 +241,7 @@ def test_cli_open_only_background_wait_handles_interrupt(monkeypatch):
     wait = Mock(side_effect=KeyboardInterrupt)
     monkeypatch.setattr(cli.threading, "Event", lambda: SimpleNamespace(wait=wait))
 
-    assert cli.main(["org/model", "--backend", "ast", "--open"]) == 0
+    assert cli.main(["org/model", "--open"]) == 0
     wait.assert_called_once()
 
 

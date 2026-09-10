@@ -4,31 +4,18 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Build Model Explorer payloads from PyTorch model tracing."""
+"""Serialization helper for Model Explorer payloads.
+
+The graph itself is built by the AST backend
+(``ast_build.build_model_explorer_payload``); this module only handles
+writing the resulting payload to disk.
+"""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from typing import Any
-
-from TraceLens.ModelUtils.torch_trace import build_graph
-
-
-def build_model_explorer_payload(
-    checkpoint: str | Path,
-    *,
-    seq_len: int = 128,
-    batch_size: int = 1,
-    title: str | None = None,
-) -> dict[str, Any]:
-    """Build a Model Explorer payload via PyTorch tracing."""
-    return build_graph(
-        checkpoint,
-        seq_len=seq_len,
-        batch_size=batch_size,
-        title=title,
-    )
 
 
 def save_model_explorer_payload(payload: dict[str, Any], path: Path | str) -> Path:

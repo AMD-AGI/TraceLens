@@ -667,6 +667,45 @@ def test_einsum_shape_inference():
     assert result.shape == ("B", "S", 32, "S")
 
 
+def test_parse_module_ctor_parses_conv_channels():
+    import ast as _ast
+
+    from TraceLens.ModelUtils.shape_inference import ModuleConvSpec, _parse_module_ctor
+
+    call = _ast.parse("nn.Conv2d(64, 128, kernel_size=3)").body[0].value
+    ctx = ShapeContext.from_spec(
+        ArchitectureSpec(name="T", model_type="t", raw_config={})
+    )
+    spec = _parse_module_ctor(call, config={}, local_vars={}, context=ctx)
+    assert isinstance(spec, ModuleConvSpec)
+    assert spec.in_channels == 64
+    assert spec.out_channels == 128
+
+
+def test_conv_shape_inference_replaces_matched_channel_axis():
+    from TraceLens.ModelUtils.shape_inference import ModuleConvSpec
+
+    inf = _make_inferencer()
+    inf.module_dims.conv_by_attr["patch_conv"] = ModuleConvSpec(
+        in_channels=3, out_channels=1280
+    )
+    inp = TensorSpec(shape=("B", 3, 224, 224), dtype="float16")
+    node = _node("Conv2d")
+    node.metadata["attr_name"] = "patch_conv"
+    result = inf._infer_node_output(node, [inp], root=None)
+    # channel axis (carrying in_channels=3) becomes out_channels; spatial passes through
+    assert result.shape == ("B", 1280, 224, 224)
+
+
+def test_conv_shape_inference_defaults_to_channel_axis_one():
+    # No parsed spec: _is_conv fires and the conventional channel axis (1) is replaced.
+    inf = _make_inferencer(hidden_size=768)
+    inp = TensorSpec(shape=("B", 16, "S"), dtype="float16")
+    node = _node("Conv1d")
+    result = inf._infer_node_output(node, [inp], root=None)
+    assert result.shape == ("B", 768, "S")
+
+
 def test_synthetic_kernel_port_passthrough_no_warning(caplog):
     """Synthetic kernel port nodes should pass through silently (no warning)."""
     import logging

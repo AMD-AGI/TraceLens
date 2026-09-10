@@ -391,9 +391,10 @@ def test_resolve_github_empty_and_transformers_fallback(tmp_path: Path, monkeypa
     result = source._transformers_github_modeling_file(
         ["wrapper", "native"], source_policy=source_policy.SourcePolicy()
     )
+    ref = github.parse_github_url(source.TRANSFORMERS_GITHUB_SOURCE).ref
     assert result == (
         upstream,
-        "github://huggingface/transformers@main/src/transformers/models/native/"
+        f"github://huggingface/transformers@{ref}/src/transformers/models/native/"
         "modeling_native.py",
     )
     assert len(attempts) == 2

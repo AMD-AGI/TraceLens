@@ -211,8 +211,14 @@ def test_resolve_source_files_reads_transformers_native_model_from_github(
 
     assert [path.name for path in files] == ["modeling_qwen3_moe.py"]
     assert requested == ["src/transformers/models/qwen3_moe/modeling_qwen3_moe.py"]
+    # The upstream source is pinned to a commit (see TRANSFORMERS_GITHUB_SOURCE),
+    # so the provenance label carries that ref rather than a moving branch name.
+    from TraceLens.ModelUtils.github import parse_github_url
+    from TraceLens.ModelUtils.source import TRANSFORMERS_GITHUB_SOURCE
+
+    ref = parse_github_url(TRANSFORMERS_GITHUB_SOURCE).ref
     assert labels == [
-        "github://huggingface/transformers@main/src/transformers/models/qwen3_moe/"
+        f"github://huggingface/transformers@{ref}/src/transformers/models/qwen3_moe/"
         "modeling_qwen3_moe.py"
     ]
 

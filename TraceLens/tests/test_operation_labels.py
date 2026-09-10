@@ -19,15 +19,15 @@ def test_decoder_spine_skips_inline_forward_ops():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     attrs = {component.attr_name for component in spec.block_components}
-    assert "@op_l1316_c85_matmul" not in attrs
-    assert "@op_l1316_c24_add" not in attrs
+    assert "@op_l1319_c85_matmul" not in attrs
+    assert "@op_l1319_c24_add" not in attrs
 
 
 def test_mhc_residual_merge_matmul_is_two_activation_matmul():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     op = spec.class_registry["Glm5NextTextDecoderLayer"].forward_operations[
-        "@op_l1316_c85_matmul"
+        "@op_l1319_c85_matmul"
     ]
     assert op.label == "MatMul"
     assert op.class_name == "MatMul"
@@ -72,6 +72,94 @@ class Block(torch.nn.Module):
     op = ops.operations[0]
     assert op.label == "Linear"
     assert "weight" in op.external_inputs
+
+
+def test_sibling_method_only_forward_keeps_inline_math():
+    """A forward whose only calls are sibling helpers still owns its tensor math.
+
+    Mirrors Glm5NextVisionRotaryEmbedding: forward computes cos/sin inline, then
+    hands each to a sibling method (recomposition). The delegation must not hide
+    the inline multiplies, and pruning must bridge the sibling call to keep them.
+    """
+    import ast
+
+    from TraceLens.ModelUtils.ast_analyze import (
+        _apply_forward_analysis,
+        _forward_delegates_only_to_sibling_methods,
+        _forward_delegates_to_nothing,
+        _forward_operations_from_forward,
+        _forward_owns_tensor_math,
+        _self_config_values,
+    )
+
+    source = """
+import torch
+class Rotary(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scale = 1.0
+    def forward(self, freqs):
+        cos = freqs.cos() * self.scale
+        sin = freqs.sin() * self.scale
+        cos = self.recompose(cos)
+        sin = self.recompose(sin)
+        return cos, sin
+    def recompose(self, freq):
+        return torch.cat([freq, freq], dim=-1)
+"""
+    tree = ast.parse(source)
+    cls = tree.body[-1]
+    forward = next(
+        item for item in cls.body
+        if isinstance(item, ast.FunctionDef) and item.name == "forward"
+    )
+    init = next(
+        item for item in cls.body
+        if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+    )
+    method_names = {
+        item.name for item in cls.body if isinstance(item, ast.FunctionDef)
+    }
+
+    forward_calls = ["recompose"]
+    init_assignments = {}
+
+    # forward delegates only to a sibling method: neither "owns math" (no
+    # pointwise submodules) nor "delegates to nothing" (there IS a call).
+    assert not _forward_owns_tensor_math(forward_calls, init_assignments)
+    assert not _forward_delegates_to_nothing(cls.name, forward_calls)
+    assert _forward_delegates_only_to_sibling_methods(
+        forward_calls, init_assignments, method_names
+    )
+
+    analysis = _forward_operations_from_forward(
+        forward, self_values=_self_config_values(init, {}), all_tensor_ops=False
+    )
+    _calls, operations, *_ = _apply_forward_analysis(
+        forward, analysis, forward_calls=forward_calls, init_assignments=init_assignments
+    )
+    # The inline multiplies survive pruning even though the returned values are
+    # produced by the sibling call.
+    assert any(op.label == "Multiply" for op in operations.values())
+
+
+def test_sibling_method_delegation_rejects_submodule_and_free_calls():
+    """The sibling-only heuristic must not fire when a real submodule is called."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        _forward_delegates_only_to_sibling_methods,
+    )
+
+    method_names = {"forward", "helper"}
+    # A submodule call (in init_assignments) means the math lives in the child.
+    assert not _forward_delegates_only_to_sibling_methods(
+        ["sub"], {"sub": "SubModule"}, method_names
+    )
+    # An unknown free call is not a recognized sibling method.
+    assert not _forward_delegates_only_to_sibling_methods(
+        ["mystery"], {}, method_names
+    )
+    # No calls at all is handled by _forward_delegates_to_nothing, not here.
+    assert not _forward_delegates_only_to_sibling_methods([], {}, method_names)
 
 
 def test_two_activation_matmul_displays_as_matmul():

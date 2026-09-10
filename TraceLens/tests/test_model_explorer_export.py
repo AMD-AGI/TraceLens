@@ -1049,7 +1049,7 @@ def test_implicit_cli_output_uses_html_default(
 
     fixture = FIXTURES / "llama_like"
     monkeypatch.chdir(tmp_path)
-    exit_code = main([str(fixture), "--backend", "ast", "--title", "LlamaLike"])
+    exit_code = main([str(fixture), "--title", "LlamaLike"])
     assert exit_code == 0
     html_files = list(tmp_path.glob("*.html"))
     assert len(html_files) == 1

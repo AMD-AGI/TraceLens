@@ -28,7 +28,12 @@ MODELING_CANDIDATES = (
 
 # Checkpoints for transformers-native architectures (Qwen3, MiniMax-M3, ...) ship
 # no modeling code of their own, so the implementation is read from upstream.
-TRANSFORMERS_GITHUB_SOURCE = "github:huggingface/transformers@main"
+# Pinned to a commit (not @main) so static analysis is reproducible: upstream line
+# shifts would otherwise drift the hard-coded op-ids in the graph tests. Bump this
+# SHA (and refresh any affected op-id assertions) to pick up newer upstream code.
+TRANSFORMERS_GITHUB_SOURCE = (
+    "github:huggingface/transformers@0b179b2df599b7edd6f91de59f71e51faee4cc5a"
+)
 TRANSFORMERS_MODELING_SUBPATH = (
     "src/transformers/models/{model_type}/modeling_{model_type}.py"
 )

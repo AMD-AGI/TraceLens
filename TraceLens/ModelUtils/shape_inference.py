@@ -122,6 +122,21 @@ class ModuleParameterSpec:
 
 
 @dataclass
+class ModuleConvSpec:
+    """Channel dimensions of an ``nn.Conv{1,2,3}d`` declared in ``__init__``.
+
+    Only the channel axis is tracked: a conv maps ``(N, in_channels, *spatial)``
+    to ``(N, out_channels, *spatial')``. The spatial extents depend on
+    kernel/stride/padding/dilation and are left unchanged (static analysis can't
+    resolve the runtime spatial size), so shape inference replaces the channel
+    axis and passes the spatial axes through.
+    """
+
+    in_channels: DimExpr | None
+    out_channels: DimExpr
+
+
+@dataclass
 class ShapeContext:
     """Resolved and symbolic dimensions derived from model config."""
 
@@ -182,6 +197,11 @@ class ShapeContext:
             for alias in aliases:
                 dims.setdefault(alias, resolved)
 
+        # Fold forward-local scalar bindings (e.g. `hc = self.hc_mult`) so shape
+        # expressions that use them (`.split([hc, hc, hc * hc])`) resolve.
+        for name, value in _collect_forward_scalar_locals(spec, dims).items():
+            dims.setdefault(name, value)
+
         return cls(dims=dims, dtype=dtype)
 
 
@@ -195,6 +215,8 @@ class ModuleDimRegistry:
     embedding_by_attr: dict[str, ModuleEmbeddingSpec] = field(default_factory=dict)
     parameter: dict[tuple[str, str], ModuleParameterSpec] = field(default_factory=dict)
     parameter_by_attr: dict[str, ModuleParameterSpec] = field(default_factory=dict)
+    conv: dict[tuple[str, str], ModuleConvSpec] = field(default_factory=dict)
+    conv_by_attr: dict[str, ModuleConvSpec] = field(default_factory=dict)
     # Names like `weight` are declared by many modules with different shapes; guessing
     # across classes would be worse than having no shape at all.
     ambiguous_parameters: set[str] = field(default_factory=set)
@@ -319,6 +341,9 @@ class ModuleDimRegistry:
         if isinstance(spec, ModuleLinearSpec):
             self.linear[(class_name, target.attr)] = spec
             self.linear_by_attr[target.attr] = spec
+        elif isinstance(spec, ModuleConvSpec):
+            self.conv[(class_name, target.attr)] = spec
+            self.conv_by_attr[target.attr] = spec
         elif isinstance(spec, ModuleEmbeddingSpec):
             self.embedding[(class_name, target.attr)] = spec
             self.embedding_by_attr[target.attr] = spec
@@ -447,6 +472,105 @@ _POINTWISE_LABELS = frozenset(
 )
 
 
+# ── Torch per-op shape execution (ground truth for shape-changing ops) ───────
+# Distinctive probe values for the symbolic batch/sequence dims — primes chosen
+# so a materialized op's output dims don't accidentally collide with a config
+# dimension (e.g. head_dim=128), which would misread as the sequence length.
+_TORCH_PROBE_BATCH = 2
+_TORCH_PROBE_SEQ = 137
+
+
+def _torch_dtype(torch: Any, name: str) -> Any:
+    return getattr(torch, str(name).replace("torch.", ""), torch.float32)
+
+
+def _first_tensor_shape(out: Any) -> tuple[int, ...] | None:
+    import torch
+
+    if isinstance(out, torch.Tensor):
+        return tuple(int(d) for d in out.shape)
+    if isinstance(out, (tuple, list)):
+        for item in out:
+            if isinstance(item, torch.Tensor):
+                return tuple(int(d) for d in item.shape)
+    return None
+
+
+def _resolve_op_int(value: Any, dims: dict[str, Any]) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        resolved = dims.get(str(value))
+        return resolved if isinstance(resolved, int) else None
+
+
+def _torch_op_split(torch, metas, details, dims):
+    dim = _int_dim(_detail_value(details, "dim") or "0") or 0
+    size = _resolve_op_int(_detail_value(details, "split_size"), dims)
+    if size is None or size <= 0:
+        return None
+    return torch.split(metas[0], size, dim=dim)[0]
+
+
+def _torch_op_chunk(torch, metas, details, dims):
+    dim = _int_dim(_detail_value(details, "dim") or "0") or 0
+    n = _resolve_op_int(
+        _detail_value(details, "split_size") or _detail_value(details, "chunks"), dims
+    )
+    if n is None or n <= 0:
+        return None
+    return torch.chunk(metas[0], n, dim=dim)[0]
+
+
+def _torch_op_unbind(torch, metas, details, dims):
+    dim = _int_dim(_detail_value(details, "dim") or "0") or 0
+    pieces = torch.unbind(metas[0], dim=dim)
+    return pieces[0] if pieces else None
+
+
+def _torch_op_unflatten(torch, metas, details, dims):
+    dim = _int_dim(_detail_value(details, "dim") or "0") or 0
+    sizes_text = _detail_value(details, "sizes") or _detail_value(details, "shape")
+    if not sizes_text:
+        return None
+    sizes: list[int] = []
+    for part in sizes_text.strip().strip("()[]").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        resolved = _resolve_op_int(part, dims)
+        sizes.append(resolved if resolved is not None else -1)
+    if not sizes or sizes.count(-1) > 1:
+        return None
+    return torch.unflatten(metas[0], dim, sizes)
+
+
+def _normalize_op_name(name: Any) -> str:
+    """Normalize an op name for cross-source matching (must stay identical to
+    ``meta_trace._norm_op`` so AST ids and FX node names join)."""
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+# Trailing ``@op_l{line}_c{col}_{name}[:idx]`` token of a graph node id, with
+# everything before it captured as the block-instance prefix.
+_LAST_OP_ID_RE = re.compile(
+    r"^(?P<prefix>.*):@op_l(?P<line>\d+)_c(?P<col>\d+)_(?P<name>[a-z0-9_]+?)"
+    r"(?::(?P<idx>\d+))?$"
+)
+
+
+# Non-parametric shape-transforming ops where torch execution gives the ground
+# truth the symbolic arithmetic often can't resolve. Keyed by normalized label.
+_TORCH_OP_BUILDERS = {
+    "split": _torch_op_split,
+    "chunk": _torch_op_chunk,
+    "unbind": _torch_op_unbind,
+    "unflatten": _torch_op_unflatten,
+}
+
+
 class ShapeInferencer:
     """Infer symbolic/concrete tensor shapes for every node in a model graph."""
 
@@ -473,6 +597,16 @@ class ShapeInferencer:
         self._introspecting: set[str] = set()
         # Meta-device traced shapes (module path -> symbolic shape).
         self._meta_shapes: dict[str, TensorSpec] = {}
+        # Checkpoint retained for the lazy per-op FX fallback (see below).
+        self._meta_checkpoint: str | Path | None = None
+        # Per-op FX ground-truth shapes, keyed by (line, op, occurrence).
+        # None = not yet built; built lazily only if an op reaches the
+        # "no symbolic rule" fallback (so models fully covered by symbolic
+        # rules — e.g. GLM-5.3 — pay nothing for it).
+        self._op_fx_shapes: dict[tuple[int, str, int], tuple[Any, ...]] | None = None
+        # node.id -> occurrence index of this op on its source line within its
+        # block instance (matches the FX-side occurrence counting).
+        self._op_line_occ: dict[str, int] = {}
 
     def load_meta_shapes(
         self,
@@ -487,6 +621,9 @@ class ShapeInferencer:
         """
         from TraceLens.ModelUtils.meta_trace import trace_meta_shapes, symbolise_meta_shape
 
+        # Retain for the lazy per-op FX fallback, even if module-level tracing
+        # below captures nothing.
+        self._meta_checkpoint = checkpoint
         raw = trace_meta_shapes(
             checkpoint,
             config=self.spec.raw_config,
@@ -508,6 +645,7 @@ class ShapeInferencer:
         self, graph: ModelGraph, *, root: BlockNode | None = None
     ) -> dict[str, TensorSpec]:
         """Infer output tensor specs for every node id in one model graph."""
+        self._register_op_line_occurrences(graph)
         self._tensor_names = {}
         for node in graph.nodes:
             if node.metadata.get("synthetic") == "@input":
@@ -784,6 +922,7 @@ class ShapeInferencer:
         if synthetic in {"@output", "@loop_carried"}:
             if inputs:
                 return inputs[-1]
+            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
             return TensorSpec(
                 shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
             )
@@ -1155,6 +1294,32 @@ class ShapeInferencer:
                 shape=_replace_last_dim(in_shape, out_features), dtype=output_dtype
             )
 
+        conv_spec = self._lookup_conv_spec(node, root=root)
+        if conv_spec is not None or _is_conv(node):
+            source = (
+                inputs[0]
+                if inputs
+                else TensorSpec(_default_hidden_shape(self.context), dtype)
+            )
+            out_channels = (
+                conv_spec.out_channels
+                if conv_spec is not None
+                else self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+            )
+            shape = list(source.shape)
+            if not shape:
+                return TensorSpec(shape=(out_channels,), dtype=source.dtype)
+            # Channel-axis only: replace the axis carrying in_channels (or the
+            # conventional channel axis 1) with out_channels; spatial axes pass through.
+            channel_axis = 1 if len(shape) >= 2 else 0
+            if conv_spec is not None and conv_spec.in_channels is not None:
+                for axis, dim in enumerate(shape):
+                    if dim == conv_spec.in_channels:
+                        channel_axis = axis
+                        break
+            shape[channel_axis] = out_channels
+            return TensorSpec(shape=tuple(shape), dtype=source.dtype)
+
         embedding_spec = self._lookup_embedding_spec(node, root=root)
         if embedding_spec is not None or _is_embedding(block_class, node):
             hidden = (
@@ -1203,6 +1368,9 @@ class ShapeInferencer:
             )
             if introspected is not None:
                 return introspected
+            fx_spec = self._fx_op_shape(node, inputs)
+            if fx_spec is not None:
+                return fx_spec
             _log.warning(
                 "No shape inference rule for %s (label=%r, class=%r); "
                 "passing through input shape",
@@ -1244,6 +1412,16 @@ class ShapeInferencer:
                 shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
             )
 
+        # Genuinely unknown op (no symbolic rule): get a ground-truth shape from
+        # the per-module FX pass, or by running the op on the meta device,
+        # before falling back to passing through / (B, S, H).
+        fx_spec = self._fx_op_shape(node, inputs)
+        if fx_spec is not None:
+            return fx_spec
+        torch_op_spec = self._torch_op_shape(node, inputs)
+        if torch_op_spec is not None:
+            return torch_op_spec
+
         if inputs:
             _log.warning(
                 "No shape inference rule for %s (label=%r, class=%r, kind=%s); "
@@ -1271,6 +1449,158 @@ class ShapeInferencer:
     # ------------------------------------------------------------------
     # Meta-device shape lookup
     # ------------------------------------------------------------------
+
+    def _torch_op_label(self, node: ModelGraphNode) -> str:
+        raw = node.label or node.metadata.get("class_name") or ""
+        return str(raw).strip().lower().replace(" ", "")
+
+    def _concrete_dim(self, dim: DimExpr) -> int | None:
+        if isinstance(dim, int):
+            return dim
+        text = str(dim)
+        if text == Symbol.BATCH.value:
+            return _TORCH_PROBE_BATCH
+        if text == Symbol.SEQ.value:
+            return _TORCH_PROBE_SEQ
+        value = self.context.dims.get(text)
+        return value if isinstance(value, int) else None
+
+    def _concrete_shape(self, spec: TensorSpec) -> tuple[int, ...] | None:
+        resolved: list[int] = []
+        for dim in spec.shape:
+            value = self._concrete_dim(dim)
+            if value is None or value < 0:
+                return None
+            resolved.append(int(value))
+        return tuple(resolved)
+
+    def _symbolise_concrete(self, shape: tuple[int, ...]) -> tuple[Any, ...]:
+        from TraceLens.ModelUtils.meta_trace import symbolise_meta_shape
+
+        return symbolise_meta_shape(
+            shape, batch_size=_TORCH_PROBE_BATCH, seq_len=_TORCH_PROBE_SEQ
+        )
+
+    def _torch_op_shape(
+        self, node: ModelGraphNode, inputs: list[TensorSpec]
+    ) -> TensorSpec | None:
+        """Run a shape-changing op on the meta device to get its true output
+        shape, when the symbolic arithmetic can't resolve it (e.g. a split
+        whose size is a config-derived name). Best-effort: returns None on any
+        gap (unmapped dim, unknown op, execution error) so the caller falls
+        back to symbolic inference."""
+        if not inputs:
+            return None
+        builder = _TORCH_OP_BUILDERS.get(self._torch_op_label(node))
+        if builder is None:
+            return None
+        try:
+            import torch
+        except ImportError:
+            return None
+        metas = []
+        for spec in inputs:
+            concrete = self._concrete_shape(spec)
+            if concrete is None:
+                return None
+            try:
+                metas.append(
+                    torch.zeros(
+                        concrete, dtype=_torch_dtype(torch, spec.dtype), device="meta"
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                return None
+        details = [str(item) for item in node.metadata.get("details", [])]
+        try:
+            with torch.device("meta"):
+                out = builder(torch, metas, details, self.context.dims)
+        except Exception:  # noqa: BLE001
+            return None
+        if out is None:
+            return None
+        shape = _first_tensor_shape(out)
+        if shape is None:
+            return None
+        return TensorSpec(self._symbolise_concrete(shape), inputs[0].dtype)
+
+    # ------------------------------------------------------------------
+    # Per-op FX fallback (ground truth for ops with no symbolic rule)
+    # ------------------------------------------------------------------
+
+    def _register_op_line_occurrences(self, graph: ModelGraph) -> None:
+        """Assign each op node its occurrence index on its source line within
+        its block instance, matching the FX-side occurrence counting used by
+        :func:`trace_meta_op_shapes` so the two line up when joined."""
+        groups: dict[str, list[tuple[int, int, str, str]]] = {}
+        for node in graph.nodes:
+            match = _LAST_OP_ID_RE.match(node.id)
+            if match is None:
+                continue
+            groups.setdefault(match["prefix"], []).append(
+                (
+                    int(match["line"]),
+                    int(match["col"]),
+                    _normalize_op_name(match["name"]),
+                    node.id,
+                )
+            )
+        for items in groups.values():
+            items.sort()
+            counter: dict[tuple[int, str], int] = {}
+            for line, _col, base, node_id in items:
+                key = (line, base)
+                occ = counter.get(key, 0)
+                counter[key] = occ + 1
+                self._op_line_occ[node_id] = occ
+
+    def _op_line_key(
+        self, node: ModelGraphNode
+    ) -> tuple[int, str, int] | None:
+        match = _LAST_OP_ID_RE.match(node.id)
+        if match is None:
+            return None
+        return (
+            int(match["line"]),
+            _normalize_op_name(match["name"]),
+            self._op_line_occ.get(node.id, 0),
+        )
+
+    def _ensure_op_fx_shapes(self) -> None:
+        if self._op_fx_shapes is not None:
+            return
+        self._op_fx_shapes = {}
+        if self._meta_checkpoint is None:
+            return
+        try:
+            from TraceLens.ModelUtils.meta_trace import trace_meta_op_shapes
+
+            captured = trace_meta_op_shapes(
+                self._meta_checkpoint, config=self.spec.raw_config
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("Per-op FX shape tracing failed: %s", exc)
+            return
+        if captured:
+            self._op_fx_shapes = captured
+
+    def _fx_op_shape(
+        self, node: ModelGraphNode, inputs: list[TensorSpec]
+    ) -> TensorSpec | None:
+        """Ground-truth output shape for an op with no symbolic rule, from a
+        per-module FX + ShapeProp pass on the meta device (built lazily on
+        first use). Returns None when unavailable or unmatched."""
+        if self._meta_checkpoint is None:
+            return None
+        key = self._op_line_key(node)
+        if key is None:
+            return None
+        self._ensure_op_fx_shapes()
+        shape = (self._op_fx_shapes or {}).get(key)
+        if shape is None:
+            return None
+        dtype = inputs[0].dtype if inputs else self.context.dtype
+        return TensorSpec(tuple(shape), dtype)
 
     def _lookup_meta_shape(
         self, node: ModelGraphNode
@@ -1679,6 +2009,19 @@ class ShapeInferencer:
             return self.module_dims.linear_by_attr.get(attr)
         return None
 
+    def _lookup_conv_spec(
+        self, node: ModelGraphNode, *, root: BlockNode | None
+    ) -> ModuleConvSpec | None:
+        attr = _node_attr_name(node)
+        class_name = node.metadata.get("class_name")
+        if class_name and attr:
+            spec = self.module_dims.conv.get((class_name, attr))
+            if spec is not None:
+                return spec
+        if attr:
+            return self.module_dims.conv_by_attr.get(attr)
+        return None
+
     def _lookup_parameter_spec(
         self,
         node: ModelGraphNode,
@@ -1921,10 +2264,80 @@ def _replace_dim(
     return tuple(lst)
 
 
+def _eval_dim_expr(node: Any, dims: dict[str, DimExpr]) -> int | None:
+    """Evaluate a small integer dimension expression against the config dims.
+
+    Handles the arithmetic that appears in real ``.split``/``.view`` sizes —
+    ``hc``, ``hc * hc``, ``self.hc_mult``, ``hidden_size // 2`` — by resolving
+    every name to a config value and folding ``+ - * //``. Returns None if any
+    name is unresolved (so the caller can keep the size symbolic).
+    """
+    import ast as _pyast
+
+    if isinstance(node, str):
+        try:
+            node = _pyast.parse(node.strip(), mode="eval")
+        except SyntaxError:
+            return None
+    if isinstance(node, _pyast.Expression):
+        return _eval_dim_expr(node.body, dims)
+    if isinstance(node, _pyast.Constant) and isinstance(node.value, int):
+        return node.value
+    if isinstance(node, _pyast.Name):
+        value = dims.get(node.id)
+        return value if isinstance(value, int) else None
+    if isinstance(node, _pyast.Attribute):
+        # self.hc_mult / config.hidden_size → resolve by the attribute name.
+        value = dims.get(node.attr)
+        return value if isinstance(value, int) else None
+    if isinstance(node, _pyast.BinOp):
+        left = _eval_dim_expr(node.left, dims)
+        right = _eval_dim_expr(node.right, dims)
+        if left is None or right is None:
+            return None
+        if isinstance(node.op, _pyast.Mult):
+            return left * right
+        if isinstance(node.op, _pyast.Add):
+            return left + right
+        if isinstance(node.op, _pyast.Sub):
+            return left - right
+        if isinstance(node.op, (_pyast.FloorDiv, _pyast.Div)):
+            return left // right if right else None
+    if isinstance(node, _pyast.UnaryOp) and isinstance(node.op, _pyast.USub):
+        inner = _eval_dim_expr(node.operand, dims)
+        return -inner if inner is not None else None
+    return None
+
+
+def _split_top_level_commas(text: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    current = ""
+    for char in text:
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append(current)
+            current = ""
+        else:
+            current += char
+    if current.strip():
+        parts.append(current)
+    return parts
+
+
 def _parse_split_sizes(
     text: str, dims: dict[str, DimExpr]
 ) -> list[DimExpr] | None:
-    """Parse a split_size_or_sections detail like ``[qkv_dim] * 3`` or ``2048``."""
+    """Resolve a split_size_or_sections detail to concrete sizes.
+
+    Handles ``[qkv_dim] * 3``, ``2048``, and — critically — a list of arbitrary
+    integer expressions such as ``[hc, hc, hc * hc]`` by evaluating each entry
+    against the config dims (including forward-local scalar bindings folded in
+    by ``ShapeContext.from_spec``).
+    """
     text = text.strip()
     # "[name] * N" pattern
     m = re.match(r"\[(\w+)\]\s*\*\s*(\d+)", text)
@@ -1934,19 +2347,57 @@ def _parse_split_sizes(
         if resolved is not None:
             return [resolved] * count
         return None
-    # Plain integer
-    try:
-        return [int(text)]
-    except (ValueError, TypeError):
-        pass
-    # Comma-separated integers
-    parts = text.split(",")
+    # A bracketed list of expressions: [hc, hc, hc * hc], [head_dim, head_dim].
+    if text.startswith("[") and text.endswith("]"):
+        entries = _split_top_level_commas(text[1:-1])
+        sizes = [_eval_dim_expr(entry, dims) for entry in entries if entry.strip()]
+        if sizes and all(isinstance(s, int) for s in sizes):
+            return sizes
+        return None
+    # Plain integer or single expression.
+    single = _eval_dim_expr(text, dims)
+    if single is not None:
+        return [single]
+    # Comma-separated expressions.
+    parts = _split_top_level_commas(text)
     if len(parts) > 1:
-        try:
-            return [int(p.strip()) for p in parts]
-        except (ValueError, TypeError):
-            pass
+        sizes = [_eval_dim_expr(p, dims) for p in parts]
+        if all(isinstance(s, int) for s in sizes):
+            return sizes
     return None
+
+
+def _collect_forward_scalar_locals(
+    spec: ArchitectureSpec, dims: dict[str, DimExpr]
+) -> dict[str, int]:
+    """Fold forward-local scalar bindings (``hc = self.hc_mult``) into dims.
+
+    A forward often aliases a config value to a short local (``hc``) and then
+    uses it in a shape expression (``.split([hc, hc, hc * hc])``). The config is
+    available to us, so resolve those locals to their integer values by walking
+    each class's ``forward`` for simple ``name = <int expr over config>``
+    assignments.
+    """
+    import ast as _pyast
+
+    extra: dict[str, int] = {}
+    for structure in (getattr(spec, "class_registry", None) or {}).values():
+        class_node = getattr(structure, "node", None)
+        if class_node is None:
+            continue
+        for item in getattr(class_node, "body", []):
+            if not (isinstance(item, _pyast.FunctionDef) and item.name == "forward"):
+                continue
+            for stmt in _pyast.walk(item):
+                if (
+                    isinstance(stmt, _pyast.Assign)
+                    and len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], _pyast.Name)
+                ):
+                    value = _eval_dim_expr(stmt.value, {**dims, **extra})
+                    if isinstance(value, int):
+                        extra.setdefault(stmt.targets[0].id, value)
+    return extra
 
 
 def _infer_einsum_shape(
@@ -2235,11 +2686,38 @@ def _parse_module_ctor(
     config: dict[str, Any],
     local_vars: dict[str, DimExpr],
     context: ShapeContext,
-) -> ModuleLinearSpec | ModuleEmbeddingSpec | ModuleParameterSpec | None:
+) -> ModuleLinearSpec | ModuleConvSpec | ModuleEmbeddingSpec | ModuleParameterSpec | None:
     if not isinstance(node, ast.Call):
         return None
     class_name = _call_class_name(node) or ""
     args = list(node.args)
+    if re.search(r"Conv(Transpose)?[123]d$", class_name):
+        # nn.Conv{1,2,3}d(in_channels, out_channels, kernel_size, ...)
+        in_channels = (
+            _resolve_dim_expr(
+                args[0], config=config, local_vars=local_vars, context=context
+            )
+            if len(args) >= 1
+            else None
+        )
+        out_channels = (
+            _resolve_dim_expr(
+                args[1], config=config, local_vars=local_vars, context=context
+            )
+            if len(args) >= 2
+            else None
+        )
+        for keyword in node.keywords:
+            if keyword.arg == "in_channels" and in_channels is None:
+                in_channels = _resolve_dim_expr(
+                    keyword.value, config=config, local_vars=local_vars, context=context
+                )
+            if keyword.arg == "out_channels" and out_channels is None:
+                out_channels = _resolve_dim_expr(
+                    keyword.value, config=config, local_vars=local_vars, context=context
+                )
+        if out_channels is not None:
+            return ModuleConvSpec(in_channels=in_channels, out_channels=out_channels)
     if re.search(r"Linear$", class_name):
         in_features = (
             _resolve_dim_expr(
@@ -2484,6 +2962,13 @@ def _is_linear(node: ModelGraphNode) -> bool:
         return False
     class_name = node.metadata.get("class_name") or node.label or ""
     return bool(re.search(r"(?i)^Linear$", str(class_name)))
+
+
+def _is_conv(node: ModelGraphNode) -> bool:
+    if node.operation not in {OperationKind.NN_MODULE, OperationKind.TORCH_FUNCTIONAL}:
+        return False
+    class_name = node.metadata.get("class_name") or node.label or ""
+    return bool(re.search(r"(?i)^Conv(Transpose)?[123]d$", str(class_name)))
 
 
 def _heuristic_linear_out_features(

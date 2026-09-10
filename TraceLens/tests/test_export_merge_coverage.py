@@ -1095,6 +1095,44 @@ def test_shape_special_nodes_linear_router_and_fallbacks():
     ).shape == ("B", "S", 16)
 
 
+def test_fx_op_fallback_join_and_occurrence_counting():
+    """The per-module FX fallback keys ops by (source line, op, occurrence-on-
+    line-within-block) and only fires when a checkpoint was supplied — so a
+    genuinely unknown op resolves to its FX-captured ground-truth shape while
+    the common path (no checkpoint) stays a no-op."""
+    inferencer = ShapeInferencer(
+        _spec(), context=ShapeContext({"H": 16}), module_dims=ModuleDimRegistry()
+    )
+
+    # Occurrence indexing: two `diff`s on the same source line in the same block
+    # instance get 0 and 1; a `diff` in a different block restarts at 0.
+    graph = ModelGraph(
+        title="t",
+        nodes=[
+            _model_node("Diff", node_id="blk:0:@op_l500_c4_diff:0"),
+            _model_node("Diff", node_id="blk:0:@op_l500_c9_diff:1"),
+            _model_node("Diff", node_id="blk:1:@op_l500_c4_diff:0"),
+        ],
+    )
+    inferencer._register_op_line_occurrences(graph)
+    keys = [inferencer._op_line_key(node) for node in graph.nodes]
+    assert keys == [(500, "diff", 0), (500, "diff", 1), (500, "diff", 0)]
+
+    # No checkpoint retained → fallback is a strict no-op (never traces).
+    unknown = _model_node("Diff", node_id="blk:0:@op_l500_c4_diff:0")
+    assert inferencer._fx_op_shape(unknown, [TensorSpec(("B", "S", 16))]) is None
+
+    # With a checkpoint and a pre-populated map, an unknown op (`diff` has no
+    # symbolic rule) resolves to the FX-captured shape (dtype inherited from the
+    # input) instead of passing the input shape through unchanged.
+    inferencer._meta_checkpoint = "dummy"
+    inferencer._op_fx_shapes = {(500, "diff", 0): ("B", "S", 15)}
+    result = inferencer._infer_node_output(
+        unknown, [TensorSpec(("B", "S", 16), "float16")], root=None
+    )
+    assert result == TensorSpec(("B", "S", 15), "float16")
+
+
 def test_shape_elementwise_forward_input_prefers_wider_activation():
     inferencer = ShapeInferencer(
         _spec(), context=ShapeContext({"H": 16}), module_dims=ModuleDimRegistry()
@@ -1646,3 +1684,259 @@ def test_shape_build_and_save_operator_export_fallbacks(
     assert target.read_text(encoding="utf-8") == (
         '{\n  "name": "synthetic",\n  "sections": []\n}\n'
     )
+
+
+# ---------------------------------------------------------------------------
+# Vision tower surfacing (multimodal wrapper) — torch-free
+# ---------------------------------------------------------------------------
+
+from TraceLens.ModelUtils.ast_analyze import ClassStructure
+from TraceLens.ModelUtils.extract import find_vision_tower, vision_tower_component
+
+
+def _class_structure(name: str, init_assignments: dict[str, str] | None = None):
+    """Minimal ClassStructure for registry-based vision-tower detection tests."""
+    return ClassStructure(
+        name=name,
+        node=ast.parse(f"class {name}:\n    pass").body[0],
+        init_assignments=init_assignments or {},
+        init_details={},
+        forward_calls=[],
+        norm_before=[],
+    )
+
+
+def _config_vlm(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    model_type: str = "foo_vision",
+    config_class: str = "FooVisionConfig",
+    tower_class: str = "FooVisionModel",
+    attr: str = "visual",
+) -> ArchitectureSpec:
+    """A VLM spec detected via a nested ``vision_config`` block.
+
+    Registers a synthetic ``model_type -> config class`` entry in transformers'
+    mapping (version-independent) and returns a spec whose registry holds the
+    derived tower class plus a wrapper binding it to ``attr``.
+    """
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
+
+    monkeypatch.setitem(CONFIG_MAPPING_NAMES, model_type, config_class)
+    registry = {
+        "Wrapper": _class_structure(
+            "Wrapper", {attr: "_from_config", "language_model": "_from_config"}
+        ),
+        "TextModel": _class_structure("TextModel"),
+        tower_class: _class_structure(tower_class, {"patch_embed": "PatchEmbed"}),
+    }
+    return _spec(
+        class_registry=registry,
+        stack_model_class="TextModel",
+        raw_config={"vision_config": {"model_type": model_type}},
+    )
+
+
+def test_find_vision_tower_resolves_from_vision_config(monkeypatch: pytest.MonkeyPatch):
+    spec = _config_vlm(monkeypatch)
+    # Detection is driven by the nested `vision_config`; the tower class is derived
+    # from transformers' model_type->config mapping (FooVisionConfig -> FooVisionModel)
+    # and confirmed against the parsed registry. The `visual` attr is recovered from
+    # the wrapper's assignments separately (the config does not name it).
+    assert find_vision_tower(spec) == ("visual", "FooVisionModel")
+
+    component = vision_tower_component(spec)
+    assert component is not None
+    assert component.attr_name == "visual"
+    assert component.class_name == "FooVisionModel"
+    assert component.role == "vision"
+
+
+def test_find_vision_tower_none_without_vision_config():
+    # A registered `*VisionModel` class alone no longer triggers detection: without a
+    # `vision_config` block the checkpoint is treated as text-only.
+    registry = {
+        "TextModel": _class_structure("TextModel"),
+        "FooVisionModel": _class_structure("FooVisionModel", {"patch_embed": "PatchEmbed"}),
+    }
+    spec = _spec(class_registry=registry, stack_model_class="TextModel")
+    assert find_vision_tower(spec) is None
+    assert vision_tower_component(spec) is None
+
+
+def test_find_vision_tower_none_when_tower_class_absent_from_registry(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # `vision_config` present, but no modeling source was parsed for the derived
+    # tower class, so there is nothing to build a detail tree from.
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
+
+    monkeypatch.setitem(CONFIG_MAPPING_NAMES, "foo_vision", "FooVisionConfig")
+    spec = _spec(
+        class_registry={"TextModel": _class_structure("TextModel")},
+        stack_model_class="TextModel",
+        raw_config={"vision_config": {"model_type": "foo_vision"}},
+    )
+    assert find_vision_tower(spec) is None
+
+
+def test_find_vision_tower_none_for_empty_registry():
+    assert find_vision_tower(_spec(class_registry={})) is None
+
+
+def test_attach_vision_language_edge_feeds_embedding_tile():
+    nodes = [{"id": "embed_tokens", "label": "Embedding", "namespace": ""}]
+    merge._attach_vision_language_edge(nodes, ("visual/@output", "result"), "embed_tokens")
+    assert nodes[0]["incomingEdges"] == [
+        {
+            "sourceNodeId": "visual/@output",
+            "sourceNodeOutputId": "result",
+            "targetNodeInputId": "0",
+        }
+    ]
+
+
+def test_attach_vision_language_edge_falls_back_to_group_input():
+    # When the embedding expanded into a namespace group, its bare id is absent and
+    # the edge must land on the group's `@input` port instead.
+    nodes = [{"id": "embed/@input", "label": "@input", "namespace": "embed"}]
+    merge._attach_vision_language_edge(nodes, "visual/@output", "embed")
+    assert nodes[0]["incomingEdges"][0]["sourceNodeId"] == "visual/@output"
+
+
+def test_attach_vision_language_edge_noop_when_target_missing():
+    nodes = [{"id": "embed_tokens", "incomingEdges": []}]
+    merge._attach_vision_language_edge(nodes, "visual/@output", None)
+    merge._attach_vision_language_edge(nodes, "visual/@output", "absent")
+    assert nodes[0]["incomingEdges"] == []
+
+
+def _vision_merge_monkeypatch(monkeypatch, *, embed, vision):
+    monkeypatch.setattr(merge, "_stack_pre_components", lambda spec: [embed])
+    monkeypatch.setattr(merge, "_stack_tail_components", lambda spec: [])
+    monkeypatch.setattr(
+        merge, "_append_decoder_layers", lambda nodes, **kw: list(kw["previous_exits"])
+    )
+    monkeypatch.setattr(merge, "vision_tower_component", lambda spec: vision)
+
+
+def test_merge_graph_emits_vision_group_and_visual_language_edge(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    embed = _component("embed_tokens", "embedding", class_name="Embedding", label="Embedding")
+    vision = _component("visual", "vision", class_name="VisionModel", label="Vision Tower", order=0)
+    spec = _spec(stack_pre=[embed], stack_tail=[], block_components=[])
+    _vision_merge_monkeypatch(monkeypatch, embed=embed, vision=vision)
+
+    monkeypatch.setattr(
+        merge,
+        "component_has_detail_section",
+        lambda component, spec: component.attr_name == "visual",
+    )
+    monkeypatch.setattr(
+        merge,
+        "_resolve_section_tree_for_component",
+        lambda *a, **k: ("Vision Tower", BlockNode("visual", "VisionModel", "vision", "Vision Tower")),
+    )
+    monkeypatch.setattr(merge, "is_transparent_inline_expansion", lambda tree: False)
+    monkeypatch.setattr(
+        merge, "expand_block_tree_inplace", lambda tree, basic_ops=None: tree
+    )
+
+    def fake_append(nodes, **kw):
+        prefix, namespace = kw["id_prefix"], kw["namespace_prefix"]
+        if prefix == "visual":
+            nodes.append({"id": "visual/patch", "label": "PatchEmbed", "namespace": "visual"})
+            nodes.append({"id": "visual/@output", "label": "result", "namespace": "visual"})
+            group_attrs = kw.get("group_node_attributes")
+            if group_attrs is not None:
+                group_attrs["visual"] = {"label": "Vision Tower", "operation": "VisionModel"}
+            return [("visual/@output", "result")]
+        nodes.append(
+            {
+                "id": prefix,
+                "label": "Embedding",
+                "namespace": namespace,
+                "incomingEdges": [merge._source_edge(s, "0") for s in kw["previous_exits"]],
+            }
+        )
+        return [prefix]
+
+    monkeypatch.setattr(merge, "_append_section", fake_append)
+
+    graph = merge.build_merged_model_graph(spec)
+    node_ids = {node["id"] for node in graph["nodes"]}
+
+    # (a) the vision tower renders as an expandable "visual" namespace group.
+    assert "@vision_input" in node_ids
+    assert any(node["namespace"] == "visual" for node in graph["nodes"])
+    assert graph["groupNodeAttributes"]["visual"]["label"] == "Vision Tower"
+
+    # (b) a visual -> language edge feeds the text embedding tile.
+    embed_node = next(node for node in graph["nodes"] if node["id"] == "embed_tokens")
+    assert any(
+        edge["sourceNodeId"] == "visual/@output"
+        for edge in embed_node.get("incomingEdges", [])
+    )
+
+
+def test_merge_graph_text_only_spec_has_no_vision_section(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # (c) a non-VLM spec is untouched: no vision input, group, or edge, and the
+    # tokenized-text input is still the first node.
+    embed = _component("embed_tokens", "embedding", class_name="Embedding", label="Embedding")
+    spec = _spec(stack_pre=[embed], stack_tail=[], block_components=[])
+    _vision_merge_monkeypatch(monkeypatch, embed=embed, vision=None)
+    monkeypatch.setattr(merge, "component_has_detail_section", lambda component, spec: False)
+
+    graph = merge.build_merged_model_graph(spec)
+    node_ids = {node["id"] for node in graph["nodes"]}
+
+    assert "@vision_input" not in node_ids
+    assert not any(node["namespace"].startswith("visual") for node in graph["nodes"])
+    assert "visual" not in graph["groupNodeAttributes"]
+    assert graph["nodes"][0]["id"] == "@input"
+
+
+def test_build_export_block_trees_appends_vision_tower_section(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from pathlib import Path
+
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
+
+    from TraceLens.ModelUtils import ast_analyze as aa
+    from TraceLens.ModelUtils.extract import _build_export_block_trees
+
+    source = """
+class VisionMLP:
+    def __init__(self):
+        self.fc1 = Linear()
+        self.fc2 = Linear()
+
+    def forward(self, x):
+        return self.fc2(self.fc1(x))
+
+class FooVisionModel:
+    def __init__(self):
+        self.patch_embed = PatchEmbed()
+        self.mlp = VisionMLP()
+
+    def forward(self, x):
+        x = self.patch_embed(x)
+        return self.mlp(x)
+"""
+    analysis = aa.analyze_sources({Path("m.py"): source})
+    monkeypatch.setitem(CONFIG_MAPPING_NAMES, "foo_vision", "FooVisionConfig")
+    spec = _spec(
+        class_registry=dict(analysis.class_registry),
+        stack_model_class=None,
+        export_block_trees=[],
+        raw_config={"vision_config": {"model_type": "foo_vision"}},
+    )
+    _build_export_block_trees(spec, BasicOpFilter.for_detailed())
+
+    vision = [tree for _title, tree in spec.export_block_trees if tree.attr_name == "visual"]
+    assert vision, "vision tower detail tree should be appended alongside the text spine"
+    assert vision[0].class_name == "FooVisionModel"

@@ -17,7 +17,9 @@ from TraceLens.ModelUtils.ast_analyze import analyze_sources, dump_ast
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.block_tree import (
     BlockNode,
+    build_block_node,
     build_full_detailed_block_trees,
+    is_method_wrapper,
 )
 from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis, LayerVariant
 from TraceLens.ModelUtils.config_resolve import load_checkpoint_config
@@ -1017,6 +1019,110 @@ def _refine_positional_from_code(
     spec.layer_notes.append("No positional encoding applied in modeling code")
 
 
+# A multimodal (VLM) checkpoint declares its vision encoder as a nested
+# ``vision_config`` block in config.json — the standard HF multimodal convention.
+# We detect the tower from that structural signal, then resolve its class through
+# transformers' ``model_type -> config class`` mapping. The wrapper binds the tower
+# to one of these attribute names, which the config itself does not record.
+_VISION_TOWER_ATTRS = frozenset({"visual", "vision_tower", "vision_model", "vision"})
+
+
+def _vision_tower_class_from_config(model_type: str, registry: dict) -> str | None:
+    """Resolve a ``vision_config`` model_type to its tower model-class name.
+
+    transformers maps ``model_type -> config class`` (e.g. ``glm5_next_vision ->
+    Glm5NextVisionConfig``) but does not register vision towers as auto-models, so
+    the model class is derived by the ``*VisionConfig -> *VisionModel`` naming
+    convention and confirmed against the parsed AST class registry (which is what
+    the detail-tree builder walks).
+    """
+    try:
+        from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
+    except ImportError:
+        return None
+    config_class = CONFIG_MAPPING_NAMES.get(model_type)
+    if not config_class or not config_class.endswith("Config"):
+        return None
+    model_class = config_class[: -len("Config")] + "Model"
+    return model_class if model_class in registry else None
+
+
+def find_vision_tower(spec: ArchitectureSpec) -> tuple[str, str] | None:
+    """Locate a VLM wrapper's vision tower as ``(attr_name, class_name)``.
+
+    Returns ``None`` for a text-only model. Detection is driven by the presence of
+    a nested ``vision_config`` in the checkpoint config (the HF multimodal
+    convention); the tower class is resolved through transformers' config mapping
+    and confirmed against the AST class registry. The text stack is never mistaken
+    for the tower.
+    """
+    vision_config = (spec.raw_config or {}).get("vision_config")
+    if not isinstance(vision_config, dict):
+        return None
+    model_type = vision_config.get("model_type")
+    if not model_type:
+        return None
+    registry = spec.class_registry or {}
+    tower_class = _vision_tower_class_from_config(model_type, registry)
+    if tower_class is None or tower_class == spec.stack_model_class:
+        return None
+    # The wrapper binds the tower to an attribute (e.g. Glm5NextModel.visual); the
+    # config does not record it, so recover it from the wrapper's assignments.
+    attr_name = next(
+        (
+            attr
+            for cls in registry.values()
+            for attr in (getattr(cls, "init_assignments", {}) or {})
+            if attr in _VISION_TOWER_ATTRS
+        ),
+        None,
+    )
+    return (attr_name or "visual", tower_class)
+
+
+def vision_tower_component(spec: ArchitectureSpec) -> BlockComponent | None:
+    """Return a synthetic ``BlockComponent`` for the vision tower, or ``None``."""
+    found = find_vision_tower(spec)
+    if found is None:
+        return None
+    attr_name, class_name = found
+    return BlockComponent(
+        attr_name=attr_name,
+        class_name=class_name,
+        role="vision",
+        label="Vision Tower",
+        forward_order=0,
+    )
+
+
+def _append_vision_section_tree(
+    spec: ArchitectureSpec, basic_ops: BasicOpFilter
+) -> None:
+    """Append the vision tower's detail tree alongside the text spine, if present."""
+    component = vision_tower_component(spec)
+    if component is None:
+        return
+    if any(attr == component.attr_name for attr, _tree in spec.export_block_trees):
+        return
+    tree = build_block_node(
+        attr_name=component.attr_name,
+        class_name=component.class_name,
+        registry=spec.class_registry,
+        basic_ops=basic_ops,
+        forward_order=component.forward_order,
+        infer_init_steps=True,
+    )
+    if is_method_wrapper(tree):
+        return
+    cls_info = spec.class_registry.get(component.class_name)
+    tree.input_label = (
+        cls_info.forward_input_name
+        if cls_info and cls_info.forward_input_name
+        else "pixel_values"
+    )
+    spec.export_block_trees.append((component.label, tree))
+
+
 def _build_export_block_trees(spec: ArchitectureSpec, basic_ops: BasicOpFilter) -> None:
     if not spec.class_registry:
         spec.export_block_trees = []
@@ -1034,6 +1140,7 @@ def _build_export_block_trees(spec: ArchitectureSpec, basic_ops: BasicOpFilter) 
         include_norms=True,
         infer_init_steps=True,
     )
+    _append_vision_section_tree(spec, basic_ops)
 
 
 def architecture_section_trees(spec: ArchitectureSpec) -> list[tuple[str, BlockNode]]:

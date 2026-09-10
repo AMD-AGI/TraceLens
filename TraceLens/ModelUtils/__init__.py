@@ -1,19 +1,13 @@
 """TraceLens ModelUtils: CPU-only LLM architecture analysis and model parsing.
 
-Two graph-building backends live side by side here:
+The Model Explorer graph is built by the AST backend (``ast_analyze`` /
+``extract`` / ``computation_graph`` / ...): a static-analysis pipeline that
+parses a model's ``modeling_*.py`` source with Python's ``ast`` module instead
+of executing it. See ``load_model_spec`` / ``load_architecture``.
 
-- ``torch_trace`` (default): traces the model on the meta device with PyTorch
-  (``named_modules()`` hierarchy + per-module ``torch.fx`` tracing + forward
-  hooks) to build the Model Explorer graph. See ``build_graph``.
-- AST backend (``ast_analyze`` / ``extract`` / ``computation_graph`` / ...):
-  the original static-analysis pipeline that parses a model's
-  ``modeling_*.py`` source with Python's ``ast`` module instead of executing
-  it. Kept as a switchable fallback (e.g. for checkpoints that can't be
-  instantiated/traced, or for offline source-only inspection). See
-  ``load_model_spec`` / ``load_architecture``.
-
-Both backends are wired into the CLI via ``--backend {torch,ast}``
-(see ``TraceLens.Visualizer.model_explorer_export.cli``).
+``torch_trace`` provides the supporting meta-device instantiation and
+per-module ``torch.fx`` shape-propagation helpers used to fill in tensor
+shapes the static analysis can't infer.
 """
 
 from TraceLens.ModelUtils.ast_analyze import (
@@ -53,8 +47,6 @@ from TraceLens.ModelUtils.shape_inference import (
     build_operator_export,
     save_operator_export,
 )
-from TraceLens.ModelUtils.torch_trace import build_graph
-
 __all__ = [
     "ArchitectureSpec",
     "BlockComponent",
@@ -68,7 +60,6 @@ __all__ = [
     "architecture_section_trees",
     "build_architecture_model_graphs",
     "build_detailed_basic_ops",
-    "build_graph",
     "build_model_graph",
     "build_operator_export",
     "dump_ast",
