@@ -17,8 +17,10 @@ tensor shapes the static analysis can't infer.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from TraceLens.ModelUtils.basic_ops import DEFAULT_BASIC_OP_PATTERNS
@@ -79,6 +81,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Write a standalone .html viewer page (default: <model>.html) "
             "or an explicit .html / .json path."
+        ),
+    )
+    parser.add_argument(
+        "--from-payload",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Render a standalone .html viewer from an existing Model Explorer "
+            "payload JSON (stage 2 of model -> JSON -> HTML); skips loading the "
+            "model. The viewer 'Generated' timestamp is taken from the JSON "
+            "file's creation date."
         ),
     )
     parser.add_argument(
@@ -235,14 +248,72 @@ def default_html_output_path(
     return Path.cwd() / (stem.replace("/", "_") + ".html")
 
 
-def write_optional_output(payload: dict, output: Path) -> Path:
+def file_created_at(path: Path) -> datetime:
+    """Best-effort file creation time (birth time when available, else mtime)."""
+    stat = Path(path).stat()
+    timestamp = getattr(stat, "st_birthtime", None) or stat.st_mtime
+    return datetime.fromtimestamp(timestamp)
+
+
+def write_optional_output(
+    payload: dict, output: Path, *, generated_at: datetime | None = None
+) -> Path:
     if is_html_output(output):
-        saved = save_viewer_html(payload, output)
+        saved = save_viewer_html(payload, output, generated_at=generated_at)
         print(f"Wrote standalone viewer: {saved}")
         return saved
     saved = save_model_explorer_payload(payload, output)
     print(f"Wrote Model Explorer JSON: {saved}")
     return saved
+
+
+def _run_from_payload(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> int:
+    """Render a viewer HTML from an existing Model Explorer payload JSON."""
+    source = args.from_payload
+    if not source.exists():
+        print(f"Error: payload not found: {source}", file=sys.stderr)
+        return 1
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"Error reading payload {source}: {exc}", file=sys.stderr)
+        return 1
+
+    generated_at = file_created_at(source)
+
+    if args.output is not None and args.output != Path("__default__"):
+        output = args.output
+    else:
+        output = source.with_suffix(".html")
+
+    serve_requested = args.serve or args.open
+    if not serve_requested or args.output is not None:
+        try:
+            write_optional_output(payload, output, generated_at=generated_at)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error writing output: {exc}", file=sys.stderr)
+            return 1
+
+    if serve_requested:
+        url = viewer_url(args.port)
+        print(f"Open viewer: {url}")
+        try:
+            if args.open:
+                open_viewer(url)
+            serve_viewer(payload=payload, port=args.port, block=args.serve)
+            if not args.serve:
+                print("Viewer started in the background. Press Ctrl+C to exit.")
+                try:
+                    threading.Event().wait()
+                except KeyboardInterrupt:
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error serving viewer: {exc}", file=sys.stderr)
+            return 1
+
+    return 0
 
 
 def _load_ast_spec(
@@ -351,7 +422,7 @@ def _run_torch_module(
         if output is None or output == Path("__default__"):
             output = Path.cwd() / (module_stem + ".html")
         try:
-            write_optional_output(payload, output)
+            write_optional_output(payload, output, generated_at=datetime.now())
         except Exception as exc:  # noqa: BLE001
             print(f"Error writing output: {exc}", file=sys.stderr)
             return 1
@@ -379,6 +450,9 @@ def _run_torch_module(
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.from_payload is not None:
+        return _run_from_payload(args, parser)
 
     if args.torch_module is not None:
         if args.input_shape is None:
@@ -423,14 +497,14 @@ def main(argv: list[str] | None = None) -> int:
             else args.output
         )
         try:
-            write_optional_output(payload, output)
+            write_optional_output(payload, output, generated_at=datetime.now())
         except Exception as exc:  # noqa: BLE001
             print(f"Error writing output: {exc}", file=sys.stderr)
             return 1
     elif not serve_requested:
         try:
             output = default_html_output_path(checkpoint, getattr(args, "github", None))
-            write_optional_output(payload, output)
+            write_optional_output(payload, output, generated_at=datetime.now())
         except Exception as exc:  # noqa: BLE001
             print(f"Error writing output: {exc}", file=sys.stderr)
             return 1

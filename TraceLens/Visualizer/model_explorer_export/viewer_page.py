@@ -10,8 +10,13 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
+    with_generated_timestamp,
+)
 
 VIEWER_DIR = Path(__file__).resolve().parent / "viewer"
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -47,17 +52,43 @@ def render_worker_script(worker_js: str) -> str:
     return f'    <script id="tracelens-worker-source" type="text/plain">{safe}</script>'
 
 
+def _payload_with_generated_timestamp(
+    payload: dict[str, Any], generated_at: datetime
+) -> dict[str, Any]:
+    """Overlay a 'Generated' timestamp on the fact sheet without mutating ``payload``.
+
+    Only the viewer fact sheet is touched; the embedded graph/payload data is
+    left identical so the persisted JSON stays byte-reproducible.
+    """
+    viewer = payload.get("tracelensViewer")
+    if not isinstance(viewer, dict):
+        return payload
+    fact_sheet = viewer.get("factSheet")
+    if not isinstance(fact_sheet, dict):
+        return payload
+    stamped = with_generated_timestamp(fact_sheet, generated_at)
+    new_viewer = dict(viewer, factSheet=stamped)
+    return dict(payload, tracelensViewer=new_viewer)
+
+
 def compose_viewer_html(
     payload: dict[str, Any] | None = None,
     *,
     inline_app: bool = False,
+    generated_at: datetime | None = None,
 ) -> str:
-    """Build viewer HTML, optionally embedding payload and app.js."""
+    """Build viewer HTML, optionally embedding payload and app.js.
+
+    When ``generated_at`` is provided, a 'Generated: <date time>' line is added
+    to the viewer fact sheet (HTML only; the payload JSON is unchanged).
+    """
     shell = (VIEWER_DIR / "index.html").read_text(encoding="utf-8")
     app_js = (VIEWER_DIR / "app.js").read_text(encoding="utf-8")
 
     replacement_parts: list[str] = []
     if payload is not None:
+        if generated_at is not None:
+            payload = _payload_with_generated_timestamp(payload, generated_at)
         replacement_parts.append(render_payload_script(payload))
     if inline_app:
         replacement_parts.append(
@@ -76,9 +107,20 @@ def compose_viewer_html(
     return shell
 
 
-def save_viewer_html(payload: dict[str, Any], path: Path | str) -> Path:
-    """Write a self-contained standalone viewer page (payload, worker, and app inline)."""
+def save_viewer_html(
+    payload: dict[str, Any],
+    path: Path | str,
+    *,
+    generated_at: datetime | None = None,
+) -> Path:
+    """Write a self-contained standalone viewer page (payload, worker, and app inline).
+
+    ``generated_at`` stamps the fact sheet with a generation time (HTML only).
+    """
     target = Path(path).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(compose_viewer_html(payload, inline_app=True), encoding="utf-8")
+    target.write_text(
+        compose_viewer_html(payload, inline_app=True, generated_at=generated_at),
+        encoding="utf-8",
+    )
     return target

@@ -113,6 +113,141 @@ def test_write_optional_output_selects_html_or_json(monkeypatch, tmp_path, capsy
     save_json.assert_called_once()
 
 
+def test_inject_group_outputs_orders_sibling_namespaces_deterministically():
+    """Equal-depth sibling namespaces must emit @output boundaries in a stable,
+    hash-seed-independent order so exports are byte-reproducible."""
+    from TraceLens.Visualizer.model_explorer_export import merge
+
+    def build_nodes() -> list[dict]:
+        return [
+            {"id": "mlp/b/@input", "namespace": "mlp/b"},
+            {"id": "mlp/b/op", "namespace": "mlp/b"},
+            {"id": "mlp/a/@input", "namespace": "mlp/a"},
+            {"id": "mlp/a/op", "namespace": "mlp/a"},
+            {
+                "id": "sink",
+                "namespace": "",
+                "incomingEdges": [
+                    {"sourceNodeId": "mlp/a/op"},
+                    {"sourceNodeId": "mlp/b/op"},
+                ],
+            },
+        ]
+
+    nodes = build_nodes()
+    merge._inject_group_outputs(nodes)
+    output_order = [n["id"] for n in nodes if merge._is_synthetic_output(n)]
+    # Deepest-first, then namespace ascending → a before b, deterministically.
+    assert output_order == ["mlp/a/@output", "mlp/b/@output"]
+
+
+def test_file_created_at_uses_stat(tmp_path: Path):
+    import os
+    import time
+    from datetime import datetime
+
+    src = tmp_path / "payload.json"
+    src.write_text("{}")
+    past = time.mktime((2026, 1, 2, 3, 4, 5, 0, 0, -1))
+    os.utime(src, (past, past))
+    # birthtime may or may not exist; when absent we fall back to mtime.
+    if not getattr(src.stat(), "st_birthtime", None):
+        assert cli.file_created_at(src) == datetime(2026, 1, 2, 3, 4, 5)
+
+
+def test_cli_from_payload_renders_html_with_file_create_date(tmp_path, capsys, monkeypatch):
+    import os
+    import time
+
+    payload = {
+        "name": "org/model",
+        "tracelensViewer": {
+            "factSheet": {
+                "title": "Fact sheet",
+                "body": "- Model type: demo",
+                "bodyHtml": "- Model type: demo",
+            }
+        },
+        "graphCollections": [{"label": "demo", "graphs": [{"id": "g", "nodes": []}]}],
+    }
+    src = tmp_path / "org_model.json"
+    src.write_text(json.dumps(payload))
+    if getattr(src.stat(), "st_birthtime", None):
+        pytest.skip("birthtime-based platform; mtime backdating not authoritative")
+    past = time.mktime((2026, 1, 2, 3, 4, 5, 0, 0, -1))
+    os.utime(src, (past, past))
+    out = tmp_path / "org_model.html"
+
+    assert cli.main(["--from-payload", str(src), "-o", str(out)]) == 0
+    text = out.read_text(encoding="utf-8")
+    assert "Generated: 2026-01-02 03:04:05" in text
+    assert "Wrote standalone viewer" in capsys.readouterr().out
+
+
+def test_cli_from_payload_default_output_is_payload_stem(tmp_path):
+    payload = {"graphCollections": [{"graphs": [{"id": "g", "nodes": []}]}]}
+    src = tmp_path / "some_model.json"
+    src.write_text(json.dumps(payload))
+
+    assert cli.main(["--from-payload", str(src)]) == 0
+    assert (tmp_path / "some_model.html").exists()
+
+
+def test_cli_from_payload_missing_file(capsys, tmp_path):
+    missing = tmp_path / "nope.json"
+    assert cli.main(["--from-payload", str(missing)]) == 1
+    assert "payload not found" in capsys.readouterr().err
+
+
+def test_cli_from_payload_invalid_json(capsys, tmp_path):
+    src = tmp_path / "bad.json"
+    src.write_text("{not json")
+    assert cli.main(["--from-payload", str(src)]) == 1
+    assert "Error reading payload" in capsys.readouterr().err
+
+
+def test_cli_from_payload_serves(monkeypatch, capsys, tmp_path):
+    src = tmp_path / "org_model.json"
+    src.write_text(json.dumps({"graphCollections": [{"graphs": [{"id": "g"}]}]}))
+    monkeypatch.setattr(cli, "viewer_url", lambda port: f"url:{port}")
+    opened = Mock()
+    served = Mock()
+    monkeypatch.setattr(cli, "open_viewer", opened)
+    monkeypatch.setattr(cli, "serve_viewer", served)
+
+    assert cli.main(["--from-payload", str(src), "--open", "--serve", "--port", "42"]) == 0
+    opened.assert_called_once_with("url:42")
+    served.assert_called_once()
+    assert "Open viewer: url:42" in capsys.readouterr().out
+
+    served.side_effect = RuntimeError("busy")
+    assert cli.main(["--from-payload", str(src), "--serve"]) == 1
+    assert "Error serving viewer: busy" in capsys.readouterr().err
+
+
+def test_cli_from_payload_open_only_background_wait(monkeypatch, tmp_path):
+    src = tmp_path / "org_model.json"
+    src.write_text(json.dumps({"graphCollections": [{"graphs": [{"id": "g"}]}]}))
+    monkeypatch.setattr(cli, "viewer_url", lambda port: f"url:{port}")
+    monkeypatch.setattr(cli, "open_viewer", Mock())
+    monkeypatch.setattr(cli, "serve_viewer", Mock())
+    wait = Mock(side_effect=KeyboardInterrupt)
+    monkeypatch.setattr(cli.threading, "Event", lambda: SimpleNamespace(wait=wait))
+
+    assert cli.main(["--from-payload", str(src), "--open"]) == 0
+    wait.assert_called_once()
+
+
+def test_cli_from_payload_write_error(monkeypatch, capsys, tmp_path):
+    src = tmp_path / "org_model.json"
+    src.write_text(json.dumps({"graphCollections": [{"graphs": [{"id": "g"}]}]}))
+    monkeypatch.setattr(
+        cli, "write_optional_output", Mock(side_effect=OSError("read only"))
+    )
+    assert cli.main(["--from-payload", str(src)]) == 1
+    assert "Error writing output: read only" in capsys.readouterr().err
+
+
 def test_cli_requires_a_source():
     with pytest.raises(SystemExit) as exc:
         cli.main([])
@@ -150,7 +285,10 @@ def test_cli_dump_ast_operator_fallback_and_explicit_output(
     assert ast_path.read_text(encoding="utf-8") == "Module()\n"
     fallback.assert_called_once()
     save_operators.assert_called_once_with({"operators": [1]}, operators)
-    write_output.assert_called_once_with(_payload(), output)
+    write_output.assert_called_once()
+    call_args, call_kwargs = write_output.call_args
+    assert call_args == (_payload(), output)
+    assert "generated_at" in call_kwargs
     assert "Wrote AST dump" in capsys.readouterr().out
 
 

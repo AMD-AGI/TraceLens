@@ -1142,6 +1142,70 @@ def test_save_viewer_html_is_self_contained(tmp_path: Path):
     assert 'id="tracelens-worker-source"' in html
 
 
+def test_with_generated_timestamp_appends_line():
+    from datetime import datetime
+
+    from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
+        with_generated_timestamp,
+    )
+
+    viewer = {"title": "Fact sheet", "body": "- Model type: demo", "bodyHtml": "- Model type: demo"}
+    stamped = with_generated_timestamp(viewer, datetime(2026, 1, 2, 3, 4, 5))
+
+    assert stamped["body"].endswith("- Generated: 2026-01-02 03:04:05")
+    assert stamped["bodyHtml"].endswith("- Generated: 2026-01-02 03:04:05")
+    # Original dict is not mutated.
+    assert "Generated" not in viewer["body"]
+
+
+def test_compose_viewer_html_generated_at_stamps_fact_sheet():
+    from datetime import datetime
+
+    from TraceLens.Visualizer.model_explorer_export.viewer_page import (
+        compose_viewer_html,
+    )
+
+    spec = load_architecture(
+        FIXTURES / "custom_model",
+        name="Custom MLA MoE",
+        detailed=True,
+        basic_ops=BasicOpFilter.from_cli(add=[r"(?i)^Linear$"]),
+    )
+    payload = build_model_explorer_payload(spec)
+
+    plain = compose_viewer_html(payload, inline_app=True)
+    assert "Generated: " not in plain
+
+    stamped = compose_viewer_html(
+        payload, inline_app=True, generated_at=datetime(2026, 1, 2, 3, 4, 5)
+    )
+    assert "Generated: 2026-01-02 03:04:05" in stamped
+    # The source payload must not be mutated by the timestamp overlay.
+    assert "Generated" not in payload["tracelensViewer"]["factSheet"]["body"]
+
+
+def test_compose_viewer_html_generated_at_without_fact_sheet_is_noop():
+    from datetime import datetime
+
+    from TraceLens.Visualizer.model_explorer_export.viewer_page import (
+        compose_viewer_html,
+    )
+
+    # No tracelensViewer at all.
+    html = compose_viewer_html(
+        {"graphCollections": []}, inline_app=True, generated_at=datetime(2026, 1, 2)
+    )
+    assert "Generated: " not in html
+
+    # tracelensViewer present but factSheet is not a dict.
+    html = compose_viewer_html(
+        {"tracelensViewer": {"factSheet": None}},
+        inline_app=True,
+        generated_at=datetime(2026, 1, 2),
+    )
+    assert "Generated: " not in html
+
+
 def test_fact_sheet_group_attributes_in_graph_info():
     spec = load_architecture(
         FIXTURES / "custom_model",

@@ -1098,8 +1098,10 @@ def _inject_group_outputs(
     }
     for namespace in sorted(
         (item for item in input_namespaces if item),
-        key=lambda item: item.count("/"),
-        reverse=True,
+        # Deepest namespaces first; the namespace string is a secondary key so
+        # sibling namespaces at equal depth emit in a deterministic (not
+        # hash-seed dependent) order, keeping exports byte-reproducible.
+        key=lambda item: (-item.count("/"), item),
     ):
         if any(
             _is_synthetic_output(node) and node.get("namespace", "") == namespace
