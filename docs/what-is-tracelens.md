@@ -50,6 +50,8 @@ TraceLens provides these capabilities:
 - **Event replay:** Isolate any operation for focused debugging. TraceLens
   generates minimal, self-contained replay scripts from trace metadata, making
   it straightforward to share IP-safe reproducers with kernel developers.
+- **Corpus catalog:** Index many traces into a shared catalog and search ops,
+  kernels, and GPU-timeline metrics without reopening each raw file.
 - **Extensible SDK:** Start with ready-to-use scripts, then build custom
   workflows with a flexible Python API.
 - **Agentic analysis:** Turn a raw trace into a prioritized, human-readable
@@ -71,6 +73,8 @@ TraceLens is suited to these scenarios:
   quantify the effect of a code, library, or hardware change.
 - **Reproducer generation:** Extract a single operator into a standalone replay
   script to share with kernel or framework developers.
+- **Corpus search:** Index a set of traces and query kernels, op categories, or
+  performance ranges across the set.
 - **Autonomous bottleneck triage:** Hand a trace to the TraceLens Agent and get
   back a ranked action list of the highest-impact optimizations, ready for
   review or for feeding into automated performance-tuning platforms.
