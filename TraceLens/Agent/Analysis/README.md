@@ -71,9 +71,7 @@ Roofline analysis compares each measured kernel against your GPU's max-achievabl
 
 ## Quick Start - How to Use
 
-> **Note**: The orchestrator skills are portable and work with agentic runners that support skill-file discovery.
-
-> **Skill paths in the package:** The orchestrator and its subagent prompts live under `TraceLens/Agent/Analysis/skills/analysis-orchestrator/` (`SKILL.md`, `reference.md`, and `agents/*.md`).
+> **Note**: The orchestrator skills are portable and work with agentic runners that support skill-file discovery (for example, Claude Code, Cursor, or Codex). The orchestrator and its subagent prompts live under `TraceLens/Agent/Analysis/skills/analysis-orchestrator/` (`SKILL.md`, `reference.md`, and `agents/*.md`).
 
 ### To run manually:
 
