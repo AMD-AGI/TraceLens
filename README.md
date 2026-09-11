@@ -47,7 +47,7 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 
 TraceLens analyses profiler traces from PyTorch, JAX, and AMD rocprofv3; see [Supported Profile Formats](#supported-profile-formats) for the full list. The instructions below cover collecting a PyTorch trace:
 - **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. The [PyTorch profiling walkthrough](notebooks/torch-profiling.ipynb) walks through this end to end.
-- **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](TraceLens/Agent/Profiling/README.md) automates vLLM/SGLang/ATOM benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces.
+- **Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](TraceLens/Agent/Profiling/README.md) automates vLLM/SGLang/ATOM benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces.
 
 To try out TraceLens without collecting your own trace, use the [demo traces](tests/traces) bundled in the repository.
 
@@ -125,6 +125,32 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 
 ---
 
+## Project Structure
+
+```text
+TraceLens/
+├── TraceLens/
+│   ├── Reporting/        # CLI tools for quick start utils
+│   ├── Trace2Tree/       # Trace2Tree parses trace into tree data structure
+│   ├── PerfModel/        # Op meta data parsing and performance modelling code (roofline, FLOPs/Byte, etc.)
+│   ├── TreePerf/         # TreePerf uses Trace Tree and PerfModel to generate perf breakdowns and perf metrics TFLOPS/s, etc.
+│   ├── NcclAnalyser/     # Analysis of collective communications
+│   ├── TraceFusion/      # Merging of multi-rank traces into a global view
+│   ├── TraceDiff/        # TraceDiff uses the Trace Tree format and does morphological comparison across traces
+│   ├── EventReplay/      # Extracts meta data and replays almost arbitrary operations
+│   ├── TraceIndex/       # Build a searchable SQLite catalog of TraceLens reports
+│   ├── TraceUtils/       # Shared trace loaders and annotation helpers
+│   └── Agent/            # Agentic optimization report (Analysis) and trace collection (Profiling)
+├── docs/               # tool-specific guides
+├── examples/           # example traces, notebooks, scripts, custom-workflows
+├── notebooks/          # end-to-end profiling and analysis walkthroughs
+├── scripts/            # helper scripts
+├── tests/              # unit & integration tests
+└── setup.py
+```
+
+---
+
 ## Documentation
 
 | Module                       | Doc                                                                                                                              |
@@ -143,16 +169,6 @@ Each format's linked doc covers its full CLI reference. For PyTorch report compa
 | Performance Report Columns   | [docs/reference/perf-report-columns.md](docs/reference/perf-report-columns.md)                                                   |
 | TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
 | TraceIndex                   | [docs/how-to/trace-index.md](docs/how-to/trace-index.md)                                                                         |
-
----
-
-## Development
-
-```bash
-git clone https://github.com/AMD-AGI/TraceLens.git && cd TraceLens
-pip install -e .[dev]
-python -m pytest tests/ -v
-```
 
 ---
 

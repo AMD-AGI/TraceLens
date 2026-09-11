@@ -21,7 +21,6 @@ Thanks for your interest in improving **TraceLens** — a toolkit that parses Py
 - Read the [README](./README.md) to understand scope and architecture.
 - Search existing **issues** and **discussions** to avoid duplicates.
 - For new features and enhancements (new analyser, backend integration, refactor), **open an issue** first to align on approach.
-- Prefer small, modular, focused PRs.
 - **Have a ready-made utility?** If your utility is already developed, you can raise a PR to add it directly to `examples/custom_workflows/`. This lets the community start using it right away while we plan a tighter integration into the core library.
 
 ---
@@ -29,10 +28,6 @@ Thanks for your interest in improving **TraceLens** — a toolkit that parses Py
 ## Table of Contents
 
 - [Dev Setup](#dev-setup)
-- [Project Structure (high level)](#project-structure-high-level)
-- [Code Formatting with Black](#code-formatting-with-black)
-  - [Installing Black](#installing-black)
-  - [Using Black](#using-black)
 - [Branch Naming Convention](#branch-naming-convention)
   - [Types (type)](#types-type)
   - [Scope (optional)](#scope-optional)
@@ -56,54 +51,6 @@ source .venv/bin/activate
 pip install -U pip
 pip install -e .[dev]
 ```
-
-## Project Structure (high level)
-
-```text
-TraceLens/
-├── TraceLens/
-│   ├── Reporting/        # CLI tools for quick start utils
-│   ├── Trace2Tree/       # Trace2Tree parses trace into tree data structure
-│   ├── PerfModel/        # Op meta data parsing and performance modelling code (roofline, FLOPs/Byte, etc.)
-│   ├── TreePerf/         # TreePerf uses Trace Tree and PerfModel to generate perf breakdowns and perf metrics TFLOPS/s, etc. 
-|   |                     # This directory also contains GPUEventAnalyzer
-│   ├── NcclAnalyser/     # Analysis of collective communications
-│   ├── TraceFusion/      # Merging of multi‑rank traces into a global view
-│   ├── TraceDiff/        # TraceDiff uses the Trace Tree format and does morphological comparison across traces
-│   └── EventReplay/      # Extracts meta data and replays almost arbitrary operations
-├── docs/               # tool-specific guides
-├── examples/           # example traces, notebooks, scripts, custom-workflows
-├── tests/              # unit & integration tests
-└── setup.py
-```
-
-## Code Formatting with Black
-
-This project uses [Black](https://black.readthedocs.io/en/stable/) to automatically format Python code for consistency and readability.
-
-### Installing Black
-
-You can install Black using pip:
-
-```sh
-pip install black
-```
-
-### Using Black
-
-To format all Python files in the project, run:
-
-```sh
-black .
-```
-
-You can also format a specific file:
-
-```sh
-black path/to/your_file.py
-```
-
-Please ensure your code is formatted with Black before submitting a pull request.
 
 ## Branch Naming Convention
 
