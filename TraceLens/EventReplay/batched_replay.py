@@ -9,7 +9,41 @@ import json
 import argparse
 import sys
 import torch
-from utils import TensorCfg, build_tensor, benchmark_func
+
+try:
+    from .utils import TensorCfg, build_tensor, benchmark_func
+    from .event_replay import _resolve_op_func as _resolve_op_func_sdk
+except ImportError:
+    from utils import TensorCfg, build_tensor, benchmark_func
+    try:
+        from event_replay import _resolve_op_func as _resolve_op_func_sdk
+    except ImportError:
+        _resolve_op_func_sdk = None
+
+
+def resolve_replay_func(op_name: str):
+    """Return a callable for *op_name*, or raise RuntimeError.
+
+    Prefers EventReplayer's resolver (JIT → torch.ops → module → auto-import).
+    If this script is used as a standalone zip without ``event_replay.py``,
+    falls back to JIT and treats a ``None`` return as a miss (do not call it).
+    """
+    if _resolve_op_func_sdk is not None:
+        func, _source, _resolved = _resolve_op_func_sdk(op_name)
+        if func is None or not callable(func):
+            raise RuntimeError(f"Cannot resolve op '{op_name}'")
+        return func
+
+    try:
+        func, _ = torch._C._jit_get_operation(op_name)
+    except Exception as e:
+        raise RuntimeError(f"Cannot resolve op '{op_name}': {e}") from e
+    if func is None or not callable(func):
+        raise RuntimeError(
+            f"Cannot resolve op '{op_name}' (JIT returned {func!r}). "
+            "Place event_replay.py next to this script for custom-op resolution."
+        )
+    return func
 
 
 def _get_args_kwargs_from_ir(
@@ -113,10 +147,11 @@ if __name__ == "__main__":
 
         # Get the PyTorch operation function
         try:
-            func, _ = torch._C._jit_get_operation(op_name)
+            func = resolve_replay_func(op_name)
         except Exception as e:
             print(
-                f"  Error: Could not find PyTorch operation '{op_name}'. Is the PyTorch version compatible? Error: {e}"
+                f"  Error: Could not find PyTorch operation '{op_name}'. "
+                f"Is the op library imported? Error: {e}"
             )
             if args.stop_on_error:
                 raise

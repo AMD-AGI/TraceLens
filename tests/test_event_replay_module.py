@@ -403,6 +403,36 @@ class TestBatchedReplayHelpers:
         assert pos_args[0].shape == (2, 3)
         assert kwargs == {}
 
+    def test_resolve_replay_func_aten_mm(self):
+        from TraceLens.EventReplay.batched_replay import resolve_replay_func
+
+        func = resolve_replay_func("aten::mm")
+        assert callable(func)
+
+    def test_resolve_replay_func_missing_op_raises(self):
+        from TraceLens.EventReplay.batched_replay import resolve_replay_func
+
+        with pytest.raises(RuntimeError, match="Cannot resolve"):
+            resolve_replay_func("pr607missing::no_such_op")
+
+    def test_resolve_replay_func_python_module_op(self):
+        import types
+        from TraceLens.EventReplay.batched_replay import resolve_replay_func
+
+        mod = types.ModuleType("pr607climod")
+
+        def add_one(x):
+            return x + 1
+
+        mod.add_one = add_one
+        sys.modules["pr607climod"] = mod
+        try:
+            func = resolve_replay_func("pr607climod::add_one")
+            assert func is add_one
+            assert func(3) == 4
+        finally:
+            sys.modules.pop("pr607climod", None)
+
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
