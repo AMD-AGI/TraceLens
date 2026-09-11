@@ -186,14 +186,18 @@ def test_trace_split(dirpath, trace_gz, tmp_path, update_references):
 
     roots, N = _find_roots(trace_path)
     targets = _compute_targets(roots, N)
+    is_llm = any(x in os.path.basename(dirpath) for x in ("sglang", "vllm"))
 
     # Run all three modes in a single main() call.
     out_dir = str(tmp_path / "output")
     os.makedirs(out_dir, exist_ok=True)
-    _run_main(trace_path, out_dir, [
+    flags = [
         "--store-single-iteration", "--iterations", "all",
         "--find-steady-state", "--divide-phases",
-    ])
+    ]
+    if is_llm:
+        flags.append("--llm-inference")
+    _run_main(trace_path, out_dir, flags)
 
     # Categorise output: top-level iteration files = splits,
     # top-level non-iteration files = steady-state, subdirs = phases.
