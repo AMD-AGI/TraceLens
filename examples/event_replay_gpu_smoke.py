@@ -16,6 +16,7 @@ instead of this script.
 """
 
 import sys, os, json, time
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
@@ -47,6 +48,7 @@ add_b = torch.randn(M, N, dtype=torch.bfloat16, device=DEVICE)
 bmm_a = torch.randn(4, M, K, dtype=torch.bfloat16, device=DEVICE)
 bmm_b = torch.randn(4, K, N, dtype=torch.bfloat16, device=DEVICE)
 
+
 def run_ops():
     torch.mm(mm_a, mm_b)
     torch.add(add_a, add_b)
@@ -54,12 +56,15 @@ def run_ops():
     torch.mul(add_a, add_b)
     torch.sigmoid(add_a)
 
+
 for _ in range(10):
     run_ops()
 torch.cuda.synchronize()
 
+
 def trace_handler(p):
     p.export_chrome_trace(TRACE_FILE)
+
 
 wait, warmup, active = 3, 3, 5
 with profile(
@@ -89,10 +94,12 @@ all_events = trace_data.get("traceEvents", [])
 
 OPS_TO_TEST = ["aten::mm", "aten::add", "aten::bmm", "aten::mul", "aten::sigmoid"]
 
+
 def find_event(events, op_name):
     """Find a cpu_op event with the right name and shape data."""
     candidates = [
-        e for e in events
+        e
+        for e in events
         if e.get("cat") == "cpu_op"
         and e.get("name") == op_name
         and "args" in e
@@ -101,6 +108,7 @@ def find_event(events, op_name):
     if candidates:
         return candidates[len(candidates) // 2]
     return None
+
 
 results = []
 errors = []
@@ -113,13 +121,17 @@ print(f"\n{'=' * 80}")
 print("Step 3: Replay and validate")
 print("=" * 80)
 
-print(f"\n{'Op':<30} {'Kernel Match':<15} {'Return':<10} {'Lazy':<10} {'ReproInfo':<12} {'Status'}")
+print(
+    f"\n{'Op':<30} {'Kernel Match':<15} {'Return':<10} {'Lazy':<10} {'ReproInfo':<12} {'Status'}"
+)
 print("-" * 100)
 
 for op_name in OPS_TO_TEST:
     evt = find_event(all_events, op_name)
     if evt is None:
-        print(f"{op_name:<30} {'SKIP':<15} {'---':<10} {'---':<10} {'---':<12} not in trace")
+        print(
+            f"{op_name:<30} {'SKIP':<15} {'---':<10} {'---':<10} {'---':<12} not in trace"
+        )
         continue
 
     status = []
@@ -148,10 +160,12 @@ for op_name in OPS_TO_TEST:
         repro_replayer = EventReplayer(evt, device=DEVICE, lazy=True)
         info1 = repro_replayer.get_repro_info()
         info2 = repro_replayer.get_repro_info()
-        repro_ok = (info1 == info2)
+        repro_ok = info1 == info2
         for arg in repro_replayer.event_replay_IR["list_pos_args"]:
             if arg["arg_type"].startswith("Tensor"):
-                assert isinstance(arg["value"], TensorCfg), "IR corrupted after get_repro_info"
+                assert isinstance(
+                    arg["value"], TensorCfg
+                ), "IR corrupted after get_repro_info"
         repro_replayer.replay()
     except Exception as e:
         repro_ok = False
@@ -201,9 +215,19 @@ for op_name in OPS_TO_TEST:
     tag = "PASS" if ok else "FAIL"
     detail = "; ".join(status) if status else ""
 
-    print(f"{op_name:<30} {kernel_match:<15} {'OK' if returns_ok else 'FAIL':<10} {'OK' if lazy_ok else 'FAIL':<10} {'OK' if repro_ok else 'FAIL':<12} {tag} {detail}")
-    results.append({"op": op_name, "ok": ok, "kernel": kernel_match,
-                     "returns": returns_ok, "lazy": lazy_ok, "repro": repro_ok})
+    print(
+        f"{op_name:<30} {kernel_match:<15} {'OK' if returns_ok else 'FAIL':<10} {'OK' if lazy_ok else 'FAIL':<10} {'OK' if repro_ok else 'FAIL':<12} {tag} {detail}"
+    )
+    results.append(
+        {
+            "op": op_name,
+            "ok": ok,
+            "kernel": kernel_match,
+            "returns": returns_ok,
+            "lazy": lazy_ok,
+            "repro": repro_ok,
+        }
+    )
 
 # ---------------------------------------------------------------------------
 # Step 4: First-match-wins test (CLAIM-1) on GPU
@@ -215,15 +239,20 @@ print("=" * 80)
 
 log = []
 
+
 class InitA(CustomInit):
     op_patterns = ["aten::mm"]
+
     def initialize(self, replayer, **kwargs):
         log.append("A")
 
+
 class InitB(CustomInit):
     op_patterns = ["aten::mm"]
+
     def initialize(self, replayer, **kwargs):
         log.append("B")
+
 
 saved_registry = EventReplayer._custom_init_registry[:]
 try:
@@ -232,7 +261,7 @@ try:
     if mm_evt:
         r = EventReplayer(mm_evt, device=DEVICE, auto_init=True)
         r.replay()
-        first_match_ok = (log == ["A"])
+        first_match_ok = log == ["A"]
         print(f"  First-match-wins: {'PASS' if first_match_ok else 'FAIL'} (log={log})")
     else:
         first_match_ok = True

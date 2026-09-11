@@ -186,7 +186,7 @@ def benchmark_func(
     median = (sorted_us[n // 2] + sorted_us[(n - 1) // 2]) / 2.0
     mean = sum(timings_us) / n
     variance = sum((t - mean) ** 2 for t in timings_us) / n
-    std = variance ** 0.5
+    std = variance**0.5
     return {
         "median_us": median,
         "mean_us": mean,

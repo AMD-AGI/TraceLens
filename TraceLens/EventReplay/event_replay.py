@@ -66,7 +66,9 @@ def _try_auto_import(op_name: str, verbose: bool = False) -> bool:
             imported_any = True
         except ImportError:
             if verbose:
-                print(f"[EventReplayer] Could not import '{mod}' for namespace '{namespace}'")
+                print(
+                    f"[EventReplayer] Could not import '{mod}' for namespace '{namespace}'"
+                )
     return imported_any
 
 
@@ -123,7 +125,9 @@ def _resolve_op_func(op_name: str, verbose: bool = False):
             if func is not None:
                 logger.warning(
                     "Op '%s' resolved via alias '%s' (%s).",
-                    op_name, alias, source,
+                    op_name,
+                    alias,
+                    source,
                 )
                 return func, source, alias
 
@@ -138,9 +142,11 @@ def _resolve_op_func(op_name: str, verbose: bool = False):
         if known:
             hint = f" Try: {', '.join(f'import {m}' for m in known)}"
         else:
-            hint = (f" The namespace '{ns}' is not in the auto-import registry."
-                    f" Use EventReplayer.register_namespace('{ns}', ['your.module'])"
-                    f" to add it.")
+            hint = (
+                f" The namespace '{ns}' is not in the auto-import registry."
+                f" Use EventReplayer.register_namespace('{ns}', ['your.module'])"
+                f" to add it."
+            )
 
     raise RuntimeError(
         f"Cannot resolve op '{op_name}'.{hint} "
@@ -270,7 +276,9 @@ class EventReplayer:
         if self.verbose:
             print(f"Resolved op via {self._func_source}")
             if self._resolved_name != self.event["name"]:
-                print(f"  (aliased from '{self.event['name']}' -> '{self._resolved_name}')")
+                print(
+                    f"  (aliased from '{self.event['name']}' -> '{self._resolved_name}')"
+                )
 
         try:
             self.matched_schema = EventReplayer._search_schema(
@@ -516,7 +524,10 @@ class EventReplayer:
                             logger.warning(
                                 "%s arg '%s' (position %d): profiler dropped "
                                 "the string value. Using known default '%s'.",
-                                evt_name, arg_name, idx, default,
+                                evt_name,
+                                arg_name,
+                                idx,
+                                default,
                             )
                     value = "" if default is None else default
                 else:
@@ -531,7 +542,13 @@ class EventReplayer:
                     if EventReplayer._should_skip_tensor_init(evt_name, arg_name, idx):
                         init = None
                     profiled_dtype = event["args"]["Input type"][idx]
-                    if profiled_dtype in ("long", "long int", "int", "bool", "unsigned char"):
+                    if profiled_dtype in (
+                        "long",
+                        "long int",
+                        "int",
+                        "bool",
+                        "unsigned char",
+                    ):
                         init = "zeros" if init == "normal" else init
                     value = TensorCfg(
                         shape=event["args"]["Input Dims"][idx],
@@ -558,7 +575,10 @@ class EventReplayer:
                             logger.warning(
                                 "%s arg '%s' (position %d): profiler dropped "
                                 "the string value. Using known default '%s'.",
-                                evt_name, arg_name, idx, value,
+                                evt_name,
+                                arg_name,
+                                idx,
+                                value,
                             )
                         else:
                             value = arg_str
@@ -630,7 +650,11 @@ class EventReplayer:
             if profiled_type in list_profile_tensor_types:
                 init = "normal"
                 if profiled_type in (
-                    "long", "long int", "int", "bool", "unsigned char",
+                    "long",
+                    "long int",
+                    "int",
+                    "bool",
+                    "unsigned char",
                 ):
                     init = "zeros"
                 value = TensorCfg(
@@ -665,13 +689,18 @@ class EventReplayer:
                     logger.warning(
                         "%s arg '%s' (position %d): profiler dropped the "
                         "string value. Using known default '%s'.",
-                        evt_name, hint_name, idx, default,
+                        evt_name,
+                        hint_name,
+                        idx,
+                        default,
                     )
                 else:
                     value = None
                     arg_type = "None"
             elif profiled_type == "ScalarList" and concrete:
-                items = [x.strip() for x in concrete.strip()[1:-1].split(",") if x.strip()]
+                items = [
+                    x.strip() for x in concrete.strip()[1:-1].split(",") if x.strip()
+                ]
                 if all(x.lstrip("-").isdigit() for x in items):
                     value = [int(x) for x in items]
                 else:
@@ -732,9 +761,7 @@ class EventReplayer:
         def _parse_arg(raw_arg: str) -> Tuple[str, str, Optional[str], bool]:
             # Greedy (.+) consumes everything up to the last whitespace before
             # a valid identifier, so "Tensor($0! -> ) key_cache" parses correctly.
-            m = re.match(
-                r"^(.+)\s+([A-Za-z_]\w*(?:=.*)?)$", raw_arg.strip()
-            )
+            m = re.match(r"^(.+)\s+([A-Za-z_]\w*(?:=.*)?)$", raw_arg.strip())
             if not m:
                 raise ValueError(f"Invalid arg: {raw_arg}")
             arg_type = m.group(1).strip()
@@ -767,6 +794,7 @@ class EventReplayer:
 
         Safe to call multiple times — does not mutate self.event_replay_IR.
         """
+
         def _serialize_arg(arg: Dict[str, Any]) -> Dict[str, Any]:
             val = arg["value"]
             return {

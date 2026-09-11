@@ -15,6 +15,7 @@ try:
     from .event_replay import _resolve_op_func as _resolve_op_func_sdk
 except ImportError:
     from utils import TensorCfg, build_tensor, benchmark_func
+
     try:
         from event_replay import _resolve_op_func as _resolve_op_func_sdk
     except ImportError:
@@ -196,7 +197,9 @@ if __name__ == "__main__":
             lambda: func(*pos_args, **kwargs), args.device, warmup=50, avg_steps=100
         )
         mean_time_us = metrics["mean_us"]
-        print(f"  Average time taken: {mean_time_us:.2f} us  (median: {metrics['median_us']:.2f} us)")
+        print(
+            f"  Average time taken: {mean_time_us:.2f} us  (median: {metrics['median_us']:.2f} us)"
+        )
         if "count" in repro_info:
             count_workload = repro_info["count"]
             total_time_us = mean_time_us * count_workload

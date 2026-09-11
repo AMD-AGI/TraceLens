@@ -342,9 +342,7 @@ class TestEventReplayerCpu:
                 seen_ids.append(id(replayer.args[0]))
 
         EventReplayer.register_custom_init(ProbeInit())
-        replayer = EventReplayer(
-            MM_EVENT, device="cpu", lazy=True, auto_init=True
-        )
+        replayer = EventReplayer(MM_EVENT, device="cpu", lazy=True, auto_init=True)
         replayer.replay()
         replayer.replay()
         assert len(seen_ids) == 2
@@ -360,9 +358,7 @@ class TestEventReplayerCpu:
                 log.append("init")
 
         EventReplayer.register_custom_init(ProbeInit())
-        replayer = EventReplayer(
-            MM_EVENT, device="cpu", lazy=False, auto_init=True
-        )
+        replayer = EventReplayer(MM_EVENT, device="cpu", lazy=False, auto_init=True)
         replayer.replay()
         replayer.replay()
         assert log == ["init"]

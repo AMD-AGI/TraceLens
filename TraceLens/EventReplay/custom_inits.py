@@ -34,9 +34,7 @@ if TYPE_CHECKING:
 
 # -- Batch context extraction from vLLM profiler annotations ---------------
 
-_BATCH_ANNO_RE = re.compile(
-    r"execute_context_(\d+)\((\d+)\)_generation_(\d+)\((\d+)\)"
-)
+_BATCH_ANNO_RE = re.compile(r"execute_context_(\d+)\((\d+)\)_generation_(\d+)\((\d+)\)")
 
 
 def extract_batch_context(analyzer: Any) -> int:
@@ -76,14 +74,16 @@ def extract_batch_context(analyzer: Any) -> int:
             continue
         ts = e.get("ts", 0)
         dur = e.get("dur", 0)
-        annotations.append({
-            "ts": ts,
-            "end": ts + dur,
-            "n_prefill": int(m.group(1)),
-            "prefill_tokens": int(m.group(2)),
-            "n_decode": int(m.group(3)),
-            "decode_tokens": int(m.group(4)),
-        })
+        annotations.append(
+            {
+                "ts": ts,
+                "end": ts + dur,
+                "n_prefill": int(m.group(1)),
+                "prefill_tokens": int(m.group(2)),
+                "n_decode": int(m.group(3)),
+                "decode_tokens": int(m.group(4)),
+            }
+        )
 
     if not annotations:
         return 0
@@ -154,6 +154,7 @@ class PagedAttentionInit(CustomInit):
 
         ir = replayer.event_replay_IR
         arg_names = [a["arg_name"] for a in ir["list_pos_args"]]
+
         def _by_name_or_pos(name, pos):
             if name in arg_names:
                 return args[arg_names.index(name)]
@@ -196,16 +197,20 @@ class PagedAttentionInit(CustomInit):
                 while len(per_seq_queries) < num_seqs:
                     per_seq_queries.append(1)
 
-            phase = ("mixed" if n_pf > 0 and n_dec > 0
-                     else "prefill" if n_pf > 0 else "decode")
+            phase = (
+                "mixed"
+                if n_pf > 0 and n_dec > 0
+                else "prefill" if n_pf > 0 else "decode"
+            )
             source = "annotation"
         else:
             tokens_per_seq = num_query_tokens / num_seqs if num_seqs else 1
             if tokens_per_seq > 1:
                 base_q = num_query_tokens // num_seqs
                 rem_q = num_query_tokens % num_seqs
-                per_seq_queries = [base_q + (1 if s < rem_q else 0)
-                                   for s in range(num_seqs)]
+                per_seq_queries = [
+                    base_q + (1 if s < rem_q else 0) for s in range(num_seqs)
+                ]
                 phase = "prefill"
             else:
                 per_seq_queries = [1] * num_seqs
@@ -233,9 +238,7 @@ class PagedAttentionInit(CustomInit):
 
         # -- query_start_loc: CSR indptr encoding per-seq query counts ---------
         qsl = _by_name_or_pos("query_start_loc", 11)
-        if (qsl is not None
-                and hasattr(qsl, "shape")
-                and qsl.numel() > 0):
+        if qsl is not None and hasattr(qsl, "shape") and qsl.numel() > 0:
             qloc = np.zeros(num_seqs + 1, dtype=np.int32)
             for s in range(num_seqs):
                 qloc[s + 1] = qloc[s] + per_seq_queries[s]
@@ -244,10 +247,12 @@ class PagedAttentionInit(CustomInit):
 
         ctx_str = ""
         if batch_ctx is not None:
-            ctx_str = (f"  Annotation: {batch_ctx['n_prefill']} prefill "
-                       f"({batch_ctx['prefill_tokens']} tok) + "
-                       f"{batch_ctx['n_decode']} decode "
-                       f"({batch_ctx['decode_tokens']} tok).")
+            ctx_str = (
+                f"  Annotation: {batch_ctx['n_prefill']} prefill "
+                f"({batch_ctx['prefill_tokens']} tok) + "
+                f"{batch_ctx['n_decode']} decode "
+                f"({batch_ctx['decode_tokens']} tok)."
+            )
 
         return (
             f"[custom init] {op_name} — paged attention metadata: "
@@ -297,6 +302,7 @@ class MoeRoutingInit(CustomInit):
         # Locate args by name from the IR when available, fall back to position
         ir = replayer.event_replay_IR
         arg_names = [a["arg_name"] for a in ir["list_pos_args"]]
+
         def _by_name_or_pos(name, pos):
             if name in arg_names:
                 return args[arg_names.index(name)]
