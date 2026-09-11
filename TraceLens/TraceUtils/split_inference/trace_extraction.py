@@ -15,6 +15,7 @@ from collections import Counter
 
 from tqdm import tqdm
 
+from ...util import most_common_first_dim
 from ..annotation_utils import (
     ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
@@ -98,27 +99,6 @@ def build_cpu_event_index(
     cpu_starts = [e["ts"] for e in cpu_events]
     return cpu_events, cpu_starts
 
-
-def most_common_first_dim(events: list[dict]) -> int | None:
-    """Return the most common first dimension across all ``Input Dims`` of cpu_op events.
-
-    Scans every ``cpu_op`` event's ``Input Dims`` argument, collects the first
-    element of each dimension list, and returns the most frequent value.
-    Returns ``None`` when no cpu_op carries ``Input Dims``.
-    """
-    first_dims: list[int] = []
-    for e in events:
-        if e.get("cat") != "cpu_op":
-            continue
-        input_dims = e.get("args", {}).get("Input Dims")
-        if not input_dims:
-            continue
-        for dim_list in input_dims:
-            if isinstance(dim_list, list) and dim_list and isinstance(dim_list[0], int):
-                first_dims.append(dim_list[0])
-    if not first_dims:
-        return None
-    return Counter(first_dims).most_common(1)[0][0]
 
 
 def infer_batch_sizes_from_shapes(

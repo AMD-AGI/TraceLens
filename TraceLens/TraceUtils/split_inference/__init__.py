@@ -27,10 +27,10 @@ from .trace_extraction import (
     extract_phases_and_save,
     get_filename,
     infer_batch_sizes_from_shapes,
-    most_common_first_dim,
     parse_range,
     preprocess_trace,
 )
+from ...util import most_common_first_dim
 
 __all__ = [
     "DetectStatus",
