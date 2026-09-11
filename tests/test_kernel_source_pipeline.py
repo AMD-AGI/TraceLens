@@ -75,7 +75,6 @@ if _ks is None:
 # both import styles above expose the same names to the tests below.
 classify_patchability = _ks.classify_patchability
 is_editable_source = _ks.is_editable_source
-resolve = _ks.resolve
 resolve_source_path = _ks.resolve_source_path
 resolve_triton_source = _ks.resolve_triton_source
 triton_def_line = _ks.triton_def_line
@@ -488,36 +487,36 @@ class TestNativeResolve:
             resolve_source_path("no_such_kernel_xyz", [framework_tree["root"]]) is None
         )
 
-    def test_resolve_hit_returns_symbol_index(self, framework_tree):
-        res = resolve("paged_attention_kernel", [framework_tree["root"]])
-        assert res.patchable is True
-        assert res.method == "symbol_index"
-        assert res.source_file.endswith("attention.cu")
-        assert res.line == framework_tree["paged_line"]
+    def test_gate_passes_then_lookup_hits(self, framework_tree):
+        assert classify_patchability("paged_attention_kernel").patchable is None
+        loc = resolve_source_path("paged_attention_kernel", [framework_tree["root"]])
+        assert loc is not None
+        assert loc.source_file.endswith("attention.cu")
+        assert loc.line == framework_tree["paged_line"]
 
-    def test_resolve_gate_short_circuits_tensile(self, framework_tree):
-        res = resolve("Cijk_Alik_Bljk_HHS", [framework_tree["root"]])
-        assert res.patchable is False
-        assert res.method == "gate_non_patchable"
-        assert res.kind == "tensile_precompiled"
+    def test_gate_rejects_tensile(self, framework_tree):
+        verdict = classify_patchability("Cijk_Alik_Bljk_HHS")
+        assert verdict.patchable is False
+        assert verdict.kind == "tensile_precompiled"
 
-    def test_resolve_gate_short_circuits_ck(self, framework_tree):
-        res = resolve("ck_tile::gemm_kernel<float>", [framework_tree["root"]])
-        assert res.patchable is False
-        assert res.kind == "aiter_ck"
+    def test_gate_rejects_ck(self, framework_tree):
+        verdict = classify_patchability("ck_tile::gemm_kernel<float>")
+        assert verdict.patchable is False
+        assert verdict.kind == "aiter_ck"
 
-    def test_resolve_miss_is_unresolved(self, framework_tree):
-        res = resolve("no_such_kernel_xyz", [framework_tree["root"]])
-        assert res.patchable is False
-        assert res.method == "unresolved"
-
-    def test_run_gate_false_skips_classification(self, framework_tree):
-        # A CK name with the gate off is not short-circuited; it just misses the
-        # index (no CK source there) and reports unresolved rather than gated.
-        res = resolve(
-            "ck_tile::gemm_kernel<float>", [framework_tree["root"]], gate=False
+    def test_gate_passes_then_lookup_misses(self, framework_tree):
+        assert classify_patchability("no_such_kernel_xyz").patchable is None
+        assert (
+            resolve_source_path("no_such_kernel_xyz", [framework_tree["root"]]) is None
         )
-        assert res.method == "unresolved"
+
+    def test_lookup_without_gate_just_misses(self, framework_tree):
+        # Skipping the gate is now the caller's choice: a CK name goes straight
+        # to the index and simply misses (no CK source in this tree).
+        assert (
+            resolve_source_path("ck_tile::gemm_kernel<float>", [framework_tree["root"]])
+            is None
+        )
 
     def test_prebuilt_index_object_is_used(self, framework_tree):
         idx = index_mod.build_index([framework_tree["root"]])
@@ -832,24 +831,25 @@ class TestContract:
 # ===========================================================================
 class TestEndToEnd:
     def test_mixed_batch_routes_correctly(self, framework_tree):
-        """One resolve() call per kernel kind, as the pipeline would issue them."""
+        """Gate then lookup per kernel kind, as the pipeline would issue them."""
         root = framework_tree["root"]
 
         # 1) A native kernel referenced by its (already-demangled) trace name.
-        native = resolve("paged_attention_kernel", [root])
-        assert native.patchable is True
+        assert classify_patchability("paged_attention_kernel").patchable is None
+        native = resolve_source_path("paged_attention_kernel", [root])
+        assert native is not None
         assert native.source_file.endswith("attention.cu")
 
         # 2) A native kernel referenced by a mangled symbol -> demangle -> hit.
-        mangled = resolve("_Z24reshape_and_cache_kernelPfPKf", [root])
-        assert mangled.patchable is True
+        mangled = resolve_source_path("_Z24reshape_and_cache_kernelPfPKf", [root])
+        assert mangled is not None
         assert mangled.source_file.endswith("attention.cu")
         assert mangled.line == framework_tree["reshape_line"]
 
         # 3) A precompiled GEMM -> gated, no filesystem work.
-        gemm = resolve("Cijk_Alik_Bljk_HHS_BH", [root])
+        gemm = classify_patchability("Cijk_Alik_Bljk_HHS_BH")
         assert gemm.patchable is False
-        assert gemm.method == "gate_non_patchable"
+        assert gemm.kind == "tensile_precompiled"
 
         # 4) An inductor-generated Triton kernel from a compile cache -> gated.
         triton_gen = resolve_triton_source(
@@ -858,7 +858,6 @@ class TestEndToEnd:
         )
         assert triton_gen.patchable is False
 
-        # 5) An unknown kernel with no source in the tree -> unresolved miss.
-        miss = resolve("mystery_kernel_zzz", [root])
-        assert miss.patchable is False
-        assert miss.method == "unresolved"
+        # 5) An unknown kernel with no source in the tree -> lookup miss.
+        assert classify_patchability("mystery_kernel_zzz").patchable is None
+        assert resolve_source_path("mystery_kernel_zzz", [root]) is None

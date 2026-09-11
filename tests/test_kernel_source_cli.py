@@ -7,9 +7,8 @@
 """Tests for the ``TraceLens_resolve_kernel_source`` CLI entry point.
 
 These drive ``cli.main(argv)`` directly (no subprocess) and parse the JSON it
-prints, so every CLI branch -- gate (non-patchable), Triton, native resolve, the
-missing ``--kernel`` error, and call-stack file reading -- is exercised without
-a GPU.
+prints, so every CLI branch -- gate (non-patchable), Triton, native resolve, and
+the missing ``--kernel`` error -- is exercised without a GPU.
 """
 
 from __future__ import annotations
@@ -36,8 +35,7 @@ def test_cli_missing_kernel_is_usage_error(capsys):
 
 
 def test_cli_gate_flags_precompiled(capsys):
-    # MIOpen op name -> the gate (run inside resolve) marks it non-patchable and
-    # the verdict shows in the normal output; no separate gate-only flag needed.
+    # MIOpen op name -> classify_patchability in main() marks it non-patchable.
     code, data = _run(
         capsys,
         [
@@ -73,24 +71,3 @@ def test_cli_native_resolve_miss(capsys, tmp_path):
     assert code == 0
     assert data["patchable"] is False
     assert "kind" in data and "method" in data
-
-
-def test_cli_reads_call_stack_file(capsys, tmp_path):
-    # A call-stack file is read (one frame per line) and fed to the gate.
-    cs = tmp_path / "stack.txt"
-    cs.write_text("frame_one\nframe_two\n", encoding="utf-8")
-    code, data = _run(
-        capsys,
-        ["--kernel", "plain_kernel", "--call-stack-file", str(cs)],
-    )
-    assert code == 0
-    assert "patchable" in data
-
-
-def test_cli_missing_call_stack_file_warns_but_succeeds(capsys, tmp_path):
-    # A non-existent call-stack file warns on stderr but does not crash.
-    missing = tmp_path / "nope.txt"
-    code = cli.main(["--kernel", "plain_kernel", "--call-stack-file", str(missing)])
-    err = capsys.readouterr().err
-    assert code == 0
-    assert "could not read call-stack file" in err

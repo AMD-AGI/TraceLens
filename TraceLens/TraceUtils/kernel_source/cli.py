@@ -13,12 +13,6 @@ exercised without writing Python. Examples::
     TraceLens_resolve_kernel_source --kernel _Z12my_kernelPf \\
         --search-path /opt/vllm/csrc --search-path /opt/aiter/csrc
 
-    # Native kernel, aided by call-stack frames (one frame per line in the file,
-    # e.g. "/repo/moe.py(247): _grouped_gemm"). Optional; used only from the CLI,
-    # since integrated callers pass the frames to the API directly.
-    TraceLens_resolve_kernel_source --kernel _fwd_kernel \\
-        --search-path /opt/vllm --call-stack-file frames.txt
-
     # Triton kernel from a trace kernel_file:
     TraceLens_resolve_kernel_source --triton-kernel-file "/repo/moe.py:120:kernel"
 """
@@ -28,10 +22,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from .datatypes import ResolveResult
-from .resolver import resolve
+from .patchability import classify_patchability
+from .resolver import resolve_source_path
 from .triton_pin import resolve_triton_source
 
 
@@ -46,23 +40,6 @@ def _result_to_dict(result: ResolveResult) -> dict:
         "reason": result.reason,
         "method": result.method,
     }
-
-
-def _read_call_stack(path: str | None) -> list[str]:
-    """Read a call-stack file (one frame per line), or return ``[]``."""
-    if not path:
-        return []
-    try:
-        return [
-            ln.strip()
-            for ln in Path(path).read_text(encoding="utf-8").splitlines()
-            if ln.strip()
-        ]
-    except OSError as exc:
-        print(
-            f"warning: could not read call-stack file {path!r}: {exc}", file=sys.stderr
-        )
-        return []
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -87,9 +64,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Launching op name (used by the gate, e.g. MIOpen).",
     )
     parser.add_argument(
-        "--call-stack-file", default="", help="File with one call-stack frame per line."
-    )
-    parser.add_argument(
         "--triton-kernel-file",
         default="",
         help="Resolve a Triton .py kernel from this trace kernel_file instead of a native symbol.",
@@ -110,16 +84,30 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --kernel (or --triton-kernel-file) is required", file=sys.stderr)
         return 2
 
-    call_stack = _read_call_stack(args.call_stack_file)
+    gate = classify_patchability(args.kernel, op_name=args.op_name)
+    if gate.patchable is False:
+        result = ResolveResult(
+            location=None,
+            patchable=False,
+            kind=gate.kind,
+            reason=gate.reason,
+            method="gate_non_patchable",
+        )
+        print(json.dumps(_result_to_dict(result), indent=2))
+        return 0
 
-    # ``resolve`` runs the patchability gate first, so a non-patchable kernel is
-    # reported (method ``gate_non_patchable``) without a separate gate-only path.
-    result = resolve(
-        args.kernel,
-        args.search_path or None,
-        op_name=args.op_name,
-        call_stack=call_stack,
-    )
+    location = resolve_source_path(args.kernel, args.search_path or None)
+    if location is not None:
+        result = ResolveResult(
+            location=location, patchable=True, method="symbol_index"
+        )
+    else:
+        result = ResolveResult(
+            location=None,
+            patchable=False,
+            method="unresolved",
+            reason="no live match",
+        )
     print(json.dumps(_result_to_dict(result), indent=2))
     return 0
 

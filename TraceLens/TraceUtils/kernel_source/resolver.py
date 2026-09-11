@@ -4,7 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Resolve a native GPU kernel to its editable source by demangling -> index lookup -> rank/verify (the "active finder")."""
+"""Resolve a native GPU kernel to its editable source by demangling -> index lookup -> rank/verify (the "active finder").
+
+Callers run :func:`~.patchability.classify_patchability` first and skip the
+lookup when the verdict is non-patchable; see ``cli.main`` for the reference
+sequence.
+"""
 
 from __future__ import annotations
 
@@ -16,12 +21,11 @@ from pathlib import Path
 from . import index
 from .demangle import base_symbol
 from .editable import is_editable_source
-from .datatypes import ResolveResult, SourceLocation
-from .patchability import classify_patchability
+from .datatypes import SourceLocation
 
 log = logging.getLogger(__name__)
 
-__all__ = ["resolve_source_path", "resolve"]
+__all__ = ["resolve_source_path"]
 
 # Framework labels inferred from a resolved path, for SourceLocation.framework.
 # Kept in sync with index._KNOWN (the frameworks we locate by name).
@@ -107,37 +111,3 @@ def resolve_source_path(
     return None
 
 
-def resolve(
-    kernel_name: str,
-    search_paths: Sequence[str | Path] | None = None,
-    *,
-    op_name: str = "",
-    call_stack: Sequence[str] = (),
-    gate: bool = True,
-    index_obj: index.SourceIndex | None = None,
-) -> ResolveResult:
-    """Run the cheap patchability gate first, then resolve survivors via :func:`resolve_source_path`.
-
-    ``gate`` is on by default; pass ``gate=False`` only when the caller has
-    already classified patchability upstream and wants to skip re-running it.
-    """
-    if gate:
-        gate = classify_patchability(
-            kernel_name, op_name=op_name, call_stack=call_stack
-        )
-        if gate.patchable is False:
-            return ResolveResult(
-                location=None,
-                patchable=False,
-                kind=gate.kind,
-                reason=gate.reason,
-                method="gate_non_patchable",
-            )
-
-    location = resolve_source_path(kernel_name, search_paths, index_obj=index_obj)
-    if location is not None:
-        return ResolveResult(location=location, patchable=True, method="symbol_index")
-
-    return ResolveResult(
-        location=None, patchable=False, method="unresolved", reason="no live match"
-    )

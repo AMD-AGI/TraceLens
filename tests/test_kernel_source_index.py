@@ -14,7 +14,11 @@ symbol to a verified, editable source location.
 
 import pytest
 
-from TraceLens.TraceUtils.kernel_source import build_index, resolve, resolve_source_path
+from TraceLens.TraceUtils.kernel_source import (
+    build_index,
+    classify_patchability,
+    resolve_source_path,
+)
 from TraceLens.TraceUtils.kernel_source.index import (
     fingerprint,
     load_or_build,
@@ -80,25 +84,23 @@ def test_resolve_source_path_unknown_symbol(csrc_tree):
     assert resolve_source_path("does_not_exist_kernel", [csrc_tree]) is None
 
 
-def test_resolve_runs_gate_before_lookup(csrc_tree):
-    # A gated (non-patchable) kernel short-circuits without a source lookup.
-    result = resolve("Cijk_Ailk_Bljk", [csrc_tree])
-    assert result.patchable is False
-    assert result.method == "gate_non_patchable"
-    assert result.kind == "tensile_precompiled"
+def test_gate_rejects_before_lookup(csrc_tree):
+    # Callers run the gate first; a non-patchable kernel never reaches the index.
+    verdict = classify_patchability("Cijk_Ailk_Bljk")
+    assert verdict.patchable is False
+    assert verdict.kind == "tensile_precompiled"
 
 
-def test_resolve_hit_reports_symbol_index_method(csrc_tree):
-    result = resolve("scale_kernel", [csrc_tree])
-    assert result.patchable is True
-    assert result.method == "symbol_index"
-    assert result.source_file.endswith("ops.cu")
+def test_gate_passes_then_lookup_hits(csrc_tree):
+    assert classify_patchability("scale_kernel").patchable is None
+    loc = resolve_source_path("scale_kernel", [csrc_tree])
+    assert loc is not None
+    assert loc.source_file.endswith("ops.cu")
 
 
-def test_resolve_miss_is_unresolved(csrc_tree):
-    result = resolve("totally_absent_kernel", [csrc_tree])
-    assert result.patchable is False
-    assert result.method == "unresolved"
+def test_gate_passes_then_lookup_misses(csrc_tree):
+    assert classify_patchability("totally_absent_kernel").patchable is None
+    assert resolve_source_path("totally_absent_kernel", [csrc_tree]) is None
 
 
 def test_fingerprint_changes_when_source_changes(csrc_tree):

@@ -58,7 +58,7 @@ class Patchability:
 
 @dataclass
 class ResolveResult:
-    """Outcome of :func:`resolver.resolve` -- a gate verdict plus a location.
+    """Outcome of a gate-then-resolve pass -- a gate verdict plus a location.
 
     Attributes:
         location: The resolved :class:`SourceLocation`, or ``None`` when the

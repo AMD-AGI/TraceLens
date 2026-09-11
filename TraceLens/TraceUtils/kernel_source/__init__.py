@@ -19,7 +19,7 @@ from .index import (
 )
 from .datatypes import Patchability, ResolveResult, SourceLocation
 from .patchability import classify_patchability
-from .resolver import resolve, resolve_source_path
+from .resolver import resolve_source_path
 from .triton_pin import resolve_triton_source, triton_def_line
 
 __all__ = [
@@ -30,7 +30,6 @@ __all__ = [
     # Gate
     "classify_patchability",
     # Native resolution
-    "resolve",
     "resolve_source_path",
     # Triton resolution
     "resolve_triton_source",
