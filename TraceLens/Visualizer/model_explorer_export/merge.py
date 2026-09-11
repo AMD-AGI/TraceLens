@@ -1802,6 +1802,54 @@ def _reconcile_edge_endpoint_shapes(nodes: list[dict[str, Any]]) -> None:
             _reconcile(src_md, tgt_md)
 
 
+def _assert_edge_endpoint_shapes_agree(nodes: list[dict[str, Any]]) -> None:
+    """Fail the export when both ends of a wire spell concrete, disagreeing dims.
+
+    Run AFTER ``_reconcile_edge_endpoint_shapes`` (which fills weak dims from a
+    concrete sibling): any remaining position where the source output and the
+    target input port both carry a non-weak dim yet disagree is a genuine wiring
+    fidelity bug — e.g. a vision boundary handing ``[Pv, 1024]`` into a patch-embed
+    that consumes ``[Pv, 1176]``. A real rank change (reshape/flatten) is a
+    different rank and is left alone. All violations are collected so one run
+    surfaces every bad edge.
+    """
+    node_by_id = {str(node.get("id")): node for node in nodes}
+    violations: list[str] = []
+    for node in nodes:
+        for edge in node.get("incomingEdges", []):
+            source = node_by_id.get(str(edge.get("sourceNodeId") or ""))
+            if source is None:
+                continue
+            src_port = str(edge.get("sourceNodeOutputId", "0"))
+            tgt_port = str(edge.get("targetNodeInputId", "0"))
+            src_md = _find_port_metadata(source, "outputsMetadata", src_port)
+            tgt_md = _find_port_metadata(node, "inputsMetadata", tgt_port)
+            if src_md is None or tgt_md is None:
+                continue
+            attr_s, attr_t = _port_shape_attrs(src_md), _port_shape_attrs(tgt_md)
+            if attr_s is None or attr_t is None:
+                continue
+            dims_s, _ = _split_shape_dtype(str(attr_s.get("value", "")))
+            dims_t, _ = _split_shape_dtype(str(attr_t.get("value", "")))
+            if not dims_s or not dims_t or len(dims_s) != len(dims_t):
+                continue
+            for ds, dt in zip(dims_s, dims_t):
+                if ds == dt or _dim_is_weak(ds) or _dim_is_weak(dt):
+                    continue
+                violations.append(
+                    f"  {source.get('id')} [{source.get('label')}]"
+                    f" out#{src_port}={format_shape_dims(dims_s)}"
+                    f"  ->  {node.get('id')} [{node.get('label')}]"
+                    f" in#{tgt_port}={format_shape_dims(dims_t)}"
+                )
+                break
+    if violations:
+        raise ValueError(
+            "Edge endpoint shapes disagree on concrete dims "
+            f"({len(violations)} wire(s)):\n" + "\n".join(violations)
+        )
+
+
 def _find_port_metadata(
     node: dict[str, Any], key: str, port: str
 ) -> dict[str, Any] | None:
@@ -2982,15 +3030,27 @@ def _append_vision_section(
     if component is None or not component_has_detail_section(component, spec):
         return None
 
-    nodes.append(
-        {
-            "id": "@vision_input",
-            "label": "Image patches",
-            "namespace": "",
-            "attrs": [{"key": "synthetic", "value": "@input"}],
-            "style": ensure_readable_text(input_port_style()),
-        }
-    )
+    vision_input_node = {
+        "id": "@vision_input",
+        "label": "Image patches",
+        "namespace": "",
+        "attrs": [{"key": "synthetic", "value": "@input"}],
+        "style": ensure_readable_text(input_port_style()),
+    }
+    # The image-patch boundary is the raw flat patch tensor ``[Pv, C*T*P*P]``,
+    # not the tower's hidden width. Stamp it here so the boundary node (which is
+    # synthesized in merge, outside the shape inferencer's own graph) carries the
+    # true shape and the downstream wire-consistency check sees matching ends.
+    patch_flat = getattr(shape_inferencer, "_vision_patch_flat", None)
+    if patch_flat is not None:
+        apply_shape_attrs(
+            vision_input_node,
+            TensorSpec(
+                (Symbol.VISION_PATCH.value, patch_flat),
+                shape_inferencer.context.dtype,
+            ),
+        )
+    nodes.append(vision_input_node)
     resolved = _resolve_section_tree_for_component(
         spec, component, variant=None, basic_ops=basic_ops
     )
@@ -3256,6 +3316,7 @@ def build_merged_model_graph(
     if shape_inferencer is not None:
         fill_missing_node_shapes(nodes, context=shape_inferencer.context)
         _reconcile_edge_endpoint_shapes(nodes)
+        _assert_edge_endpoint_shapes_agree(nodes)
 
     model_attrs: dict[str, str] = {
         "title": spec.name,

@@ -2027,6 +2027,33 @@ class _ForwardOperationExtractor:
         for name in self._target_names(stmt):
             self.var_producer[name] = producer
 
+    def _propagate_param_alias(
+        self, targets: list[ast.expr], value: ast.AST
+    ) -> None:
+        """Carry a secondary forward-input's param status onto unpacked locals.
+
+        ``cos, sin = position_embeddings`` (and the plain ``x = position_embeddings``
+        rename) binds new names that alias a forward parameter but are otherwise
+        invisible to ``_param_refs`` — its gate only recognizes names literally in
+        ``self.param_names``. Without this, downstream reads of ``cos``/``sin`` (the
+        rotary path) resolve to nothing and the operation is dropped. When the RHS
+        is itself a param (or an already-registered alias), register every unpacked
+        target name as a param alias so ``_param_refs`` attributes it like the
+        original forward input. This is general: any secondary forward input renamed
+        or unpacked into locals is tracked.
+        """
+        if not (isinstance(value, ast.Name) and value.id in self.param_names):
+            return
+        for target in targets:
+            elements = (
+                target.elts
+                if isinstance(target, (ast.Tuple, ast.List))
+                else [target]
+            )
+            for element in elements:
+                if isinstance(element, ast.Name):
+                    self.param_names.add(element.id)
+
     def _track_shape_assignment(
         self, targets: list[ast.expr], value: ast.AST
     ) -> None:
@@ -2257,6 +2284,7 @@ class _ForwardOperationExtractor:
                     stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
                 )
                 self._track_shape_assignment(targets, value)
+                self._propagate_param_alias(targets, value)
                 direct_module = (
                     value.func.attr
                     if isinstance(value, ast.Call)

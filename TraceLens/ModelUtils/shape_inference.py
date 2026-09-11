@@ -776,6 +776,10 @@ class ShapeInferencer:
         # Per-graph @input overrides (port label -> spec), populated by callers that
         # know a section's true upstream boundary shape. Empty for the default path.
         self._entry_specs: dict[str, TensorSpec] = {}
+        # @input boundary node ids this graph resolved via an authoritative
+        # ``_entry_spec_for`` seed/override. A root-less subgraph recursion must
+        # not clobber these with its default activation spec (see infer_model_graph).
+        self._entry_seeded_ids: set[str] = set()
         self._tensor_names: dict[str, str] = {}
         self._tensor_specs: dict[str, TensorSpec] = {}
         self._owner_classes: dict[int, dict[str, str]] = {}
@@ -936,6 +940,7 @@ class ShapeInferencer:
                 self._tensor_names[node.id] = _output_tensor_name(node)
         self._tensor_specs = {}
         self._forward_input_specs = set()
+        self._entry_seeded_ids = set()
         order = _topological_order(graph)
         node_by_id = {node.id: node for node in graph.nodes}
 
@@ -946,6 +951,8 @@ class ShapeInferencer:
             self._tensor_specs[node_id] = output
             if node.metadata.get("synthetic") == "@input":
                 self._forward_input_specs.add(id(output))
+                if self._entry_spec_for(node, root) is not None:
+                    self._entry_seeded_ids.add(node_id)
 
         if root is not None and "HyperConnection" in root.class_name:
             batch = Symbol.BATCH.value
@@ -984,11 +991,22 @@ class ShapeInferencer:
         # inferred specs (their node ids are globally unique) into the result so
         # callers see the full graph, not just the last subgraph.
         merged = dict(self._tensor_specs)
+        # Node ids this (parent) graph authoritatively seeded from context. The
+        # subgraph recursion below runs root-less, so its @input boundaries fall
+        # back to the default activation spec; where a boundary id collides with a
+        # parent-seeded one (e.g. the vision patch-embed @input = [Pv, C*T*P*P]),
+        # the parent's in-context spec must win rather than be clobbered by the
+        # root-less default (which would stamp the generic [Pv, hidden]).
+        seeded = set(self._entry_seeded_ids)
         for node in graph.nodes:
             if node.kind == NodeKind.SUBGRAPH:
                 subgraph_key = node.metadata.get("subgraph_key")
                 if subgraph_key and subgraph_key in graph.subgraphs:
-                    merged.update(self.infer_model_graph(graph.subgraphs[subgraph_key]))
+                    sub_specs = self.infer_model_graph(graph.subgraphs[subgraph_key])
+                    for spec_id, spec in sub_specs.items():
+                        if spec_id in seeded and spec_id in merged:
+                            continue
+                        merged[spec_id] = spec
         self._tensor_specs = merged
         self._active_seq_axes, self._active_hidden = prev_axes, prev_hidden
         return dict(merged)

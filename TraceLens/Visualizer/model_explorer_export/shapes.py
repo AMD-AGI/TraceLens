@@ -558,7 +558,12 @@ def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, st
         for group, group_shapes in store.items():
             attributes.setdefault(group, {})[key] = ", ".join(group_shapes[:3])
 
-    boundary_values: dict[tuple[str, str], list[str]] = {}
+    # Collect every boundary port (label, shape) per (namespace, key). The name is
+    # shown ONLY when a boundary carries more than one output/input — a per-port
+    # split leaves each synthetic node with a single port, so the decision must be
+    # made from the boundary's total arity across all its sibling @input/@output
+    # nodes, not from any one node's port count.
+    boundary_entries: dict[tuple[str, str], list[tuple[str, str]]] = {}
     for node in nodes:
         namespace = str(node.get("namespace") or "")
         if not namespace:
@@ -573,9 +578,9 @@ def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, st
         )
         if synthetic not in {"@input", "@output"}:
             continue
-        output_metadata = node.get("outputsMetadata", [])
-        values: list[str] = []
-        for metadata in output_metadata:
+        key = "input_shape" if synthetic == "@input" else "output_shape"
+        default_name = "input" if synthetic == "@input" else "output"
+        for metadata in node.get("outputsMetadata", []):
             metadata_attrs = {
                 attr.get("key"): attr.get("value") for attr in metadata.get("attrs", [])
             }
@@ -583,15 +588,21 @@ def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, st
             if not shape:
                 continue
             port = str(metadata.get("id", "0"))
-            if len(output_metadata) == 1 and port in {"0", "result", "output"}:
-                values.append(str(shape))
+            port_label = metadata_attrs.get("port_label")
+            if port_label:
+                label = str(port_label)
+            elif port in {"0", "result", "output"}:
+                label = str(node.get("label") or default_name)
             else:
-                label = str(node.get("label") or "input") if port == "0" else port
-                values.append(f"{label}: {shape}")
-        if values:
-            key = "input_shape" if synthetic == "@input" else "output_shape"
-            boundary_values.setdefault((namespace, key), []).extend(values)
-    for (namespace, key), values in boundary_values.items():
+                label = port
+            boundary_entries.setdefault((namespace, key), []).append(
+                (label, str(shape))
+            )
+    for (namespace, key), entries in boundary_entries.items():
+        if len(entries) > 1:
+            values = [f"{label}: {shape}" for label, shape in entries]
+        else:
+            values = [shape for _label, shape in entries]
         attributes.setdefault(namespace, {})[key] = ", ".join(dict.fromkeys(values))
     return attributes
 
