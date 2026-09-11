@@ -1131,6 +1131,77 @@ def test_glm53_visual_loop_carried_in_is_consumed_and_precedes_body():
     assert positions[lc_in["id"]] < min(body_positions)
 
 
+def _output_shape(node) -> str | None:
+    return next(
+        (attr["value"] for attr in node.get("attrs", []) if attr["key"] == "output_shape"),
+        None,
+    )
+
+
+def test_glm53_vision_tower_carries_patch_axis_not_text_seq():
+    """The vision tower must use the ``Pv`` patch axis, never the text ``B*S``.
+
+    Bug 3B: the whole vision stack conflated its patch axis with the LLM
+    sequence, stamping text ``B*S``/``B*S/4`` symbols onto vision activations.
+    Every vision activation should now read ``Pv`` (raw patches) or ``Pv/4``
+    (after the 2x2 spatial merge), while the text/decoder path is untouched.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    node_by_id = {node["id"]: node for node in nodes}
+
+    _assert_export_is_acyclic(nodes)
+
+    # No vision node may carry the text sequence symbol.
+    vision_nodes = [n for n in nodes if str(n["id"]).startswith("visual")]
+    assert vision_nodes
+    for node in vision_nodes:
+        shape = _output_shape(node)
+        if shape is None:
+            continue
+        assert "B*S" not in shape, (node["id"], shape)
+        assert not shape.lstrip("[").startswith("B,"), (node["id"], shape)
+
+    # At least some vision activations carry the distinct patch axis.
+    assert any("Pv" in (_output_shape(n) or "") for n in vision_nodes)
+
+    # Patch-embed pipeline: [Pv,1176] -> view [Pv,3,2,14,14] -> Conv3d
+    # [Pv,1024,1,1,1] -> view [Pv,1024].
+    pe = "visual/seq:0:patch_embed:patch_embed:0"
+    assert _output_shape(node_by_id[f"{pe}/@input"]) == "[Pv, 1176] bfloat16"
+    assert (
+        _output_shape(node_by_id[f"{pe}/seq:0:@op_l1713_c24_view:@op_l1713_c24_view:0"])
+        == "[Pv, 3, 2, 14, 14] bfloat16"
+    )
+    assert (
+        _output_shape(node_by_id[f"{pe}/seq:2:proj:proj:0"])
+        == "[Pv, 1024, 1, 1, 1] bfloat16"
+    )
+    assert _output_shape(node_by_id[f"{pe}/@output"]) == "[Pv, 1024] bfloat16"
+
+    # After the spatial merge the merger projects the pooled [Pv/4, 4096] rows.
+    merger_out = node_by_id["visual/seq:8:merger/@output"]
+    assert _output_shape(merger_out) == "[Pv/4, 4096] bfloat16"
+    assert len(merger_out.get("incomingEdges", [])) == 1
+
+    # The vision-language combine reconciles the [Pv/4,4096] image rows with the
+    # independent text sequence and stays [B,S,4096] with three sources.
+    combine = node_by_id["@vision_language_combine"]
+    assert _output_shape(combine) == "[B, S, 4096] bfloat16"
+    assert len(combine.get("incomingEdges", [])) == 3
+
+    # Decoder path is untouched: the text RMSNorm still speaks [B, S, H].
+    text_norm = next(
+        n
+        for n in nodes
+        if "kv_a_layernorm:@op_l78_c24_cast" in n["id"]
+    )
+    assert "Pv" not in (_output_shape(text_norm) or "")
+    assert (_output_shape(text_norm) or "").startswith("[B, S,")
+
+
 def test_glm53_forget_gate_has_real_boundary_nodes():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)

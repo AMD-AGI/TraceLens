@@ -755,6 +755,24 @@ class ShapeInferencer:
         # flat patch shape ``[Pv, C*T*P*P]`` lets the patch-embed views + Conv3d
         # resolve concretely instead of collapsing to a language ``(B, S, H)``.
         self._vision_patch_embed_class: str | None = self._detect_patch_embed_class()
+        self._vision_hidden: int | None = (
+            _int_dim(self._vision_config.get("hidden_size"))
+            if self._vision_config
+            else None
+        )
+        # Active activation geometry for the section currently being inferred.
+        # The language default is ``(B, S)`` + text ``hidden``; while inferring a
+        # vision-scoped section (root class in ``_vision_scoped``) it switches to a
+        # single patch axis ``(Pv,)`` + vision ``hidden``. Every ``(B, S, H)``
+        # fallback stamp reads these, so a disconnected vision op (no inputs) lands
+        # on ``(Pv, 1024)`` instead of the text sequence ``(B, S, 4096)``.
+        self._active_seq_axes: tuple[str, ...] = (
+            Symbol.BATCH.value,
+            Symbol.SEQ.value,
+        )
+        self._active_hidden: Any = self.context.dims.get(
+            Symbol.HIDDEN.value, Symbol.HIDDEN.value
+        )
         # Per-graph @input overrides (port label -> spec), populated by callers that
         # know a section's true upstream boundary shape. Empty for the default path.
         self._entry_specs: dict[str, TensorSpec] = {}
@@ -792,6 +810,37 @@ class ShapeInferencer:
                 return class_name
         return None
 
+    def _active_hidden_shape(self) -> tuple[Any, ...]:
+        """The current section's default activation *shape tuple*.
+
+        ``(B, S, H)`` for the text stack; ``(Pv, Hv)`` while a vision-scoped
+        section is being inferred. Mirrors the module-level ``_default_hidden_shape``
+        but honours the active vision geometry.
+        """
+        return (*self._active_seq_axes, self._active_hidden)
+
+    def _active_flattened_seq(self) -> str:
+        """Product symbol for the flattened sequence axis of the active section.
+
+        ``B*S`` for the text stack, ``Pv`` for the single vision patch axis. Used
+        when a ``-1`` reshape collapses the leading axes and no per-dim symbol
+        survives, so the vision tower never inherits the text ``B*S`` symbol.
+        """
+        return "*".join(str(axis) for axis in self._active_seq_axes)
+
+    def _activation_spec(
+        self, dtype: str | None = None, *, hidden: Any = None
+    ) -> TensorSpec:
+        """The current section's default activation shape.
+
+        ``(B, S, H)`` for the text stack; ``(Pv, Hv)`` while a vision-scoped
+        section is being inferred (see ``_active_seq_axes``/``_active_hidden``).
+        """
+        h = hidden if hidden is not None else self._active_hidden
+        return TensorSpec(
+            shape=(*self._active_seq_axes, h), dtype=dtype or self.context.dtype
+        )
+
     def _entry_spec_for(
         self, node: ModelGraphNode, root: BlockNode | None
     ) -> TensorSpec | None:
@@ -805,11 +854,19 @@ class ShapeInferencer:
         override = self._entry_specs.get(node.label or "")
         if override is not None:
             return override
+        # Seed the flat patch shape ``[Pv, C*T*P*P]`` for both the patch-embed
+        # class (whose views/Conv3d then resolve concretely) and the vision tower
+        # itself. The tower's forward flattens raw patches, calls the patch-embed,
+        # then runs the blocks / post-norm / merger inline; those inner boundaries
+        # inherit their shapes by conservation from this root ``@input``. Seeding
+        # the tower with the language ``(B, S, H)`` default is what stamps the text
+        # sequence axis ``B*S`` (and text hidden 4096) across the whole vision
+        # tower — seeding ``[Pv, …]`` here flows the vision patch axis instead.
+        seed_classes = {self._vision_patch_embed_class, self._vision_tower_class}
         if (
             self._vision_patch_flat is not None
-            and self._vision_patch_embed_class is not None
             and root is not None
-            and root.class_name == self._vision_patch_embed_class
+            and root.class_name in seed_classes
         ):
             return TensorSpec(
                 shape=(Symbol.VISION_PATCH.value, self._vision_patch_flat),
@@ -854,6 +911,22 @@ class ShapeInferencer:
         self, graph: ModelGraph, *, root: BlockNode | None = None
     ) -> dict[str, TensorSpec]:
         """Infer output tensor specs for every node id in one model graph."""
+        # Switch the default activation geometry to the vision patch axis while a
+        # vision-scoped section is inferred; a root-less subgraph recursion keeps
+        # whatever the enclosing section established. Restored before returning.
+        prev_axes, prev_hidden = self._active_seq_axes, self._active_hidden
+        if root is not None:
+            if (
+                root.class_name in self._vision_scoped
+                and self._vision_hidden is not None
+            ):
+                self._active_seq_axes = (Symbol.VISION_PATCH.value,)
+                self._active_hidden = self._vision_hidden
+            else:
+                self._active_seq_axes = (Symbol.BATCH.value, Symbol.SEQ.value)
+                self._active_hidden = self.context.dims.get(
+                    Symbol.HIDDEN.value, Symbol.HIDDEN.value
+                )
         self._register_op_line_occurrences(graph)
         self._tensor_names = {}
         for node in graph.nodes:
@@ -917,6 +990,7 @@ class ShapeInferencer:
                 if subgraph_key and subgraph_key in graph.subgraphs:
                     merged.update(self.infer_model_graph(graph.subgraphs[subgraph_key]))
         self._tensor_specs = merged
+        self._active_seq_axes, self._active_hidden = prev_axes, prev_hidden
         return dict(merged)
 
     def infer_block_tree(
@@ -1133,18 +1207,12 @@ class ShapeInferencer:
             entry = self._entry_spec_for(node, root)
             if entry is not None:
                 return entry
-            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            return TensorSpec(
-                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
-            )
+            return self._activation_spec(dtype)
 
         if synthetic in {"@output", "@loop_carried"}:
             if inputs:
                 return inputs[-1]
-            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            return TensorSpec(
-                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
-            )
+            return self._activation_spec(dtype)
 
         if synthetic == "@tensor":
             label = (node.metadata.get("port_label") or node.label or "").lower()
@@ -1175,20 +1243,14 @@ class ShapeInferencer:
                 if node.label in {"+", "Add"}:
                     return max(inputs, key=_broadcast_rank)
                 return self._elementwise_operand(inputs)
-            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            return TensorSpec(
-                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
-            )
+            return self._activation_spec(dtype)
 
         # Catch-all for any remaining synthetic wiring nodes (kernel ports,
         # hidden_states, etc.) — silent passthrough, no warning.
         if synthetic is not None and synthetic.startswith("@"):
             if inputs:
                 return inputs[0]
-            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            return TensorSpec(
-                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
-            )
+            return self._activation_spec(dtype)
 
         # Meta-device ground-truth shapes (highest priority for real modules).
         meta_spec = self._lookup_meta_shape(node)
@@ -1226,7 +1288,7 @@ class ShapeInferencer:
                 inputs[0]
                 if inputs
                 else external_spec()
-                or TensorSpec(_default_hidden_shape(self.context), dtype)
+                or TensorSpec(self._active_hidden_shape(), dtype)
             )
             shape_detail = next(
                 (
@@ -1255,7 +1317,7 @@ class ShapeInferencer:
             if resolved is not None:
                 return TensorSpec(shape=resolved, dtype=source.dtype)
             if "-1" in shape_detail:
-                flattened = f"{Symbol.BATCH.value}*{Symbol.SEQ.value}"
+                flattened = self._active_flattened_seq()
                 return TensorSpec(
                     shape=(flattened, source.shape[-1]), dtype=source.dtype
                 )
@@ -1269,7 +1331,7 @@ class ShapeInferencer:
             source = (
                 inputs[0]
                 if inputs
-                else TensorSpec(_default_hidden_shape(self.context), dtype)
+                else TensorSpec(self._active_hidden_shape(), dtype)
             )
             dim_str = _detail_value(details, "dim")
             dim = _int_dim(dim_str) if dim_str is not None else -1
@@ -1315,7 +1377,7 @@ class ShapeInferencer:
 
         if operation_label in {"concat", "stack"}:
             if not inputs:
-                return TensorSpec(_default_hidden_shape(self.context), dtype)
+                return TensorSpec(self._active_hidden_shape(), dtype)
             if operation_label == "stack":
                 base = inputs[0]
                 return TensorSpec(shape=(len(inputs), *base.shape), dtype=base.dtype)
@@ -1342,7 +1404,7 @@ class ShapeInferencer:
             source = (
                 inputs[0]
                 if inputs
-                else TensorSpec(_default_hidden_shape(self.context), dtype)
+                else TensorSpec(self._active_hidden_shape(), dtype)
             )
             if operation_label == "transpose" and len(source.shape) >= 2:
                 dim0_str = _detail_value(details, "dim0")
@@ -1371,7 +1433,7 @@ class ShapeInferencer:
                     return TensorSpec(shape=out_shape, dtype=a.dtype)
             if inputs:
                 return inputs[0]
-            return TensorSpec(_default_hidden_shape(self.context), dtype)
+            return TensorSpec(self._active_hidden_shape(), dtype)
 
         if operation_label == "einsum":
             equation = _detail_value(details, "equation")
@@ -1381,13 +1443,13 @@ class ShapeInferencer:
                     return TensorSpec(shape=out_shape, dtype=inputs[0].dtype)
             if inputs:
                 return inputs[0]
-            return TensorSpec(_default_hidden_shape(self.context), dtype)
+            return TensorSpec(self._active_hidden_shape(), dtype)
 
         if operation_label == "nonzero":
             source = (
                 inputs[0]
                 if inputs
-                else TensorSpec(_default_hidden_shape(self.context), dtype)
+                else TensorSpec(self._active_hidden_shape(), dtype)
             )
             ndim = len(source.shape) if source.shape else 1
             return TensorSpec(shape=("nnz", ndim), dtype="int64")
@@ -1396,7 +1458,7 @@ class ShapeInferencer:
             source = (
                 inputs[0]
                 if inputs
-                else TensorSpec(_default_hidden_shape(self.context), dtype)
+                else TensorSpec(self._active_hidden_shape(), dtype)
             )
             num_classes = self.context.dims.get(
                 Symbol.EXPERTS.value, Symbol.EXPERTS.value
@@ -1409,14 +1471,14 @@ class ShapeInferencer:
         }:
             if inputs:
                 return inputs[0]
-            return TensorSpec(_default_hidden_shape(self.context), dtype)
+            return TensorSpec(self._active_hidden_shape(), dtype)
 
         if operation_label in {"cast", "contiguous", "squeeze", "expand"}:
             source = (
                 inputs[0]
                 if inputs
                 else external_spec()
-                or TensorSpec(_default_hidden_shape(self.context), dtype)
+                or TensorSpec(self._active_hidden_shape(), dtype)
             )
             cast_dtype = source.dtype
             dtype_detail = next(
@@ -1437,7 +1499,7 @@ class ShapeInferencer:
             source = (
                 inputs[0]
                 if inputs
-                else TensorSpec(_default_hidden_shape(self.context), dtype)
+                else TensorSpec(self._active_hidden_shape(), dtype)
             )
             top_k = self.context.dims.get(
                 Symbol.EXPERTS_PER_TOK.value, Symbol.EXPERTS_PER_TOK.value
@@ -1453,7 +1515,7 @@ class ShapeInferencer:
             )
             index = next((item for item in inputs if item.dtype == "int64"), None)
             if source is None:
-                source = TensorSpec(_default_hidden_shape(self.context), dtype)
+                source = TensorSpec(self._active_hidden_shape(), dtype)
             shape = (
                 index.shape
                 if index is not None
@@ -1470,7 +1532,7 @@ class ShapeInferencer:
             source = (
                 inputs[0]
                 if inputs
-                else TensorSpec(_default_hidden_shape(self.context), dtype)
+                else TensorSpec(self._active_hidden_shape(), dtype)
             )
             index_reduction = operation_label in {"argmax", "argmin"}
             reduced_dim = _detail_value(details, "dim")
@@ -1495,7 +1557,7 @@ class ShapeInferencer:
             if inputs:
                 source = max(inputs, key=_broadcast_rank)
                 return TensorSpec(shape=source.shape, dtype=source.dtype)
-            return TensorSpec(shape=_default_hidden_shape(self.context), dtype=dtype)
+            return TensorSpec(shape=self._active_hidden_shape(), dtype=dtype)
 
         linear_spec = self._lookup_linear_spec(node, root=root)
         if linear_spec is not None or _is_linear(node):
@@ -1516,7 +1578,7 @@ class ShapeInferencer:
             in_shape = (
                 activation_input.shape
                 if activation_input is not None
-                else _default_hidden_shape(self.context)
+                else self._active_hidden_shape()
             )
             out_features = (
                 linear_spec.out_features
@@ -1562,7 +1624,7 @@ class ShapeInferencer:
             source = (
                 inputs[0]
                 if inputs
-                else TensorSpec(_default_hidden_shape(self.context), dtype)
+                else TensorSpec(self._active_hidden_shape(), dtype)
             )
             out_channels = (
                 conv_spec.out_channels
@@ -1605,10 +1667,7 @@ class ShapeInferencer:
         if _is_norm(block_class, node):
             if inputs:
                 return inputs[0]
-            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            return TensorSpec(
-                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
-            )
+            return self._activation_spec(dtype)
 
         if node.operation == OperationKind.GPU_KERNEL or class_name in {
             "AttentionOp",
@@ -1621,15 +1680,12 @@ class ShapeInferencer:
             )
             if introspected is not None:
                 return introspected
-            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            return TensorSpec(
-                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
-            )
+            return self._activation_spec(dtype)
 
         if _is_router(block_class, node):
             experts = self.context.dims.get(Symbol.EXPERTS.value, Symbol.EXPERTS.value)
             in_shape = (
-                inputs[0].shape if inputs else _default_hidden_shape(self.context)
+                inputs[0].shape if inputs else self._active_hidden_shape()
             )
             return TensorSpec(shape=_replace_last_dim(in_shape, experts), dtype=dtype)
 
@@ -1651,10 +1707,7 @@ class ShapeInferencer:
             )
             if inputs:
                 return inputs[0]
-            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            return TensorSpec(
-                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
-            )
+            return self._activation_spec(dtype)
 
         if (
             node.kind in {NodeKind.BLOCK, NodeKind.TOP_LEVEL}
@@ -1662,10 +1715,7 @@ class ShapeInferencer:
         ):
             if inputs:
                 return inputs[0]
-            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            return TensorSpec(
-                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
-            )
+            return self._activation_spec(dtype)
 
         introspected = self._introspect_forward_shape(
             node, inputs, root=root
@@ -1678,10 +1728,7 @@ class ShapeInferencer:
             node.metadata.get("attr_name") or node.id.rsplit(":", 1)[-1] or ""
         ).lower()
         if "attention" in node_name:
-            hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            return TensorSpec(
-                shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
-            )
+            return self._activation_spec(dtype)
 
         # Genuinely unknown op (no symbolic rule): get a ground-truth shape from
         # the per-module FX pass, or by running the op on the meta device,
@@ -1712,10 +1759,7 @@ class ShapeInferencer:
             node.metadata.get("class_name"),
             node.operation,
         )
-        hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-        return TensorSpec(
-            shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
-        )
+        return TensorSpec(shape=self._active_hidden_shape(), dtype=dtype)
 
     # ------------------------------------------------------------------
     # Meta-device shape lookup
@@ -1935,13 +1979,11 @@ class ShapeInferencer:
         if structure is not None:
             # Attention modules use complex runtime reshapes (.size() calls,
             # multi-head view/transpose) that AST simulation cannot resolve.
-            # Derive output from config: attention always produces (B, S, H).
+            # Derive output from config: attention preserves the activation
+            # geometry of its section (``(B, S, H)`` text, ``(Pv, Hv)`` vision).
             if "attention" in (structure.name or "").lower():
-                hidden = self.context.dims.get(
-                    Symbol.HIDDEN.value, Symbol.HIDDEN.value
-                )
                 return TensorSpec(
-                    shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden),
+                    shape=self._active_hidden_shape(),
                     dtype=self.context.dtype,
                 )
             result = self._simulate_forward_ops(
@@ -2168,7 +2210,7 @@ class ShapeInferencer:
         try:
             dtype = self.context.dtype
             input_spec = inputs[0] if inputs else TensorSpec(
-                _default_hidden_shape(self.context), dtype
+                self._active_hidden_shape(), dtype
             )
             op_shapes: dict[str, TensorSpec] = {}
             input_name = structure.forward_input_name

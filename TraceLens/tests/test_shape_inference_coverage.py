@@ -923,6 +923,24 @@ def test_default_hidden_shape():
     assert _default_hidden_shape(ctx) == ("B", "S", 256)
 
 
+def test_active_geometry_defaults_to_text():
+    inf = _make_inferencer(hidden_size=256)
+    # By default the active geometry is the text stack: (B, S, H) and a B*S
+    # flattened sequence symbol.
+    assert inf._active_hidden_shape() == ("B", "S", 256)
+    assert inf._active_flattened_seq() == "B*S"
+
+
+def test_active_geometry_switches_to_vision_patch_axis():
+    inf = _make_inferencer(hidden_size=256)
+    # Simulate a vision-scoped section: single patch axis, vision hidden size.
+    inf._active_seq_axes = (Symbol.VISION_PATCH.value,)
+    inf._active_hidden = 1024
+    assert inf._active_hidden_shape() == ("Pv", 1024)
+    # A -1 reshape that collapses the leading axes must not re-introduce B*S.
+    assert inf._active_flattened_seq() == "Pv"
+
+
 # ---------------------------------------------------------------------------
 # Integration tests: full export pipeline (sweeps infer_model_graph,
 # export_operators, export_architecture, topological ordering, dedup, etc.)
