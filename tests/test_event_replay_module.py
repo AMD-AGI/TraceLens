@@ -6,8 +6,11 @@
 
 """Unit tests for TraceLens/EventReplay.
 
-Schema parsing and IR construction run without torch. Torch-dependent paths are
-imported lazily; GPU replay and benchmarking require CUDA/HIP.
+Schema parsing, IR construction, custom-init name matching, and
+``extract_batch_context`` run without torch. Torch-dependent paths are skipped
+when torch is missing. GPU replay uses ``@pytest.mark.gpu`` (excluded from
+CPU-only CI). For a longer GPU smoke (profile + replay), run
+``python examples/event_replay_gpu_smoke.py``.
 """
 
 from __future__ import annotations
@@ -19,6 +22,11 @@ from unittest.mock import patch
 
 import pytest
 
+from TraceLens.EventReplay.custom_inits import (
+    CustomInit,
+    PagedAttentionInit,
+    extract_batch_context,
+)
 from TraceLens.EventReplay.event_replay import EventReplayer
 from TraceLens.EventReplay.utils import TensorCfg, list_profile_tensor_types
 
@@ -146,6 +154,65 @@ class TestEventReplayIR:
         assert kw_values["alpha"] == 1.0
 
 
+class _FakeReplayer:
+    def __init__(self, name):
+        self.event = {"name": name}
+
+
+class _NoOpInit(CustomInit):
+    def initialize(self, replayer, **kwargs):
+        return None
+
+
+class TestCustomInitAppliesTo:
+    def test_exact_event_name_matches(self):
+        init = _NoOpInit()
+        init.op_patterns = ["aten::mm"]
+        assert init.applies_to(_FakeReplayer("aten::mm"))
+
+    def test_substring_does_not_match(self):
+        init = _NoOpInit()
+        init.op_patterns = ["mm"]
+        assert not init.applies_to(_FakeReplayer("aten::mm"))
+
+
+class _FakeAnalyzer:
+    def __init__(self, events):
+        self.tree = type("Tree", (), {"events": events})()
+
+
+def _vllm_annotation(ts=0, dur=100):
+    return {
+        "cat": "user_annotation",
+        "name": "execute_context_2(18)_generation_5(5)",
+        "ts": ts,
+        "dur": dur,
+    }
+
+
+def _cpu_op(name, ts=10):
+    return {
+        "name": name,
+        "ts": ts,
+        "args": {"Input Dims": [[1, 1]]},
+    }
+
+
+class TestExtractBatchContext:
+    def test_exact_paged_attention_is_annotated(self):
+        op = _cpu_op("_rocm_C::paged_attention")
+        n = extract_batch_context(_FakeAnalyzer([_vllm_annotation(), op]))
+        assert n == 1
+        assert op["batch_context"]["n_prefill"] == 2
+        assert "_rocm_C::paged_attention" in PagedAttentionInit.op_patterns
+
+    def test_substring_name_is_not_annotated(self):
+        op = _cpu_op("aiter::paged_attention_v1")
+        n = extract_batch_context(_FakeAnalyzer([_vllm_annotation(), op]))
+        assert n == 0
+        assert "batch_context" not in op
+
+
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 class TestEventReplayIRWithTorch:
     def test_get_args_kwargs_cpu(self):
@@ -194,9 +261,19 @@ class TestEventReplayUtils:
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 class TestEventReplayerCpu:
+    @pytest.fixture(autouse=True)
+    def _isolate_custom_init_registry(self):
+        saved = EventReplayer._custom_init_registry[:]
+        yield
+        EventReplayer._custom_init_registry = saved
+
     def test_event_replayer_lazy_cpu_replay(self):
         replayer = EventReplayer(MM_EVENT, device="cpu", lazy=True)
-        replayer.replay()
+        result = replayer.replay()
+        torch = _require_torch()
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == (4, 16)
+        assert hasattr(replayer, "args")
 
     def test_get_repro_info_serializes_tensor_cfg(self):
         replayer = EventReplayer(MM_EVENT, device="cpu", lazy=True)
@@ -205,6 +282,64 @@ class TestEventReplayerCpu:
         pos0 = info["replay_ir"]["list_pos_args"][0]["value"]
         assert pos0["shape"] == [4, 8]
         assert pos0["dtype"] == "c10::BFloat16"
+
+    def test_get_repro_info_idempotent_and_does_not_mutate_ir(self):
+        replayer = EventReplayer(MM_EVENT, device="cpu", lazy=True)
+        assert replayer.get_repro_info() == replayer.get_repro_info()
+        for arg in replayer.event_replay_IR["list_pos_args"]:
+            if arg["arg_type"].startswith("Tensor"):
+                assert isinstance(arg["value"], TensorCfg)
+        torch = _require_torch()
+        result = replayer.replay()
+        assert isinstance(result, torch.Tensor)
+
+    def test_lazy_custom_init_sees_args(self):
+        accessed = {}
+
+        class ProbeInit(CustomInit):
+            op_patterns = ["aten::mm"]
+
+            def initialize(self, replayer, **kwargs):
+                accessed["args"] = replayer.args
+                accessed["kwargs"] = replayer.kwargs
+                return None
+
+        EventReplayer.register_custom_init(ProbeInit())
+        EventReplayer(MM_EVENT, device="cpu", lazy=True, auto_init=True).replay()
+        assert "args" in accessed
+        assert len(accessed["args"]) == 2
+
+    def test_first_matching_custom_init_wins(self):
+        log = []
+
+        class InitA(CustomInit):
+            op_patterns = ["aten::mm"]
+
+            def initialize(self, replayer, **kwargs):
+                log.append("A")
+
+        class InitB(CustomInit):
+            op_patterns = ["aten::mm"]
+
+            def initialize(self, replayer, **kwargs):
+                log.append("B")
+
+        EventReplayer._custom_init_registry = [InitA(), InitB()]
+        EventReplayer(MM_EVENT, device="cpu", auto_init=True).replay()
+        assert log == ["A"]
+
+    def test_auto_init_false_skips_custom_inits(self):
+        log = []
+
+        class AlwaysInit(CustomInit):
+            op_patterns = ["aten::mm"]
+
+            def initialize(self, replayer, **kwargs):
+                log.append("ran")
+
+        EventReplayer._custom_init_registry = [AlwaysInit()]
+        EventReplayer(MM_EVENT, device="cpu", auto_init=False).replay()
+        assert log == []
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
@@ -260,7 +395,7 @@ class TestEventReplayGpu:
         def matmul():
             torch.matmul(a, b)
 
-        avg_us = benchmark_func(
+        metrics = benchmark_func(
             matmul, device=torch.device("cuda"), warmup=1, avg_steps=2
         )
-        assert avg_us > 0
+        assert metrics["mean_us"] > 0

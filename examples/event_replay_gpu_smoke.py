@@ -1,25 +1,22 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
-"""
-GPU integration tests for EventReplay.
+"""Manual GPU smoke for EventReplay (not collected by pytest).
 
-Profiles real ops, replays from the captured trace, and validates:
-  1. Kernel name match between original and replayed execution
-  2. BUG-1:  lazy=True + auto_init=True works on GPU
-  3. BUG-2:  get_repro_info() is idempotent (doesn't corrupt IR)
-  4. CLAIM-4: replay() returns a tensor
-  5. CLAIM-1: first-match-wins with real ops
+Profiles a few aten ops, replays them from the captured trace, and prints
+pass/fail. Requires a CUDA/HIP GPU. From the repo root:
 
-Requires a GPU (MI300X / MI210 / etc). Run from the repo root:
-    python TraceLens/EventReplay/test_event_replay_gpu.py
+    python examples/event_replay_gpu_smoke.py
+
+CI unit tests use ``tests/test_event_replay_module.py`` with ``@pytest.mark.gpu``
+instead of this script.
 """
 
 import sys, os, json, time
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
 from torch.profiler import profile, ProfilerActivity
