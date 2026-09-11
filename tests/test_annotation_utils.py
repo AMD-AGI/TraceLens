@@ -32,7 +32,7 @@ from TraceLens.TraceUtils.annotation_utils import (
     average_detail,
     classify_phase,
     find_events_by_patterns,
-    find_iteration_roots_by_priority,
+    find_known_annotations,
     find_phase_from_window,
     has_context,
     has_generation,
@@ -889,35 +889,26 @@ def test_find_events_by_patterns_with_a_single_pattern():
     assert [e["ts"] for e in roots] == [10, 20]
 
 
-def test_find_iteration_roots_by_priority_prefers_the_detailed_tier():
+def test_find_known_annotations_prefers_the_detailed_tier():
     events = [
         _event(DETAILED_DECODE, ts=10),
         _event(NATIVE_DECODE, ts=20),
         _event("step[DECODE bs=64]", ts=30),
     ]
-    roots = find_iteration_roots_by_priority(events)
+    roots = find_known_annotations(events)
     assert [e["name"] for e in roots] == [DETAILED_DECODE]
 
 
-def test_find_iteration_roots_by_priority_falls_back_to_the_native_tier():
+def test_find_known_annotations_falls_back_to_the_native_tier():
     events = [_event(NATIVE_DECODE, ts=20), _event("step[DECODE bs=64]", ts=10)]
-    roots = find_iteration_roots_by_priority(events)
+    roots = find_known_annotations(events)
     assert [e["ts"] for e in roots] == [10, 20]
 
 
-def test_find_iteration_roots_by_priority_on_no_match():
-    assert find_iteration_roots_by_priority([_event("unrelated")]) == []
-    # Detailed annotations are ignored when they carry the wrong category.
+def test_find_known_annotations_on_no_match():
+    assert find_known_annotations([_event("unrelated")]) == []
     wrong_cat = [_event(DETAILED_DECODE, cat="cpu_op")]
-    assert find_iteration_roots_by_priority(wrong_cat) == []
-
-
-def test_find_iteration_roots_by_priority_accepts_custom_tiers():
-    events = [_event(DETAILED_DECODE, ts=10), _event(NATIVE_DECODE, ts=20)]
-    roots = find_iteration_roots_by_priority(
-        events, pattern_tiers=[ITERATION_BACKUP_PATTERNS]
-    )
-    assert [e["name"] for e in roots] == [NATIVE_DECODE]
+    assert find_known_annotations(wrong_cat) == []
 
 
 # --------------------------------------------------------------------------- #

@@ -10,6 +10,7 @@ import gzip
 import json
 import os
 import zipfile
+from bisect import bisect_left, bisect_right
 
 from tqdm import tqdm
 
@@ -23,7 +24,16 @@ from ..annotation_utils import (
     iteration_details,
 )
 
-GPU_EVENT_CATEGORIES = ["kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation"]
+from .detect_utils import (
+    GPU_KERNEL_CATEGORIES,
+    PROJECTION_CATEGORY,
+    build_root_tiles,
+)
+
+# Kernels plus the annotation projections that describe them. Anything summing
+# GPU *time* must use GPU_KERNEL_CATEGORIES instead, since a projection encloses
+# the kernels it describes and counting both double-counts.
+GPU_EVENT_CATEGORIES = [*GPU_KERNEL_CATEGORIES, PROJECTION_CATEGORY]
 
 
 def get_filename(filepath: str) -> dict:
@@ -65,6 +75,29 @@ def preprocess_trace(events: list[dict]):
     return gpu_corr_map, flow_corr_map, meta_events
 
 
+def build_cpu_event_index(
+    events: list[dict],
+) -> tuple[list[dict], list[float]]:
+    """Pre-filter and sort CPU-side events for extraction.
+
+    Returns ``(cpu_events, cpu_starts)`` -- the sorted event list and a parallel
+    list of timestamps for bisect lookups.  Build once, pass to every
+    :func:`extract_iteration` call on the same trace.
+    """
+    cpu_events = []
+    for e in events:
+        ts = e.get("ts")
+        dur = e.get("dur")
+        if ts is None or dur is None:
+            continue
+        if e.get("cat") in GPU_EVENT_CATEGORIES:
+            continue
+        cpu_events.append(e)
+    cpu_events.sort(key=lambda e: e["ts"])
+    cpu_starts = [e["ts"] for e in cpu_events]
+    return cpu_events, cpu_starts
+
+
 def extract_iteration(
     iteration_roots: list[dict],
     events: list[dict],
@@ -72,8 +105,30 @@ def extract_iteration(
     gpu_corr_map: dict,
     flow_corr_map: dict,
     meta_events: list[dict],
+    root_tiles: dict | None = None,
+    gap_fill: bool = True,
+    cpu_event_index: tuple[list[dict], list[float]] | None = None,
 ) -> dict:
-    """Extract a single iteration trace."""
+    """Extract a single iteration trace.
+
+    Events are assigned to the window containing their *start* timestamp, which
+    makes the windows a partition of the timeline. Testing for full containment
+    instead would drop any event straddling a boundary from both neighbours, so
+    closing the gaps alone would not stop kernels going missing.
+
+    Events longer than their window are enclosing spans -- thread roots, outer
+    python frames -- which belong to no single iteration and are left out. They
+    carry no correlation id, so no kernel is lost with them.
+
+    ``root_tiles`` should come from :func:`build_root_tiles` over the *whole* root
+    list: built from a selected window instead, the window's last root would lose
+    the boundary of the root that follows it. Pass ``gap_fill=False`` to score
+    each root by its own span.
+
+    ``cpu_event_index`` is an optional ``(cpu_events, cpu_starts)`` tuple from
+    :func:`build_cpu_event_index`.  When provided the expensive full-event scan
+    and sort is skipped -- pass it when calling in a loop over many roots.
+    """
 
     filtered_events = []
     gpu_dur = 0
@@ -81,58 +136,58 @@ def extract_iteration(
     num_gpu_events = 0
     batch_list = []
 
-    # Pre-index GPU and flow events by correlation id
-
-    # Compute the global time window for all iteration roots
     if not iteration_roots:
         return trace_json.copy(), [], 0, 0, 0
-    min_iter_ts = min(root.get("ts", 0) for root in iteration_roots)
-    max_iter_end = max(
-        root.get("ts", 0) + root.get("dur", 0) for root in iteration_roots
-    )
-    # Collect all relevant tid/pid pairs
-    tid_pid_set = {(root.get("tid"), root.get("pid")) for root in iteration_roots}
 
-    # Pre-filter all CPU events in the global window and by tid/pid
-    cpu_events = []
-    for e in events:
-        ts = e.get("ts")
-        if ts is None:
-            continue
-        dur = e.get("dur")
-        if dur is None:
-            continue
-        e_end = ts + dur
-        e_tid = e.get("tid")
-        e_pid = e.get("pid")
-        if (e_tid, e_pid) in tid_pid_set and (
-            min_iter_ts <= ts and e_end <= max_iter_end
-        ):
-            cpu_events.append(e)
+    if not gap_fill:
+        windows = [
+            (r.get("ts", 0), r.get("ts", 0) + r.get("dur", 0)) for r in iteration_roots
+        ]
+    else:
+        tiles = (
+            root_tiles
+            if root_tiles is not None
+            else build_root_tiles(iteration_roots)[0]
+        )
+        windows = [
+            tiles.get(
+                (r.get("pid"), r.get("tid"), r.get("ts", 0)),
+                (r.get("ts", 0), r.get("ts", 0) + r.get("dur", 0)),
+            )
+            for r in iteration_roots
+        ]
 
-    # For each iteration root, filter CPU events and collect correlation ids
-    for iteration_root in tqdm(iteration_roots):
+    max_iter_end = max(end for _, end in windows)
+    if root_tiles:
+        max_iter_end = max(max_iter_end, max(end for _, end in root_tiles.values()))
+
+    if cpu_event_index is not None:
+        cpu_events, cpu_starts = cpu_event_index
+    else:
+        cpu_events, cpu_starts = build_cpu_event_index(events)
+
+    # For each iteration window collect the CPU events whose start falls in it,
+    # regardless of thread, then follow their correlation ids to the GPU work.
+    for iteration_root, (win_ts, win_end) in zip(tqdm(iteration_roots), windows):
         start_time = []
         end_time = []
-        iter_tid = iteration_root.get("tid")
-        iter_pid = iteration_root.get("pid")
-        iter_ts = iteration_root.get("ts", 0)
-        iter_end = iter_ts + iteration_root.get("dur", 0)
+        win_dur = win_end - win_ts
+        is_last = win_end == max_iter_end
 
         correlation_ids: set[int] = set()
 
-        # CPU events: filter from pre-filtered list
-        for e in cpu_events:
-            ts = e.get("ts")
-            dur = e.get("dur")
-            e_end = ts + dur
-            e_tid = e.get("tid")
-            e_pid = e.get("pid")
-            if (
-                e_tid == iter_tid
-                and e_pid == iter_pid
-                and (iter_ts <= ts and e_end <= iter_end)
-            ):
+        # Bisect to the window's slice so widening to all threads stays cheap.
+        lo = bisect_left(cpu_starts, win_ts)
+        hi = bisect_right(cpu_starts, win_end)
+        for e in cpu_events[lo:hi]:
+            ts = e["ts"]
+            # Half-open so neighbouring windows cannot both claim an event; the
+            # final window is closed so nothing at the very end is orphaned.
+            within = win_ts <= ts < win_end or (is_last and ts == win_end)
+            # Spans longer than the window are enclosing frames (thread roots,
+            # outer python frames) that belong to no single iteration; they carry
+            # no correlation id, so no kernel is lost by skipping them.
+            if within and e["dur"] <= win_dur:
                 filtered_events.append(e)
                 corr = e.get("args", {}).get("correlation")
                 if corr is not None:
@@ -190,15 +245,18 @@ def extract_and_save(
     flow_corr_map: dict,
     meta_events: list[dict],
     output_label: str | None = None,
+    root_tiles: dict | None = None,
 ):
     """Extract and save a range of iterations.
 
     If ``output_label`` is provided the output filename becomes
     ``{output_label}_{name_append}_{base_name}.json.gz`` instead of the
     default ``{base_name}_{prefix}_{idx}_{name_append}.json.gz``.
+
+    ``root_tiles`` should be built over the whole root list so that a root at the
+    edge of a selected window still knows where its successor begins.
     """
     extraction_summary = []
-    # print(f"roots: {roots}")
     if len(roots) == 0 or len(roots[0]) == 0:
         print(f"No {prefix} events found in the specified range, skipping extraction")
         return extraction_summary
@@ -207,10 +265,18 @@ def extract_and_save(
     if len(selected) == 0:
         print(f"No {prefix} events found in the specified range, skipping extraction")
         return extraction_summary
+    cpu_idx = build_cpu_event_index(events)
     for idx, root in zip(indices, selected):
         iter_details = iteration_details(root)
         iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = extract_iteration(
-            root, events, trace_json, gpu_corr_map, flow_corr_map, meta_events
+            root,
+            events,
+            trace_json,
+            gpu_corr_map,
+            flow_corr_map,
+            meta_events,
+            root_tiles=root_tiles,
+            cpu_event_index=cpu_idx,
         )
         is_annotation = "annotation_iteration" in prefix
         # Use the structured phase-aware name for any annotation extraction
@@ -298,6 +364,7 @@ def extract_phases_and_save(
     gpu_corr_map: dict,
     flow_corr_map: dict,
     meta_events: list[dict],
+    root_tiles: dict | None = None,
 ):
     """Extract and save a range of iterations."""
     extraction_summary = []
@@ -322,6 +389,7 @@ def extract_phases_and_save(
                     gpu_corr_map,
                     flow_corr_map,
                     meta_events,
+                    root_tiles=root_tiles,
                 )
             )
             name_append = f"prefilldecode_{phase_details['num_prefilldecode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
@@ -354,6 +422,7 @@ def extract_phases_and_save(
                     gpu_corr_map,
                     flow_corr_map,
                     meta_events,
+                    root_tiles=root_tiles,
                 )
             )
             name_append = f"decode_{phase_details['num_decode']}_bs{phase_details['avg_bs']}_conc{phase_details['avg_conc']}"
@@ -388,6 +457,7 @@ def divide_phases_and_save(
     flow_corr_map: dict,
     meta_events: list[dict],
     steady_state_regions: list[tuple[int, int]],
+    root_tiles: dict | None = None,
 ) -> list[dict]:
     """
     Group contiguous steps of the same phase within steady-state regions and
@@ -480,6 +550,7 @@ def divide_phases_and_save(
                 flow_corr_map,
                 meta_events,
                 output_label=f"{phase}_{name_append}",
+                root_tiles=root_tiles,
             )
         )
 

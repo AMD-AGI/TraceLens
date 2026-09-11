@@ -6,13 +6,19 @@
 
 """Inference trace splitting: execution roots, steady-state windows, extraction."""
 
-from .execution_roots import find_iteration_roots
+from .execution_roots import (
+    DetectStatus,
+    PhaseConfidence,
+    RootSet,
+    find_iteration_roots,
+)
 from .steady_state_window import (
     compute_reference_pd_ratio,
     find_steady_state_window,
     identify_steady_state_regions,
 )
 from .trace_extraction import (
+    build_root_tiles,
     divide_phases_and_save,
     extract_and_save,
     extract_iteration,
@@ -23,6 +29,10 @@ from .trace_extraction import (
 )
 
 __all__ = [
+    "DetectStatus",
+    "PhaseConfidence",
+    "RootSet",
+    "build_root_tiles",
     "compute_reference_pd_ratio",
     "divide_phases_and_save",
     "extract_and_save",
