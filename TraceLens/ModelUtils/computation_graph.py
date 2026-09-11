@@ -243,6 +243,30 @@ def _resolve_primary_input(
     return last_index if last_index is not None else input_index
 
 
+def _first_op_entry_params(module: "BlockNode") -> set[str]:
+    """Param names the module's first forward op reads directly from method input.
+
+    A module-call side arg (``cu_seqlens``/``position_embeddings`` on an
+    attention block) with no dedicated pipeline entry otherwise falls back to the
+    module's first op. But a leading ``RMSNorm`` reads only ``hidden_states``;
+    dumping the side args onto its first ``Cast`` fabricates inputs it never
+    takes — and when the producer runs later (an attention kernel that feeds
+    ``cu_seqlens``), a downstream→entry back-edge. Only args the first op
+    actually consumes from the method input belong on the fallback target. When
+    the first op's arg map is unknown (empty), the caller stays permissive.
+    """
+    children = [child for child in module.children if child.attr_name]
+    if not children:
+        return set()
+    first = min(children, key=lambda child: child.forward_order or 0)
+    arg_map = (module.forward_step_predecessor_args or {}).get(first.attr_name, {})
+    return {
+        _normalize_param_name(name)
+        for name, src in arg_map.items()
+        if src == FORWARD_METHOD_INPUT
+    }
+
+
 def _resolve_return_slot_source(
     producer: "BlockNode",
     arg_name: str,
@@ -509,6 +533,7 @@ def _wire_all_predecessor_edges(
       6. Inline-frame dangling outputs(was ``_wire_inline_frame_dangling_outputs``)
     """
     attr_last_index = _rebuild_attr_last_index(graph)
+    block_index_by_id = _build_block_index_map(graph)
 
     # A nested module that is inline-expanded into this graph keeps its own
     # operation/forward-step predecessor metadata describing data flow among
@@ -577,7 +602,7 @@ def _wire_all_predecessor_edges(
             if step_node is None:
                 continue
             default_target = _first_graph_index_for_module(
-                step_node, attr_last_index
+                step_node, attr_last_index, block_index_by_id
             )
             if default_target is None:
                 default_target = attr_last_index.get(step_attr)
@@ -585,6 +610,7 @@ def _wire_all_predecessor_edges(
                 continue
             arg_map = pred_arg_maps.get(step_attr, {})
             param_entries = module_param_entries.get(step_attr, {})
+            entry_params = _first_op_entry_params(step_node)
             multi = len(preds) >= 2
 
             # Build (pred, arg_name) pairs.  When an arg_map is available,
@@ -624,6 +650,20 @@ def _wire_all_predecessor_edges(
                     if arg_name
                     else default_target
                 )
+                # A side arg with no dedicated entry point must not be dumped onto
+                # the module's first op when that op does not read it: the norm at
+                # a block's head takes only ``hidden_states``, and binding
+                # ``cu_seqlens``/``position_embeddings`` there both misrepresents
+                # the norm and, since the kernel that produces ``cu_seqlens`` runs
+                # later, closes a cycle. Skip only when we positively know the
+                # first op's inputs (``entry_params`` non-empty).
+                if (
+                    arg_name is not None
+                    and target_index == default_target
+                    and entry_params
+                    and _normalize_param_name(arg_name) not in entry_params
+                ):
+                    continue
                 link = (source_index, target_index)
                 if link not in graph.links:
                     graph.links.append(link)
@@ -678,7 +718,9 @@ def _wire_all_predecessor_edges(
 
     # --- 4. Multi-input op forward links ---
     if not skip_forward_links:
-        _wire_multi_input_op_forward_links(graph, root, attr_last_index)
+        _wire_multi_input_op_forward_links(
+            graph, root, attr_last_index, block_index_by_id
+        )
 
     # --- 5. Loop-carried nodes (must precede inline-frame pass) ---
     _add_loop_carried_nodes(graph, root)
@@ -692,6 +734,7 @@ def _wire_multi_input_op_forward_links(
     graph: ComputationGraph,
     root: BlockNode,
     attr_last_index: dict[str, int],
+    block_index_by_id: dict[int, int] | None = None,
 ) -> None:
     """Connect multi-input ops to the next forward step once all operands are wired."""
     steps_by_attr = _forward_steps_by_attr(root)
@@ -734,7 +777,9 @@ def _wire_multi_input_op_forward_links(
         if named and step.attr_name not in named:
             continue
 
-        target_index = _first_graph_index_for_module(consumer, attr_last_index)
+        target_index = _first_graph_index_for_module(
+            consumer, attr_last_index, block_index_by_id
+        )
         if target_index is None:
             target_index = attr_last_index.get(consumer.attr_name)
         if target_index is None:
@@ -1162,6 +1207,42 @@ def _add_kernel_pipeline_merge_chain(
     return list(pipeline_indices) + [output_index], output_index
 
 
+def _submodule_chain_input(
+    wrapper: BlockNode | None,
+    sub_step: BlockNode,
+    attr_last_index: dict[str, int] | None,
+    fallback: int | None,
+) -> int | None:
+    """Resolve the graph index an inlined submodule really reads from.
+
+    ``_add_linear_pipeline_chain`` feeds each step from the previous sibling's
+    tail by default.  That is correct for a straight pipeline, but wrong for
+    parallel sibling submodules that both consume a shared upstream — e.g. an
+    attention block's ``q_norm`` and ``k_norm`` each read the ``qkv`` ``unbind``,
+    not one another.  Chaining them sequentially manufactures a spurious
+    ``q_norm -> k_norm`` edge; combined with the correct ``k_norm <- unbind``
+    edge that section-1b wires from the arg map, it also closes a cycle.
+
+    The wrapper (the submodule's parent) records each step's real predecessors in
+    ``forward_step_predecessor_args``.  When those resolve to an already-emitted
+    node, feed from there instead of the previous sibling.  Falls back to the
+    caller's value whenever the mapping is absent or unresolved, so genuine
+    sequential chains are untouched.
+    """
+    if wrapper is None or attr_last_index is None:
+        return fallback
+    arg_map = (wrapper.forward_step_predecessor_args or {}).get(sub_step.attr_name)
+    if not arg_map:
+        return fallback
+    for src in arg_map.values():
+        if src == FORWARD_METHOD_INPUT:
+            continue
+        resolved = attr_last_index.get(src)
+        if resolved is not None:
+            return resolved
+    return fallback
+
+
 def _add_linear_pipeline_chain(
     graph: ComputationGraph,
     steps: list[BlockNode],
@@ -1193,6 +1274,13 @@ def _add_linear_pipeline_chain(
     for sub_index, sub_step in enumerate(steps):
         inner_steps, inner_wrapper = _maybe_inline(sub_step, inline_expansion=inline_expansion)
         if inner_wrapper is not None:
+            sibling_input = (
+                chain_last
+                if sub_index == 0
+                else _submodule_chain_input(
+                    wrapper, sub_step, attr_last_index, indices[-1]
+                )
+            )
             inner_indices, inner_tail = _add_linear_pipeline_chain(
                 graph,
                 inner_steps,
@@ -1200,7 +1288,7 @@ def _add_linear_pipeline_chain(
                 key_prefix=f"{key_prefix}:{sub_step.attr_name}",
                 attr_last_index=attr_last_index,
                 input_index=input_index if sub_index == 0 else None,
-                last_index=chain_last if sub_index == 0 else indices[-1],
+                last_index=sibling_input,
                 fork_from_input=fork_from_input and sub_index == 0,
                 branch_from_input_dashed=branch_from_input_dashed and sub_index == 0,
                 port_label=port_label if sub_index == 0 else None,
@@ -1623,14 +1711,40 @@ def _forward_steps_by_attr(root: BlockNode) -> dict[str, BlockNode]:
     return {step.attr_name: step for step in root.children if step.attr_name}
 
 
+def _build_block_index_map(graph: ComputationGraph) -> dict[int, int]:
+    """Map ``id(BlockNode) -> first graph-node index`` for identity-scoped lookup.
+
+    ``attr_last_index`` is keyed by ``attr_name``, which repeats across module
+    instances built from the same source line (e.g. every ``Glm5NextRMSNorm``'s
+    ``Cast`` shares one attr_name), and keeps only the *last* occurrence. Scoping
+    a module's first-op lookup by the identity of its own ``BlockNode`` steps
+    routes each instance's boundary edges to its own node instead of collapsing
+    onto whichever instance happened to be emitted last.
+    """
+    index_by_id: dict[int, int] = {}
+    for index, spec in enumerate(graph.nodes):
+        if spec.block is not None:
+            index_by_id.setdefault(id(spec.block), index)
+    return index_by_id
+
+
 def _first_graph_index_for_module(
     module: BlockNode,
     attr_last_index: dict[str, int],
+    block_index_by_id: dict[int, int] | None = None,
 ) -> int | None:
     steps = collect_function_steps(module)
     if not steps:
         return attr_last_index.get(module.attr_name)
+    # Select this module's entry op by forward order (as before), then resolve it
+    # to *its own* graph-node index by identity. ``attr_last_index`` is keyed by
+    # attr_name and keeps only the last occurrence, so instances built from the
+    # same source line (every RMSNorm's ``Cast``) otherwise collapse onto whichever
+    # was emitted last. Resolving by identity keeps the same target op — no earlier
+    # node is chosen — so wiring stays acyclic while the collision is removed.
     first = min(steps, key=lambda step: step.forward_order or 0)
+    if block_index_by_id is not None and id(first) in block_index_by_id:
+        return block_index_by_id[id(first)]
     return attr_last_index.get(first.attr_name)
 
 

@@ -1155,6 +1155,16 @@ def _inject_group_outputs(
         )
         prefix = input_node["id"].split("/@input", 1)[0]
         output_id = f"{prefix}/@output"
+        # A nested boundary (e.g. a loop body whose @input nodes live at an
+        # ancestor's id-prefix) can derive an output id already owned by an
+        # ancestor section's real boundary. Two nodes sharing an id are fused by
+        # the viewer, merging their edge sets into a false cycle. Disambiguate by
+        # namespace when the id is already taken by a node in another namespace.
+        if any(
+            node["id"] == output_id and node.get("namespace", "") != namespace
+            for node in section_nodes
+        ):
+            output_id = f"{namespace}/@output"
         internal_ids = _namespace_internal_ids(section_nodes, namespace)
         outgoing: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for target in section_nodes:
