@@ -21,6 +21,7 @@ import re
 import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
+from TraceLens.util import most_common_first_dim
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.generate_perf_report_pytorch import _find_entry_point
 from TraceLens.Reporting.reporting_utils import (
@@ -225,8 +226,6 @@ def classify_graph_capture_trace(input_folder: str):
             if "StreamBeginCapture" in e.get("name", "")
             and e.get("cat") == "cuda_runtime"
         )
-
-    from TraceLens.util import most_common_first_dim
 
     def infer_mode_from_captures(num_captures: int):
         return "FULL" if num_captures <= 1 else "PIECEWISE"
