@@ -369,8 +369,9 @@ def _run_experiment(args: argparse.Namespace) -> None:
         f"{trace_and_platform}\n\n"
     )
 
-    api_key = os.environ.get("CURSOR_API_KEY")
-    use_interactive_login = args.interactive_login or not api_key
+    use_interactive_login = args.interactive_login or not os.environ.get(
+        "CURSOR_API_KEY"
+    )
 
     prompt_q = shlex.quote(prompt)
     log_bn = os.path.basename(args.agent_log_file)
@@ -428,8 +429,9 @@ date -u
             *mounts,
         ]
     )
-    if api_key:
-        docker_cmd.extend(["-e", f"CURSOR_API_KEY={api_key}"])
+    # `-e NAME` copies the host value; never put the secret in argv (logged below).
+    if os.environ.get("CURSOR_API_KEY"):
+        docker_cmd.extend(["-e", "CURSOR_API_KEY"])
     docker_cmd.extend([args.docker_image, "bash", "-lc", inner_script])
 
     print("+ docker run ...", flush=True)
