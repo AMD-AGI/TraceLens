@@ -362,6 +362,21 @@ def test_extract_iteration_keeps_cpu_ops_between_step_annotations():
     assert "cpu_op_0_0" not in names1
 
 
+def test_cpu_window_end_falls_back_to_annotation_duration():
+    from TraceLens.TraceUtils.split_inference import trace_extraction as te
+
+    assert te._annotation_pattern("not_an_iteration") is None
+    lone = {
+        "name": VLLM_PRIMARY_ANNOTATION.format(i=0),
+        "ts": 1000,
+        "dur": 100,
+        "tid": 10,
+        "pid": 1,
+    }
+    assert te._cpu_window_end(lone, None, []) == 1100
+    assert te._next_same_pattern_ts({"name": "not_an_iteration", "ts": 0}, []) is None
+
+
 def test_extract_iteration_empty_roots():
     trace = make_trace([VLLM_PRIMARY_ANNOTATION.format(i=0)])
     events = trace["traceEvents"]

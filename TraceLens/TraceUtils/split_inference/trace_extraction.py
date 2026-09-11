@@ -13,6 +13,7 @@ import zipfile
 
 from tqdm import tqdm
 
+from ...util import TraceEventUtils
 from ..annotation_utils import (
     ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
@@ -22,6 +23,8 @@ from ..annotation_utils import (
     is_decode_only,
     iteration_details,
 )
+
+_K = TraceEventUtils.TraceKeys
 
 
 def _annotation_pattern(name: str):
@@ -41,20 +44,20 @@ def _next_same_pattern_ts(root: dict, events: list[dict]) -> float | None:
     duration drops that work. Bounding by the next matching annotation keeps it
     without leaking the following step's nested ops.
     """
-    pattern = _annotation_pattern(root.get("name", ""))
+    pattern = _annotation_pattern(root.get(_K.Name, ""))
     if pattern is None:
         return None
-    iter_ts = root.get("ts", 0)
-    iter_tid = root.get("tid")
-    iter_pid = root.get("pid")
+    iter_ts = root.get(_K.TimeStamp, 0)
+    iter_tid = root.get(_K.TID)
+    iter_pid = root.get(_K.PID)
     next_ts = None
     for e in events:
-        ts = e.get("ts")
+        ts = e.get(_K.TimeStamp)
         if ts is None or ts <= iter_ts:
             continue
-        if e.get("tid") != iter_tid or e.get("pid") != iter_pid:
+        if e.get(_K.TID) != iter_tid or e.get(_K.PID) != iter_pid:
             continue
-        if pattern.match(e.get("name") or ""):
+        if pattern.match(e.get(_K.Name) or ""):
             if next_ts is None or ts < next_ts:
                 next_ts = ts
     return next_ts
@@ -67,7 +70,7 @@ def _cpu_window_end(root: dict, next_sibling_ts: float | None, events: list[dict
     next_ts = _next_same_pattern_ts(root, events)
     if next_ts is not None:
         return next_ts
-    return root.get("ts", 0) + root.get("dur", 0)
+    return root.get(_K.TimeStamp, 0) + root.get(_K.Duration, 0)
 
 GPU_EVENT_CATEGORIES = ["kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation"]
 
@@ -137,18 +140,20 @@ def extract_iteration(
     # Compute the global time window for all iteration roots
     if not iteration_roots:
         return trace_json.copy(), [], 0, 0, 0
-    roots_by_ts = sorted(iteration_roots, key=lambda r: r.get("ts", 0))
+    roots_by_ts = sorted(iteration_roots, key=lambda r: r.get(_K.TimeStamp, 0))
     sibling_end = []
     for i, root in enumerate(roots_by_ts):
         next_sibling = (
-            roots_by_ts[i + 1].get("ts") if i + 1 < len(roots_by_ts) else None
+            roots_by_ts[i + 1].get(_K.TimeStamp)
+            if i + 1 < len(roots_by_ts)
+            else None
         )
         sibling_end.append(_cpu_window_end(root, next_sibling, events))
     root_end = {id(root): end for root, end in zip(roots_by_ts, sibling_end)}
-    min_iter_ts = min(root.get("ts", 0) for root in iteration_roots)
+    min_iter_ts = min(root.get(_K.TimeStamp, 0) for root in iteration_roots)
     max_iter_end = max(sibling_end)
     # Collect all relevant tid/pid pairs
-    tid_pid_set = {(root.get("tid"), root.get("pid")) for root in iteration_roots}
+    tid_pid_set = {(root.get(_K.TID), root.get(_K.PID)) for root in iteration_roots}
 
     # Pre-filter all CPU events in the global window and by tid/pid
     cpu_events = []
@@ -171,9 +176,9 @@ def extract_iteration(
     for iteration_root in tqdm(iteration_roots):
         start_time = []
         end_time = []
-        iter_tid = iteration_root.get("tid")
-        iter_pid = iteration_root.get("pid")
-        iter_ts = iteration_root.get("ts", 0)
+        iter_tid = iteration_root.get(_K.TID)
+        iter_pid = iteration_root.get(_K.PID)
+        iter_ts = iteration_root.get(_K.TimeStamp, 0)
         iter_end = root_end[id(iteration_root)]
 
         correlation_ids: set[int] = set()
