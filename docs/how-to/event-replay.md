@@ -286,10 +286,9 @@ class IndexAddInit(CustomInit):
 EventReplayer.register_custom_init(IndexAddInit())
 ```
 
-`replay()` applies the **first** matching initializer. Built-ins are registered
-first; `register_custom_init` appends, so a user initializer for the same exact
-op name as a built-in doesn't run. List the registry with
-`EventReplayer.list_custom_inits()`.
+`replay()` applies the **first** matching initializer. `register_custom_init`
+prepends, so the last registered initializer for an event name wins — including
+over a built-in. List the registry with `EventReplayer.list_custom_inits()`.
 
 The built-in implementations are in `TraceLens/EventReplay/custom_inits.py`.
 

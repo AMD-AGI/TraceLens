@@ -211,8 +211,8 @@ class EventReplayer:
 
     @classmethod
     def register_custom_init(cls, init: CustomInit):
-        """Add a custom initializer to the registry."""
-        cls._custom_init_registry.append(init)
+        """Prepend a custom initializer. Last register wins for the same event name."""
+        cls._custom_init_registry.insert(0, init)
 
     @classmethod
     def register_namespace(cls, namespace: str, modules: List[str]):

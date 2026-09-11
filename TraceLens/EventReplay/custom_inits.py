@@ -19,7 +19,8 @@ To add a custom initializer for a new op family:
   3. Implement ``initialize()`` — mutate replayer.args / replayer.kwargs in-place
   4. Return a one-line summary string (printed by EventReplayer)
   5. Register with ``EventReplayer.register_custom_init(YourInit())``
-     or add it to the ``_custom_init_registry`` default list.
+     (prepends; last register wins for that event name) or add it to
+     the ``_custom_init_registry`` default list.
 """
 
 from __future__ import annotations

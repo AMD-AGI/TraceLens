@@ -176,6 +176,29 @@ class TestCustomInitAppliesTo:
         assert not init.applies_to(_FakeReplayer("aten::mm"))
 
 
+class TestCustomInitRegistry:
+    @pytest.fixture(autouse=True)
+    def _isolate_custom_init_registry(self):
+        saved = EventReplayer._custom_init_registry[:]
+        yield
+        EventReplayer._custom_init_registry = saved
+
+    def test_register_prepends_so_last_wins(self):
+        builtin = _NoOpInit()
+        builtin.op_patterns = ["_rocm_C::paged_attention"]
+        user = _NoOpInit()
+        user.op_patterns = ["_rocm_C::paged_attention"]
+        EventReplayer._custom_init_registry = [builtin]
+        EventReplayer.register_custom_init(user)
+        assert EventReplayer._custom_init_registry[0] is user
+        first = next(
+            i
+            for i in EventReplayer._custom_init_registry
+            if i.applies_to(_FakeReplayer("_rocm_C::paged_attention"))
+        )
+        assert first is user
+
+
 class _FakeAnalyzer:
     def __init__(self, events):
         self.tree = type("Tree", (), {"events": events})()
@@ -362,6 +385,26 @@ class TestEventReplayerCpu:
         EventReplayer._custom_init_registry = [InitA(), InitB()]
         EventReplayer(MM_EVENT, device="cpu", auto_init=True).replay()
         assert log == ["A"]
+
+    def test_register_custom_init_overrides_builtin(self):
+        log = []
+
+        class BuiltinInit(CustomInit):
+            op_patterns = ["aten::mm"]
+
+            def initialize(self, replayer, **kwargs):
+                log.append("builtin")
+
+        class UserInit(CustomInit):
+            op_patterns = ["aten::mm"]
+
+            def initialize(self, replayer, **kwargs):
+                log.append("user")
+
+        EventReplayer._custom_init_registry = [BuiltinInit()]
+        EventReplayer.register_custom_init(UserInit())
+        EventReplayer(MM_EVENT, device="cpu", auto_init=True).replay()
+        assert log == ["user"]
 
     def test_auto_init_false_skips_custom_inits(self):
         log = []
