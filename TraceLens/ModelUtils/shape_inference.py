@@ -18,7 +18,12 @@ from pathlib import Path
 from collections.abc import Sequence
 from typing import Any, TYPE_CHECKING
 
-from TraceLens.ModelUtils.extract import architecture_section_trees
+from TraceLens.ModelUtils.extract import (
+    architecture_section_trees,
+    find_vision_tower,
+    vision_scoped_classes,
+    vision_scoped_config,
+)
 from TraceLens.ModelUtils.ast_analyze import (
     analyze_source,
     is_forward_operation,
@@ -56,6 +61,10 @@ class Symbol(str, Enum):
     INTERMEDIATE = "I"
     EXPERTS = "E"
     EXPERTS_PER_TOK = "TopK"
+    # Vision-tower patch/sequence axis. Distinct from the text ``B*S`` so a VLM's
+    # image tokens (and the spatial-merge ``Pv/4`` reduction) are not conflated with
+    # the language sequence they are scattered into at ``masked_scatter``.
+    VISION_PATCH = "Pv"
 
 
 # Config attribute names modeling code reads for each symbolic dimension. Registered as
@@ -310,6 +319,19 @@ class ModuleDimRegistry:
     # across classes would be worse than having no shape at all.
     ambiguous_parameters: set[str] = field(default_factory=set)
 
+    def known_classes(self) -> set[str]:
+        """Class names that own at least one parsed module dim.
+
+        Used to tell a real owning module class (which should scope
+        ``(class, attr)`` lookups) from a primitive op label carried in node
+        metadata (``View``/``Conv2d``), which must not suppress the attr-only
+        fallback for an otherwise-unresolved node.
+        """
+        names: set[str] = set(self.scalar_by_class)
+        for table in (self.linear, self.embedding, self.parameter, self.conv):
+            names.update(class_name for class_name, _attr in table)
+        return names
+
     @classmethod
     def from_registry(
         cls,
@@ -317,6 +339,8 @@ class ModuleDimRegistry:
         *,
         config: dict[str, Any],
         context: ShapeContext,
+        vision_scoped: set[str] | None = None,
+        vision_config: dict[str, Any] | None = None,
     ) -> ModuleDimRegistry:
         registry = cls()
         for class_name, structure in class_registry.items():
@@ -324,10 +348,19 @@ class ModuleDimRegistry:
             if init_func is None:
                 continue
             local_vars: dict[str, DimExpr] = {}
+            # A vision-scoped class resolves ``config.<attr>`` against the vision
+            # sub-config so e.g. ``self.embed_dim = config.hidden_size`` lands on the
+            # vision hidden (1024), and ``nn.Conv3d(in_channels, embed_dim, ...)``
+            # gets the vision channel counts, not the text stack's.
+            class_config = (
+                vision_config
+                if vision_scoped and vision_config and class_name in vision_scoped
+                else config
+            )
             registry._walk_init_body(
                 init_func.body,
                 class_name=class_name,
-                config=config,
+                config=class_config,
                 local_vars=local_vars,
                 context=context,
             )
@@ -415,6 +448,14 @@ class ModuleDimRegistry:
             )
             if resolved is not None:
                 local_vars[target.id] = resolved
+            elif isinstance(value, (ast.List, ast.Tuple)):
+                # List locals feed conv geometry, e.g.
+                # ``kernel_size = [temporal_patch_size, patch_size, patch_size]``.
+                int_tuple = _resolve_int_tuple(
+                    value, config=config, local_vars=local_vars, context=context
+                )
+                if int_tuple is not None:
+                    local_vars[target.id] = int_tuple
             return
         if not (isinstance(target, ast.Attribute) and _is_self_attr(target)):
             return
@@ -687,11 +728,36 @@ class ShapeInferencer:
     ) -> None:
         self.spec = spec
         self.context = context or ShapeContext.from_spec(spec)
+        # Vision-tower disambiguation: every class instantiated under the tower is
+        # constructed with the nested ``vision_config`` (different ``hidden_size``,
+        # plus ``in_channels``/``patch_size`` that live only there). Resolve those
+        # classes' ``config.<attr>`` against the vision overlay; the text path is
+        # untouched (empty set for text-only models).
+        self._vision_scoped: set[str] = vision_scoped_classes(spec)
+        self._vision_config: dict[str, Any] = (
+            vision_scoped_config(spec) if self._vision_scoped else {}
+        )
+        found_tower = find_vision_tower(spec)
+        self._vision_tower_class: str | None = found_tower[1] if found_tower else None
+        self._vision_patch_flat: int | None = _vision_patch_flat_dim(
+            self._vision_config
+        )
         self.module_dims = module_dims or ModuleDimRegistry.from_registry(
             spec.class_registry,
             config=spec.raw_config or {},
             context=self.context,
+            vision_scoped=self._vision_scoped,
+            vision_config=self._vision_config,
         )
+        # The patch-embed class is the vision-scoped class that consumes the raw
+        # pixel patches: it owns a conv whose ``in_channels`` matches the config's
+        # image ``in_channels`` (3 for RGB). Seeding *its* forward input with the
+        # flat patch shape ``[Pv, C*T*P*P]`` lets the patch-embed views + Conv3d
+        # resolve concretely instead of collapsing to a language ``(B, S, H)``.
+        self._vision_patch_embed_class: str | None = self._detect_patch_embed_class()
+        # Per-graph @input overrides (port label -> spec), populated by callers that
+        # know a section's true upstream boundary shape. Empty for the default path.
+        self._entry_specs: dict[str, TensorSpec] = {}
         self._tensor_names: dict[str, str] = {}
         self._tensor_specs: dict[str, TensorSpec] = {}
         self._owner_classes: dict[int, dict[str, str]] = {}
@@ -711,6 +777,45 @@ class ShapeInferencer:
         # node.id -> occurrence index of this op on its source line within its
         # block instance (matches the FX-side occurrence counting).
         self._op_line_occ: dict[str, int] = {}
+
+    def _detect_patch_embed_class(self) -> str | None:
+        """Vision-scoped class whose conv consumes the raw image channels."""
+        if not self._vision_scoped:
+            return None
+        in_channels = _int_dim(self._vision_config.get("in_channels"))
+        if in_channels is None:
+            return None
+        for (class_name, _attr), conv in self.module_dims.conv.items():
+            if class_name not in self._vision_scoped:
+                continue
+            if _int_dim(conv.in_channels) == in_channels:
+                return class_name
+        return None
+
+    def _entry_spec_for(
+        self, node: ModelGraphNode, root: BlockNode | None
+    ) -> TensorSpec | None:
+        """Resolve a forward ``@input`` boundary to its true upstream shape.
+
+        Precedence: an explicit per-graph override (``self._entry_specs`` keyed by
+        the port label), then the vision patch-embed seed. Returns ``None`` so the
+        caller applies the default language ``(B, S, H)`` seed — the text path and
+        every non-vision model are therefore untouched.
+        """
+        override = self._entry_specs.get(node.label or "")
+        if override is not None:
+            return override
+        if (
+            self._vision_patch_flat is not None
+            and self._vision_patch_embed_class is not None
+            and root is not None
+            and root.class_name == self._vision_patch_embed_class
+        ):
+            return TensorSpec(
+                shape=(Symbol.VISION_PATCH.value, self._vision_patch_flat),
+                dtype=self.context.dtype,
+            )
+        return None
 
     def load_meta_shapes(
         self,
@@ -1025,6 +1130,9 @@ class ShapeInferencer:
                 return TensorSpec(
                     shape=(Symbol.BATCH.value, Symbol.SEQ.value), dtype="int64"
                 )
+            entry = self._entry_spec_for(node, root)
+            if entry is not None:
+                return entry
             hidden = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
             return TensorSpec(
                 shape=(Symbol.BATCH.value, Symbol.SEQ.value, hidden), dtype=dtype
@@ -2159,16 +2267,46 @@ class ShapeInferencer:
 
         return None
 
+    def _module_class_candidates(
+        self, node: ModelGraphNode, root: BlockNode | None
+    ) -> list[str]:
+        """Classes that could own ``node``'s module, most specific first.
+
+        Node metadata is authoritative when present; otherwise the owning
+        submodule class (read off the id path) then the block's own class.
+        Used to scope ``(class, attr)`` lookups so an attr name shared across
+        classes (e.g. ``proj`` = Conv in a patch embed, Linear in a merger) is
+        never resolved against the wrong class.
+        """
+        known = self.module_dims.known_classes()
+        candidates: list[str] = []
+        for name in (
+            node.metadata.get("class_name"),
+            self._owner_class_name(node, root),
+            root.class_name if root is not None else None,
+        ):
+            # Only real module-owning classes scope the lookup; a primitive op
+            # label (``Conv2d``/``View``) in node metadata is not an owner, so it
+            # must not block the attr-only fallback for an unscoped node.
+            if name and name in known and name not in candidates:
+                candidates.append(name)
+        return candidates
+
     def _lookup_linear_spec(
         self, node: ModelGraphNode, *, root: BlockNode | None
     ) -> ModuleLinearSpec | None:
         attr = _node_attr_name(node)
-        class_name = node.metadata.get("class_name")
-        if class_name and attr:
+        if not attr:
+            return None
+        candidates = self._module_class_candidates(node, root)
+        for class_name in candidates:
             spec = self.module_dims.linear.get((class_name, attr))
             if spec is not None:
                 return spec
-        if attr:
+        # Only fall back to the (cross-class) attr-only index when the owning
+        # class is genuinely unknown; a known class that lacks this attr means
+        # the node is not that module's linear.
+        if not candidates:
             return self.module_dims.linear_by_attr.get(attr)
         return None
 
@@ -2176,12 +2314,14 @@ class ShapeInferencer:
         self, node: ModelGraphNode, *, root: BlockNode | None
     ) -> ModuleConvSpec | None:
         attr = _node_attr_name(node)
-        class_name = node.metadata.get("class_name")
-        if class_name and attr:
+        if not attr:
+            return None
+        candidates = self._module_class_candidates(node, root)
+        for class_name in candidates:
             spec = self.module_dims.conv.get((class_name, attr))
             if spec is not None:
                 return spec
-        if attr:
+        if not candidates:
             return self.module_dims.conv_by_attr.get(attr)
         return None
 
@@ -3074,6 +3214,13 @@ def _resolve_int_tuple(
     """
     if node is None:
         return None
+    # A local bound to a list literal, e.g. ``kernel_size = [t, p, p]`` then
+    # ``nn.Conv3d(..., kernel_size=kernel_size)``. The init walker stores such
+    # resolved lists as tuples in ``local_vars``.
+    if isinstance(node, ast.Name):
+        bound = local_vars.get(node.id)
+        if isinstance(bound, tuple):
+            return bound
     if isinstance(node, (ast.Tuple, ast.List)):
         elems = node.elts
     else:
@@ -3224,6 +3371,23 @@ def _int_dim(value: Any) -> int | None:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return None
+
+
+def _vision_patch_flat_dim(vision_config: dict[str, Any]) -> int | None:
+    """Flattened per-patch feature length fed to a vision tower's patch embed.
+
+    A ``Glm5NextVisionPatchEmbed`` receives ``[num_patches, in_channels *
+    temporal_patch_size * patch_size**2]`` and immediately ``view``s it back to
+    ``[num_patches, in_channels, temporal_patch_size, patch_size, patch_size]``.
+    Returns ``None`` (caller falls back to the generic ``(B, S, H)`` input) when any
+    factor is missing, so non-GLM towers are never corrupted.
+    """
+    in_channels = _int_dim(vision_config.get("in_channels"))
+    temporal = _int_dim(vision_config.get("temporal_patch_size"))
+    patch = _int_dim(vision_config.get("patch_size"))
+    if in_channels is None or temporal is None or patch is None:
+        return None
+    return in_channels * temporal * patch * patch
 
 
 def _config_dim(name: str, *, config: dict[str, Any], context: ShapeContext) -> DimExpr:

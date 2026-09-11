@@ -1080,6 +1080,55 @@ def find_vision_tower(spec: ArchitectureSpec) -> tuple[str, str] | None:
     return (attr_name or "visual", tower_class)
 
 
+def vision_scoped_classes(spec: ArchitectureSpec) -> set[str]:
+    """Return every module class instantiated under the vision tower.
+
+    A VLM's vision encoder is constructed with the nested ``vision_config`` (where
+    ``hidden_size`` and friends differ from the text stack — e.g. GLM-5.3 vision
+    ``hidden_size=1024`` vs text ``4096``, and ``in_channels``/``patch_size`` exist
+    *only* there). Callers use this set to resolve ``config.<attr>`` against the
+    vision sub-config for exactly these classes, leaving the text path untouched.
+
+    Returns an empty set for text-only models (``find_vision_tower`` is ``None``),
+    so the text stack is provably unaffected. Scoping is by instantiation subtree,
+    not class name, so a norm class (``Glm5NextRMSNorm``) shared by both towers is
+    only scoped for its vision-instantiated occurrences.
+    """
+    found = find_vision_tower(spec)
+    if found is None:
+        return set()
+    _attr, tower_class = found
+    registry = spec.class_registry or {}
+    scoped: set[str] = set()
+    frontier = [tower_class]
+    while frontier:
+        class_name = frontier.pop()
+        if class_name in scoped or class_name not in registry:
+            continue
+        scoped.add(class_name)
+        structure = registry[class_name]
+        # ``init_assignments`` maps ``self.<attr> -> constructed class name`` for
+        # every recognised submodule (including ``nn.ModuleList`` element classes).
+        for child in (getattr(structure, "init_assignments", {}) or {}).values():
+            if child in registry and child not in scoped:
+                frontier.append(child)
+    return scoped
+
+
+def vision_scoped_config(spec: ArchitectureSpec) -> dict[str, Any]:
+    """Return ``{**top_level_config, **vision_config}`` (vision keys win).
+
+    Empty when the checkpoint has no ``vision_config``. The overlay lets a scoped
+    class resolve ``config.hidden_size`` to the vision value while every unscoped
+    class keeps the top-level config.
+    """
+    config = spec.raw_config or {}
+    vision_config = config.get("vision_config")
+    if not isinstance(vision_config, dict):
+        return dict(config)
+    return {**config, **vision_config}
+
+
 def vision_tower_component(spec: ArchitectureSpec) -> BlockComponent | None:
     """Return a synthetic ``BlockComponent`` for the vision tower, or ``None``."""
     found = find_vision_tower(spec)

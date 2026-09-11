@@ -775,6 +775,85 @@ def _call_class_name(node: ast.Call) -> str | None:
     return None
 
 
+def _constructed_class_name(func: ast.expr) -> str | None:
+    """The class a call constructs: ``X(...)`` and ``X._from_config(...)`` -> ``X``.
+
+    Direct instantiation names the class on ``func`` itself; HF classmethod
+    constructors (``X._from_config``/``X.from_config``) name it on the attribute
+    receiver. ``pkg.Thing(...)`` (e.g. ``nn.Conv3d``) resolves to the package name,
+    which is harmless here since callers filter against the local class registry.
+    """
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        return func.value.id
+    return None
+
+
+def _call_uses_vision_config(call: ast.Call) -> bool:
+    """True when any argument references ``…vision_config`` (the nested sub-config)."""
+    for arg in list(call.args) + [kw.value for kw in call.keywords]:
+        for sub in ast.walk(arg):
+            if isinstance(sub, ast.Attribute) and sub.attr == "vision_config":
+                return True
+    return False
+
+
+def _vision_scoped_class_names(tree: ast.AST, config: dict[str, Any] | None) -> set[str]:
+    """Local classes constructed under the vision tower (built with ``vision_config``).
+
+    A HF vision-language model instantiates its vision tower with the nested
+    ``vision_config`` (e.g. ``self.visual = XVisionModel._from_config(config.vision_config)``),
+    inside which ``hidden_size`` and the patch geometry differ from the text model.
+    Every module the tower builds inherits that sub-config, so its ``self.<attr> =
+    config.<attr>`` reads must resolve against ``vision_config``. Text-only repos
+    have no ``vision_config`` -> empty set -> the text path is provably untouched.
+
+    Scoping is by instantiation subtree, not class name: a shared class such as
+    ``RMSNorm`` used in both towers is included only through the vision subtree here,
+    and callers overlay the sub-config for those instances alone.
+    """
+    if not isinstance(config, dict) or not isinstance(config.get("vision_config"), dict):
+        return set()
+    class_defs: dict[str, ast.ClassDef] = {
+        node.name: node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+    }
+    if not class_defs:
+        return set()
+    # Roots: any local class whose (class)method is called with ``config.vision_config``.
+    roots: list[str] = []
+    for cls in class_defs.values():
+        for call in ast.walk(cls):
+            if isinstance(call, ast.Call) and _call_uses_vision_config(call):
+                root = _constructed_class_name(call.func)
+                if root in class_defs and root not in roots:
+                    roots.append(root)
+    # BFS through ``__init__`` constructor calls, restricted to local classes.
+    scoped: set[str] = set()
+    frontier = list(roots)
+    while frontier:
+        name = frontier.pop()
+        if name in scoped or name not in class_defs:
+            continue
+        scoped.add(name)
+        init = next(
+            (
+                item
+                for item in class_defs[name].body
+                if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+            ),
+            None,
+        )
+        if init is None:
+            continue
+        for call in ast.walk(init):
+            if isinstance(call, ast.Call):
+                child = _constructed_class_name(call.func)
+                if child in class_defs and child not in scoped:
+                    frontier.append(child)
+    return scoped
+
+
 def _is_self_attr(node: ast.AST, attr: str) -> bool:
     return (
         isinstance(node, ast.Attribute)
@@ -3146,11 +3225,26 @@ class _ModelAstVisitor(ast.NodeVisitor):
         config: dict[str, Any] | None = None,
         all_tensor_ops: bool = False,
         activation_param_bindings: dict[str, dict[str, str]] | None = None,
+        vision_scoped_classes: set[str] | None = None,
+        vision_config: dict[str, Any] | None = None,
     ) -> None:
         self.classes: dict[str, ClassStructure] = {}
         self.config = dict(config or {})
         self.all_tensor_ops = all_tensor_ops
         self.activation_param_bindings = activation_param_bindings or {}
+        self.vision_scoped_classes = set(vision_scoped_classes or ())
+        self.vision_config = dict(vision_config or {})
+
+    def _config_for_class(self, class_name: str) -> dict[str, Any]:
+        """Config a class resolves ``self.<attr> = config.<attr>`` against.
+
+        Vision-tower classes overlay ``vision_config`` (vision wins, because
+        ``hidden_size`` exists at both levels: 4096 text vs 1024 vision). Every
+        other class — the entire text path — keeps the top-level config unchanged.
+        """
+        if class_name in self.vision_scoped_classes and self.vision_config:
+            return {**self.config, **self.vision_config}
+        return self.config
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         init_assignments: dict[str, str] = {}
@@ -3226,7 +3320,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             )
             forward_step_details = dict(parsed_step_details)
             if _is_moe_gate_class(node.name, forward_calls):
-                values = _self_config_values(init_func, self.config)
+                values = _self_config_values(init_func, self._config_for_class(node.name))
                 analysis = _forward_operations_from_forward(
                     resolved_forward_func,
                     self_values=values,
@@ -3261,14 +3355,14 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 node,
                 forward_calls,
                 init_assignments,
-                self_values=_self_config_values(init_func, self.config),
+                self_values=_self_config_values(init_func, self._config_for_class(node.name)),
                 all_tensor_ops=self.all_tensor_ops,
             )
             multi_op_methods = _multi_op_forward_methods(
                 node,
                 forward_calls,
                 init_assignments,
-                self_values=_self_config_values(init_func, self.config),
+                self_values=_self_config_values(init_func, self._config_for_class(node.name)),
                 all_tensor_ops=self.all_tensor_ops,
             )
             delegates_inline = _forward_delegates_to_nothing(node.name, forward_calls)
@@ -3285,7 +3379,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 or delegates_inline
                 or delegates_to_siblings
             ):
-                values = _self_config_values(init_func, self.config)
+                values = _self_config_values(init_func, self._config_for_class(node.name))
                 analysis = _forward_operations_from_forward(
                     resolved_forward_func,
                     self_values=values,
@@ -3324,7 +3418,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         }
                     )
             elif forward_func is not None:
-                values = _self_config_values(init_func, self.config)
+                values = _self_config_values(init_func, self._config_for_class(node.name))
                 probed = _forward_operations_from_forward(
                     resolved_forward_func,
                     self_values=values,
@@ -5477,10 +5571,15 @@ def analyze_source(
     tree = parse_python_ast(source, filename=filename)
     external_imports = _collect_external_imports(tree)
     activation_param_bindings = _collect_activation_param_bindings(tree, config)
+    vision_scoped = _vision_scoped_class_names(tree, config)
     visitor = _ModelAstVisitor(
         config=config,
         all_tensor_ops=all_tensor_ops,
         activation_param_bindings=activation_param_bindings,
+        vision_scoped_classes=vision_scoped,
+        vision_config=(config or {}).get("vision_config")
+        if isinstance(config, dict)
+        else None,
     )
     visitor.visit(tree)
     finalize_class_registry(visitor.classes)
