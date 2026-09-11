@@ -1,0 +1,11 @@
+label,verdict,method,status,n_roots,coverage,kernel_count_mean,kernel_count_cv,duration_cv,shape_cosine_sim,n_gpu_in_trace,n_gpu_extracted,duplicated,n_overlapping_roots,phase_confidence,detect_secs,extract_secs,note,error
+sglang_deepseek_mi300/sglang_deepseek_mi300.trace.json.gz,PASS,annotation:tier,SPLITTABLE,6,100.0,72.3,1.8358,0.6872,0.3938,434,434,False,0,high,0.0,0.09,,
+vllm_gptoss_mi300/vllm_gptoss_mi300.trace.json.gz,PASS,annotation:tier,SPLITTABLE,7,100.0,569,0.0,0.0256,1.0,3983,3983,False,0,high,0.03,0.23,,
+flux-512x512-baseline/flux-512x512-baseline.json.gz,WARN,family:unknown_only,SPLITTABLE,20,94.11,977.6,0.0016,2.5809,0.9968,20776,19553,False,0,unknown,0.1,0.22,,
+dlrm-rank5/dlrm-rank5.json.gz,PASS,generic:branch_descent,SPLITTABLE,6,100.0,414,0.0,0.0106,1.0,2484,2484,False,0,unknown,0.52,0.52,,
+vllm_qwen2.5_mi300/vllm_qwen2.5_mi300.trace.json.gz,WARN,annotation:tier,DEGRADED,7,100.0,0.9,0.4082,1.9161,0.8571,6,6,False,0,high,0.74,0.86,,
+google_owlv2_h100/google_owlv2-large-patch14-ensemble__1016001.json.gz,PASS,generic:branch_descent,SPLITTABLE,5,100.0,1033,0.0,0.009,1.0,5165,5165,False,0,unknown,1.32,1.24,,
+owlv2-h100/owlv2-h100.json.gz,PASS,generic:branch_descent,SPLITTABLE,5,100.0,1033,0.0,0.009,1.0,5165,5165,False,0,unknown,1.35,1.24,,
+google_owlv2_mi300/google_owlv2-large-patch14-ensemble__1016001.json.gz,PASS,generic:branch_descent,SPLITTABLE,5,100.0,868,0.0,0.008,1.0,4340,4340,False,0,unknown,1.31,1.24,,
+owlv2-mi300/owlv2-mi300.json.gz,PASS,generic:branch_descent,SPLITTABLE,5,100.0,868,0.0,0.008,1.0,4340,4340,False,0,unknown,1.32,1.18,,
+owlv2-vision-mi300/owlv2-vision-mi300.json.gz,PASS,generic:branch_descent,SPLITTABLE,5,100.0,868,0.0,0.008,1.0,4340,4340,False,0,unknown,1.32,1.21,,
