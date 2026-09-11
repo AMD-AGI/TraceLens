@@ -195,8 +195,9 @@ def detect_from_branch_descent(
         if visited > BRANCH_MAX_NODES:
             break
         children = tree.get_children_events(node)
-        if len(children) >= MIN_LABEL_CHILDREN:
-            ordered = sorted(children, key=lambda e: e.get("ts", 0))
+        gpu_children = [c for c in children if _gpu_bearing(c)]
+        if len(gpu_children) >= MIN_LABEL_CHILDREN:
+            ordered = sorted(gpu_children, key=lambda e: e.get("ts", 0))
             period, pattern, start = _find_repeating_period(
                 [normalize_name_for_comparison(e.get("name", "")) for e in ordered]
             )
@@ -212,7 +213,19 @@ def detect_from_branch_descent(
                         event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
                         iteration_roots.append(event)
                         blocked.extend(block)
-                    cov = _descendant_gpu_time(tree, blocked) / total_gpu
+                    iter_gpu_time = _descendant_gpu_time(tree, blocked)
+                    cov = iter_gpu_time / total_gpu
+                    blocked_uids = {e.get("UID") for e in blocked}
+                    before_uids = [
+                        e.get("UID") for e in ordered[:start]
+                        if e.get("UID") not in blocked_uids
+                    ]
+                    last_blocked_ts = blocked[-1]["ts"] + blocked[-1].get("dur", 0)
+                    after_uids = [
+                        e.get("UID") for e in ordered
+                        if e["ts"] >= last_blocked_ts
+                        and e.get("UID") not in blocked_uids
+                    ]
                     candidate = RootSet(
                         roots=iteration_roots,
                         method=f"generic:{BRANCH_DESCENT_TIER}",
@@ -223,6 +236,9 @@ def detect_from_branch_descent(
                             "period": period,
                             "period_depth": depth,
                             "branch_coverage": round(cov, 4),
+                            "iter_gpu_time": iter_gpu_time,
+                            "before_uids": before_uids,
+                            "after_uids": after_uids,
                         },
                     )
                     if cov >= BRANCH_COVERAGE_GATE:
@@ -269,7 +285,19 @@ def detect_from_sibling_roots(
     if not sibling_roots:
         return None
 
-    cov = _descendant_gpu_time(tree, blocked) / total_gpu if total_gpu else 0.0
+    iter_gpu_time = _descendant_gpu_time(tree, blocked) if total_gpu else 0.0
+    cov = iter_gpu_time / total_gpu if total_gpu else 0.0
+    blocked_uids = {e.get("UID") for e in blocked}
+    before_uids = [
+        e.get("UID") for e in ordered[:start]
+        if e.get("UID") not in blocked_uids
+    ]
+    last_blocked_ts = blocked[-1]["ts"] + blocked[-1].get("dur", 0)
+    after_uids = [
+        e.get("UID") for e in ordered
+        if e["ts"] >= last_blocked_ts
+        and e.get("UID") not in blocked_uids
+    ]
     return RootSet(
         roots=sibling_roots,
         method="generic:sibling_roots",
@@ -279,6 +307,9 @@ def detect_from_sibling_roots(
             "period_label_tier": "sibling_roots",
             "period": period,
             "branch_coverage": round(cov, 4),
+            "iter_gpu_time": iter_gpu_time,
+            "before_uids": before_uids,
+            "after_uids": after_uids,
         },
     )
 

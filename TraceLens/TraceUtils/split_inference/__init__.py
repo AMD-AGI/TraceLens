@@ -21,6 +21,7 @@ from .steady_state_window import (
 from .trace_extraction import (
     build_cpu_event_index,
     build_root_tiles,
+    collect_ancestor_events,
     divide_phases_and_save,
     extract_and_save,
     extract_iteration,

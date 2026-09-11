@@ -263,6 +263,36 @@ def extract_iteration(
     return output, list(set(batch_list)), num_gpu_events, gpu_dur, gpu_busy
 
 
+def collect_ancestor_events(
+    iteration_roots: list[dict],
+    events_by_uid: dict,
+) -> list[dict]:
+    """Collect ancestor events from iteration roots up to the process entry.
+
+    Walks up the ``parent`` chain from each root, collecting the enclosing
+    frames (thread root, outer python frames) that ``extract_iteration``
+    normally excludes because their duration exceeds the iteration window.
+    Only the ancestor events themselves are included, not their other children.
+
+    ``events_by_uid`` should be a UID→event mapping from the tree
+    (e.g. ``tree.events_by_uid``).
+    """
+    ancestor_uids: set = set()
+
+    for root in iteration_roots:
+        parent_uid = root.get("parent")
+        while parent_uid is not None:
+            if parent_uid in ancestor_uids:
+                break
+            ancestor_uids.add(parent_uid)
+            parent = events_by_uid.get(parent_uid)
+            if parent is None:
+                break
+            parent_uid = parent.get("parent")
+
+    return [events_by_uid[uid] for uid in ancestor_uids if uid in events_by_uid]
+
+
 def parse_range(range_str: str, max_len: int) -> tuple[int, int]:
     """Parse a range string like '10:20' or 'all'."""
     if range_str == "all":
@@ -320,7 +350,7 @@ def extract_and_save(
             root_tiles=root_tiles,
             cpu_event_index=cpu_idx,
         )
-        is_annotation = "annotation_iteration" in prefix
+        is_annotation = "iteration" in prefix
         # Use the structured phase-aware name for any annotation extraction
         # produced by the steady-state code paths (output_label is set), and
         # for any multi-step annotation window. Single-step annotations from
@@ -373,6 +403,10 @@ def extract_and_save(
                 out_path = os.path.join(
                     output_dir, f"{output_label}_{base_name}.json.gz"
                 )
+        elif is_annotation and len(root) == 1 and root[0].get("name") in ("warmup", "wrapup"):
+            out_path = os.path.join(
+                output_dir, f"{base_name}_{root[0]['name']}.json.gz"
+            )
         else:
             suffix = f"_{name_append}" if name_append else ""
             out_path = os.path.join(
@@ -416,7 +450,7 @@ def extract_phases_and_save(
     """Extract and save a range of iterations."""
     extraction_summary = []
 
-    if "annotation_iteration" not in prefix:
+    if "iteration" not in prefix:
         print("phase extraction only supported for annotation iterations, skipping")
         return extraction_summary
     for root in roots:
@@ -606,7 +640,7 @@ def divide_phases_and_save(
                 trace_json,
                 out_dir,
                 base_name,
-                "annotation_iteration",
+                "iteration",
                 0,
                 1,
                 gpu_corr_map,
