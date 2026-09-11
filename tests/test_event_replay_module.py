@@ -309,6 +309,41 @@ class TestEventReplayerCpu:
         assert "args" in accessed
         assert len(accessed["args"]) == 2
 
+    def test_lazy_custom_init_reruns_after_rebuild(self):
+        seen_ids = []
+
+        class ProbeInit(CustomInit):
+            op_patterns = ["aten::mm"]
+
+            def initialize(self, replayer, **kwargs):
+                seen_ids.append(id(replayer.args[0]))
+
+        EventReplayer.register_custom_init(ProbeInit())
+        replayer = EventReplayer(
+            MM_EVENT, device="cpu", lazy=True, auto_init=True
+        )
+        replayer.replay()
+        replayer.replay()
+        assert len(seen_ids) == 2
+        assert seen_ids[0] != seen_ids[1]
+
+    def test_eager_custom_init_runs_once(self):
+        log = []
+
+        class ProbeInit(CustomInit):
+            op_patterns = ["aten::mm"]
+
+            def initialize(self, replayer, **kwargs):
+                log.append("init")
+
+        EventReplayer.register_custom_init(ProbeInit())
+        replayer = EventReplayer(
+            MM_EVENT, device="cpu", lazy=False, auto_init=True
+        )
+        replayer.replay()
+        replayer.replay()
+        assert log == ["init"]
+
     def test_first_matching_custom_init_wins(self):
         log = []
 

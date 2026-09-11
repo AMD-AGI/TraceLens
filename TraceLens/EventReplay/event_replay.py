@@ -312,6 +312,8 @@ class EventReplayer:
             self.args, self.kwargs = EventReplayer._get_args_kwargs(
                 self.event_replay_IR, device=self.device
             )
+            # Rebuilt tensors are not the ones previously inited.
+            self._inits_applied = False
 
         if not self._inits_applied and self._auto_init:
             self._apply_custom_inits()
