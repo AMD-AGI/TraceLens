@@ -317,11 +317,13 @@ replayer = EventReplayer(event, device="cuda")
 replayer.replay()
 ```
 
-`extract_batch_context` attaches `event["batch_context"]` with `n_prefill`,
-`prefill_tokens`, `n_decode`, and `decode_tokens`. `PagedAttentionInit` uses
-that dict for `query_start_loc`. Without annotations it assumes pure decode
-when `query_tokens == num_seqs`, and pure prefill otherwise. That approximation
-is weak for mixed batches.
+`extract_batch_context` only annotates events whose name is in
+`PagedAttentionInit.op_patterns` (exact match, currently
+`_rocm_C::paged_attention`). It attaches `event["batch_context"]` with
+`n_prefill`, `prefill_tokens`, `n_decode`, and `decode_tokens`.
+`PagedAttentionInit` uses that dict for `query_start_loc`. Without annotations
+it assumes pure decode when `query_tokens == num_seqs`, and pure prefill
+otherwise. That approximation is weak for mixed batches.
 
 ## Known limitations
 

@@ -20,7 +20,11 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from TraceLens.EventReplay.event_replay import EventReplayer  # noqa: E402
-from TraceLens.EventReplay.custom_inits import CustomInit  # noqa: E402
+from TraceLens.EventReplay.custom_inits import (  # noqa: E402
+    CustomInit,
+    PagedAttentionInit,
+    extract_batch_context,
+)
 from TraceLens.EventReplay.utils import TensorCfg  # noqa: E402
 
 
@@ -198,6 +202,47 @@ class TestAutoInitDisabled:
         EventReplayer._custom_init_registry = [AlwaysInit()]
         EventReplayer(_make_mm_event(), device="cpu", auto_init=False).replay()
         assert log == []
+
+
+# ---------------------------------------------------------------------------
+# extract_batch_context uses the same exact names as PagedAttentionInit
+# ---------------------------------------------------------------------------
+
+class _FakeAnalyzer:
+    def __init__(self, events):
+        self.tree = type("Tree", (), {"events": events})()
+
+
+def _annotation(ts=0, dur=100):
+    return {
+        "cat": "user_annotation",
+        "name": "execute_context_2(18)_generation_5(5)",
+        "ts": ts,
+        "dur": dur,
+    }
+
+
+def _cpu_op(name, ts=10):
+    return {
+        "name": name,
+        "ts": ts,
+        "args": {"Input Dims": [[1, 1]]},
+    }
+
+
+class TestExtractBatchContextExactName:
+    def test_exact_paged_attention_is_annotated(self):
+        op = _cpu_op("_rocm_C::paged_attention")
+        n = extract_batch_context(_FakeAnalyzer([_annotation(), op]))
+        assert n == 1
+        assert op["batch_context"]["n_prefill"] == 2
+        assert "_rocm_C::paged_attention" in PagedAttentionInit.op_patterns
+
+    def test_substring_name_is_not_annotated(self):
+        op = _cpu_op("aiter::paged_attention_v1")
+        n = extract_batch_context(_FakeAnalyzer([_annotation(), op]))
+        assert n == 0
+        assert "batch_context" not in op
 
 
 if __name__ == "__main__":

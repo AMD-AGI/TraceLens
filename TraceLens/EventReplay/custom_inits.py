@@ -14,7 +14,8 @@ patterns during replay benchmarking.
 
 To add a custom initializer for a new op family:
   1. Subclass ``CustomInit``
-  2. Set ``op_patterns`` to one or more substrings that match the op name
+  2. Set ``op_patterns`` to one or more exact profiler event names
+     (for example ``"aten::index_add_"``, not ``"index_add"``)
   3. Implement ``initialize()`` — mutate replayer.args / replayer.kwargs in-place
   4. Return a one-line summary string (printed by EventReplayer)
   5. Register with ``EventReplayer.register_custom_init(YourInit())``
@@ -24,7 +25,6 @@ To add a custom initializer for a new op family:
 from __future__ import annotations
 
 import re
-import warnings
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -47,8 +47,9 @@ def extract_batch_context(analyzer: Any) -> int:
 
     This function:
       1. Collects all such annotations with their ``[ts, ts+dur]`` ranges.
-      2. For every ``paged_attention`` cpu_op event, finds the enclosing
-         annotation by timestamp and attaches a ``batch_context`` dict::
+      2. For every event whose name is in ``PagedAttentionInit.op_patterns``,
+         finds the enclosing annotation by timestamp and attaches a
+         ``batch_context`` dict::
 
              event["batch_context"] = {
                  "n_prefill": 2,
@@ -62,7 +63,7 @@ def extract_batch_context(analyzer: Any) -> int:
             yields the trace event list).
 
     Returns:
-        Number of paged_attention events that were annotated.
+        Number of ``PagedAttentionInit`` ops that were annotated.
     """
     annotations = []
     for e in analyzer.tree.events:
@@ -91,7 +92,7 @@ def extract_batch_context(analyzer: Any) -> int:
     annotated = 0
     for e in analyzer.tree.events:
         name = e.get("name", "")
-        if "paged_attention" not in name:
+        if name not in PagedAttentionInit.op_patterns:
             continue
         if not e.get("args", {}).get("Input Dims"):
             continue
