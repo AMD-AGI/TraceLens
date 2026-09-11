@@ -1263,6 +1263,24 @@ class ShapeInferencer:
                 return self._elementwise_operand(inputs)
             return self._activation_spec(dtype)
 
+        # A split output-port node carries one named slice of its parent split.
+        # Its input is the whole (pre-split) tensor; size it down to this port's
+        # ordinal (``[.., 16]`` for ``comb_w`` = ordinal 2 of ``split([4,4,16])``).
+        if synthetic == "@split_port_out" and inputs:
+            source = inputs[0]
+            port_label = (
+                node.metadata.get("class_name") or node.label or ""
+            ).strip().lower()
+            ordinal = int(node.metadata.get("output_ordinal", 0))
+            sliced = _multi_output_slice_shape(
+                source,
+                [str(item) for item in node.metadata.get("details", [])],
+                port_label,
+                ordinal,
+                self.context.dims,
+            )
+            return sliced if sliced is not None else source
+
         # Catch-all for any remaining synthetic wiring nodes (kernel ports,
         # hidden_states, etc.) — silent passthrough, no warning.
         if synthetic is not None and synthetic.startswith("@"):
@@ -1349,8 +1367,13 @@ class ShapeInferencer:
             source = (
                 inputs[0]
                 if inputs
-                else TensorSpec(self._active_hidden_shape(), dtype)
+                else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
             )
+            # A tuple-unpacked split fans out into per-slice output-port nodes
+            # (each sized by ``@split_port_out`` above); the split node itself then
+            # represents the whole tensor being divided, so pass the source through.
+            if node.metadata.get("output_names"):
+                return source
             dim_str = _detail_value(details, "dim")
             dim = _int_dim(dim_str) if dim_str is not None else -1
             if dim is None:
@@ -2868,6 +2891,58 @@ def _parse_split_sizes(
         if all(isinstance(s, int) for s in sizes):
             return sizes
     return None
+
+
+def _multi_output_slice_shape(
+    source: TensorSpec,
+    details: list[str],
+    operation_label: str,
+    ordinal: int,
+    dims: dict[str, DimExpr],
+) -> TensorSpec | None:
+    """Shape of one output slice of a split/chunk/unbind.
+
+    ``split([4, 4, 16], dim=-1)`` gives ordinal 2 a ``[..., 16]`` slice; ``chunk``
+    divides the dim evenly for every ordinal; ``unbind`` removes the split axis
+    entirely (each output drops that dimension). Returns ``None`` when the source
+    dim is symbolic/unknown so the caller can fall back.
+    """
+    if not source.shape:
+        return source
+    dim_str = _detail_value(details, "dim")
+    default_dim = 0 if operation_label == "unbind" else -1
+    dim = _int_dim(dim_str) if dim_str is not None else default_dim
+    if dim is None:
+        dim = default_dim
+    resolved_dim = dim % len(source.shape)
+    if operation_label == "unbind":
+        new_shape = tuple(
+            value for index, value in enumerate(source.shape) if index != resolved_dim
+        )
+        return TensorSpec(shape=new_shape, dtype=source.dtype)
+    dim_val = source.shape[resolved_dim]
+    split_size = _detail_value(details, "split_size")
+    if not isinstance(dim_val, int) or split_size is None:
+        return None
+    if operation_label == "chunk":
+        try:
+            count = int(split_size)
+        except (ValueError, TypeError):
+            return None
+        if count <= 0:
+            return None
+        return TensorSpec(
+            shape=_replace_dim(source.shape, resolved_dim, dim_val // count),
+            dtype=source.dtype,
+        )
+    sizes = _parse_split_sizes(split_size, dims)
+    if not sizes:
+        return None
+    out_size = sizes[ordinal] if ordinal < len(sizes) else sizes[-1]
+    return TensorSpec(
+        shape=_replace_dim(source.shape, resolved_dim, out_size),
+        dtype=source.dtype,
+    )
 
 
 def _collect_init_scalar_attrs(

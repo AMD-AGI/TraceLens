@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from TraceLens.ModelUtils.block_tree import (
     BlockNode,
@@ -31,6 +32,7 @@ from TraceLens.ModelUtils.block_tree import (
     is_situ_gated_mlp,
     is_straight_line_module,
     is_transparent_inline_expansion,
+    is_transparent_loop_wrapper,
     is_method_wrapper,
     wrapper_bullet_lines,
 )
@@ -73,6 +75,10 @@ class GraphNodeSpec:
     port_label: str | None = None
     port_style: PortStyle | None = None
     synthetic: str | None = None
+    # Extra key/values merged verbatim into the node's exported metadata. Used by
+    # synthetic split output-port nodes to carry their output ordinal and the
+    # parent split's ``details`` so shape inference can size each slice.
+    extra_metadata: dict[str, Any] | None = None
 
 
 @dataclass
@@ -126,6 +132,7 @@ def _add_node(
     port_label: str | None = None,
     port_style: PortStyle | None = None,
     synthetic: str | None = None,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> int:
     display = label if label is not None else (block.label if block else key)
     spec = GraphNodeSpec(
@@ -136,6 +143,7 @@ def _add_node(
         port_label=port_label,
         port_style=port_style,
         synthetic=synthetic,
+        extra_metadata=extra_metadata,
     )
     graph.nodes.append(spec)
     return len(graph.nodes) - 1
@@ -475,6 +483,78 @@ def _add_kernel_output_port_nodes(graph: ComputationGraph) -> None:
                         graph.output_ports[port_name] = port_index
 
 
+SYNTHETIC_SPLIT_PORT_OUT = "@split_port_out"
+
+
+def _add_split_output_port_nodes(graph: ComputationGraph) -> None:
+    """Fan a tuple-unpacked split/chunk/unbind out into one node per named output.
+
+    A multi-output op produces several tensors of possibly different shapes; each
+    unpacked name (``pre_w``/``post_w``/``comb_w``) becomes its own output-port
+    node carrying that slice's shape, so a ``.split([4, 4, 16])`` no longer renders
+    every consumer reading a single ``[..., 4]`` tensor. Consumers were already
+    wired to the correct ordinal via ``link_output_ports`` (from the AST unpack);
+    here we interpose one port node per distinct consumed ordinal on those edges.
+
+    Only fires when at least two distinct outputs are actually consumed — a split
+    whose ordinals were never captured collapses to one group and is left as-is,
+    so this never perturbs single-output slicing. General: keys off
+    ``block.output_names``, no class-name checks.
+    """
+    split_indices = [
+        index
+        for index, spec in enumerate(graph.nodes)
+        if spec.block is not None and spec.block.output_names
+    ]
+    for split_index in split_indices:
+        block = graph.nodes[split_index].block
+        output_names = block.output_names
+        details = list(block.details)
+        targets_by_ordinal: dict[int, list[int]] = {}
+        for source, target in graph.links:
+            if source != split_index:
+                continue
+            ordinal_str = graph.link_output_ports.get((source, target))
+            try:
+                ordinal = int(ordinal_str) if ordinal_str is not None else 0
+            except (TypeError, ValueError):
+                ordinal = 0
+            targets_by_ordinal.setdefault(ordinal, []).append(target)
+        if len(targets_by_ordinal) < 2:
+            continue
+        for ordinal in sorted(targets_by_ordinal):
+            targets = targets_by_ordinal[ordinal]
+            label = (
+                output_names[ordinal]
+                if ordinal < len(output_names)
+                else f"output_{ordinal}"
+            )
+            safe_label = label.replace("/", "_")
+            port_index = _add_node(
+                graph,
+                key=f"@split_out:{split_index}:{safe_label}",
+                label=label,
+                synthetic=SYNTHETIC_SPLIT_PORT_OUT,
+                extra_metadata={
+                    "output_ordinal": ordinal,
+                    "details": details,
+                    "class_name": block.class_name,
+                },
+            )
+            _inherit_kernel_frames(graph, split_index, port_index)
+            for target in targets:
+                graph.links = [
+                    link for link in graph.links if link != (split_index, target)
+                ]
+                graph.link_output_ports.pop((split_index, target), None)
+                graph.link_port_labels.pop((split_index, target), None)
+                graph.links.append((port_index, target))
+            graph.links.append((split_index, port_index))
+            for port_name, src in list(graph.output_ports.items()):
+                if src == split_index and port_name == label:
+                    graph.output_ports[port_name] = port_index
+
+
 def _has_inline_attention_child(block: BlockNode) -> bool:
     """True when *block* directly owns an inline-expanded attention kernel.
 
@@ -521,6 +601,7 @@ def _wire_all_predecessor_edges(
     *,
     input_index: int | None = None,
     skip_forward_links: bool = False,
+    exclude_carried_from: frozenset[int] | None = None,
 ) -> None:
     """Uniform predecessor-based edge wiring for all node types.
 
@@ -576,6 +657,13 @@ def _wire_all_predecessor_edges(
                 link = (source_index, target_index)
                 if link not in graph.links:
                     graph.links.append(link)
+                # A consumer that reads a specific slice of a multi-output op
+                # (``comb_w`` = ordinal 2 of a split) tags its edge with that
+                # ordinal, so the split can later fan out into one named output
+                # port per slice with its own shape.
+                ordinal = child.operation_predecessor_ports.get(pred)
+                if ordinal is not None:
+                    graph.link_output_ports[link] = str(ordinal)
                 if multi_input and link not in graph.link_port_labels:
                     source_label = (
                         graph.nodes[source_index].label
@@ -723,7 +811,7 @@ def _wire_all_predecessor_edges(
         )
 
     # --- 5. Loop-carried nodes (must precede inline-frame pass) ---
-    _add_loop_carried_nodes(graph, root)
+    _add_loop_carried_nodes(graph, root, exclude_carried_from)
 
     # --- 6. Inline-frame dangling outputs ---
     if not skip_forward_links:
@@ -839,15 +927,30 @@ def _operation_source_indices(
 
 
 def _reads_only_a_side_parameter(step: BlockNode) -> bool:
-    """True when an operation's operands are a forward parameter rather than the chain.
+    """True when an operation's operands are a side input rather than the chain.
 
-    Such an operation has no source among the steps it sits between, so falling back to
-    the previous step would draw a dataflow edge the forward never performs.
+    Two cases have no source among the steps they sit between, so falling back to
+    the previous step would draw a dataflow edge the forward never performs:
+
+    * a forward parameter read (``param_inputs``); or
+    * a *multi-output* op (``output_names``) whose sole operand is a module
+      parameter/buffer the AST surfaced as an external read — e.g.
+      ``pre_b, post_b, comb_b = self.base.split(...)`` or
+      ``pre_scale, post_scale, comb_scale = self.scale.unbind(0)``. The parameter
+      is the receiver being fanned out; there is no chain predecessor.
+
+    The multi-output guard is deliberate: a *single*-output op that reads a
+    ``self.param`` (``x = x * self.weight``) commonly also continues the chain
+    implicitly, and the AST does not always record that predecessor, so treating
+    every external read as a side input would delete real edges.
     """
     return (
         is_forward_operation(step.attr_name)
-        and bool(step.param_inputs)
         and not step.operation_predecessors
+        and (
+            bool(step.param_inputs)
+            or (bool(step.external_inputs) and bool(step.output_names))
+        )
     )
 
 
@@ -1145,7 +1248,10 @@ def _start_inline_frame(graph: ComputationGraph, wrapper: BlockNode) -> InlineFr
         frame_id=wrapper.attr_name,
         label=inline_block_frame_label(wrapper),
         sublabel=inline_block_frame_sublabel(wrapper),
-        transparent=is_transparent_inline_expansion(wrapper),
+        transparent=(
+            is_transparent_inline_expansion(wrapper)
+            or is_transparent_loop_wrapper(wrapper)
+        ),
     )
     graph.inline_frames.append(frame)
     return frame
@@ -1783,19 +1889,37 @@ def _add_loop_frames(graph: ComputationGraph) -> None:
     flush()
 
 
-def _collect_loop_carried(root: BlockNode) -> list:
-    """Gather loop_carried specs from root and all inlined children."""
+def _collect_loop_carried(
+    root: BlockNode, exclude_carried_from: frozenset[int] | None = None
+) -> list:
+    """Gather loop_carried specs from root and all inlined children.
+
+    ``exclude_carried_from`` holds ``id()`` values of child blocks that are
+    independently re-exported as their own nested diagram. Such a child
+    materializes its own loop-carried boundary in that diagram, so pulling its
+    spec into this (ancestor) scope too would duplicate the loop with a boundary
+    that is only correct in the child's scope. Children whose loop is *only*
+    visible here — e.g. an inlined ``for blk in self.blocks`` ModuleList — are
+    still collected.
+    """
     from TraceLens.ModelUtils.ast_analyze import LoopCarriedSpec
 
+    exclude = exclude_carried_from or frozenset()
     specs: list[LoopCarriedSpec] = list(root.loop_carried)
     for child in root.children:
+        if id(child) in exclude:
+            continue
         specs.extend(child.loop_carried)
     return specs
 
 
-def _add_loop_carried_nodes(graph: ComputationGraph, root: BlockNode) -> None:
+def _add_loop_carried_nodes(
+    graph: ComputationGraph,
+    root: BlockNode,
+    exclude_carried_from: frozenset[int] | None = None,
+) -> None:
     """Materialize acyclic loop-result boundaries for values updated by a loop."""
-    all_carried = _collect_loop_carried(root)
+    all_carried = _collect_loop_carried(root, exclude_carried_from)
     if not all_carried:
         return
     attr_last_index = _rebuild_attr_last_index(graph)
@@ -1891,7 +2015,17 @@ def _add_loop_carried_nodes(graph: ComputationGraph, root: BlockNode) -> None:
         graph.link_port_labels[(out_node_index, in_node_index)] = "next iteration"
         graph.loop_carried_nodes[carried.updated_producer] = out_node_index
         if loop_frame is not None:
-            loop_frame.node_indices.extend([in_node_index, out_node_index])
+            # Place the carried-boundary nodes in the same frame *stack* as the
+            # loop body's producer. The innermost loop frame is nested inside any
+            # enclosing composite frame (e.g. an inlined submodule); if the
+            # boundary nodes were added only to the innermost frame they would
+            # inherit a shallower namespace than the body and render as a
+            # separate sibling loop group one level too high. Adding them to
+            # every frame that already contains ``updated_index`` keeps the
+            # boundary and the body in one loop group.
+            for frame in graph.inline_frames:
+                if updated_index in frame.node_indices:
+                    frame.node_indices.extend([in_node_index, out_node_index])
 
 
 def _predecessor_map(graph: ComputationGraph) -> dict[int, list[int]]:
@@ -2375,8 +2509,14 @@ def build_computation_graph(
     basic_ops: BasicOpFilter | None = None,
     strip_unused_return_branches: bool = False,
     inline_expansion: bool = True,
+    exclude_carried_from: frozenset[int] | None = None,
 ) -> ComputationGraph:
-    """Convert a block tree into a directed acyclic computation graph."""
+    """Convert a block tree into a directed acyclic computation graph.
+
+    ``exclude_carried_from`` lists ``id()`` values of direct-child blocks that
+    the caller renders as their own nested diagram; their loop-carried specs are
+    materialized there and are skipped in this scope to avoid a duplicate loop.
+    """
     graph = ComputationGraph()
 
     if root.is_basic or not root.children:
@@ -2924,7 +3064,11 @@ def build_computation_graph(
     graph.attr_output_indices.update(attr_last_index)
     skip_fwd = strip_unused_return_branches and root.multi_return_module
     _wire_all_predecessor_edges(
-        graph, root, input_index=input_index, skip_forward_links=skip_fwd,
+        graph,
+        root,
+        input_index=input_index,
+        skip_forward_links=skip_fwd,
+        exclude_carried_from=exclude_carried_from,
     )
     if root.primary_output_step:
         for index, spec in enumerate(graph.nodes):
@@ -2950,6 +3094,7 @@ def build_computation_graph(
     graph = _strip_dangling_leaves(graph, root=root)
     add_forward_output(graph, root=root)
     _add_kernel_output_port_nodes(graph)
+    _add_split_output_port_nodes(graph)
     if basic_ops is not None and basic_ops.basic_only:
         return _filter_graph_basic_only(graph)
     return graph

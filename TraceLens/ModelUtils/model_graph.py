@@ -299,12 +299,19 @@ def _minimal_metadata(spec: GraphNodeSpec) -> dict[str, Any]:
             metadata["details"] = list(block.details)
         if block.external_inputs:
             metadata["external_inputs"] = list(block.external_inputs)
+        # A multi-output split renders each slice as its own output-port node, so
+        # the split node itself carries the whole (pre-split) tensor shape; the
+        # marker tells shape inference to pass its input through unchanged.
+        if block.output_names:
+            metadata["output_names"] = list(block.output_names)
     if spec.port_label:
         metadata["port_label"] = spec.port_label
     if spec.port_style:
         metadata["port_style"] = spec.port_style
     if spec.synthetic:
         metadata["synthetic"] = spec.synthetic
+    if spec.extra_metadata:
+        metadata.update(spec.extra_metadata)
     return metadata
 
 

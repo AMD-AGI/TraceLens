@@ -11,7 +11,7 @@ from __future__ import annotations
 import ast
 import copy
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1089,6 +1089,15 @@ class ForwardOperation:
     external_inputs: tuple[str, ...] = ()
     details: tuple[str, ...] = ()
     param_inputs: tuple[str, ...] = ()
+    # Ordered names a multi-output op was tuple-unpacked into
+    # (``pre_w, post_w, comb_w = ...split([hc, hc, hc * hc])`` -> these three).
+    # Non-empty only for split/chunk/unbind that feed distinct downstream reads;
+    # each name becomes one named output port with its own slice shape.
+    output_names: tuple[str, ...] = ()
+    # For a consumer of a multi-output op: which output ordinal of each producer
+    # this operation reads (``producer_attr -> ordinal``), so its edge can attach
+    # to the matching output port rather than the whole split.
+    predecessor_ports: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1459,6 +1468,31 @@ def _inline_forward_step(attr_name: str) -> bool:
     return is_forward_operation(attr_name) or is_functional_synthetic(attr_name)
 
 
+# Upper bound on a loop's resolved static trip count. Keeps generated graphs
+# bounded for malformed or unexpectedly large configs while still admitting
+# realistic expert counts (e.g. ``num_experts=288``).
+_LOOP_COUNT_MAX = 100_000
+
+# A config *object* attribute name (what modeling code reads) mapped to the
+# serialized config-dict keys it may be aliased to. Mirrors the synonym lists in
+# ``extract._infer_ffn_and_moe`` so ``config.<attr>`` resolves against the raw
+# config dict for any model using these conventional names.
+_CONFIG_ATTR_ALIASES: dict[str, tuple[str, ...]] = {
+    "num_experts": ("n_routed_experts", "moe_num_experts", "num_local_experts"),
+    "num_experts_per_tok": (
+        "num_experts_per_token",
+        "moe_top_k",
+        "num_selected_experts",
+    ),
+    "num_local_experts": ("num_experts", "n_routed_experts", "moe_num_experts"),
+}
+
+# A config attribute mapped to a (nested-dict-key, inner-key) pair.
+_CONFIG_NESTED_ALIASES: dict[str, tuple[str, str]] = {
+    "linear_lower_bound": ("linear_attn_config", "gate_lower_bound"),
+}
+
+
 def _config_value(
     node: ast.AST, config: dict[str, Any], self_values: dict[str, Any]
 ) -> Any:
@@ -1474,10 +1508,16 @@ def _config_value(
             direct = config.get(node.attr, _UNKNOWN)
             if direct is not _UNKNOWN:
                 return direct
-            aliases = {
-                "linear_lower_bound": ("linear_attn_config", "gate_lower_bound"),
-            }
-            nested_key = aliases.get(node.attr)
+            # Modeling code reads the transformers config *object* attribute
+            # (e.g. ``config.num_experts``), whose name a config class often
+            # aliases to a different serialized key (``n_routed_experts``). The
+            # raw config dict only has the serialized key, so consult the same
+            # well-known synonym lists ``extract._infer_*`` uses.
+            for alias in _CONFIG_ATTR_ALIASES.get(node.attr, ()):
+                aliased = config.get(alias, _UNKNOWN)
+                if aliased is not _UNKNOWN:
+                    return aliased
+            nested_key = _CONFIG_NESTED_ALIASES.get(node.attr)
             if nested_key is not None:
                 nested = config.get(nested_key[0])
                 if isinstance(nested, dict):
@@ -1596,6 +1636,117 @@ def _self_config_values(
     return values
 
 
+def _range_iteration_count_of(node: ast.For, self_values: dict) -> int | None:
+    """Resolve a small static ``range(...)`` loop from constructor/config values."""
+    iterator = node.iter
+    if (
+        not isinstance(iterator, ast.Call)
+        or _expr_name(iterator.func) != "range"
+        or iterator.keywords
+        or not 1 <= len(iterator.args) <= 3
+    ):
+        return None
+    values = [_config_value(arg, {}, self_values) for arg in iterator.args]
+    if not all(isinstance(value, int) for value in values):
+        return None
+    try:
+        count = len(range(*values))
+    except (TypeError, ValueError):
+        return None
+    # Keep generated graphs bounded for malformed or unexpectedly large configs.
+    return count if 0 <= count <= _LOOP_COUNT_MAX else None
+
+
+def _num_classes_arg_of(call: ast.Call, self_values: dict) -> int | None:
+    """Resolve ``one_hot``'s ``num_classes`` (keyword or 2nd positional)."""
+    for keyword in call.keywords:
+        if keyword.arg == "num_classes":
+            resolved = _config_value(keyword.value, {}, self_values)
+            if isinstance(resolved, int) and not isinstance(resolved, bool):
+                return resolved
+    if len(call.args) >= 2:
+        resolved = _config_value(call.args[1], {}, self_values)
+        if isinstance(resolved, int) and not isinstance(resolved, bool):
+            return resolved
+    return None
+
+
+def _one_hot_bound_of(
+    expr: ast.expr | None,
+    seen: set[str],
+    name_value_ast: dict[str, ast.expr],
+    self_values: dict,
+) -> int | None:
+    """Follow an iterable's provenance to a ``one_hot(num_classes=...)`` width."""
+    if expr is None:
+        return None
+    if isinstance(expr, ast.Name):
+        if expr.id in seen:
+            return None
+        seen.add(expr.id)
+        return _one_hot_bound_of(
+            name_value_ast.get(expr.id), seen, name_value_ast, self_values
+        )
+    if isinstance(expr, ast.Call):
+        func = expr.func
+        is_one_hot = (_expr_name(func) == "one_hot") or (
+            isinstance(func, ast.Attribute) and func.attr == "one_hot"
+        )
+        if is_one_hot:
+            width = _num_classes_arg_of(expr, self_values)
+            if width is not None:
+                return width
+        candidates: list[ast.expr] = []
+        if isinstance(func, ast.Attribute):
+            candidates.append(func.value)
+        candidates.extend(expr.args)
+        for candidate in candidates:
+            width = _one_hot_bound_of(candidate, seen, name_value_ast, self_values)
+            if width is not None:
+                return width
+        return None
+    if isinstance(expr, (ast.Attribute, ast.Subscript)):
+        return _one_hot_bound_of(expr.value, seen, name_value_ast, self_values)
+    return None
+
+
+def _loop_iteration_count_of(
+    node: ast.For,
+    self_values: dict,
+    name_value_ast: dict[str, ast.expr],
+) -> int | None:
+    """Resolve a loop's static trip count for the ``Loop_N_iterations`` label.
+
+    A literal ``range(...)`` bound wins. Otherwise a data-dependent iterable
+    (``for expert_idx in hit:`` where ``hit`` is a ``nonzero()`` selection) can
+    still have a static *upper* bound when the selected tensor's width comes from
+    config — e.g. an expert-dispatch loop over
+    ``one_hot(top_k_index, num_classes=self.num_experts)``. Trace the iterable
+    back through simple ``name = expr`` bindings to that ``one_hot`` and resolve
+    ``num_classes``. Returns ``None`` for genuinely unbounded loops.
+    """
+    count = _range_iteration_count_of(node, self_values)
+    if count is not None:
+        return count
+    bound = _one_hot_bound_of(node.iter, set(), name_value_ast, self_values)
+    return bound if bound is not None and 0 <= bound <= _LOOP_COUNT_MAX else None
+
+
+def _collect_name_value_ast(func: ast.FunctionDef) -> dict[str, ast.expr]:
+    """Map each simple ``name = expr`` binding in a function to its value AST.
+
+    Used to trace a loop iterable's provenance (across statement boundaries and
+    nesting) back to the ``one_hot`` call that bounds an expert-dispatch loop.
+    """
+    name_value_ast: dict[str, ast.expr] = {}
+    for sub in ast.walk(func):
+        if isinstance(sub, ast.Assign):
+            for target in sub.targets:
+                if isinstance(target, ast.Name):
+                    name_value_ast[target.id] = sub.value
+    return name_value_ast
+
+
 class _ForwardOperationExtractor:
     """Recover primitive tensor operations and their data dependencies."""
 
@@ -1612,6 +1763,11 @@ class _ForwardOperationExtractor:
         self.operations: list[ForwardOperation] = []
         self.var_producer: dict[str, str] = {}
         self.var_module_origin: dict[str, str] = {}
+        # ``pre_w, post_w, comb_w = ...split(...)`` binds each unpacked local to
+        # the single split producer plus the output ordinal it selects. Consumers
+        # read one of these locals; the ordinal lets their edge attach to the
+        # matching named output port (see ForwardOperation.predecessor_ports).
+        self.var_output_ordinal: dict[str, int] = {}
         # ``a, b = x.shape[:2]`` binds ``a``/``b`` to a source dim; record the
         # positional read token (``x.shape[0]``) so a later ``view``/``reshape``
         # arg naming ``a`` resolves to that axis instead of an opaque local.
@@ -1620,6 +1776,10 @@ class _ForwardOperationExtractor:
         # reshape target. Record the literal so ``view(hidden_shape)`` expands to
         # its dims rather than the un-resolvable variable name.
         self.shape_tuple_vars: dict[str, ast.Tuple] = {}
+        # ``name = expr`` bindings kept as raw AST so a loop's dynamic iterable
+        # (``for i in hit:`` where ``hit = ...nonzero()``) can be traced back to
+        # a config-resolvable static bound (see ``_loop_iteration_count``).
+        self._name_value_ast: dict[str, ast.expr] = {}
         self.step_predecessors: dict[str, tuple[str, ...]] = {}
         self.step_predecessor_args: dict[str, dict[str, str]] = {}
         # When an ``if``/``else`` assigns the same variable to different producers
@@ -1673,9 +1833,32 @@ class _ForwardOperationExtractor:
                 external_inputs=self._dedupe(external_inputs),
                 details=tuple(details or ()),
                 param_inputs=self._param_refs(node),
+                predecessor_ports=self._read_output_ports(node),
             )
         )
         return attr_name
+
+    def _read_output_ports(self, node: ast.AST) -> tuple[tuple[str, int], ...]:
+        """Producer→ordinal pairs for multi-output locals this expression reads.
+
+        When an operation reads ``comb_w`` (unpacked as ordinal 2 of a split), it
+        consumes that specific output port, not the whole split. Walk the
+        expression for such locals so the graph can wire the edge to the matching
+        port. A local read at several ordinals of the *same* producer keeps the
+        first seen (a single consumer edge carries one port label).
+        """
+        if not self.var_output_ordinal:
+            return ()
+        ports: dict[str, int] = {}
+        for current in ast.walk(node):
+            if isinstance(current, ast.Name):
+                ordinal = self.var_output_ordinal.get(current.id)
+                if ordinal is None:
+                    continue
+                producer = self.var_producer.get(current.id)
+                if producer and producer not in ports:
+                    ports[producer] = ordinal
+        return tuple(ports.items())
 
     def _param_refs(self, node: ast.AST) -> tuple[str, ...]:
         """Secondary forward parameters this operation's expression reads.
@@ -2027,6 +2210,39 @@ class _ForwardOperationExtractor:
         for name in self._target_names(stmt):
             self.var_producer[name] = producer
 
+    _MULTI_OUTPUT_LABELS = frozenset({"Split", "Chunk", "Unbind"})
+
+    def _record_output_unpack(
+        self, stmt: ast.Assign | ast.AnnAssign, producer: str | None
+    ) -> None:
+        """Record a ``a, b, c = <split/chunk/unbind>`` tuple-unpack.
+
+        A single split op produces several tensors; unpacking names them. Tag each
+        unpacked local with its output ordinal (so consumers wire to the matching
+        port) and stamp the ordered names onto the producer op (so the graph can
+        render one named output port per slice with its own shape). General: fires
+        for any multi-output tensor call, not just the GLM hyperconnection splits.
+        """
+        if producer is None or not isinstance(stmt, ast.Assign):
+            return
+        if len(stmt.targets) != 1:
+            return
+        target = stmt.targets[0]
+        if not isinstance(target, (ast.Tuple, ast.List)):
+            return
+        names = [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
+        if len(names) < 2 or len(names) != len(target.elts):
+            return
+        for index, operation in enumerate(self.operations):
+            if operation.attr_name != producer:
+                continue
+            if operation.label not in self._MULTI_OUTPUT_LABELS:
+                return
+            self.operations[index] = replace(operation, output_names=tuple(names))
+            for ordinal, name in enumerate(names):
+                self.var_output_ordinal[name] = ordinal
+            return
+
     def _propagate_param_alias(
         self, targets: list[ast.expr], value: ast.AST
     ) -> None:
@@ -2105,25 +2321,9 @@ class _ForwardOperationExtractor:
             return str(resolved)
         return ast.unparse(elt)
 
-    def _range_iteration_count(self, node: ast.For) -> int | None:
-        """Resolve a small static ``range(...)`` loop from constructor/config values."""
-        iterator = node.iter
-        if (
-            not isinstance(iterator, ast.Call)
-            or _expr_name(iterator.func) != "range"
-            or iterator.keywords
-            or not 1 <= len(iterator.args) <= 3
-        ):
-            return None
-        values = [_config_value(arg, {}, self.self_values) for arg in iterator.args]
-        if not all(isinstance(value, int) for value in values):
-            return None
-        try:
-            count = len(range(*values))
-        except (TypeError, ValueError):
-            return None
-        # Keep generated graphs bounded for malformed or unexpectedly large configs.
-        return count if 0 <= count <= 256 else None
+    def _loop_iteration_count(self, node: ast.For) -> int | None:
+        """Static trip count for the ``Loop_N_iterations`` label (see module helper)."""
+        return _loop_iteration_count_of(node, self.self_values, self._name_value_ast)
 
     def _annotate_operations_since(self, start: int, detail: str) -> None:
         for index in range(start, len(self.operations)):
@@ -2284,6 +2484,9 @@ class _ForwardOperationExtractor:
                     stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
                 )
                 self._track_shape_assignment(targets, value)
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        self._name_value_ast[target.id] = value
                 self._propagate_param_alias(targets, value)
                 direct_module = (
                     value.func.attr
@@ -2308,6 +2511,7 @@ class _ForwardOperationExtractor:
                 ):
                     producer = self.var_module_origin.get(value.func.value.id)
                 self._bind(stmt, producer)
+                self._record_output_unpack(stmt, producer)
                 continue
             if isinstance(stmt, ast.AugAssign):
                 left, left_external = self.expression(stmt.target)
@@ -2431,7 +2635,7 @@ class _ForwardOperationExtractor:
                     self.var_producer = survivor_env
                 continue
             if isinstance(stmt, ast.For):
-                iteration_count = self._range_iteration_count(stmt)
+                iteration_count = self._loop_iteration_count(stmt)
                 iterable_producer, _iterable_external = self.expression(stmt.iter)
                 if iterable_producer is not None:
                     for index, operation in enumerate(self.operations):
@@ -3059,6 +3263,8 @@ def _refine_forward_operation_predecessors(
             external_inputs=operation.external_inputs,
             details=operation.details,
             param_inputs=operation.param_inputs,
+            output_names=operation.output_names,
+            predecessor_ports=operation.predecessor_ports,
         )
     return refined
 
@@ -3330,7 +3536,12 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 attention_inputs,
                 side_inputs,
                 parsed_step_details,
-            ) = _parse_forward(resolved_forward_func)
+            ) = _parse_forward(
+                resolved_forward_func,
+                self_values=_self_config_values(
+                    init_func, self._config_for_class(node.name)
+                ),
+            )
             alternate = _alternate_forward_dispatches(forward_func)
             if alternate:
                 forward_calls = [
@@ -4719,6 +4930,7 @@ def _parallel_gate_activations_from_forward(
 
 def _parse_forward(
     func: ast.FunctionDef,
+    self_values: dict | None = None,
 ) -> tuple[
     list[str],
     list[str],
@@ -4734,6 +4946,8 @@ def _parse_forward(
     side_inputs: dict[str, list[SideInputSpec]] = {}
     forward_step_details: dict[str, list[str]] = {}
     forward_input_names = _forward_input_names(func)
+    self_values = self_values or {}
+    name_value_ast = _collect_name_value_ast(func)
 
     for node in func.body:
         pending_norm = _walk_forward_stmt(
@@ -4746,6 +4960,8 @@ def _parse_forward(
             side_inputs,
             forward_input_names,
             forward_step_details,
+            self_values,
+            name_value_ast,
         )
     forward_step_details.update(_positional_step_details(func))
     return (
@@ -4767,6 +4983,8 @@ def _walk_forward_stmt(
     side_inputs: dict[str, list[SideInputSpec]],
     forward_input_names: set[str],
     forward_step_details: dict[str, list[str]],
+    self_values: dict | None = None,
+    name_value_ast: dict[str, ast.expr] | None = None,
 ) -> str | None:
     if isinstance(node, ast.Assign):
         stmt_calls: list[str] = []
@@ -4874,6 +5092,8 @@ def _walk_forward_stmt(
                 side_inputs,
                 forward_input_names,
                 forward_step_details,
+                self_values,
+                name_value_ast,
             )
         return pending_norm
 
@@ -4890,15 +5110,25 @@ def _walk_forward_stmt(
                 side_inputs,
                 forward_input_names,
                 forward_step_details,
+                self_values,
+                name_value_ast,
             )
         # Tensor operations are annotated by _ForwardOperationExtractor, but
         # expanded helper calls (for example `_apply_gate()`) are not operations
         # in this method's graph. Preserve their call-site loop context too so
-        # their expanded children remain inside the source loop.
+        # their expanded children remain inside the source loop. Resolve the same
+        # static trip count the extractor uses so the helper ops share the loop's
+        # `Loop_N_iterations` frame instead of fragmenting into `Loop_repeated`.
+        count = _loop_iteration_count_of(
+            node, self_values or {}, name_value_ast or {}
+        )
+        loop_detail = (
+            f"loop: {count} iterations" if count is not None else "loop: repeated"
+        )
         for call in calls[first_loop_call:]:
             details = forward_step_details.setdefault(call, [])
             if not any(detail.startswith("loop:") for detail in details):
-                details.append("loop: repeated")
+                details.append(loop_detail)
         return pending_norm
 
     if isinstance(node, ast.With):
@@ -4913,6 +5143,8 @@ def _walk_forward_stmt(
                 side_inputs,
                 forward_input_names,
                 forward_step_details,
+                self_values,
+                name_value_ast,
             )
         return pending_norm
 

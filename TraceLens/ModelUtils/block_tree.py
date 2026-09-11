@@ -453,6 +453,57 @@ def is_inline_expandable_module(node: BlockNode) -> bool:
     return is_linear_pipeline_block(node)
 
 
+def _step_forms_own_frame(step: BlockNode) -> bool:
+    """True when a step renders as its own namespace frame (submodule / method)."""
+    return _is_composite_block(step) or is_method_wrapper(step)
+
+
+def is_transparent_loop_wrapper(node: BlockNode) -> bool:
+    """True when a composite's body is just leaf preamble/postamble around one loop.
+
+    A wrapper whose forward reduces to some setup ops and a single loop (for
+    example an expert-dispatch module: ``final = zeros_like(...); ...; for expert
+    in hit: ...``) adds no grouping value beyond the loop it contains — the loop
+    already renders as its own ``Loop_N_iterations`` frame. Flattening the wrapper
+    lets that loop sit directly under the parent module.
+
+    A wrapper is *not* transparent when a non-loop step forms its own frame (a
+    nested submodule such as a normalization, or a helper-method call outside the
+    loop) or when it contains more than one distinct loop: those group meaningfully.
+    No class-name checks — the decision is purely structural.
+    """
+    if not _is_composite_block(node):
+        return False
+    segments = collect_computation_segments(node)
+    if not segments:
+        return False
+    loop_details: set[str] = set()
+    has_preamble = False
+    for segment in segments:
+        if not isinstance(segment, SeqSegment):
+            # Fan-out / combine / side-feed structure is real grouping.
+            return False
+        step = segment.step
+        loop_detail = next(
+            (detail for detail in step.details if detail.startswith("loop:")), None
+        )
+        if loop_detail is not None:
+            # A loop-body step (including helper methods expanded inside the loop).
+            loop_details.add(loop_detail)
+            continue
+        # A step at this wrapper's own scope, outside any loop. If it forms its own
+        # frame the wrapper groups more than a loop; otherwise it is loop setup.
+        if _step_forms_own_frame(step):
+            return False
+        if step.label not in LAYOUT_ONLY_LABELS:
+            has_preamble = True
+    # Requiring a non-loop preamble step is what distinguishes a module that *owns*
+    # a loop (setup before its `for`) from a helper/submodule whose every step
+    # merely inherits an ancestor loop's detail because it is called inside one —
+    # the latter has no step of its own outside the loop and must keep its frame.
+    return has_preamble and len(loop_details) == 1
+
+
 def is_transparent_inline_expansion(node: BlockNode) -> bool:
     """True when an expanded wrapper adds no useful grouping boundary.
 
@@ -662,6 +713,11 @@ class BlockNode:
     tensor_step_targets: dict[str, str] = field(default_factory=dict)
     kernel_predecessors: list[str] = field(default_factory=list)
     operation_predecessors: list[str] = field(default_factory=list)
+    # Ordered output-port names for a multi-output op (split/chunk/unbind that was
+    # tuple-unpacked); ``operation_predecessor_ports`` maps a producer attr this
+    # node consumes to the output ordinal it reads. Both empty for ordinary ops.
+    output_names: list[str] = field(default_factory=list)
+    operation_predecessor_ports: dict[str, int] = field(default_factory=dict)
     kernel_second_operand: str | None = None
     external_inputs: list[str] = field(default_factory=list)
     param_inputs: list[str] = field(default_factory=list)
@@ -878,6 +934,8 @@ def _leaf_node(
     label: str | None = None,
     kernel_predecessors: list[str] | None = None,
     operation_predecessors: list[str] | None = None,
+    output_names: list[str] | None = None,
+    operation_predecessor_ports: dict[str, int] | None = None,
     kernel_second_operand: str | None = None,
     external_inputs: list[str] | None = None,
     param_inputs: list[str] | None = None,
@@ -894,6 +952,8 @@ def _leaf_node(
         is_basic=basic,
         kernel_predecessors=list(kernel_predecessors or []),
         operation_predecessors=list(operation_predecessors or []),
+        output_names=list(output_names or []),
+        operation_predecessor_ports=dict(operation_predecessor_ports or {}),
         kernel_second_operand=kernel_second_operand,
         external_inputs=list(external_inputs or []),
         param_inputs=list(param_inputs or []),
@@ -1965,6 +2025,8 @@ def build_block_node(
                     ),
                     basic=True,
                     operation_predecessors=list(operation.predecessors),
+                    output_names=list(operation.output_names),
+                    operation_predecessor_ports=dict(operation.predecessor_ports),
                     external_inputs=list(operation.external_inputs),
                     param_inputs=list(operation.param_inputs),
                     boundary_input_name=_boundary_input_name(operation, cls),
@@ -2031,6 +2093,10 @@ def build_block_node(
                                 label=operation.label,
                                 basic=True,
                                 operation_predecessors=list(operation.predecessors),
+                                output_names=list(operation.output_names),
+                                operation_predecessor_ports=dict(
+                                    operation.predecessor_ports
+                                ),
                                 external_inputs=list(operation.external_inputs),
                                 param_inputs=list(operation.param_inputs),
                             )
@@ -2051,6 +2117,8 @@ def build_block_node(
                         label=single_op.label,
                         basic=True,
                         operation_predecessors=list(single_op.predecessors),
+                        output_names=list(single_op.output_names),
+                        operation_predecessor_ports=dict(single_op.predecessor_ports),
                         external_inputs=list(single_op.external_inputs),
                         param_inputs=list(single_op.param_inputs),
                     )

@@ -836,7 +836,7 @@ def test_glm53_expert_helper_stays_inside_loop_without_cycle():
     ]
     assert helper_nodes
     assert all(
-        "/Glm5NextTextExperts/Loop_repeated/_apply_gate" in node.get("namespace", "")
+        "/Glm5NextTextMoE/Loop_288_iterations/_apply_gate" in node.get("namespace", "")
         for node in helper_nodes
     )
     _assert_export_is_acyclic(graph["nodes"])
@@ -877,31 +877,48 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
         node
         for node in graph["nodes"]
         if node["id"].startswith(f"{prefix}/mlp/")
-        and node.get("namespace", "").endswith("/Glm5NextTextExperts/Loop_repeated")
+        and node.get("namespace", "").endswith("/Glm5NextTextMoE/Loop_288_iterations")
         and any(
             attr.get("key") == "synthetic" and attr.get("value") == "@input"
             for attr in node.get("attrs", [])
         )
     ]
-    assert any(node["label"] == "final" for node in loop_inputs)
+    # The loop-carried value ``final`` renders as a carried-dependency boundary
+    # (in/out) nested inside the loop frame, not as a plain ``@input``. Its id
+    # carries the loop id and variable name.
+    carried = [
+        node
+        for node in graph["nodes"]
+        if node["id"].startswith(f"{prefix}/mlp/")
+        and node.get("namespace", "").endswith("/Glm5NextTextMoE/Loop_288_iterations")
+        and any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@loop_carried"
+            for attr in node.get("attrs", [])
+        )
+    ]
+    assert any(node["id"].endswith(":final") for node in carried)
     assert all(len(node.get("incomingEdges", [])) <= 1 for node in loop_inputs)
     assert not any(
         "nonzero" in edge["sourceNodeId"]
         for node in loop_inputs
         for edge in node.get("incomingEdges", [])
     )
+    # The expert dispatch flattens into the MoE scope, so its boundary inputs are
+    # mirrored directly under ``Glm5NextTextMoE``. The routed activations
+    # (``hidden_states``) and the gate weights (``topk_weights``) cross into the
+    # loop; ``topk_indices`` now feeds the MoE-scope ``one_hot`` preamble at the
+    # same scope as the router that produces it, so it needs no boundary mirror.
     expert_input_mirrors = [
         node
         for node in graph["nodes"]
         if node["id"].startswith(f"{prefix}/mlp/")
-        and ":experts:" in node["id"]
         and any(
             attr.get("key") == "synthetic" and attr.get("value") == "@input_mirror"
             for attr in node.get("attrs", [])
         )
         and node.get("namespace", "").endswith("/Glm5NextTextMoE")
     ]
-    assert {"hidden_states", "topk_indices", "topk_weights"} <= {
+    assert {"hidden_states", "topk_weights"} <= {
         node["label"] for node in expert_input_mirrors
     }
 
@@ -916,6 +933,77 @@ def test_glm53_expert_loop_inputs_are_separate_and_index_add_is_basic():
     index_add = next(node for node in computation.nodes if node.label == "Index add")
     assert index_add.block is not None
     assert index_add.block.is_basic
+
+
+def test_glm53_loop_carried_pairs_are_well_formed():
+    """Every loop-carried variable is one nested in/out pair with a single back edge.
+
+    General loop-rendering invariant (not GLM-specific): for each ``@loop_carried``
+    variable the export must emit exactly one ``@loop_carried_in`` and one
+    ``@loop_carried_out`` node, both nested in the *same* loop namespace (not
+    siblings of the loop), joined by exactly one back edge (out → in). No orphan
+    ``out`` without its ``in``. The whole export stays acyclic once those single
+    back edges are removed. The expert loop specifically carries ``final`` (not the
+    ``mask`` intermediate) under a counted ``Loop_288_iterations`` frame.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    nodes = graph["nodes"]
+
+    def is_carried(node) -> bool:
+        return any(
+            attr.get("key") == "synthetic" and attr.get("value") == "@loop_carried"
+            for attr in node.get("attrs", [])
+        )
+
+    # key = (prefix, loop_key, var) -> {"in": node, "out": node}
+    pairs: dict[tuple[str, str, str], dict[str, dict]] = {}
+    for node in nodes:
+        node_id = node["id"]
+        for marker, direction in (
+            ("@loop_carried_in:", "in"),
+            ("@loop_carried_out:", "out"),
+        ):
+            if marker in node_id:
+                assert is_carried(node), node_id
+                prefix, rest = node_id.split(marker, 1)
+                loop_key, var = rest.split(":", 1)
+                slot = pairs.setdefault((prefix, loop_key, var), {})
+                assert direction not in slot, f"duplicate {direction} for {node_id}"
+                slot[direction] = node
+                break
+
+    assert pairs, "expected loop-carried boundaries in the export"
+
+    for (prefix, loop_key, var), slot in pairs.items():
+        # Exactly one in and one out — no orphan boundary.
+        assert set(slot) == {"in", "out"}, (loop_key, var, sorted(slot))
+        in_node, out_node = slot["in"], slot["out"]
+        # Both boundaries live in the *same* namespace — nested together inside
+        # the loop body, never split so that one is a sibling of the other. (A
+        # compactly-rendered loop puts them under a ``Loop_N_iterations`` frame;
+        # an inline-expanded loop such as the vision block shares the block's own
+        # namespace. Either way, in and out agree.)
+        assert in_node.get("namespace") == out_node.get("namespace")
+        # Exactly one back edge: the in node is fed by its matching out node.
+        back_edges = [
+            edge
+            for edge in in_node.get("incomingEdges", [])
+            if edge["sourceNodeId"] == out_node["id"]
+        ]
+        assert len(back_edges) == 1, (loop_key, var, back_edges)
+
+    # The expert loop carries ``final`` under a counted 288-iteration frame, and
+    # never the ``mask`` intermediate that a scope collision used to mis-resolve.
+    carried_vars_by_loop_ns = {
+        (var, slot["in"].get("namespace", "").rsplit("/", 1)[-1])
+        for (_prefix, _loop_key, var), slot in pairs.items()
+    }
+    assert ("final", "Loop_288_iterations") in carried_vars_by_loop_ns
+    assert not any(var == "mask" for var, _ns in carried_vars_by_loop_ns)
+
+    _assert_export_is_acyclic(nodes)
 
 
 def test_glm53_decoder_boundary_keeps_hyper_stream_shape():

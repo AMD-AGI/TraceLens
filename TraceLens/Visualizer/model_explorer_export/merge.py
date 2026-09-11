@@ -2378,6 +2378,11 @@ def _append_section(
         merged_nodes.append(summary)
         return [id_prefix]
     block_tree = prepared_tree
+    # Blocks that are re-exported as their own nested diagram materialize their
+    # own loop-carried boundaries there; exclude their specs from this parent
+    # scope so an inlined child loop is not duplicated as an orphan loop frame.
+    nested_diagrams = collect_nested_diagrams(block_tree, basic_ops=basic_ops)
+    exclude_carried_from = frozenset(id(block) for _label, block in nested_diagrams)
     computation = build_computation_graph(
         block_tree,
         basic_ops=basic_ops,
@@ -2385,6 +2390,7 @@ def _append_section(
         # them also preserves real setup work such as mHC's Sinkhorn projection.
         strip_unused_return_branches=False,
         inline_expansion=inline_expansion,
+        exclude_carried_from=exclude_carried_from,
     )
     skip_variant_root_input = _skip_variant_root_input(component)
     section_nodes = _computation_nodes(
@@ -2419,7 +2425,6 @@ def _append_section(
     tile_ids = _block_tile_ids(computation, id_prefix=id_prefix)
     tile_replacements: dict[str, SourceRef] = {}
     nested_output_names: dict[str, str] = {}
-    nested_diagrams = collect_nested_diagrams(block_tree, basic_ops=basic_ops)
     nested_label_counts: dict[str, int] = {}
     for nested_label, _nested_block in nested_diagrams:
         nested_label_counts[nested_label] = nested_label_counts.get(nested_label, 0) + 1
@@ -2456,6 +2461,7 @@ def _append_section(
             basic_ops=basic_ops,
             strip_unused_return_branches=False,
             inline_expansion=inline_expansion,
+            exclude_carried_from=exclude_carried_from,
         )
         nested_nodes = _computation_nodes(
             nested_computation,

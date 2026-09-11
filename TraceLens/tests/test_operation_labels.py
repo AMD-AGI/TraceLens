@@ -267,10 +267,12 @@ def test_glm_experts_expands_router_boundary_into_named_parameters():
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
     graph = build_merged_model_graph(spec)
+    # The expert dispatch flattens into the MoE scope, so the router boundary is
+    # expanded into named parameters directly under ``Glm5NextTextMoE``.
     expert_inputs = [
         node
         for node in graph["nodes"]
-        if "Glm5NextTextExperts" in node.get("namespace", "")
+        if "Glm5NextTextMoE" in node.get("namespace", "")
         and any(
             attr.get("key") == "synthetic" and attr.get("value") == "@input"
             for attr in node.get("attrs", [])
