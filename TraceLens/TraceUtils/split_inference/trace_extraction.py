@@ -11,9 +11,11 @@ import json
 import os
 import zipfile
 from bisect import bisect_left, bisect_right
+from collections import Counter
 
 from tqdm import tqdm
 
+from ...util import most_common_first_dim
 from ..annotation_utils import (
     ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
@@ -96,6 +98,45 @@ def build_cpu_event_index(
     cpu_events.sort(key=lambda e: e["ts"])
     cpu_starts = [e["ts"] for e in cpu_events]
     return cpu_events, cpu_starts
+
+
+
+def infer_batch_sizes_from_shapes(
+    roots: list[dict],
+    cpu_event_index: tuple[list[dict], list[float]],
+    root_tiles: dict | None = None,
+) -> list[int | None]:
+    """Derive batch size per iteration from the most common first dim of cpu_op Input Dims.
+
+    Performs a lightweight scan (no full extraction) using the pre-built
+    cpu_event_index for bisect-based windowing.  Returns one value per root,
+    or ``None`` when no cpu_op with ``Input Dims`` falls in the window.
+    """
+    cpu_events, cpu_starts = cpu_event_index
+    batch_sizes: list[int | None] = []
+
+    for root in roots:
+        if root_tiles is not None:
+            key = (root.get("pid"), root.get("tid"), root.get("ts", 0))
+            win_ts, win_end = root_tiles.get(
+                key, (root["ts"], root["ts"] + root["dur"])
+            )
+        else:
+            win_ts = root["ts"]
+            win_end = win_ts + root["dur"]
+
+        lo = bisect_left(cpu_starts, win_ts)
+        hi = bisect_right(cpu_starts, win_end)
+        win_dur = win_end - win_ts
+
+        # Filter to events within the window, excluding enclosing spans
+        window_events = [
+            e for e in cpu_events[lo:hi]
+            if win_ts <= e["ts"] < win_end and e["dur"] <= win_dur
+        ]
+        batch_sizes.append(most_common_first_dim(window_events))
+
+    return batch_sizes
 
 
 def extract_iteration(
@@ -222,6 +263,36 @@ def extract_iteration(
     return output, list(set(batch_list)), num_gpu_events, gpu_dur, gpu_busy
 
 
+def collect_ancestor_events(
+    iteration_roots: list[dict],
+    events_by_uid: dict,
+) -> list[dict]:
+    """Collect ancestor events from iteration roots up to the process entry.
+
+    Walks up the ``parent`` chain from each root, collecting the enclosing
+    frames (thread root, outer python frames) that ``extract_iteration``
+    normally excludes because their duration exceeds the iteration window.
+    Only the ancestor events themselves are included, not their other children.
+
+    ``events_by_uid`` should be a UID→event mapping from the tree
+    (e.g. ``tree.events_by_uid``).
+    """
+    ancestor_uids: set = set()
+
+    for root in iteration_roots:
+        parent_uid = root.get("parent")
+        while parent_uid is not None:
+            if parent_uid in ancestor_uids:
+                break
+            ancestor_uids.add(parent_uid)
+            parent = events_by_uid.get(parent_uid)
+            if parent is None:
+                break
+            parent_uid = parent.get("parent")
+
+    return [events_by_uid[uid] for uid in ancestor_uids if uid in events_by_uid]
+
+
 def parse_range(range_str: str, max_len: int) -> tuple[int, int]:
     """Parse a range string like '10:20' or 'all'."""
     if range_str == "all":
@@ -246,6 +317,7 @@ def extract_and_save(
     meta_events: list[dict],
     output_label: str | None = None,
     root_tiles: dict | None = None,
+    llm_inference: bool = False,
 ):
     """Extract and save a range of iterations.
 
@@ -278,7 +350,7 @@ def extract_and_save(
             root_tiles=root_tiles,
             cpu_event_index=cpu_idx,
         )
-        is_annotation = "annotation_iteration" in prefix
+        is_annotation = "iteration" in prefix
         # Use the structured phase-aware name for any annotation extraction
         # produced by the steady-state code paths (output_label is set), and
         # for any multi-step annotation window. Single-step annotations from
@@ -323,8 +395,17 @@ def extract_and_save(
                 name_append = f"batch_NA_gpu{prefix}"
 
         if output_label is not None:
+            if llm_inference:
+                out_path = os.path.join(
+                    output_dir, f"{output_label}_{name_append}_{base_name}.json.gz"
+                )
+            else:
+                out_path = os.path.join(
+                    output_dir, f"{output_label}_{base_name}.json.gz"
+                )
+        elif is_annotation and len(root) == 1 and root[0].get("name") in ("warmup", "wrapup"):
             out_path = os.path.join(
-                output_dir, f"{output_label}_{name_append}_{base_name}.json.gz"
+                output_dir, f"{base_name}_{root[0]['name']}.json.gz"
             )
         else:
             suffix = f"_{name_append}" if name_append else ""
@@ -369,7 +450,7 @@ def extract_phases_and_save(
     """Extract and save a range of iterations."""
     extraction_summary = []
 
-    if "annotation_iteration" not in prefix:
+    if "iteration" not in prefix:
         print("phase extraction only supported for annotation iterations, skipping")
         return extraction_summary
     for root in roots:
@@ -458,6 +539,7 @@ def divide_phases_and_save(
     meta_events: list[dict],
     steady_state_regions: list[tuple[int, int]],
     root_tiles: dict | None = None,
+    phase_labels: list[str] | None = None,
 ) -> list[dict]:
     """
     Group contiguous steps of the same phase within steady-state regions and
@@ -474,22 +556,37 @@ def divide_phases_and_save(
     steady_state_regions
         Pre-computed steady-state region list as ``(start, end)`` index pairs.
         Pass ``[(0, len(iteration_roots))]`` to treat the entire slice as steady state.
+    phase_labels
+        Optional per-iteration phase labels (``"decode"`` or ``"prefill_bearing"``),
+        e.g. from :func:`classify_phases_from_batch_sizes`.  When provided,
+        annotation-based classification is skipped — use this for
+        ``--llm-inference`` traces without serving annotations.
     """
-    iter_details = iteration_details(iteration_roots)
     regions = steady_state_regions
     print(f"[divide-phases] Steady-state regions: {regions}")
 
     # Build an ordered list of (phase_label, root) for all steady-state steps
     steady_steps: list[tuple[str, dict]] = []
-    for s, e in regions:
-        for idx in range(s, e):
-            detail = iter_details[idx]
-            root = iteration_roots[idx]
-            if has_context(detail):
-                steady_steps.append(("prefilldecodemix", root))
-            elif has_generation(detail):
-                steady_steps.append(("decode_only", root))
-            # steps that are neither (e.g. idle) are skipped
+    if phase_labels is not None:
+        for s, e in regions:
+            for idx in range(s, e):
+                root = iteration_roots[idx]
+                label = phase_labels[idx]
+                if label == "prefill_bearing":
+                    steady_steps.append(("prefilldecodemix", root))
+                else:
+                    steady_steps.append(("decode_only", root))
+    else:
+        iter_details = iteration_details(iteration_roots)
+        for s, e in regions:
+            for idx in range(s, e):
+                detail = iter_details[idx]
+                root = iteration_roots[idx]
+                if has_context(detail):
+                    steady_steps.append(("prefilldecodemix", root))
+                elif has_generation(detail):
+                    steady_steps.append(("decode_only", root))
+                # steps that are neither (e.g. idle) are skipped
 
     # Group into contiguous runs of the same phase
     runs: list[tuple[str, list[dict]]] = []  # (phase, [roots])
@@ -543,7 +640,7 @@ def divide_phases_and_save(
                 trace_json,
                 out_dir,
                 base_name,
-                "annotation_iteration",
+                "iteration",
                 0,
                 1,
                 gpu_corr_map,
@@ -551,6 +648,7 @@ def divide_phases_and_save(
                 meta_events,
                 output_label=f"{phase}_{name_append}",
                 root_tiles=root_tiles,
+                llm_inference=True,
             )
         )
 

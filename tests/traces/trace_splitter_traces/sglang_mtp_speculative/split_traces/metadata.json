@@ -1,0 +1,8 @@
+{
+  "total_iterations": 10,
+  "targets": {
+    "first": 0,
+    "middle": 5,
+    "last": 9
+  }
+}
