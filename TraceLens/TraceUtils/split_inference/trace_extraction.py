@@ -72,6 +72,7 @@ def _cpu_window_end(root: dict, next_sibling_ts: float | None, events: list[dict
         return next_ts
     return root.get(_K.TimeStamp, 0) + root.get(_K.Duration, 0)
 
+
 GPU_EVENT_CATEGORIES = ["kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation"]
 
 
@@ -144,9 +145,7 @@ def extract_iteration(
     sibling_end = []
     for i, root in enumerate(roots_by_ts):
         next_sibling = (
-            roots_by_ts[i + 1].get(_K.TimeStamp)
-            if i + 1 < len(roots_by_ts)
-            else None
+            roots_by_ts[i + 1].get(_K.TimeStamp) if i + 1 < len(roots_by_ts) else None
         )
         sibling_end.append(_cpu_window_end(root, next_sibling, events))
     root_end = {id(root): end for root, end in zip(roots_by_ts, sibling_end)}
