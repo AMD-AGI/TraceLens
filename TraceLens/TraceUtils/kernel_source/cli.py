@@ -98,9 +98,7 @@ def main(argv: list[str] | None = None) -> int:
 
     location = resolve_source_path(args.kernel, args.search_path or None)
     if location is not None:
-        result = ResolveResult(
-            location=location, patchable=True, method="symbol_index"
-        )
+        result = ResolveResult(location=location, patchable=True, method="symbol_index")
     else:
         result = ResolveResult(
             location=None,

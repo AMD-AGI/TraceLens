@@ -109,5 +109,3 @@ def resolve_source_path(
 
     log.debug("active-finder: no editable/verified source for base %r", base)
     return None
-
-
