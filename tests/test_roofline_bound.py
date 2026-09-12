@@ -13,6 +13,8 @@ import importlib.util, json, os, pandas as pd, pytest
 from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch,
 )
+from TraceLens.TreePerf import tree_perf as tree_perf_module
+
 from conftest import list_perf_report_csv_sheets
 
 _ORIGAMI_AVAILABLE = importlib.util.find_spec("origami") is not None
@@ -44,6 +46,14 @@ TRACE_PATH = os.path.join(
 )
 
 VALID_BOUND_VALUES = {"COMPUTE_BOUND", "MEMORY_BOUND"}
+VALID_BOUND_VALUES_WITH_LATENCY = VALID_BOUND_VALUES | {"LATENCY_BOUND"}
+
+
+@pytest.fixture(autouse=True)
+def reset_mem_latency_warning():
+    tree_perf_module._MEM_LATENCY_MISSING_WARNED = False
+    yield
+    tree_perf_module._MEM_LATENCY_MISSING_WARNED = False
 
 
 @pytest.fixture(scope="module")
@@ -55,6 +65,28 @@ def perf_report(tmp_path_factory):
 
     with open(arch_path, "w") as f:
         json.dump(MI300X_ARCH, f)
+
+    generate_perf_report_pytorch(
+        profile_json_path=TRACE_PATH,
+        output_xlsx_path=None,
+        output_csvs_dir=csv_dir,
+        gpu_arch_json_path=arch_path,
+        enable_origami=True,
+    )
+
+    return csv_dir
+
+
+@pytest.fixture(scope="module")
+def perf_report_with_mem_latency(tmp_path_factory):
+    """Generate a perf report with mem_latency_us in the arch JSON."""
+    output_dir = tmp_path_factory.mktemp("roofline_bound_latency")
+    arch_path = str(output_dir / "mi300x.json")
+    csv_dir = str(output_dir / "perf_report_csvs")
+    arch = dict(MI300X_ARCH, mem_latency_us=0.3)
+
+    with open(arch_path, "w") as f:
+        json.dump(arch, f)
 
     generate_perf_report_pytorch(
         profile_json_path=TRACE_PATH,
@@ -85,6 +117,23 @@ def test_roofline_bound_in_unified_perf_summary(perf_report):
     )
     bound_vals = set(df[bound_col].dropna().unique())
     assert bound_vals <= VALID_BOUND_VALUES, f"Unexpected values: {bound_vals}"
+
+
+def test_roofline_bound_legacy_arch_warns(perf_report):
+    """Legacy arch JSON without mem_latency_us should warn once during report gen."""
+    with pytest.warns(UserWarning, match="mem_latency_us"):
+        tree_perf_module.warn_if_missing_mem_latency(MI300X_ARCH)
+
+
+def test_roofline_bound_with_mem_latency(perf_report_with_mem_latency):
+    """With mem_latency_us, LATENCY_BOUND may appear in unified_perf_summary."""
+    df = pd.read_csv(
+        os.path.join(perf_report_with_mem_latency, "unified_perf_summary.csv")
+    )
+    bound_col = _find_col(df, "Roofline Bound")
+    assert bound_col is not None
+    bound_vals = set(df[bound_col].dropna().unique())
+    assert bound_vals <= VALID_BOUND_VALUES_WITH_LATENCY, f"Unexpected values: {bound_vals}"
 
 
 @pytest.mark.skipif(not _ORIGAMI_AVAILABLE, reason="requires origami (rocm-origami)")
