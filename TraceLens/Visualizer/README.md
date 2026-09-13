@@ -105,28 +105,35 @@ python visualize_model_in_explorer.py moonshotai/Kimi-K3 --operators-json kimi_o
 
 ### Model Explorer (`python -m TraceLens.Visualizer.model_explorer_export.cli`)
 
-Two graph-building backends are available via `--backend`:
-
-- `torch` (default) — traces the model with PyTorch on the meta device
-  (`TraceLens.ModelUtils.torch_trace`). Requires `torch` + `transformers`.
-- `ast` — the original static-analysis pipeline: parses the model's
-  `modeling_*.py` source with Python's `ast` module instead of executing any
-  model code (`TraceLens.ModelUtils.extract` / `computation_graph` / `merge`
-  / ...). Kept as a switchable fallback, e.g. for checkpoints that cannot be
-  instantiated or traced. All flags below except the torch-tracing ones
-  (`--seq-len`, `--batch-size`) apply only to `--backend ast`.
+The graph is built by **static analysis**: the model's `modeling_*.py` source
+is parsed with Python's `ast` module (`TraceLens.ModelUtils.ast_analyze` /
+`computation_graph` / `merge` / ...) instead of executing any model code, so no
+checkpoint weights are loaded and no GPU is needed. A PyTorch meta-device pass
+(`--meta-shapes`, on by default) then fills in the shapes static analysis
+cannot infer — it allocates no real tensors and requires only `torch` +
+`transformers`. Disable it with `--no-meta-shapes` for pure static analysis.
 
 ```bash
-python -m TraceLens.Visualizer.model_explorer_export.cli moonshotai/Kimi-K3 --backend ast --serve --open
+python -m TraceLens.Visualizer.model_explorer_export.cli moonshotai/Kimi-K3 --serve --open
+```
+
+Export is a two-stage pipeline — model → JSON payload, then JSON → HTML viewer.
+Write the JSON with `-o <model>.json`, then render the standalone viewer from it
+with `--from-payload <model>.json -o <model>.html` (stage 2 skips loading the
+model entirely):
+
+```bash
+python -m TraceLens.Visualizer.model_explorer_export.cli moonshotai/Kimi-K3 -o kimi.json
+python -m TraceLens.Visualizer.model_explorer_export.cli --from-payload kimi.json -o kimi.html
 ```
 
 | Option                          | Description                                                                                             |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `SOURCE` / `--checkpoint`, `-c` | Hugging Face model id or local checkpoint directory                                                     |
-| `--backend`                     | `torch` (default, meta-device tracing) or `ast` (static source parsing)                                 |
-| `--github`, `-g`                | *(ast only)* GitHub repo URL or `github:owner/repo@ref:path` for modeling source (repo must be whitelisted) |
-| `--allow-repo OWNER/REPO`       | Whitelist an extra GitHub repo for remote source introspection (repeatable)                             |
 | `-o`, `--output`                | Write a self-contained `.html` viewer (`<model>.html` by default) or an explicit `.html` / `.json` path |
+| `--from-payload PATH`           | Render the `.html` viewer from an existing payload JSON (stage 2); skips loading the model               |
+| `--github`, `-g`                | GitHub repo URL or `github:owner/repo@ref:path` for modeling source (repo must be whitelisted)          |
+| `--allow-repo OWNER/REPO`       | Whitelist an extra GitHub repo for remote source introspection (repeatable)                             |
 | `--title`                       | Architecture display name override                                                                      |
 | `--serve`                       | Start a local HTTP server with the viewer (optional; HTML export works without it)                      |
 | `--open`                        | Open the viewer URL in a browser (with `--serve`)                                                       |
@@ -137,11 +144,35 @@ python -m TraceLens.Visualizer.model_explorer_export.cli moonshotai/Kimi-K3 --ba
 | `--basic-op-add REGEX`          | Treat matching block names as leaf/basic ops (repeatable)                                               |
 | `--basic-op-remove REGEX`       | Remove a default basic-op pattern (repeatable)                                                          |
 | `--all-tensor-ops`              | Include tensor housekeeping ops in detailed graphs                                                      |
+| `--no-inline-expansion`         | Keep composite modules as opaque tiles instead of expanding into internal steps                         |
 | `--no-shapes`                   | Skip `output_shape` / `output_dtype` annotations                                                        |
+| `--meta-shapes` / `--no-meta-shapes` | Meta-device shape pass filling shapes static analysis can't infer — on by default (`--no-meta-shapes` = pure static) |
 | `--operators-json PATH`         | Also write flat operator export JSON with inferred shapes                                               |
+| `--torch-module PKG.MOD:FACTORY` | *(debugging)* Introspect a plain `torch.nn.Module` instead of an HF checkpoint (see below)              |
+| `--input-shape N,...`           | *(debugging)* Primary input tensor shape for `--torch-module` (e.g. `2,128`)                            |
 
 
 Shape inference is **on by default**, and every exported node carries output metadata so the viewer shows tensor shapes on edges instead of `?`. Nodes without an inferred shape of their own (overview spine tiles, group input ports) inherit the shape of whatever feeds them. Model Explorer cannot label an edge that ends on a collapsed group, so expandable blocks also carry `input_shape` and `output_shape` layer attributes describing what crosses their boundary. Dimensions use the symbols `B` (batch), `S` (sequence), `H` (hidden), `V` (vocab), `N`/`K` (attention and KV heads), `D` (head dim), `I` (intermediate), `E` (experts) and `TopK`.
+
+### Debugging: standalone `nn.Module` introspection (`--torch-module`)
+
+The main pipeline visualizes a Hugging Face checkpoint from its `modeling_*.py`
+source. As a **debugging aid**, `--torch-module` instead introspects an
+arbitrary in-memory `torch.nn.Module` — useful for inspecting a module in
+isolation, or cross-checking the static-analysis graph against a real trace.
+It requires `torch`: the module is instantiated, symbolically traced with
+`torch.fx`, and its shapes propagated with `ShapeProp`
+(`TraceLens.ModelUtils.torch_introspect`). Give an importable
+`package.module:callable` returning an `nn.Module` (a class or zero-arg
+factory) plus the primary `--input-shape`:
+
+```bash
+python -m TraceLens.Visualizer.model_explorer_export.cli \
+  --torch-module my_pkg.models:MyBlock --input-shape 2,128 -o myblock.html
+```
+
+This path is intentionally kept for debugging and is separate from the HF
+checkpoint pipeline; it is not part of the default export flow.
 
 ## Source resolution
 
