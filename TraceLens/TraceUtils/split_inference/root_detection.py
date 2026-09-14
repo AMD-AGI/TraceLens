@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Sequence
 
 from collections import deque
 
+from ...util import normalize_name_for_comparison
 from ...Trace2Tree.inference_iteration_roots import (
     BRANCH_COVERAGE_GATE,
     BRANCH_DESCENT_TIER,
@@ -173,6 +174,7 @@ def _branch_candidate(
         "period_depth": depth,
         "branch_source": source,
         "branch_coverage": round(cov, 4),
+        "iter_gpu_time": gpu_time,
     }
     diagnostics.update(extra or {})
     return RootSet(
@@ -182,6 +184,108 @@ def _branch_candidate(
         status=_grade(cov),
         diagnostics=diagnostics,
     )
+
+
+def _compute_gpu_signature(tree: TraceToTree, block: Sequence[dict]) -> List[str]:
+    """Normalized names carrying the first half of a block's GPU time.
+
+    The names are sorted by descending GPU contribution and cut as soon as they
+    pass half the block's total, so the signature describes what an iteration
+    unmistakably does rather than everything it happens to touch.
+    """
+    name_gpu: Dict[str, float] = {}
+    total = 0.0
+    for event in block:
+        gpu = _descendant_gpu_time(tree, [event])
+        norm = normalize_name_for_comparison(event.get("name", ""))
+        name_gpu[norm] = name_gpu.get(norm, 0.0) + gpu
+        total += gpu
+    if not total:
+        return []
+    signature: List[str] = []
+    accumulated = 0.0
+    for name, gpu in sorted(name_gpu.items(), key=lambda x: -x[1]):
+        signature.append(name)
+        accumulated += gpu
+        if accumulated > total * 0.5:
+            break
+    return signature
+
+
+def _matches_gpu_signature(events: Sequence[dict], signature: List[str]) -> bool:
+    """True when ``signature`` appears as a subsequence of ``events``' names.
+
+    A subsequence rather than a contiguous run: a warmup pass does the same work
+    as a steady-state iteration with extra setup interleaved.
+    """
+    index = 0
+    for event in events:
+        if index < len(signature) and (
+            normalize_name_for_comparison(event.get("name", "")) == signature[index]
+        ):
+            index += 1
+    return index == len(signature)
+
+
+def _promote_bookend_iterations(
+    tree: TraceToTree,
+    ordered: Sequence[dict],
+    start: int,
+    unit_blocks: List[List[dict]],
+) -> tuple:
+    """Adopt the leading and trailing regions as iterations when they do the same work.
+
+    The period search anchors on a repeating run, which leaves whatever precedes
+    and follows it outside every block -- typically a warmup pass and a wrapup,
+    each doing an iteration's work without matching its stride. Judging them by
+    GPU signature rather than by name is what lets them in: they are the same
+    computation, so excluding them reports GPU time no root accounts for.
+
+    Returns ``(unit_blocks, prefix, suffix)`` with the promoted regions moved
+    into ``unit_blocks`` and only the unpromoted remainder left behind.
+    """
+    representative = unit_blocks[len(unit_blocks) // 2]
+    signature = _compute_gpu_signature(tree, representative)
+
+    prefix = list(ordered[:start])
+    blocked_uids = {e.get("UID") for block in unit_blocks for e in block}
+    last = unit_blocks[-1][-1]
+    last_block_end = last["ts"] + last.get("dur", 0)
+    suffix = [
+        e
+        for e in ordered
+        if e["ts"] >= last_block_end and e.get("UID") not in blocked_uids
+    ]
+
+    if signature and prefix and _matches_gpu_signature(prefix, signature):
+        unit_blocks.insert(0, prefix)
+        prefix = []
+    if signature and suffix and _matches_gpu_signature(suffix, signature):
+        unit_blocks.append(suffix)
+        suffix = []
+    return unit_blocks, prefix, suffix
+
+
+def _bookend_diagnostics(
+    blocked: Sequence[dict],
+    prefix: Sequence[dict],
+    suffix: Sequence[dict],
+) -> Dict:
+    """The unpromoted remainder, for the cascade to offer as bookend roots.
+
+    Only UIDs: resolving them to events and pricing their GPU time is the
+    cascade's job, and doing it here would walk the subtree a second time on the
+    descent's hot path.
+    """
+    blocked_uids = {e.get("UID") for e in blocked}
+    return {
+        "before_uids": [
+            e.get("UID") for e in prefix if e.get("UID") not in blocked_uids
+        ],
+        "after_uids": [
+            e.get("UID") for e in suffix if e.get("UID") not in blocked_uids
+        ],
+    }
 
 
 def _periodic_candidate(
@@ -200,12 +304,22 @@ def _periodic_candidate(
     live = [e for e in ordered if gputime_by_name.get(e.get("name", ""), 0.0) > 0]
     if len(live) < MIN_LABEL_CHILDREN:
         return None
-    period, pattern, start = _find_repeating_period([e.get("name", "") for e in live])
+    # Normalized names, because ``_blocks_by_pattern`` matches on them: the two
+    # have to agree, and normalizing is what lets a python frame repeat at all
+    # when its line number shifts between iterations.
+    period, pattern, start = _find_repeating_period(
+        [normalize_name_for_comparison(e.get("name", "")) for e in live]
+    )
     if period is None or period == 1:
         return None
     unit_blocks = _blocks_by_pattern(live, pattern, start)
     if len(unit_blocks) < MIN_LABEL_CHILDREN:
         return None
+    # ``live``, not ``ordered``: ``start`` indexes the sequence the period was
+    # found in, so the bookends have to be taken from that same sequence.
+    unit_blocks, prefix, suffix = _promote_bookend_iterations(
+        tree, live, start, unit_blocks
+    )
     iteration_roots: List[dict] = []
     blocked: List[dict] = []
     for block in unit_blocks:
@@ -216,7 +330,14 @@ def _periodic_candidate(
         iteration_roots.append(event)
         blocked.extend(block)
     return _branch_candidate(
-        tree, iteration_roots, blocked, total_gpu, depth, "period", period
+        tree,
+        iteration_roots,
+        blocked,
+        total_gpu,
+        depth,
+        "period",
+        period,
+        extra=_bookend_diagnostics(blocked, prefix, suffix),
     )
 
 
@@ -229,10 +350,10 @@ def _grouped_candidate(
 ) -> Optional[RootSet]:
     """One candidate from the recurring child frame that carries the GPU work.
 
-    A *conditional* loop body has no contiguous period. Grouping by name ignores 
+    A *conditional* loop body has no contiguous period. Grouping by name ignores
     the gaps, exactly as ``build_families`` does one level up.
 
-    Ranked by GPU time, then cadence, then count. Only the winning family becomes roots. 
+    Ranked by GPU time, then cadence, then count. Only the winning family becomes roots.
     """
     ranked = [
         (
@@ -355,32 +476,47 @@ def detect_from_sibling_roots(
         return None
 
     ordered = sorted(entry_roots, key=lambda e: e.get("ts", 0))
-    period, _, start = _find_repeating_period([e.get("name", "") for e in ordered])
+    period, _, start = _find_repeating_period(
+        [normalize_name_for_comparison(e.get("name", "")) for e in ordered]
+    )
     if period is None:
         return None
 
     blocks = (len(ordered) - start) // period
+    unit_blocks = [
+        list(ordered[start + index * period : start + (index + 1) * period])
+        for index in range(blocks)
+    ]
+    if not unit_blocks:
+        return None
+    unit_blocks, prefix, suffix = _promote_bookend_iterations(
+        tree, ordered, start, unit_blocks
+    )
+
     sibling_roots = []
     blocked = []
-    for index in range(blocks):
-        block = ordered[start + index * period : start + (index + 1) * period]
+    for block in unit_blocks:
         first, last = block[0], block[-1]
         event = dict(first)
         event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
         sibling_roots.append(event)
         blocked.extend(block)
-    if not sibling_roots:
-        return None
 
-    cov = _descendant_gpu_time(tree, blocked) / total_gpu if total_gpu else 0.0
+    iter_gpu_time = _descendant_gpu_time(tree, blocked)
+    cov = iter_gpu_time / total_gpu if total_gpu else 0.0
+    diagnostics = _bookend_diagnostics(blocked, prefix, suffix)
+    diagnostics.update(
+        {
+            "period_label_tier": "sibling_roots",
+            "period": period,
+            "branch_coverage": round(cov, 4),
+            "iter_gpu_time": iter_gpu_time,
+        }
+    )
     return RootSet(
         roots=sibling_roots,
         method="generic:sibling_roots",
         phase_confidence=PhaseConfidence.UNKNOWN,
         status=_grade(cov),
-        diagnostics={
-            "period_label_tier": "sibling_roots",
-            "period": period,
-            "branch_coverage": round(cov, 4),
-        },
+        diagnostics=diagnostics,
     )

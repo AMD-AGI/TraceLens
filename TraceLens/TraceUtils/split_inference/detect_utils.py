@@ -61,7 +61,7 @@ class PhaseConfidence(str, Enum):
 class CoverageReport:
     """Result of a GPU-time coverage audit.
 
-    ``covered_selected`` measures the roots' extraction windows, gaps included; ``covered_spans`` measures the bare annotation spans. 
+    ``covered_selected`` measures the roots' extraction windows, gaps included; ``covered_spans`` measures the bare annotation spans.
     """
 
     strategy: str
@@ -82,8 +82,7 @@ class CoverageReport:
 
     @property
     def passes(self) -> bool:
-        """Whether the roots explain enough GPU work, without being stretched.
-        """
+        """Whether the roots explain enough GPU work, without being stretched."""
         return self.covered_selected >= COVERAGE_GATE and (
             self.span_share >= MIN_SPAN_SHARE
         )
@@ -115,7 +114,11 @@ class RootSet:
             "coverage_root_spans_only": round(cov.covered_spans, 4) if cov else None,
             "root_span_share": round(cov.span_share, 4) if cov else None,
         }
-        manifest.update(self.diagnostics)
+        # Underscore keys are objects passed between stages -- the event map, for
+        # one -- not findings. Serializing them would swamp the manifest.
+        manifest.update(
+            {k: v for k, v in self.diagnostics.items() if not k.startswith("_")}
+        )
         return manifest
 
 
@@ -324,8 +327,7 @@ class GpuAttribution:
         return out
 
     def attributed_kernels(self, instances: Sequence[dict]) -> Tuple[List[dict], str]:
-        """Kernels belonging to ``instances``, and which strategy found them.
-        """
+        """Kernels belonging to ``instances``, and which strategy found them."""
         matched = [
             self._spans_by_external_id.get((e.get("args") or {}).get("External id"))
             for e in instances

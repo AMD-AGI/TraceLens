@@ -11,8 +11,8 @@ Covers:
   (``find_iteration_roots``) and the priority of the primary 1211 pattern.
 - Per-iteration splitting / time-window isolation (``extract_iteration``).
 - Annotation-name parsing of the names these fixtures generate.
-- Steady-state window finding (``identify_steady_state_regions`` and
-  ``find_steady_state_window``).
+- Steady-state window finding (``find_steady_state_inference`` and
+  ``find_steady_state_generic``).
 
 No trace files are written; everything operates on in-memory dicts.
 """
@@ -21,6 +21,10 @@ import gzip, json, os, zipfile, sys, pytest
 from typing import Dict, List
 from TraceLens.TraceUtils import split_inference_trace_annotation as split
 from TraceLens.TraceUtils.annotation_utils import IterationAnnotation
+from TraceLens.TraceUtils.split_inference.steady_state_window import (
+    _identify_regions_inference,
+    _compute_reference_pd_ratio,
+)
 from TraceLens.PerfModel.extensions import moe_perf_model_extensions as moe_ext
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _align_graph_to_capture_by_group,
@@ -247,24 +251,20 @@ def _details(num_requests, context_requests=0):
 
 def test_identify_steady_state_regions_clear_region():
     iter_details = [_details(2) for _ in range(4)] + [_details(20) for _ in range(30)]
-    regions, global_max = split.identify_steady_state_regions(
-        iter_details, num_steps=32
-    )
+    regions, global_max = _identify_regions_inference(iter_details, num_steps=32)
     assert global_max == 20
     assert regions == [(4, 33)]
 
 
 def test_identify_steady_state_regions_fallback():
     iter_details = [_details(20 if i % 2 == 0 else 2) for i in range(10)]
-    regions, global_max = split.identify_steady_state_regions(
-        iter_details, num_steps=12
-    )
+    regions, global_max = _identify_regions_inference(iter_details, num_steps=12)
     assert global_max == 20
     assert len(regions) == 1
     assert regions == [(4, 6)]
 
 
-def test_find_steady_state_window_returns_contiguous_slice():
+def test_find_steady_state_inference_returns_contiguous_slice():
     roots = [
         {
             "name": SGLANG_DECODE_ANNOTATION.format(i=20),
@@ -274,8 +274,8 @@ def test_find_steady_state_window_returns_contiguous_slice():
         }
         for i in range(32)
     ]
-    window = split.find_steady_state_window(
-        roots, num_steps=8, steady_state_regions=[(0, 32)], mode="decode_only"
+    window, _ = split.find_steady_state_inference(
+        roots, num_steps=8, mode="decode_only"
     )
     assert len(window) == 8
     # The window is a contiguous slice of the original roots.
@@ -378,7 +378,7 @@ def test_extract_phases_and_save(tmp_path):
 def test_compute_reference_pd_ratio():
     iter_details = [_details(20 if i % 2 else 2) for i in range(20)]
     regions = [(0, 20)]
-    (start, end), avg_ratio, largest_ratio = split.compute_reference_pd_ratio(
+    (start, end), avg_ratio, largest_ratio = _compute_reference_pd_ratio(
         regions, iter_details
     )
     assert (start, end) == (0, 20)
@@ -386,7 +386,7 @@ def test_compute_reference_pd_ratio():
     assert 0.0 <= largest_ratio <= 1.0
 
 
-def test_find_steady_state_window_decode_only_mode():
+def test_find_steady_state_inference_decode_only_mode():
     roots = [
         {
             "name": SGLANG_DECODE_ANNOTATION.format(i=20),
@@ -396,10 +396,9 @@ def test_find_steady_state_window_decode_only_mode():
         }
         for i in range(32)
     ]
-    window = split.find_steady_state_window(
+    window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
-        steady_state_regions=[(0, 32)],
         mode="decode_only",
     )
     assert len(window) == 8
@@ -518,197 +517,6 @@ def test_branch_descent_from_synthetic_events():
     result = detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu_time(tree))
     assert result is not None
     assert len(result.roots) >= 1
-
-
-def _conditional_loop_events(
-    turns: int, worked: set, noisy: set = frozenset(), post: bool = False
-) -> List[Dict]:
-    """An event loop where only the turns in ``worked`` run the GPU frame.
-
-    Every turn also emits a kernel-free bookkeeping frame, so the child-name
-    sequence has no contiguous period -- the shape that made real sglang overlap
-    scheduling undetectable.
-
-    ``noisy`` turns emit one extra kernel-free frame, which is enough to break
-    the stride even when every turn does work. ``post`` adds a second, much
-    cheaper GPU frame per working turn, so the loop body is two frames wide.
-    """
-    events: List[Dict] = [
-        {
-            "ph": "X",
-            "cat": "cpu_op",
-            "name": "event_loop",
-            "pid": 1,
-            "tid": 1,
-            "ts": 0,
-            "dur": turns * 2000,
-            "args": {"Sequence number": 0},
-        }
-    ]
-    corr = 900
-    for turn in range(turns):
-        base = 100 + turn * 2000
-        idle = (("idle", 200),) if turn in noisy else ()
-        for name, offset in (("get_next_batch", 0), ("bookkeeping", 100)) + idle:
-            events.append(
-                {
-                    "ph": "X",
-                    "cat": "cpu_op",
-                    "name": name,
-                    "pid": 1,
-                    "tid": 1,
-                    "ts": base + offset,
-                    "dur": 50,
-                    "args": {"Sequence number": turn},
-                }
-            )
-        if turn not in worked:
-            continue
-        frames = [("run_batch", 300, 400, 100)]
-        if post:
-            frames.append(("post_process", 800, 100, 5))
-        for name, offset, dur, kernel_dur in frames:
-            events.append(
-                {
-                    "ph": "X",
-                    "cat": "cpu_op",
-                    "name": name,
-                    "pid": 1,
-                    "tid": 1,
-                    "ts": base + offset,
-                    "dur": dur,
-                    "args": {"Sequence number": turn, "correlation": corr},
-                }
-            )
-            events.extend(
-                [
-                    {
-                        "ph": "X",
-                        "cat": "cuda_runtime",
-                        "name": "hipLaunchKernel",
-                        "pid": 1,
-                        "tid": 1,
-                        "ts": base + offset + 10,
-                        "dur": 5,
-                        "args": {"correlation": corr},
-                    },
-                    {
-                        "ph": "X",
-                        "cat": "kernel",
-                        "name": f"{name}_kernel",
-                        "pid": 0,
-                        "tid": 7,
-                        "ts": base + offset + 50,
-                        "dur": kernel_dur,
-                        "args": {"correlation": corr, "stream": 7},
-                    },
-                    {
-                        "ph": "s",
-                        "id": corr,
-                        "pid": 0,
-                        "tid": 7,
-                        "ts": base + offset + 50,
-                        "cat": "ac2g",
-                        "name": "ac2g",
-                    },
-                    {
-                        "ph": "f",
-                        "id": corr,
-                        "pid": 0,
-                        "tid": 7,
-                        "ts": base + offset + 50 + kernel_dur,
-                        "cat": "ac2g",
-                        "name": "ac2g",
-                        "bp": "e",
-                    },
-                ]
-            )
-            corr += 1
-    return events
-
-
-def _descend(events: List[Dict]):
-    tree = TraceToTree(events, prune_nongpu_paths=True)
-    tree.build_tree(add_python_func=True)
-    _reattach_worker_threads(tree)
-    return detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu_time(tree))
-
-
-def test_branch_descent_finds_conditional_loop_body():
-    """The working frame is found even though it runs on only some turns."""
-    worked = {0, 1, 3, 4, 6, 8, 10, 11}
-    result = _descend(_conditional_loop_events(14, worked))
-
-    assert result is not None
-    assert result.diagnostics["branch_source"] == "frame_family"
-    assert len(result.roots) == len(worked)
-    assert {r["name"] for r in result.roots} == {"run_batch"}
-    assert result.status is DetectStatus.SPLITTABLE
-
-
-def test_branch_descent_periodicity_ignores_kernel_free_frames():
-    """Chatter is dropped before the period search, not only after it.
-
-    ``_blocks_by_pattern`` already tolerates kernel-free intruders, but that
-    tolerance never runs when their irregular spacing is the very thing stopping
-    a period from being found.
-    """
-    events = _conditional_loop_events(
-        12, worked=set(range(12)), noisy={2, 5, 9}, post=True
-    )
-    tree = TraceToTree(events, prune_nongpu_paths=True)
-    tree.build_tree(add_python_func=True)
-    _reattach_worker_threads(tree)
-    node = next(e for e in tree.events_by_uid.values() if e.get("name") == "event_loop")
-    ordered = sorted(tree.get_children_events(node), key=lambda e: e.get("ts", 0))
-    _, gputime_by_name = _child_groups(tree, ordered)
-
-    # The idle frames land on 3 of 12 turns, leaving no contiguous repeating run.
-    assert _find_repeating_period([e.get("name", "") for e in ordered])[0] is None
-
-    candidate = _periodic_candidate(
-        tree, node, ordered, gputime_by_name, _total_gpu_time(tree), 0
-    )
-    assert candidate is not None
-    assert candidate.diagnostics["branch_coverage"] > 0.9
-
-
-def test_branch_descent_rejects_frames_with_no_gpu_work():
-    """A frame explaining no GPU work is never an answer, however often it runs.
-
-    The loop below is perfectly periodic, so the pattern path does produce a
-    candidate -- it just accounts for none of the trace's GPU time, which sits on
-    an unrelated frame. Reporting it was how 63 CPU-only roots got emitted.
-    """
-    events = _conditional_loop_events(14, worked=set())
-    events.extend(
-        [
-            {
-                "ph": "X",
-                "cat": "cpu_op",
-                "name": "unrelated_work",
-                "pid": 1,
-                "tid": 1,
-                "ts": 90000,
-                "dur": 500,
-                "args": {"correlation": 42},
-            },
-            {
-                "ph": "X",
-                "cat": "kernel",
-                "name": "gemm_kernel",
-                "pid": 0,
-                "tid": 7,
-                "ts": 90100,
-                "dur": 200,
-                "args": {"correlation": 42, "stream": 7},
-            },
-        ]
-    )
-    # Guard the guard: the detector must reach the coverage check, not bail out
-    # early on a trace with no GPU work at all.
-    assert sum(e["dur"] for e in events if e.get("cat") == "kernel") > 0
-    assert _descend(events) is None
 
 
 VLLM_PRIMARY = (
@@ -859,17 +667,13 @@ def test_find_iteration_roots_no_annotation_trace():
     assert result.status.name == "NOT_SPLITTABLE"
 
 
-def test_find_steady_state_window_mixed_mode_with_conc_osl_r():
+def test_find_steady_state_inference_mixed_mode_with_conc_osl_r():
     names = _mixed_phase_roots(48)
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    regions, _ = split.identify_steady_state_regions(
-        split.iteration_details(roots), num_steps=16
-    )
-    window = split.find_steady_state_window(
+    window, _ = split.find_steady_state_inference(
         roots,
         num_steps=4,
-        steady_state_regions=regions,
         mode="mixed",
         CONC=20,
         OSL=100.0,
@@ -878,82 +682,77 @@ def test_find_steady_state_window_mixed_mode_with_conc_osl_r():
     assert len(window) >= 1
 
 
-def test_find_steady_state_window_mixed_no_pd_candidates(capsys):
+def test_find_steady_state_inference_mixed_no_pd_candidates(capsys):
     names = [SGLANG_DECODE.format(i=20) for _ in range(24)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    window = split.find_steady_state_window(
+    window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
-        steady_state_regions=[(0, len(roots))],
         mode="mixed",
     )
     captured = capsys.readouterr().out
     assert "falling back to the full candidate set" in captured or len(window) >= 1
 
 
-def test_find_steady_state_window_decode_only_no_pure_run():
+def test_find_steady_state_inference_decode_only_no_pure_run():
     names = [SGLANG_EXTEND.format(t=800) for _ in range(16)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    window = split.find_steady_state_window(
+    window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
-        steady_state_regions=[(0, len(roots))],
         mode="decode_only",
     )
     assert window == []
 
 
-def test_find_steady_state_window_max_prefilldecode():
+def test_find_steady_state_inference_max_prefilldecode():
+    # Mix prefill steps into the steady-state region so concurrency-based
+    # region detection doesn't exclude them as warmup.
     names = []
     for i in range(24):
-        if i < 8:
+        if i % 4 == 0:
             names.append(SGLANG_EXTEND.format(t=800))
         else:
             names.append(SGLANG_DECODE.format(i=20))
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    window = split.find_steady_state_window(
+    window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
-        steady_state_regions=[(0, len(roots))],
         mode="max_prefilldecode",
     )
     assert len(window) >= 1
 
 
-def test_find_steady_state_window_max_prefilldecode_empty():
+def test_find_steady_state_inference_max_prefilldecode_empty():
     names = [SGLANG_DECODE.format(i=20) for _ in range(16)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    window = split.find_steady_state_window(
+    window, _ = split.find_steady_state_inference(
         roots,
         num_steps=8,
-        steady_state_regions=[(0, len(roots))],
         mode="max_prefilldecode",
     )
     assert window == []
 
 
-def test_find_steady_state_window_invalid_mode():
+def test_find_steady_state_inference_invalid_mode():
     names = [VLLM_PRIMARY.format(i=i) for i in range(8)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
     with pytest.raises(ValueError, match="Unknown mode"):
-        split.find_steady_state_window(
-            roots, num_steps=4, steady_state_regions=[(0, 8)], mode="invalid"
-        )
+        split.find_steady_state_inference(roots, num_steps=4, mode="invalid")
 
 
-def test_find_steady_state_window_conc_mismatch_warning(capsys):
+def test_find_steady_state_inference_conc_mismatch_warning(capsys):
     names = [SGLANG_DECODE.format(i=5) for _ in range(16)]
     trace = _make_trace(names)
     roots = split.find_iteration_roots(trace["traceEvents"]).roots
-    split.find_steady_state_window(
+    split.find_steady_state_inference(
         roots,
         num_steps=8,
-        steady_state_regions=[(0, len(roots))],
         mode="mixed",
         CONC=999,
     )
@@ -1035,7 +834,7 @@ def test_identify_steady_state_regions_end_and_middle():
     details = [{"num_requests": 2} for _ in range(6)]
     details += [{"num_requests": 20} for _ in range(20)]
     details += [{"num_requests": 2} for _ in range(6)]
-    regions, global_max = split.identify_steady_state_regions(details, num_steps=16)
+    regions, global_max = _identify_regions_inference(details, num_steps=16)
     assert global_max == 20
     assert len(regions) >= 1
 
@@ -1051,7 +850,7 @@ def test_compute_reference_pd_ratio_median_fallback(capsys):
             }
         )
     regions = [(0, 20)]
-    _, ref_ratio, _ = split.compute_reference_pd_ratio(regions, iter_details)
+    _, ref_ratio, _ = _compute_reference_pd_ratio(regions, iter_details)
     assert 0.0 <= ref_ratio <= 1.0
 
 
@@ -1447,3 +1246,202 @@ class TestCaptureMergeFinal:
             p.write_text(json.dumps(events))
             _get_cached_capture_tree((f"k{i}", str(p)), str(p))
         assert len(tcm._capture_tree_cache) <= tcm._CAPTURE_TREE_CACHE_MAX_SIZE
+
+
+def _conditional_loop_events(
+    turns: int, worked: set, noisy: set = frozenset(), post: bool = False
+) -> List[Dict]:
+    """An event loop where only the turns in ``worked`` run the GPU frame.
+
+    Every turn also emits a kernel-free bookkeeping frame, so the child-name
+    sequence has no contiguous period -- the shape that made real sglang overlap
+    scheduling undetectable.
+
+    ``noisy`` turns emit one extra kernel-free frame, which is enough to break
+    the stride even when every turn does work. ``post`` adds a second, much
+    cheaper GPU frame per working turn, so the loop body is two frames wide.
+    """
+    events: List[Dict] = [
+        {
+            "ph": "X",
+            "cat": "cpu_op",
+            "name": "event_loop",
+            "pid": 1,
+            "tid": 1,
+            "ts": 0,
+            "dur": turns * 2000,
+            "args": {"Sequence number": 0},
+        }
+    ]
+    corr = 900
+    for turn in range(turns):
+        base = 100 + turn * 2000
+        idle = (("idle", 200),) if turn in noisy else ()
+        for name, offset in (("get_next_batch", 0), ("bookkeeping", 100)) + idle:
+            events.append(
+                {
+                    "ph": "X",
+                    "cat": "cpu_op",
+                    "name": name,
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": base + offset,
+                    "dur": 50,
+                    "args": {"Sequence number": turn},
+                }
+            )
+        if turn not in worked:
+            continue
+        frames = [("run_batch", 300, 400, 100)]
+        if post:
+            frames.append(("post_process", 800, 100, 5))
+        for name, offset, dur, kernel_dur in frames:
+            events.append(
+                {
+                    "ph": "X",
+                    "cat": "cpu_op",
+                    "name": name,
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": base + offset,
+                    "dur": dur,
+                    "args": {"Sequence number": turn, "correlation": corr},
+                }
+            )
+            events.extend(
+                [
+                    {
+                        "ph": "X",
+                        "cat": "cuda_runtime",
+                        "name": "hipLaunchKernel",
+                        "pid": 1,
+                        "tid": 1,
+                        "ts": base + offset + 10,
+                        "dur": 5,
+                        "args": {"correlation": corr},
+                    },
+                    {
+                        "ph": "X",
+                        "cat": "kernel",
+                        "name": f"{name}_kernel",
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base + offset + 50,
+                        "dur": kernel_dur,
+                        "args": {"correlation": corr, "stream": 7},
+                    },
+                    {
+                        "ph": "s",
+                        "id": corr,
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base + offset + 50,
+                        "cat": "ac2g",
+                        "name": "ac2g",
+                    },
+                    {
+                        "ph": "f",
+                        "id": corr,
+                        "pid": 0,
+                        "tid": 7,
+                        "ts": base + offset + 50 + kernel_dur,
+                        "cat": "ac2g",
+                        "name": "ac2g",
+                        "bp": "e",
+                    },
+                ]
+            )
+            corr += 1
+    return events
+
+
+def _descend(events: List[Dict]):
+    tree = TraceToTree(events, prune_nongpu_paths=True)
+    tree.build_tree(add_python_func=True)
+    _reattach_worker_threads(tree)
+    return detect_from_branch_descent(tree, _entry_roots(tree), _total_gpu_time(tree))
+
+
+def test_branch_descent_finds_conditional_loop_body():
+    """The working frame is found even though it runs on only some turns."""
+    worked = {0, 1, 3, 4, 6, 8, 10, 11}
+    result = _descend(_conditional_loop_events(14, worked))
+
+    assert result is not None
+    assert result.diagnostics["branch_source"] == "frame_family"
+    assert len(result.roots) == len(worked)
+    assert {r["name"] for r in result.roots} == {"run_batch"}
+    assert result.status is DetectStatus.SPLITTABLE
+
+
+def test_branch_descent_periodicity_ignores_kernel_free_frames():
+    """Chatter is dropped before the period search, not only after it.
+
+    ``_blocks_by_pattern`` already tolerates kernel-free intruders, but that
+    tolerance never runs when their irregular spacing is the very thing stopping
+    a period from being found.
+    """
+    events = _conditional_loop_events(
+        12, worked=set(range(12)), noisy={2, 5, 9}, post=True
+    )
+    tree = TraceToTree(events, prune_nongpu_paths=True)
+    tree.build_tree(add_python_func=True)
+    _reattach_worker_threads(tree)
+    node = next(e for e in tree.events_by_uid.values() if e.get("name") == "event_loop")
+    ordered = sorted(tree.get_children_events(node), key=lambda e: e.get("ts", 0))
+    _, gputime_by_name = _child_groups(tree, ordered)
+
+    # The idle frames land on 3 of 12 turns, leaving no contiguous repeating run.
+    assert _find_repeating_period([e.get("name", "") for e in ordered])[0] is None
+
+    candidate = _periodic_candidate(
+        tree, node, ordered, gputime_by_name, _total_gpu_time(tree), 0
+    )
+    assert candidate is not None
+    assert candidate.diagnostics["branch_coverage"] > 0.9
+
+
+def test_branch_descent_rejects_frames_with_no_gpu_work():
+    """A frame explaining no GPU work is never an answer, however often it runs.
+
+    The loop below is perfectly periodic, so the pattern path does produce a
+    candidate -- it just accounts for none of the trace's GPU time, which sits on
+    an unrelated frame. Reporting it was how 63 CPU-only roots got emitted.
+    """
+    events = _conditional_loop_events(14, worked=set())
+    events.extend(
+        [
+            {
+                "ph": "X",
+                "cat": "cpu_op",
+                "name": "unrelated_work",
+                "pid": 1,
+                "tid": 1,
+                "ts": 90000,
+                "dur": 500,
+                "args": {"correlation": 42},
+            },
+            {
+                "ph": "X",
+                "cat": "kernel",
+                "name": "gemm_kernel",
+                "pid": 0,
+                "tid": 7,
+                "ts": 90100,
+                "dur": 200,
+                "args": {"correlation": 42, "stream": 7},
+            },
+        ]
+    )
+    # Guard the guard: the detector must reach the coverage check, not bail out
+    # early on a trace with no GPU work at all.
+    assert sum(e["dur"] for e in events if e.get("cat") == "kernel") > 0
+    assert _descend(events) is None
+
+
+VLLM_PRIMARY = (
+    "execute_{i}_context_3(sq128sk256sqsq1sqsk1)_generation_2(sq1sk300sqsq1sqsk1)"
+)
+SGLANG_DECODE = "step[DECODE bs={i}]"
+SGLANG_EXTEND = "step[EXTEND bs=2 toks={t}]"
+VLLM_BACKUP = "execute_context_3({i})_generation_2(50)"

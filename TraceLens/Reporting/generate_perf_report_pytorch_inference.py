@@ -21,6 +21,7 @@ import re
 import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
+from TraceLens.util import most_common_first_dim
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.generate_perf_report_pytorch import _find_entry_point
 from TraceLens.Reporting.reporting_utils import (
@@ -226,22 +227,6 @@ def classify_graph_capture_trace(input_folder: str):
             and e.get("cat") == "cuda_runtime"
         )
 
-    def infer_batch_size_from_cpu_ops(events):
-        first_dims = []
-        for e in events:
-            if e.get("cat") != "cpu_op":
-                continue
-            input_dims = e.get("args", {}).get("Input Dims")
-            if not input_dims:
-                continue
-            for dim_list in input_dims:
-                if isinstance(dim_list, list) and dim_list:
-                    if isinstance(dim_list[0], int):
-                        first_dims.append(dim_list[0])
-        if not first_dims:
-            return None
-        return collections.Counter(first_dims).most_common(1)[0][0]
-
     def infer_mode_from_captures(num_captures: int):
         return "FULL" if num_captures <= 1 else "PIECEWISE"
 
@@ -280,7 +265,7 @@ def classify_graph_capture_trace(input_folder: str):
 
         num_captures = count_stream_begin_captures(events)
         mode = infer_mode_from_captures(num_captures)
-        batch_size = infer_batch_size_from_cpu_ops(events)
+        batch_size = most_common_first_dim(events)
         print(
             f"batch_size: {batch_size}, mode: {mode} inferred, num_captures: {num_captures}"
         )

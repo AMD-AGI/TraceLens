@@ -12,7 +12,7 @@ import re
 import glob
 import sys
 import tempfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 try:
     from enum import StrEnum
@@ -84,6 +84,29 @@ def merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, f
         else:
             merged.append((start, end))
     return merged
+
+
+_KERNEL_LAUNCH_EQUIVALENTS = {
+    "hipModuleLaunchKernel": "__kernel_launch__",
+    "cuLaunchKernel": "__kernel_launch__",
+}
+
+
+def normalize_name_for_comparison(name, strip_details=False):
+    """Normalize a trace event name for comparison.
+
+    Strips volatile parts (line numbers, hex addresses) so that names like
+    ``scheduler.py(3006): run_batch`` and ``scheduler.py(2996): run_batch``
+    compare as equal.
+    """
+    if name is None:
+        return name
+    normalized = re.sub(r"0x[0-9a-fA-F]+", "0xXXXX", name)
+    normalized = re.sub(r"\.py\(\d+\):", ".py:", normalized)
+    if strip_details:
+        normalized = re.sub(r":\s+\S+$", "", normalized)
+        normalized = re.sub(r"^.*/([^/]+\.py)$", r"\1", normalized)
+    return _KERNEL_LAUNCH_EQUIVALENTS.get(normalized, normalized)
 
 
 # generic data loader class for json, json.gz, or tensorboard pb files
@@ -1089,3 +1112,25 @@ class PftraceParser:
     def get_events(pftrace_data: dict) -> List[dict]:
         """Return the traceEvents list from loaded pftrace data."""
         return pftrace_data.get("traceEvents", [])
+
+
+def most_common_first_dim(events: list[dict]) -> int | None:
+    """Return the most common first dimension across all ``Input Dims`` of cpu_op events.
+
+    Scans every ``cpu_op`` event's ``Input Dims`` argument, collects the first
+    element of each dimension list, and returns the most frequent value.
+    Returns ``None`` when no cpu_op carries ``Input Dims``.
+    """
+    first_dims: list[int] = []
+    for e in events:
+        if e.get("cat") != "cpu_op":
+            continue
+        input_dims = e.get("args", {}).get("Input Dims")
+        if not input_dims:
+            continue
+        for dim_list in input_dims:
+            if isinstance(dim_list, list) and dim_list and isinstance(dim_list[0], int):
+                first_dims.append(dim_list[0])
+    if not first_dims:
+        return None
+    return Counter(first_dims).most_common(1)[0][0]
