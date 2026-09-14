@@ -583,6 +583,75 @@ def test_glm53_linear_attention_projections_are_parallel_off_masked_input():
         ), (proj, source_key)
 
 
+def test_glm53_flinear_weight_operand_is_hidden():
+    """Every rendered ``Linear`` has a single input; learned weights are hidden.
+
+    ``F.linear(input, weight)`` records both operands, so the hyper-connection,
+    MoE-experts and router linears each carried a second tensor input -- the
+    learned weight (a ``self.fn.float()`` cast, a per-expert ``gate_up_proj``
+    gather, a ``self.weight.type(float32)`` cast). Just like the absorbed weight
+    of an ``nn.Linear`` submodule, that operand must not be drawn: a ``Linear``
+    node has exactly one input, the activation. Zero inputs would mean the
+    activation edge was wrongly removed instead.
+    """
+    pytest.importorskip("huggingface_hub")
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+
+    linear_nodes = [node for node in graph["nodes"] if node.get("label") == "Linear"]
+    # The export contains hyper-connection, experts and router F.linear ops.
+    assert linear_nodes
+    for node in linear_nodes:
+        incoming = node.get("incomingEdges", [])
+        assert len(incoming) == 1, (node["id"], [e.get("sourceNodeId") for e in incoming])
+
+
+def test_glm53_hyperconnection_linear_keeps_activation_drops_weight():
+    """The surviving hyper-connection linear input is the activation, not ``fn``.
+
+    Removing the weight operand must leave the activation (``flat``) edge intact
+    and disconnect the ``self.fn.float()`` weight producer -- confirming the pass
+    hides the learned weight rather than the activation. (The disconnected weight
+    cast may linger as a dangling leaf in this intermediate per-class graph when
+    an inline frame protects it from the leaf strip; the merged export drops it,
+    which ``test_glm53_flinear_weight_operand_is_hidden`` covers.)
+    """
+    pytest.importorskip("huggingface_hub")
+    from TraceLens.ModelUtils.block_tree import build_block_node
+    from TraceLens.ModelUtils.computation_graph import build_computation_graph
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    tree = build_block_node(
+        attr_name="attn_hc",
+        class_name="Glm5NextTextHyperConnection",
+        registry=spec.class_registry,
+        basic_ops=spec.basic_ops,
+        infer_init_steps=True,
+    )
+    graph = build_computation_graph(tree, basic_ops=spec.basic_ops)
+
+    linear_index = next(
+        index
+        for index, node in enumerate(graph.nodes)
+        if node.block is not None and node.block.attr_name.endswith("_linear")
+    )
+    incoming = [source for source, dest in graph.links if dest == linear_index]
+    assert len(incoming) == 1, [graph.nodes[s].key for s in incoming]
+    # The surviving producer is an activation op, never a param-reading weight op.
+    survivor = graph.nodes[incoming[0]].block
+    assert not (survivor is not None and survivor.external_inputs), (
+        graph.nodes[incoming[0]].key,
+        survivor.external_inputs if survivor else None,
+    )
+    # The learned-weight producer that read ``self.fn`` no longer feeds the linear.
+    assert not any(
+        graph.nodes[source].block is not None
+        and "fn" in graph.nodes[source].block.external_inputs
+        for source in incoming
+    )
+
+
 def test_glm53_dead_code_elimination_is_idempotent_for_hyperconnection():
     pytest.importorskip("huggingface_hub")
     from TraceLens.ModelUtils.block_tree import build_block_node

@@ -1254,6 +1254,59 @@ def _prune_weight_only_ops(graph: ComputationGraph) -> ComputationGraph:
     return _prune_computation_nodes(graph, weight_only)
 
 
+def _prune_linear_weight_operands(
+    graph: ComputationGraph, root: BlockNode | None = None
+) -> ComputationGraph:
+    """Hide the weight argument of an ``F.linear`` op, mirroring ``nn.Linear``.
+
+    ``F.linear(input, weight[, bias])`` records its operands in call order, so the
+    entries after the first are the weight (and optional bias). When such an
+    operand's producer reads a module parameter directly (``external_inputs``
+    names a ``self.<param>`` — a raw weight, a ``self.weight.float()`` cast, or a
+    per-expert ``self.gate_up_proj[expert_idx]`` gather) it is a learned weight
+    and, like the absorbed weight of an ``nn.Linear`` submodule, must not be
+    drawn. Only the activation operand (index 0) survives, so the op renders with
+    a single input.
+
+    The weight *edge* is removed rather than bridged across the producer: a
+    gathered weight shares its routing-index predecessor with the activation
+    gather, and bridging would rewire that index into the linear as a spurious
+    operand. Removing the edge leaves the producer dangling, and the existing
+    dangling-leaf strip then drops it and any param-only ancestors, while shared
+    predecessors keep their other consumers.
+    """
+    weight_edges: set[tuple[int, int]] = set()
+    for target, spec in enumerate(graph.nodes):
+        block = spec.block
+        if block is None or not is_forward_operation(block.attr_name):
+            continue
+        if not block.attr_name.endswith("_linear"):
+            continue
+        preds = block.operation_predecessors
+        if len(preds) < 2:
+            continue
+        weight_attrs = {attr for attr in preds[1:] if attr != preds[0]}
+        if not weight_attrs:
+            continue
+        for source, tgt in graph.links:
+            if tgt != target:
+                continue
+            source_block = graph.nodes[source].block
+            if source_block is None:
+                continue
+            # A learned-weight operand reads a module parameter directly; a
+            # computed weight (e.g. a LoRA delta) would not, so it is left drawn.
+            if source_block.attr_name in weight_attrs and source_block.external_inputs:
+                weight_edges.add((source, target))
+    if not weight_edges:
+        return graph
+    graph.links = [link for link in graph.links if link not in weight_edges]
+    for link in weight_edges:
+        graph.link_port_labels.pop(link, None)
+        graph.link_output_ports.pop(link, None)
+    return _strip_dangling_leaves(graph, root=root)
+
+
 def add_forward_output(
     graph: ComputationGraph,
     *,
@@ -3247,6 +3300,7 @@ def build_computation_graph(
     )
     graph = _strip_dangling_leaves(graph, root=root)
     graph = _prune_weight_only_ops(graph)
+    graph = _prune_linear_weight_operands(graph, root=root)
     add_forward_output(graph, root=root)
     _add_kernel_output_port_nodes(graph)
     if basic_ops is not None and basic_ops.basic_only:
