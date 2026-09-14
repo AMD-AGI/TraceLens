@@ -26,14 +26,14 @@ from ..annotation_utils import (
 
 from .detect_utils import (
     GPU_KERNEL_CATEGORIES,
-    PROJECTION_CATEGORY,
+    GPU_USER_ANNOTATION,
     build_root_tiles,
 )
 
-# Kernels plus the annotation projections that describe them. Anything summing
-# GPU *time* must use GPU_KERNEL_CATEGORIES instead, since a projection encloses
+# Kernels plus the GPU annotation spans that enclose them. Anything summing
+# GPU *time* must use GPU_KERNEL_CATEGORIES instead, since a span encloses
 # the kernels it describes and counting both double-counts.
-GPU_EVENT_CATEGORIES = [*GPU_KERNEL_CATEGORIES, PROJECTION_CATEGORY]
+GPU_EVENT_CATEGORIES = [*GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION]
 
 
 def get_filename(filepath: str) -> dict:

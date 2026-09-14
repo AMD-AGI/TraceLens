@@ -16,6 +16,7 @@ from ...Trace2Tree.trace_to_tree import TraceToTree
 from ..annotation_utils import (
     find_known_annotations,
     is_parseable,
+    name_skeleton,
 )
 from .detect_utils import (
     COVERAGE_FLOOR,
@@ -55,7 +56,7 @@ def _detect_from_known_annotations(
     known = find_known_annotations(annotations)
     if not known:
         return None
-
+    # ToDo: We do not need this check, clean up in a follow up PR.
     labelled = sum(1 for r in known if is_parseable(r.get("name", "")))
     if labelled == len(known):
         confidence = PhaseConfidence.HIGH
@@ -88,6 +89,8 @@ def _detect_from_unknown_family(
     regular = [f for f in families if f.regular]
     if not regular:
         return None
+    # Find the family with the lowest rank, which is the family with the most GPU work.
+    # Tie-break by the family with lowest interarrival CV
     family = min(regular, key=lambda f: f.rank)
     return RootSet(
         roots=sorted(family.instances, key=lambda e: e.get("ts", 0)),
@@ -98,6 +101,37 @@ def _detect_from_unknown_family(
             "root_family_skeleton": family.skeleton,
             "root_family_known": False,
         },
+    )
+
+
+# Enough to show a mixed root set without one pathological case flooding the log.
+_LOGGED_SKELETONS = 3
+
+
+def _log_attempt(step: str, root_set: Optional[RootSet]) -> None:
+    """Report what one cascade step found, so the escalation is traceable."""
+    if root_set is None:
+        print(f"[roots] {step}: no candidate")
+        return
+    cov = root_set.coverage
+
+    skeletons = sorted({name_skeleton(r.get("name", "")) for r in root_set.roots})
+    shown = ", ".join(
+        s if len(s) <= 60 else s[:57] + "..." for s in skeletons[:_LOGGED_SKELETONS]
+    )
+    if len(skeletons) > _LOGGED_SKELETONS:
+        shown += f", +{len(skeletons) - _LOGGED_SKELETONS} more"
+    head = (
+        f"[roots] {step}: {len(root_set.roots)} roots via {root_set.method} "
+        f"[{shown}]"
+    )
+    if cov is None:
+        print(f"{head}, coverage not measured, status={root_set.status.name}")
+        return
+    print(
+        f"{head}, covered_selected={cov.covered_selected:.1%}, "
+        f"span_share={cov.span_share:.1%} "
+        f"({cov.strategy}), status={root_set.status.name}"
     )
 
 
@@ -116,12 +150,13 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
     annotations = collect_annotations(events)
     best_fallback: Optional[RootSet] = None
 
-    def _try(root_set: Optional[RootSet]) -> Optional[RootSet]:
+    def _try(step: str, root_set: Optional[RootSet]) -> Optional[RootSet]:
         """Audit coverage; return the root_set if it passes, else save as fallback."""
         nonlocal best_fallback
         if root_set is None:
+            _log_attempt(step, None)
             return None
-        coverage = attribution.audit(annotations, root_set.roots)
+        coverage = attribution.audit(root_set.roots)
         root_set.coverage = coverage
 
         known_labels = root_set.phase_confidence is PhaseConfidence.HIGH
@@ -129,12 +164,14 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
             known_labels or not root_set.diagnostics.get("suspiciously_few_roots")
         ):
             root_set.status = DetectStatus.SPLITTABLE
+            _log_attempt(step, root_set)
             return root_set
 
         if coverage.covered_selected >= COVERAGE_FLOOR:
             root_set.status = DetectStatus.DEGRADED
         else:
             root_set.status = DetectStatus.NOT_SPLITTABLE
+        _log_attempt(step, root_set)
 
         if best_fallback is None or (
             root_set.status.value < best_fallback.status.value
@@ -143,18 +180,20 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
         return None
 
     # --- 1. Known annotation patterns -----------------------------------------
-    result = _try(_detect_from_known_annotations(annotations))
+    result = _try("1 known annotations", _detect_from_known_annotations(annotations))
     if result is not None:
         return result
 
     # --- 2. Unknown annotation families ---------------------------------------
-    result = _try(_detect_from_unknown_family(annotations, attribution))
+    result = _try(
+        "2 unknown families", _detect_from_unknown_family(annotations, attribution)
+    )
     if result is not None:
         return result
 
     # --- 3 & 4. Tree-based detectors (built once) ----------------------------
     try:
-        tree = TraceToTree(list(events), prune_nongpu_paths=False)
+        tree = TraceToTree(list(events), prune_nongpu_paths=True)
         tree.build_tree(add_python_func=True)
     except Exception as exc:
         print(f"TraceToTree build failed ({exc}), skipping tree detectors.")
@@ -170,14 +209,26 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
     tree = _reattach_worker_threads(tree)
     entry_roots = _entry_roots(tree)
     total_gpu = _total_gpu_time(tree)
-
+    if total_gpu == 0:
+        return RootSet(
+            roots=[],
+            method="none",
+            status=DetectStatus.NOT_SPLITTABLE,
+            diagnostics={"reason": "no GPU work"},
+        )
     # --- 3. Branch descent ----------------------------------------------------
     branch_set = detect_from_branch_descent(tree, entry_roots, total_gpu)
+    if branch_set is not None:
+        branch_set.coverage = attribution.audit(branch_set.roots)
+    _log_attempt("3 branch descent", branch_set)
     if branch_set is not None and branch_set.status is DetectStatus.SPLITTABLE:
         return branch_set
 
     # --- 4. Sibling roots ----------------------------------------------------
     sibling_set = detect_from_sibling_roots(tree, entry_roots, total_gpu)
+    if sibling_set is not None:
+        sibling_set.coverage = attribution.audit(sibling_set.roots)
+    _log_attempt("4 sibling roots", sibling_set)
     if sibling_set is not None and sibling_set.status is DetectStatus.SPLITTABLE:
         return sibling_set
 
@@ -187,9 +238,11 @@ def find_iteration_roots(events: Sequence[dict]) -> RootSet:
             candidate is not None
             and candidate.status is not DetectStatus.NOT_SPLITTABLE
         ):
+            _log_attempt("fallback (best usable)", candidate)
             return candidate
     for candidate in (branch_set, sibling_set, best_fallback):
         if candidate is not None:
+            _log_attempt("fallback (last resort)", candidate)
             return candidate
     return RootSet(
         roots=[],

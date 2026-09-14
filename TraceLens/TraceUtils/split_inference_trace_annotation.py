@@ -344,8 +344,8 @@ def main():
     if detection.coverage:
         print(
             f"GPU coverage ({detection.coverage.strategy}): "
-            f"{detection.coverage.covered_any:.1%} by any annotation, "
-            f"{detection.coverage.covered_selected:.1%} by the selected roots"
+            f"{detection.coverage.covered_selected:.1%} of GPU time by the "
+            f"selected roots"
         )
 
     # Create output directory

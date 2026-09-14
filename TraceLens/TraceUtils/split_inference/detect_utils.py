@@ -22,12 +22,10 @@ from enum import Enum, IntEnum
 from statistics import median
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from ..annotation_utils import PROVENANCE_KEY, name_skeleton
-
-# Projections *enclose* the kernels they describe, so summing GPU time over both
-# double-counts. Kept apart here and recombined by consumers that want both.
+# A GPU annotation span *encloses* the kernels it describes, so summing GPU time
+# over both double-counts. Kept apart here, recombined by consumers wanting both.
 GPU_KERNEL_CATEGORIES = ("kernel", "gpu_memcpy", "gpu_memset")
-PROJECTION_CATEGORY = "gpu_user_annotation"
+GPU_USER_ANNOTATION = "gpu_user_annotation"
 
 # Coverage to accept roots outright, and the floor below which a trace is
 # unsplittable rather than degraded.
@@ -47,8 +45,8 @@ class DetectStatus(IntEnum):
     """Whether the trace can be split. Deliberately separate from phase trust."""
 
     SPLITTABLE = 0
-    NOT_SPLITTABLE = 1
-    DEGRADED = 2
+    NOT_SPLITTABLE = 2
+    DEGRADED = 1
 
 
 class PhaseConfidence(str, Enum):
@@ -63,18 +61,13 @@ class PhaseConfidence(str, Enum):
 class CoverageReport:
     """Result of a GPU-time coverage audit.
 
-    ``covered_selected`` measures the roots' extraction windows, gaps included,
-    since that is what the output contains; ``covered_spans`` measures the bare
-    annotation spans. Judging on bare spans alone hunts for extra roots whenever
-    an iteration's sampling step runs just outside its annotation.
+    ``covered_selected`` measures the roots' extraction windows, gaps included; ``covered_spans`` measures the bare annotation spans. 
     """
 
     strategy: str
-    covered_any: float
     covered_selected: float
     covered_spans: float
     gpu_busy: float
-    window: Optional[Tuple[float, float]] = None
 
     @property
     def span_share(self) -> float:
@@ -90,11 +83,6 @@ class CoverageReport:
     @property
     def passes(self) -> bool:
         """Whether the roots explain enough GPU work, without being stretched.
-
-        Gating on the roots rather than on all annotations is what makes this a
-        real check: a run whose annotations blanket the timeline while the roots
-        cover fifteen of five hundred iterations scores near-perfectly on the
-        permissive measure.
         """
         return self.covered_selected >= COVERAGE_GATE and (
             self.span_share >= MIN_SPAN_SHARE
@@ -123,7 +111,6 @@ class RootSet:
             "phase_confidence": self.phase_confidence.value,
             "n_roots": len(self.roots),
             "attribution_strategy": cov.strategy if cov else None,
-            "coverage_any_annotation": round(cov.covered_any, 4) if cov else None,
             "coverage_selected_roots": round(cov.covered_selected, 4) if cov else None,
             "coverage_root_spans_only": round(cov.covered_spans, 4) if cov else None,
             "root_span_share": round(cov.span_share, 4) if cov else None,
@@ -219,8 +206,8 @@ def group_by_thread(events: Iterable[dict]) -> Dict[Tuple, List[dict]]:
 class SpanSet:
     """A disjoint, sorted union of ``(start, end)`` time spans.
 
-    Overlapping input is the norm -- annotations nest, projections repeat per
-    stream -- so merging on construction is what makes membership a bisect.
+    Overlapping input is the norm -- annotations nest, GPU annotation spans
+    repeat per stream -- so merging on construction makes membership a bisect.
     """
 
     def __init__(self, spans: Iterable[Tuple[float, float]] = ()):
@@ -260,23 +247,20 @@ class SpanSet:
 class GpuAttribution:
     """Attributes GPU kernels to annotations and measures coverage.
 
-    Two strategies, chosen per trace. ``projection`` (the kernel starts inside a
-    ``gpu_user_annotation`` span) is preferred: cheaper, and immune to graph
-    capture, where correlations cannot be walked at all. ``correlation`` (the
-    launch traces back to a CPU op inside an annotation) is a mandatory
-    fallback, since some traces have no projections -- notably any trace that is
-    itself a previous split output.
-
-    Attribution to *any* annotation counts, not just the selected root: the
-    question is "are we missing whole regions of work", not fine accounting.
+    Two strategies, chosen per set of instances
+    ``gpu_span`` (the kernel starts inside a ``gpu_user_annotation`` span) is
+    preferred because it needs no launch link, and applies when *every* instance
+    has a GPU counterpart: one instance missing its span silently undercounts the
+    whole set, so a single miss sends the set to ``correlation`` (the launch
+    traces back to a CPU op inside the instance).
     """
 
-    STRATEGY_PROJECTION = "projection"
+    STRATEGY_GPU_SPAN = "gpu_span"
     STRATEGY_CORRELATION = "correlation"
 
     def __init__(self, events: Iterable[dict]):
         self.kernels: List[dict] = []
-        self.projections: List[dict] = []
+        self.gpu_annotation_spans: List[dict] = []
         corr_cpu: List[dict] = []
         self._corr_kernels: Dict[int, List[dict]] = {}
         for e in events:
@@ -284,8 +268,8 @@ class GpuAttribution:
             if ts is None or dur is None:
                 continue
             corr = (e.get("args") or {}).get("correlation")
-            if cat == PROJECTION_CATEGORY:
-                self.projections.append(e)
+            if cat == GPU_USER_ANNOTATION:
+                self.gpu_annotation_spans.append(e)
             elif cat in GPU_KERNEL_CATEGORIES:
                 self.kernels.append(e)
                 if corr is not None:
@@ -295,13 +279,15 @@ class GpuAttribution:
 
         self.kernels.sort(key=lambda x: x["ts"])
         self._kernel_starts = [k["ts"] for k in self.kernels]
-        self.strategy = (
-            self.STRATEGY_PROJECTION if self.projections else self.STRATEGY_CORRELATION
-        )
-        # Built on demand: the projection path normally never needs it, but it
-        # remains reachable as a cross-check when projections look untrustworthy.
+        self.gpu_busy = sum(k["dur"] for k in self.kernels)
+
         self._corr_cpu = corr_cpu
         self._cpu_index_cache: Optional[IntervalIndex] = None
+        self._spans_by_external_id: Dict[object, List[dict]] = {}
+        for span in self.gpu_annotation_spans:
+            ext = (span.get("args") or {}).get("External id")
+            if ext is not None:
+                self._spans_by_external_id.setdefault(ext, []).append(span)
 
     @property
     def _cpu_index(self) -> IntervalIndex:
@@ -337,95 +323,48 @@ class GpuAttribution:
                         out.append(k)
         return out
 
-    def gpu_time_by_correlation(self, spans: Sequence[dict]) -> float:
-        """GPU time launched from CPU ops inside ``spans``."""
-        return sum(k["dur"] for k in self.kernels_for(spans))
-
-    def gpu_time_for_family(self, skeleton: str, instances: Sequence[dict]) -> float:
-        """GPU time attributable to one annotation family."""
-        if self.strategy != self.STRATEGY_PROJECTION:
-            return self.gpu_time_by_correlation(instances)
-        spans = self._projection_union({skeleton})
-        if not spans:
-            return 0.0
-        return sum(
-            k["dur"] for k in self._kernels_in(spans.bounds) if spans.covers(k["ts"])
-        )
-
-    # -- coverage ------------------------------------------------------------
-    def audit(
-        self, annotations: Sequence[dict], roots: Sequence[dict]
-    ) -> CoverageReport:
-        """Measure GPU coverage by all annotations, and by the roots alone.
-
-        High ``covered_any`` next to low ``covered_selected`` means the roots
-        sit at the wrong nesting level, and widening should fix it.
+    def attributed_kernels(self, instances: Sequence[dict]) -> Tuple[List[dict], str]:
+        """Kernels belonging to ``instances``, and which strategy found them.
         """
-        # Credit the roots two ways: projections survive graph capture, and
-        # launch correlations work for roots no annotation produced. Matching by
-        # name alone scores every synthetic root zero and stalls escalation.
-        if self.strategy == self.STRATEGY_PROJECTION:
-            by_name = self._projection_union(_window_names(roots))
-            any_spans = self._projection_union(None)
-            window = SpanSet.of_events(self.projections).bounds
-        else:
-            by_name = SpanSet()
-            any_spans = SpanSet.of_events(self.kernels_for(annotations))
-            window = any_spans.bounds
-
-        in_window = self._kernels_in(window)
-        busy = sum(k["dur"] for k in in_window)
-        if busy <= 0:
-            return CoverageReport(self.strategy, 0.0, 0.0, 0.0, 0.0, window)
-
-        tiles, _ = build_root_tiles(roots)
-        tile_spans = [
-            {"pid": pid, "tid": tid, "ts": start, "dur": end - start}
-            for (pid, tid, _), (start, end) in tiles.items()
+        matched = [
+            self._spans_by_external_id.get((e.get("args") or {}).get("External id"))
+            for e in instances
         ]
-        covered = {}
-        for label, spans in (
-            ("any", any_spans),
-            ("spans", by_name | SpanSet.of_events(self.kernels_for(roots))),
-            ("tiles", by_name | SpanSet.of_events(self.kernels_for(tile_spans))),
-        ):
-            covered[label] = sum(k["dur"] for k in in_window if spans.covers(k["ts"]))
+        if instances and all(matched):
+            spans = SpanSet.of_events([s for group in matched for s in group])
+            return [
+                k for k in self._kernels_in(spans.bounds) if spans.covers(k["ts"])
+            ], self.STRATEGY_GPU_SPAN
+        return self.kernels_for(instances), self.STRATEGY_CORRELATION
+
+    def gpu_time_for_family(self, instances: Sequence[dict]) -> float:
+        """GPU time attributable to one annotation family."""
+        return sum(k["dur"] for k in self.attributed_kernels(instances)[0])
+
+    def audit(self, roots: Sequence[dict]) -> CoverageReport:
+        """Measure what share of the trace's GPU time the roots account for."""
+        root_kernels, strategy = self.attributed_kernels(roots)
+        if self.gpu_busy <= 0:
+            return CoverageReport(strategy, 0.0, 0.0, self.gpu_busy)
+
+        # Extraction hands out whole windows, so judge the window: first root's
+        # start to the last one's end, per thread
+        windows = [
+            {
+                "pid": pid,
+                "tid": tid,
+                "ts": group[0].get("ts", 0),
+                "dur": group[-1].get("ts", 0)
+                + group[-1].get("dur", 0)
+                - group[0].get("ts", 0),
+            }
+            for (pid, tid), group in group_by_thread(roots).items()
+        ]
+        selected = {id(k): k for k in root_kernels}
+        selected.update({id(k): k for k in self.kernels_for(windows)})
         return CoverageReport(
-            self.strategy,
-            covered["any"] / busy,
-            covered["tiles"] / busy,
-            covered["spans"] / busy,
-            busy,
-            window,
+            strategy,
+            sum(k["dur"] for k in selected.values()) / self.gpu_busy,
+            sum(k["dur"] for k in root_kernels) / self.gpu_busy,
+            self.gpu_busy,
         )
-
-    def _projection_union(self, names: Optional[set]) -> SpanSet:
-        """Union of projection spans, optionally restricted by annotation name.
-
-        Taken across every GPU thread rather than per stream: a kernel on a side
-        stream inside an annotated region is genuinely covered, and per-stream
-        matching would call it uncovered and escalate for nothing.
-        """
-        return SpanSet.of_events(
-            p
-            for p in self.projections
-            if names is None or name_skeleton(p.get("name", "")) in names
-        )
-
-
-def _window_names(roots: Sequence[dict]) -> set:
-    """Skeletons to match projections against for the selected roots.
-
-    A root enriched in step 1.5 carries the inner annotation's name, so its
-    projections are recorded under the outer span it actually came from.
-    """
-    names = set()
-    for r in roots:
-        prov = r.get(PROVENANCE_KEY) or {}
-        names.add(name_skeleton(prov.get("window_from") or r.get("name", "")))
-    return names
-
-
-# Escalation probes were removed: on the fallback corpus they never once improved
-# a split, and the coverage gate now grades roots directly (splittable / degraded
-# / not-splittable) with no intermediate probe ladder.

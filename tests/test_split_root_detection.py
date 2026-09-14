@@ -6,14 +6,14 @@
 
 """Tests for the coverage-gated splitter: components and the flow built on them."""
 
+import pytest
+
 from TraceLens.Trace2Tree.inference_iteration_roots import (
     find_period_candidates,
 )
 from TraceLens.TraceUtils.annotation_utils import (
-    PROVENANCE_KEY,
     cluster_by_skeleton,
     dominant_cluster,
-    inherit_identity,
     is_parseable,
     name_skeleton,
     parse_annotation,
@@ -43,7 +43,7 @@ VLLM = "execute_{i}_context_3(sq128sk256sqsq1sqsk1)_generation_2(sq1sk300sqsq1sq
 # --------------------------------------------------------------------------- #
 # Event builders
 # --------------------------------------------------------------------------- #
-def annotation(name, ts, dur, pid=1, tid=10):
+def annotation(name, ts, dur, pid=1, tid=10, ext=None):
     return {
         "name": name,
         "cat": "user_annotation",
@@ -52,7 +52,7 @@ def annotation(name, ts, dur, pid=1, tid=10):
         "dur": dur,
         "pid": pid,
         "tid": tid,
-        "args": {},
+        "args": {} if ext is None else {"External id": ext},
     }
 
 
@@ -82,7 +82,9 @@ def kernel(ts, dur, corr, name="gemm", pid=1, tid=99):
     }
 
 
-def projection(name, ts, dur, pid=1, tid=99):
+def gpu_annotation_span(name, ts, dur, pid=1, tid=99, ext=None):
+    # Carries the External id its CPU annotation carries: that shared id is how
+    # a GPU span is known to describe one specific instance.
     return {
         "name": name,
         "cat": "gpu_user_annotation",
@@ -91,21 +93,21 @@ def projection(name, ts, dur, pid=1, tid=99):
         "dur": dur,
         "pid": pid,
         "tid": tid,
-        "args": {},
+        "args": {} if ext is None else {"External id": ext},
     }
 
 
-def serving_trace(count=16, name_template=VLLM, period=1000, with_projection=False):
+def serving_trace(count=16, name_template=VLLM, period=1000, with_gpu_annotation=False):
     """One annotation per iteration, each launching one kernel."""
     events, corr = [], 500
     for i in range(count):
         base = 1000 + i * period
         name = name_template.format(i=i)
-        events.append(annotation(name, base, 100))
+        events.append(annotation(name, base, 100, ext=i))
         events.append(launch(base + 10, corr))
         events.append(kernel(base + 200, 40, corr))
-        if with_projection:
-            events.append(projection(name, base + 200, 40))
+        if with_gpu_annotation:
+            events.append(gpu_annotation_span(name, base + 200, 40, ext=i))
         corr += 1
     return events
 
@@ -168,27 +170,6 @@ class TestAnnotationIdentity:
     def test_resolution_exists_on_every_annotation(self):
         """Stage 2 keys on resolution; a missing attribute would raise."""
         assert parse_annotation("step[DECODE bs=4]").resolution is None
-
-    def test_inherit_keeps_window_and_takes_identity(self):
-        outer = annotation("scheduler.process_batch_result", 1000, 500)
-        inner = annotation("step[DECODE bs=7]", 1050, 100)
-        merged = inherit_identity(outer, inner)
-
-        assert merged["ts"] == 1000 and merged["dur"] == 500
-        assert merged["name"] == "step[DECODE bs=7]"
-        assert parse_annotation(merged["name"]).generation_requests == 7
-        assert merged[PROVENANCE_KEY] == {
-            "window_from": "scheduler.process_batch_result",
-            "identity_from": "step[DECODE bs=7]",
-        }
-        assert outer["name"] == "scheduler.process_batch_result"
-
-    def test_second_inheritance_keeps_the_original_window_owner(self):
-        outer = annotation("scheduler.process_batch_result", 1000, 500)
-        once = inherit_identity(outer, annotation("step[DECODE bs=1]", 1050, 100))
-        twice = inherit_identity(once, annotation("step[EXTEND bs=2 toks=8]", 1060, 10))
-        assert twice[PROVENANCE_KEY]["window_from"] == "scheduler.process_batch_result"
-        assert twice[PROVENANCE_KEY]["identity_from"] == "step[EXTEND bs=2 toks=8]"
 
 
 # --------------------------------------------------------------------------- #
@@ -270,25 +251,41 @@ class TestIntervalIndex:
 # C4: GPU attribution
 # --------------------------------------------------------------------------- #
 class TestGpuAttribution:
-    def test_prefers_projections_when_present(self):
-        attribution = GpuAttribution(serving_trace(4, with_projection=True))
-        assert attribution.strategy == GpuAttribution.STRATEGY_PROJECTION
+    def test_prefers_gpu_annotation_spans_when_present(self):
+        events = serving_trace(4, with_gpu_annotation=True)
+        attribution = GpuAttribution(events)
+        _, strategy = attribution.attributed_kernels(collect_annotations(events))
+        assert strategy == GpuAttribution.STRATEGY_GPU_SPAN
 
-    def test_falls_back_to_correlation_without_projections(self):
-        attribution = GpuAttribution(serving_trace(4))
-        assert attribution.strategy == GpuAttribution.STRATEGY_CORRELATION
+    def test_falls_back_to_correlation_without_gpu_annotation_spans(self):
+        events = serving_trace(4)
+        attribution = GpuAttribution(events)
+        _, strategy = attribution.attributed_kernels(collect_annotations(events))
+        assert strategy == GpuAttribution.STRATEGY_CORRELATION
 
-    def test_projections_are_excluded_from_gpu_busy_time(self):
-        """Counting a projection as GPU time double-counts the kernels inside it."""
-        events = serving_trace(4, with_projection=True)
+    def test_strategy_is_chosen_per_root_set_not_per_trace(self):
+        """One instance without a GPU counterpart must not measure by spans.
+
+        A name join would credit this set with the annotated iterations' spans;
+        the External id join sees the gap and falls back to correlation.
+        """
+        events = serving_trace(4, with_gpu_annotation=True)
         annotations = collect_annotations(events)
-        assert GpuAttribution(events).audit(annotations, annotations).gpu_busy == 4 * 40
+        unannotated = annotation("step[DECODE bs=9]", 90_000, 400)
+        attribution = GpuAttribution(events + [unannotated])
+        _, strategy = attribution.attributed_kernels(annotations + [unannotated])
+        assert strategy == GpuAttribution.STRATEGY_CORRELATION
+
+    def test_gpu_annotation_spans_are_excluded_from_gpu_busy_time(self):
+        """Counting an annotation span as GPU time double-counts the kernels inside."""
+        events = serving_trace(4, with_gpu_annotation=True)
+        annotations = collect_annotations(events)
+        assert GpuAttribution(events).audit(annotations).gpu_busy == 4 * 40
 
     def test_full_coverage_when_every_kernel_is_annotated(self):
         events = serving_trace(8)
         annotations = collect_annotations(events)
-        report = GpuAttribution(events).audit(annotations, annotations)
-        assert report.covered_any == 1.0
+        report = GpuAttribution(events).audit(annotations)
         assert report.covered_selected == 1.0
         assert report.passes
 
@@ -312,17 +309,19 @@ class TestGpuAttribution:
             corr += 1
 
         roots = collect_annotations(events)
-        report = GpuAttribution(events).audit(roots, roots)
-        assert report.covered_spans < 1.0
-        assert report.covered_selected == 1.0
-        assert report.span_share > 0.9
+        report = GpuAttribution(events).audit(roots)
+        # A tenth of GPU time is launched after the annotations close.
+        assert report.covered_spans == pytest.approx(0.9)
+        # The windows reclaim it, bar the final iteration's tail, which falls
+        # outside the last root and so outside the audited window.
+        assert report.covered_selected > report.covered_spans
         assert report.passes
 
     def test_sparse_roots_stretched_over_many_iterations_do_not_pass(self):
         """Coverage from window extension alone is not root coverage."""
         events = serving_trace(40)
         annotations = collect_annotations(events)
-        report = GpuAttribution(events).audit(annotations, annotations[::20])
+        report = GpuAttribution(events).audit(annotations[::20])
         assert report.covered_selected > report.covered_spans
         assert report.span_share < 0.5
         assert not report.passes
@@ -335,33 +334,33 @@ class TestGpuAttribution:
         """
         events = serving_trace(40)
         annotations = collect_annotations(events)
-        report = GpuAttribution(events).audit(annotations, annotations[:2])
-        assert report.covered_any == 1.0
-        assert not report.passes
+        attribution = GpuAttribution(events)
+        assert attribution.audit(annotations).covered_selected == 1.0
+        assert not attribution.audit(annotations[:2]).passes
 
     def test_unannotated_work_lowers_coverage(self):
         events = serving_trace(8)
         # A kernel with no launch site inside any annotation.
         events.append(kernel(1500, 4000, 99999, name="orphan"))
         attribution = GpuAttribution(events)
-        report = attribution.audit(collect_annotations(events), [])
-        assert report.covered_any < COVERAGE_GATE
+        report = attribution.audit(collect_annotations(events))
+        assert report.covered_selected < COVERAGE_GATE
 
     def test_selected_roots_can_cover_less_than_all_annotations(self):
         """The signature of roots sitting at the wrong nesting level."""
         events = serving_trace(8)
         annotations = collect_annotations(events)
         attribution = GpuAttribution(events)
-        report = attribution.audit(annotations, annotations[:2])
-        assert report.covered_any == 1.0
-        assert report.covered_selected < report.covered_any
+        assert (
+            attribution.audit(annotations[:2]).covered_selected
+            < attribution.audit(annotations).covered_selected
+        )
 
     def test_family_gpu_time(self):
         events = serving_trace(4)
         attribution = GpuAttribution(events)
         annotations = collect_annotations(events)
-        skeleton = name_skeleton(annotations[0]["name"])
-        assert attribution.gpu_time_for_family(skeleton, annotations) == 4 * 40
+        assert attribution.gpu_time_for_family(annotations) == 4 * 40
 
 
 # --------------------------------------------------------------------------- #
@@ -412,7 +411,7 @@ class TestDetectionFlow:
         assert result.phase_confidence is PhaseConfidence.HIGH
         assert result.method == "annotation:tier"
         assert len(result) == 16
-        assert result.coverage.covered_any == 1.0
+        assert result.coverage.covered_selected == 1.0
 
     def test_partial_known_falls_through_to_unknown_family(self):
         """Only 3 of 20 iterations match a known pattern. Known annotations
@@ -521,7 +520,7 @@ class TestDetectionFlow:
         events = serving_trace(16)
         events.append(kernel(1500, 500_000, 99999, name="unaccounted"))
         result = find_iteration_roots(events)
-        assert result.coverage.covered_any < COVERAGE_GATE
+        assert result.coverage.covered_selected < COVERAGE_GATE
         assert result.status in (DetectStatus.DEGRADED, DetectStatus.NOT_SPLITTABLE)
 
     def test_manifest_reports_quality(self):
@@ -529,7 +528,7 @@ class TestDetectionFlow:
         assert manifest["status"] == 0
         assert manifest["phase_confidence"] == "high"
         assert manifest["n_roots"] == 16
-        assert manifest["coverage_any_annotation"] == 1.0
+        assert manifest["coverage_selected_roots"] == 1.0
         assert manifest["attribution_strategy"] == "correlation"
 
 
