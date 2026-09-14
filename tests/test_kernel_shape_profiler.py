@@ -27,6 +27,14 @@ import torch
 _TOOL_DIR = (
     Path(__file__).parent.parent / "TraceLens" / "TraceUtils" / "kernel_shape_tool"
 )
+if str(_TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOL_DIR))
+import kernel_shape_profiler as _KSP  # noqa: E402
+
+# Real submodule walker; the autouse fixture stubs the module global so
+# enable() never imports real kernel packages in CI. Tests needing the real
+# walker call this captured reference.
+_REAL_FORCE_IMPORT = _KSP._force_import_submodules
 
 # Serialise every test in this file onto a single xdist worker: the profiler
 # keeps process-global state (a persistent Library, the ``_enabled`` flag), so
@@ -36,16 +44,13 @@ pytestmark = pytest.mark.xdist_group("kernel_shape_tool")
 
 @pytest.fixture(scope="module")
 def ksp():
-    if str(_TOOL_DIR) not in sys.path:
-        sys.path.insert(0, str(_TOOL_DIR))
-    import kernel_shape_profiler as _ksp
-
-    return _ksp
+    return _KSP
 
 
 @pytest.fixture(autouse=True)
-def _disabled_after_each(ksp):
-    """Guarantee the global profiler is disabled between tests."""
+def _hermetic_and_disabled(ksp, monkeypatch):
+    """Stub the package walker so enable() imports nothing; disable afterwards."""
+    monkeypatch.setattr(ksp, "_force_import_submodules", lambda _prefix: None)
     yield
     if ksp.is_enabled():
         ksp.disable()
@@ -566,11 +571,11 @@ class TestEnableDisable:
 class TestAutoDiscovery:
     def test_force_import_submodules_missing_pkg(self, ksp):
         # Non-existent package: returns without raising.
-        ksp._force_import_submodules("no_such_pkg_abcxyz")
+        _REAL_FORCE_IMPORT("no_such_pkg_abcxyz")
 
     def test_force_import_submodules_non_package(self, ksp):
         # A plain module has no ``__path__`` to walk: returns without raising.
-        ksp._force_import_submodules("math")
+        _REAL_FORCE_IMPORT("math")
 
     def test_force_import_submodules_walks_and_skips_tests(
         self, ksp, tmp_path, monkeypatch
@@ -584,9 +589,9 @@ class TestAutoDiscovery:
         (pkg / "badmod.py").write_text("raise ImportError('boom')\n")
         monkeypatch.syspath_prepend(str(tmp_path))
 
-        ksp._force_import_submodules("fakewalkpkg")
+        _REAL_FORCE_IMPORT("fakewalkpkg")
         # A second pass finds every submodule already imported and skips it.
-        ksp._force_import_submodules("fakewalkpkg")
+        _REAL_FORCE_IMPORT("fakewalkpkg")
 
         assert "fakewalkpkg.kernel_ops" in sys.modules
         # ``test_``-prefixed leaves are filtered out before import.
@@ -618,6 +623,9 @@ class TestAutoDiscovery:
         # Odd entries under the scanned prefix must be tolerated.
         monkeypatch.setitem(sys.modules, "aiter.ops.none_entry", None)
         monkeypatch.setitem(sys.modules, "aiter.ops.weird_entry", 42)
+        # Real walker, restricted to our fake package only.
+        monkeypatch.setattr(ksp, "_force_import_submodules", _REAL_FORCE_IMPORT)
+        monkeypatch.setattr(ksp, "_AUTO_DISCOVER_PREFIXES", ("aiter.ops",))
 
         discovered = ksp._discover_kernel_entry_points()
 

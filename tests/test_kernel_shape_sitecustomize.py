@@ -88,6 +88,16 @@ def _clean_flag(monkeypatch):
     yield
 
 
+@pytest.fixture
+def hermetic_engine(monkeypatch):
+    """Neuter the engine so enable() is a pure state flip (imports nothing)."""
+    import kernel_shape_profiler as ksp
+
+    monkeypatch.setattr(ksp, "_force_import_submodules", lambda _prefix: None)
+    monkeypatch.setattr(ksp, "_KERNEL_ENTRY_POINTS", [])
+    return ksp
+
+
 # ---------------------------------------------------------------------------
 # Env-flag parsing
 # ---------------------------------------------------------------------------
@@ -136,8 +146,8 @@ class TestProfilerGating:
         assert hasattr(prof, "enable")
         assert tool_dir in sys.path
 
-    def test_enable_disable_gated_on_flag(self, site, monkeypatch):
-        import kernel_shape_profiler as ksp
+    def test_enable_disable_gated_on_flag(self, site, monkeypatch, hermetic_engine):
+        ksp = hermetic_engine
 
         # Flag off -> enable is a no-op.
         site._enable_profiler()
@@ -202,10 +212,12 @@ class TestProfilerPatching:
         kp = _KinetoProfile(record_shapes=False)
         assert kp.record_shapes is False
 
-    def test_cuda_profiler_wrappers_toggle_engine(self, site, monkeypatch):
+    def test_cuda_profiler_wrappers_toggle_engine(
+        self, site, monkeypatch, hermetic_engine
+    ):
         import torch.cuda.profiler as tcp
 
-        import kernel_shape_profiler as ksp
+        ksp = hermetic_engine
 
         # Substitute innocuous start/stop (the real ones need a CUDA device) and
         # force a fresh patch over them so the wrappers can be exercised on CPU.
@@ -230,8 +242,8 @@ class TestProfilerPatching:
             if ksp.is_enabled():
                 ksp.disable()
 
-    def test_profiler_window_toggles_engine(self, site, monkeypatch):
-        import kernel_shape_profiler as ksp
+    def test_profiler_window_toggles_engine(self, site, monkeypatch, hermetic_engine):
+        ksp = hermetic_engine
 
         monkeypatch.setenv("TRACELENS_SHAPE_DISCOVERY", "1")
         assert ksp.is_enabled() is False
