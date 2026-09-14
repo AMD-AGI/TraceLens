@@ -3187,6 +3187,7 @@ def build_computation_graph(
                 elif (
                     not _reads_only_a_side_parameter(sub_step)
                     and not sub_step.operation_predecessors
+                    and not root.forward_step_predecessors.get(sub_step.attr_name)
                 ):
                     # Only spine-chain steps that name no predecessors. A step that
                     # names producers (e.g. a gate ``view`` reading a side-producer
@@ -3194,6 +3195,13 @@ def build_computation_graph(
                     # ``_wire_all_predecessor_edges``; the sequential fallback would
                     # otherwise fabricate an edge from whatever ``last_index`` is —
                     # e.g. an unconsumed cache-update ``Cast`` sitting just before it.
+                    #
+                    # A submodule call with AST-recorded predecessors
+                    # (``forward_step_predecessors``) is likewise wired by section 1b
+                    # to its real inputs — parallel siblings like ``q_proj``,
+                    # ``k_proj``, ``v_proj`` all read ``hidden_states``, not one
+                    # another. Spine-chaining them here fabricates a spurious
+                    # ``q_proj -> k_proj`` edge (a two-input Linear).
                     use_fork = fork_from_input and sub_index == 0
                     _append_step_link(
                         graph,

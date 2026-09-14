@@ -536,6 +536,53 @@ def test_glm53_concat_and_forget_gate_branch_ops_have_outgoing_edges():
     assert key_to_index[branch_add_key] in sources
 
 
+def test_glm53_linear_attention_projections_are_parallel_off_masked_input():
+    """q/k/v/b_proj each read *only* the masked-input producer, not a sibling.
+
+    ``q_proj``, ``k_proj``, ``v_proj`` and ``b_proj`` are parallel calls on the
+    same ``apply_mask_to_padding_states(hidden_states, ...)`` result -- none of
+    them consumes another projection. The SeqSegment sequential-source fallback
+    used to spine-chain consecutive submodule calls, fabricating a spurious
+    ``q_proj -> k_proj`` edge that rendered a Linear with two tensor inputs.
+    Each projection must therefore have exactly one incoming edge, and that edge
+    must originate from the shared masked-input op rather than a sibling Linear.
+    """
+    pytest.importorskip("huggingface_hub")
+    from TraceLens.ModelUtils.block_tree import build_block_node
+    from TraceLens.ModelUtils.computation_graph import build_computation_graph
+
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    tree = build_block_node(
+        attr_name="self_attn",
+        class_name="Glm5NextTextLinearAttention",
+        registry=spec.class_registry,
+        basic_ops=spec.basic_ops,
+        infer_init_steps=True,
+    )
+    graph = build_computation_graph(tree, basic_ops=spec.basic_ops)
+
+    proj_indices = {
+        proj: next(
+            index
+            for index, node in enumerate(graph.nodes)
+            if node.key.endswith(f":{proj}:{proj}:0")
+        )
+        for proj in ("q_proj", "k_proj", "v_proj", "b_proj")
+    }
+
+    for proj, target in proj_indices.items():
+        incoming = [source for source, dest in graph.links if dest == target]
+        # A Linear takes a single tensor input; two inputs would render as a
+        # spurious two-input node.
+        assert len(incoming) == 1, (proj, [graph.nodes[s].key for s in incoming])
+        source_key = graph.nodes[incoming[0]].key
+        # The one producer is the masked-input op, never a sibling projection.
+        assert "apply_mask_to_padding_states" in source_key, (proj, source_key)
+        assert not any(
+            f":{sibling}:" in source_key for sibling in proj_indices
+        ), (proj, source_key)
+
+
 def test_glm53_dead_code_elimination_is_idempotent_for_hyperconnection():
     pytest.importorskip("huggingface_hub")
     from TraceLens.ModelUtils.block_tree import build_block_node
