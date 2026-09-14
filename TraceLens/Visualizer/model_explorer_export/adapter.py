@@ -12,6 +12,7 @@ import re
 from collections import defaultdict
 from typing import Any
 
+from TraceLens.ModelUtils.ast_analyze import kernel_name_from_step_details
 from TraceLens.ModelUtils.computation_graph import ComputationGraph
 from TraceLens.ModelUtils.model_graph import classify_operation
 
@@ -95,6 +96,10 @@ def _node_attrs(spec) -> list[dict[str, str]]:
     operation = classify_operation(block, synthetic=spec.synthetic, label=spec.label)
     if operation is not None:
         attrs.append(_kv("operation", operation.value))
+    if block is not None and block.class_name == "AttentionOp" and block.details:
+        kernel = kernel_name_from_step_details(block.details)
+        if kernel:
+            attrs.append(_kv("attn_implementation", kernel))
     if block is not None and block.details:
         attrs.append(_kv("details", "; ".join(block.details)))
     return attrs

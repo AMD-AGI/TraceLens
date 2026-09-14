@@ -224,7 +224,7 @@ def test_dispatched_attention_resolves_through_the_checkpoint_config():
         ]
         return kernel_name_from_step_details(details)
 
-    assert kernel_for({}) == "attention_interface", "no config leaves the variable name"
+    assert kernel_for({}) == "sdpa", "no config falls back to the transformers default"
     assert (
         kernel_for({"_attn_implementation": "flash_attention_2"}) == "flash_attention_2"
     )

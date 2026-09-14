@@ -4330,11 +4330,17 @@ def _resolve_dispatched_attention_kernel(
     A forward that calls ``ALL_ATTENTION_FUNCTIONS[config._attn_implementation]``
     through a local variable leaves the AST with nothing but the variable's name.
     The checkpoint says which implementation that variable resolves to.
+
+    When the checkpoint leaves ``_attn_implementation`` unset we resolve it to
+    ``"sdpa"`` — the transformers default when nothing is configured — so a
+    dispatched-attention step still names the kernel that actually runs instead
+    of leaving the call site's opaque dispatch variable.
     """
     implementation = (config or {}).get("_attn_implementation")
-    if not isinstance(implementation, str) or not implementation.strip():
-        return
-    resolved = implementation.strip()
+    if isinstance(implementation, str) and implementation.strip():
+        resolved = implementation.strip()
+    else:
+        resolved = "sdpa"
     for cls in classes.values():
         details = cls.forward_step_details.get(SYNTHETIC_ATTENTION)
         if not details:
