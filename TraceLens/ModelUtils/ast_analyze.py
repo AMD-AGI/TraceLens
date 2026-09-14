@@ -176,6 +176,20 @@ _ATTENTION_DISPATCH_NAMES = {
     "attn_interface",
     "all_attention_functions",
 }
+# Boolean helpers a forward branches on to pick a flash-attention code path
+# (``if is_flash_attention_requested(self.config): ...``). We resolve them from
+# the checkpoint's ``_attn_implementation`` so only the selected branch survives,
+# instead of walking both and leaving duplicated/dangling kernel plumbing.
+_FLASH_REQUEST_PREDICATES = {"is_flash_attention_requested"}
+# ``_attn_implementation`` values that route to a flash code path.
+_FLASH_IMPL_NAMES = {
+    "flash_attention_2",
+    "flash_attention_3",
+    "flash_attention",
+    "flash_attn",
+    "flash_attn_2",
+    "kernels-community/flash-attn",
+}
 _KERNEL_MERGE_NAME_RE = re.compile(
     r"(attention|attn|recurrent|flash|sdpa|linear_attn|kernel|chunk)",
     re.IGNORECASE,
@@ -1756,9 +1770,11 @@ class _ForwardOperationExtractor:
         self_values: dict[str, Any],
         all_tensor_ops: bool,
         param_names: set[str] | None = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
         self.self_values = self_values
         self.all_tensor_ops = all_tensor_ops
+        self.config = dict(config or {})
         self.param_names = set(param_names or ())
         self.operations: list[ForwardOperation] = []
         self.var_producer: dict[str, str] = {}
@@ -2473,6 +2489,34 @@ class _ForwardOperationExtractor:
             and _ForwardOperationExtractor._statements_terminate(final.orelse)
         )
 
+    def _resolve_flash_request_predicate(self, test: ast.expr) -> bool | None:
+        """Resolve ``if is_flash_attention_requested(config):`` from the checkpoint.
+
+        A vision/attention forward commonly branches between a fused flash kernel
+        and a per-chunk fallback on this transformers helper. Walking both branches
+        leaves the graph with duplicated attention plumbing (a phantom ``cat`` from
+        the branch that does not run). Resolve the predicate here from
+        ``config._attn_implementation`` — defaulting to ``sdpa`` (the transformers
+        default) when unset — so only the selected branch survives. Returns the
+        boolean the predicate evaluates to, or ``None`` when *test* is not one of
+        these predicates (leaving the general ``_config_value`` path in charge).
+
+        General: keys off the shared transformers predicate name, not any model.
+        """
+        node = test
+        negate = False
+        while isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            negate = not negate
+            node = node.operand
+        if not isinstance(node, ast.Call):
+            return None
+        if _expr_name(node.func) not in _FLASH_REQUEST_PREDICATES:
+            return None
+        impl = self.config.get("_attn_implementation")
+        resolved = impl.strip().lower() if isinstance(impl, str) and impl.strip() else "sdpa"
+        is_flash = resolved in _FLASH_IMPL_NAMES
+        return (not is_flash) if negate else is_flash
+
     def statements(
         self, statements: list[ast.stmt], *, condition: str | None = None
     ) -> None:
@@ -2581,7 +2625,9 @@ class _ForwardOperationExtractor:
                 self.expression(stmt.value)
                 continue
             if isinstance(stmt, ast.If):
-                outcome = _config_value(stmt.test, {}, self.self_values)
+                outcome = self._resolve_flash_request_predicate(stmt.test)
+                if outcome is None:
+                    outcome = _config_value(stmt.test, {}, self.self_values)
                 if outcome is True:
                     self.statements(stmt.body, condition=condition)
                     if self._statements_terminate(stmt.body):
@@ -3347,6 +3393,7 @@ def _forward_operations_from_forward(
     *,
     self_values: dict[str, Any],
     all_tensor_ops: bool,
+    config: dict[str, Any] | None = None,
 ) -> ForwardAnalysis:
     # The primary parameter is the main path, so only the extra ones can identify
     # which step consumes a side feed.
@@ -3355,6 +3402,7 @@ def _forward_operations_from_forward(
         self_values=self_values,
         all_tensor_ops=all_tensor_ops,
         param_names=_forward_input_names(func) - {primary} if primary else set(),
+        config=config,
     )
     # An operation reading the primary parameter partway through the forward reads the
     # value arriving at the chain, not the previous step. Naming it lets those reads
@@ -3564,6 +3612,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     resolved_forward_func,
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
+                    config=self._config_for_class(node.name),
                 )
                 if analysis.operations:
                     forward_step_predecessors = dict(analysis.step_predecessors)
@@ -3623,6 +3672,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     resolved_forward_func,
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
+                    config=self._config_for_class(node.name),
                 )
                 if analysis.operations:
                     forward_step_predecessors = dict(analysis.step_predecessors)
@@ -3662,6 +3712,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     resolved_forward_func,
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
+                    config=self._config_for_class(node.name),
                 )
                 if _forward_mixes_modules_and_inline_ops(
                     forward_calls,

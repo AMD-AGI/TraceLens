@@ -1373,3 +1373,53 @@ def test_glm53_hyper_head_precedes_final_norm():
     assert norm_output["label"] == "hidden_states"
     assert "norm/@output^hidden_states" not in node_by_id
     assert _has_export_path(graph["nodes"], "hc_head", norm_output["id"])
+
+
+def test_glm53_vision_attention_resolves_single_kernel_branch():
+    """The vision attention flash-vs-fallback branch resolves to one kernel.
+
+    ``Glm5NextVisionAttention.forward`` branches on
+    ``if is_flash_attention_requested(self.config): ...`` between a fused flash
+    kernel and a per-chunk ``torch.cat`` fallback. GLM-5.3-Flash ships
+    ``_attn_implementation`` unset, which transformers defaults to ``sdpa`` — not
+    flash — so only the fallback branch runs. Resolving the predicate from the
+    checkpoint config (C2) must leave exactly one attention kernel node, one real
+    per-chunk ``Concat`` fed by that kernel (no phantom ``Concat`` from the
+    untaken branch, no ``Concat`` self-loop, no duplicated ``@kernel_out`` node),
+    and an output reshape reading that single ``Concat``. The graph stays acyclic.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    nodes = graph["nodes"]
+    node_by_id = {node["id"]: node for node in nodes}
+
+    _assert_export_is_acyclic(nodes)
+
+    attn_nodes = [n for n in nodes if "VisionAttention" in n.get("namespace", "")]
+    assert attn_nodes
+
+    # Exactly one attention kernel node, tagged with the resolved implementation.
+    kernels = [n for n in attn_nodes if n.get("label") == "Attention"]
+    assert len(kernels) == 1, [n["id"] for n in kernels]
+    kernel = kernels[0]
+    assert any(
+        attr.get("key") == "attn_implementation" and attr.get("value") == "sdpa"
+        for attr in kernel.get("attrs", [])
+    )
+
+    # No duplicated kernel-output node survives from the untaken flash branch.
+    assert not [n for n in attn_nodes if "@kernel_out" in n["id"]]
+
+    # Exactly one per-chunk Concat, fed by the single kernel, with no self-loop.
+    concats = [n for n in attn_nodes if n.get("label") == "Concat"]
+    assert len(concats) == 1, [n["id"] for n in concats]
+    concat = concats[0]
+    concat_sources = [e["sourceNodeId"] for e in concat.get("incomingEdges", [])]
+    assert concat_sources == [kernel["id"]]
+    assert concat["id"] not in concat_sources
+
+    # The output reshape reads only that single Concat.
+    reshape = node_by_id["visual/seq:2:blocks:attn:@op_l1665_c22_reshape:14"]
+    reshape_sources = [e["sourceNodeId"] for e in reshape.get("incomingEdges", [])]
+    assert reshape_sources == [concat["id"]]
