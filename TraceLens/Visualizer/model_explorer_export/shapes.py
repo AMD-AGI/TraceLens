@@ -259,6 +259,13 @@ def _incoming_sources(node: dict[str, Any]) -> list[tuple[str, str, str]]:
     ]
 
 
+def _node_synthetic(node: dict[str, Any]) -> str:
+    for attr in node.get("attrs", []):
+        if attr.get("key") == "synthetic":
+            return str(attr.get("value") or "")
+    return ""
+
+
 def _incoming_source_ids(node: dict[str, Any]) -> list[str]:
     return [
         source_id for source_id, _source_port, _target_port in _incoming_sources(node)
@@ -453,11 +460,24 @@ def fill_missing_node_shapes(
     for node in list(pending):
         label = str(node.get("label") or "").strip().lower()
         node_id = str(node.get("id", ""))
+        synthetic = _node_synthetic(node)
+        # A boundary/mirror carrying a real producer (``position_embeddings`` from
+        # a ``rotary_pos_emb``) must inherit that producer's shape, not be caught
+        # by a computational-tile label heuristic. ``position_embeddings`` matches
+        # the ``embedding`` substring below, which would otherwise stamp it with
+        # the language ``(B, S, H)`` activation shape and hide its true axes.
+        connected_boundary = synthetic in {"@input", "@input_mirror"} and bool(
+            _incoming_sources(node)
+        )
         seeded: TensorSpec | None = None
         if node_id == "@input" or label in {"tokenized text", "input_ids"}:
             seeded = tokens
         elif label == "logits" or node_id.split("/")[-1] in {"lm_head", "output"}:
             seeded = logits
+        elif connected_boundary:
+            # Leave it pending: the edge-propagation pass below inherits the
+            # producer's shape.
+            seeded = None
         elif "embedding" in label or "embed" in node_id:
             # Embeddings widen token ids, so they must not inherit the (B, S) input shape.
             seeded = activation

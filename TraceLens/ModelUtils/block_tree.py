@@ -2085,6 +2085,9 @@ def build_block_node(
                     label=positional_display_label(call_attr),
                     basic=False,
                     output_names=cls.forward_step_output_names.get(call_attr),
+                    param_inputs=list(
+                        cls.forward_step_boundary_params.get(call_attr, ())
+                    ),
                 )
             )
             continue

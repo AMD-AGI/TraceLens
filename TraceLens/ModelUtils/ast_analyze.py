@@ -1268,6 +1268,7 @@ class ForwardAnalysis:
     step_predecessor_args: dict[str, dict[str, str]]
     step_predecessor_ordinals: dict[str, dict[str, int]]
     step_output_names: dict[str, list[str]]
+    step_boundary_params: dict[str, tuple[str, ...]]
     return_slots: dict[str, str]
     return_order: list[str]
     primary_return_slot: str | None
@@ -1307,6 +1308,9 @@ class ClassStructure:
         default_factory=dict
     )
     forward_step_output_names: dict[str, list[str]] = field(default_factory=dict)
+    forward_step_boundary_params: dict[str, tuple[str, ...]] = field(
+        default_factory=dict
+    )
     single_op_methods: dict[str, ForwardOperation] = field(default_factory=dict)
     multi_op_methods: dict[str, list[ForwardOperation]] = field(default_factory=dict)
     forward_return_slots: dict[str, str] = field(default_factory=dict)
@@ -1947,6 +1951,19 @@ class _ForwardOperationExtractor:
         # not an inline ``self.operations`` entry. Lets the export fan the
         # positional/function node out into one named output port per slot.
         self.step_output_names: dict[str, list[str]] = {}
+        # own-step attr -> forward parameter names it reads straight from the
+        # module boundary (``apply_rotary_pos_emb_vision(q, k, cos, sin)`` where
+        # ``cos, sin = position_embeddings``). These synthetics are their own
+        # chain node but read forward params that have no internal producer, so
+        # the cross-module predecessor pass needs them named to route the caller's
+        # producer (``rotary_pos_emb``) onto this consumer. Origins are the
+        # caller-visible parameter (``position_embeddings``), not the unpacked
+        # local, so the arg-name keys match the call site's keyword.
+        self.step_boundary_params: dict[str, tuple[str, ...]] = {}
+        # unpacked-local -> the forward parameter it aliases
+        # (``cos``/``sin`` -> ``position_embeddings``). Populated as
+        # ``_propagate_param_alias`` registers the alias.
+        self.param_alias_origin: dict[str, str] = {}
         # When an ``if``/``else`` assigns the same variable to different producers
         # (e.g. ``attn_output`` = flash ``@attention`` in one branch, a manual
         # ``torch.cat`` in the other), only one survives ``var_producer`` after the
@@ -2279,6 +2296,20 @@ class _ForwardOperationExtractor:
                     self.step_predecessor_args[own_step] = arg_name_map
                 if arg_ordinal_map:
                     self.step_predecessor_ordinals[own_step] = arg_ordinal_map
+                # A synthetic that is its own node may read forward parameters that
+                # have no internal producer (``apply_rotary_pos_emb_vision(..., cos,
+                # sin)`` where ``cos, sin = position_embeddings``). Record the
+                # caller-visible origin (``position_embeddings``) so the cross-module
+                # predecessor pass can route the producer feeding that parameter onto
+                # this consumer, the way ``cu_seqlens`` reaches the kernel.
+                boundary = self._dedupe(
+                    [
+                        self.param_alias_origin.get(name, name)
+                        for name in self._param_refs(node)
+                    ]
+                )
+                if boundary:
+                    self.step_boundary_params[own_step] = boundary
                 return own_step, external
             producers = [value for value in (base_producer, *arg_producers) if value]
             return (producers[-1] if producers else None), external
@@ -2454,6 +2485,10 @@ class _ForwardOperationExtractor:
         """
         if not (isinstance(value, ast.Name) and value.id in self.param_names):
             return
+        # The RHS may itself be an alias (``pe = position_embeddings; cos, sin = pe``);
+        # resolve to the original forward parameter so every unpacked local points
+        # back at the caller-visible name.
+        origin = self.param_alias_origin.get(value.id, value.id)
         for target in targets:
             elements = (
                 target.elts
@@ -2463,6 +2498,7 @@ class _ForwardOperationExtractor:
             for element in elements:
                 if isinstance(element, ast.Name):
                     self.param_names.add(element.id)
+                    self.param_alias_origin[element.id] = origin
 
     def _track_shape_assignment(
         self, targets: list[ast.expr], value: ast.AST
@@ -3598,6 +3634,7 @@ def _forward_operations_from_forward(
         step_predecessor_args=dict(extractor.step_predecessor_args),
         step_predecessor_ordinals=dict(extractor.step_predecessor_ordinals),
         step_output_names=dict(extractor.step_output_names),
+        step_boundary_params=dict(extractor.step_boundary_params),
         return_slots=return_slots,
         return_order=return_order,
         primary_return_slot=primary_return_slot,
@@ -3667,6 +3704,7 @@ def expand_class_forward_dataflow(
     cls.forward_step_predecessor_args = dict(analysis.step_predecessor_args)
     cls.forward_step_predecessor_ordinals = dict(analysis.step_predecessor_ordinals)
     cls.forward_step_output_names = dict(analysis.step_output_names)
+    cls.forward_step_boundary_params = dict(analysis.step_boundary_params)
     cls.forward_operations = _refine_forward_operation_predecessors(
         forward,
         cls.forward_operations,
@@ -3724,6 +3762,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         forward_step_predecessor_args: dict[str, dict[str, str]] = {}
         forward_step_predecessor_ordinals: dict[str, dict[str, int]] = {}
         forward_step_output_names: dict[str, list[str]] = {}
+        forward_step_boundary_params: dict[str, tuple[str, ...]] = {}
         forward_return_slots: dict[str, str] = {}
         forward_return_order: list[str] = []
         primary_return_slot: str | None = None
@@ -3801,6 +3840,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         analysis.step_predecessor_ordinals
                     )
                     forward_step_output_names = dict(analysis.step_output_names)
+                    forward_step_boundary_params = dict(
+                        analysis.step_boundary_params
+                    )
                     forward_loop_carried = list(analysis.loop_carried)
                     (
                         forward_calls,
@@ -3865,6 +3907,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         analysis.step_predecessor_ordinals
                     )
                     forward_step_output_names = dict(analysis.step_output_names)
+                    forward_step_boundary_params = dict(
+                        analysis.step_boundary_params
+                    )
                     forward_loop_carried = list(analysis.loop_carried)
                     module_calls = _module_calls_for_forward_merge(
                         forward_calls,
@@ -3913,6 +3958,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                         probed.step_predecessor_ordinals
                     )
                     forward_step_output_names = dict(probed.step_output_names)
+                    forward_step_boundary_params = dict(
+                        probed.step_boundary_params
+                    )
                     forward_loop_carried = list(probed.loop_carried)
                     module_calls = _module_calls_for_forward_merge(
                         forward_calls,
@@ -3963,6 +4011,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             forward_step_predecessor_args=forward_step_predecessor_args,
             forward_step_predecessor_ordinals=forward_step_predecessor_ordinals,
             forward_step_output_names=forward_step_output_names,
+            forward_step_boundary_params=forward_step_boundary_params,
             single_op_methods=single_op_methods,
             multi_op_methods=multi_op_methods,
             forward_return_slots=forward_return_slots,

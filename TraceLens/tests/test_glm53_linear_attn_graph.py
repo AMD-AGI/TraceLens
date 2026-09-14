@@ -1512,6 +1512,57 @@ def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
     ]
 
 
+def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
+    """``position_embeddings`` reaches ``apply_rotary`` across the block loop.
+
+    ``Glm5NextVisionModel.forward`` builds ``position_embeddings`` from
+    ``rotary_pos_emb(...)`` *before* the block loop and hands it to each block's
+    attention, which unpacks ``cos, sin = position_embeddings`` and feeds them to
+    ``apply_rotary_pos_emb_vision``. The rotary path previously severed here: the
+    positional synthetic declared no forward-param input, so its ``cos``/``sin``
+    operands defaulted to ``hidden_states`` and the real producer was orphaned.
+
+    General: a positional synthetic that reads a forward param (resolved through
+    the ``cos, sin = position_embeddings`` unpack to its origin) declares that
+    param as a ``param_inputs`` entry, so the module-call predecessor edge docks
+    it onto the deep consumer and the producer's shape flows across the boundary
+    (no text ``(B, S, H)`` re-stamp).
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    node_by_id = {node["id"]: node for node in nodes}
+
+    _assert_export_is_acyclic(nodes)
+
+    # apply_rotary reads the position_embeddings boundary, not hidden_states.
+    apply_rotary = next(
+        node
+        for node in nodes
+        if "@positional_" in node["id"]
+        and "apply_rotary_pos_emb_vision" in node["id"]
+        and "@input" not in node["id"]
+    )
+    rotary_sources = {e["sourceNodeId"] for e in apply_rotary["incomingEdges"]}
+    assert "visual/@input:position_embeddings" in rotary_sources
+    assert not any("hidden_states" in src for src in rotary_sources)
+
+    # The boundary traces back to the pre-loop rotary producer, across its mirror.
+    pe_mirror = node_by_id["visual/@input_mirror:position_embeddings^position_embeddings"]
+    producer_id = pe_mirror["incomingEdges"][0]["sourceNodeId"]
+    assert producer_id.endswith("rotary_pos_emb/@output")
+
+    # The crossing carries the vision producer's shape, not the text sequence axis.
+    for boundary_id in (
+        "visual/@input:position_embeddings",
+        pe_mirror["id"],
+    ):
+        shape = _output_shape(node_by_id[boundary_id])
+        assert shape is not None and "Pv" in shape, (boundary_id, shape)
+        assert "B, S" not in shape, (boundary_id, shape)
+
+
 def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
     """The 3-way ``q, k, v = qkv(h)...unbind(0)`` fans out into three ports.
 
