@@ -1695,3 +1695,45 @@ def test_glm53_vision_mlp_gate_and_up_are_parallel():
     # No edge between the two sibling linears in either direction.
     assert gate["id"] not in up_sources
     assert up["id"] not in gate_sources
+
+
+def test_glm53_hyperconnection_param_only_ops_show_their_source():
+    """``pre_b``/``post_b`` and the scale unbind must dock a visible operand.
+
+    The mHC mapping unpacks a raw learned parameter
+    (``pre_b, post_b, comb_b = self.base.split(...)`` and
+    ``pre_scale, post_scale, comb_scale = self.scale.unbind(0)``). These ops read
+    no chain producer, so without surfacing the parameter they render with no
+    incoming edge and their values appear to come from nowhere. Each such op must
+    instead be fed by a local ``@tensor:external:<param>`` operand node.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+    _assert_export_is_acyclic(nodes)
+
+    base_split = [
+        n
+        for n in nodes
+        if "attn_hc" in n["id"] and n["id"].endswith(":@op_l281_c32_split:0")
+    ]
+    scale_unbind = [
+        n
+        for n in nodes
+        if "attn_hc" in n["id"] and n["id"].endswith(":@op_l282_c44_unbind:0")
+    ]
+    assert base_split, "expected the self.base split (pre_b/post_b/comb_b)"
+    assert scale_unbind, "expected the self.scale unbind (pre_scale/...)"
+
+    for node, param in ((base_split[0], "base"), (scale_unbind[0], "scale")):
+        sources = {e["sourceNodeId"] for e in node.get("incomingEdges", [])}
+        assert sources, f"{node['id']} still has no source"
+        assert all(":external:" in src for src in sources), sources
+        assert any(src.endswith(f"@tensor:external:{param}") for src in sources), (
+            param,
+            sources,
+        )
+        # The operand node itself is a leaf: no incoming producer of its own.
+        operand = next(n for n in nodes if n["id"] in sources)
+        assert not operand.get("incomingEdges")

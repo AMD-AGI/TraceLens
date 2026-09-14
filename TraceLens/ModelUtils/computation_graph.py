@@ -1135,6 +1135,46 @@ def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
                 graph.links.append((source, index))
 
 
+def _add_module_parameter_inputs(graph: ComputationGraph) -> None:
+    """Dock a visible operand node for a module parameter/buffer an op reads alone.
+
+    An inline op whose only operands are module parameters or buffers reads no
+    chain producer, so it otherwise renders with no incoming edge and its data
+    appears to come from nowhere. The canonical case is the mHC mapping's
+    ``pre_b, post_b, comb_b = self.base.split(...)`` and
+    ``pre_scale, post_scale, comb_scale = self.scale.unbind(0)``: a ``Split`` /
+    ``Unbind`` reading a raw learned parameter. The AST already surfaces that
+    parameter as an ``external_input``; materialize it as a local operand node
+    docked into the op so the computation shows where its values originate.
+
+    General: fires for any forward operation that reads a ``self.<attr>`` tensor
+    and has no incoming producer edge. It is gated on the op being otherwise
+    sourceless (no incoming edge) so chain steps that read a weight *and* continue
+    the spine (``x = x * self.weight``) are untouched — matching the guardrail in
+    :func:`_reads_only_a_side_parameter`.
+    """
+    incoming: set[int] = {target for _source, target in graph.links}
+    param_nodes: dict[str, int] = {}
+    for index, spec in enumerate(list(graph.nodes)):
+        block = spec.block
+        if block is None or not is_forward_operation(block.attr_name):
+            continue
+        if not block.external_inputs or index in incoming:
+            continue
+        for name in block.external_inputs:
+            source = param_nodes.get(name)
+            if source is None:
+                source = _add_node(
+                    graph,
+                    key=f"{SYNTHETIC_TENSOR}:external:{name}",
+                    label=name,
+                    synthetic=SYNTHETIC_TENSOR,
+                )
+                param_nodes[name] = source
+            if (source, index) not in graph.links:
+                graph.links.append((source, index))
+
+
 def add_forward_output(
     graph: ComputationGraph,
     *,
@@ -3119,6 +3159,7 @@ def build_computation_graph(
         strip_unused_return_branches=strip_unused_return_branches,
     )
     graph = _strip_dangling_leaves(graph, root=root)
+    _add_module_parameter_inputs(graph)
     add_forward_output(graph, root=root)
     _add_kernel_output_port_nodes(graph)
     _add_split_output_port_nodes(graph)
