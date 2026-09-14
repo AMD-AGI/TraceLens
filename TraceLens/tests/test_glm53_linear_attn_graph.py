@@ -1501,3 +1501,38 @@ def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
             assert not (sources & q_norm_ids), node["id"]
         if node["id"] in q_norm_ids:
             assert not (sources & k_norm_ids), node["id"]
+
+
+def test_glm53_vision_mlp_gate_and_up_are_parallel():
+    """``gate_proj`` and ``up_proj`` both read the block input, not each other.
+
+    ``Glm5NextVisionMLP.forward`` computes ``gate = gate_proj(hidden_state)`` and
+    ``up = up_proj(hidden_state)`` — two leaf linears in parallel off the same
+    block input (clamp-based swiglu). The pipeline chain fed each leaf from the
+    previous sibling by default, rendering ``up_proj <- gate_proj`` (two linears
+    in a row). Consulting the AST-recorded predecessor (C3) must feed both from
+    the block input with no edge between them.
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec)
+    nodes = graph["nodes"]
+
+    _assert_export_is_acyclic(nodes)
+
+    mlp_nodes = [n for n in nodes if "VisionMLP" in n.get("namespace", "")]
+    assert mlp_nodes
+
+    gate = next(n for n in mlp_nodes if n["id"].endswith(":gate_proj:0"))
+    up = next(n for n in mlp_nodes if n["id"].endswith(":up_proj:1"))
+    block_input = next(n for n in mlp_nodes if n["id"].endswith("/@input"))
+
+    gate_sources = {e["sourceNodeId"] for e in gate.get("incomingEdges", [])}
+    up_sources = {e["sourceNodeId"] for e in up.get("incomingEdges", [])}
+
+    # Both source the block input.
+    assert gate_sources == {block_input["id"]}
+    assert up_sources == {block_input["id"]}
+    # No edge between the two sibling linears in either direction.
+    assert gate["id"] not in up_sources
+    assert up["id"] not in gate_sources

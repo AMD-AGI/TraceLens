@@ -1327,6 +1327,8 @@ def _submodule_chain_input(
     sub_step: BlockNode,
     attr_last_index: dict[str, int] | None,
     fallback: int | None,
+    *,
+    chain_input_index: int | None = None,
 ) -> int | None:
     """Resolve the graph index an inlined submodule really reads from.
 
@@ -1334,27 +1336,32 @@ def _submodule_chain_input(
     tail by default.  That is correct for a straight pipeline, but wrong for
     parallel sibling submodules that both consume a shared upstream — e.g. an
     attention block's ``q_norm`` and ``k_norm`` each read the ``qkv`` ``unbind``,
-    not one another.  Chaining them sequentially manufactures a spurious
-    ``q_norm -> k_norm`` edge; combined with the correct ``k_norm <- unbind``
-    edge that section-1b wires from the arg map, it also closes a cycle.
+    not one another, or an MLP's ``gate_proj`` and ``up_proj`` that both read the
+    block input.  Chaining them sequentially manufactures a spurious
+    ``gate_proj -> up_proj`` edge (and, for the norm case, a cycle).
 
     The wrapper (the submodule's parent) records each step's real predecessors in
     ``forward_step_predecessor_args``.  When those resolve to an already-emitted
-    node, feed from there instead of the previous sibling.  Falls back to the
-    caller's value whenever the mapping is absent or unresolved, so genuine
-    sequential chains are untouched.
+    sibling, feed from there.  When they resolve to the forward input and the
+    caller supplies ``chain_input_index``, feed from the block input instead of
+    the previous sibling.  Falls back to the caller's value whenever the mapping
+    is absent or unresolved, so genuine sequential chains are untouched.
     """
     if wrapper is None or attr_last_index is None:
         return fallback
     arg_map = (wrapper.forward_step_predecessor_args or {}).get(sub_step.attr_name)
     if not arg_map:
         return fallback
+    reads_input = False
     for src in arg_map.values():
         if src == FORWARD_METHOD_INPUT:
+            reads_input = True
             continue
         resolved = attr_last_index.get(src)
         if resolved is not None:
             return resolved
+    if reads_input and chain_input_index is not None:
+        return chain_input_index
     return fallback
 
 
@@ -1456,7 +1463,18 @@ def _add_linear_pipeline_chain(
                         fork_from_input=use_fork,
                     )
             else:
-                graph.links.append((indices[-1], step_index))
+                # Prefer the AST-recorded predecessor (a shared block input or a
+                # named sibling) over "previous call in source order", so parallel
+                # sibling leaves — an MLP's ``gate_proj`` and ``up_proj`` both off
+                # the block input — do not chain into one another.
+                resolved_source = _submodule_chain_input(
+                    wrapper,
+                    sub_step,
+                    attr_last_index,
+                    indices[-1],
+                    chain_input_index=chain_input_index,
+                )
+                graph.links.append((resolved_source, step_index))
 
         _append_kernel_second_operand_link(
             graph,
