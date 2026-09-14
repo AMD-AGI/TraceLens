@@ -258,11 +258,23 @@ def _reattach_worker_threads(tree: TraceToTree) -> TraceToTree:
         host_node.setdefault("children", []).append(root["UID"])
         # Flag the new ancestry GPU-bearing so the descent will follow it: the
         # reattached subtree carries kernels the host frames previously lacked.
+        gpu_uids = root.get("gpu_events", [])
         ancestor: Optional[dict] = host_node
         while ancestor is not None and not ancestor.get("_kernel_bearing"):
             ancestor["_kernel_bearing"] = True
+            if gpu_uids:
+                ancestor.setdefault("gpu_events", []).extend(gpu_uids)
             ancestor = tree.get_parent_event(ancestor)
         reattached += 1
+
+    if reattached:
+        reattached_uids = {
+            root["UID"] for root in _entry_roots(tree) if root.get("parent") is not None
+        }
+        tree.cpu_root_nodes = [
+            uid for uid in tree.cpu_root_nodes if uid not in reattached_uids
+        ]
+
     return tree
 
 

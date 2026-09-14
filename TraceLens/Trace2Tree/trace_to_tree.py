@@ -796,6 +796,10 @@ class TraceToTree(BaseTraceToTree):
         self.build_host_call_stack_tree(add_python_func)
         self.add_gpu_ops_to_tree()
 
+        from .inference_iteration_roots import _reattach_worker_threads
+
+        _reattach_worker_threads(self)
+
         if self.prune_nongpu_paths:
             self.label_non_gpu_paths()
 
