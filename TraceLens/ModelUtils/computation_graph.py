@@ -483,78 +483,6 @@ def _add_kernel_output_port_nodes(graph: ComputationGraph) -> None:
                         graph.output_ports[port_name] = port_index
 
 
-SYNTHETIC_SPLIT_PORT_OUT = "@split_port_out"
-
-
-def _add_split_output_port_nodes(graph: ComputationGraph) -> None:
-    """Fan a tuple-unpacked split/chunk/unbind out into one node per named output.
-
-    A multi-output op produces several tensors of possibly different shapes; each
-    unpacked name (``pre_w``/``post_w``/``comb_w``) becomes its own output-port
-    node carrying that slice's shape, so a ``.split([4, 4, 16])`` no longer renders
-    every consumer reading a single ``[..., 4]`` tensor. Consumers were already
-    wired to the correct ordinal via ``link_output_ports`` (from the AST unpack);
-    here we interpose one port node per distinct consumed ordinal on those edges.
-
-    Only fires when at least two distinct outputs are actually consumed — a split
-    whose ordinals were never captured collapses to one group and is left as-is,
-    so this never perturbs single-output slicing. General: keys off
-    ``block.output_names``, no class-name checks.
-    """
-    split_indices = [
-        index
-        for index, spec in enumerate(graph.nodes)
-        if spec.block is not None and spec.block.output_names
-    ]
-    for split_index in split_indices:
-        block = graph.nodes[split_index].block
-        output_names = block.output_names
-        details = list(block.details)
-        targets_by_ordinal: dict[int, list[int]] = {}
-        for source, target in graph.links:
-            if source != split_index:
-                continue
-            ordinal_str = graph.link_output_ports.get((source, target))
-            try:
-                ordinal = int(ordinal_str) if ordinal_str is not None else 0
-            except (TypeError, ValueError):
-                ordinal = 0
-            targets_by_ordinal.setdefault(ordinal, []).append(target)
-        if len(targets_by_ordinal) < 2:
-            continue
-        for ordinal in sorted(targets_by_ordinal):
-            targets = targets_by_ordinal[ordinal]
-            label = (
-                output_names[ordinal]
-                if ordinal < len(output_names)
-                else f"output_{ordinal}"
-            )
-            safe_label = label.replace("/", "_")
-            port_index = _add_node(
-                graph,
-                key=f"@split_out:{split_index}:{safe_label}",
-                label=label,
-                synthetic=SYNTHETIC_SPLIT_PORT_OUT,
-                extra_metadata={
-                    "output_ordinal": ordinal,
-                    "details": details,
-                    "class_name": block.class_name,
-                },
-            )
-            _inherit_kernel_frames(graph, split_index, port_index)
-            for target in targets:
-                graph.links = [
-                    link for link in graph.links if link != (split_index, target)
-                ]
-                graph.link_output_ports.pop((split_index, target), None)
-                graph.link_port_labels.pop((split_index, target), None)
-                graph.links.append((port_index, target))
-            graph.links.append((split_index, port_index))
-            for port_name, src in list(graph.output_ports.items()):
-                if src == split_index and port_name == label:
-                    graph.output_ports[port_name] = port_index
-
-
 def _has_inline_attention_child(block: BlockNode) -> bool:
     """True when *block* directly owns an inline-expanded attention kernel.
 
@@ -3162,7 +3090,6 @@ def build_computation_graph(
     _add_module_parameter_inputs(graph)
     add_forward_output(graph, root=root)
     _add_kernel_output_port_nodes(graph)
-    _add_split_output_port_nodes(graph)
     if basic_ops is not None and basic_ops.basic_only:
         return _filter_graph_basic_only(graph)
     return graph

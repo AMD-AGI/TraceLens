@@ -47,6 +47,13 @@ _log = logging.getLogger(__name__)
 
 DimExpr = int | str
 
+# Reserved key separator for per-output-port shape specs. A tuple-unpacked
+# split/chunk/unbind publishes one spec per ordinal (its slice shape) under
+# ``f"{node_id}{PORT_SPEC_SEP}{ordinal}"`` so the exporter can label each output
+# port of the split with the right sub-shape. The null bytes never occur in node
+# ids, so these entries never collide with a real node lookup.
+PORT_SPEC_SEP = "\x00port\x00"
+
 
 class Symbol(str, Enum):
     """Common symbolic dimensions propagated through the graph."""
@@ -1007,6 +1014,31 @@ class ShapeInferencer:
                         if spec_id in seeded and spec_id in merged:
                             continue
                         merged[spec_id] = spec
+
+        # Per-output-port slices for tuple-unpacked split/chunk/unbind. The node's
+        # own spec is the whole (pre-split) tensor; each consumer edge selects an
+        # ordinal. Publish one spec per ordinal under a reserved key so the
+        # exporter can label each output port with its slice shape ([B, S, 16] for
+        # ``comb_w``) instead of the undivided tensor.
+        for node in graph.nodes:
+            output_names = node.metadata.get("output_names")
+            if not output_names or len(output_names) < 2:
+                continue
+            class_name = (node.metadata.get("class_name") or node.label or "").strip()
+            op_label = (node.label or class_name).strip().lower()
+            if op_label not in {"split", "chunk", "unbind"}:
+                continue
+            whole = merged.get(node.id)
+            if whole is None:
+                continue
+            details = [str(item) for item in node.metadata.get("details", [])]
+            for ordinal in range(len(output_names)):
+                sliced = _multi_output_slice_shape(
+                    whole, details, op_label, ordinal, self.context.dims
+                )
+                if sliced is not None:
+                    merged[f"{node.id}{PORT_SPEC_SEP}{ordinal}"] = sliced
+
         self._tensor_specs = merged
         self._active_seq_axes, self._active_hidden = prev_axes, prev_hidden
         return dict(merged)
@@ -1263,24 +1295,6 @@ class ShapeInferencer:
                 return self._elementwise_operand(inputs)
             return self._activation_spec(dtype)
 
-        # A split output-port node carries one named slice of its parent split.
-        # Its input is the whole (pre-split) tensor; size it down to this port's
-        # ordinal (``[.., 16]`` for ``comb_w`` = ordinal 2 of ``split([4,4,16])``).
-        if synthetic == "@split_port_out" and inputs:
-            source = inputs[0]
-            port_label = (
-                node.metadata.get("class_name") or node.label or ""
-            ).strip().lower()
-            ordinal = int(node.metadata.get("output_ordinal", 0))
-            sliced = _multi_output_slice_shape(
-                source,
-                [str(item) for item in node.metadata.get("details", [])],
-                port_label,
-                ordinal,
-                self.context.dims,
-            )
-            return sliced if sliced is not None else source
-
         # Catch-all for any remaining synthetic wiring nodes (kernel ports,
         # hidden_states, etc.) — silent passthrough, no warning.
         if synthetic is not None and synthetic.startswith("@"):
@@ -1369,9 +1383,10 @@ class ShapeInferencer:
                 if inputs
                 else external_spec() or TensorSpec(self._active_hidden_shape(), dtype)
             )
-            # A tuple-unpacked split fans out into per-slice output-port nodes
-            # (each sized by ``@split_port_out`` above); the split node itself then
-            # represents the whole tensor being divided, so pass the source through.
+            # A tuple-unpacked split exposes one output port per slice (sized by
+            # the ``PORT_SPEC_SEP`` post-pass in ``infer_model_graph``); the split
+            # node itself represents the whole tensor being divided, so its own
+            # spec passes the source through.
             if node.metadata.get("output_names"):
                 return source
             dim_str = _detail_value(details, "dim")

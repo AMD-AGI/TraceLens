@@ -13,6 +13,7 @@ from typing import Any
 from TraceLens.ModelUtils.block_tree import BlockNode
 from TraceLens.ModelUtils.shape_inference import (
     DimExpr,
+    PORT_SPEC_SEP,
     ShapeContext,
     ShapeInferencer,
     Symbol,
@@ -141,6 +142,78 @@ def apply_shape_attrs(node: dict[str, Any], spec: TensorSpec) -> None:
     _apply_shape_attrs(node, spec)
 
 
+def _output_names_attr(node: dict[str, Any]) -> list[str]:
+    for attr in node.get("attrs", []):
+        if attr.get("key") == "output_names":
+            return [name for name in str(attr.get("value") or "").split(",") if name]
+    return []
+
+
+def _port_specs_for(
+    local_key: str, shape_specs: dict[str, TensorSpec]
+) -> dict[int, TensorSpec]:
+    """Per-ordinal slice specs a tuple-unpacked split published for ``local_key``.
+
+    The inferencer stores one spec per consumed output port under the reserved
+    ``f"{node_id}{PORT_SPEC_SEP}{ordinal}"`` key (see ``infer_model_graph``).
+    """
+    prefix = f"{local_key}{PORT_SPEC_SEP}"
+    result: dict[int, TensorSpec] = {}
+    for key, spec in shape_specs.items():
+        if not key.startswith(prefix):
+            continue
+        try:
+            result[int(key[len(prefix) :])] = spec
+        except ValueError:
+            continue
+    return result
+
+
+def _apply_multi_port_shape_attrs(
+    node: dict[str, Any],
+    whole_spec: TensorSpec | None,
+    port_specs: dict[int, TensorSpec],
+) -> None:
+    """Stamp one output port per split/unbind slice, each with its own shape.
+
+    A tuple-unpacked split has real output ports (``pre_w``/``post_w``/``comb_w``)
+    instead of synthetic per-slice tiles. Consumers were already wired to the
+    right ordinal (``sourceNodeOutputId``); here each port carries its slice shape
+    so the edge feeding ``view`` reads ``[B, S, 16]`` rather than the whole tensor.
+    """
+    output_names = _output_names_attr(node)
+    if whole_spec is not None:
+        display_text = format_shape_with_dtype(whole_spec)
+        attrs = [
+            item
+            for item in node.get("attrs", [])
+            if item.get("key") not in {"output_shape", "output_dtype"}
+        ]
+        if display_text:
+            attrs.append({"key": "output_shape", "value": display_text})
+            attrs.append({"key": "output_dtype", "value": whole_spec.dtype})
+        node["attrs"] = attrs
+    ports: list[dict[str, Any]] = []
+    for ordinal in sorted(port_specs):
+        port_spec = port_specs[ordinal]
+        label = (
+            output_names[ordinal] if ordinal < len(output_names) else str(ordinal)
+        )
+        ports.append(
+            {
+                "id": str(ordinal),
+                "attrs": [
+                    {"key": "port_label", "value": label},
+                    {"key": "shape", "value": format_shape_with_dtype(port_spec)},
+                    {"key": "tensor_shape", "value": format_shape_tensor(port_spec)},
+                    {"key": "dtype", "value": port_spec.dtype},
+                ],
+            }
+        )
+    if ports:
+        node["outputsMetadata"] = ports
+
+
 def annotate_nodes_with_shapes(
     nodes: list[dict[str, Any]],
     shape_specs: dict[str, TensorSpec],
@@ -159,6 +232,10 @@ def annotate_nodes_with_shapes(
             local_key = node_id[len(prefix) :]
         else:
             local_key = node_id
+        port_specs = _port_specs_for(local_key, shape_specs)
+        if port_specs:
+            _apply_multi_port_shape_attrs(node, shape_specs.get(local_key), port_specs)
+            continue
         spec = shape_specs.get(local_key)
         if spec is None:
             continue

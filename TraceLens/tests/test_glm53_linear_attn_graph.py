@@ -1563,63 +1563,71 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
         assert "B, S" not in shape, (boundary_id, shape)
 
 
+def _attr_value(node: dict, key: str) -> str | None:
+    for attr in node.get("attrs", []):
+        if attr.get("key") == key:
+            return attr.get("value")
+    return None
+
+
+def _port_metadata(node: dict, port: str) -> dict | None:
+    for metadata in node.get("outputsMetadata", []):
+        if str(metadata.get("id")) == str(port):
+            return metadata
+    return None
+
+
+def _port_attr(metadata: dict, key: str) -> str | None:
+    for attr in metadata.get("attrs", []):
+        if attr.get("key") == key:
+            return attr.get("value")
+    return None
+
+
 def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
-    """The 3-way ``q, k, v = qkv(h)...unbind(0)`` fans out into three ports.
+    """The 3-way ``q, k, v = qkv(h)...unbind(0)`` fans out into three real ports.
 
     ``Glm5NextVisionAttention`` unpacks ``query_states, key_states, value_states``
     from a single ``unbind`` and then feeds ``q_norm(query_states)`` and
     ``k_norm(key_states)`` — two submodule calls that each read a *distinct* slot
-    of that producer. The submodule-call wiring previously dropped the consumed
-    output ordinal, so ``key_states`` never appeared as its own port and both
-    norms docked to slot 0 (``query_states``). Threading the ordinal (C1) must
-    give three named ``@split_out`` ports and route ``q_norm``→``query_states``,
-    ``k_norm``→``key_states``, ``value_states``→its own slot, with no direct
-    ``q_norm``→``k_norm`` edge.
+    of that producer. The unbind node itself now exposes one named output port per
+    slot (no synthetic per-slice tiles); each consumer reads its own ordinal via
+    ``sourceNodeOutputId`` and each port carries its own slice shape. ``q_norm``
+    reads ordinal 0, ``k_norm`` ordinal 1, ``value_states`` ordinal 2, with no
+    direct ``q_norm``→``k_norm`` edge.
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
-    graph = build_merged_model_graph(spec)
+    # Per-slice port shapes are only stamped when shape inference runs.
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
     nodes = graph["nodes"]
-    node_by_id = {node["id"]: node for node in nodes}
 
     _assert_export_is_acyclic(nodes)
 
-    # Three distinct named slot ports fan out of the vision qkv unbind.
-    split_labels = {
-        node["label"]
+    # The qkv unbind node carries all three slot names as real output ports; there
+    # are no synthetic per-slice port tiles anymore.
+    assert not any("@split_out:" in node["id"] for node in nodes)
+
+    unbind = next(
+        node
         for node in nodes
-        if "@split_out:" in node["id"]
-        and "VisionAttention" in node.get("namespace", "")
-    }
-    assert {"query_states", "key_states", "value_states"} <= split_labels
+        if "VisionAttention" in node.get("namespace", "")
+        and (_attr_value(node, "output_names") or "").split(",")
+        == ["query_states", "key_states", "value_states"]
+    )
 
-    # Locate the qkv unbind group (the one fanning out all three slots) without
-    # hardcoding its graph index, which shifts as sibling nodes are added.
-    def _vision_split(slot: str) -> dict:
-        candidates = [
-            node
-            for node in nodes
-            if node["id"].endswith(f":{slot}")
-            and "@split_out:" in node["id"]
-            and "VisionAttention" in node.get("namespace", "")
-        ]
-        prefixes = {node["id"].rsplit(":", 1)[0] for node in candidates}
-        full_group = next(
-            prefix
-            for prefix in prefixes
-            if all(
-                f"{prefix}:{name}" in node_by_id
-                for name in ("query_states", "key_states", "value_states")
-            )
-        )
-        return node_by_id[f"{full_group}:{slot}"]
+    # Three ordinal-keyed output ports, each labeled with its slot and carrying a
+    # per-slice shape (the head-dim slot axis dropped by the unbind).
+    for ordinal, slot in enumerate(
+        ("query_states", "key_states", "value_states")
+    ):
+        port = _port_metadata(unbind, str(ordinal))
+        assert port is not None, ordinal
+        assert _port_attr(port, "port_label") == slot
+        assert _port_attr(port, "shape"), slot
 
-    q_split = _vision_split("query_states")
-    k_split = _vision_split("key_states")
-    v_split = _vision_split("value_states")
-
-    # Each norm's input boundary reads its own slot — k_norm no longer docks to
-    # query_states.
+    # Each norm's input boundary reads the unbind and selects its own ordinal —
+    # k_norm no longer docks to query_states (ordinal 0).
     def _norm_input(kind: str) -> dict:
         return next(
             node
@@ -1631,15 +1639,22 @@ def test_glm53_vision_attention_qkv_unbind_fans_out_three_ports():
 
     q_norm_input = _norm_input("q_norm")
     k_norm_input = _norm_input("k_norm")
-    assert [e["sourceNodeId"] for e in q_norm_input["incomingEdges"]] == [q_split["id"]]
-    assert [e["sourceNodeId"] for e in k_norm_input["incomingEdges"]] == [k_split["id"]]
+    q_edges = [
+        e for e in q_norm_input["incomingEdges"] if e["sourceNodeId"] == unbind["id"]
+    ]
+    k_edges = [
+        e for e in k_norm_input["incomingEdges"] if e["sourceNodeId"] == unbind["id"]
+    ]
+    assert [e["sourceNodeOutputId"] for e in q_edges] == ["0"]
+    assert [e["sourceNodeOutputId"] for e in k_edges] == ["1"]
 
-    # value_states is consumed directly (its transpose reads the value slot).
+    # value_states (ordinal 2) is consumed directly by its transpose.
     value_consumers = [
         node
         for node in nodes
         if any(
-            edge["sourceNodeId"] == v_split["id"]
+            edge["sourceNodeId"] == unbind["id"]
+            and edge.get("sourceNodeOutputId") == "2"
             for edge in node.get("incomingEdges", [])
         )
     ]

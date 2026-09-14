@@ -93,6 +93,11 @@ def _node_attrs(spec) -> list[dict[str, str]]:
         attrs.append(_kv("port_style", spec.port_style))
     if spec.synthetic:
         attrs.append(_kv("synthetic", spec.synthetic))
+    # A tuple-unpacked split/chunk/unbind fans out into real output ports (one per
+    # unpacked name). Publish the ordered names so the shape pass can label each
+    # port (``pre_w``/``post_w``/``comb_w``) and carry its per-slice shape.
+    if block is not None and block.output_names:
+        attrs.append(_kv("output_names", ",".join(block.output_names)))
     operation = classify_operation(block, synthetic=spec.synthetic, label=spec.label)
     if operation is not None:
         attrs.append(_kv("operation", operation.value))
