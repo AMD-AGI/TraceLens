@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Auto-loaded shim that drives kernel-shape annotation without patching the server.
 
 CPython auto-imports ``sitecustomize`` at interpreter startup for any process

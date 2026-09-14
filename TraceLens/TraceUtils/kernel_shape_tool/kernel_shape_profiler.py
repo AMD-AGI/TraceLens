@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Tensor shape metadata for Triton / FlashInfer / aiter kernels in profiler traces.
 
 Registered kernel launchers are wrapped as torch custom ops so they appear as

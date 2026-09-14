@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Kernel shape profiler
 
 Adds `Input Dims` / `Input type` / `Input Strides` to PyTorch profiler traces
