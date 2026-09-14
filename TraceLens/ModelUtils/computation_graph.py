@@ -1063,44 +1063,56 @@ def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
                 graph.links.append((source, index))
 
 
-def _add_module_parameter_inputs(graph: ComputationGraph) -> None:
-    """Dock a visible operand node for a module parameter/buffer an op reads alone.
+def _prune_weight_only_ops(graph: ComputationGraph) -> ComputationGraph:
+    """Hide ops whose value derives solely from module parameters/buffers.
 
-    An inline op whose only operands are module parameters or buffers reads no
-    chain producer, so it otherwise renders with no incoming edge and its data
-    appears to come from nowhere. The canonical case is the mHC mapping's
+    Constants and learned weights are never drawn: ``F.linear`` shows its
+    activation input and hides ``self.weight``. Two mHC mapping ops slip past
+    that rule because the weight is their *only* operand and it is fanned out —
     ``pre_b, post_b, comb_b = self.base.split(...)`` and
-    ``pre_scale, post_scale, comb_scale = self.scale.unbind(0)``: a ``Split`` /
-    ``Unbind`` reading a raw learned parameter. The AST already surfaces that
-    parameter as an ``external_input``; materialize it as a local operand node
-    docked into the op so the computation shows where its values originate.
+    ``pre_scale, post_scale, comb_scale = self.scale.unbind(0)`` read a raw
+    ``nn.Parameter`` with no activation flowing through. Such an op (and any op
+    reachable only through it, e.g. ``comb_b.view(hc, hc)``) is a constant and
+    must not appear. Consumers that mix the result back with a real activation
+    (``pre_w * pre_scale + pre_b``) stay; they simply lose the hidden operand.
 
-    General: fires for any forward operation that reads a ``self.<attr>`` tensor
-    and has no incoming producer edge. It is gated on the op being otherwise
-    sourceless (no incoming edge) so chain steps that read a weight *and* continue
-    the spine (``x = x * self.weight``) are untouched — matching the guardrail in
-    :func:`_reads_only_a_side_parameter`.
+    General: roots are sourceless *multi-output* forward ops reading only a
+    ``self.<attr>`` external — mirroring the conservative multi-output guard in
+    :func:`_reads_only_a_side_parameter` (a single-output ``x = x * self.weight``
+    may continue the spine implicitly, so it is left alone). Weight-only-ness is
+    then propagated to any op every one of whose operands is itself weight-only.
     """
     incoming: set[int] = {target for _source, target in graph.links}
-    param_nodes: dict[str, int] = {}
-    for index, spec in enumerate(list(graph.nodes)):
+    weight_only: set[int] = set()
+    for index, spec in enumerate(graph.nodes):
         block = spec.block
         if block is None or not is_forward_operation(block.attr_name):
             continue
-        if not block.external_inputs or index in incoming:
+        if index in incoming:
             continue
-        for name in block.external_inputs:
-            source = param_nodes.get(name)
-            if source is None:
-                source = _add_node(
-                    graph,
-                    key=f"{SYNTHETIC_TENSOR}:external:{name}",
-                    label=name,
-                    synthetic=SYNTHETIC_TENSOR,
-                )
-                param_nodes[name] = source
-            if (source, index) not in graph.links:
-                graph.links.append((source, index))
+        if block.external_inputs and block.output_names:
+            weight_only.add(index)
+    if not weight_only:
+        return graph
+
+    preds: dict[int, list[int]] = {index: [] for index in range(len(graph.nodes))}
+    for source, target in graph.links:
+        preds[target].append(source)
+    changed = True
+    while changed:
+        changed = False
+        for index, spec in enumerate(graph.nodes):
+            if index in weight_only:
+                continue
+            block = spec.block
+            if block is None or not is_forward_operation(block.attr_name):
+                continue
+            operands = preds[index]
+            if operands and all(source in weight_only for source in operands):
+                weight_only.add(index)
+                changed = True
+
+    return _prune_computation_nodes(graph, weight_only)
 
 
 def add_forward_output(
@@ -3087,7 +3099,7 @@ def build_computation_graph(
         strip_unused_return_branches=strip_unused_return_branches,
     )
     graph = _strip_dangling_leaves(graph, root=root)
-    _add_module_parameter_inputs(graph)
+    graph = _prune_weight_only_ops(graph)
     add_forward_output(graph, root=root)
     _add_kernel_output_port_nodes(graph)
     if basic_ops is not None and basic_ops.basic_only:

@@ -1712,15 +1712,16 @@ def test_glm53_vision_mlp_gate_and_up_are_parallel():
     assert up["id"] not in gate_sources
 
 
-def test_glm53_hyperconnection_param_only_ops_show_their_source():
-    """``pre_b``/``post_b`` and the scale unbind must dock a visible operand.
+def test_glm53_hyperconnection_weight_only_ops_are_hidden():
+    """The mHC mapping's weight-only unpacks are not drawn.
 
-    The mHC mapping unpacks a raw learned parameter
-    (``pre_b, post_b, comb_b = self.base.split(...)`` and
-    ``pre_scale, post_scale, comb_scale = self.scale.unbind(0)``). These ops read
-    no chain producer, so without surfacing the parameter they render with no
-    incoming edge and their values appear to come from nowhere. Each such op must
-    instead be fed by a local ``@tensor:external:<param>`` operand node.
+    ``pre_b, post_b, comb_b = self.base.split(...)`` and
+    ``pre_scale, post_scale, comb_scale = self.scale.unbind(0)`` unpack a raw
+    ``nn.Parameter`` with no activation flowing through, so — like any learned
+    weight — the op and any ``@tensor:external`` operand for ``base``/``scale``
+    must not appear. The ``pre_w/post_w/comb_w`` split stays: it unpacks
+    ``F.linear(flat, self.fn)``, which transforms the real activation ``flat``,
+    and its consumers keep that real operand after the weight operands vanish.
     """
     pytest.importorskip("huggingface_hub")
     spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
@@ -1728,27 +1729,29 @@ def test_glm53_hyperconnection_param_only_ops_show_their_source():
     nodes = graph["nodes"]
     _assert_export_is_acyclic(nodes)
 
-    base_split = [
-        n
-        for n in nodes
-        if "attn_hc" in n["id"] and n["id"].endswith(":@op_l281_c32_split:0")
-    ]
-    scale_unbind = [
-        n
-        for n in nodes
-        if "attn_hc" in n["id"] and n["id"].endswith(":@op_l282_c44_unbind:0")
-    ]
-    assert base_split, "expected the self.base split (pre_b/post_b/comb_b)"
-    assert scale_unbind, "expected the self.scale unbind (pre_scale/...)"
+    attn_hc = [n for n in nodes if "attn_hc" in n["id"]]
+    assert attn_hc, "expected the attn_hc mHC mapping nodes"
 
-    for node, param in ((base_split[0], "base"), (scale_unbind[0], "scale")):
-        sources = {e["sourceNodeId"] for e in node.get("incomingEdges", [])}
-        assert sources, f"{node['id']} still has no source"
-        assert all(":external:" in src for src in sources), sources
-        assert any(src.endswith(f"@tensor:external:{param}") for src in sources), (
-            param,
-            sources,
-        )
-        # The operand node itself is a leaf: no incoming producer of its own.
-        operand = next(n for n in nodes if n["id"] in sources)
-        assert not operand.get("incomingEdges")
+    # The learned base/scale weights and their weight-only unpacks are gone.
+    externals = [n for n in attn_hc if ":external:" in n["id"]]
+    assert not externals, [n["id"] for n in externals]
+    base_split = [n for n in attn_hc if n["id"].endswith(":@op_l281_c32_split:0")]
+    scale_unbind = [n for n in attn_hc if n["id"].endswith(":@op_l282_c44_unbind:0")]
+    assert not base_split, [n["id"] for n in base_split]
+    assert not scale_unbind, [n["id"] for n in scale_unbind]
+
+    # The activation-derived split (F.linear(flat, self.fn)) survives with its
+    # three named output ports, and a real edge still feeds its consumers.
+    fn_split = [
+        n
+        for n in attn_hc
+        if "comb_w" in (_attr_value(n, "output_names") or "")
+    ]
+    assert fn_split, "expected the pre_w/post_w/comb_w activation split to survive"
+    split_id = fn_split[0]["id"]
+    consumers = [
+        n
+        for n in attn_hc
+        if any(e["sourceNodeId"] == split_id for e in n.get("incomingEdges", []))
+    ]
+    assert consumers, "the surviving split must still feed downstream ops"
