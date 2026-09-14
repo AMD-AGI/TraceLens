@@ -1,6 +1,8 @@
+diff --git a/python/sglang/srt/utils/profile_utils.py b/python/sglang/srt/utils/profile_utils.py
+index 705f1010b6..ad2672db19 100644
 --- a/python/sglang/srt/utils/profile_utils.py
 +++ b/python/sglang/srt/utils/profile_utils.py
-@@ -8,6 +8,7 @@
+@@ -8,6 +8,7 @@ from typing import Callable, Dict, List, Optional
  
  import torch
  
@@ -8,15 +10,15 @@
  from sglang.srt.distributed.parallel_state_wrapper import ParallelState
  from sglang.srt.environ import envs
  from sglang.srt.managers.io_struct import ProfileReqOutput
-@@ -105,6 +106,7 @@
+@@ -98,6 +99,7 @@ class ProfileManager:
+         merge_profiles: bool,
          profile_prefix: str,
          profile_stages: Optional[List[str]] = None,
-         detailed_annotations: bool = False,
 +        shape_discovery: bool = False,
      ):
-         self.detailed_annotations = detailed_annotations
          # not supported yet
-@@ -126,6 +128,7 @@
+         assert start_step is None
+@@ -118,6 +120,7 @@ class ProfileManager:
              output_dir=output_dir,
              output_prefix=profile_prefix,
              profile_id=profile_id,
@@ -24,7 +26,7 @@
          )
  
          self.stage_based_trigger.configure(
-@@ -317,11 +320,19 @@
+@@ -302,11 +305,19 @@ class _ProfilerConcreteBase(_ProfilerBase):
  
  
  class _ProfilerTorch(_ProfilerConcreteBase):
@@ -45,7 +47,7 @@
  
      def start(self):
          activity_map = {
-@@ -350,12 +361,20 @@
+@@ -335,12 +346,19 @@ class _ProfilerTorch(_ProfilerConcreteBase):
                  else torch_npu.profiler.tensorboard_trace_handler(self.output_dir)
              ),
          )
@@ -62,7 +64,6 @@
 +
 +        if self.record_shapes and self.shape_discovery:
 +            kernel_shape_profiler.disable()
-+
          if not _is_npu:
              # Build filename with only non-zero ranks to maintain backward compatibility
              filename_parts = [self.profile_id, f"TP-{self.ps.tp_rank}"]
