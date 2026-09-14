@@ -1598,6 +1598,49 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
         assert "B, S" not in shape, (boundary_id, shape)
 
 
+def test_glm53_vision_apply_rotary_tuple_returns_dock_per_ordinal():
+    """``q_embed, k_embed = apply_rotary_pos_emb_vision(...)`` docks per slot.
+
+    The inline-expanded rotary frame returns a tuple: ``q_embed`` is its ordinal-0
+    producer (an internal cast) and ``k_embed`` its ordinal-1 producer (the frame's
+    *last* op). The two consumers sit next in source order — ``q_embed``'s transpose
+    (l1616) then ``k_embed``'s transpose (l1617). The source-order chain fed the
+    l1616 transpose from the frame's last op (``k_embed``), so it read *both* slots.
+
+    General: a consumer reading a specific return slot of a tuple-returning inline
+    frame docks onto that slot's internal producer, and the stale frame-tail chain
+    edge is removed — so the q-path reads only ``q_embed`` and the k-path only
+    ``k_embed`` (no cross-slot edge, ``q_embed`` no longer orphaned).
+    """
+    pytest.importorskip("huggingface_hub")
+    spec = load_model_spec("zai-org/GLM-5.3-Flash", detailed=True)
+    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    nodes = graph["nodes"]
+
+    _assert_export_is_acyclic(nodes)
+
+    def _one(suffix: str) -> dict:
+        return next(n for n in nodes if n["id"].endswith(suffix))
+
+    q_embed = _one(":@op_l1577_c14_cast:14")   # rotary tuple slot 0
+    k_embed = _one(":@op_l1578_c14_cast:15")   # rotary tuple slot 1
+    q_transpose = _one(":@op_l1616_c23_transpose:6")
+    k_transpose = _one(":@op_l1617_c21_transpose:8")
+
+    q_sources = [e["sourceNodeId"] for e in q_transpose["incomingEdges"]]
+    k_sources = [e["sourceNodeId"] for e in k_transpose["incomingEdges"]]
+
+    # Each transpose reads exactly its own rotary slot — no stale cross edge.
+    assert q_sources == [q_embed["id"]], q_sources
+    assert k_sources == [k_embed["id"]], k_sources
+
+    # ``q_embed`` (ordinal-0 slot) is consumed, not orphaned.
+    all_sources = {
+        e["sourceNodeId"] for n in nodes for e in n.get("incomingEdges", [])
+    }
+    assert q_embed["id"] in all_sources
+
+
 def _attr_value(node: dict, key: str) -> str | None:
     for attr in node.get("attrs", []):
         if attr.get("key") == key:

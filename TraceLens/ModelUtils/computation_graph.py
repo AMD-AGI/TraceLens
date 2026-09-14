@@ -645,6 +645,41 @@ def _wire_all_predecessor_edges(
                     source_index = attr_last_index.get(pred)
                 if source_index is None:
                     continue
+                # A consumer reading a specific return slot of an inline-expanded
+                # tuple-returning free function (``query_states`` = ordinal 0 of
+                # ``apply_rotary_pos_emb_vision``) must dock onto that slot's
+                # internal producer, not the frame's last op (which
+                # ``attr_last_index[call_attr]`` resolves to). Redirect to the
+                # per-ordinal producer and skip the port tag — the internal op has
+                # a single output, so no fan-out ordinal applies.
+                return_producers = block.forward_step_return_producers.get(pred)
+                consumed_ordinal = child.operation_predecessor_ports.get(pred)
+                slot_resolved = False
+                if (
+                    return_producers
+                    and consumed_ordinal is not None
+                    and consumed_ordinal < len(return_producers)
+                ):
+                    resolved = attr_last_index.get(
+                        return_producers[consumed_ordinal]
+                    )
+                    if resolved is not None and resolved != source_index:
+                        # The consumer was chained onto the frame's last op by the
+                        # source-order sequential fallback in ``_add_chain`` (a
+                        # tuple-returning free function ends on its ordinal-1
+                        # producer, but the ordinal-0 consumer sits next in source
+                        # order). Drop that stale frame-tail edge before docking
+                        # onto the correct per-ordinal producer, else the consumer
+                        # reads both slots.
+                        stale_link = (source_index, target_index)
+                        if stale_link in graph.links:
+                            graph.links.remove(stale_link)
+                            graph.link_output_ports.pop(stale_link, None)
+                            graph.link_port_labels.pop(stale_link, None)
+                        source_index = resolved
+                        slot_resolved = True
+                    elif resolved is not None:
+                        slot_resolved = True
                 link = (source_index, target_index)
                 if link not in graph.links:
                     graph.links.append(link)
@@ -653,7 +688,7 @@ def _wire_all_predecessor_edges(
                 # ordinal, so the split can later fan out into one named output
                 # port per slice with its own shape.
                 ordinal = child.operation_predecessor_ports.get(pred)
-                if ordinal is not None:
+                if ordinal is not None and not slot_resolved:
                     graph.link_output_ports[link] = str(ordinal)
                 if multi_input and link not in graph.link_port_labels:
                     source_label = (

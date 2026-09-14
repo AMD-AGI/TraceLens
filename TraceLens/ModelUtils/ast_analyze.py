@@ -1033,14 +1033,22 @@ def _multi_op_free_functions(
     *,
     self_values: dict[str, Any],
     all_tensor_ops: bool,
-) -> dict[str, list[ForwardOperation]]:
+) -> tuple[dict[str, list[ForwardOperation]], dict[str, list[str]]]:
     """Traced free-function calls whose body expands into a visible sub-pipeline.
 
     Keyed by the synthetic call attr (``@positional_l1615_...``) so the block
     tree renders the helper's computation inline instead of one opaque tile.
     Mirrors ``_multi_op_forward_methods`` for module-level functions.
+
+    Also returns, for a tuple-returning helper, the ordered internal producer
+    attrs of its return slots (ordinal -> producer attr), so a consumer reading a
+    specific slot (``query_states`` = ordinal 0 of
+    ``apply_rotary_pos_emb_vision``) can dock onto the matching internal op
+    instead of the frame's last op. General: derived from the helper's own
+    ``return_order``/``return_slots``, no class-name checks.
     """
     expanded: dict[str, list[ForwardOperation]] = {}
+    return_producers: dict[str, list[str]] = {}
     for call_attr in forward_calls:
         name = _synthetic_call_function_name(call_attr)
         if name is None:
@@ -1063,7 +1071,17 @@ def _multi_op_free_functions(
         )
         if len(operations) > 1:
             expanded[call_attr] = operations
-    return expanded
+            if len(analysis.return_order) >= 2:
+                op_attrs = {op.attr_name for op in operations}
+                producers = [
+                    analysis.return_slots.get(slot)
+                    for slot in analysis.return_order
+                ]
+                # Only publish the map when every slot resolves to an op that
+                # survived inlining (else fall back to the default last-op wiring).
+                if all(p is not None and p in op_attrs for p in producers):
+                    return_producers[call_attr] = [p for p in producers if p]
+    return expanded, return_producers
 
 
 def _register_forward_calls(
@@ -1521,6 +1539,11 @@ class ClassStructure:
     ] = field(default_factory=dict)
     single_op_methods: dict[str, ForwardOperation] = field(default_factory=dict)
     multi_op_methods: dict[str, list[ForwardOperation]] = field(default_factory=dict)
+    # For an inline-expanded free function returning a tuple
+    # (``q_embed, k_embed = apply_rotary_pos_emb_vision(...)``): call attr ->
+    # ordered internal producer attrs, so a consumer reading a specific return
+    # ordinal docks onto the matching internal op, not the frame's last op.
+    forward_step_return_producers: dict[str, list[str]] = field(default_factory=dict)
     forward_return_slots: dict[str, str] = field(default_factory=dict)
     forward_return_order: list[str] = field(default_factory=list)
     primary_return_slot: str | None = None
@@ -4105,6 +4128,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         forward_loop_carried: list[LoopCarriedSpec] = []
         single_op_methods: dict[str, ForwardOperation] = {}
         multi_op_methods: dict[str, list[ForwardOperation]] = {}
+        forward_step_return_producers: dict[str, list[str]] = {}
         init_func = next(
             (
                 item
@@ -4222,16 +4246,16 @@ class _ModelAstVisitor(ast.NodeVisitor):
             # module-level definition. Keys are synthetic attrs (``@positional_``/
             # ``@function_``), disjoint from method names, so they share the same
             # ``multi_op_methods`` rendering path in the block tree.
-            multi_op_methods.update(
-                _multi_op_free_functions(
-                    self.module_functions,
-                    forward_calls,
-                    self_values=_self_config_values(
-                        init_func, self._config_for_class(node.name)
-                    ),
-                    all_tensor_ops=self.all_tensor_ops,
-                )
+            free_fn_methods, free_fn_return_producers = _multi_op_free_functions(
+                self.module_functions,
+                forward_calls,
+                self_values=_self_config_values(
+                    init_func, self._config_for_class(node.name)
+                ),
+                all_tensor_ops=self.all_tensor_ops,
             )
+            multi_op_methods.update(free_fn_methods)
+            forward_step_return_producers.update(free_fn_return_producers)
             delegates_inline = _forward_delegates_to_nothing(node.name, forward_calls)
             method_names = {
                 item.name
@@ -4376,6 +4400,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             forward_step_boundary_arg_params=forward_step_boundary_arg_params,
             single_op_methods=single_op_methods,
             multi_op_methods=multi_op_methods,
+            forward_step_return_producers=forward_step_return_producers,
             forward_return_slots=forward_return_slots,
             forward_return_order=forward_return_order,
             primary_return_slot=primary_return_slot,

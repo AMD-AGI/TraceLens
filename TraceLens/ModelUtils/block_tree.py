@@ -747,6 +747,13 @@ class BlockNode:
     forward_step_predecessor_ordinals: dict[str, dict[str, int]] = field(
         default_factory=dict
     )
+    # Inline-expanded tuple-returning free function: call attr -> ordered
+    # internal producer attrs (ordinal -> producer), so a consumer reading a
+    # specific return slot docks onto the matching internal op, not the frame's
+    # last op. Empty for single-return helpers.
+    forward_step_return_producers: dict[str, list[str]] = field(
+        default_factory=dict
+    )
 
 
 PortStyle = Literal["floating", "inline"]
@@ -2364,6 +2371,7 @@ def build_block_node(
         forward_step_predecessor_ordinals=dict(
             cls.forward_step_predecessor_ordinals
         ),
+        forward_step_return_producers=dict(cls.forward_step_return_producers),
     )
 
 
