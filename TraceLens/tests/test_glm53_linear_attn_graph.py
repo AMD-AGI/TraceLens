@@ -1416,7 +1416,15 @@ def test_glm53_vision_attention_resolves_single_kernel_branch():
     assert not [n for n in attn_nodes if "@kernel_out" in n["id"]]
 
     # Exactly one per-chunk Concat, fed by the single kernel, with no self-loop.
-    concats = [n for n in attn_nodes if n.get("label") == "Concat"]
+    # The rope helper's own ``rotate_half`` Concats live in the expanded
+    # ``apply_rotary_pos_emb_vision`` frame (a separate computation) and are
+    # excluded here.
+    concats = [
+        n
+        for n in attn_nodes
+        if n.get("label") == "Concat"
+        and "apply_rotary_pos_emb_vision" not in n["id"]
+    ]
     assert len(concats) == 1, [n["id"] for n in concats]
     concat = concats[0]
     concat_sources = [e["sourceNodeId"] for e in concat.get("incomingEdges", [])]
@@ -1505,8 +1513,14 @@ def test_glm53_vision_cu_seqlens_producer_visible_and_wired():
     assert [e["sourceNodeId"] for e in cu_mirror["incomingEdges"]] == [producer_id]
 
     # The kernel's cu_seqlens input port is fed through that boundary, and the
-    # crossing carries no back edge.
-    cu_port = node_by_id["visual/@kernel_in:45:cu_seqlens"]
+    # crossing carries no back edge. (Looked up by suffix: the ``@kernel_in``
+    # ordinal shifts as unrelated nodes are added/removed.)
+    cu_port = next(
+        n
+        for n in nodes
+        if n["id"].startswith("visual/@kernel_in:")
+        and n["id"].endswith(":cu_seqlens")
+    )
     assert [e["sourceNodeId"] for e in cu_port["incomingEdges"]] == [
         "visual/@input:cu_seqlens"
     ]
@@ -1536,22 +1550,43 @@ def test_glm53_vision_rotary_position_embeddings_wired_across_loop():
 
     _assert_export_is_acyclic(nodes)
 
-    # apply_rotary reads the position_embeddings boundary, not hidden_states.
-    apply_rotary = next(
-        node
-        for node in nodes
-        if "@positional_" in node["id"]
-        and "apply_rotary_pos_emb_vision" in node["id"]
-        and "@input" not in node["id"]
-    )
-    rotary_sources = {e["sourceNodeId"] for e in apply_rotary["incomingEdges"]}
-    assert "visual/@input:position_embeddings" in rotary_sources
-    assert not any("hidden_states" in src for src in rotary_sources)
+    # The expanded apply_rotary frame unpacks ``cos, sin = position_embeddings``
+    # and feeds each to its own unsqueeze. The boundary fans out one port per
+    # slot (cos = port 0, sin = port 1) instead of collapsing both onto slot 0 or
+    # dropping the second slot; neither reads hidden_states.
+    def _pe_slot_port(node_suffix: str) -> str:
+        node = next(n for n in nodes if n["id"].endswith(node_suffix))
+        assert not any(
+            "hidden_states" in e["sourceNodeId"] for e in node["incomingEdges"]
+        ), node["id"]
+        pe_edges = [
+            e
+            for e in node["incomingEdges"]
+            if e["sourceNodeId"] == "visual/@input:position_embeddings"
+        ]
+        assert len(pe_edges) == 1, node["id"]
+        return pe_edges[0].get("sourceNodeOutputId", "0")
 
-    # The boundary traces back to the pre-loop rotary producer, across its mirror.
+    cos_port = _pe_slot_port(
+        "@positional_l1615_apply_rotary_pos_emb_vision:@op_l1574_c15_unsqueeze:2"
+    )
+    sin_port = _pe_slot_port(
+        "@positional_l1615_apply_rotary_pos_emb_vision:@op_l1574_c42_unsqueeze:4"
+    )
+    assert {cos_port, sin_port} == {"0", "1"}, (cos_port, sin_port)
+
+    # The boundary traces back to the pre-loop rotary producer, across its
+    # mirror. The producer is a tuple return (cos, sin); each slot has a
+    # distinct per-port output node (no collision onto a single @output), so the
+    # mirror carries one incoming edge per slot.
     pe_mirror = node_by_id["visual/@input_mirror:position_embeddings^position_embeddings"]
-    producer_id = pe_mirror["incomingEdges"][0]["sourceNodeId"]
-    assert producer_id.endswith("rotary_pos_emb/@output")
+    producer_ids = {e["sourceNodeId"] for e in pe_mirror["incomingEdges"]}
+    assert all(
+        "rotary_pos_emb/@output" in pid for pid in producer_ids
+    ), producer_ids
+    assert {
+        pid.rsplit("@output:", 1)[1].split("^", 1)[0] for pid in producer_ids
+    } == {"cos", "sin"}, producer_ids
 
     # The crossing carries the vision producer's shape, not the text sequence axis.
     for boundary_id in (

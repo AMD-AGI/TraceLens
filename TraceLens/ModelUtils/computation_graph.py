@@ -204,6 +204,53 @@ def _build_module_param_entries(
     return result
 
 
+def _build_module_param_ordinal_entries(
+    graph: ComputationGraph,
+) -> dict[str, dict[str, list[tuple[int, int]]]]:
+    """Map each expanded module to ``{param: [(entry_index, ordinal), ...]}``.
+
+    A tuple-unpacked side arg (``cos, sin = position_embeddings`` inside an
+    inline-expanded ``apply_rotary_pos_emb_vision`` frame) feeds one op per slot,
+    each tagged with its ordinal (``boundary_input_ordinal``). The flat
+    :func:`_build_module_param_entries` records only the first index for the whole
+    param, so the second slot's consumer is left unwired. This records the first
+    consumer of *each* ordinal so the side-arg producer can fan out one port per
+    slot — mirroring :func:`_add_forward_param_inputs`, which does the same for a
+    module built in isolation.
+    """
+    result: dict[str, dict[str, list[tuple[int, int]]]] = {}
+    for frame in graph.inline_frames:
+        # First consumer per (param, ordinal), in frame order.
+        seen: dict[tuple[str, int], int] = {}
+        order: list[tuple[str, int]] = []
+        for index in frame.node_indices:
+            block = graph.nodes[index].block
+            if block is None or block.boundary_input_ordinal is None:
+                continue
+            param = block.boundary_input_name
+            if param is None or param not in block.param_inputs:
+                continue
+            key = (param, block.boundary_input_ordinal)
+            if key not in seen:
+                seen[key] = index
+                order.append(key)
+        if not order:
+            continue
+        entries: dict[str, list[tuple[int, int]]] = {}
+        for param, ordinal in order:
+            entries.setdefault(param, []).append((seen[(param, ordinal)], ordinal))
+        # Only a genuine multi-slot fan-out needs special handling; a lone slot
+        # rides the ordinary single-entry path unchanged.
+        result[frame.frame_id] = {
+            param: consumers
+            for param, consumers in entries.items()
+            if len(consumers) >= 2
+        }
+        if not result[frame.frame_id]:
+            del result[frame.frame_id]
+    return result
+
+
 def _resolve_primary_input(
     consumer_attr: str,
     root: "BlockNode",
@@ -306,6 +353,21 @@ def _lookup_param_entry(
         if _normalize_param_name(param) == normalized:
             return index
     return default
+
+
+def _lookup_ordinal_entries(
+    param_ordinal_entries: dict[str, list[tuple[int, int]]],
+    arg_name: str,
+) -> list[tuple[int, int]] | None:
+    """Look up a param's tuple-unpack slot consumers, with fuzzy fallback."""
+    exact = param_ordinal_entries.get(arg_name)
+    if exact is not None:
+        return exact
+    normalized = _normalize_param_name(arg_name)
+    for param, consumers in param_ordinal_entries.items():
+        if _normalize_param_name(param) == normalized:
+            return consumers
+    return None
 
 
 _KERNEL_CLASS_NAMES = frozenset(
@@ -555,6 +617,7 @@ def _wire_all_predecessor_edges(
     # side-fed arguments land on the correct expanded pipeline node.  Graph-wide
     # and independent of which block we are wiring, so build it once.
     module_param_entries = _build_module_param_entries(graph)
+    module_param_ordinal_entries = _build_module_param_ordinal_entries(graph)
 
     # --- 1. Inline-op predecessor edges ---
     for block in wiring_blocks:
@@ -628,6 +691,7 @@ def _wire_all_predecessor_edges(
             arg_map = pred_arg_maps.get(step_attr, {})
             ordinal_map = pred_ordinal_maps.get(step_attr, {})
             param_entries = module_param_entries.get(step_attr, {})
+            param_ordinal_entries = module_param_ordinal_entries.get(step_attr, {})
             entry_params = _first_op_entry_params(step_node)
             multi = len(preds) >= 2
 
@@ -661,6 +725,25 @@ def _wire_all_predecessor_edges(
                             attr_last_index,
                             source_index,
                         )
+                # A tuple-unpacked side arg (``position_embeddings`` ->
+                # ``cos, sin`` inside an inline-expanded rope frame) feeds one op
+                # per slot. Fan the producer out to each slot's consumer with its
+                # ordinal, so port1's ``sin`` op is wired too instead of dropped
+                # onto the single first-slot entry.
+                fan_out = (
+                    _lookup_ordinal_entries(param_ordinal_entries, arg_name)
+                    if arg_name
+                    else None
+                )
+                if fan_out:
+                    for consumer_index, ordinal in fan_out:
+                        slot_link = (source_index, consumer_index)
+                        if slot_link not in graph.links:
+                            graph.links.append(slot_link)
+                        graph.link_output_ports[slot_link] = str(ordinal)
+                        if multi and arg_name and slot_link not in graph.link_port_labels:
+                            graph.link_port_labels[slot_link] = arg_name
+                    continue
                 # Resolve arg-specific target when the predecessor maps to a
                 # named parameter with its own pipeline entry point.
                 target_index = (
@@ -1034,22 +1117,41 @@ def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
         incoming_count[target] = incoming_count.get(target, 0) + 1
     param_index: dict[str, int] = {}
     param_consumers: set[str] = set()
+    # A tuple-unpacked boundary input (``cos, sin = position_embeddings``) feeds
+    # several ops, one per slot. Docking is tracked per ``(param, ordinal)`` so
+    # each slot reaches its own consumer (``position_embeddings`` port0 -> the
+    # ``cos`` unsqueeze, port1 -> the ``sin`` unsqueeze) instead of collapsing
+    # onto the first consumer of the whole tensor.
+    param_ordinal_consumers: set[tuple[str, int]] = set()
     for index, spec in enumerate(list(graph.nodes)):
         block = spec.block
         if block is None or not is_forward_operation(block.attr_name):
             continue
         for param in block.param_inputs:
+            ordinal = (
+                block.boundary_input_ordinal
+                if block.boundary_input_name == param
+                else None
+            )
             # Nested expressions can repeat a parameter on each extracted operation
-            # (one_hot(x).permute(...)). Dock it only at its first visible consumer.
+            # (one_hot(x).permute(...)). Dock a whole-tensor param only at its first
+            # visible consumer; a tuple-unpacked one at the first consumer of each
+            # slot.
             if (
                 param == primary
-                or param in param_consumers
                 or block.boundary_input_name != param
                 or param not in root.forward_param_inputs
                 or incoming_count.get(index, 0) > len(block.operation_predecessors)
             ):
                 continue
-            param_consumers.add(param)
+            if ordinal is None:
+                if param in param_consumers:
+                    continue
+                param_consumers.add(param)
+            else:
+                if (param, ordinal) in param_ordinal_consumers:
+                    continue
+                param_ordinal_consumers.add((param, ordinal))
             source = param_index.get(param)
             if source is None:
                 source = _add_node(
@@ -1061,6 +1163,8 @@ def _add_forward_param_inputs(graph: ComputationGraph, root: BlockNode) -> None:
                 param_index[param] = source
             if (source, index) not in graph.links:
                 graph.links.append((source, index))
+                if ordinal is not None:
+                    graph.link_output_ports[(source, index)] = str(ordinal)
 
 
 def _prune_weight_only_ops(graph: ComputationGraph) -> ComputationGraph:

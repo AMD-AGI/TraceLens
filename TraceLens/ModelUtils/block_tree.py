@@ -34,6 +34,7 @@ from TraceLens.ModelUtils.ast_analyze import (
     is_positional_synthetic,
     operation_display_label,
     positional_display_label,
+    _synthetic_call_function_name,
     is_kernel_pipeline_step,
     kernel_kwarg_ports,
     kernel_name_from_step_details,
@@ -724,6 +725,11 @@ class BlockNode:
     external_inputs: list[str] = field(default_factory=list)
     param_inputs: list[str] = field(default_factory=list)
     boundary_input_name: str | None = None
+    # Output ordinal read from a tuple-unpacked boundary input, when this op
+    # consumes one slot of it (``cos = position_embeddings[0]`` -> 0). Lets the
+    # boundary input node fan out one port per consuming op instead of collapsing
+    # every consumer onto slot 0. ``None`` for a whole-tensor boundary read.
+    boundary_input_ordinal: int | None = None
     forward_param_inputs: list[str] = field(default_factory=list)
     primary_output_step: str | None = None
     forward_return_slots: dict[str, str] = field(default_factory=dict)
@@ -945,6 +951,7 @@ def _leaf_node(
     external_inputs: list[str] | None = None,
     param_inputs: list[str] | None = None,
     boundary_input_name: str | None = None,
+    boundary_input_ordinal: int | None = None,
 ) -> BlockNode:
     # A traced free function's synthetic attr embeds the callee name
     # (``@fn_l1840_get_vision_attention_seqlens``). Token-classifying that name
@@ -973,6 +980,105 @@ def _leaf_node(
         external_inputs=list(external_inputs or []),
         param_inputs=list(param_inputs or []),
         boundary_input_name=boundary_input_name,
+        boundary_input_ordinal=boundary_input_ordinal,
+    )
+
+
+def _expanded_free_function_node(
+    call_attr: str,
+    cls: ClassStructure,
+    *,
+    child_order: int | None,
+    child_details: list[str],
+    label: str,
+    fallback_class_name: str,
+    fallback_param_inputs: list[str] | None,
+) -> BlockNode:
+    """Render a traced free-function call, expanded into its body when known.
+
+    A rope helper or other module-level function called from a forward
+    (``apply_rotary_pos_emb_vision(q, k, cos, sin)``) shows the computation it
+    performs — mirroring the class-method ``multi_op_methods`` expansion — instead
+    of a single opaque tile. Falls back to the opaque op leaf when the callee's
+    body was not collected (keeping prior behaviour for un-expandable helpers).
+    """
+    method_ops = cls.multi_op_methods.get(call_attr)
+    output_names = cls.forward_step_output_names.get(call_attr)
+    if method_ops:
+        name = _synthetic_call_function_name(call_attr) or call_attr
+        call_context = [
+            detail
+            for detail in child_details
+            if detail.startswith(("loop:", "condition:"))
+        ]
+        # A callee parameter fed from a boundary forward input at the call site
+        # (``cos``/``sin`` <- ``position_embeddings``) has no producer inside the
+        # frame. Rewrite those ops so they read the boundary input by name, and
+        # tag the tuple-unpack ordinal so it fans out one port per slot.
+        boundary_arg_params = cls.forward_step_boundary_arg_params.get(call_attr, {})
+        children: list[BlockNode] = []
+        for operation_index, operation in enumerate(method_ops):
+            translated: list[str] = []
+            boundary_name: str | None = None
+            boundary_ordinal: int | None = None
+            for param in operation.param_inputs:
+                mapping = boundary_arg_params.get(param)
+                if mapping is None:
+                    translated.append(param)
+                    continue
+                origin, ordinal = mapping
+                if origin not in translated:
+                    translated.append(origin)
+                # An op reading a single boundary slot docks that slot; one that
+                # reads several (an over-collected ``cos``+``sin`` on a downstream
+                # Add) keeps the first — the extra edges are pruned as the slot's
+                # real consumer already docked it.
+                if boundary_name is None:
+                    boundary_name = origin
+                    boundary_ordinal = ordinal
+            children.append(
+                _leaf_node(
+                    attr_name=operation.attr_name,
+                    class_name=operation.class_name,
+                    forward_order=operation_index,
+                    details=[
+                        *operation.details,
+                        *(
+                            detail
+                            for detail in call_context
+                            if detail not in operation.details
+                        ),
+                    ],
+                    label=operation.label,
+                    basic=True,
+                    operation_predecessors=list(operation.predecessors),
+                    output_names=list(operation.output_names),
+                    operation_predecessor_ports=dict(operation.predecessor_ports),
+                    external_inputs=list(operation.external_inputs),
+                    param_inputs=translated,
+                    boundary_input_name=boundary_name,
+                    boundary_input_ordinal=boundary_ordinal,
+                )
+            )
+        return BlockNode(
+            attr_name=call_attr,
+            class_name=call_attr,
+            role="other",
+            label=label,
+            forward_order=child_order,
+            details=[f"function `{name}()`", *call_context],
+            output_names=list(output_names or []),
+            children=children,
+        )
+    return _leaf_node(
+        attr_name=call_attr,
+        class_name=fallback_class_name,
+        forward_order=child_order,
+        details=list(child_details),
+        label=label,
+        basic=False,
+        output_names=output_names,
+        param_inputs=fallback_param_inputs,
     )
 
 
@@ -2076,34 +2182,31 @@ def build_block_node(
             continue
 
         if is_positional_synthetic(call_attr):
-            child_nodes.append(
-                _leaf_node(
-                    attr_name=call_attr,
-                    class_name="PositionalOp",
-                    forward_order=child_order,
-                    details=list(child_details),
-                    label=positional_display_label(call_attr),
-                    basic=False,
-                    output_names=cls.forward_step_output_names.get(call_attr),
-                    param_inputs=list(
-                        cls.forward_step_boundary_params.get(call_attr, ())
-                    ),
-                )
+            expanded = _expanded_free_function_node(
+                call_attr,
+                cls,
+                child_order=child_order,
+                child_details=child_details,
+                label=positional_display_label(call_attr),
+                fallback_class_name="PositionalOp",
+                fallback_param_inputs=list(
+                    cls.forward_step_boundary_params.get(call_attr, ())
+                ),
             )
+            child_nodes.append(expanded)
             continue
 
         if is_function_synthetic(call_attr):
-            child_nodes.append(
-                _leaf_node(
-                    attr_name=call_attr,
-                    class_name="FunctionOp",
-                    forward_order=child_order,
-                    details=list(child_details),
-                    label=function_display_label(call_attr),
-                    basic=False,
-                    output_names=cls.forward_step_output_names.get(call_attr),
-                )
+            expanded = _expanded_free_function_node(
+                call_attr,
+                cls,
+                child_order=child_order,
+                child_details=child_details,
+                label=function_display_label(call_attr),
+                fallback_class_name="FunctionOp",
+                fallback_param_inputs=None,
             )
+            child_nodes.append(expanded)
             continue
 
         child_class = cls.init_assignments.get(call_attr)

@@ -370,6 +370,21 @@ def _positional_helper_functions(tree: ast.AST) -> list[str]:
     return names
 
 
+def _module_forward_functions(tree: ast.AST) -> dict[str, ast.FunctionDef]:
+    """Module-level ``def``s keyed by name, for expanding traced free-function calls.
+
+    A rope helper or other free function called from a forward
+    (``apply_rotary_pos_emb_vision(q, k, cos, sin)``) renders as an opaque tile
+    unless its body is available to inline. Collecting the definitions lets the
+    export show the computation it performs, like a submodule's forward.
+    """
+    functions: dict[str, ast.FunctionDef] = {}
+    for node in getattr(tree, "body", []):
+        if isinstance(node, ast.FunctionDef):
+            functions.setdefault(node.name, node)
+    return functions
+
+
 def _positional_step_details(func: ast.FunctionDef) -> dict[str, list[str]]:
     """Detail lines for traced rope calls, so an inverse rotation reads differently."""
     details: dict[str, list[str]] = {}
@@ -862,6 +877,195 @@ def _multi_op_forward_methods(
     return expanded
 
 
+def _synthetic_call_function_name(call_attr: str) -> str | None:
+    """Recover the source function name from a traced free-function synthetic attr.
+
+    ``@positional_l1615_apply_rotary_pos_emb_vision`` ->
+    ``apply_rotary_pos_emb_vision``.
+    """
+    if is_positional_synthetic(call_attr):
+        return _POSITIONAL_SOURCE_POS_RE.sub("", call_attr) or None
+    if is_function_synthetic(call_attr):
+        return _FUNCTION_SOURCE_POS_RE.sub("", call_attr) or None
+    return None
+
+
+def _free_function_param_list(func: ast.FunctionDef) -> list[str]:
+    return [arg.arg for arg in func.args.posonlyargs + func.args.args]
+
+
+def _inline_nested_free_functions(
+    analysis: "ForwardAnalysis",
+    module_functions: dict[str, ast.FunctionDef],
+    *,
+    self_values: dict[str, Any],
+    all_tensor_ops: bool,
+    _seen: frozenset[str] = frozenset(),
+    _depth: int = 0,
+) -> list[ForwardOperation]:
+    """Flatten a free function's nested free-function calls into visible ops.
+
+    ``apply_rotary_pos_emb_vision`` calls ``rotate_half(q)``; the extractor
+    records that call as a synthetic predecessor (``@fn_l1575_rotate_half``) with
+    no operation of its own, so a naive expansion leaves the multiply that
+    consumes it pointing at a node that never renders. Splice the callee's ops in
+    (namespaced per call site so two calls do not collide), remap the callee's
+    ``@method_input`` to the producer feeding that call's primary arg, and rename
+    the callee's return op to the synthetic attr so the original consumer still
+    resolves. General: recurses to a bounded depth for any known free function.
+    """
+    operations = list(analysis.operations)
+    if _depth >= 8:
+        return operations
+    own = {op.attr_name for op in operations}
+    arg_maps = analysis.step_predecessor_args
+
+    # Synthetic predecessors that name a known free function and have no op yet.
+    nested_calls: list[str] = []
+    for op in operations:
+        for pred in op.predecessors:
+            if pred in own or pred in nested_calls:
+                continue
+            name = _synthetic_call_function_name(pred)
+            if name and name in module_functions and name not in _seen:
+                nested_calls.append(pred)
+    if not nested_calls:
+        return operations
+
+    expansions: dict[str, list[ForwardOperation]] = {}
+    for call_attr in nested_calls:
+        name = _synthetic_call_function_name(call_attr)
+        nested_func = module_functions[name]
+        nested = _forward_operations_from_forward(
+            nested_func,
+            self_values=self_values,
+            all_tensor_ops=all_tensor_ops,
+            module_functions=module_functions,
+        )
+        nested_ops = _inline_nested_free_functions(
+            nested,
+            module_functions,
+            self_values=self_values,
+            all_tensor_ops=all_tensor_ops,
+            _seen=_seen | {name},
+            _depth=_depth + 1,
+        )
+        if not nested_ops:
+            continue
+        params = _free_function_param_list(nested_func)
+        primary = params[0] if params else None
+        arg_map = arg_maps.get(call_attr, {})
+        nested_attrs = {op.attr_name for op in nested_ops}
+        return_producer = None
+        if nested.primary_return_slot is not None:
+            return_producer = nested.return_slots.get(nested.primary_return_slot)
+        if return_producer is None:
+            return_producer = nested_ops[-1].attr_name
+        namespace = f"{call_attr}::"
+
+        def remap_attr(attr: str) -> str:
+            return call_attr if attr == return_producer else namespace + attr
+
+        def remap_pred(pred: str) -> str | None:
+            if pred == FORWARD_METHOD_INPUT:
+                # The callee's primary parameter is fed by this call's first arg.
+                return arg_map.get(primary) if primary else None
+            if pred in nested_attrs:
+                return remap_attr(pred)
+            return pred
+
+        rewritten: list[ForwardOperation] = []
+        for op in nested_ops:
+            preds = tuple(
+                p for p in (remap_pred(pred) for pred in op.predecessors) if p
+            )
+            # A callee secondary parameter (rare) is fed by a further call arg;
+            # turn it into a predecessor when a producer is known, else drop it.
+            extra_param_preds: list[str] = []
+            remaining_params: list[str] = []
+            for param in op.param_inputs:
+                producer = arg_map.get(param)
+                if producer:
+                    extra_param_preds.append(producer)
+                elif param == primary:
+                    resolved = arg_map.get(primary) if primary else None
+                    if resolved:
+                        extra_param_preds.append(resolved)
+                else:
+                    remaining_params.append(param)
+            ports = tuple(
+                (remap_attr(attr) if attr in nested_attrs else attr, ordinal)
+                for attr, ordinal in op.predecessor_ports
+            )
+            rewritten.append(
+                replace(
+                    op,
+                    attr_name=remap_attr(op.attr_name),
+                    predecessors=tuple((*preds, *extra_param_preds)),
+                    param_inputs=tuple(remaining_params),
+                    predecessor_ports=ports,
+                )
+            )
+        expansions[call_attr] = rewritten
+
+    if not expansions:
+        return operations
+
+    # Emit each callee's ops just before the first original op that consumes it,
+    # so producers precede consumers in the rendered pipeline.
+    result: list[ForwardOperation] = []
+    emitted: set[str] = set()
+    for op in operations:
+        for pred in op.predecessors:
+            if pred in expansions and pred not in emitted:
+                result.extend(expansions[pred])
+                emitted.add(pred)
+        result.append(op)
+    for call_attr, ops in expansions.items():
+        if call_attr not in emitted:
+            result.extend(ops)
+    return result
+
+
+def _multi_op_free_functions(
+    module_functions: dict[str, ast.FunctionDef],
+    forward_calls: list[str],
+    *,
+    self_values: dict[str, Any],
+    all_tensor_ops: bool,
+) -> dict[str, list[ForwardOperation]]:
+    """Traced free-function calls whose body expands into a visible sub-pipeline.
+
+    Keyed by the synthetic call attr (``@positional_l1615_...``) so the block
+    tree renders the helper's computation inline instead of one opaque tile.
+    Mirrors ``_multi_op_forward_methods`` for module-level functions.
+    """
+    expanded: dict[str, list[ForwardOperation]] = {}
+    for call_attr in forward_calls:
+        name = _synthetic_call_function_name(call_attr)
+        if name is None:
+            continue
+        func = module_functions.get(name)
+        if func is None:
+            continue
+        analysis = _forward_operations_from_forward(
+            func,
+            self_values=self_values,
+            all_tensor_ops=all_tensor_ops,
+            module_functions=module_functions,
+        )
+        operations = _inline_nested_free_functions(
+            analysis,
+            module_functions,
+            self_values=self_values,
+            all_tensor_ops=all_tensor_ops,
+            _seen=frozenset({name}),
+        )
+        if len(operations) > 1:
+            expanded[call_attr] = operations
+    return expanded
+
+
 def _register_forward_calls(
     stmt_calls: list[str],
     calls: list[str],
@@ -1269,6 +1473,7 @@ class ForwardAnalysis:
     step_predecessor_ordinals: dict[str, dict[str, int]]
     step_output_names: dict[str, list[str]]
     step_boundary_params: dict[str, tuple[str, ...]]
+    step_boundary_arg_params: dict[str, dict[str, tuple[str, int | None]]]
     return_slots: dict[str, str]
     return_order: list[str]
     primary_return_slot: str | None
@@ -1311,6 +1516,9 @@ class ClassStructure:
     forward_step_boundary_params: dict[str, tuple[str, ...]] = field(
         default_factory=dict
     )
+    forward_step_boundary_arg_params: dict[
+        str, dict[str, tuple[str, int | None]]
+    ] = field(default_factory=dict)
     single_op_methods: dict[str, ForwardOperation] = field(default_factory=dict)
     multi_op_methods: dict[str, list[ForwardOperation]] = field(default_factory=dict)
     forward_return_slots: dict[str, str] = field(default_factory=dict)
@@ -1913,11 +2121,16 @@ class _ForwardOperationExtractor:
         all_tensor_ops: bool,
         param_names: set[str] | None = None,
         config: dict[str, Any] | None = None,
+        module_functions: dict[str, ast.FunctionDef] | None = None,
     ) -> None:
         self.self_values = self_values
         self.all_tensor_ops = all_tensor_ops
         self.config = dict(config or {})
         self.param_names = set(param_names or ())
+        # Module-level free functions (``apply_rotary_pos_emb_vision``, ...) keyed
+        # by name, so a traced synthetic call can map its positional args to the
+        # callee's parameter names and route each to the producer feeding it.
+        self.module_functions = dict(module_functions or {})
         self.operations: list[ForwardOperation] = []
         self.var_producer: dict[str, str] = {}
         self.var_module_origin: dict[str, str] = {}
@@ -1960,10 +2173,24 @@ class _ForwardOperationExtractor:
         # caller-visible parameter (``position_embeddings``), not the unpacked
         # local, so the arg-name keys match the call site's keyword.
         self.step_boundary_params: dict[str, tuple[str, ...]] = {}
+        # own-step attr -> {callee-parameter -> (boundary origin, ordinal|None)}
+        # for a traced free-function call whose body is inlined. Its ops read the
+        # callee's parameter names (``cos``/``sin``); this maps each such param
+        # back to the boundary forward input it was fed from at the call site
+        # (``position_embeddings``) and, for a tuple-unpacked boundary
+        # (``cos, sin = position_embeddings``), the ordinal so the boundary input
+        # fans out one port per slot (port0->cos-op, port1->sin-op).
+        self.step_boundary_arg_params: dict[
+            str, dict[str, tuple[str, int | None]]
+        ] = {}
         # unpacked-local -> the forward parameter it aliases
         # (``cos``/``sin`` -> ``position_embeddings``). Populated as
         # ``_propagate_param_alias`` registers the alias.
         self.param_alias_origin: dict[str, str] = {}
+        # unpacked-local -> its ordinal within a tuple-unpacked boundary param
+        # (``cos`` -> 0, ``sin`` -> 1 for ``cos, sin = position_embeddings``), so
+        # a free-function frame can fan the boundary input out per slot.
+        self.param_alias_ordinal: dict[str, int] = {}
         # When an ``if``/``else`` assigns the same variable to different producers
         # (e.g. ``attn_output`` = flash ``@attention`` in one branch, a manual
         # ``torch.cat`` in the other), only one survives ``var_producer`` after the
@@ -2100,6 +2327,21 @@ class _ForwardOperationExtractor:
         if _is_emittable_free_function(func, target):
             return function_synthetic_attr(target, node.lineno)
         return None
+
+    def _free_function_param_names(self, node: ast.Call) -> list[str] | None:
+        """Positional parameter names of the module-level function *node* calls.
+
+        Lets a traced free-function call align its call-site args with the
+        callee's signature (``apply_rotary_pos_emb_vision(q, k, cos, sin)``), so
+        each argument routes to the parameter it feeds once the body is inlined.
+        """
+        func = node.func
+        if not isinstance(func, ast.Name):
+            return None
+        definition = self.module_functions.get(func.id)
+        if definition is None:
+            return None
+        return [arg.arg for arg in definition.args.posonlyargs + definition.args.args]
 
     def _self_attr_input(self, node: ast.Attribute) -> tuple[str | None, list[str]]:
         if isinstance(node.value, ast.Name) and node.value.id == "self":
@@ -2247,6 +2489,7 @@ class _ForwardOperationExtractor:
         arg_producers: list[str] = []
         arg_name_map: dict[str, str] = {}
         arg_ordinal_map: dict[str, int] = {}
+        positional_producers: list[list[str]] = []
 
         def _record_arg_ordinal(name: str, producer: str, arg_node: ast.AST) -> None:
             # If this arg reads a specific output slot of its producer (an
@@ -2269,6 +2512,7 @@ class _ForwardOperationExtractor:
                 start = 1
             for idx, arg in enumerate(node.args):
                 producers, arg_external = _collect_call_arg_producers(arg)
+                positional_producers.append(producers)
                 arg_producers.extend(producers)
                 external.extend(arg_external)
                 if submodule_call and idx >= start and len(producers) == 1:
@@ -2292,6 +2536,44 @@ class _ForwardOperationExtractor:
                 self.step_predecessors[own_step] = self._dedupe(
                     [value for value in (base_producer, *arg_producers) if value]
                 )
+                # A traced free-function node (rope helper, ...) is expanded into
+                # its body's ops when the callee is known; map each positional arg
+                # to the callee's parameter name so the cross-module predecessor
+                # pass can route producers onto the matching per-parameter entry of
+                # the inlined pipeline (``q``->query_states, ``k``->key_states).
+                if not arg_name_map and (
+                    is_positional_synthetic(own_step)
+                    or is_function_synthetic(own_step)
+                ):
+                    param_names = self._free_function_param_names(node)
+                    boundary_arg_map: dict[str, tuple[str, int | None]] = {}
+                    if param_names:
+                        for idx, producers in enumerate(positional_producers):
+                            if idx >= len(param_names):
+                                continue
+                            callee_param = param_names[idx]
+                            if len(producers) == 1:
+                                arg_name_map[callee_param] = producers[0]
+                                _record_arg_ordinal(
+                                    callee_param, producers[0], node.args[idx]
+                                )
+                                continue
+                            # No internal producer: the arg reads straight from a
+                            # boundary forward input (``cos``/``sin``, aliased to
+                            # ``position_embeddings``). Map the callee parameter to
+                            # that origin and its unpack ordinal so the inlined
+                            # frame fans the boundary input out one port per slot.
+                            arg = node.args[idx]
+                            if (
+                                isinstance(arg, ast.Name)
+                                and arg.id in self.param_names
+                            ):
+                                boundary_arg_map[callee_param] = (
+                                    self.param_alias_origin.get(arg.id, arg.id),
+                                    self.param_alias_ordinal.get(arg.id),
+                                )
+                    if boundary_arg_map:
+                        self.step_boundary_arg_params[own_step] = boundary_arg_map
                 if arg_name_map:
                     self.step_predecessor_args[own_step] = arg_name_map
                 if arg_ordinal_map:
@@ -2490,15 +2772,21 @@ class _ForwardOperationExtractor:
         # back at the caller-visible name.
         origin = self.param_alias_origin.get(value.id, value.id)
         for target in targets:
-            elements = (
-                target.elts
-                if isinstance(target, (ast.Tuple, ast.List))
-                else [target]
-            )
-            for element in elements:
-                if isinstance(element, ast.Name):
-                    self.param_names.add(element.id)
-                    self.param_alias_origin[element.id] = origin
+            if isinstance(target, (ast.Tuple, ast.List)):
+                # ``cos, sin = position_embeddings`` -> cos is slot 0, sin slot 1.
+                for ordinal, element in enumerate(target.elts):
+                    if isinstance(element, ast.Name):
+                        self.param_names.add(element.id)
+                        self.param_alias_origin[element.id] = origin
+                        self.param_alias_ordinal[element.id] = ordinal
+            elif isinstance(target, ast.Name):
+                # A plain rename (``pe = position_embeddings``) carries the RHS's
+                # own ordinal forward, if it had one.
+                self.param_names.add(target.id)
+                self.param_alias_origin[target.id] = origin
+                inherited = self.param_alias_ordinal.get(value.id)
+                if inherited is not None:
+                    self.param_alias_ordinal[target.id] = inherited
 
     def _track_shape_assignment(
         self, targets: list[ast.expr], value: ast.AST
@@ -2724,11 +3012,38 @@ class _ForwardOperationExtractor:
     ) -> None:
         for stmt in statements:
             if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
-                producer, _ = self.expression(stmt.value)
                 value = stmt.value
                 targets = (
                     stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
                 )
+                # Parallel tuple assignment (``q, k = q.float(), k.float()``) binds
+                # each target to its OWN right-hand element's producer. The generic
+                # path takes a single producer for the whole RHS (the last element),
+                # which collapses every target onto it — so ``q`` would wrongly point
+                # at ``k.float()``. Element-wise binding keeps each name's true
+                # source. General: any equal-arity ``a, b = x, y`` assignment.
+                if (
+                    isinstance(stmt, ast.Assign)
+                    and len(targets) == 1
+                    and isinstance(targets[0], (ast.Tuple, ast.List))
+                    and isinstance(value, (ast.Tuple, ast.List))
+                    and len(targets[0].elts) == len(value.elts)
+                ):
+                    element_producers = [
+                        self.expression(element)[0] for element in value.elts
+                    ]
+                    self._track_shape_assignment(targets, value)
+                    self._propagate_param_alias(targets, value)
+                    for element_target, element_producer in zip(
+                        targets[0].elts, element_producers
+                    ):
+                        if (
+                            isinstance(element_target, ast.Name)
+                            and element_producer is not None
+                        ):
+                            self.var_producer[element_target.id] = element_producer
+                    continue
+                producer, _ = self.expression(stmt.value)
                 self._track_shape_assignment(targets, value)
                 for target in targets:
                     if isinstance(target, ast.Name):
@@ -3598,6 +3913,7 @@ def _forward_operations_from_forward(
     self_values: dict[str, Any],
     all_tensor_ops: bool,
     config: dict[str, Any] | None = None,
+    module_functions: dict[str, ast.FunctionDef] | None = None,
 ) -> ForwardAnalysis:
     # The primary parameter is the main path, so only the extra ones can identify
     # which step consumes a side feed.
@@ -3607,6 +3923,7 @@ def _forward_operations_from_forward(
         all_tensor_ops=all_tensor_ops,
         param_names=_forward_input_names(func) - {primary} if primary else set(),
         config=config,
+        module_functions=module_functions,
     )
     # An operation reading the primary parameter partway through the forward reads the
     # value arriving at the chain, not the previous step. Naming it lets those reads
@@ -3617,7 +3934,18 @@ def _forward_operations_from_forward(
     # node's real source; seed it as the method boundary so the edge starts from
     # the input instead of dangling. Gated to those args so ordinary side-inputs
     # (handed straight to a submodule) keep flowing through param attribution.
-    for name in _traced_free_function_arg_names(func) & _forward_input_names(func):
+    # A param that is REASSIGNED in the body (``q, k = q.float(), k.float()``
+    # inside ``apply_rotary_pos_emb_vision``) must NOT be seeded: the seed would
+    # bind its first read to the shared ``@method_input`` (the *primary*'s
+    # boundary), so ``k.float()`` would spuriously read the primary ``q`` before
+    # ``k`` is rebound. Such a param already docks through its own boundary
+    # (``param_names``) and flows normally after its assignment; only pure
+    # pass-through params (never reassigned) need the seed.
+    reassigned = _ForwardOperationExtractor._assigned_names(func.body)
+    for name in (
+        _traced_free_function_arg_names(func)
+        & _forward_input_names(func)
+    ) - reassigned:
         extractor.var_producer.setdefault(name, FORWARD_METHOD_INPUT)
     extractor.statements(func.body)
     extractor._apply_branch_alternatives()
@@ -3635,6 +3963,7 @@ def _forward_operations_from_forward(
         step_predecessor_ordinals=dict(extractor.step_predecessor_ordinals),
         step_output_names=dict(extractor.step_output_names),
         step_boundary_params=dict(extractor.step_boundary_params),
+        step_boundary_arg_params=dict(extractor.step_boundary_arg_params),
         return_slots=return_slots,
         return_order=return_order,
         primary_return_slot=primary_return_slot,
@@ -3705,6 +4034,7 @@ def expand_class_forward_dataflow(
     cls.forward_step_predecessor_ordinals = dict(analysis.step_predecessor_ordinals)
     cls.forward_step_output_names = dict(analysis.step_output_names)
     cls.forward_step_boundary_params = dict(analysis.step_boundary_params)
+    cls.forward_step_boundary_arg_params = dict(analysis.step_boundary_arg_params)
     cls.forward_operations = _refine_forward_operation_predecessors(
         forward,
         cls.forward_operations,
@@ -3725,6 +4055,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         activation_param_bindings: dict[str, dict[str, str]] | None = None,
         vision_scoped_classes: set[str] | None = None,
         vision_config: dict[str, Any] | None = None,
+        module_functions: dict[str, ast.FunctionDef] | None = None,
     ) -> None:
         self.classes: dict[str, ClassStructure] = {}
         self.config = dict(config or {})
@@ -3732,6 +4063,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
         self.activation_param_bindings = activation_param_bindings or {}
         self.vision_scoped_classes = set(vision_scoped_classes or ())
         self.vision_config = dict(vision_config or {})
+        self.module_functions = dict(module_functions or {})
 
     def _config_for_class(self, class_name: str) -> dict[str, Any]:
         """Config a class resolves ``self.<attr> = config.<attr>`` against.
@@ -3763,6 +4095,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
         forward_step_predecessor_ordinals: dict[str, dict[str, int]] = {}
         forward_step_output_names: dict[str, list[str]] = {}
         forward_step_boundary_params: dict[str, tuple[str, ...]] = {}
+        forward_step_boundary_arg_params: dict[
+            str, dict[str, tuple[str, int | None]]
+        ] = {}
         forward_return_slots: dict[str, str] = {}
         forward_return_order: list[str] = []
         primary_return_slot: str | None = None
@@ -3832,6 +4167,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
                     config=self._config_for_class(node.name),
+                    module_functions=self.module_functions,
                 )
                 if analysis.operations:
                     forward_step_predecessors = dict(analysis.step_predecessors)
@@ -3842,6 +4178,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     forward_step_output_names = dict(analysis.step_output_names)
                     forward_step_boundary_params = dict(
                         analysis.step_boundary_params
+                    )
+                    forward_step_boundary_arg_params = dict(
+                        analysis.step_boundary_arg_params
                     )
                     forward_loop_carried = list(analysis.loop_carried)
                     (
@@ -3879,6 +4218,20 @@ class _ModelAstVisitor(ast.NodeVisitor):
                 self_values=_self_config_values(init_func, self._config_for_class(node.name)),
                 all_tensor_ops=self.all_tensor_ops,
             )
+            # Traced free-function calls (rope helpers, ...) expand from their
+            # module-level definition. Keys are synthetic attrs (``@positional_``/
+            # ``@function_``), disjoint from method names, so they share the same
+            # ``multi_op_methods`` rendering path in the block tree.
+            multi_op_methods.update(
+                _multi_op_free_functions(
+                    self.module_functions,
+                    forward_calls,
+                    self_values=_self_config_values(
+                        init_func, self._config_for_class(node.name)
+                    ),
+                    all_tensor_ops=self.all_tensor_ops,
+                )
+            )
             delegates_inline = _forward_delegates_to_nothing(node.name, forward_calls)
             method_names = {
                 item.name
@@ -3899,6 +4252,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
                     config=self._config_for_class(node.name),
+                    module_functions=self.module_functions,
                 )
                 if analysis.operations:
                     forward_step_predecessors = dict(analysis.step_predecessors)
@@ -3909,6 +4263,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     forward_step_output_names = dict(analysis.step_output_names)
                     forward_step_boundary_params = dict(
                         analysis.step_boundary_params
+                    )
+                    forward_step_boundary_arg_params = dict(
+                        analysis.step_boundary_arg_params
                     )
                     forward_loop_carried = list(analysis.loop_carried)
                     module_calls = _module_calls_for_forward_merge(
@@ -3946,6 +4303,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     self_values=values,
                     all_tensor_ops=self.all_tensor_ops,
                     config=self._config_for_class(node.name),
+                    module_functions=self.module_functions,
                 )
                 if _forward_mixes_modules_and_inline_ops(
                     forward_calls,
@@ -3960,6 +4318,9 @@ class _ModelAstVisitor(ast.NodeVisitor):
                     forward_step_output_names = dict(probed.step_output_names)
                     forward_step_boundary_params = dict(
                         probed.step_boundary_params
+                    )
+                    forward_step_boundary_arg_params = dict(
+                        probed.step_boundary_arg_params
                     )
                     forward_loop_carried = list(probed.loop_carried)
                     module_calls = _module_calls_for_forward_merge(
@@ -4012,6 +4373,7 @@ class _ModelAstVisitor(ast.NodeVisitor):
             forward_step_predecessor_ordinals=forward_step_predecessor_ordinals,
             forward_step_output_names=forward_step_output_names,
             forward_step_boundary_params=forward_step_boundary_params,
+            forward_step_boundary_arg_params=forward_step_boundary_arg_params,
             single_op_methods=single_op_methods,
             multi_op_methods=multi_op_methods,
             forward_return_slots=forward_return_slots,
@@ -6271,6 +6633,7 @@ def build_class_registry(
         config=config,
         all_tensor_ops=all_tensor_ops,
         activation_param_bindings=activation_param_bindings,
+        module_functions=_module_forward_functions(tree),
     )
     visitor.visit(tree)
     return visitor.classes
@@ -6305,6 +6668,7 @@ def analyze_source(
         vision_config=(config or {}).get("vision_config")
         if isinstance(config, dict)
         else None,
+        module_functions=_module_forward_functions(tree),
     )
     visitor.visit(tree)
     finalize_class_registry(visitor.classes)

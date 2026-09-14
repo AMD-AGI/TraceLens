@@ -15,6 +15,8 @@ from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.ast_analyze import (
     _pick_stack_model_class,
     expand_class_forward_dataflow,
+    FUNCTION_SYNTHETIC_PREFIX,
+    POSITIONAL_SYNTHETIC_PREFIX,
     stack_entry_dataflow,
 )
 from TraceLens.ModelUtils.block_tree import (
@@ -873,12 +875,51 @@ def _namespace_internal_ids(
 _INLINE_FRAME_NAMESPACE_SUFFIXES = frozenset({"SituAndMul", "SiluAndMul"})
 
 
+def _is_free_function_frame_namespace(
+    section_nodes: list[dict[str, Any]], namespace: str
+) -> bool:
+    """True when ``namespace`` is a traced free-function's inline-expanded body.
+
+    A rope helper (``apply_rotary_pos_emb_vision``) or other traced free function
+    (``get_vision_position_ids``) is expanded into a namespace whose segment is the
+    sanitized synthetic call attr (``@positional_l1615_...`` -> ``_positional_l1615_``).
+    The raw attr survives verbatim inside each op's id, so recover it from there and
+    confirm it sanitizes to this namespace's own segment.
+    """
+    if "/" not in namespace:
+        return False
+    segment = namespace.rsplit("/", 1)[-1]
+    for node in section_nodes:
+        if node.get("namespace", "") != namespace:
+            continue
+        for part in re.split(r"[/:]", str(node.get("id", ""))):
+            if (
+                part.startswith(POSITIONAL_SYNTHETIC_PREFIX)
+                or part.startswith(FUNCTION_SYNTHETIC_PREFIX)
+            ) and _sanitize_namespace_segment(part) == segment:
+                return True
+    return False
+
+
 def _skip_nested_inline_frame_input(
     section_nodes: list[dict[str, Any]], namespace: str
 ) -> bool:
-    """Inline activation frames inherit the parent KimiMLP input port."""
+    """Inline-expanded frames keep their ops' direct edges, no synthetic @input.
+
+    Two inline-frame kinds must not receive a group boundary:
+    - an activation frame (``SituAndMul``) inherits the parent MLP's single input;
+    - a traced free-function frame (a rope helper, ``get_vision_position_ids``)
+      whose ops already reference their true external producers with the correct
+      output-port ordinals. A frame-local boundary would flatten a tuple fan-out
+      (the cos/sin ``position_embeddings[0]``/``[1]`` split) onto one port; leaving
+      the ops docked to the enclosing block's boundary preserves the ordinals.
+    """
+    if "/" not in namespace:
+        return False
+    if _is_free_function_frame_namespace(section_nodes, namespace):
+        return True
     segment = namespace.rsplit("/", 1)[-1]
-    if segment not in _INLINE_FRAME_NAMESPACE_SUFFIXES or "/" not in namespace:
+    if segment not in _INLINE_FRAME_NAMESPACE_SUFFIXES:
         return False
     parent = namespace.rsplit("/", 1)[0]
     return any(
@@ -897,23 +938,28 @@ def _group_entry_buckets(
     two unrelated producers. Collapsing them onto one boundary tile would claim the
     normalization reads the gate, so each distinct producer keeps its own entry.
     """
-    buckets: dict[frozenset[tuple[str, str]], list[dict[str, Any]]] = {}
-    order: list[frozenset[tuple[str, str]]] = []
+    # Key each bucket by the producer NODE, not by (node, port): a tuple producer
+    # feeding two ports (``position_embeddings`` -> cos at port 0, sin at port 1)
+    # is ONE logical input that fans out, so both ports land on one boundary tile
+    # that re-exposes them. Distinct producers still key distinct buckets, so
+    # ``forward(hidden_states, gate)`` keeps one boundary per unrelated producer.
+    buckets: dict[str, tuple[set[tuple[str, str]], list[dict[str, Any]]]] = {}
+    order: list[str] = []
     for node in entry_nodes:
         sources = [
             (edge["sourceNodeId"], edge.get("sourceNodeOutputId", "0"))
             for edge in node.get("incomingEdges", [])
             if edge["sourceNodeId"] not in internal_ids
         ]
-        source_groups = (
-            [frozenset({source}) for source in sources] if sources else [frozenset()]
-        )
-        for source_group in source_groups:
-            if source_group not in buckets:
-                buckets[source_group] = []
-                order.append(source_group)
-            buckets[source_group].append(node)
-    return [(sources, buckets[sources]) for sources in order]
+        keys = {source_id for source_id, _ in sources} or {""}
+        for key in keys:
+            if key not in buckets:
+                buckets[key] = (set(), [])
+                order.append(key)
+            source_set, members = buckets[key]
+            source_set.update(source for source in sources if source[0] == key)
+            members.append(node)
+    return [(frozenset(buckets[key][0]), buckets[key][1]) for key in order]
 
 
 def _entry_bucket_label(
@@ -1068,6 +1114,11 @@ def _inject_group_inputs(
 
         used_labels: set[str] = set()
         entry_inputs: dict[str, list[str]] = {}
+        # A boundary that gathers one producer at several output ports (the cos/sin
+        # tuple ``position_embeddings[0]``/``[1]`` both flow from one rope concat)
+        # re-exposes those ports so each consumer keeps reading its own slot. Map
+        # every gathered ``(source, port)`` to the boundary slot it lands on.
+        tile_source_slot: dict[str, dict[tuple[str, str], int]] = {}
         for (sources, entries), label in zip(buckets, bucket_labels):
             if not label:
                 label = _infer_group_input_label(group_nodes, namespace)
@@ -1095,6 +1146,9 @@ def _inject_group_inputs(
                     }
                     for index, (source_id, source_port) in enumerate(bucket_sources)
                 ]
+            tile_source_slot[input_id] = {
+                source: index for index, source in enumerate(bucket_sources)
+            }
 
             for entry in entries:
                 entry_inputs.setdefault(entry["id"], []).append(input_id)
@@ -1104,19 +1158,35 @@ def _inject_group_inputs(
 
         for entry_id, input_ids in entry_inputs.items():
             entry = node_by_id[entry_id]
+            original = list(entry.get("incomingEdges", []))
             internal = [
-                edge
-                for edge in entry.get("incomingEdges", [])
-                if edge["sourceNodeId"] in internal_ids
+                edge for edge in original if edge["sourceNodeId"] in internal_ids
             ]
-            entry["incomingEdges"] = internal + [
-                {
-                    "sourceNodeId": input_id,
-                    "sourceNodeOutputId": "0",
-                    "targetNodeInputId": str(len(internal) + index),
-                }
-                for index, input_id in enumerate(input_ids)
+            external = [
+                edge for edge in original if edge["sourceNodeId"] not in internal_ids
             ]
+            redocked: list[dict[str, Any]] = []
+            for index, input_id in enumerate(input_ids):
+                slot_map = tile_source_slot.get(input_id, {})
+                # Preserve the exact tuple slot this consumer read from the shared
+                # producer; a single-source boundary keeps port "0" (unchanged).
+                port = "0"
+                for edge in external:
+                    source = (
+                        edge["sourceNodeId"],
+                        edge.get("sourceNodeOutputId", "0"),
+                    )
+                    if source in slot_map:
+                        port = str(slot_map[source])
+                        break
+                redocked.append(
+                    {
+                        "sourceNodeId": input_id,
+                        "sourceNodeOutputId": port,
+                        "targetNodeInputId": str(len(internal) + index),
+                    }
+                )
+            entry["incomingEdges"] = internal + redocked
 
 
 def _tile_prefix_attr_name(prefix: str) -> str:
@@ -1214,21 +1284,44 @@ def _inject_group_outputs(
         name = name or "result"
 
         # Try to resolve named return slots for multi-output modules.
-        slot_names: dict[str, str] | None = None
+        slot_names: dict[str, list[str]] | None = None
         if len(sources) > 1 and resolve_slot_names is not None:
             slot_names = resolve_slot_names(prefix)
 
         if slot_names and len(sources) > 1:
             ports = []
+            # When several return slots trace to the same producer op, the
+            # source output ordinal selects which slot each edge carries so the
+            # boundary emits distinct per-slot outputs (cos=0, sin=1) instead of
+            # collapsing both onto the last-written slot name.
+            producer_cursor: dict[str, int] = {}
             for source, source_port in sources:
-                slot = next(
+                slots = next(
                     (
-                        slot_name
-                        for attr, slot_name in slot_names.items()
+                        slot_list
+                        for attr, slot_list in slot_names.items()
                         if attr in source
                     ),
                     None,
                 )
+                # Tolerate a scalar mapping (attr → single slot) as well as the
+                # ordinal-aware list form so callers can pass either.
+                if isinstance(slots, str):
+                    slots = [slots]
+                slot = None
+                if slots:
+                    if len(slots) == 1:
+                        slot = slots[0]
+                    else:
+                        idx = (
+                            int(source_port)
+                            if str(source_port).isdigit()
+                            else None
+                        )
+                        if idx is None or idx >= len(slots):
+                            idx = producer_cursor.get(source, 0)
+                        slot = slots[idx] if idx < len(slots) else None
+                        producer_cursor[source] = producer_cursor.get(source, 0) + 1
                 port_label = slot or f"{name}_{len(ports) + 1}"
                 ports.append((port_label, source, source_port))
         else:
@@ -2514,18 +2607,35 @@ def _append_section(
     if skip_variant_root_input:
         inject_skip.add(namespace_prefix)
     _inject_group_inputs(section_nodes, skip_namespaces=frozenset(inject_skip))
-    def _resolve_slot_names_for_prefix(prefix: str) -> dict[str, str] | None:
-        """Map source attr_names → return slot names for multi-return children."""
+    def _resolve_slot_names_for_prefix(prefix: str) -> dict[str, list[str]] | None:
+        """Map source attr_names → return slot names for multi-return children.
+
+        A producer that supplies more than one return slot (e.g. a tuple-
+        returning ``cos, sin = self.recomposition_frequencies(...)`` where both
+        slots trace to the same op) maps to an *ordered* list of slots; the
+        consumer disambiguates by the source output ordinal so the two boundary
+        outputs get distinct ids/labels instead of colliding onto one.
+        """
         attr = _tile_prefix_attr_name(prefix)
         child = next(
             (c for c in block_tree.children if c.attr_name == attr), None
         )
         if child is None or not child.forward_return_slots:
             return None
-        return {
-            producer: slot
-            for slot, producer in child.forward_return_slots.items()
-        }
+        order = child.forward_return_order or list(
+            child.forward_return_slots.keys()
+        )
+        result: dict[str, list[str]] = {}
+        for slot in order:
+            producer = child.forward_return_slots.get(slot)
+            if producer is None:
+                continue
+            result.setdefault(producer, []).append(slot)
+        # Include any slots not covered by the recorded order (defensive).
+        for slot, producer in child.forward_return_slots.items():
+            if producer is not None and slot not in result.get(producer, []):
+                result.setdefault(producer, []).append(slot)
+        return result
 
     _inject_group_outputs(
         section_nodes,

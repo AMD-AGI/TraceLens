@@ -391,6 +391,39 @@ def test_inject_group_outputs_multi_source_with_slot_names():
     assert ports == {"attn_out", "mlp_out"}
 
 
+def test_inject_group_outputs_shared_producer_ordinal_slots():
+    """Two return slots tracing to the same producer op get distinct per-slot
+    outputs, disambiguated by the source output ordinal (cos=0, sin=1) — not
+    collapsed onto one colliding id/label."""
+    nodes = [
+        {"id": "ns/@input", "namespace": "ns", "attrs": _attrs(synthetic="@input")},
+        {"id": "ns/rot", "namespace": "ns", "incomingEdges": [_edge("ns/@input")]},
+        {
+            "id": "consumer",
+            "namespace": "",
+            "incomingEdges": [
+                {"sourceNodeId": "ns/rot", "sourceNodeOutputId": "0", "targetNodeInputId": "0"},
+                {"sourceNodeId": "ns/rot", "sourceNodeOutputId": "1", "targetNodeInputId": "1"},
+            ],
+        },
+    ]
+    merge._inject_group_outputs(
+        nodes,
+        # Ordinal-aware list form: one producer supplies both slots in order.
+        resolve_slot_names=lambda prefix: {"rot": ["cos", "sin"]},
+    )
+    output_ids = {node["id"] for node in nodes if merge._is_synthetic_output(node)}
+    assert len(output_ids) == 2, output_ids
+    consumer = next(node for node in nodes if node["id"] == "consumer")
+    # Each edge lands on a distinct per-slot output node/port.
+    by_port = {
+        edge["sourceNodeOutputId"]: edge["sourceNodeId"]
+        for edge in consumer["incomingEdges"]
+    }
+    assert set(by_port) == {"cos", "sin"}, by_port
+    assert by_port["cos"] != by_port["sin"]
+
+
 # ---------------------------------------------------------------------------
 # _mirror_boundary_inputs (1515-1571)
 # ---------------------------------------------------------------------------
