@@ -68,7 +68,8 @@ _enabled = False
 _lib: Optional[Library] = None
 _op_counter = 0  # monotonic, never reset, so old op names stay valid
 _patches: List[Tuple[Any, str, Callable]] = []  # (module, attr, original_fn)
-_built_wrappers: dict = {}  # {qualified_name: (wrapper, original_fn)}, reused across cycles
+# {qualified_name: (wrapper, original_fn)}, reused across cycles
+_built_wrappers: dict = {}
 
 
 def _get_or_create_lib() -> Library:
