@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 from pathlib import Path
 from typing import Any
@@ -151,6 +152,62 @@ def _transformers_modeling_path(model_type: str) -> Path | None:
     return origin if origin.is_file() else None
 
 
+def _installed_transformers_version() -> str | None:
+    try:
+        import transformers
+    except ImportError:
+        return None
+    return getattr(transformers, "__version__", None)
+
+
+@functools.lru_cache(maxsize=None)
+def _fetch_versioned_transformers_file(
+    model_types: tuple[str, ...], version: str
+) -> tuple[Path, str] | None:
+    """Fetch the upstream modeling file at a transformers *release tag*.
+
+    Cached (including the negative result) so a checkpoint whose declared tag is
+    missing does not re-hit the network on every ``load_model_spec`` call. Tries
+    both ``vX.Y.Z`` and the bare ``X.Y.Z`` tag spelling.
+    """
+    policy = get_source_policy()
+    for tag in (f"v{version}", version):
+        for model_type in model_types:
+            subpath = TRANSFORMERS_MODELING_SUBPATH.format(model_type=model_type)
+            try:
+                ref = parse_github_url(
+                    f"github:huggingface/transformers@{tag}:{subpath}"
+                )
+                path = fetch_github_source(ref, source_policy=policy)
+            except Exception:
+                continue
+            if path.is_file():
+                return path, ref.display
+    return None
+
+
+def _transformers_versioned_modeling_file(
+    config: dict[str, Any],
+    model_types: list[str],
+) -> tuple[Path, str] | None:
+    """Prefer the modeling file at the version the checkpoint was exported with.
+
+    A checkpoint records that version in ``config.transformers_version``. When it
+    differs from the installed transformers, the installed modeling file can be
+    the wrong revision for the checkpoint, so read the implementation from the
+    upstream release tag instead. Returns ``None`` (fall back to the installed
+    file) when no version is declared, it matches the installed one, or the tag
+    is not published upstream.
+    """
+    declared = str(config.get("transformers_version") or "").strip()
+    if not declared:
+        return None
+    installed = _installed_transformers_version()
+    if installed is not None and declared == installed:
+        return None
+    return _fetch_versioned_transformers_file(tuple(model_types), declared)
+
+
 def _config_model_types(config: dict[str, Any]) -> list[str]:
     """Model types to look up upstream, outer wrapper first then its text backbone."""
     types: list[str] = []
@@ -286,10 +343,21 @@ def resolve_source_files(
 
     model_type = str(config.get("model_type") or "")
     if model_type and not files:
-        tf_path = _transformers_modeling_path(model_type)
-        if tf_path is not None:
-            files.append(tf_path)
-            labels.append(str(tf_path))
+        # Prefer the modeling file at the transformers version the checkpoint
+        # declares; only when that tag is unavailable (or matches installed) do
+        # we read the version installed alongside TraceLens.
+        versioned = _transformers_versioned_modeling_file(
+            config, _config_model_types(config)
+        )
+        if versioned is not None:
+            path, label = versioned
+            files.append(path)
+            labels.append(label)
+        else:
+            tf_path = _transformers_modeling_path(model_type)
+            if tf_path is not None:
+                files.append(tf_path)
+                labels.append(str(tf_path))
 
     auto_map_files = _collect_auto_map_files(config)
 

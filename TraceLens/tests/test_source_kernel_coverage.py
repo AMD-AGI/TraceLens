@@ -283,6 +283,51 @@ def test_source_helpers_and_model_types():
     assert source._dedupe_paths(files) == files[:2] + [files[3]]
 
 
+def test_versioned_transformers_source_prefers_declared(tmp_path: Path, monkeypatch):
+    src = tmp_path / "modeling_glm5_next.py"
+    src.write_text("x = 1\n", encoding="utf-8")
+
+    # No declared version -> fall back to the installed file (None here).
+    assert source._transformers_versioned_modeling_file({}, ["glm5_next"]) is None
+
+    # Declared version equal to installed -> no network fetch, fall back (None).
+    monkeypatch.setattr(source, "_installed_transformers_version", lambda: "5.16.1")
+    assert (
+        source._transformers_versioned_modeling_file(
+            {"transformers_version": "5.16.1"}, ["glm5_next"]
+        )
+        is None
+    )
+
+    # Declared differs and the tag resolves upstream -> that file is chosen.
+    source._fetch_versioned_transformers_file.cache_clear()
+    calls: list[tuple[tuple[str, ...], str]] = []
+
+    def fake_fetch(model_types: tuple[str, ...], version: str):
+        calls.append((model_types, version))
+        return src, f"github://huggingface/transformers@v{version}/.../modeling.py"
+
+    monkeypatch.setattr(source, "_fetch_versioned_transformers_file", fake_fetch)
+    result = source._transformers_versioned_modeling_file(
+        {"transformers_version": "5.16.0", "model_type": "glm5_next"}, ["glm5_next"]
+    )
+    assert result is not None and result[0] == src
+    assert calls == [(("glm5_next",), "5.16.0")]
+
+
+def test_versioned_transformers_fetch_missing_tag_is_none(monkeypatch):
+    source._fetch_versioned_transformers_file.cache_clear()
+
+    def boom(ref, source_policy=None):
+        raise RuntimeError("no such tag")
+
+    monkeypatch.setattr(source, "fetch_github_source", boom)
+    assert (
+        source._fetch_versioned_transformers_file(("glm5_next",), "0.0.0") is None
+    )
+    source._fetch_versioned_transformers_file.cache_clear()
+
+
 def test_hub_snapshot_selection(tmp_path: Path, monkeypatch):
     cache = tmp_path / "hub"
     base = cache / "models--org--model"
