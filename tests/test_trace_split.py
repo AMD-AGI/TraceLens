@@ -352,19 +352,28 @@ def test_trace_split_no_annotations(dirpath, trace_gz, tmp_path):
 
     targets = meta["targets"]
 
+    # Run all modes in a single invocation
+    ss_ref = os.path.join(dirpath, "steady_state_traces")
+    dp_ref = os.path.join(dirpath, "phase_split_traces")
+    run_ss = os.path.isdir(ss_ref) and not is_llm
+    run_dp = os.path.isdir(dp_ref) and not is_llm
+
+    out = str(tmp_path / "output")
+    os.makedirs(out, exist_ok=True)
+    flags = ["--store-single-iteration", "--iterations", "all"]
+    if run_ss:
+        flags.append("--find-steady-state")
+    if run_dp:
+        flags.append("--divide-phases")
+    _run_main(stripped_path, out, flags + extra)
+
     # --- store-single-iteration: compare kernel counts ---
     total_gen_kernels = 0
     total_ref_kernels = 0
     for label, idx in targets.items():
-        out = str(tmp_path / f"split_{label}")
-        os.makedirs(out, exist_ok=True)
-        _run_main(
-            stripped_path, out,
-            ["--store-single-iteration", "--iterations", str(idx)] + extra,
-        )
-        gen_gz = _list_gz(out)
-        assert gen_gz, f"No output for stripped iteration {idx} ({label})"
-        gen_events = DataLoader.load_data(os.path.join(out, gen_gz[0]))["traceEvents"]
+        gen_file = _find_gen_file_for_iter(out, idx, N)
+        assert gen_file, f"No output for stripped iteration {idx} ({label})"
+        gen_events = DataLoader.load_data(os.path.join(out, gen_file))["traceEvents"]
 
         ref_file = _ref_file_for_iter(split_ref, idx, N_ref)
         assert ref_file, f"No reference file for iteration {idx}"
@@ -382,40 +391,25 @@ def test_trace_split_no_annotations(dirpath, trace_gz, tmp_path):
     )
 
     # --- find-steady-state + divide-phases: compare kernel counts ---
-    ss_ref = os.path.join(dirpath, "steady_state_traces")
-    dp_ref = os.path.join(dirpath, "phase_split_traces")
-    run_ss = os.path.isdir(ss_ref) and not is_llm
-    run_dp = os.path.isdir(dp_ref) and not is_llm
+    if run_ss:
+        gen_kernels = _kernel_events(_collect_events(out))
+        ref_kernels = _kernel_events(
+            _strip_annotations(_collect_events(ss_ref))
+        )
+        assert len(gen_kernels) >= len(ref_kernels), (
+            f"find-steady-state: stripped has fewer kernels ({len(gen_kernels)}) "
+            f"than annotated ({len(ref_kernels)})"
+        )
 
-    if run_ss or run_dp:
-        out = str(tmp_path / "ss_and_phase")
-        os.makedirs(out, exist_ok=True)
-        flags = []
-        if run_ss:
-            flags.append("--find-steady-state")
-        if run_dp:
-            flags.append("--divide-phases")
-        _run_main(stripped_path, out, flags + extra)
-
-        if run_ss:
-            gen_kernels = _kernel_events(_collect_events(out))
-            ref_kernels = _kernel_events(
-                _strip_annotations(_collect_events(ss_ref))
-            )
-            assert len(gen_kernels) >= len(ref_kernels), (
-                f"find-steady-state: stripped has fewer kernels ({len(gen_kernels)}) "
-                f"than annotated ({len(ref_kernels)})"
-            )
-
-        if run_dp:
-            gen_kernels = _kernel_events(_collect_events(out, recursive=True))
-            ref_kernels = _kernel_events(
-                _strip_annotations(_collect_events(dp_ref, recursive=True))
-            )
-            assert len(gen_kernels) >= len(ref_kernels), (
-                f"divide-phases: stripped has fewer kernels ({len(gen_kernels)}) "
-                f"than annotated ({len(ref_kernels)})"
-            )
+    if run_dp:
+        gen_kernels = _kernel_events(_collect_events(out, recursive=True))
+        ref_kernels = _kernel_events(
+            _strip_annotations(_collect_events(dp_ref, recursive=True))
+        )
+        assert len(gen_kernels) >= len(ref_kernels), (
+            f"divide-phases: stripped has fewer kernels ({len(gen_kernels)}) "
+            f"than annotated ({len(ref_kernels)})"
+        )
 
 
 # ---------------------------------------------------------------------------

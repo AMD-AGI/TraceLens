@@ -633,6 +633,7 @@ def main():
                 a["flow_corr_map"],
                 a["meta_events"],
                 output_label=f"{label_base}_A",
+                llm_inference=True,
             )
             if a_summary:
                 m["a_output_path"] = a_summary[0]["output_path"]
@@ -651,6 +652,7 @@ def main():
                 b["flow_corr_map"],
                 b["meta_events"],
                 output_label=f"{label_base}_B",
+                llm_inference=True,
             )
             if b_summary:
                 m["b_output_path"] = b_summary[0]["output_path"]
