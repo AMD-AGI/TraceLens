@@ -1154,6 +1154,22 @@ def test_check_marker_op_rows_none_present(tmp_path):
     assert rows[0]["result"] == "PASS"
 
 
+def test_check_marker_op_rows_no_analysis_md(tmp_path):
+    rows = workflow._check_marker_op_rows(str(tmp_path))
+    assert rows[0]["result"] == "FAIL"
+    assert "not found" in rows[0]["details"]
+
+
+def test_marker_not_found_shape():
+    rows = workflow._marker_not_found("marker_eval_x", "Some markers")
+    assert len(rows) == 1
+    assert rows[0]["index"] == "marker_eval_x"
+    assert rows[0]["issue_summary"] == "Some markers"
+    assert rows[0]["result"] == "FAIL"
+    assert rows[0]["details"] == "analysis.md not found"
+    assert rows[0]["category"] == "Marker Identification"
+
+
 # ---------------------------------------------------------------------------
 # run_post_processing: pure scalar helpers
 # ---------------------------------------------------------------------------

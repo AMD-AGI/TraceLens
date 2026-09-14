@@ -898,20 +898,27 @@ def _make_marker_row(index, summary, result, details, root_cause="", fix=""):
     )
 
 
+def _marker_not_found(index, summary):
+    """Single FAIL row for a marker eval whose report file is missing."""
+    return [
+        _make_marker_row(
+            index,
+            summary,
+            "FAIL",
+            "analysis.md not found",
+            "pipeline",
+            "Re-run report generation",
+        )
+    ]
+
+
 def _check_marker_top_ops(output_dir, comparison_scope=None):
     """Marker eval 1: top_ops wrapper + inline top-ops-row markers."""
     content = _read_report(output_dir)
     if content is None:
-        return [
-            _make_marker_row(
-                "marker_eval_1",
-                "Top Operations markers (kind=top_ops)",
-                "FAIL",
-                "analysis.md not found",
-                "pipeline",
-                "Re-run report generation",
-            )
-        ]
+        return _marker_not_found(
+            "marker_eval_1", "Top Operations markers (kind=top_ops)"
+        )
 
     errors = []
     top_ops_begin = None
@@ -968,16 +975,7 @@ def _check_marker_p_items(output_dir, comparison_scope=None):
     """Marker eval 2: kind=p_item markers for each compute P-item."""
     content = _read_report(output_dir)
     if content is None:
-        return [
-            _make_marker_row(
-                "marker_eval_2",
-                "P-item markers (kind=p_item)",
-                "FAIL",
-                "analysis.md not found",
-                "pipeline",
-                "Re-run report generation",
-            )
-        ]
+        return _marker_not_found("marker_eval_2", "P-item markers (kind=p_item)")
 
     compute_section = _extract_section(content, "## Compute Kernel Optimizations")
     if compute_section is None:
@@ -1052,16 +1050,9 @@ def _check_marker_detail_estimates(output_dir, comparison_scope=None):
     """Marker eval 3: kind=detail_estimate markers in Detailed Analysis."""
     content = _read_report(output_dir)
     if content is None:
-        return [
-            _make_marker_row(
-                "marker_eval_3",
-                "Detail estimate markers (kind=detail_estimate)",
-                "FAIL",
-                "analysis.md not found",
-                "pipeline",
-                "Re-run report generation",
-            )
-        ]
+        return _marker_not_found(
+            "marker_eval_3", "Detail estimate markers (kind=detail_estimate)"
+        )
 
     detailed_section = _extract_section(content, "## Detailed Analysis")
     if detailed_section is None:
@@ -1183,16 +1174,7 @@ def _check_marker_reasoning_candidates(output_dir, comparison_scope=None):
     """Marker eval 4: reasoning-candidate markers match P-item headings per tier."""
     content = _read_report(output_dir)
     if content is None:
-        return [
-            _make_marker_row(
-                "marker_eval_4",
-                "Reasoning-candidate markers",
-                "FAIL",
-                "analysis.md not found",
-                "pipeline",
-                "Re-run report generation",
-            )
-        ]
+        return _marker_not_found("marker_eval_4", "Reasoning-candidate markers")
 
     rows = []
     checks = [
@@ -1288,16 +1270,9 @@ def _check_marker_op_rows(output_dir, comparison_scope=None):
     """Marker eval 5: kind=op_row per-row impact markers per compute candidate."""
     content = _read_report(output_dir)
     if content is None:
-        return [
-            _make_marker_row(
-                "marker_eval_5",
-                "Per-row impact markers (kind=op_row)",
-                "FAIL",
-                "analysis.md not found",
-                "pipeline",
-                "Re-run report generation",
-            )
-        ]
+        return _marker_not_found(
+            "marker_eval_5", "Per-row impact markers (kind=op_row)"
+        )
 
     candidates = list(_REASONING_CANDIDATE_RE.finditer(content))
     rows = []
@@ -1333,9 +1308,7 @@ def _check_marker_op_rows(output_dir, comparison_scope=None):
                     f"kind=op_row has {n_csv} impacts but Data table has {n_rows} rows"
                 )
 
-        begin_count = len(_MV_BEGIN_RE.findall(block))
-        end_count = len(_MV_END_RE.findall(block))
-        if begin_count > end_count:
+        if len(_MV_BEGIN_RE.findall(block)) > len(_MV_END_RE.findall(block)):
             errors.append("Unpaired impact-begin (missing impact-end)")
 
         result = "PASS" if not errors else "FAIL"
