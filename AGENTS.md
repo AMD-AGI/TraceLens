@@ -78,10 +78,12 @@ Demo traces for local runs are bundled in `tests/traces`.
 
 - **Delete, don't comment out.** No `# removed …` tombstones.
 - **Comment why, not what,** and only where the reason is non-obvious. Never narrate the change: no
-  "previously this did X," no step or plan numbering.
+  "previously this did X," no step or plan numbering. Match the surrounding comment and docstring
+  style; don't write unusually long comments or docstrings.
 - **Follow the file layout.** New Python file: copyright banner → module docstring → imports
-  (fully-qualified `from TraceLens…`, stdlib then third-party then local, no `sys.path.insert`, no
-  mid-file imports) → a `# Constants` block with every threshold and regex → public functions,
+  (fully-qualified `from TraceLens…`, stdlib then third-party then local, no `sys.path.insert`,
+  imports at the top and no mid-file imports, the only exception being conditional imports) → a
+  `# Constants` block with every threshold and regex → public functions,
   then private (`_name`).
 - **Public repo, vendor-neutral.** Never add private, confidential, or customer data. Keep code and
   docs vendor-neutral, unless the surrounding code is already specific. Quoting an actual kernel
